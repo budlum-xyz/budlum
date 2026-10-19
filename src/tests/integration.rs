@@ -827,6 +827,7 @@ mod integration_tests {
             auth_sig: Vec::new(),
         };
         vote1.sig_bls = sign_bls(&bls_sk, &vote1.signing_message());
+        vote1.auth_sig = sign_bls(&bls_sk, &vote1.auth_signing_message());
         assert!(bc.handle_prevote(vote1).is_ok());
 
         let mut vote2 = Precommit {
@@ -838,6 +839,7 @@ mod integration_tests {
             auth_sig: Vec::new(),
         };
         vote2.sig_bls = sign_bls(&bls_sk, &vote2.signing_message());
+        vote2.auth_sig = sign_bls(&bls_sk, &vote2.auth_signing_message());
         let result = bc.handle_precommit(vote2);
         assert!(
             result.is_ok(),
@@ -890,6 +892,7 @@ mod integration_tests {
             auth_sig: Vec::new(),
         };
         wrong_vote.sig_bls = sign_bls(&bls_sk, &wrong_vote.signing_message());
+        wrong_vote.auth_sig = sign_bls(&bls_sk, &wrong_vote.auth_signing_message());
         let result = bc.handle_prevote(wrong_vote);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("hash mismatch"));

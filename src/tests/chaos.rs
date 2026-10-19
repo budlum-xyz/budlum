@@ -452,23 +452,24 @@ mod chaos_tests {
         let mut commitment =
             DomainCommitment::from_block(&pow, &block, tree.root(), [9u8; 32], 0).unwrap();
         commitment.event_root = tree.root();
+        let block_hash = commitment.domain_block_hash;
         blockchain.submit_domain_commitment(commitment).unwrap();
 
         let proof = tree.proof(0).unwrap();
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, [9u8; 32], event.clone(), &proof)
+            .verify_domain_event_proof(pow.id, 77, 0, block_hash, event.clone(), &proof)
             .is_ok());
 
         let mut foreign_domain = event.clone();
         foreign_domain.domain_id = 99;
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, [9u8; 32], foreign_domain, &proof)
+            .verify_domain_event_proof(pow.id, 77, 0, block_hash, foreign_domain, &proof)
             .is_err());
 
         let mut payload_tampered = event;
         payload_tampered.payload_hash = hash_fields_bytes(&[b"tampered"]);
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, [9u8; 32], payload_tampered, &proof,)
+            .verify_domain_event_proof(pow.id, 77, 0, block_hash, payload_tampered, &proof,)
             .is_err());
     }
 

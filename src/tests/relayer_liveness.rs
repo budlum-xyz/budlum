@@ -452,7 +452,10 @@ fn liveness_slash_applied_through_blockchain_flow() {
         assert_eq!(bc.record_liveness_epoch(e, &present), 0);
     }
     assert_eq!(bc.record_liveness_epoch(k, &present), 1);
-    assert!(!bc.state.registry.is_active(&v, roles::VALIDATOR));
+    // A liveness fault is a timed jail (BLG-0087, decision B): the validator
+    // leaves the active set but is not slashed, so its release is possible.
+    let jailed = bc.state.validators.get(&v).expect("still a validator");
+    assert!(jailed.jailed && !jailed.active && !jailed.slashed);
 }
 
 #[test]

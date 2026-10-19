@@ -524,6 +524,7 @@ fn equivocation_generates_slashing_evidence() {
         auth_sig: Vec::new(),
     };
     pv1.sig_bls = sign_bls(&equiv_bls, &pv1.signing_message());
+    pv1.auth_sig = sign_bls(&equiv_bls, &pv1.auth_signing_message());
     bc.handle_prevote(pv1).expect("canonical prevote accepted");
 
     let mut pv2 = Prevote {
@@ -535,6 +536,7 @@ fn equivocation_generates_slashing_evidence() {
         auth_sig: Vec::new(),
     };
     pv2.sig_bls = sign_bls(&equiv_bls, &pv2.signing_message());
+    pv2.auth_sig = sign_bls(&equiv_bls, &pv2.auth_signing_message());
     // The conflicting vote does not count (hash mismatch) but produces evidence and triggers a slash.
     let _ = bc.handle_prevote(pv2);
 
@@ -607,6 +609,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
         auth_sig: Vec::new(),
     };
     pv1.sig_bls = sign_bls(&equiv_bls, &pv1.signing_message());
+    pv1.auth_sig = sign_bls(&equiv_bls, &pv1.auth_signing_message());
     bc.handle_prevote(pv1).expect("canonical prevote accepted");
 
     let mut pv2 = Prevote {
@@ -618,6 +621,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
         auth_sig: Vec::new(),
     };
     pv2.sig_bls = sign_bls(&equiv_bls, &pv2.signing_message());
+    pv2.auth_sig = sign_bls(&equiv_bls, &pv2.auth_signing_message());
     let _ = bc.handle_prevote(pv2);
 
     // The slash was applied AND written to the persistent history.
@@ -818,7 +822,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
 
     // Threshold-1 invalid signatures: NO slash.
     for _ in 0..(threshold - 1) {
-        let bad = Prevote {
+        let mut bad = Prevote {
             epoch,
             checkpoint_height: cp,
             checkpoint_hash: block.hash.clone(),
@@ -826,6 +830,9 @@ fn invalid_signatures_below_threshold_do_not_slash() {
             sig_bls: vec![0u8; 48],
             auth_sig: Vec::new(),
         };
+        // Authenticated, so the vote may incriminate its own sender (BLG-0083):
+        // the vote signature is the invalid part.
+        bad.auth_sig = sign_bls(&spammer_bls, &bad.auth_signing_message());
         let _ = bc.handle_prevote(bad);
     }
 

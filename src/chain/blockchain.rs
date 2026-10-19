@@ -1228,17 +1228,23 @@ impl Blockchain {
         // The named admin must actually hold authority on this domain: an
         // admin in the admission registry, or the registered operator while
         // the domain has no admins yet.
-        let admin_is_admin = self
-            .state
-            .poa_onboarding
-            .registry()
-            .is_admin(domain_id, &admin);
-        let admin_is_operator = domain.operator == Some(admin);
-        if !admin_is_admin && !admin_is_operator {
-            return Err(format!(
-                "admin {} holds no authority on domain {domain_id}",
-                admin.to_hex()
-            ));
+        //
+        // Only a PoA domain has such authority to check. A permissionless
+        // domain has none to hold, and the compliance ledger refuses it by
+        // KIND - the refusal that says why, rather than a missing admin.
+        if kind == crate::registry::ComplianceDomainKind::PoA {
+            let admin_is_admin = self
+                .state
+                .poa_onboarding
+                .registry()
+                .is_admin(domain_id, &admin);
+            let admin_is_operator = domain.operator == Some(admin);
+            if !admin_is_admin && !admin_is_operator {
+                return Err(format!(
+                    "admin {} holds no authority on domain {domain_id}",
+                    admin.to_hex()
+                ));
+            }
         }
         let height = self.chain.len() as u64;
         let result = if unfreeze {
@@ -1657,6 +1663,23 @@ impl Blockchain {
         // ledger is persisted once at block close (next to the pending
         // queues), tagged dirty here.
         self.quarantine_dirty = true;
+    }
+
+    /// Writes the quarantine ledger if an event tagged it dirty. Called at
+    /// block close, and by the slashing-report path, which runs outside block
+    /// production: without the second call an operator slash would sit only
+    /// in memory until some later block closed, and a restart before that
+    /// loses the quarantine row and its alarm.
+    fn flush_quarantine_ledger(&mut self) {
+        if !self.quarantine_dirty {
+            return;
+        }
+        self.quarantine_dirty = false;
+        if let Some(store) = &self.storage {
+            if let Err(e) = store.save_quarantine_ledger(&self.quarantine_ledger) {
+                tracing::error!(error = %e, "Failed to persist quarantine ledger");
+            }
+        }
     }
 
     fn apply_pending_commitments(
@@ -2596,7 +2619,19 @@ impl Blockchain {
             .get_transfer(&message_id)
             .cloned()
             .ok_or_else(|| "Unknown bridge transfer".to_string())?;
-        let amount = transfer.amount.get();
+        // The recipient holds what the mint credited to it: the transfer
+        // amount minus the relayer fee, which the mint paid to the relayer
+        // out of the arriving asset. Debiting the gross amount would demand
+        // units the recipient never received, so with any fee the burn could
+        // never succeed.
+        let params = *self.state.registry.params();
+        let (held, _relayer_fee) = crate::cross_domain::bridge::split_bridge_fee(
+            transfer.amount,
+            params.bridge_relayer_fee_ppm,
+            params.bridge_relayer_min_fee,
+        )
+        .map_err(|e| e.to_string())?;
+        let amount = held.get();
         let burner = transfer.recipient;
         let burner_balance = self.state.get_balance(&burner);
         if burner_balance < amount {
@@ -3166,7 +3201,8 @@ impl Blockchain {
                 let _ = self.state.slash_from_report(report);
                 if let Some(v) = self.state.validators.get_mut(&report.offender) {
                     if !v.slashed {
-                        v.slashed = true;
+                        // Timed jail, not a permanent slash (BLG-0087,
+                        // decision B): see `apply_epoch_close_liveness`.
                         v.active = false;
                         v.jailed = true;
                         v.jail_until = jail_until;
@@ -3922,6 +3958,7 @@ impl Blockchain {
                         &format!("offender slashed (role {})", report.role),
                         3,
                     );
+                    self.flush_quarantine_ledger();
                 }
                 Ok(outcome)
             }
@@ -4817,7 +4854,9 @@ impl Blockchain {
                 let _ = state.slash_from_report(report);
                 if let Some(validator) = state.validators.get_mut(&report.offender) {
                     if !validator.slashed {
-                        validator.slashed = true;
+                        // BLG-0087 (P04-F05, decision B): absence is a TIMED
+                        // jail. `slashed` stays false, or the release loop
+                        // (`!slashed`) could never bring the validator back.
                         validator.active = false;
                         // The term, and the flag the release loop reads.
                         //
@@ -5205,14 +5244,7 @@ impl Blockchain {
             self.chain.len() as u64,
             crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH * 10,
         );
-        if self.quarantine_dirty {
-            self.quarantine_dirty = false;
-            if let Some(store) = &self.storage {
-                if let Err(e) = store.save_quarantine_ledger(&self.quarantine_ledger) {
-                    tracing::error!(error = %e, "Failed to persist quarantine ledger");
-                }
-            }
-        }
+        self.flush_quarantine_ledger();
         self.sweep_retired_relays(block.index);
 
         self.record_validator_snapshot(self.state.epoch_index);
