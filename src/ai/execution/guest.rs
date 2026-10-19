@@ -23,20 +23,27 @@ pub struct FixedPointMlpSpec {
     pub biases: Vec<i32>,
 }
 
+/// Checks the layer count and layer widths. Reads only `dims` and allocates
+/// nothing, so it can run before any buffer sized from `dims` is created.
+fn check_dims_shape(dims: &[u16]) -> Result<(), String> {
+    if dims.len() < 2 || dims.len() > MAX_MLP_LAYERS + 1 {
+        return Err(format!(
+            "dims length must be 2..={} (got {})",
+            MAX_MLP_LAYERS + 1,
+            dims.len()
+        ));
+    }
+    for &d in dims {
+        if d == 0 || d as usize > MAX_MLP_WIDTH {
+            return Err(format!("layer dim {d} out of 1..={MAX_MLP_WIDTH}"));
+        }
+    }
+    Ok(())
+}
+
 impl FixedPointMlpSpec {
     pub fn validate(&self) -> Result<(), String> {
-        if self.dims.len() < 2 || self.dims.len() > MAX_MLP_LAYERS + 1 {
-            return Err(format!(
-                "dims length must be 2..={} (got {})",
-                MAX_MLP_LAYERS + 1,
-                self.dims.len()
-            ));
-        }
-        for &d in &self.dims {
-            if d == 0 || d as usize > MAX_MLP_WIDTH {
-                return Err(format!("layer dim {d} out of 1..={MAX_MLP_WIDTH}"));
-            }
-        }
+        check_dims_shape(&self.dims)?;
         let mut expected_w = 0usize;
         let mut expected_b = 0usize;
         for w in self.dims.windows(2) {
@@ -1082,6 +1089,7 @@ pub fn guest_program_for_model(model: &crate::ai::types::AiModelSpec) -> Result<
         .execution_dims
         .as_ref()
         .ok_or("model does not register execution_dims; cannot rebuild its guest program")?;
+    check_dims_shape(dims)?;
     let spec = FixedPointMlpSpec {
         dims: dims.clone(),
         // Sized to match the architecture so `validate` passes. The values are
@@ -1137,6 +1145,34 @@ pub fn run_matmul_guest(
 #[cfg(test)]
 mod matmul_tests {
     use super::*;
+
+    #[test]
+    fn guest_program_for_model_refuses_oversize_dims_without_allocating() {
+        let owner = crate::core::address::Address::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+        let model = crate::ai::types::AiModelSpec {
+            model_id: crate::ai::types::AiModelId::of(&owner, &[1u8; 32], 1),
+            model_hash: [1u8; 32],
+            owner,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_weights_digest: None,
+            execution_dims: Some(vec![u16::MAX; 5]),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        };
+        assert!(guest_program_for_model(&model).is_err());
+    }
 
     /// The whole point of the guest: what the VM computes must equal what the
     /// host evaluator computes, for the same weights and the same input.
