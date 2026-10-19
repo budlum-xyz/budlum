@@ -193,7 +193,6 @@ impl PoSEngine {
         checkpoint: &Checkpoint,
         storage: Option<&crate::storage::db::Storage>,
     ) -> Result<(), ConsensusError> {
-
         if let Some(store) = storage {
             // Not `let _ =`: a checkpoint that fails to persist is not a
             // cosmetic loss. On restart the node would not know the block was
