@@ -35,6 +35,17 @@ fn serialize_payload_or_log<T: serde::Serialize>(what: &str, value: &T) -> Vec<u
     }
 }
 
+/// Same as [`serialize_payload_or_log`] for bincode payloads: a failure is logged, not silent.
+fn bincode_payload_or_log<T: serde::Serialize + ?Sized>(what: &str, value: &T) -> Vec<u8> {
+    match bincode::serialize(value) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!("Failed to serialize {what} for network payload: {e}");
+            Vec::new()
+        }
+    }
+}
+
 /// The only transaction wire version this node encodes and accepts.
 const TX_WIRE_VERSION: u32 = 2;
 
@@ -182,7 +193,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::Identity as i32,
                 Some(pb::proto_transaction::TypePayload::Identity(
                     pb::ProtoIdentityTx {
-                        data: bincode::serialize(identity_tx).unwrap_or_default(),
+                        data: bincode_payload_or_log("IdentityTx", identity_tx),
                     },
                 )),
             ),
@@ -190,7 +201,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PoaOnboarding as i32,
                 Some(pb::proto_transaction::TypePayload::PoaOnboarding(
                     pb::ProtoPoaOnboardingTx {
-                        data: bincode::serialize(poa_tx).unwrap_or_default(),
+                        data: bincode_payload_or_log("PoaOnboardingTx", poa_tx),
                     },
                 )),
             ),
@@ -204,7 +215,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::Vault as i32,
                 Some(pb::proto_transaction::TypePayload::Vault(
                     pb::ProtoVaultTx {
-                        data: bincode::serialize(vault_tx).unwrap_or_default(),
+                        data: bincode_payload_or_log("VaultTx", vault_tx),
                     },
                 )),
             ),
@@ -212,7 +223,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::Storage as i32,
                 Some(pb::proto_transaction::TypePayload::Storage(
                     pb::ProtoStorageTx {
-                        data: bincode::serialize(storage_tx).unwrap_or_default(),
+                        data: bincode_payload_or_log("StorageTx", storage_tx),
                     },
                 )),
             ),
@@ -375,7 +386,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenRegisterDataAsset as i32,
                 Some(pb::proto_transaction::TypePayload::PollenRegisterDataAsset(
                     pb::ProtoPollenDataAsset {
-                        data: bincode::serialize(asset).unwrap_or_default(),
+                        data: bincode_payload_or_log("DataAsset", asset),
                     },
                 )),
             ),
@@ -383,7 +394,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenAuthorizeSale as i32,
                 Some(pb::proto_transaction::TypePayload::PollenAuthorizeSale(
                     pb::ProtoPollenSaleAuthorization {
-                        data: bincode::serialize(authorization).unwrap_or_default(),
+                        data: bincode_payload_or_log("SaleAuthorization", authorization),
                     },
                 )),
             ),
@@ -391,7 +402,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenGrantAccess as i32,
                 Some(pb::proto_transaction::TypePayload::PollenGrantAccess(
                     pb::ProtoPollenAccessGrant {
-                        data: bincode::serialize(grant).unwrap_or_default(),
+                        data: bincode_payload_or_log("AccessGrant", grant),
                     },
                 )),
             ),
@@ -2554,6 +2565,18 @@ mod tests {
 
         proto.tx_type = 999; // Unknown transaction type tag
         assert!(Transaction::try_from(proto).is_err());
+    }
+
+    #[test]
+    fn a_bincode_payload_failure_gives_an_empty_payload_after_logging() {
+        struct Refuses;
+        impl serde::Serialize for Refuses {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("refused"))
+            }
+        }
+        assert!(bincode_payload_or_log("Refuses", &Refuses).is_empty());
+        assert!(!bincode_payload_or_log("u8", &7u8).is_empty());
     }
 
     #[test]
