@@ -1426,12 +1426,6 @@ src/crypto/primitives.rs	const	PQ_ML_DSA_65_SIGNATURE_LEN
 src/crypto/primitives.rs	enum	KeyBackend
 src/crypto/primitives.rs	fn	devnet_default
 src/crypto/primitives.rs	fn	generate_pop
-src/crypto/primitives.rs	fn	load_for_network
-src/crypto/primitives.rs	fn	mainnet_default
-src/crypto/primitives.rs	fn	pq_signature_len_acceptable
-src/crypto/primitives.rs	fn	private_key_bytes
-src/crypto/primitives.rs	fn	secret_key_bytes
-src/crypto/primitives.rs	fn	validate_mainnet_disk_policy
 src/crypto/primitives.rs	struct	ValidatorKeyPolicy
 src/crypto/signer.rs	fn	with_bls
 src/crypto/signer.rs	fn	with_pq
