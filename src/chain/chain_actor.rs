@@ -2017,7 +2017,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    /// Submit a ZK proof (permissionless; L1 ↔ BudZKVM bridge).
+    /// Submit a ZK proof (permissionless; chain ↔ BudZKVM bridge).
     pub async fn submit_zk_proof(
         &self,
         submission: crate::prover::ZkProofSubmission,

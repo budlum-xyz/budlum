@@ -1,4 +1,4 @@
-//! Permissionless ZK proof submission and the L1 ↔ BudZKVM bridge.
+//! Permissionless ZK proof submission and the chain ↔ BudZKVM bridge.
 //!
 //! ## Model (decided this turn: "Option B" - fully open submission)
 //! Anyone may submit a proof; registration is NOT required to have a valid proof

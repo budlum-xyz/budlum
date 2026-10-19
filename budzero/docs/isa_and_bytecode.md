@@ -39,7 +39,7 @@ pub struct Instruction {
 | 18-22 | `rs2` | Second source register (0-31) |
 | 23-54 | `imm` | A 32-bit signed immediate value |
 
-Every instruction is therefore a fixed-size 8-byte word, which is a critical advantage for the bytecode alignment check in the L1 integration.
+Every instruction is therefore a fixed-size 8-byte word, which is a critical advantage for the bytecode alignment check in the chain integration.
 
 ## Opcodes and their production status
 
@@ -83,9 +83,9 @@ The BudZKVM ISA is split into two profiles, **production** and **experimental**.
 
 > All 31 opcodes are at production level. No experimental opcode remains. Every opcode's VM implementation and AIR constraint is complete.
 
-## The bytecode format and the L1 integration
+## The bytecode format and the chain integration
 
-`Instruction::encode()` packs each instruction into a single `u64`. In the CLI and the L1 integration these values are turned into a little-endian byte string:
+`Instruction::encode()` packs each instruction into a single `u64`. In the CLI and the chain integration these values are turned into a little-endian byte string:
 
 ```rust
 let bytes: Vec<u8> = bytecode
@@ -94,7 +94,7 @@ let bytes: Vec<u8> = bytecode
     .collect();
 ```
 
-`TransactionType::ContractCall` in the Budlum L1 `infra` repository uses this format. The `tx.data` field cannot be empty and its length must be a multiple of 8; every 8 bytes is one BudZKVM instruction.
+`TransactionType::ContractCall` in the Budlum chain `infra` repository uses this format. The `tx.data` field cannot be empty and its length must be a multiple of 8; every 8 bytes is one BudZKVM instruction.
 
 ## ZK-friendly encoding
 

@@ -374,12 +374,12 @@ pub enum TransactionType {
     /// Reclaim an expired escrowed agent payment back to the sender.
     AiAgentPaymentReclaim([u8; 32]),
     /// Submit private transfer (note commitments + nullifiers).
-    /// Mainnet opcode activation is separate; L1 registry updates here.
+    /// Mainnet opcode activation is separate; chain registry updates here.
     PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit),
     /// Faucet/test helper - insert a live note commitment (governance/tests).
     PrivacyNoteInsert([u8; 32]),
     /// AI execution layer: attach BudZKVM execution proof to a result
-    /// (active RoleId(8) operator-submitted; structural verify on L1).
+    /// (active RoleId(8) operator-submitted; structural verify on the chain).
     AiAttachExecutionProof {
         request_id: crate::ai::types::AiRequestId,
         proof: crate::ai::types::AiExecutionProof,

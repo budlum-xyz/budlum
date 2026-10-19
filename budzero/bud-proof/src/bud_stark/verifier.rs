@@ -357,7 +357,7 @@ where
     // layout of the produced proof and moved which field that one flipped byte
     // lands in. The panic predates this path; the test corrupts a fixed field.
     //
-    // The envelope carries its own `degree_bits` and the L1 checks that one
+    // The envelope carries its own `degree_bits` and the chain checks that one
     // against `MAX_DEGREE_BITS`. This is a different field, inside the
     // serialized proof, and nothing compared the two. Bounding it here covers
     // every caller rather than the one that remembered.
