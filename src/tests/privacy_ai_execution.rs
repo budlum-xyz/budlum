@@ -158,6 +158,15 @@ fn ai_mlp_guest_program_hash_stable() {
     let h2 = program_hash_from_words(&w);
     assert_eq!(h1, h2);
     assert_ne!(h1, [0u8; 32]);
+
+    // Different weights give a different program, so a different hash.
+    let other = FixedPointMlpSpec {
+        dims: vec![2, 2, 1],
+        weights: vec![1, 0, 0, 1, 1, 2],
+        biases: vec![0, 0, 0],
+    };
+    let w_other = build_fixed_point_mlp_guest(&other, &ic).unwrap();
+    assert_ne!(h1, program_hash_from_words(&w_other));
 }
 
 #[test]
