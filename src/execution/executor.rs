@@ -938,6 +938,13 @@ impl Executor {
                     .burn(id, &tx.from)
                     .map_err(|e| BudlumError::validation("nft_burn_failed", e.to_string()))?;
 
+                // An empty folder token that is burned must not stay registered.
+                if state.vault.is_folder(id) {
+                    state.vault.close_folder(id).map_err(|e| {
+                        BudlumError::validation("vault_close_failed", e.to_string())
+                    })?;
+                }
+
                 // Constitution section 1: when an NFT is burned the data is physically deleted from B.U.D. storage.
                 // Physical pruning is handled at Blockchain level (storage_registry.prune_content);
                 // Here we record the CID for the post-block prune hook.
