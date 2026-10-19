@@ -192,19 +192,6 @@ pub fn leading_zero_bits(hash: &crate::domain::Hash32) -> u32 {
     bits
 }
 
-/// Map domain config_hash / chain parameters to a minimum leading-zero
-/// Difficulty. When no explicit difficulty is encoded, require a modest
-/// Floor so totally random hashes cannot finalize.
-pub fn pow_min_difficulty_bits(domain: &crate::domain::ConsensusDomain) -> u32 {
-    // Optional override: config_hash[0..4] = b"DIFF", config_hash[4..8] = u32 LE bits.
-    // Otherwise use a conservative default floor (8 leading zero bits).
-    if &domain.config_hash[0..4] == b"DIFF" {
-        let encoded = u32::from_le_bytes(domain.config_hash[4..8].try_into().unwrap_or([0; 4]));
-        return encoded.clamp(1, 128);
-    }
-    8
-}
-
 /// Bounded, deterministic PoW light client used by bridge-enabled PoW domains.
 #[derive(Debug, Clone, Default)]
 pub struct PoWHeaderChainFinalityAdapter;
