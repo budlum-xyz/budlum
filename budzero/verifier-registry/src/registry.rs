@@ -161,6 +161,10 @@ pub enum RegistryError {
         account: Address,
         role: RoleId,
     },
+    StakeOverflow {
+        account: Address,
+        role: RoleId,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -198,6 +202,9 @@ impl std::fmt::Display for RegistryError {
                     f,
                     "{account} already slashed as {role}; slashing is idempotent"
                 )
+            }
+            RegistryError::StakeOverflow { account, role } => {
+                write!(f, "stake of {account} as {role} would overflow")
             }
         }
     }
@@ -278,12 +285,22 @@ impl VerifierRegistry {
         }
     }
 
+    /// P16-F12: like [`Self::with_params`], but refuses parameters that fail
+    /// [`RegistryParams::validate`] (zero `min_stake` or `unbonding_epochs`,
+    /// ratios above the scale).
+    pub fn try_with_params(params: RegistryParams) -> Result<Self, String> {
+        params.validate()?;
+        Ok(Self::with_params(params))
+    }
+
     pub fn params(&self) -> &RegistryParams {
         &self.params
     }
 
-    pub fn set_params(&mut self, params: RegistryParams) {
+    pub fn set_params(&mut self, params: RegistryParams) -> Result<(), String> {
+        params.validate()?;
         self.params = params;
+        Ok(())
     }
 
     // ─── Registration ──────────────────────────────────────────────────
@@ -404,7 +421,15 @@ impl VerifierRegistry {
                     return;
                 }
                 if total_stake == 0 {
-                    self.registrations.remove(&key);
+                    // P16-F11: a zero stake is an exit, not a deletion. The
+                    // bond stays slashable and locked for the unbonding
+                    // window; removing it let evidence find `NotRegistered`.
+                    if matches!(reg.status, MemberStatus::Active) {
+                        reg.status = MemberStatus::Unbonding {
+                            release_epoch: current_epoch
+                                .saturating_add(self.params.unbonding_epochs),
+                        };
+                    }
                 } else {
                     reg.stake = total_stake;
                 }
@@ -436,7 +461,15 @@ impl VerifierRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        reg.stake = reg.stake.saturating_add(amount);
+        // P16-F13: only an Active bond can grow; an unbonding or slashed
+        // bond is on its way out. An overflow is an error, not a clip.
+        if !matches!(reg.status, MemberStatus::Active) {
+            return Err(RegistryError::NotActive { account, role });
+        }
+        reg.stake = reg
+            .stake
+            .checked_add(amount)
+            .ok_or(RegistryError::StakeOverflow { account, role })?;
         Ok(reg.stake)
     }
 
@@ -1110,6 +1143,67 @@ mod tests {
             .last()
             .map(|record| record.report.offender);
         assert_eq!(last, Some(Address::from(expected_last)));
+    }
+
+    /// P16-F11: a zero stake unbonds, it does not delete the registration.
+    #[test]
+    fn upsert_zero_stake_keeps_the_bond_slashable() {
+        let mut reg = VerifierRegistry::new();
+        reg.register_master_verifier(addr(30), 10_000, 0).unwrap();
+        reg.upsert_stake(addr(30), roles::MASTER_VERIFIER, 0, 5);
+        let entry = reg
+            .registrations
+            .get(&(roles::MASTER_VERIFIER, addr(30)))
+            .expect("the registration must survive a zero stake");
+        assert_eq!(
+            entry.status,
+            MemberStatus::Unbonding {
+                release_epoch: 5 + reg.params().unbonding_epochs
+            }
+        );
+        assert!(reg
+            .slash(
+                addr(30),
+                roles::MASTER_VERIFIER,
+                SlashingCondition::MaliciousBehaviour,
+                FIXED_POINT_SCALE,
+            )
+            .is_ok());
+    }
+
+    /// P16-F13: stake only grows on an Active bond and never clips.
+    #[test]
+    fn add_stake_refuses_non_active_and_overflow() {
+        let mut reg = VerifierRegistry::new();
+        reg.register_master_verifier(addr(31), u64::MAX - 1, 0)
+            .unwrap();
+        assert!(matches!(
+            reg.add_stake(addr(31), roles::MASTER_VERIFIER, 2),
+            Err(RegistryError::StakeOverflow { .. })
+        ));
+        assert_eq!(
+            reg.add_stake(addr(31), roles::MASTER_VERIFIER, 1),
+            Ok(u64::MAX)
+        );
+        reg.begin_unbonding(addr(31), roles::MASTER_VERIFIER, 0)
+            .unwrap();
+        assert!(matches!(
+            reg.add_stake(addr(31), roles::MASTER_VERIFIER, 1),
+            Err(RegistryError::NotActive { .. })
+        ));
+    }
+
+    /// P16-F12: parameters that fail validation are refused.
+    #[test]
+    fn invalid_params_are_refused() {
+        let bad = RegistryParams {
+            unbonding_epochs: 0,
+            ..Default::default()
+        };
+        assert!(VerifierRegistry::try_with_params(bad.clone()).is_err());
+        let mut reg = VerifierRegistry::new();
+        assert!(reg.set_params(bad).is_err());
+        assert_eq!(reg.params().unbonding_epochs, 7);
     }
 
     #[test]
