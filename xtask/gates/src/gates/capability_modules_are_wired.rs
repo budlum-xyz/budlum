@@ -277,6 +277,61 @@ fn byte_index(chars: &[char], idx: usize) -> usize {
     chars[..idx].iter().map(|c| c.len_utf8()).sum()
 }
 
+/// Is `name` a live test in `src`: a `#[test] fn` that is not ignored, is not
+/// in a comment and asserts something?
+///
+/// Comments and string literals are blanked first. The attributes are read
+/// from the text between the previous item and the `fn`, in either order, so
+/// `#[ignore]` before or after `#[test]` is seen. An empty body enforces
+/// nothing and is not live.
+pub(crate) fn test_is_live(src: &str, name: &str) -> bool {
+    let code = strip_noise(src);
+    let needle = format!("fn {name}");
+    let mut from = 0usize;
+    while let Some(rel) = code[from..].find(&needle) {
+        let at = from + rel;
+        from = at + needle.len();
+        let after = &code[from..];
+        if !after.trim_start().starts_with('(') || after.starts_with(is_ident_char) {
+            continue;
+        }
+        let head = &code[..at];
+        let attrs = &head[head.rfind(['}', ';']).map_or(0, |i| i + 1)..];
+        if !attrs.contains("#[test]") || attrs.contains("#[ignore") || attrs.contains("#[cfg(") {
+            continue;
+        }
+        let Some(open) = after.find('{') else {
+            continue;
+        };
+        let mut depth = 0i32;
+        let mut body_end = None;
+        for (i, c) in after[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = body_end else {
+            continue;
+        };
+        let body = &after[open + 1..end];
+        if ["assert", "panic!", "unwrap", "expect", "unreachable!"]
+            .iter()
+            .any(|m| body.contains(m))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Source with test items, comments and string literals removed: code only.
 pub(crate) fn code_only(src: &str) -> String {
     strip_noise(&strip_test_mods(src))
@@ -1160,5 +1215,28 @@ mod tests {
         let out = strip_test_mods(src);
         assert!(!out.contains("leaked_call"));
         assert!(out.contains("fn prod"));
+    }
+
+    #[test]
+    fn live_test_needs_attr_assertion_and_no_ignore() {
+        let ok = "#[test]\nfn a() { assert!(true); }\n";
+        assert!(test_is_live(ok, "a"));
+        assert!(!test_is_live("#[test]\nfn a() {}\n", "a"));
+        assert!(!test_is_live(
+            "#[ignore]\n#[test]\nfn a() { assert!(true); }\n",
+            "a"
+        ));
+        assert!(!test_is_live(
+            "#[test]\n#[ignore]\nfn a() { assert!(true); }\n",
+            "a"
+        ));
+        assert!(!test_is_live(
+            "// #[test]\nfn a() { assert!(true); }\n",
+            "a"
+        ));
+        assert!(test_is_live(
+            "#[test]\n#[should_panic]\nfn a() { assert!(true); }\n",
+            "a"
+        ));
     }
 }
