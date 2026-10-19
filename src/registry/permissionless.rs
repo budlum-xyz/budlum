@@ -183,6 +183,11 @@ pub enum RegistryError {
         account: Address,
         role: RoleId,
     },
+    /// BLG-0092 (P04-F10): the role-bond door registers the verifier family
+    /// and nothing else; any other RoleId is refused by name.
+    UnsupportedRole {
+        role: RoleId,
+    },
 }
 
 impl std::fmt::Display for RegistryError {
@@ -208,6 +213,9 @@ impl std::fmt::Display for RegistryError {
                 f,
                 "stake still unbonding until epoch {release_epoch} (now {current_epoch})"
             ),
+            RegistryError::UnsupportedRole { role } => {
+                write!(f, "role {role} has no bond registration path")
+            }
             RegistryError::RelayerNotActive { account } => write!(
                 f,
                 "{account} is not an active relayer (register with stake first)"
