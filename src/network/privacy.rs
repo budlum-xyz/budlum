@@ -190,7 +190,9 @@ pub enum NetworkPrivacyError {
     /// Target string was empty.
     EmptyTarget,
     /// Route id was empty, path-like, URL-like, or otherwise non-deterministic.
-    InvalidRouteId(String),
+    ///
+    /// The id is not stored: a mistyped proxy URL may hold a user name and password.
+    InvalidRouteId,
     /// Policy requires proxy/overlay egress but the caller selected direct.
     DirectEgressDenied {
         purpose: EgressPurpose,
@@ -208,9 +210,7 @@ impl fmt::Display for NetworkPrivacyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyTarget => f.write_str("network egress target must not be empty"),
-            Self::InvalidRouteId(route_id) => {
-                write!(f, "invalid network privacy route id: {route_id}")
-            }
+            Self::InvalidRouteId => f.write_str("invalid network privacy route id"),
             Self::DirectEgressDenied {
                 purpose,
                 target_kind,
@@ -368,7 +368,7 @@ fn validate_route_id(route_id: &str) -> Result<(), NetworkPrivacyError> {
     if valid {
         Ok(())
     } else {
-        Err(NetworkPrivacyError::InvalidRouteId(route_id.to_string()))
+        Err(NetworkPrivacyError::InvalidRouteId)
     }
 }
 
@@ -481,9 +481,16 @@ mod tests {
             let request = EgressRequest::new(EgressPurpose::PeerDial, "adapter-target-1", route);
             assert!(matches!(
                 check_egress(&policy, &request),
-                Err(NetworkPrivacyError::InvalidRouteId(_))
+                Err(NetworkPrivacyError::InvalidRouteId)
             ));
         }
+
+        let leaky = EgressRoute::Proxy {
+            route_id: "https://user:secret@proxy.example".into(),
+        };
+        let request = EgressRequest::new(EgressPurpose::PeerDial, "adapter-target-1", leaky);
+        let error = check_egress(&policy, &request).expect_err("a URL route id is refused");
+        assert!(!format!("{error} {error:?}").contains("secret"));
 
         let request = EgressRequest::new(
             EgressPurpose::PeerDial,
