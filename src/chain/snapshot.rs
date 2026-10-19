@@ -16,7 +16,14 @@ pub struct StateSnapshot {
     pub finalized_hash: String,
     pub validators: HashMap<Address, crate::core::account::Validator>,
     pub snapshot_hash: String,
+    /// 0 for blobs written before entry counts were hashed, 1 afterwards.
+    /// A missing field reads as 0, so an old blob verifies against its own digest.
+    #[serde(default)]
+    pub digest_version: u8,
 }
+/// Digest version that prefixes every variable-length run with its entry count.
+const COUNTED_DIGEST_VERSION: u8 = 1;
+
 /// Stand-in bytes used when a snapshot value cannot be serialized.
 ///
 /// The previous `expect`s argued, correctly, that folding a failure into empty
@@ -54,6 +61,7 @@ impl StateSnapshot {
             finalized_hash,
             validators,
             snapshot_hash: String::new(),
+            digest_version: COUNTED_DIGEST_VERSION,
         };
         snapshot.snapshot_hash = snapshot.calculate_hash();
         snapshot
@@ -64,11 +72,18 @@ impl StateSnapshot {
         hasher.update(self.height.to_le_bytes());
         hasher.update(self.block_hash.as_bytes());
         hasher.update(self.chain_id.to_le_bytes());
+        let counted = self.digest_version >= COUNTED_DIGEST_VERSION;
+        if counted {
+            hasher.update((self.balances.len() as u64).to_le_bytes());
+        }
         let mut balance_keys: Vec<_> = self.balances.keys().collect();
         balance_keys.sort();
         for key in balance_keys {
             hasher.update(key.0);
             hasher.update(self.balances[key].to_le_bytes());
+        }
+        if counted {
+            hasher.update((self.nonces.len() as u64).to_le_bytes());
         }
         let mut nonce_keys: Vec<_> = self.nonces.keys().collect();
         nonce_keys.sort();
@@ -1302,6 +1317,26 @@ mod tests {
             "finalhash".to_string(),
         );
         assert!(snapshot.verify());
+    }
+    #[test]
+    fn legacy_digest_version_verifies_against_its_own_digest() {
+        let account_state = AccountState::new();
+        let mut snapshot =
+            StateSnapshot::from_state(5, "h".to_string(), 42, &account_state, 1, "f".to_string());
+        let counted_hash = snapshot.snapshot_hash.clone();
+        snapshot.digest_version = 0;
+        assert!(!snapshot.verify());
+        snapshot.snapshot_hash = snapshot.calculate_hash();
+        assert!(snapshot.verify());
+        assert_ne!(snapshot.snapshot_hash, counted_hash);
+        let mut value = serde_json::to_value(&snapshot).expect("to value");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("digest_version");
+        let legacy: StateSnapshot = serde_json::from_value(value).expect("parse legacy blob");
+        assert_eq!(legacy.digest_version, 0);
+        assert!(legacy.verify());
     }
     #[test]
     fn test_pruning_manager() {
