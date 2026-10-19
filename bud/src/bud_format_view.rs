@@ -62,11 +62,13 @@ impl CompiledView {
         if keys.len() > MAX_VIEW_KEYS {
             return None;
         }
-        // All keys, including the optional ones.
+        // All keys, including the optional ones. A set answers "seen before?"
+        // in one step, so many records with many keys do not cost a scan each.
+        let mut known: std::collections::HashSet<String> = keys.iter().cloned().collect();
         for rec in arr {
             if let Some(o) = rec.as_object() {
                 for k in o.keys() {
-                    if !keys.contains(k) {
+                    if known.insert(k.clone()) {
                         keys.push(k.clone());
                         // The view is optional (KF2); a view the reader refuses is not built.
                         if keys.len() > MAX_VIEW_KEYS {
@@ -84,7 +86,7 @@ impl CompiledView {
             let mut uniq: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut sample = String::new();
             let mut present = 0u64;
-            let mut type_name: &'static str = "null";
+            let mut type_name: Option<&'static str> = None;
             for rec in arr {
                 let o = match rec.as_object() {
                     Some(o) => o,
@@ -98,9 +100,17 @@ impl CompiledView {
                 if sample.is_empty() {
                     sample = compact_value(v);
                 }
-                uniq.insert(compact_value(v));
-                type_name = value_type(v);
+                // Distinct means distinct as JSON: the full encoding, so a shared
+                // 24 character prefix and the word "null" do not merge values.
+                uniq.insert(v.to_string());
+                let t = value_type(v);
+                type_name = match type_name {
+                    None => Some(t),
+                    Some(prev) if prev == t => Some(prev),
+                    Some(_) => Some("mixed"),
+                };
             }
+            let type_name = type_name.unwrap_or("null");
             let optional = present < arr.len() as u64;
             schemas.push(KeySchema {
                 key: key.clone(),
@@ -265,6 +275,20 @@ mod tests {
 
     fn sample_json() -> Vec<u8> {
         br#"[{"u":"u1","ts":"2026-08-01","a":"r","v":42,"s":200},{"u":"u2","ts":"2026-08-02","a":"w","v":7,"s":200},{"u":"u1","ts":"2026-08-03","a":"l","v":999,"s":404}]"#.to_vec()
+    }
+
+    #[test]
+    fn cardinality_counts_long_values_and_mixed_types_honestly() {
+        let prefix = "p".repeat(30);
+        let json = format!(
+            r#"[{{"a":"{prefix}1","b":null}},{{"a":"{prefix}2","b":"null"}},{{"a":"{prefix}2","b":3}}]"#
+        );
+        let view = CompiledView::compile(json.as_bytes()).unwrap();
+        let a = view.keys.iter().find(|k| k.key == "a").unwrap();
+        assert_eq!(a.unique_values, 2, "values past 24 chars stay distinct");
+        let b = view.keys.iter().find(|k| k.key == "b").unwrap();
+        assert_eq!(b.unique_values, 3, "null, the word null and a number");
+        assert_eq!(b.type_name, "mixed");
     }
 
     #[test]
