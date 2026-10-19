@@ -21,7 +21,7 @@ public proof API shapes change.
 
 - Add or update the proof-format version before treating bytes as stable.
 - Include the Plonky3 version and backend assumptions in release notes.
-- Record whether the change affects CLI, chain integration, or node-facing APIs.
+- Record whether the change affects CLI, L1 integration, or node-facing APIs.
 
 ## Release Gates
 
@@ -43,4 +43,4 @@ Release notes should include:
 - Whether existing proof bytes still verify.
 - Any new public values or transcript observations.
 - Any verifier failure mode that changed.
-- Required downstream updates for CLI, state, node, or chain integration.
+- Required downstream updates for CLI, state, node, or L1 integration.

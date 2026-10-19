@@ -10,7 +10,7 @@ This chapter walks step by step through the 5 critical improvements made during 
 
 ### Problem
 
-`bincode` 1.3 carried the **RUSTSEC-2020-0159** advisory in the Rust ecosystem: unbounded deserialization can lead to memory exhaustion (DoS). We were ignoring that advisory in `deny.toml`. But in a production environment an enormous invalid proof byte string sent to a chain node can bring the node down.
+`bincode` 1.3 carried the **RUSTSEC-2020-0159** advisory in the Rust ecosystem: unbounded deserialization can lead to memory exhaustion (DoS). We were ignoring that advisory in `deny.toml`. But in a production environment an enormous invalid proof byte string sent to an L1 node can bring the node down.
 
 ### Solution
 
@@ -298,7 +298,7 @@ Adding a new state area (storage, stack, memory) to a ZKVM does not always requi
 | Topic | Status | Plan |
 |------|-------|------|
 | Poseidon multi-round AIR | only round 0 is verified | full verification once Plonky3 supports multi-round constraints |
-| chain node integration | bud-node placeholder | JSON-RPC API and P2P network layer |
+| L1 node integration | bud-node placeholder | JSON-RPC API and P2P network layer |
 | Compiler error messages | no span information | `miette` integration |
 | Debug mode | no step-by-step debugger | a `bud-cli debug` command |
 

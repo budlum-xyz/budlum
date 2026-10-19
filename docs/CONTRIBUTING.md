@@ -2,7 +2,7 @@
 
 Thanks for helping improve Budlum Core.
 
-Budlum is an experimental Rust blockchain core focused on modular consensus, deterministic execution, ZKVM-native contracts, privacy research, and future AI-assisted execution tooling. Contributions are welcome, especially from builders who enjoy protocol internals and clean systems code.
+Budlum is an experimental Rust Layer-1 blockchain core focused on modular consensus, deterministic execution, ZKVM-native contracts, privacy research, and future AI-assisted execution tooling. Contributions are welcome, especially from builders who enjoy protocol internals and clean systems code.
 
 If you find the project useful, please also consider starring and forking the repo. It helps the project reach more protocol researchers and chain builders.
 
