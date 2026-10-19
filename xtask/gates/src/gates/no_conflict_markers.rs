@@ -35,19 +35,22 @@ const SELF_PATH: &str = "xtask/gates/src/gates/no_conflict_markers.rs";
 /// space on the open and close markers matters: `<<<<<<<` with no space is a
 /// legitimate thing to write in prose about merge conflicts.
 fn is_marker(line: &str) -> bool {
+    // A CRLF file leaves a `\r` at the end of the separator line.
+    let line = line.strip_suffix('\r').unwrap_or(line);
     line.starts_with("<<<<<<< ") || line.starts_with(">>>>>>> ") || line == "======="
 }
 
-fn scan(root: &Path) -> Vec<String> {
+/// Scan the tree. Returns the marker lines and the number of files scanned.
+fn scan_checked(root: &Path) -> Result<(Vec<String>, usize), String> {
     let files = sorted_walk(root, SKIP_DIRS);
     let mut found = Vec::new();
+    let mut scanned = 0usize;
     for path in files {
         if path.ends_with(SELF_PATH) {
             continue;
         }
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
+        let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        scanned += 1;
         // grep reads binary files too and reports a match by path; lossy
         // decoding keeps the line content readable in the report. The path is
         // shown root-joined, mirroring `grep "$dir"`, so an absolute
@@ -60,7 +63,14 @@ fn scan(root: &Path) -> Vec<String> {
             }
         }
     }
-    found
+    Ok((found, scanned))
+}
+
+/// The marker lines only, for the canaries below.
+fn scan(root: &Path) -> Vec<String> {
+    scan_checked(root)
+        .map(|(found, _)| found)
+        .unwrap_or_default()
 }
 
 /// Recursively collect files, in deterministic (sorted) order.
@@ -106,7 +116,12 @@ fn walk_into(dir: &Path, skip_dirs: &[&str], out: &mut Vec<PathBuf>) {
 ///
 /// Returns every marker line, root-joined, when the tree contains one.
 pub fn run(root: &Path) -> Result<String, String> {
-    let found = scan(root);
+    let (found, scanned) = scan_checked(root)?;
+    if scanned == 0 {
+        return Err(String::from(
+            "FAIL: no file was scanned - wrong root, the gate would be vacuous",
+        ));
+    }
     if found.is_empty() {
         return Ok(String::from("OK: no conflict markers in the tree"));
     }
@@ -287,5 +302,22 @@ mod tests {
         // pointing the gate at its own crate root.
         let here = Path::new(env!("CARGO_MANIFEST_DIR"));
         assert!(run(here).is_ok(), "gate must exclude its own source");
+    }
+}
+
+#[cfg(test)]
+mod crlf_tests {
+    use super::*;
+
+    #[test]
+    fn crlf_separator_is_a_marker_and_an_empty_root_is_an_error() {
+        assert!(is_marker("=======\r"));
+        assert!(is_marker("<<<<<<< HEAD\r"));
+        assert!(!is_marker("======== x"));
+        let dir = std::env::temp_dir().join(format!("conflict-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = run(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(out.is_err());
     }
 }
