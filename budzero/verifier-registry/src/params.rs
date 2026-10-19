@@ -13,8 +13,8 @@ pub const FIXED_POINT_SCALE: u64 = 1_000_000;
 ///
 /// This mirrors `budlum_core::core::chain_config::slash_penalty`. The two are
 /// separate because this crate is in the BudZero workspace and does not depend
-/// on `budlum-core`; `slash_expression_is_the_same_in_both_workspaces` in the
-/// core tree compares them so the copy cannot drift silently.
+/// on `budlum-core`; the `slash_expression` gate in `xtask/gates` compares the
+/// two expressions so the copy cannot drift silently.
 ///
 /// The cap is not decoration. Written the obvious way, as
 /// `((stake as u128 * ratio as u128) / SCALE as u128) as u64`, a ratio above
