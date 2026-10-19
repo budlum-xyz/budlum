@@ -548,7 +548,9 @@ impl PoSEngine {
                             let spaced = now_ms
                                 .saturating_sub(prev.timestamp)
                                 .saturating_sub(MIN_BLOCK_INTERVAL_MS);
-                            (spaced / ROUND_TIMEOUT_MS).min(MAX_LEADER_ROUNDS)
+                            u64::try_from(spaced / ROUND_TIMEOUT_MS)
+                .unwrap_or(u64::MAX)
+                .min(MAX_LEADER_ROUNDS)
                         });
                         let mut elected = false;
                         for round in 0..=round_cap {
