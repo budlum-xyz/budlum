@@ -99,6 +99,23 @@ fn ensure_checkpoints_verified(
     Ok(())
 }
 
+/// Largest chain export the tool reads.
+const MAX_CHAIN_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Read a file but refuse one longer than `max` bytes.
+fn read_bounded(path: &std::path::Path, max: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    file.take(max.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.len() as u64 > max {
+        return Err(format!("file is larger than {max} bytes"));
+    }
+    Ok(buf)
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -107,7 +124,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let raw = match fs::read(&cli.chain_file) {
+    let raw = match read_bounded(&cli.chain_file, MAX_CHAIN_FILE_BYTES) {
         Ok(raw) => raw,
         Err(e) => {
             eprintln!("cannot read {}: {e}", cli.chain_file.display());
@@ -228,7 +245,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_interval, ensure_checkpoints_verified};
+    use super::{check_interval, ensure_checkpoints_verified, read_bounded};
 
     /// BLG-0705: a run that verifies nothing must not end as trusted.
     #[test]
@@ -238,5 +255,14 @@ mod tests {
         assert!(ensure_checkpoints_verified(0, 5, 5).is_err());
         assert!(ensure_checkpoints_verified(0, 5, 9).is_err());
         assert!(ensure_checkpoints_verified(1, 5, 20).is_ok());
+    }
+
+    #[test]
+    fn an_oversized_file_is_refused() {
+        let path = std::env::temp_dir().join(format!("budlum_light_bound_{}", std::process::id()));
+        std::fs::write(&path, [0u8; 16]).unwrap();
+        assert!(read_bounded(&path, 16).is_ok());
+        assert!(read_bounded(&path, 15).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 }
