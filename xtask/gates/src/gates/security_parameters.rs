@@ -739,6 +739,9 @@ fn passes_security(config_tail: &str) -> bool {
 }
 
 fn check_build_config(build_src: &str, problems: &mut Vec<String>, checked: &mut usize) {
+    // Text in a comment or a string cannot satisfy the structure checks.
+    let build_src = strip_comments(build_src);
+    let build_src = build_src.as_str();
     // The absorbed vector must be derived from the FriParameters binding.
     *checked += 1;
     let Some(fri_body) = fri_params_body(build_src) else {
@@ -844,7 +847,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     // 1. The trait must declare it.
     checked += 1;
-    if !has_trait_decl(&cfg_src) {
+    if !has_trait_decl(&strip_comments(&cfg_src)) {
         problems.push(String::from(
             "config.rs does not declare `security_parameters`, so the FRI \
              parameters are outside the Fiat-Shamir transcript. num_queries and \
