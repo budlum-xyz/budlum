@@ -48,6 +48,11 @@ impl LrcScheme {
         if k == 0 || l == 0 || g == 0 || k < l {
             return None;
         }
+        // The hash and the blob write these as `u32`; larger values would
+        // collide with smaller ones.
+        if u32::try_from(k).is_err() || u32::try_from(l).is_err() || u32::try_from(g).is_err() {
+            return None;
+        }
         // The group size: the k data shards are split into l groups, at least one
         // each.
         if k / l < 1 {
@@ -64,8 +69,9 @@ impl LrcScheme {
     /// How many shards a single-shard repair reads, which is the local group
     /// size.
     pub fn repair_reads(&self) -> usize {
-        let group = self.k / self.l; // the data shards in each group
-        group + 1 // plus the local parity
+        // The largest group: when l does not divide k, the first groups hold
+        // one shard more than the rest.
+        self.k.div_ceil(self.l) + 1 // plus the local parity
     }
 
     /// The local group index: which local group a shard belongs to. For parity
@@ -74,7 +80,18 @@ impl LrcScheme {
         if shard >= self.k + self.l {
             return None; // global parity
         }
-        Some(shard / (self.k / self.l).max(1))
+        if shard >= self.k {
+            return Some(shard - self.k); // local parity j covers group j
+        }
+        // The first `rem` groups hold `base + 1` data shards, the rest `base`.
+        let base = self.k / self.l;
+        let rem = self.k % self.l;
+        let big = (base + 1) * rem;
+        if shard < big {
+            Some(shard / (base + 1))
+        } else {
+            Some(rem + (shard - big) / base)
+        }
     }
 
     /// The comparison against RS(10,16) from the `src/storage/lrc.rs` table, used as
@@ -202,6 +219,23 @@ mod tests {
             None,
             "a global parity belongs to no group"
         );
+    }
+
+    #[test]
+    fn local_parities_and_uneven_groups_map_to_valid_groups() {
+        let lrc = LrcScheme::new(2000, 50, 12).unwrap();
+        assert_eq!(lrc.local_group(2000), Some(0));
+        assert_eq!(lrc.local_group(2049), Some(49));
+        // k = 10 in l = 4 groups: sizes 3, 3, 2, 2.
+        let u = LrcScheme::new(10, 4, 1).unwrap();
+        let groups: Vec<usize> = (0..10).map(|s| u.local_group(s).unwrap()).collect();
+        assert_eq!(groups, vec![0, 0, 0, 1, 1, 1, 2, 2, 3, 3]);
+        assert_eq!(u.repair_reads(), 4);
+        for s in 0..14 {
+            assert!(u.local_group(s).unwrap() < 4);
+        }
+        // Sizes that do not fit the u32 fields are refused.
+        assert!(LrcScheme::new(usize::MAX, 50, 12).is_none());
     }
 
     #[test]
