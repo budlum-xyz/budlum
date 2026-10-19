@@ -895,11 +895,7 @@ async fn a_configured_evm_adapter_still_refuses_its_own_stubbed_result() {
     // ever reaches the confirmation step. The message names the gap.
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("does not speak to Ethereum")
-            || msg.contains("does not read Ethereum")
-            || msg.contains("Merkle")
-            || msg.contains("leaf")
-            || msg.contains("forgery"),
+        msg.contains("does not speak to Ethereum"),
         "the refusal must name what is missing, got: {msg}"
     );
     assert!(
