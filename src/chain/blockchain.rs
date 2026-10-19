@@ -1250,20 +1250,7 @@ impl Blockchain {
     }
 
     fn verify_slashing_evidence(evidence: &SlashingEvidence) -> bool {
-        if evidence.header1.index != evidence.header2.index {
-            return false;
-        }
-        if evidence.header1.producer != evidence.header2.producer {
-            return false;
-        }
-        if evidence.header1.producer.is_none() {
-            return false;
-        }
-        if evidence.header1.hash == evidence.header2.hash {
-            return false;
-        }
-        evidence.header1.verify_signature(&evidence.signature1)
-            && evidence.header2.verify_signature(&evidence.signature2)
+        crate::consensus::pos::slashing_evidence_is_valid(evidence)
     }
 
     fn validate_consensus_domain_registration(domain: &ConsensusDomain) -> Result<(), String> {

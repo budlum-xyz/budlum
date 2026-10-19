@@ -5,8 +5,8 @@
 //! caller supplies a binary `combine` for paired nodes and a unary
 //! `promote` for an unpaired tail.
 //!
-//! An unpaired tail is **promoted under its own domain tag, never paired
-//! with itself**. The self-pairing made the tail contribute exactly what a
+//! An unpaired tail is promoted under its own domain tag, never paired
+//! with itself. The self-pairing made the tail contribute exactly what a
 //! duplicated leaf would, so the root of `[a, b, c]` equalled the root of
 //! `[a, b, c, c]`: two different commitments, one digest (the F-6 shape,
 //! in every tree that used this module's duplicate-tail rule). A promoted

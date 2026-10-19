@@ -1169,13 +1169,16 @@ mod tests {
     }
 
     /// The expensive-path canary: a blob stuffed with entries must be refused
-    /// without the cost growing with the entry count.
+    /// before any per-entry work runs (P01-F25).
     ///
-    /// If the bound is ever removed this test still passes on correctness but
-    /// the timing assertion fails, which is the point, the finding was a CPU
-    /// exhaustion, not a wrong answer.
+    /// The invariant is check ORDER, and the refusal reason proves it
+    /// deterministically. The blob carries a garbage root and more entries
+    /// than the set has members: if the count bound runs first, the error
+    /// names the entry count; if the merkle hashing ran first, the error
+    /// would name the root. The wall-clock ratio this used to assert flaked
+    /// under CI load while proving the same fact less directly.
     #[test]
-    fn oversized_blob_is_refused_in_constant_time() {
+    fn oversized_blob_is_refused_before_hashing() {
         let (snapshot, _keys) = make_snapshot_with_pq_keys(4);
 
         let build = |n: usize| -> QcBlob {
@@ -1198,30 +1201,15 @@ mod tests {
             }
         };
 
-        let small = build(100);
-        let large = build(10_000);
-
-        let t = std::time::Instant::now();
-        assert!(small
-            .verify_against_snapshot(&snapshot, None, None)
-            .is_err());
-        let small_us = t.elapsed().as_micros().max(1);
-
-        let t = std::time::Instant::now();
-        assert!(large
-            .verify_against_snapshot(&snapshot, None, None)
-            .is_err());
-        let large_us = t.elapsed().as_micros().max(1);
-
-        // Before the fix this ratio tracked the entry count (100x more
-        // entries cost about 100x more time). A generous ceiling still
-        // catches a regression to per-entry work.
-        assert!(
-            large_us < small_us.saturating_mul(20) + 5_000,
-            "rejecting 10000 entries took {large_us}us against {small_us}us for \
-             100 - the cost is scaling with the entry count again, so the \
-             bound is no longer running before verify_merkle_root"
-        );
+        for n in [100usize, 10_000] {
+            let err = build(n)
+                .verify_against_snapshot(&snapshot, None, None)
+                .expect_err("more entries than validators must be refused");
+            assert!(
+                err.contains("signature entries for a validator set of"),
+                "with {n} entries the count bound must fire before any hashing, got: {err}"
+            );
+        }
     }
 
     /// The bound must not reject a legitimate blob: exactly one entry per
