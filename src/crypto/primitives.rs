@@ -871,6 +871,13 @@ impl WalletKeyPair {
             .expanded_key()
             .sign_randomized(message, b"", &mut rand::rng())
             .unwrap_or_else(|_| {
+                // P02-F20: the deterministic fallback stays (a dead OS rng
+                // must not strand a transaction mid-flight), but it is no
+                // longer silent. Hedged signing is the FIPS 204 posture and
+                // losing it is an incident, not a quiet detail.
+                tracing::error!(
+                    "Wallet ML-DSA randomized signing failed (OS rng unavailable);                      fell back to deterministic signing"
+                );
                 use ml_dsa::signature::Signer as _;
                 self.signing_key.sign(message)
             });
