@@ -319,11 +319,9 @@ pub fn run_args(_root: &Path, args: &[&str]) -> Verdict {
         ));
     }
     if !baseline.join("Cargo.toml").is_file() {
-        // First release / empty baseline: there is no previous version to compare against,
-        // so there is no such measure as a public API break. This is
-        // not an infrastructure error but the first-PR scenario; let it pass.
-        return Ok(String::from(
-            "SEMVER GATE: PASS - the baseline is empty (first release), no comparison.",
+        return Err(format!(
+            "baseline root without Cargo.toml: {}",
+            baseline.display()
         ));
     }
 
@@ -796,6 +794,22 @@ mod tests {
 
     fn scratch() -> PathBuf {
         scratch_dir().expect("scratch dir")
+    }
+
+    #[test]
+    fn a_baseline_without_a_manifest_is_refused() {
+        let d = scratch();
+        let cur = d.join("cur");
+        let base = d.join("base");
+        fs::create_dir_all(&cur).expect("fixture");
+        fs::create_dir_all(&base).expect("fixture");
+        fs::write(cur.join("Cargo.toml"), "[package]\n").expect("fixture");
+        let out = run_args(
+            &d,
+            &[cur.to_str().expect("utf8"), base.to_str().expect("utf8")],
+        );
+        let _ = fs::remove_dir_all(&d);
+        assert!(out.is_err());
     }
 
     #[test]
