@@ -129,7 +129,7 @@ fn kat_freeze_digest_is_stable() {
     ] {
         let seed = [seed_byte; 32];
         let mut signer = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen(seed, EpochWindow(window))
-            .unwrap_or_else(|e| panic!("kat keygen: {e}"));
+                .unwrap_or_else(|e| panic!("kat keygen: {e}"));
         let Nonesig = signer
             .sign_at_height(height, msg)
             .unwrap_or_else(|e| panic!("kat sign: {e}"));
