@@ -786,6 +786,26 @@ mod tests {
         );
     }
 
+    /// BLG-0141 (P06-F13): the reward is paid out of the slashed bond, so a
+    /// floor larger than the slash is capped at the slash.
+    #[test]
+    fn a_challenge_reward_never_exceeds_what_was_slashed() {
+        let mut bond = ProverBond {
+            prover: Address([1; 32]),
+            bond_atoms: 100,
+            ceiling_atoms: 1_000,
+            slashed_atoms: 0,
+            slashings: Vec::new(),
+            accepted: 0,
+            refused: 0,
+        };
+        let challenger = Address([2; 32]);
+        let taken = bond.slash(5, [0; 32], 10, challenger, 1_000);
+        assert_eq!(taken, 10);
+        let record = bond.slashings.last().expect("recorded");
+        assert_eq!(record.challenge_reward_atoms, 10);
+    }
+
     // ---------------------------------------------------------------------
     // ethereum
     // ---------------------------------------------------------------------
