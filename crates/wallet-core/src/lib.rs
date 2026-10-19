@@ -1179,9 +1179,11 @@ impl Wallet {
         verify_signature(public_key, message, signature)
     }
 
-    /// Seed (32-byte ML-DSA-87 xi - use carefully when exporting).
+    /// Seed (32-byte ML-DSA-87 xi). Not part of the public API: the raw
+    /// seed never leaves the wallet outside tests.
+    #[cfg(test)]
     #[must_use]
-    pub fn seed(&self) -> &[u8; ML_DSA_87_SEED_LEN] {
+    pub(crate) fn seed(&self) -> &[u8; ML_DSA_87_SEED_LEN] {
         &self.seed
     }
 

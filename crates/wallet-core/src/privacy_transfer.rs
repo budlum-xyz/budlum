@@ -33,6 +33,11 @@ impl std::fmt::Debug for PrivateNoteInput {
 }
 
 impl PrivateNoteInput {
+    /// Overwrite the nullifier secret.
+    fn wipe_spend_secret(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.spend_secret);
+    }
+
     #[must_use]
     pub fn commitment(&self) -> u64 {
         // privacy_commit(amount, blinding, recipient_tag)
@@ -42,6 +47,12 @@ impl PrivateNoteInput {
     #[must_use]
     pub fn nullifier(&self) -> u64 {
         privacy_nullifier(self.spend_secret)
+    }
+}
+
+impl Drop for PrivateNoteInput {
+    fn drop(&mut self) {
+        self.wipe_spend_secret();
     }
 }
 
@@ -244,6 +255,18 @@ pub(crate) fn public_digest(nullifiers: &[[u8; 32]], output_commitments: &[[u8; 
 #[cfg(test)]
 mod change_output_tests {
     use super::*;
+
+    #[test]
+    fn wipe_spend_secret_clears_the_nullifier_secret() {
+        let mut input = PrivateNoteInput {
+            amount: 1,
+            recipient_tag: 2,
+            blinding: 3,
+            spend_secret: 0xdead_beef,
+        };
+        input.wipe_spend_secret();
+        assert_eq!(input.spend_secret, 0);
+    }
 
     fn request_with_change(tag: Option<u64>, blinding: Option<u64>) -> PrivateTransferRequest {
         PrivateTransferRequest {
