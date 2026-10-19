@@ -152,18 +152,31 @@ impl QuantumAccount {
         h.finalize().into()
     }
 
+    /// Storage cost of this account in PICO units (10^-12 of one currency
+    /// unit) under the model: 0.23342 per TB, divided by the 16.68 Duz
+    /// ratio; device-only storage costs nothing.
+    ///
+    /// BLG-0279 (P17-F13): this returned an `f64` behind a
+    /// `cast_precision_loss` allow. Z8's rule is that money-shaped values
+    /// do not travel as floats - a comparison or accumulation of this number
+    /// anywhere downstream inherits float error and platform-dependent
+    /// rounding. The fixed-point form is exact integer arithmetic
+    /// (u128 intermediate, pico resolution), and callers that need a human
+    /// number format it once, at the edge.
     #[must_use]
-    pub fn storage_cost(&self) -> f64 {
-        // physical 0.23342 * e / r, device-only 0
-        // For simplicity: storage_bytes * 0.23342 / 1_099_511_627_776 (1TB) / 16.68 (Duz ratio)
-        // The byte count of an account is far below the exact integer range of f64 (2^53);
-        // the cost is a fractional estimate anyway.
-        #[allow(clippy::cast_precision_loss)]
-        let tb = self.storage_bytes as f64 / 1_099_511_627_776.0;
+    pub fn storage_cost_pico(&self) -> u64 {
         if self.storage_bytes == 0 {
-            0.0
-        } else {
-            tb * 0.23342 / 16.68
+            return 0;
+        }
+        // bytes * (23342/10^5) / (1668/100) * 10^12
+        //   = bytes * 23342 * 10^9 / (2^40 * 1668)
+        let numerator = u128::from(self.storage_bytes)
+            .checked_mul(23_342)
+            .and_then(|v| v.checked_mul(1_000_000_000));
+        let denominator: u128 = 1_099_511_627_776 * 1_668;
+        match numerator {
+            Some(n) => u64::try_from(n / denominator).unwrap_or(u64::MAX),
+            None => u64::MAX,
         }
     }
 
