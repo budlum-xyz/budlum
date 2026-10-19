@@ -59,6 +59,12 @@
 //! [`EXTERNAL_DOMAIN_FINALITY_ADAPTER`]. Re-derive before believing, as
 //! always: `grep -rn 'external_intake' src/ --include='*.rs'`.
 //!
+//! **Limit of that claim (P07-F21).** The call sites are wired, but the
+//! attestations are not part of any block or header: the digest is an RPC
+//! value only, and the intake is written outside block execution. Two nodes
+//! agree on it only if they saw the same calls. This is the external-roots
+//! gap tracked in STATUS.md section 4.5.
+//!
 //! # The rule underneath all six
 //!
 //! Budlum does not decide whether a domain is good. It decides whether the
@@ -381,15 +387,19 @@ mod tests {
         // The refusal half of the name, asserted directly: each probe's
         // corrupted evidence is rejected by the adapter itself, not merely
         // counted as passed by the report.
-        for (name, _) in &report.probes {
-            let mut corrupted = Tiny
-                .golden_evidence()
-                .expect("the golden sample exists above");
-            corrupted.payload.clear();
+        let golden = Tiny
+            .golden_evidence()
+            .expect("the golden sample exists above");
+        let probes = Tiny.fault_probes();
+        assert_eq!(probes.len(), report.total());
+        for probe in &probes {
+            let corrupted = selftest::apply_patch(&golden, &probe.patch)
+                .unwrap_or_else(|reason| panic!("probe {} must apply: {reason}", probe.name));
             assert!(
                 Tiny.verify(&corrupted, &VerificationPolicy::strict(10))
                     .is_err(),
-                "emptied evidence must be refused (probe context: {name})"
+                "probe {} must be refused by the adapter itself",
+                probe.name
             );
         }
         assert!(report.admitted);
@@ -665,7 +675,8 @@ mod tests {
             None,
             "never is not the same as stale"
         );
-        assert!(!p.state.serves() || p.state == DomainState::Admitted);
+        assert_eq!(p.state, DomainState::Admitted);
+        assert!(p.state.serves());
     }
 
     // ---------------------------------------------------------------------
