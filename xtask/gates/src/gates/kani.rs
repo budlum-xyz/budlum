@@ -96,7 +96,7 @@ fn fn_name(trimmed: &str) -> Option<&str> {
     let rest = trimmed.strip_prefix("fn ")?;
     let mut end = 0usize;
     for ch in rest.chars() {
-        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
             end += ch.len_utf8();
         } else {
             break;
@@ -116,7 +116,7 @@ fn first_fn_name(window: &str) -> Option<String> {
         let start = rel + "fn ".len();
         let mut end = start;
         for ch in window[start..].chars() {
-            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
                 end += ch.len_utf8();
             } else {
                 break;
@@ -475,5 +475,20 @@ mod tests {
         fs::write(&log, "VERIFICATION:- FAILED\n").expect("log");
         assert!(gate(&log, 1).is_err());
         let _ = fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn harness_names_may_hold_uppercase_letters() {
+        assert_eq!(fn_name("fn proofA_1("), Some("proofA_1"));
+        assert_eq!(
+            first_fn_name("pub fn Check_X() {"),
+            Some("Check_X".to_string())
+        );
+        assert_eq!(fn_name("fn "), None);
     }
 }
