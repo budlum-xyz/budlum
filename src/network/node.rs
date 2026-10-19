@@ -3169,10 +3169,9 @@ impl Node {
                                                    header.global_height,
                                                    &header.calculate_hash()[..16]
                                                );
-                                               {
-                                                   let mut pm = self.peer_manager_lock();
-                                                   pm.report_good_behavior(&peer_id);
-                                               }
+                                               // Nothing about the header is validated here, so it
+                                               // earns no credit: crediting it would offset the
+                                               // penalties of invalid blocks (P11-F03).
                                            }
                                        }
                                        }
@@ -3857,6 +3856,13 @@ mod sync_handler_order_tests {
         }
         assert!(code.contains("> height_before"));
         assert!(code.contains("> snap_height_before"));
+        // P11-F03: an unvalidated GlobalHeader earns no credit.
+        let arm = code
+            .split_once("NetworkMessage::GlobalHeader(header) => {")
+            .and_then(|(_, rest)| rest.split_once("Computed invalid message"))
+            .map(|(arm, _)| arm)
+            .unwrap_or("report_good_behavior");
+        assert!(!arm.contains("report_good_behavior"));
     }
 
     /// BLG-0205: the guard compares the height that is signed.
