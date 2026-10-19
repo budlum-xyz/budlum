@@ -411,6 +411,47 @@ impl AnchorSigner for HsmSignerStub {
 ///
 /// [`AnchorError::ProductionBlocked`] when `mode` is
 /// [`AnchorMode::ProductionApproved`].
+/// Node-side anchor emission (BLG-0076 / P03-F19): where a sealed anchor is
+/// written, under which mode, at which key epoch, and with which key.
+///
+/// The production trace runs on every global-header seal; the default is the
+/// GatedOff stub, so the trace takes the `Skipped` arm and nothing is
+/// written until a node configures a signer and the devnet mode.
+pub struct AnchorEmission {
+    /// Node-local anchor log path.
+    pub log_path: std::path::PathBuf,
+    /// Enforcement mode (GatedOff skips; ProductionApproved fails closed).
+    pub mode: AnchorMode,
+    /// The key epoch the emitted anchor is signed at.
+    pub key_epoch: u32,
+    /// The signing key (the software signer on devnet; the HSM stub refuses).
+    pub signer: std::sync::Arc<dyn AnchorSigner + Send + Sync>,
+}
+
+impl Clone for AnchorEmission {
+    fn clone(&self) -> Self {
+        Self {
+            log_path: self.log_path.clone(),
+            mode: self.mode,
+            key_epoch: self.key_epoch,
+            signer: std::sync::Arc::clone(&self.signer),
+        }
+    }
+}
+
+impl Default for AnchorEmission {
+    fn default() -> Self {
+        Self {
+            log_path: std::path::PathBuf::from("data/anchors.jsonl"),
+            mode: AnchorMode::GatedOff,
+            key_epoch: 0,
+            signer: std::sync::Arc::new(HsmSignerStub {
+                vendor_label: "unconfigured".to_string(),
+            }),
+        }
+    }
+}
+
 pub fn enforce_anchor_mode(mode: AnchorMode) -> Result<(), AnchorError> {
     match mode {
         AnchorMode::GatedOff | AnchorMode::Devnet => Ok(()),
