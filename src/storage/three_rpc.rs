@@ -42,6 +42,8 @@ pub enum RevealRpcError {
     Forbidden,
     /// A sealed recipe was presented without the public opening that unpacks it.
     NeedFullRecipe,
+    /// The public opening was sent but it does not open the sealed recipe.
+    WrongOpening,
     /// The read metering budget tripped.
     Meter(MeterError),
     /// The underlying re-emit failed.
@@ -56,6 +58,10 @@ impl std::fmt::Display for RevealRpcError {
                 f,
                 "three reveal rpc: sealed recipe needs a full public opening"
             ),
+            Self::WrongOpening => write!(
+                f,
+                "three reveal rpc: the opening does not open the sealed recipe"
+            ),
             Self::Meter(e) => write!(f, "three reveal rpc: meter: {e}"),
             Self::Reemit(e) => write!(f, "three reveal rpc: reemit: {e}"),
         }
@@ -69,6 +75,7 @@ impl From<RevealError> for RevealRpcError {
         match e {
             RevealError::Forbidden => Self::Forbidden,
             RevealError::NeedFullRecipe => Self::NeedFullRecipe,
+            RevealError::WrongOpening => Self::WrongOpening,
             RevealError::Reemit(e) => Self::Reemit(e),
         }
     }
