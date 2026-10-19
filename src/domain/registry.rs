@@ -5,6 +5,10 @@ use std::collections::BTreeMap;
 
 pub const MIN_DOMAIN_OPERATOR_BOND: u64 = 10_000;
 
+/// Most zk programs one domain may allow at the same time. Each entry is hashed into the
+/// registry leaf and checked on proof submission.
+pub const MAX_ZK_PROGRAMS_PER_DOMAIN: usize = 64;
+
 /// The maximum number of domains that may be kept registered.
 ///
 /// # Why a ceiling is needed
@@ -242,6 +246,11 @@ impl ConsensusDomainRegistry {
                 hex::encode(program)
             ));
         }
+        if domain.zk_program_allowlist.len() >= MAX_ZK_PROGRAMS_PER_DOMAIN {
+            return Err(format!(
+                "Domain {id} already allows {MAX_ZK_PROGRAMS_PER_DOMAIN} zk programs; revoke one first"
+            ));
+        }
         domain.zk_program_allowlist.push(program);
         Ok(())
     }
@@ -413,6 +422,19 @@ mod tests {
     use super::*;
     use crate::domain::plugin::default_domain;
     use crate::domain::types::ConsensusKind;
+
+    #[test]
+    fn the_zk_allowlist_is_capped() {
+        let mut registry = ConsensusDomainRegistry::new();
+        let domain = default_domain(2, ConsensusKind::PoS, 1338, "pos", 0);
+        registry.register(domain).expect("register");
+        for n in 0..MAX_ZK_PROGRAMS_PER_DOMAIN {
+            registry
+                .allow_zk_program(2, [u8::try_from(n).unwrap_or(0); 32])
+                .expect("under the cap");
+        }
+        assert!(registry.allow_zk_program(2, [200u8; 32]).is_err());
+    }
 
     #[test]
     fn the_leaf_commits_to_the_zk_allowlist_and_plugin_hash() {
