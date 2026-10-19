@@ -120,6 +120,18 @@ fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
                 if !v.is_empty() && !out.contains(&v) {
                     out.push(v);
                 }
+                // A floating channel moves under the pin, so it counts as a
+                // different toolchain unless the file declares the divergence.
+                let word = rest
+                    .split('#')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_matches('"')
+                    .to_string();
+                if matches!(word.as_str(), "stable" | "beta" | "nightly") && !out.contains(&word) {
+                    out.push(word);
+                }
             }
         }
     }
@@ -261,6 +273,15 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from(
             "canary: a differing workflow toolchain was accepted",
+        ));
+    }
+
+    let floating = tmp.join("floating");
+    build_fixture(&floating, good_from, good_copy, good_check, "stable")?;
+    if run(&floating).is_ok() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "canary: a floating stable channel was accepted against the pin",
         ));
     }
 
