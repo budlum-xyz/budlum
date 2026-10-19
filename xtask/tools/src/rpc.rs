@@ -71,11 +71,23 @@ pub fn request(
             .map_err(|e| format!("socket setup failed: {e}"))?;
         match stream.read(&mut chunk) {
             Ok(0) => break,
-            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Ok(n) => append_capped(&mut raw, &chunk[..n], &addr.to_string())?,
             Err(e) => return Err(format!("read from {addr} failed: {e}")),
         }
     }
     parse_reply(&raw)
+}
+
+/// The most a reply may hold. The nodes under test answer with small bodies.
+const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
+
+/// Append a chunk to the reply, refusing a reply above [`MAX_REPLY_BYTES`].
+fn append_capped(raw: &mut Vec<u8>, chunk: &[u8], addr: &str) -> Result<(), String> {
+    if raw.len() + chunk.len() > MAX_REPLY_BYTES {
+        return Err(format!("{addr} sent a reply above {MAX_REPLY_BYTES} bytes"));
+    }
+    raw.extend_from_slice(chunk);
+    Ok(())
 }
 
 /// POST one JSON-RPC call and return the reply body.
@@ -186,6 +198,14 @@ fn dechunk(mut rest: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reply_above_the_cap_is_refused() {
+        let mut raw = vec![0u8; MAX_REPLY_BYTES];
+        assert!(append_capped(&mut raw, b"x", "127.0.0.1:1").is_err());
+        let mut small = Vec::new();
+        assert!(append_capped(&mut small, b"x", "127.0.0.1:1").is_ok());
+    }
 
     #[test]
     fn parses_a_plain_reply() {
