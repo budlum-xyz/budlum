@@ -1934,12 +1934,25 @@ impl AccountState {
                     v.active = false;
                     v.jailed = true;
                     v.jail_until = self.epoch_index.saturating_add(7);
-                    v.stake = 0;
+                    let mut destroyed = u128::from(std::mem::take(&mut v.stake));
                     // A full governance slash also takes the stake that is
                     // still waiting to unbond. Otherwise unstake before the
                     // vote would keep it whole.
+                    destroyed += self
+                        .unbonding_queue
+                        .iter()
+                        .filter(|entry| entry.address == *address)
+                        .map(|entry| u128::from(entry.amount))
+                        .sum::<u128>();
                     self.unbonding_queue
                         .retain(|entry| entry.address != *address);
+                    // The destroyed stake was issued once. Counting it as
+                    // burned keeps it from reopening mint headroom.
+                    if let Ok(total) =
+                        u64::try_from(u128::from(self.burned_total).saturating_add(destroyed))
+                    {
+                        self.burned_total = total;
+                    }
                     tracing::info!(
                         "Executing Governance: Slashed validator {address} (evidence-verified)"
                     );
@@ -3791,7 +3804,20 @@ mod tests {
             0,
             10,
         );
+        let stake_before = state.get_validator(&who).unwrap().stake;
+        let queued_before: u64 = state
+            .unbonding_queue
+            .iter()
+            .filter(|entry| entry.address == who)
+            .map(|entry| entry.amount)
+            .sum();
+        let burned_before = state.burned_total;
         state.execute_proposal(&p);
+        assert_eq!(
+            state.burned_total,
+            burned_before + stake_before + queued_before,
+            "destroyed stake must count as burned"
+        );
         let validator = state.get_validator(&who).unwrap();
         assert_eq!(validator.stake, 0);
         assert!(validator.jailed);
