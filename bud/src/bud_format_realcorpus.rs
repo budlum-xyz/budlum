@@ -1,11 +1,10 @@
-//! B.U.D. 2.0 - REAL WORLD CORPUS TESTS (remaining work item #7).
+//! B.U.D. 2.0 - CORPUS SHAPE TESTS (remaining work item #7).
 //!
-//! Instead of a synthetic corpus, the engine round trip and the ratio are
-//! verified against REAL files ON THE SYSTEM: ELF (/bin/*), fonts
-//! (/usr/share/fonts) and text (/etc/*, /usr/share/doc). When a file is
-//! missing the test SKIPs (it is not a production environment). These tests
-//! are the canary for the "realistic ratio" limits in the matrix: nothing FAR
-//! above what was measured may be claimed.
+//! The engine round trip and the ratio are verified against fixed in-process
+//! corpora shaped like an ELF binary, a font and text. The inputs do not
+//! depend on files of the host, so the tests run the same everywhere. These
+//! tests are the canary for the "realistic ratio" limits in the matrix:
+//! nothing FAR above what was measured may be claimed.
 
 #![forbid(unsafe_code)]
 
@@ -13,90 +12,96 @@
 mod tests {
     use crate::bud_format_engine::{engine_restore_full, engine_store};
 
-    /// Find a real file (the first one that exists).
-    fn real_file(candidates: &[&str]) -> Option<Vec<u8>> {
-        for c in candidates {
-            if let Ok(m) = std::fs::read(c) {
-                if !m.is_empty() {
-                    return Some(m);
-                }
-            }
-        }
-        None
+    /// Deterministic filler bytes (a linear congruential generator).
+    fn noise(seed: u64, len: usize) -> Vec<u8> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 56) as u8
+            })
+            .collect()
     }
 
-    #[test]
-    fn a_real_elf_survives_the_engine_losslessly() {
-        if let Some(elf) = real_file(&["/bin/bash", "/usr/bin/bash", "/bin/ls", "/usr/bin/env"]) {
-            let res = engine_store(&elf, false, 1).expect("engine");
-            let blob = res.to_blob();
-            let back =
-                engine_restore_full(&blob, res.transform_kind.to_u8(), false).expect("restore");
-            assert_eq!(back, elf, "a REAL ELF comes back byte for byte");
-            assert!(res.measured_ratio > 1.0 || elf.len() < 4096);
-        } else {
-            eprintln!("SKIP: no real ELF was found (test environment)");
+    /// An ELF-shaped file: the magic, a header, code-like noise, zero padding
+    /// and a string table.
+    fn elf_like() -> Vec<u8> {
+        let mut f = b"\x7fELF\x02\x01\x01\x00".to_vec();
+        f.extend_from_slice(&[0u8; 56]);
+        f.extend_from_slice(&noise(1, 16 * 1024));
+        f.extend_from_slice(&[0u8; 8 * 1024]);
+        for _ in 0..64 {
+            f.extend_from_slice(b".text\0.rodata\0.data\0.bss\0.symtab\0.strtab\0");
         }
+        f
     }
 
-    #[test]
-    fn a_real_font_survives_the_engine_losslessly() {
-        let candidates = vec![
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
-        ];
-        // scan for ttf files under /usr/share/fonts
-        if let Ok(read) = std::fs::read_dir("/usr/share/fonts") {
-            for _e in read.flatten() {
-                if candidates.len() > 30 {
-                    break;
-                }
-                // only a sample: the candidates above are enough
-            }
+    /// A font-shaped file: a table directory followed by table-like noise.
+    fn font_like() -> Vec<u8> {
+        let mut f = b"\x00\x01\x00\x00".to_vec();
+        for tag in [b"cmap", b"glyf", b"head", b"hhea", b"hmtx", b"loca"] {
+            f.extend_from_slice(tag);
+            f.extend_from_slice(&noise(2, 12));
         }
-        if let Some(font) = real_file(&candidates) {
-            let res = engine_store(&font, false, 2).expect("engine");
-            let back = engine_restore_full(&res.to_blob(), res.transform_kind.to_u8(), false)
-                .expect("restore");
-            assert_eq!(back, font, "a REAL font comes back byte for byte");
-        } else {
-            eprintln!("SKIP: no font was found");
-        }
+        f.extend_from_slice(&noise(3, 12 * 1024));
+        f.extend_from_slice(&[0u8; 2 * 1024]);
+        f
     }
 
-    #[test]
-    fn real_text_survives_the_engine_losslessly() {
-        let candidates = [
-            "/etc/os-release",
-            "/etc/hostname",
-            "/etc/hosts",
-            "/usr/share/doc",
-        ];
-        if let Some(txt) = real_file(&candidates) {
-            let res = engine_store(&txt, false, 3).expect("engine");
-            let back = engine_restore_full(&res.to_blob(), res.transform_kind.to_u8(), false)
-                .expect("restore");
-            assert_eq!(back, txt, "real text comes back byte for byte");
-        } else {
-            eprintln!("SKIP: no text file was found");
-        }
-    }
-
-    #[test]
-    fn a_claim_above_the_real_corpus_measurement_is_refused() {
-        // The canary: a real ELF/font measurement cannot exceed the range in
-        // the matrix (matrix: elf 2.6x with zstd19, font 2.5x - the engine's
-        // measurement sits at the honest boundary).
-        if let Some(elf) = real_file(&["/bin/bash", "/usr/bin/env"]) {
-            let res = engine_store(&elf, false, 1).unwrap();
-            // A single ELF file: no transform, so a zstd limit around 2-3x is
-            // reasonable.
-            assert!(
-                res.measured_ratio < 50.0,
-                "a claim above 50x for an ELF is REFUSED: {}",
-                res.measured_ratio
+    /// Plain text with the repetition of a real document.
+    fn text_like() -> Vec<u8> {
+        let mut t = Vec::new();
+        for i in 0..400 {
+            t.extend_from_slice(
+                format!("line {i}: the quick brown fox jumps over it\n").as_bytes(),
             );
         }
+        t
+    }
+
+    #[test]
+    fn an_elf_shaped_file_survives_the_engine_losslessly() {
+        let elf = elf_like();
+        let res = engine_store(&elf, false, 1).expect("engine");
+        let blob = res.to_blob();
+        let back = engine_restore_full(&blob, res.transform_kind.to_u8(), false).expect("restore");
+        assert_eq!(back, elf, "an ELF-shaped file comes back byte for byte");
+        assert!(res.measured_ratio > 1.0);
+    }
+
+    #[test]
+    fn a_font_shaped_file_survives_the_engine_losslessly() {
+        let font = font_like();
+        let res = engine_store(&font, false, 2).expect("engine");
+        let back = engine_restore_full(&res.to_blob(), res.transform_kind.to_u8(), false)
+            .expect("restore");
+        assert_eq!(back, font, "a font-shaped file comes back byte for byte");
+    }
+
+    #[test]
+    fn text_survives_the_engine_losslessly() {
+        let txt = text_like();
+        let res = engine_store(&txt, false, 3).expect("engine");
+        let back = engine_restore_full(&res.to_blob(), res.transform_kind.to_u8(), false)
+            .expect("restore");
+        assert_eq!(back, txt, "text comes back byte for byte");
+    }
+
+    #[test]
+    fn a_claim_above_the_corpus_measurement_is_refused() {
+        // The canary: an ELF measurement cannot exceed the range in the matrix
+        // (matrix: elf 2.6x with zstd19, font 2.5x - the engine's measurement
+        // sits at the honest boundary).
+        let elf = elf_like();
+        let res = engine_store(&elf, false, 1).unwrap();
+        // A single ELF-shaped file: no transform, so a zstd limit far below 50x
+        // is reasonable.
+        assert!(
+            res.measured_ratio < 50.0,
+            "a claim above 50x for an ELF is REFUSED: {}",
+            res.measured_ratio
+        );
     }
 }

@@ -396,7 +396,8 @@ mod tests {
         assert!(pcap_transform(&[0u8; 24]).is_none()); // no magic
         let mut p = sample_pcap();
         p.truncate(40); // global hdr + half a record
-        assert!(pcap_transform(&p).is_none() || pcap_transform(&p).is_some()); // no panic
+                        // The record header promises 60 bytes that are not there.
+        assert!(pcap_transform(&p).is_none());
     }
 
     /// A record length of `u64::MAX` in the varint stream. `pos + l + 1`
