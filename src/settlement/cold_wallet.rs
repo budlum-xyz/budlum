@@ -482,7 +482,11 @@ impl ColdWalletState {
     /// # Errors
     ///
     /// The first [`ColdRefusal`] that applies.
-    pub fn sign(
+    ///
+    /// BLG-0071 (P03-F14): module-private on purpose. The unauthenticated
+    /// path may only be reached through [`Self::sign_with_quorum`], which has
+    /// verified the device quorum before any budget or counter moves.
+    fn sign(
         &mut self,
         request: &SettlementRequest,
         presented_key_epoch: u32,
@@ -709,11 +713,16 @@ impl ColdWalletState {
         // quorum gate however must refuse signatures pinned to any other
         // epoch right here, before the policy layer even looks at the request.
         if presented_key_epoch != self.key_epoch {
-            // Reuse the policy layer's refusal path so rotation boundaries
-            // stay recorded in the refusal history.
-            return match self.sign(request, presented_key_epoch, 0) {
-                Ok(_) => unreachable!("mismatched key epoch cannot pass check"),
+            // BLG-0072 (P03-F15): no signature has been checked yet, so this
+            // refusal must NOT enter the bounded refusal history — an
+            // unsigned caller could otherwise push real refusals out of it.
+            // `check` decides without recording; only the authenticated path
+            // below may append to the log.
+            return match self.check(request, presented_key_epoch, 0) {
                 Err(refusal) => Err(ColdSettleError::Policy(refusal)),
+                Ok(()) => Err(ColdSettleError::Policy(ColdRefusal::InvalidState {
+                    rule: "mismatched key epoch cannot pass check".to_string(),
+                })),
             };
         }
         let signer_ids = verify_quorum(
@@ -739,7 +748,10 @@ impl ColdWalletState {
     /// a rotation that cannot be tied to a point in the chain cannot be audited.
     /// WIRING: unwired - key rotation is an operator action on the same
     /// dormant cold-wallet path; refusal rules are pinned by this file's tests.
-    pub fn rotate_key(&mut self, at_height: u64, reason: &str) -> Result<u32, RotationError> {
+    ///
+    /// BLG-0071 (P03-F14): module-private, like [`Self::sign`]. A caller that
+    /// cannot present the device quorum must not bump the key epoch.
+    fn rotate_key(&mut self, at_height: u64, reason: &str) -> Result<u32, RotationError> {
         if reason.is_empty() {
             return Err(RotationError::EmptyReason);
         }
