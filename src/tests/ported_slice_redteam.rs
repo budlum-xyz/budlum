@@ -205,17 +205,11 @@ fn the_write_gate_answers_before_the_payload_is_read() {
 fn a_credential_id_is_content_derived_so_a_forged_issuer_reaches_nothing() {
     let mut registry = two_dids();
     let real = credential(9, 100, Some(1_000));
-    execute_identity_tx(
-        &mut registry,
-        &addr(9),
-        IdentityTx::Issue {
-            credential: real.clone(),
-        },
-        &POA,
-        200,
-        1,
-    )
-    .unwrap();
+    // BLG-0095: the door now needs the subject's consent for a third-party
+    // issuance; this test is about ids, so it sets up through the Op layer.
+    registry
+        .apply(&POA, IdentityOp::Issue { credential: real.clone() }, 200)
+        .unwrap();
 
     // The stranger copies the victim's bytes and names itself issuer. If the
     // id were anything but content-derived, this would resolve to the
@@ -269,17 +263,11 @@ fn a_revocation_is_not_a_toggle() {
     let mut registry = two_dids();
     let c = credential(9, 100, Some(1_000));
     let id = credential_id(&c);
-    execute_identity_tx(
-        &mut registry,
-        &addr(9),
-        IdentityTx::Issue {
-            credential: c.clone(),
-        },
-        &POA,
-        200,
-        1,
-    )
-    .unwrap();
+    // Setup through the Op layer: this test is about revocation semantics
+    // (BLG-0095 moved third-party issuance consent to the door).
+    registry
+        .apply(&POA, IdentityOp::Issue { credential: c.clone() }, 200)
+        .unwrap();
     execute_identity_tx(
         &mut registry,
         &addr(9),
@@ -312,11 +300,17 @@ fn a_revocation_is_not_a_toggle() {
 fn issuance_refuses_a_credential_from_the_future_or_born_dead() {
     let mut registry = two_dids();
 
-    let future = credential(9, 500, Some(1_000));
+    let mut future = credential(9, 500, Some(1_000));
+    // Self-issued (subject == issuer): no consent gate, so the registry's
+    // own time checks are what answers (BLG-0095).
+    future.subject = addr(9);
     let err = execute_identity_tx(
         &mut registry,
         &addr(9),
-        IdentityTx::Issue { credential: future },
+        IdentityTx::Issue {
+            credential: future,
+            consent: None,
+        },
         &POA,
         200,
         1,
@@ -338,7 +332,10 @@ fn issuance_refuses_a_credential_from_the_future_or_born_dead() {
     let err = execute_identity_tx(
         &mut registry,
         &addr(9),
-        IdentityTx::Issue { credential: dead },
+        IdentityTx::Issue {
+            credential: dead,
+            consent: None,
+        },
         &POA,
         200,
         1,
@@ -390,21 +387,18 @@ fn an_unregistered_subject_cannot_be_handed_a_credential() {
 fn the_same_credential_cannot_be_issued_twice() {
     let mut registry = two_dids();
     let c = credential(9, 100, Some(1_000));
-    execute_identity_tx(
-        &mut registry,
-        &addr(9),
-        IdentityTx::Issue {
-            credential: c.clone(),
-        },
-        &POA,
-        200,
-        1,
-    )
-    .unwrap();
+    // Setup through the Op layer: this test is about revocation semantics
+    // (BLG-0095 moved third-party issuance consent to the door).
+    registry
+        .apply(&POA, IdentityOp::Issue { credential: c.clone() }, 200)
+        .unwrap();
     let err = execute_identity_tx(
         &mut registry,
         &addr(9),
-        IdentityTx::Issue { credential: c },
+        IdentityTx::Issue {
+            credential: c,
+            consent: None,
+        },
         &POA,
         200,
         1,
