@@ -1986,8 +1986,18 @@ impl Plonky3Adapter {
             .proof_bytes
             .len()
             .min(crate::adapter::MAX_ENVELOPE_PROOF_BYTES)];
-        let p3_proof: crate::bud_stark::Proof<MyConfig> = postcard::from_bytes(bounded_bytes)
-            .map_err(|e| VerifyError::DeserializationError(e.to_string()))?;
+        // One proof must have one encoding: trailing bytes after the proof
+        // would give a single valid proof many distinct byte strings, and
+        // the relay fingerprint hashes and signs those bytes.
+        let (p3_proof, trailing): (crate::bud_stark::Proof<MyConfig>, &[u8]) =
+            postcard::take_from_bytes(bounded_bytes)
+                .map_err(|e| VerifyError::DeserializationError(e.to_string()))?;
+        if !trailing.is_empty() {
+            return Err(VerifyError::DeserializationError(format!(
+                "{} trailing bytes after the proof",
+                trailing.len()
+            )));
+        }
 
         stark_verify_with_preprocessed(
             &config,
@@ -5718,6 +5728,27 @@ mod tests {
                 "garbage proof bytes must fail in the decoder or the verifier, got {res:?}"
             );
         }
+    }
+
+    /// P15-F02: one proof has exactly one encoding. Bytes appended after a
+    /// valid proof are refused, so the proof hash and the relay fingerprint
+    /// cannot be varied without invalidating the proof.
+    #[test]
+    fn rejects_trailing_bytes_after_a_valid_proof() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 42),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let (envelope, pi) = prove_and_verify_full(program.clone(), |_| {});
+        assert!(Plonky3Adapter::verify(&envelope, &pi, &program).is_ok());
+
+        let mut padded = envelope.clone();
+        padded.proof_bytes.push(0);
+        let res = Plonky3Adapter::verify(&padded, &pi, &program);
+        assert!(
+            matches!(res, Err(VerifyError::DeserializationError(_))),
+            "a trailing byte must be refused by the decoder, got {res:?}"
+        );
     }
 
     #[test]
@@ -10452,7 +10483,20 @@ mod tests {
         // Trace_len).
         let pi = ExecutionPublicInputs {
             chain_id: 1,
-            program_hash: [0u8; 32],
+            program_hash: {
+                // The real program hash: a zero hash is refused at the
+                // envelope check before the AIR runs, which would make this
+                // test pass whatever the termination rule does.
+                let program_bytes: Vec<u8> = program
+                    .iter()
+                    .flat_map(|&inst| inst.to_le_bytes().to_vec())
+                    .collect();
+                let mut hasher = Keccak::v256();
+                hasher.update(&program_bytes);
+                let mut program_hash = [0u8; 32];
+                hasher.finalize(&mut program_hash);
+                program_hash
+            },
             initial_state_root: crate::adapter::initial_state_root_of(
                 crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
                 crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
@@ -10525,8 +10569,8 @@ mod tests {
 
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            res.is_err(),
-            "Expected verification to FAIL with non-Halt termination (Z-C), but it succeeded!"
+            matches!(res, Err(VerifyError::InvalidProof)),
+            "Expected the AIR to refuse non-Halt termination (Z-C), got {res:?}"
         );
     }
 
@@ -10721,7 +10765,20 @@ mod tests {
         // Trace_len).
         let pi = ExecutionPublicInputs {
             chain_id: 1,
-            program_hash: [0u8; 32],
+            program_hash: {
+                // The real program hash: a zero hash is refused at the
+                // envelope check before the AIR runs and the test would
+                // pass whatever the S-box constraint does.
+                let program_bytes: Vec<u8> = program
+                    .iter()
+                    .flat_map(|&inst| inst.to_le_bytes().to_vec())
+                    .collect();
+                let mut hasher = Keccak::v256();
+                hasher.update(&program_bytes);
+                let mut program_hash = [0u8; 32];
+                hasher.finalize(&mut program_hash);
+                program_hash
+            },
             initial_state_root: crate::adapter::initial_state_root_of(
                 crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
                 crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
@@ -10742,8 +10799,9 @@ mod tests {
 
         // Tamper the trace matrix directly: corrupt an S-box intermediate (x2) column
         let (mut matrix, _trace_len) = trace_matrix(&vm.trace, &program, &pi);
-        // Round 0, element 0 x2 is at COL_POSEIDON_X2_BASE = 290
-        matrix.values[290] = Goldilocks::new(999);
+        // Round 0, lane 0 S-box square. 290 lies inside the state block, so
+        // the earlier version of this test never touched an S-box witness.
+        matrix.values[crate::plonky3_air::COL_POSEIDON_X2_BASE] = Goldilocks::new(999);
         // Re-wrap in RowMajorMatrix
         let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
 
@@ -10786,8 +10844,8 @@ mod tests {
         // ...verification should FAIL because the S-box constraint is violated
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            res.is_err(),
-            "Expected verification to FAIL with tampered S-box, but it succeeded!"
+            matches!(res, Err(VerifyError::InvalidProof)),
+            "Expected the AIR to refuse a tampered S-box, got {res:?}"
         );
     }
 
