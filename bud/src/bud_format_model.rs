@@ -211,6 +211,16 @@ impl ModelFloatSplit {
         if count == 0 || count > MAX_VALUES {
             return None;
         }
+        // Exact stream sizes: one valid blob per content, and a wrong count
+        // is refused here and not only at decode time.
+        let rest_bits_per_value = match kind {
+            FloatKind::Bf16 => 8usize,
+            FloatKind::Fp32 => 24usize,
+        };
+        let rest_len = count.checked_mul(rest_bits_per_value)?.div_ceil(8);
+        if exponents.len() != count || rest_bits.len() != rest_len {
+            return None;
+        }
         Some(ModelFloatSplit {
             kind,
             count,
@@ -263,6 +273,21 @@ mod tests {
             out.push(b1);
         }
         out
+    }
+
+    #[test]
+    fn a_blob_with_extra_or_missing_stream_bytes_is_refused() {
+        let raw = gen_bf16_model(64);
+        let split = ModelFloatSplit::encode(&raw, FloatKind::Bf16).unwrap();
+        assert!(ModelFloatSplit::from_blob(&split.to_blob()).is_some());
+        // One extra remainder byte, sealed with a valid digest.
+        let mut longer = split.clone();
+        longer.rest_bits.push(0);
+        assert!(ModelFloatSplit::from_blob(&longer.to_blob()).is_none());
+        // A count that disagrees with the streams.
+        let mut wrong = split.clone();
+        wrong.count += 1;
+        assert!(ModelFloatSplit::from_blob(&wrong.to_blob()).is_none());
     }
 
     #[test]
