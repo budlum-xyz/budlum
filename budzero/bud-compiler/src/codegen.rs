@@ -957,6 +957,11 @@ impl Codegen {
                         return 0;
                     }
 
+                    if Opcode::VerifyMerkle.requires_mainnet_activation() {
+                        tracing::warn!(
+                            "verify_merkle_proof emits VerifyMerkle, which is not active on mainnet; the program is refused there until the opcode is activated"
+                        );
+                    }
                     let res = self.alloc_reg();
                     self.emit(Opcode::VerifyMerkle, res, r_root, r_leaf, path_addr as i32);
                     res
