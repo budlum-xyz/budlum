@@ -172,11 +172,16 @@ mod byzantine_settlement_tests {
         let (mut fake_com, proof) = pow_commitments[0].clone();
         fake_com.state_root = [0xFFu8; 32];
         fake_com.sequence = 9999;
+        // The proof carries no headers, so the adapter refuses it before any
+        // state root is compared. A forged root cannot ride on an empty proof.
+        // The accepting side of the same path is covered by the finalized
+        // depth test in settlement_prod.rs.
+        let err = node_a
+            .submit_verified_domain_commitment(fake_com, proof)
+            .expect_err("a forged state root on an empty proof must be rejected");
         assert!(
-            node_a
-                .submit_verified_domain_commitment(fake_com, proof)
-                .is_err(),
-            "Invalid state root in proof must be rejected"
+            err.contains("PoW header chain is empty"),
+            "unexpected rejection reason: {err}"
         );
 
         let header = node_a.seal_global_header(None).unwrap();
