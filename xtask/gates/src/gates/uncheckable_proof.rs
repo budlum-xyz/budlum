@@ -30,6 +30,28 @@ fn has_fn(code: &str, name: &str) -> bool {
     rust_literals::has_live_test(code, name)
 }
 
+/// `Some(true)` when the body of `fn <flag>()` is exactly `false`,
+/// `Some(false)` when it is anything else, `None` when there is no such fn.
+fn flag_is_constant_false(code: &str, flag: &str) -> Option<bool> {
+    let needle = format!("fn {flag}()");
+    let at = code.find(&needle)?;
+    let open = at + code[at..].find('{')?;
+    let mut depth = 0usize;
+    for (i, c) in code[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(code[open + 1..open + i].trim() == "false");
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -39,20 +61,8 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    // The flag is a plain constant `false`. Line-based: find the line that
-    // defines `fn <flag>() -> bool {`, then the first non-empty line inside
-    // the body must be `false`.
-    let flag_value: Option<bool> = {
-        let needle = format!("fn {flag}()");
-        match code.lines().position(|l| l.contains(&needle)) {
-            None => None,
-            Some(def_idx) => code
-                .lines()
-                .skip(def_idx + 1)
-                .find(|l| !l.trim().is_empty())
-                .map(|l| l.trim() == "false"),
-        }
-    };
+    // The flag is a plain constant `false`: the whole body is that one word.
+    let flag_value = flag_is_constant_false(&code, flag);
     // `flag_value` is `Some(true)` when the body is exactly `false`, i.e.
     // the flag is correctly closed; `Some(false)` means the flag now reports
     // `true`.
@@ -167,4 +177,20 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "uncheckable-proof canary OK (contained PASSes, a true flag FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_bare_false_body_is_a_closed_flag() {
+        let f = "storage_challenge_proofs_are_checkable";
+        let closed = format!("fn {f}() -> bool {{\n    false\n}}\n");
+        assert_eq!(flag_is_constant_false(&closed, f), Some(true));
+        let one_line = format!("fn {f}() -> bool {{ false }}\n");
+        assert_eq!(flag_is_constant_false(&one_line, f), Some(true));
+        let open = format!("fn {f}() -> bool {{\n    false\n        || enabled()\n}}\n");
+        assert_eq!(flag_is_constant_false(&open, f), Some(false));
+    }
 }
