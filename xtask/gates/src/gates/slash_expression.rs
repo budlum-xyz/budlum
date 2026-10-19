@@ -131,7 +131,7 @@ fn caps_narrow_to_stake(narrow: &str) -> bool {
     };
     let bindings: Vec<(&str, &str)> = statements.iter().copied().filter_map(binding_of).collect();
     let tail = resolve(tail.strip_prefix("return").unwrap_or(tail), &bindings);
-    let narrowed = |v: &str| resolve(v, &bindings).contains("asu64");
+    let narrowed = |v: &str| is_narrowed_value(resolve(v, &bindings));
     if let Some(receiver) = tail.strip_suffix(".min(stake)") {
         return narrowed(receiver);
     }
@@ -147,8 +147,54 @@ fn caps_narrow_to_stake(narrow: &str) -> bool {
     let Some((cond, yes, no)) = if_else_parts(tail) else {
         return false;
     };
-    let compares = cond.contains("stake") && cond.contains(['<', '>']);
-    compares && ((yes == "stake" && narrowed(no)) || (no == "stake" && narrowed(yes)))
+    picks_the_smaller_of_stake_and_narrowed(cond, yes, no, &bindings)
+}
+
+/// Is this (already resolved) expression the narrowed quotient: an `as u64`
+/// cast of something that is not a bare numeric literal? `(0 as u64)` is a
+/// cast too, and capping it to the stake caps nothing the quotient decided.
+fn is_narrowed_value(expr: &str) -> bool {
+    let Some(at) = expr.find("asu64") else {
+        return false;
+    };
+    let before = expr[..at].trim_matches(['(', ')']);
+    !(before.is_empty() || before.bytes().all(|b| b.is_ascii_digit() || b == b'_'))
+}
+
+/// Does `if cond { yes } else { no }` yield the smaller of `stake` and the
+/// narrowed value? The direction of the comparison matters: `if narrow >
+/// stake { stake } else { narrow }` is a minimum and `if narrow < stake {
+/// stake } else { narrow }` is a maximum with the same words in it. The
+/// condition must compare exactly those two values, the branch taken when it
+/// holds must be the smaller operand and the other branch the larger.
+fn picks_the_smaller_of_stake_and_narrowed(
+    cond: &str,
+    yes: &str,
+    no: &str,
+    bindings: &[(&str, &str)],
+) -> bool {
+    let found = if let Some(i) = cond.find("<=") {
+        Some((i, 2, false))
+    } else if let Some(i) = cond.find(">=") {
+        Some((i, 2, true))
+    } else if let Some(i) = cond.find('<') {
+        Some((i, 1, false))
+    } else {
+        cond.find('>').map(|i| (i, 1, true))
+    };
+    let Some((at, width, greater_is_left)) = found else {
+        return false;
+    };
+    let left = resolve(&cond[..at], bindings);
+    let right = resolve(&cond[at + width..], bindings);
+    let (small, large) = if greater_is_left {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    let one_is_stake_other_narrowed = (small == "stake" && is_narrowed_value(large))
+        || (large == "stake" && is_narrowed_value(small));
+    one_is_stake_other_narrowed && resolve(yes, bindings) == small && resolve(no, bindings) == large
 }
 
 /// The statements of a normalized fragment, split at the `;` that sit
@@ -431,11 +477,13 @@ pub fn self_test() -> Result<String, String> {
     let body = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    (r as u64).min(stake)\n}\n";
     let tail = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    } else {\n        (r as u64).min(stake)\n    }\n}\n";
     let branch = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let narrow = r as u64;\n    if narrow > stake {\n        stake\n    } else {\n        narrow\n    }\n}\n";
+    let reversed = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let narrow = r as u64;\n    if narrow < stake {\n        narrow\n    } else {\n        stake\n    }\n}\n";
     let bound = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let capped = u64::min(r as u64, stake);\n    capped\n}\n";
     for (tag, clamp) in [
         ("early return", body),
         ("tail expression", tail),
         ("if/else cap", branch),
+        ("reversed if/else cap", reversed),
         ("cap bound to a name", bound),
     ] {
         std::fs::write(dir.join("src/core/chain_config.rs"), clamp).unwrap();
@@ -456,10 +504,14 @@ pub fn self_test() -> Result<String, String> {
     let discarded = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    };\n    r as u64\n}\n";
     let uncapped_return = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    r as u64\n}\n";
     let uncapped_tail = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        stake\n    } else {\n        r as u64\n    }\n}\n";
+    let maximum = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let narrow = r as u64;\n    if narrow < stake {\n        stake\n    } else {\n        narrow\n    }\n}\n";
+    let literal_cap = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    (0 as u64).min(stake)\n}\n";
     let discarded_cap = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let _ = 0u64.min(stake);\n    r as u64\n}\n";
     let capped_other = "pub fn slash_penalty(stake: u64, ratio: u64) -> u64 {\n    let r = u128::from(stake) * u128::from(ratio) / FIXED_POINT_SCALE;\n    if r > u128::from(u64::MAX) {\n        return stake;\n    }\n    let narrow = r as u64;\n    let _ = narrow.min(stake);\n    narrow\n}\n";
     for (tag, bug) in [
         ("never yield the stake", unclamped),
+        ("take the larger of the stake and the cast", maximum),
+        ("cap a literal instead of the quotient", literal_cap),
         ("discard the stake", discarded),
         ("return the bare cast after the guard", uncapped_return),
         ("return the bare cast in the else block", uncapped_tail),
@@ -491,8 +543,17 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
         "slash canary OK (an early-return clamp, a tail-expression clamp, an if/else \
-         cap and a cap bound to a name PASS, two agreeing unclamped homes FAIL, a \
+         cap in either direction and a cap bound to a name PASS, a maximum and a \
+         capped literal FAIL, two agreeing unclamped homes FAIL, a \
          discarded `{ stake }` block FAILs, a bare cast after the guard FAILs on both \
          shapes, a cap on a value that is not returned FAILs, a diverging home FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn self_test_passes() {
+        super::self_test().expect("slash-expression self-test");
+    }
 }
