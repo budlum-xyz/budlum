@@ -735,6 +735,22 @@ impl AccountState {
         );
     }
 
+    /// Like [`Self::sync_validator_registration`], but a validator with no
+    /// registration yet enters the registry only once its stake reaches
+    /// `floor` (the network's onboarding floor). Existing registrations
+    /// always follow the validator's stake, so an unstake is never skipped.
+    pub fn sync_validator_registration_with_floor(&mut self, address: &Address, floor: u64) {
+        let stake = self.validators.get(address).map_or(0, |v| v.stake);
+        let registered = self
+            .registry
+            .get(address, crate::registry::role::roles::VALIDATOR)
+            .is_some();
+        if !registered && stake < floor {
+            return;
+        }
+        self.sync_validator_registration(address);
+    }
+
     /// Shared bond path for the independently debited roles.
     ///
     /// `upsert_stake` takes the new TOTAL stake, so the total is the existing
