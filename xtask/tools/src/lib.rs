@@ -103,6 +103,25 @@ pub fn repo_root() -> PathBuf {
     })
 }
 
+/// [`repo_root`], refused when the result is not a Budlum checkout. A tool
+/// that started outside the repository must fail rather than act in the
+/// working directory.
+///
+/// # Errors
+///
+/// When neither the working directory nor the build path is a checkout.
+pub fn checked_repo_root() -> Result<PathBuf, String> {
+    let root = repo_root();
+    if is_repo_root(&root) {
+        Ok(root)
+    } else {
+        Err(format!(
+            "{} is not a Budlum checkout; run the tool inside the repository",
+            root.display()
+        ))
+    }
+}
+
 /// The nearest repository root at or above `start`, if there is one.
 fn root_above(start: &Path) -> Option<PathBuf> {
     start
@@ -177,6 +196,12 @@ pub fn has_program(program: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directory_outside_the_repository_is_not_a_root() {
+        assert!(!is_repo_root(&std::env::temp_dir()));
+        assert!(checked_repo_root().is_ok());
+    }
 
     #[test]
     fn repo_root_has_a_manifest_and_a_source_tree() {
