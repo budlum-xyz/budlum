@@ -420,12 +420,22 @@ impl MarketplaceRegistry {
         issued_at_block: u64,
         expires_at_block: u64,
     ) -> Result<(), String> {
-        if let Some(policy) = self
+        // A policy deprecated before this grant is issued no longer sets the
+        // ceiling while a current one exists. If every active policy is
+        // deprecated, the strictest one still refuses the grant.
+        let current = self
             .encryption_policies
             .values()
             .filter(|p| p.active)
-            .min_by_key(|p| p.max_grant_duration_blocks)
-        {
+            .filter(|p| !matches!(p.deprecated_after_block, Some(d) if issued_at_block >= d))
+            .min_by_key(|p| p.max_grant_duration_blocks);
+        let chosen = current.or_else(|| {
+            self.encryption_policies
+                .values()
+                .filter(|p| p.active)
+                .min_by_key(|p| p.max_grant_duration_blocks)
+        });
+        if let Some(policy) = chosen {
             policy.check_grant_duration(issued_at_block, expires_at_block)?;
         }
         Ok(())
@@ -1396,6 +1406,28 @@ mod tests {
         let json = serde_json::to_string(&registry).unwrap();
         assert!(!json.contains("decrypt"));
         assert!(!json.contains("private_key"));
+    }
+
+    #[test]
+    fn a_deprecated_policy_does_not_set_the_ceiling_while_a_current_one_exists() {
+        let policy = |version: u32, max: u64, deprecated: Option<u64>| EncryptionPolicy {
+            version,
+            hpke_suite_id: 0x20,
+            min_public_key_bytes: 32,
+            max_grant_duration_blocks: max,
+            deprecated_after_block: deprecated,
+            active: true,
+        };
+        let mut registry = MarketplaceRegistry::new();
+        registry
+            .set_encryption_policy(policy(1, 10, Some(50)))
+            .unwrap();
+        registry
+            .set_encryption_policy(policy(2, 100, None))
+            .unwrap();
+        assert!(registry.check_dao_grant_duration_ceiling(60, 160).is_ok());
+        assert!(registry.check_dao_grant_duration_ceiling(60, 161).is_err());
+        assert!(registry.check_dao_grant_duration_ceiling(40, 60).is_err());
     }
 
     #[test]
