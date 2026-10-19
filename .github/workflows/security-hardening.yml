@@ -812,4 +812,9 @@ jobs:
           fn main() {}
           EOF
           cd /tmp/loom-model
-          RUSTFLAGS="--cfg loom" cargo test --release -- --nocapture
+          RUSTFLAGS="--cfg loom" cargo test --release -- --nocapture 2>&1 | tee /tmp/loom-model.log
+          # A model run that executes zero tests is not a pass.
+          if ! grep -Eq '^running [1-9][0-9]* tests?$' /tmp/loom-model.log; then
+            echo "::error::the loom model ran zero tests"
+            exit 1
+          fi
