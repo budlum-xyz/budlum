@@ -1,14 +1,13 @@
-# Format diff surface for readers that cannot reach the log host.
+# Diagnostic surfaces for readers that cannot reach the log host.
 #
-# The `Budlum Core quality` job already reports which files carry rustfmt
-# hunks (eight `Diff in` headers, then a count). That is enough to know the
-# debt is there, but not enough to repay it from a sandbox that cannot read
-# job logs. This workflow turns `cargo fmt --all -- --check` into a PR
-# comment with the full hunk bodies, so the fix can be applied exactly
-# without ever touching the log host. It reports only: it is not a gate, and
-# it changes no verdict.
+# The gated jobs already report verdicts; this workflow reports reasons. It
+# turns `cargo fmt --all -- --check`, `cargo clippy --all-targets`, and
+# `cargo test --lib` failures into PR comments with the actual hunks, lint
+# names and failing tests, so the fix can be applied exactly from a sandbox
+# whose egress cannot read Actions logs. It reports only: it is not a gate,
+# and it changes no verdict.
 
-name: Fmt diff surface
+name: Diff surface
 
 on:
   pull_request:
@@ -20,16 +19,14 @@ permissions:
 
 jobs:
   surface:
-    name: Report rustfmt hunks as a PR comment
+    name: Report fmt, clippy and test failures as PR comments
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt
-          rustup default stable
+        run: rustup show active-toolchain || rustup toolchain install
 
       - name: Collect the rustfmt diff
         id: fmt
@@ -37,31 +34,86 @@ jobs:
           set +e
           cargo fmt --all -- --check > /tmp/fmt-raw.txt 2>&1
           status=$?
-          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/fmt-raw.txt > /tmp/fmt.txt
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/fmt-raw.txt | grep -v '^info: ' > /tmp/fmt.txt
           if [ "$status" -eq 0 ]; then
             echo "clean=true" >> "$GITHUB_OUTPUT"
           else
             echo "clean=false" >> "$GITHUB_OUTPUT"
-            # Keep well inside the 65536-character comment limit.
             head -c 60000 /tmp/fmt.txt > /tmp/fmt-trimmed.txt
           fi
 
-      - name: Comment the diff
-        if: steps.fmt.outputs.clean == 'false'
+      - name: Collect clippy lints
+        id: clippy
+        run: |
+          set +e
+          cargo clippy --all-targets --message-format=short -- -D warnings > /tmp/clippy-raw.txt 2>&1
+          status=$?
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/clippy-raw.txt > /tmp/clippy.txt
+          if [ "$status" -eq 0 ]; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            grep -E '^[^ ]+\.(rs|toml):[0-9]+' /tmp/clippy.txt | head -200 > /tmp/clippy-trimmed.txt
+            if [ ! -s /tmp/clippy-trimmed.txt ]; then
+              tail -100 /tmp/clippy.txt > /tmp/clippy-trimmed.txt
+            fi
+          fi
+
+      - name: Collect failing tests
+        id: tests
+        run: |
+          set +e
+          cargo test --lib > /tmp/tests-raw.txt 2>&1
+          status=$?
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/tests-raw.txt > /tmp/tests.txt
+          if [ "$status" -eq 0 ]; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            grep -E "^(test .* FAILED|failures:|---- .* stdout ----|thread .* panicked|assertion|Error:|left:|right:)" /tmp/tests.txt | head -200 > /tmp/tests-trimmed.txt
+            if [ ! -s /tmp/tests-trimmed.txt ]; then
+              tail -120 /tmp/tests.txt > /tmp/tests-trimmed.txt
+            fi
+          fi
+
+      - name: Comment the surfaces
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          marker="<!-- fmt-diff-surface -->"
+          marker="<!-- diff-surface -->"
           {
             echo "$marker"
-            echo "## rustfmt hunks (fmt diff surface)"
+            echo "## Diagnostic surfaces (fmt / clippy / tests)"
+            if [ "${{ steps.fmt.outputs.clean }}" = "true" ]; then
+              echo "- rustfmt: clean"
+            else
+              echo
+              echo "### rustfmt hunks"
+              echo '```diff'
+              cat /tmp/fmt-trimmed.txt
+              echo '```'
+            fi
+            if [ "${{ steps.clippy.outputs.clean }}" = "true" ]; then
+              echo "- clippy: clean"
+            else
+              echo
+              echo "### clippy lints (-D warnings)"
+              echo '```'
+              cat /tmp/clippy-trimmed.txt
+              echo '```'
+            fi
+            if [ "${{ steps.tests.outputs.clean }}" = "true" ]; then
+              echo "- tests: clean"
+            else
+              echo
+              echo "### failing tests"
+              echo '```'
+              cat /tmp/tests-trimmed.txt
+              echo '```'
+            fi
             echo
-            echo '```diff'
-            cat /tmp/fmt-trimmed.txt
-            echo '```'
-            echo
-            echo "_Fix with \`cargo fmt --all\` or apply the hunks above._"
+            echo "_Posted by the diff-surface workflow; it reports reasons only._"
           } > /tmp/comment.md
           jq -Rs '{body: .}' /tmp/comment.md > /tmp/payload.json
           existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
