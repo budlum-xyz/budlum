@@ -59,7 +59,7 @@ The solution in BudZKVM is to write the serde bounds explicitly. The proof is tr
 * if the challenge type is serializable, the opened values are serializable,
 * if the PCS proof type is serializable, the whole proof can be turned into a byte string.
 
-This approach brings `postcard` support and simplifies the proof transport layer needed for CLI/chain integration. If the proof format should later become a stable wire format, this file is the natural boundary.
+This approach brings `postcard` support and simplifies the proof transport layer needed for CLI/L1 integration. If the proof format should later become a stable wire format, this file is the natural boundary.
 
 ## Main trace and auxiliary trace
 
@@ -129,7 +129,7 @@ On the verification side the flow reverses:
 3. `verify` runs over the proof and the public input,
 4. it returns `false` on error and `true` on success.
 
-The purpose of this adapter is to keep the CLI, the chain integration and the tests from having to know Plonky3's internal types.
+The purpose of this adapter is to keep the CLI, the L1 integration and the tests from having to know Plonky3's internal types.
 
 Auxiliary trace generation is also kept at the adapter boundary. `plonky3_prover.rs` first builds the main trace matrix, then hands the prover a closure that computes the register accumulators from that same matrix. The `bud_stark` core therefore only knows the two-phase protocol; the BudVM-specific register packet details stay in the adapter/AIR layer.
 
