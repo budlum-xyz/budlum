@@ -646,10 +646,8 @@ impl SlashingReport {
 }
 
 /// Decode a block hash from the hex a report carries into the bytes that were
-/// signed. Test-only like `verify_double_sign`: production no longer
-/// verifies raw signature-over-two-hashes evidence since the CWE-347
-/// fix.
-#[cfg(test)]
+/// signed. Used by `verify_double_sign`, which opens the signatures again
+/// since BLG-0102 (P04-F24).
 fn decode_block_hash(hex_hash: &str) -> Result<[u8; 32], EvidenceError> {
     let raw = hex::decode(hex_hash).map_err(|_| EvidenceError::MalformedBlockHash)?;
     raw.try_into()
