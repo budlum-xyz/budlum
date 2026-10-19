@@ -116,6 +116,12 @@ fn decode<T: DeserializeOwned>(value: &[u8]) -> std::io::Result<T> {
 #[derive(Clone, Debug)]
 pub struct Storage {
     db: Db,
+    /// BLG-0190 (P09-F11): a test-only knob that makes the storage-economics
+    /// persist fail for real, so the accounting paths' `?` propagation can
+    /// be EXERCISED instead of grepped. Never set outside `cfg(test)`; no
+    /// production behaviour reads it.
+    #[cfg(test)]
+    fail_economics_writes: std::sync::atomic::AtomicBool,
 }
 
 /// Sled's file-lock release is not synchronous with `Db::drop`: the flusher
@@ -155,7 +161,11 @@ impl Storage {
     /// conditions.
     pub fn new(path: &str) -> std::io::Result<Self> {
         let db = sled_open_with_retry(path)?;
-        let storage = Self { db };
+        let storage = Self {
+            db,
+            #[cfg(test)]
+            fail_economics_writes: std::sync::atomic::AtomicBool::new(false),
+        };
         storage.apply_migrations()?;
         storage.recover_interrupted_commit()?;
         Ok(storage)
@@ -1257,10 +1267,26 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    /// BLG-0190 (P09-F11): arm/disarm the test-only persist failure.
+    #[cfg(test)]
+    pub(crate) fn set_fail_economics_writes(&self, on: bool) {
+        self.fail_economics_writes
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn save_storage_economics_state(
         &self,
         snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
     ) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_economics_writes
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(std::io::Error::other(
+                "injected storage-economics persist failure (BLG-0190)",
+            ));
+        }
         let val = encode(snapshot)?;
         self.db.insert(b"STORAGE_ECONOMICS_STATE", val)?;
         self.db.flush()?;
