@@ -24,6 +24,12 @@ pub const GENESIS_TIMESTAMP: u128 = 0;
 /// and `Blockchain::new_with_genesis` refuses to start a binary built for any
 /// other scheme. Custom chains (`GenesisConfig::new`) still record the scheme
 /// of the build that created them.
+/// Minimum per-header difficulty (leading zero bits) of a mainnet
+/// bridge-enabled PoW domain (P25-F01). 2^64 hashes per header is out of reach
+/// for a self-mined forgery; the cumulative minimum scales with the
+/// confirmation depth.
+pub const MAINNET_BRIDGE_POW_MIN_DIFFICULTY_BITS: u32 = 64;
+
 const LAUNCHED_PQ_SCHEME: &str = "ml-dsa-65";
 
 /// The domain configuration bootstrapped at genesis.
@@ -283,6 +289,18 @@ impl GenesisConfig {
                     cfg.min_confirmations,
                 );
                 domain.bridge_enabled = cfg.bridge_enabled;
+
+                // P25-F01: the default PoW floor (8 bits, about 1.5k hashes
+                // for six headers) lets anyone mine a "finalized" header
+                // chain for a bridge-enabled domain. On mainnet the floor is
+                // raised to a work level that is not self-mineable.
+                if domain.bridge_enabled && self.chain_id == Network::Mainnet.chain_id().value() {
+                    if let Some(params) = domain.pow_parameters.as_mut() {
+                        params.min_difficulty_bits = MAINNET_BRIDGE_POW_MIN_DIFFICULTY_BITS;
+                        params.min_cumulative_work = u128::from(cfg.min_confirmations.max(1))
+                            .saturating_mul(1u128 << MAINNET_BRIDGE_POW_MIN_DIFFICULTY_BITS);
+                    }
+                }
 
                 if matches!(domain.kind, crate::domain::ConsensusKind::PoA)
                     && !cfg.poa_authorities.is_empty()
@@ -1330,6 +1348,25 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
         serde_json::from_str(&data)
             .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
+    }
+
+    /// P25-F01: the mainnet bridge-enabled PoW domain must not keep the
+    /// 8-bit default floor.
+    #[test]
+    fn mainnet_bridge_pow_domain_has_a_non_trivial_difficulty_floor() {
+        let config = mainnet_genesis();
+        let domains = config.bootstrap_consensus_domains().unwrap();
+        let pow = domains
+            .iter()
+            .find(|d| d.bridge_enabled && d.pow_parameters.is_some())
+            .expect("mainnet has a bridge-enabled PoW domain");
+        let params = pow.pow_parameters.as_ref().unwrap();
+        assert_eq!(
+            params.min_difficulty_bits,
+            MAINNET_BRIDGE_POW_MIN_DIFFICULTY_BITS
+        );
+        assert!(params.min_cumulative_work >= 6u128 << 64);
+        assert!(params.validate(pow.min_confirmations).is_ok());
     }
 
     #[test]
