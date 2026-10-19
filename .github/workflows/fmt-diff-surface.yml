@@ -28,6 +28,9 @@ jobs:
       - name: Install Rust
         run: rustup show active-toolchain || rustup toolchain install
 
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
       - name: Collect the rustfmt diff
         id: fmt
         run: |
