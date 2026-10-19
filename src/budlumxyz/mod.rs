@@ -28,6 +28,11 @@ pub struct BudlumxyzRegistry {
     pub authorized_governors: std::collections::HashSet<Address>,
 }
 
+/// Longest app name in bytes.
+pub const MAX_APP_NAME_BYTES: usize = 64;
+/// Longest app URL in bytes.
+pub const MAX_APP_URL_BYTES: usize = 256;
+
 impl BudlumxyzRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -42,6 +47,19 @@ impl BudlumxyzRegistry {
         manifest_id: Option<crate::storage::content_id::ContentId>,
         epoch: u64,
     ) -> Result<u64, BudlumxyzError> {
+        if name.is_empty()
+            || name.len() > MAX_APP_NAME_BYTES
+            || website_url.is_empty()
+            || website_url.len() > MAX_APP_URL_BYTES
+            || name.chars().any(char::is_control)
+            || website_url.chars().any(char::is_control)
+        {
+            return Err(BudlumxyzError::InvalidData);
+        }
+        let next_id = self
+            .next_app_id
+            .checked_add(1)
+            .ok_or(BudlumxyzError::InvalidData)?;
         let id = self.next_app_id;
         // The same shape as `NftRegistry::mint`: `insert` overwrites, and the
         // record it would overwrite belongs to a different developer. That
@@ -68,7 +86,7 @@ impl BudlumxyzRegistry {
             verified: false,
         };
         self.apps.insert(id, record);
-        self.next_app_id += 1;
+        self.next_app_id = next_id;
         Ok(id)
     }
 
@@ -394,6 +412,24 @@ mod tests {
             .is_ok());
         assert_eq!(reg.apps[&id].website_url, "new");
         assert_eq!(reg.apps[&id].manifest_id, Some(ContentId([3u8; 32])));
+    }
+
+    #[test]
+    fn register_refuses_bad_text() {
+        let mut reg = BudlumxyzRegistry::new();
+        let dev = Address::from([1u8; 32]);
+        let long = "a".repeat(MAX_APP_NAME_BYTES + 1);
+        for (name, url) in [
+            (String::new(), "u".to_string()),
+            (long, "u".to_string()),
+            ("ok".to_string(), String::new()),
+            ("bad\nname".to_string(), "u".to_string()),
+        ] {
+            assert!(reg
+                .register_app(name, dev, AppCategory::DeFi, url, None, 1)
+                .is_err());
+        }
+        assert!(reg.apps.is_empty());
     }
 
     #[test]
