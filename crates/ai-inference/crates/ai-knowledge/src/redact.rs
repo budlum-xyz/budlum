@@ -30,9 +30,24 @@ const SECRET_KEYWORDS: &[&str] = &[
     "wallet_key",
 ];
 
+/// Whole key names that contain a secret keyword only by accident. They are
+/// matched exactly, so `author_token` or `authorization` still count as secret.
+const BENIGN_KEYS: &[&str] = &[
+    "author",
+    "authors",
+    "authority",
+    "max_tokens",
+    "tokenizer",
+    "secretary",
+];
+
 /// Does a key name carry one of the secret keywords?
 fn is_secret_key(key: &str) -> bool {
     let key_norm = key.to_lowercase().replace('-', "_");
+    let bare = key_norm.trim_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'');
+    if BENIGN_KEYS.contains(&bare) {
+        return false;
+    }
     SECRET_KEYWORDS.iter().any(|kw| key_norm.contains(kw))
 }
 
@@ -492,6 +507,14 @@ pub fn redact_model_strings(value: &serde_json::Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_keys_that_contain_a_keyword_are_not_masked() {
+        let r = redact_text("author: Bob\nmax_tokens = 100");
+        assert_eq!(r.text(), "author: Bob\nmax_tokens = 100");
+        let r = redact_text("authorization: abc123");
+        assert!(r.text().contains(REDACTION_TOKEN));
+    }
 
     #[test]
     fn redacts_api_key_value() {
