@@ -100,7 +100,7 @@ impl DeterminismProfile {
 }
 
 /// Bridge configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServeConfig {
     /// The weight source - the original name is preserved (attribution).
     pub weight_source: String,
@@ -123,6 +123,41 @@ pub struct ServeConfig {
     /// startup, fail-closed. The placement never moves - disk pressure must
     /// not change which tier a shard lands in - only the verdict does.
     pub disk_budget_bytes: Option<u64>,
+}
+
+impl core::fmt::Debug for ServeConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ServeConfig")
+            .field("weight_source", &self.weight_source)
+            .field("served_model_name", &self.served_model_name)
+            .field("tier", &self.tier)
+            .field("engine", &self.engine)
+            .field("port", &self.port)
+            .field("base_url", &"<redacted>")
+            .field("determinism", &self.determinism)
+            .field("disk_budget_bytes", &self.disk_budget_bytes)
+            .finish()
+    }
+}
+
+/// The base URL must be a plain http(s) URL with no credentials, spaces or
+/// query string, so it can neither carry a secret nor smuggle a header.
+fn check_base_url(url: &str) -> Result<(), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or_else(|| String::from("base_url must start with http:// or https://"))?;
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty()
+        || authority.contains('@')
+        || url.contains('?')
+        || url.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(String::from(
+            "base_url must name a host and carry no credentials, query or whitespace",
+        ));
+    }
+    Ok(())
 }
 
 impl Default for ServeConfig {
@@ -406,6 +441,7 @@ fn plan_on_device(
     // a liveness problem rather than a configuration one. A local operator is
     // held to the same prompt: it is the text shown to the user.
     checked_system_prompt()?;
+    check_base_url(&cfg.base_url)?;
 
     let plan = match cfg.disk_budget_bytes {
         Some(limit) => ResidencyPlan::plan_bounded_by_disk(shards, budget, semantics, limit),
@@ -481,6 +517,23 @@ fn looks_like_multiplier(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::residency::Demand;
+
+    #[test]
+    fn base_url_is_validated_and_hidden_from_debug() {
+        assert!(check_base_url("http://127.0.0.1:8000/v1").is_ok());
+        assert!(check_base_url("https://host/v1").is_ok());
+        assert!(check_base_url("ftp://host").is_err());
+        assert!(check_base_url("http://user:pw@host/v1").is_err());
+        assert!(check_base_url("http://host/v1?key=1").is_err());
+        assert!(check_base_url("http:///v1").is_err());
+        assert!(check_base_url("http://host/a b").is_err());
+
+        let cfg = ServeConfig {
+            base_url: "http://internal.example:9/v1".into(),
+            ..ServeConfig::default()
+        };
+        assert!(!format!("{cfg:?}").contains("internal.example"));
+    }
 
     #[test]
     fn default_config_is_light_tier() {
