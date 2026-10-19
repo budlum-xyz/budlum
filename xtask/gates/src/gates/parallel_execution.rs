@@ -124,6 +124,14 @@ fn body_of(src: &str, name: &str) -> Option<String> {
 /// folded or named in [`UNFOLDED`]. A declaration may span lines; it ends at
 /// the first line that closes with `,` outside brackets.
 fn struct_fields(struct_text: &str) -> Vec<String> {
+    struct_field_decls(struct_text)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Every field with the text of its type, as declared.
+fn struct_field_decls(struct_text: &str) -> Vec<(String, String)> {
     let body = struct_text
         .split_once('{')
         .map_or(struct_text, |(_, rest)| rest);
@@ -145,7 +153,7 @@ fn struct_fields(struct_text: &str) -> Vec<String> {
             }
         }
         if depth <= 0 && t.ends_with(',') {
-            if let Some((name, _)) = decl.split_once(':') {
+            if let Some((name, ty)) = decl.split_once(':') {
                 let name = name
                     .trim()
                     .trim_start_matches("pub(crate) ")
@@ -156,7 +164,7 @@ fn struct_fields(struct_text: &str) -> Vec<String> {
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
                 {
-                    out.push(name.to_string());
+                    out.push((name.to_string(), ty.trim().to_string()));
                 }
             }
             decl.clear();
@@ -301,6 +309,23 @@ pub fn run(root: &Path) -> Result<String, String> {
              that agree on every block can disagree on the state, and only the next block hash \
              reveals it.",
             missing.join(", ")
+        ));
+    }
+    // A folded field whose type is a HashMap or HashSet is walked in the
+    // allocator's order. The fold body never writes the type name, so the
+    // declaration is what shows it.
+    let unordered_folded: Vec<String> = struct_field_decls(&src[struct_at..struct_end])
+        .into_iter()
+        .filter(|(name, ty)| {
+            (ty.contains("HashMap") || ty.contains("HashSet")) && mentions_ident(&fold_code, name)
+        })
+        .map(|(name, _)| name)
+        .collect();
+    if !unordered_folded.is_empty() {
+        problems.push(format!(
+            "the root folds fields declared as a HashMap or HashSet: {}. Iteration order \
+             there is a property of the allocator, not of the block.",
+            unordered_folded.join(", ")
         ));
     }
     let (extra, sorun) = extra_checks(&body);
@@ -474,5 +499,23 @@ mod tests {
     fn struct_fields_reads_multi_line_and_registry_types() {
         let text = "pub struct R {\n    a: u64,\n    pub b: crate::x::Registry,\n    pub c:\n        BTreeMap<u64, u64>,\n    d: BTreeMap<(u8, u8), Vec<u64>>,\n}";
         assert_eq!(super::struct_fields(text), ["a", "b", "c", "d"]);
+    }
+}
+
+#[cfg(test)]
+mod decl_tests {
+    use super::*;
+
+    #[test]
+    fn field_types_are_kept_with_their_names() {
+        let text =
+            "pub struct R {\n    a: BTreeMap<u64, u64>,\n    b: HashMap<u64,\n        u64>,\n}";
+        let d = struct_field_decls(text);
+        assert_eq!(d.len(), 2);
+        assert!(d[1].1.contains("HashMap"));
+        assert_eq!(
+            struct_fields(text),
+            vec![String::from("a"), String::from("b")]
+        );
     }
 }
