@@ -222,11 +222,19 @@ impl GrantAuthorization {
     }
 }
 
-/// Digest a grant issuance is signed over. The content, the derived `issuer`,
+/// Digest a grant issuance is signed over.
+///
+/// `chain_id` keeps a signature from working on another network, and `nonce`
+/// is the grant id the registry will assign next (`ViewGrantRegistry::issued`).
+/// That counter only grows, so a captured issue authorisation cannot be
+/// replayed once any grant was issued after it, including after its own
+/// grant was revoked. The content, the derived `issuer`,
 /// the grantee, the key handle, the policy and the opening epoch all enter: a
 /// signature cannot be moved to another object, another key or another grant.
 #[must_use]
 pub fn grant_issue_digest(
+    chain_id: u64,
+    nonce: u64,
     content_id: &ContentId,
     issuer: &Address,
     grantee: Option<&Address>,
@@ -241,7 +249,9 @@ pub fn grant_issue_digest(
     }];
     let absent_grantee = [0u8; 32];
     hash_fields_bytes(&[
-        b"BDLM_GRANT_ISSUE_V1",
+        b"BDLM_GRANT_ISSUE_V2",
+        &chain_id.to_le_bytes(),
+        &nonce.to_le_bytes(),
         content_id.as_bytes(),
         issuer.as_bytes(),
         grantee.map_or(absent_grantee.as_slice(), |g| g.as_bytes()),
@@ -253,9 +263,15 @@ pub fn grant_issue_digest(
 
 /// Digest a grant revocation is signed over.
 #[must_use]
-pub fn grant_revoke_digest(grant_id: u64, caller: &Address, at_epoch: u64) -> [u8; 32] {
+pub fn grant_revoke_digest(
+    chain_id: u64,
+    grant_id: u64,
+    caller: &Address,
+    at_epoch: u64,
+) -> [u8; 32] {
     hash_fields_bytes(&[
-        b"BDLM_GRANT_REVOKE_V1",
+        b"BDLM_GRANT_REVOKE_V2",
+        &chain_id.to_le_bytes(),
         &grant_id.to_le_bytes(),
         caller.as_bytes(),
         &at_epoch.to_le_bytes(),
@@ -266,9 +282,17 @@ pub fn grant_revoke_digest(grant_id: u64, caller: &Address, at_epoch: u64) -> [u
 /// from issue and revoke: a delete is not a revoke of one grant, it is the
 /// owner retiring every grant of one content and its key id with them.
 #[must_use]
-pub fn social_delete_digest(content_id: &ContentId, caller: &Address, at_epoch: u64) -> [u8; 32] {
+pub fn social_delete_digest(
+    chain_id: u64,
+    nonce: u64,
+    content_id: &ContentId,
+    caller: &Address,
+    at_epoch: u64,
+) -> [u8; 32] {
     hash_fields_bytes(&[
-        b"BDLM_SOCIAL_DELETE_V1",
+        b"BDLM_SOCIAL_DELETE_V2",
+        &chain_id.to_le_bytes(),
+        &nonce.to_le_bytes(),
         content_id.as_bytes(),
         caller.as_bytes(),
         &at_epoch.to_le_bytes(),
@@ -741,6 +765,8 @@ mod tests {
         assert_ne!(
             base,
             grant_issue_digest(
+                1,
+                0,
                 &cid(1),
                 &addr(2),
                 None,
@@ -750,6 +776,32 @@ mod tests {
             ),
             "a view claim must not collide with a grant issue over the same fields"
         );
+    }
+
+    /// P28-F16: chain id and nonce enter every signed digest.
+    #[test]
+    fn signed_digests_bind_chain_id_and_nonce() {
+        let issue = |c: u64, n: u64| {
+            grant_issue_digest(
+                c,
+                n,
+                &cid(1),
+                &addr(2),
+                None,
+                &[3u8; 32],
+                ViewPolicy::OwnerOnly,
+                6,
+            )
+        };
+        assert_ne!(issue(1, 0), issue(2, 0));
+        assert_ne!(issue(1, 0), issue(1, 1));
+        assert_ne!(
+            grant_revoke_digest(1, 5, &addr(2), 6),
+            grant_revoke_digest(2, 5, &addr(2), 6)
+        );
+        let del = |c: u64, n: u64| social_delete_digest(c, n, &cid(1), &addr(2), 6);
+        assert_ne!(del(1, 0), del(2, 0));
+        assert_ne!(del(1, 0), del(1, 1));
     }
 
     /// The claim's lifetime matches the session it opens.

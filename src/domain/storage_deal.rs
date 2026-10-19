@@ -1735,6 +1735,7 @@ impl StorageRegistry {
     /// own.
     pub fn issue_view_grant(
         &mut self,
+        chain_id: u64,
         content_id: ContentId,
         auth: &crate::storage::GrantAuthorization,
         grantee: Option<Address>,
@@ -1752,6 +1753,8 @@ impl StorageRegistry {
             return Err(crate::storage::ViewGrantError::NotOwner { issuer, owner });
         }
         let digest = crate::storage::grant_issue_digest(
+            chain_id,
+            self.view_grants.issued(),
             &content_id,
             &issuer,
             grantee.as_ref(),
@@ -1776,6 +1779,7 @@ impl StorageRegistry {
     /// the owner, or an unreadable authorisation.
     pub fn revoke_view_grant(
         &mut self,
+        chain_id: u64,
         grant_id: u64,
         auth: &crate::storage::GrantAuthorization,
         at_epoch: u64,
@@ -1783,7 +1787,7 @@ impl StorageRegistry {
         let caller = auth
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        let digest = crate::storage::grant_revoke_digest(grant_id, &caller, at_epoch);
+        let digest = crate::storage::grant_revoke_digest(chain_id, grant_id, &caller, at_epoch);
         let grant = self
             .view_grants
             .get(grant_id)
@@ -2130,6 +2134,7 @@ impl StorageRegistry {
     /// is not the owner, or an unreadable authorisation.
     pub fn social_delete(
         &mut self,
+        chain_id: u64,
         content_id: ContentId,
         auth: &crate::storage::GrantAuthorization,
         at_epoch: u64,
@@ -2146,7 +2151,13 @@ impl StorageRegistry {
                 owner,
             });
         }
-        let digest = crate::storage::social_delete_digest(&content_id, &caller, at_epoch);
+        let digest = crate::storage::social_delete_digest(
+            chain_id,
+            self.view_grants.issued(),
+            &content_id,
+            &caller,
+            at_epoch,
+        );
         auth.verify(&digest, &owner)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
         let mut hook = crate::storage::three_hooks::NopThreeHook;
@@ -4332,6 +4343,7 @@ mod tests {
         };
         let err = reg
             .issue_view_grant(
+                1,
                 content,
                 &unsigned,
                 None,
@@ -4426,6 +4438,8 @@ mod tests {
 
         let key = [5u8; 32];
         let digest = crate::storage::grant_issue_digest(
+            1,
+            0,
             &content,
             &owner,
             None,
@@ -4438,6 +4452,7 @@ mod tests {
             signature: kp.sign(&digest).to_vec(),
         };
         reg.issue_view_grant(
+            1,
             content,
             &auth,
             None,
@@ -4456,6 +4471,7 @@ mod tests {
         // the digest, so it verifies as nothing.
         let err = reg
             .issue_view_grant(
+                1,
                 other,
                 &auth,
                 None,
@@ -4474,6 +4490,7 @@ mod tests {
         // in the digest too.
         let err = reg
             .issue_view_grant(
+                1,
                 content,
                 &auth,
                 Some(bob),
@@ -4509,6 +4526,8 @@ mod tests {
         reg.register_manifest(&m);
         let key = [5u8; 32];
         let digest = crate::storage::grant_issue_digest(
+            1,
+            0,
             &m.manifest_id,
             &owner,
             None,
@@ -4522,6 +4541,7 @@ mod tests {
         };
         let before = reg.root();
         reg.issue_view_grant(
+            1,
             m.manifest_id,
             &auth,
             None,
@@ -4531,6 +4551,58 @@ mod tests {
         )
         .expect("the owner's signed grant");
         assert_ne!(before, reg.root(), "a live grant must reach the state root");
+    }
+
+    /// P28-F16: a captured issue authorisation cannot be replayed after the
+    /// grant is revoked, and a signature made for another chain is refused.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_captured_grant_authorisation_cannot_be_replayed() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let key = [6u8; 32];
+        let policy = crate::storage::ViewPolicy::PublicKeyId;
+        let sign = |chain: u64, nonce: u64| {
+            let d = crate::storage::grant_issue_digest(
+                chain,
+                nonce,
+                &m.manifest_id,
+                &owner,
+                None,
+                &key,
+                policy,
+                1,
+            );
+            crate::storage::GrantAuthorization {
+                owner_key: kp.public_key_bytes(),
+                signature: kp.sign(&d).to_vec(),
+            }
+        };
+        let other_chain = sign(2, 0);
+        assert!(reg
+            .issue_view_grant(1, m.manifest_id, &other_chain, None, key, policy, 1)
+            .is_err());
+        let auth = sign(1, 0);
+        let grant = reg
+            .issue_view_grant(1, m.manifest_id, &auth, None, key, policy, 1)
+            .expect("first use");
+        let revoke_d = crate::storage::grant_revoke_digest(1, grant, &owner, 4);
+        let revoke = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&revoke_d).to_vec(),
+        };
+        reg.revoke_view_grant(1, grant, &revoke, 4).expect("revoke");
+        assert!(
+            reg.issue_view_grant(1, m.manifest_id, &auth, None, key, policy, 1)
+                .is_err(),
+            "the captured authorisation must not restore a revoked grant"
+        );
     }
 
     #[cfg(feature = "wallet-ml-dsa")]
@@ -4546,6 +4618,8 @@ mod tests {
         reg.register_manifest(&m);
         let key = [6u8; 32];
         let issue_digest = crate::storage::grant_issue_digest(
+            1,
+            0,
             &m.manifest_id,
             &owner,
             None,
@@ -4559,6 +4633,7 @@ mod tests {
         };
         let grant = reg
             .issue_view_grant(
+                1,
                 m.manifest_id,
                 &issue,
                 None,
@@ -4571,7 +4646,7 @@ mod tests {
 
         // Revoking with the issuance signature still attached is not revoking.
         let err = reg
-            .revoke_view_grant(grant, &issue, 4)
+            .revoke_view_grant(1, grant, &issue, 4)
             .expect_err("a revocation needs its own signature");
         assert!(matches!(
             err,
@@ -4584,12 +4659,12 @@ mod tests {
             "a refused revocation must leave the grant standing"
         );
 
-        let revoke_digest = crate::storage::grant_revoke_digest(grant, &owner, 4);
+        let revoke_digest = crate::storage::grant_revoke_digest(1, grant, &owner, 4);
         let revoke = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
             signature: kp.sign(&revoke_digest).to_vec(),
         };
-        reg.revoke_view_grant(grant, &revoke, 4)
+        reg.revoke_view_grant(1, grant, &revoke, 4)
             .expect("the owner's signed revocation");
         assert!(
             !reg.may_view(&m.manifest_id, &Address::from([2u8; 32]), &key, &owner),
