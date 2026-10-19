@@ -24,19 +24,32 @@ mod tests {
 
     #[test]
     fn pow_difficulty_adjusts_after_blocks() {
-        let mut bc = setup_chain();
+        use crate::consensus::pow::PoWConfig;
+
+        // Blocks arrive on a one second slot while the engine expects ten, so
+        // the first retarget boundary must raise the difficulty by one digit.
+        let engine = Arc::new(PoWEngine::with_config(PoWConfig {
+            difficulty: 1,
+            target_block_time: 10,
+            adjustment_interval: 4,
+            ..Default::default()
+        }));
+        let mut bc = Blockchain::new(engine.clone(), None, 45262, None);
         let producer = addr(0x01);
 
-        // Produce several blocks - difficulty should adjust
-        for _ in 0..5 {
-            let _ = bc.produce_block(producer);
+        assert_eq!(engine.difficulty_for_next_block(&bc.chain), 1);
+        for _ in 0..6 {
+            bc.produce_block(producer).expect("produce must succeed");
         }
 
-        // After multiple blocks, difficulty field should be accessible and non-trivial.
-        // The PoW engine tracks difficulty internally; we verify chain growth.
         assert!(
-            bc.chain.len() > 1,
-            "chain must have grown after block production"
+            bc.chain.len() > 4,
+            "the chain must pass a retarget boundary"
+        );
+        assert_eq!(
+            engine.difficulty_for_next_block(&bc.chain),
+            2,
+            "fast blocks must raise the difficulty by one digit"
         );
     }
 
