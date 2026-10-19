@@ -70,6 +70,9 @@ pub struct EvmChainAdapter {
     pub deposit_topic0: [u8; 32],
     /// The N-confirmation threshold (the reorg window; mainnet is about 64).
     pub required_confirmations: u32,
+    /// BLG-0111 (P05-F04): the operator's trusted checkpoint `(number,
+    /// hash)` - the interim anchor the header chain must touch.
+    pub trusted_checkpoint: Option<(u64, [u8; 32])>,
 }
 
 impl EvmChainAdapter {
@@ -78,7 +81,18 @@ impl EvmChainAdapter {
             bridge_address,
             deposit_topic0,
             required_confirmations: DEFAULT_CONFIRMATIONS,
+            trusted_checkpoint: None,
         }
+    }
+
+    /// Pins the operator's trusted checkpoint - BLG-0111 (P05-F04) interim
+    /// form A of the finality rule: until relayers ship sync-committee
+    /// attestations (form B), the deposit's header chain must touch this
+    /// anchor or the deposit refuses.
+    #[must_use]
+    pub fn with_trusted_checkpoint(mut self, number: u64, hash: [u8; 32]) -> Self {
+        self.trusted_checkpoint = Some((number, hash));
+        self
     }
 
     /// Is this adapter configured well enough to be trusted with deposits?
@@ -103,6 +117,17 @@ impl EvmChainAdapter {
     ///
     /// A message naming which of the two is wrong.
     pub fn check_fit_for_relay(&self) -> Result<(), String> {
+        // BLG-0111 (P05-F04): without finality evidence every deposit would
+        // refuse at verify time anyway - say it once, at setup. Form B
+        // (sync-committee attestation) supersedes the anchor when relayers
+        // ship it.
+        if self.trusted_checkpoint.is_none() {
+            return Err(
+                "EVM adapter has no trusted checkpoint: deposits need finality \
+                 evidence (a sync-committee attestation or the interim anchor)"
+                    .to_string(),
+            );
+        }
         if self.bridge_address.len() != 20 {
             return Err(format!(
                 "EVM adapter bridge address must be exactly 20 bytes, got {}",
