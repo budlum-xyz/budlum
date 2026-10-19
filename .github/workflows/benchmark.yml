@@ -62,6 +62,31 @@ jobs:
           (cd budzero && cargo bench --bench canonical_programs --features "" 2>&1) | tee /tmp/bench-budzero-canonical.txt
           (cd budzero && cargo bench --bench proof_baseline 2>&1) | tee /tmp/bench-budzero-baseline.txt
           echo "BudZero bench runs completed."
+      # BLG-1049 (P58-F03, decision B interim): the job is named "Benchmark
+      # Regression" but had no baseline and no threshold - it could not fail
+      # on a regression. The interim gate makes a vacuous run fail: every
+      # micro bench must emit its throughput line and every BudZero bench its
+      # metric, or the job goes red. A numeric regression gate (the A part)
+      # needs recorded baseline history and lands when there is a baseline to
+      # compare against; until then a run that produces no numbers is itself a
+      # failure, never a silent green.
+      - name: Fail on a vacuous benchmark run (BLG-1049 interim)
+        run: |
+          set -euo pipefail
+          for f in /tmp/bench-micro.txt /tmp/bench-single.txt; do
+            if ! grep -qE 'Throughput:|Avg per' "$f"; then
+              echo "::error file=$f::no benchmark metric in $f - a vacuous run must fail (BLG-1049)"
+              exit 1
+            fi
+          done
+          for f in /tmp/bench-budzero-canonical.txt /tmp/bench-budzero-baseline.txt; do
+            if [ ! -s "$f" ]; then
+              echo "::error file=$f::empty BudZero bench output - a vacuous run must fail (BLG-1049)"
+              exit 1
+            fi
+          done
+          echo "all benchmark runs produced metrics"
+
       - name: Store the results as an artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

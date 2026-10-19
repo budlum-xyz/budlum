@@ -86,16 +86,18 @@ updates:
       # same major as the crate they exercise.
       - dependency-name: "bincode"
         update-types: ["version-update:semver-major"]
-      # Hickory-proto 0.25 remains only in the explicit devnet `p2p-mdns`
-      # Feature graph. Production/default builds do not compile or construct the
-      # MDNS behaviour. Keep the advisory visible until upstream libp2p-mdns is
-      # Compatible with hickory >=0.26; unlike the former list, already-patched
-      # Lru/gossipsub/yamux dependencies are NOT hidden from Dependabot.
+      # Hickory-proto remains only in the explicit devnet `p2p-mdns` feature
+      # graph. Production/default builds do not compile or construct the MDNS
+      # behaviour. BLG-1052 (P58-F06, decision A): the old reason claimed
+      # "hickory-proto 0.25 remains", which went stale - the locks resolved
+      # 0.26.1 while the ignore kept hiding every update. The ignore is now
+      # scoped to what the reason actually justifies: hold the line the locks
+      # already resolve and keep the mdns graph deliberate; unlike the former
+      # list, already-patched Lru/gossipsub/yamux dependencies are NOT hidden
+      # from Dependabot.
       - dependency-name: "hickory-proto"
         update-types:
           - "version-update:semver-major"
-          - "version-update:semver-minor"
-          - "version-update:semver-patch"
   # P58-F06: the standalone workspaces carry their own Cargo.lock and were not
   # covered by any entry above. None of them depends on bincode, so no ignore is needed.
   - package-ecosystem: "cargo"
