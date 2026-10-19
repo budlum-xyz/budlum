@@ -1,6 +1,6 @@
 //! In-tree Recursive Length Prefix (RLP) - Ethereum Yellow Paper Appendix B.
 //!
-//! A minimal, auditable, independent implementation. **NO alloy and NO ethers**;
+//! A minimal, auditable, independent implementation. NO alloy and NO ethers;
 //! RFC Q3 selects `in_tree`, which fits the minimal-dependency rule and
 //! cargo-deny. Keccak256 is not used on the RLP side, only in the MPT node
 //! hash; RLP is pure byte encoding.
@@ -140,7 +140,7 @@ fn trim_leading_zeros(n: usize) -> Vec<u8> {
     be[start..].to_vec()
 }
 
-/// Decodes an RLP byte stream. **The whole input must be consumed**; trailing
+/// Decodes an RLP byte stream. The whole input must be consumed; trailing
 /// bytes are FORBIDDEN.
 pub fn decode(input: &[u8]) -> Result<Item, RlpError> {
     let mut budget = MAX_ITEMS;
@@ -216,7 +216,7 @@ fn decode_at(
     Ok((Item::List(items), &input[payload_start + len..]))
 }
 
-/// Reads a big-endian length from `len_of_len` bytes, with a **canonical check**:
+/// Reads a big-endian length from `len_of_len` bytes, with a canonical check:
 /// a leading zero and a zero length are FORBIDDEN.
 fn decode_length_value(input: &[u8], len_of_len: usize) -> Result<usize, RlpError> {
     let len_bytes = take_exact(input, len_of_len)?;
@@ -536,5 +536,19 @@ mod tests {
         enc.extend_from_slice(&len[1..]);
         enc.extend_from_slice(&payload);
         assert!(matches!(decode(&enc), Err(RlpError::TooManyItems)));
+    }
+
+    /// BLG-0126 (P05-F19): a nested list past MAX_DEPTH is refused, not
+    /// recursed into.
+    #[test]
+    fn neg_nesting_too_deep_rejected() {
+        // Each level wraps the whole previous encoding in a list: 33 deep.
+        let mut enc = vec![0x80u8];
+        for _ in 0..(MAX_DEPTH + 1) {
+            let mut next = vec![0xc0u8 + enc.len() as u8];
+            next.extend_from_slice(&enc);
+            enc = next;
+        }
+        assert_eq!(decode(&enc), Err(RlpError::NestingTooDeep));
     }
 }

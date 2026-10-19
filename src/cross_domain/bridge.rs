@@ -352,7 +352,10 @@ impl BridgeState {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "BLG-0128 (P05-F21): lock's arguments ARE the transfer's parameter set (route, indices, parties, amount, expiry) - a struct would mirror them one-for-one"
+    )]
     pub fn lock(
         &mut self,
         source_domain: DomainId,
@@ -458,6 +461,14 @@ impl BridgeState {
     ) -> Result<(), BridgeError> {
         if !message.verify_id() {
             return Err(BridgeError("Invalid cross-domain message id".into()));
+        }
+        // BLG-0126 (P05-F19): an expired message cannot be minted. The
+        // boundary is strict - the expiry block itself is still live.
+        if message.expiry_height > 0 && current_height > message.expiry_height {
+            return Err(BridgeError(format!(
+                "cross-domain message expired (expiry={}, current={})",
+                message.expiry_height, current_height
+            )));
         }
         let transfer = self
             .transfers
@@ -656,7 +667,7 @@ impl BridgeState {
                 "Transfer is not burned on target domain".into(),
             ));
         }
-        // The cross_domain unlock message arrives from the **burn domain**,
+        // The cross_domain unlock message arrives from the burn domain,
         // which is `transfer.target_domain`. The earlier code checked
         // `transfer.source_domain != source_domain`; in production
         // `executor.rs` passes `msg.source_domain` (the burn domain, so
@@ -668,7 +679,7 @@ impl BridgeState {
                 "Unlock must originate from the burn (target) domain".into(),
             ));
         }
-        // The asset returns to Active on the **original source domain**, where
+        // The asset returns to Active on the original source domain, where
         // the lock was made.
         let original_source = transfer.source_domain;
         transfer.status = BridgeStatus::Unlocked {
@@ -1460,5 +1471,111 @@ mod bridge_fee_split {
         let id = transfer.message_id;
         bridge.burn_with_event(id, 2, 200, 0, 500, [9u8; 20]).unwrap();
         assert_eq!(bridge.get_transfer(&id).unwrap().recipient_eth, Some([9u8; 20]));
+    }
+
+    /// BLG-0126 (P05-F19): a message minted after its expiry is refused,
+    /// and the refusal is at the strict boundary.
+    #[test]
+    fn neg_mint_after_expiry_rejected() {
+        let mut bridge = BridgeState::new();
+        let a = AssetId(hash_fields_bytes(&[b"MINT-EXP"]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        bridge.register_asset(a, 1).unwrap();
+        let (_, event) = bridge
+            .lock(1, 2, 10, 0, a, owner, recipient, 100, 50)
+            .unwrap();
+        let message = event.message.unwrap();
+        // Strict boundary: the expiry block itself is still live.
+        assert!(bridge.mint(&message, 50).is_ok());
+        // A second mint is refused by replay; the point here is a FRESH
+        // transfer whose mint arrives past its expiry.
+        let mut bridge2 = BridgeState::new();
+        bridge2.register_asset(a, 1).unwrap();
+        let (transfer2, event2) = bridge2
+            .lock(1, 2, 10, 0, a, owner, recipient, 100, 50)
+            .unwrap();
+        let message2 = event2.message.unwrap();
+        let err = bridge2.mint(&message2, 51).unwrap_err();
+        assert!(
+            err.to_string().contains("expired"),
+            "got: {err}"
+        );
+        assert_eq!(
+            bridge2.get_transfer(&transfer2.message_id).unwrap().status,
+            BridgeStatus::Locked { domain: 1 }
+        );
+    }
+
+    /// BLG-0126 (P05-F19): out-of-order nonces are refused by the replay
+    /// high-water - the later message cannot settle first and lock the
+    /// earlier one out silently.
+    #[test]
+    fn neg_out_of_order_nonce_rejected() {
+        let mut bridge = BridgeState::new();
+        let a = AssetId(hash_fields_bytes(&[b"NONCE-OOO"]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        bridge.register_asset(a, 1).unwrap();
+        let (t0, e0) = bridge
+            .lock(1, 2, 10, 0, a, owner, recipient, 10, 500)
+            .unwrap();
+        let (t1, e1) = bridge
+            .lock(1, 2, 11, 1, a, owner, recipient, 10, 500)
+            .unwrap();
+        let m0 = e0.message.unwrap();
+        let m1 = e1.message.unwrap();
+        assert!(m0.nonce < m1.nonce);
+        // The later message settles first...
+        bridge.mint(&m1, 12).unwrap();
+        // ...and the earlier one is then refused.
+        let err = bridge.mint(&m0, 13).unwrap_err();
+        assert!(
+            err.to_string().contains("already processed"),
+            "got: {err}"
+        );
+        assert_eq!(
+            bridge.get_transfer(&t0.message_id).unwrap().status,
+            BridgeStatus::Locked { domain: 1 }
+        );
+        assert_eq!(
+            bridge.get_transfer(&t1.message_id).unwrap().status,
+            BridgeStatus::Minted { domain: 2 }
+        );
+    }
+
+    /// BLG-0126 (P05-F19): the full cycle conserves the amount - one lock
+    /// becomes one mint becomes one burn becomes one unlock, and never two
+    /// live rows of the same value.
+    #[test]
+    fn full_cycle_conserves_the_amount() {
+        let mut bridge = BridgeState::new();
+        let a = AssetId(hash_fields_bytes(&[b"CONSERVE"]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        bridge.register_asset(a, 1).unwrap();
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, a, owner, recipient, 100, 500)
+            .unwrap();
+        let id = transfer.message_id;
+        let message = event.message.clone().unwrap();
+        bridge.mint(&message, 12).unwrap();
+        let burn_event = bridge
+            .burn_with_event(id, 2, 20, 0, 500, [9u8; 20])
+            .unwrap();
+        let burn_msg = burn_event.message.clone().unwrap();
+        bridge
+            .unlock(id, 1, 30)
+            .expect("unlock after verified burn");
+        // The single row holds the whole amount through every status.
+        assert_eq!(bridge.get_transfer(&id).unwrap().amount.get(), 100);
+        assert!(matches!(
+            bridge.get_transfer(&id).unwrap().status,
+            BridgeStatus::Unlocked { .. }
+        ));
+        // The burn message is still the SAME identity - nothing minted a
+        // second row under a new id.
+        assert_eq!(burn_msg.message_id, id);
+        assert!(bridge.get_transfer(&burn_msg.message_id).is_some());
     }
 }
