@@ -1,0 +1,75 @@
+# Format diff surface for readers that cannot reach the log host.
+#
+# The `Budlum Core quality` job already reports which files carry rustfmt
+# hunks (eight `Diff in` headers, then a count). That is enough to know the
+# debt is there, but not enough to repay it from a sandbox that cannot read
+# job logs. This workflow turns `cargo fmt --all -- --check` into a PR
+# comment with the full hunk bodies, so the fix can be applied exactly
+# without ever touching the log host. It reports only: it is not a gate, and
+# it changes no verdict.
+
+name: Fmt diff surface
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  surface:
+    name: Report rustfmt hunks as a PR comment
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Collect the rustfmt diff
+        id: fmt
+        run: |
+          set +e
+          cargo fmt --all -- --check > /tmp/fmt-raw.txt 2>&1
+          status=$?
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/fmt-raw.txt > /tmp/fmt.txt
+          if [ "$status" -eq 0 ]; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            # Keep well inside the 65536-character comment limit.
+            head -c 60000 /tmp/fmt.txt > /tmp/fmt-trimmed.txt
+          fi
+
+      - name: Comment the diff
+        if: steps.fmt.outputs.clean == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          marker="<!-- fmt-diff-surface -->"
+          {
+            echo "$marker"
+            echo "## rustfmt hunks (fmt diff surface)"
+            echo
+            echo '```diff'
+            cat /tmp/fmt-trimmed.txt
+            echo '```'
+            echo
+            echo "_Fix with \`cargo fmt --all\` or apply the hunks above._"
+          } > /tmp/comment.md
+          jq -Rs '{body: .}' /tmp/comment.md > /tmp/payload.json
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --jq "[.[] | select(.body | startswith(\"$marker\"))][0].id")
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" \
+              --input /tmp/payload.json
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --input /tmp/payload.json
+          fi
