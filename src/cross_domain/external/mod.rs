@@ -553,7 +553,9 @@ mod tests {
     #[test]
     fn a_grace_window_wider_than_the_domain_allows_is_refused() {
         let mut policy = VersionPolicy::single(AdapterId::from_name("x"), 1, 100);
-        let err = policy.schedule_fork(1, 2, 500, 10_000, &[1, 2]).unwrap_err();
+        let err = policy
+            .schedule_fork(1, 2, 500, 10_000, &[1, 2])
+            .unwrap_err();
         assert!(matches!(err, ForkError::GraceTooWide { .. }));
     }
 

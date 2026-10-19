@@ -3292,12 +3292,8 @@ impl Blockchain {
         // number. The poster's balance is debited BEFORE the registry sees
         // the registration, and credited back if the registration refuses -
         // a refusal must never leave money behind.
-        let bond = u64::try_from(request.bond_atoms).map_err(|_| {
-            format!(
-                "bond {} does not fit the balance type",
-                request.bond_atoms
-            )
-        })?;
+        let bond = u64::try_from(request.bond_atoms)
+            .map_err(|_| format!("bond {} does not fit the balance type", request.bond_atoms))?;
         let poster = request.poster;
         self.state.lock_external_bond(&poster, bond)?;
         let key = match self.external_intake.register_domain(request, bls) {
@@ -4443,20 +4439,6 @@ impl Blockchain {
                 height = blob.checkpoint_height,
                 "QC blob imported, but the pending finality cert at this height did not apply: {e}"
             );
-        }
-        Ok(())
-    }
-
-    /// A stored QC blob must sign the same checkpoint block as the certificate.
-    /// After a reorg `get_qc_blob` can still return the blob of the old fork
-    /// from disk, and a certificate of the new fork must not be finalized with
-    /// it (BLG-0181).
-    fn ensure_blob_matches_checkpoint(blob: &QcBlob, checkpoint_hash: &str) -> Result<(), String> {
-        if blob.checkpoint_hash != checkpoint_hash {
-            return Err(format!(
-                "QC blob checkpoint hash {} does not match certificate hash {} at height {}",
-                blob.checkpoint_hash, checkpoint_hash, blob.checkpoint_height
-            ));
         }
         Ok(())
     }

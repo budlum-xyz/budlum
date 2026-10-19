@@ -383,8 +383,13 @@ mod byzantine_settlement_tests {
             },
         );
         let err = crate::execution::executor::Executor::apply_transaction(&mut node.state, &tx)
-            .expect_err("an attacker without a validator seat must not move another account's nonce");
-        assert!(err.contains("state_update_authority"), "wrong refusal: {err}");
+            .expect_err(
+                "an attacker without a validator seat must not move another account's nonce",
+            );
+        assert!(
+            err.contains("state_update_authority"),
+            "wrong refusal: {err}"
+        );
         assert_eq!(
             node.state.get_nonce(&victim),
             0,

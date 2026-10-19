@@ -238,7 +238,6 @@ impl QuorumRounds {
     /// is: two nodes disagreeing about the threshold decide differently.
     pub(super) fn set_policy(&mut self, domain: DomainKey, policy: QuorumPolicy) {
         self.policies.insert(domain, policy);
-        Ok(())
     }
 
     /// The policy of a domain, if it runs quorum rounds.
@@ -833,10 +832,9 @@ mod tests {
         );
         // Two real refusals of the SAME evidence close the round over those
         // bytes (threshold 2)...
-        let refusal: Result<FinalityAttestation, AdapterError> =
-            Err(AdapterError::ConsensusRule {
-                rule: "nope".to_string(),
-            });
+        let refusal: Result<FinalityAttestation, AdapterError> = Err(AdapterError::ConsensusRule {
+            rule: "nope".to_string(),
+        });
         let a = rounds
             .submit(key(), &evidence(1, 5), &refusal, 100)
             .unwrap();
@@ -857,5 +855,4 @@ mod tests {
             .expect("new bytes open a new round after a refusal");
         assert!(matches!(state, RoundState::Open));
     }
-
 }

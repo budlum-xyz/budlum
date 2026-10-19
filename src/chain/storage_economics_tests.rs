@@ -203,8 +203,8 @@ mod tests {
     #[test]
     fn a_failed_persist_propagates_out_of_the_accounting_paths() {
         let dir = tempdir().expect("tempdir");
-        let store = Storage::new(dir.path().join("chain.db").to_str().unwrap())
-            .expect("open the store");
+        let store =
+            Storage::new(dir.path().join("chain.db").to_str().unwrap()).expect("open the store");
         store.set_fail_economics_writes(true);
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, Some(store), 45262, None);
@@ -241,7 +241,8 @@ mod tests {
     fn blockchain_with_one_deal(deal_end_epoch: u64) -> (Blockchain, u64, Address, u64, u64) {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
-        let (deal_id, operator, bond, after_bond) = blockchain_with_one_deal_in(deal_end_epoch, &mut blockchain);
+        let (deal_id, operator, bond, after_bond) =
+            blockchain_with_one_deal_in(deal_end_epoch, &mut blockchain);
         (blockchain, deal_id, operator, bond, after_bond)
     }
 
@@ -323,12 +324,7 @@ mod tests {
             .unwrap();
 
         let after_bond = blockchain.state.get_balance(&operator);
-        (
-            deal_id,
-            operator,
-            economics.operator_bond,
-            after_bond,
-        )
+        (deal_id, operator, economics.operator_bond, after_bond)
     }
 
     /// An operator that serves a deal to term must get its bond back.

@@ -6732,7 +6732,12 @@ mod tests {
         let challenger = Address::from([0xC0u8; 32]);
         let challenge_id = reg
             .open_challenge(
-                deal_id, 0, 8, 140, 160, challenger,
+                deal_id,
+                0,
+                8,
+                140,
+                160,
+                challenger,
                 StorageRegistry::required_opener_bond(8),
             )
             .expect("a funded challenge opens");
@@ -6740,7 +6745,10 @@ mod tests {
         let (pruned, bonds) = reg.prune_content(&manifest_id, 150);
         assert_eq!(pruned, 0, "no pruning under an open challenge");
         assert!(bonds.is_empty());
-        assert!(reg.get_manifest(&manifest_id).is_some(), "manifest stays live");
+        assert!(
+            reg.get_manifest(&manifest_id).is_some(),
+            "manifest stays live"
+        );
         assert_eq!(
             reg.get_deal(deal_id).map(|d| d.status),
             Some(DealStatus::Active),

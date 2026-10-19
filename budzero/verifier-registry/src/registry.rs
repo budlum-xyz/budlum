@@ -52,7 +52,7 @@
 
 use crate::address::Address;
 use crate::evidence::{EvidenceError, SlashingProof, SlashingReport};
-use crate::params::{RegistryParams, slash_penalty};
+use crate::params::{slash_penalty, RegistryParams};
 use crate::role::RoleId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1049,10 +1049,9 @@ mod tests {
         let mut reg = VerifierRegistry::new();
         reg.register_attester(addr(3), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
-        assert!(
-            reg.register_attester(addr(3), MIN_REGISTRATION_STAKE, 0)
-                .is_err()
-        );
+        assert!(reg
+            .register_attester(addr(3), MIN_REGISTRATION_STAKE, 0)
+            .is_err());
     }
 
     #[test]
@@ -1074,10 +1073,9 @@ mod tests {
         reg.register_validator(addr(4), 5_000, 10).unwrap();
         let release = reg.begin_unbonding(addr(4), roles::VALIDATOR, 10).unwrap();
         assert_eq!(release, 10 + UNBONDING_EPOCHS);
-        assert!(
-            reg.withdraw(addr(4), roles::VALIDATOR, release - 1)
-                .is_err()
-        );
+        assert!(reg
+            .withdraw(addr(4), roles::VALIDATOR, release - 1)
+            .is_err());
         let released = reg.withdraw(addr(4), roles::VALIDATOR, release).unwrap();
         assert_eq!(released, 5_000);
         assert!(reg.get(&addr(4), roles::VALIDATOR).is_none());
@@ -1373,15 +1371,14 @@ mod tests {
                 release_epoch: 5 + reg.params().unbonding_epochs
             }
         );
-        assert!(
-            reg.slash(
+        assert!(reg
+            .slash(
                 addr(30),
                 roles::MASTER_VERIFIER,
                 SlashingCondition::MaliciousBehaviour,
                 FIXED_POINT_SCALE,
             )
-            .is_ok()
-        );
+            .is_ok());
     }
 
     /// P16-F13: stake only grows on an Active bond and never clips.

@@ -782,15 +782,13 @@ mod tests {
         // a vote record that names this proposal but carries someone else's signature
         let mut forged = honest[1].clone();
         forged.signature = honest[0].signature;
-        assert!(
-            BftGuardianFinality::finalize(
-                vec![honest[0].clone(), forged],
-                &guardians,
-                2,
-                &proposal
-            )
-            .is_err()
-        );
+        assert!(BftGuardianFinality::finalize(
+            vec![honest[0].clone(), forged],
+            &guardians,
+            2,
+            &proposal
+        )
+        .is_err());
         // one honest vote is below the threshold of two
         assert!(
             BftGuardianFinality::finalize(honest[..1].to_vec(), &guardians, 2, &proposal).is_err()

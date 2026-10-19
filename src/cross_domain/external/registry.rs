@@ -857,7 +857,6 @@ pub fn no_backing() -> SecurityBacking {
     SecurityBacking::None
 }
 
-
 #[cfg(test)]
 mod tests {
     // BLG-0157 (P07-F12): the R3 registry had no direct tests at all - the
@@ -868,9 +867,7 @@ mod tests {
         FinalityKind, TimeUnit, TrustModel, VerificationPolicy,
     };
     use crate::cross_domain::external::versioning::VersionPolicy;
-    use crate::cross_domain::external::{
-        ChallengeReward, DomainEconomics, ProverFee,
-    };
+    use crate::cross_domain::external::{ChallengeReward, DomainEconomics, ProverFee};
 
     struct Fix;
 
@@ -1074,9 +1071,7 @@ mod tests {
         let admission = admit(&Fix, &VerificationPolicy::strict(10));
         // A serving domain cannot be "re-admitted" with the identical report
         // - that is not a readmission, it is nothing.
-        let err = registry
-            .readmit(&key, &admission, "no reason")
-            .unwrap_err();
+        let err = registry.readmit(&key, &admission, "no reason").unwrap_err();
         assert!(
             matches!(err, RegistryError::AdmissionDigestMismatch { .. })
                 || matches!(err, RegistryError::Adapter(_))

@@ -152,7 +152,11 @@ mod tests {
         // Same low bytes, non-zero tail: the fold would silently drop it.
         let mut high = real;
         high[FIELD_BYTES] = 0x01;
-        assert_eq!(field_from_hash(&high), field_from_hash(&real), "raw fold aliases");
+        assert_eq!(
+            field_from_hash(&high),
+            field_from_hash(&real),
+            "raw fold aliases"
+        );
         assert_eq!(
             field_of_packed_hash(&high),
             None,
@@ -184,7 +188,11 @@ mod tests {
             // the prime and refuses at-or-above it, even when the bytes came
             // from this module's own packer.
             let expected = if fe < GOLDILOCKS_P { Some(fe) } else { None };
-            assert_eq!(field_of_packed_hash(&hash_from_field(fe)), expected, "fe = {fe}");
+            assert_eq!(
+                field_of_packed_hash(&hash_from_field(fe)),
+                expected,
+                "fe = {fe}"
+            );
         }
     }
 
