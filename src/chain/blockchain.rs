@@ -6277,6 +6277,23 @@ impl Blockchain {
     }
 
     pub fn handle_prevote(&mut self, vote: Prevote) -> Result<(), String> {
+        // BLG-0083 (P04-F01): authenticate BEFORE attributing. A garbage
+        // vote naming a victim must not count against the victim: only a
+        // vote whose `auth_sig` proves control of the registered key may
+        // later earn an invalid-vote tick (self-incrimination). Unverified
+        // messages are dropped without touching anyone's counters.
+        if let Some(v) = self.state.validators.get(&vote.voter_id) {
+            if !v.bls_public_key.is_empty()
+                && crate::chain::finality::verify_bls_sig(
+                    &v.bls_public_key,
+                    &vote.auth_signing_message(),
+                    &vote.auth_sig,
+                )
+                .is_err()
+            {
+                return Err("Unauthenticated prevote (vote auth failed)".into());
+            }
+        }
         // Validate the BLS signature of the prevote against the
         // Voter's registered BLS public key BEFORE ingesting it. An invalid
         // Signature is a protocol violation: the vote never enters the
@@ -6321,6 +6338,20 @@ impl Blockchain {
     }
 
     pub fn handle_precommit(&mut self, vote: Precommit) -> Result<Option<FinalityCert>, String> {
+        // BLG-0083 (P04-F01): authenticate BEFORE attributing (see
+        // `handle_prevote`).
+        if let Some(v) = self.state.validators.get(&vote.voter_id) {
+            if !v.bls_public_key.is_empty()
+                && crate::chain::finality::verify_bls_sig(
+                    &v.bls_public_key,
+                    &vote.auth_signing_message(),
+                    &vote.auth_sig,
+                )
+                .is_err()
+            {
+                return Err("Unauthenticated precommit (vote auth failed)".into());
+            }
+        }
         // Same invalid-signature gate as `handle_prevote`.
         if let Some(v) = self.state.validators.get(&vote.voter_id) {
             if !v.bls_public_key.is_empty() {
@@ -6391,6 +6422,7 @@ impl Blockchain {
                 checkpoint_hash: checkpoint_hash.to_string(),
                 voter_id: *voter_id,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             dummy.signing_message()
         };
@@ -6405,12 +6437,33 @@ impl Blockchain {
             return Err("No BLS signing capability available".to_string());
         };
 
+        // BLG-0083 (P04-F01): the vote is also authenticated under the same
+        // key, over the domain-separated auth message. The receiving side
+        // refuses to attribute an invalid vote to this validator unless the
+        // auth signature proves key control first.
+        let auth_msg = {
+            let mut m = Vec::new();
+            m.extend_from_slice(b"BUDLUM_VOTE_AUTH_V1");
+            m.extend_from_slice(&msg);
+            m
+        };
+        let auth_sig = if let Some(sk) = self.consensus.bls_secret_key() {
+            crate::chain::finality::sign_bls(&sk, &auth_msg)
+        } else if let Some(signer) = self.consensus.signer() {
+            signer
+                .bls_sign(&auth_msg)
+                .map_err(|e| format!("BLS signer backend failed: {e}"))?
+        } else {
+            return Err("No BLS signing capability available".to_string());
+        };
+
         Ok(Prevote {
             epoch,
             checkpoint_height,
             checkpoint_hash: checkpoint_hash.to_string(),
             voter_id: *voter_id,
             sig_bls: sig,
+            auth_sig,
         })
     }
 
@@ -6437,12 +6490,31 @@ impl Blockchain {
             return Err("No BLS signing capability available".to_string());
         };
 
+        // BLG-0083 (P04-F01): the precommit carries the same vote
+        // authentication the prevote does.
+        let auth_msg = {
+            let mut m = Vec::new();
+            m.extend_from_slice(b"BUDLUM_VOTE_AUTH_V1");
+            m.extend_from_slice(&msg);
+            m
+        };
+        let auth_sig = if let Some(sk) = self.consensus.bls_secret_key() {
+            crate::chain::finality::sign_bls(&sk, &auth_msg)
+        } else if let Some(signer) = self.consensus.signer() {
+            signer
+                .bls_sign(&auth_msg)
+                .map_err(|e| format!("BLS signer backend failed: {e}"))?
+        } else {
+            return Err("No BLS signing capability available".to_string());
+        };
+
         Ok(Precommit {
             epoch,
             checkpoint_height,
             checkpoint_hash: checkpoint_hash.to_string(),
             voter_id: *voter_id,
             sig_bls: sig,
+            auth_sig,
         })
     }
 
@@ -9040,6 +9112,7 @@ mod tests {
             checkpoint_hash: "hash".to_string(),
             voter_id: Address::from([1u8; 32]),
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let result = bc.handle_prevote(vote);
         assert!(result.is_err());
@@ -9059,6 +9132,7 @@ mod tests {
             checkpoint_hash: "hash".to_string(),
             voter_id: Address::from([1u8; 32]),
             sig_bls: vec![],
+            auth_sig: Vec::new(),
         };
         let result = bc.handle_precommit(vote);
         assert!(result.is_err());

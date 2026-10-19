@@ -111,6 +111,7 @@ fn signed_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Addre
         checkpoint_hash: hash.to_string(),
         voter_id: voter,
         sig_bls: vec![],
+        auth_sig: Vec::new(),
     };
     v.sig_bls = sign_bls(sk, &v.signing_message());
     v
@@ -125,6 +126,7 @@ fn signed_precommit(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Add
         checkpoint_hash: hash.to_string(),
         voter_id: voter,
         sig_bls: sign_bls(sk, &msg),
+        auth_sig: Vec::new(),
     }
 }
 
@@ -250,6 +252,7 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
         checkpoint_hash: hash.to_string(),
         voter_id: snap.validators[3].address,
         sig_bls: sign_bls(&sks[3], &wrong_msg),
+        auth_sig: Vec::new(),
     };
     // REFUSED at ingest, never enters the aggregate.
     let err = agg
@@ -517,6 +520,7 @@ fn equivocation_generates_slashing_evidence() {
         checkpoint_hash: block.hash.clone(),
         voter_id: equivocator,
         sig_bls: vec![],
+        auth_sig: Vec::new(),
     };
     pv1.sig_bls = sign_bls(&equiv_bls, &pv1.signing_message());
     bc.handle_prevote(pv1).expect("canonical prevote accepted");
@@ -527,6 +531,7 @@ fn equivocation_generates_slashing_evidence() {
         checkpoint_hash: "CONFLICTING_HASH".to_string(),
         voter_id: equivocator,
         sig_bls: vec![],
+        auth_sig: Vec::new(),
     };
     pv2.sig_bls = sign_bls(&equiv_bls, &pv2.signing_message());
     // The conflicting vote does not count (hash mismatch) but produces evidence and triggers a slash.
@@ -598,6 +603,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
         checkpoint_hash: block.hash.clone(),
         voter_id: equivocator,
         sig_bls: vec![],
+        auth_sig: Vec::new(),
     };
     pv1.sig_bls = sign_bls(&equiv_bls, &pv1.signing_message());
     bc.handle_prevote(pv1).expect("canonical prevote accepted");
@@ -608,6 +614,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
         checkpoint_hash: "CONFLICTING_HASH".to_string(),
         voter_id: equivocator,
         sig_bls: vec![],
+        auth_sig: Vec::new(),
     };
     pv2.sig_bls = sign_bls(&equiv_bls, &pv2.signing_message());
     let _ = bc.handle_prevote(pv2);
@@ -703,15 +710,19 @@ fn repeated_invalid_signatures_trigger_slash() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // Threshold-1 invalid signatures: no slash yet.
+    // Threshold-1 invalid signatures: no slash yet. BLG-0083 (P04-F01): the
+    // spam is self-authenticated under the spammer's key - only a vote the
+    // validator's own key vouches for can count against the validator.
     for _ in 0..(threshold - 1) {
-        let bad = Prevote {
+        let mut bad = Prevote {
             epoch,
             checkpoint_height: cp,
             checkpoint_hash: block.hash.clone(),
             voter_id: spammer,
             sig_bls: vec![0u8; 48], // invalid
+            auth_sig: Vec::new(),
         };
+        bad.auth_sig = crate::chain::finality::sign_bls(&spammer_bls, &bad.auth_signing_message());
         let _ = bc.handle_prevote(bad);
     }
     let mid = bc.state.registry.get(&spammer, roles::VALIDATOR).unwrap();
@@ -721,14 +732,17 @@ fn repeated_invalid_signatures_trigger_slash() {
     );
     assert_eq!(mid.stake, 10_000);
 
-    // An invalid signature past the threshold -> slash.
-    let bad = Prevote {
+    // An invalid signature past the threshold -> slash (BLG-0083: the spam
+    // authenticates itself under the spammer's key).
+    let mut bad = Prevote {
         epoch,
         checkpoint_height: cp,
         checkpoint_hash: block.hash.clone(),
         voter_id: spammer,
         sig_bls: vec![0u8; 48],
+        auth_sig: Vec::new(),
     };
+    bad.auth_sig = crate::chain::finality::sign_bls(&spammer_bls, &bad.auth_signing_message());
     let _ = bc.handle_prevote(bad);
 
     let after = bc.state.registry.get(&spammer, roles::VALIDATOR).unwrap();
@@ -809,6 +823,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
             checkpoint_hash: block.hash.clone(),
             voter_id: spammer,
             sig_bls: vec![0u8; 48],
+            auth_sig: Vec::new(),
         };
         let _ = bc.handle_prevote(bad);
     }
@@ -854,18 +869,47 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // A vote with an invalid signature -> refused at ingest.
-    let bad = Prevote {
+    // BLG-0083 (P04-F01): a garbage vote WITHOUT authentication is dropped
+    // without attributing anything to the named validator - anybody can put
+    // any name in a message, so the tick is only reachable through the
+    // voter's own authenticated signature (self-incrimination).
+    let spoofed = Prevote {
         epoch,
         checkpoint_height: cp,
         checkpoint_hash: block.hash.clone(),
         voter_id: honest,
         sig_bls: vec![0u8; 48],
+        auth_sig: Vec::new(),
     };
     let err = bc
+        .handle_prevote(spoofed)
+        .expect_err("unauthenticated garbage must be rejected");
+    assert!(err.contains("Unauthenticated"));
+    assert_eq!(
+        bc.state.invalid_votes.invalid_count(&honest),
+        0,
+        "a spoofed vote must not tick the named validator"
+    );
+
+    // The same vote AUTHENTICATED under the victim's key is self-incriminating:
+    // the vote signature is still garbage, so it is refused and the tick counts.
+    let mut hsk = [0u8; 64];
+    hsk[0] = 33;
+    let honest_sk = Scalar::from_bytes_wide(&hsk);
+    let mut bad = Prevote {
+        epoch,
+        checkpoint_height: cp,
+        checkpoint_hash: block.hash.clone(),
+        voter_id: honest,
+        sig_bls: vec![0u8; 48],
+        auth_sig: Vec::new(),
+    };
+    bad.auth_sig = crate::chain::finality::sign_bls(&honest_sk, &bad.auth_signing_message());
+    let err = bc
         .handle_prevote(bad)
-        .expect_err("garbage sig must be rejected");
+        .expect_err("authenticated garbage must be rejected");
     assert!(err.contains("Invalid prevote signature"));
+    assert_eq!(bc.state.invalid_votes.invalid_count(&honest), 1);
     assert_eq!(
         bc.finality_aggregator.as_ref().unwrap().prevotes.len(),
         0,
