@@ -749,9 +749,10 @@ impl ColdWalletState {
     /// WIRING: unwired - key rotation is an operator action on the same
     /// dormant cold-wallet path; refusal rules are pinned by this file's tests.
     ///
-    /// BLG-0071 (P03-F14): module-private, like [`Self::sign`]. A caller that
-    /// cannot present the device quorum must not bump the key epoch.
-    fn rotate_key(&mut self, at_height: u64, reason: &str) -> Result<u32, RotationError> {
+    /// BLG-0071 (P03-F14): crate-visible only, like [`Self::sign`] is
+    /// module-visible. The sole caller is the committee-gated rotation in
+    /// `pq_anchor`; an unauthenticated caller must not bump the key epoch.
+    pub(crate) fn rotate_key(&mut self, at_height: u64, reason: &str) -> Result<u32, RotationError> {
         if reason.is_empty() {
             return Err(RotationError::EmptyReason);
         }
