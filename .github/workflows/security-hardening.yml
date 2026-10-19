@@ -331,96 +331,14 @@ jobs:
         run: |
           set -euo pipefail
           cargo supply-chain json --diffable > /tmp/supply-chain.json
-          cat > /tmp/ownerless_gate.py <<'PY'
-          import json, sys
-
-          def crate_owners(data):
-              crates = data.get("crates_io_crates")
-              if isinstance(crates, dict):
-                  # cargo-supply-chain 0.3.x emits name -> owners here; the old
-                  # script iterated this as a list of objects and died on
-                  # 'str' object has no attribute 'get', so the gate inspected
-                  # nothing while looking red for the wrong reason.
-                  for name, owners in crates.items():
-                      yield name, owners if isinstance(owners, list) else []
-              elif isinstance(crates, list):
-                  for entry in crates:
-                      if isinstance(entry, dict):
-                          yield entry.get("name", "?"), entry.get("owners") or []
-                      elif isinstance(entry, str):
-                          yield entry, []
-              else:
-                  sys.exit(
-                      "unrecognised crates_io_crates shape "
-                      f"({type(crates).__name__}); the gate refuses to claim "
-                      "a verdict over JSON it cannot parse"
-                  )
-
-          with open(sys.argv[1]) as f:
-              pairs = list(crate_owners(json.load(f)))
-          if not pairs:
-              print("THE GATE RAN EMPTY: no crates were inspected.", file=sys.stderr)
-              sys.exit(1)
-          orphans = sorted(n for n, owners in pairs if not owners)
-          if orphans:
-              print(f"{len(orphans)} ownerless dependencies:", file=sys.stderr)
-              for o in orphans:
-                  print(f"  {o}", file=sys.stderr)
-              print(
-                  "\nAn ownerless crate cannot be patched by anyone. If a "
-                  "vulnerability appears there is nobody to wait for; replace "
-                  "the dependency or vendor it in.",
-                  file=sys.stderr,
-              )
-              sys.exit(1)
-          print(f"No ownerless dependencies: all {len(pairs)} crates.io crates have a publisher.")
-          PY
-          # Canary before the real data: the parser must flag a synthetic
-          # ownerless crate sitting next to an owned one, otherwise a green
-          # verdict could come from a parser that inspects nothing.
-          cat > /tmp/ownerless-canary.json <<'J'
-          {"crates_io_crates": {"owned-crate": [{"login": "someone", "kind": "user"}], "orphan-crate": []}}
-          J
-          if python3 /tmp/ownerless_gate.py /tmp/ownerless-canary.json; then
-            echo "ERROR: the gate let a synthetic ownerless crate through -> vacuous" >&2
-            exit 1
-          fi
-          echo "canary OK (map shape): the gate flags an ownerless crate."
-          # Second canary, list-of-strings shape. The parser accepts three
-          # shapes so that a tool-side format change cannot crash it again
-          # (that is the AttributeError of issue #66) - but a branch nothing
-          # exercises is a branch that quietly rots into accepting everything.
-          # A bare string carries no owner, so it MUST be reported.
-          cat > /tmp/ownerless-canary-list.json <<'J'
-          {"crates_io_crates": [{"name": "owned-crate", "owners": [{"login": "someone"}]}, "bare-string-crate"]}
-          J
-          if python3 /tmp/ownerless_gate.py /tmp/ownerless-canary-list.json; then
-            echo "ERROR: the list-shape branch let an ownerless crate through -> vacuous" >&2
-            exit 1
-          fi
-          echo "canary OK (list shape): the gate flags an ownerless crate."
-          # Third canary: the gate must also refuse a shape it does not know
-          # rather than call an unparsed file clean.
-          echo '{"crates_io_crates": 42}' > /tmp/ownerless-canary-bogus.json
-          if python3 /tmp/ownerless_gate.py /tmp/ownerless-canary-bogus.json; then
-            echo "ERROR: the gate claimed a verdict over JSON it cannot parse -> vacuous" >&2
-            exit 1
-          fi
-          echo "canary OK (unknown shape): the gate refuses instead of guessing."
-          # Fourth canary: an empty inspection is a failure, not a pass.
-          echo '{"crates_io_crates": {}}' > /tmp/ownerless-canary-empty.json
-          if python3 /tmp/ownerless_gate.py /tmp/ownerless-canary-empty.json; then
-            echo "ERROR: the gate passed while inspecting zero crates -> vacuous" >&2
-            exit 1
-          fi
-          echo "canary OK (empty): an empty inspection cannot pass."
-          # Positive control: a wholly owned tree MUST pass, otherwise the four
-          # canaries above would be satisfied by a parser that fails always.
-          echo '{"crates_io_crates": {"a": [{"login": "x"}], "b": [{"login": "y"}]}}' \
-            > /tmp/ownerless-canary-clean.json
-          python3 /tmp/ownerless_gate.py /tmp/ownerless-canary-clean.json
-          echo "canary OK (clean): an owned tree passes, so the gate is not a constant FAIL."
-          python3 /tmp/ownerless_gate.py /tmp/supply-chain.json
+          # The parser and its canaries are a Rust gate (xtask/gates,
+          # ownerless_dependencies.rs), not a script written from a heredoc.
+          # The self-test feeds it a synthetic ownerless crate in each JSON
+          # shape the tool has emitted, an unknown shape and an empty
+          # inspection (all must fail) and an owned tree (must pass), so a
+          # green verdict cannot come from a parser that inspects nothing.
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ownerless-dependencies --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ownerless-dependencies /tmp/supply-chain.json
 
   # BLOCKS. For a chain a data race is not a flaky test: if two nodes reach
   # different states depending on the outcome of a race, that is a fork.
