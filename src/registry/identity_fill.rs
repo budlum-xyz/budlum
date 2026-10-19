@@ -278,6 +278,7 @@ pub fn template_slots(template: &str) -> Result<Vec<String>, FillError> {
 ///
 /// Every [`FillError`] refusal that concerns the template's shape or the
 /// slot/value pairing.
+#[cfg(test)]
 pub fn fill_template(template: &str, disclosures: &[SlotDisclosure]) -> Result<String, FillError> {
     let parsed = pieces(template)?;
 
@@ -404,8 +405,8 @@ impl PresentationReceipt {
                 entry.field.as_bytes(),
                 &entry.salt,
                 &entry.value_digest,
-                &entry.proof.leaf_index.to_le_bytes(),
-                &entry.proof.leaf_count.to_le_bytes(),
+                &(entry.proof.leaf_index as u64).to_le_bytes(),
+                &(entry.proof.leaf_count as u64).to_le_bytes(),
             ]);
         }
         acc
@@ -466,6 +467,7 @@ impl PresentationReceipt {
 ///
 /// Any [`FillError`]: an unusable credential behind any slot, a mismatched
 /// disclosure, or a template that does not pair with the disclosures.
+#[cfg(test)]
 pub fn build_presentation(
     registry: &IdentityRegistry,
     requester: &Address,

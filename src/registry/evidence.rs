@@ -128,15 +128,30 @@ pub struct SlashingReport {
     pub role: RoleId,
     /// The proof of the offence.
     pub proof: SlashingProof,
-    /// Provenance of the proof's verification.
-    pub provenance: ProofProvenance,
+    /// Provenance of the proof's verification. Private (BLG-0100/P04-F18):
+    /// only the constructors here can certify a report - a public field let
+    /// any caller stamp `ConsensusVerified` on its own claim.
+    provenance: ProofProvenance,
     /// Who reported it (audit trail; not trusted for authorization).
     pub reporter: Option<Address>,
 }
 
+/// BLG-0100 (P04-F18): shape bounds matching the sibling verifier-registry
+/// evidence: a post-quantum signature (ML-DSA-87, under 5 KiB) still fits.
+const MAX_BLOCK_HASH_LEN: usize = 128;
+const MAX_SIGNATURE_LEN: usize = 8192;
+const MAX_EVIDENCE_TAG_LEN: usize = 64;
+const MAX_EVIDENCE_DATA_LEN: usize = 4096;
+
 /// Reasons a report is structurally invalid (before any crypto check).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceError {
+    /// A byte-carrying field exceeds its shape bound (BLG-0100).
+    FieldTooLarge {
+        field: &'static str,
+        len: usize,
+        max: usize,
+    },
     /// The offender address is the zero address.
     ZeroOffender,
     /// A double-sign proof references identical hashes (not conflicting).
@@ -172,6 +187,12 @@ pub enum EvidenceError {
 impl std::fmt::Display for EvidenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            EvidenceError::FieldTooLarge { field, len, max } => {
+                write!(
+                    f,
+                    "report field `{field}` is {len} bytes, over the {max}-byte bound"
+                )
+            }
             EvidenceError::ZeroOffender => write!(f, "offender is the zero address"),
             EvidenceError::NonConflictingHashes => {
                 write!(f, "double-sign proof references identical block hashes")
@@ -209,70 +230,90 @@ impl std::fmt::Display for EvidenceError {
 impl std::error::Error for EvidenceError {}
 
 impl SlashingReport {
+    /// Builds an [`ProofProvenance::Unverified`] report - the only thing a
+    /// public constructor may certify. Consensus-verified reports come from
+    /// [`SlashingReport::new_verified`] or a cryptographic self-proof
+    /// ([`SlashingReport::promote_self_proven`]), never from a claim
+    /// (BLG-0100/P04-F18, CWE-347).
     pub fn new(
         offender: Address,
         role: RoleId,
         proof: SlashingProof,
-        provenance: ProofProvenance,
         reporter: Option<Address>,
     ) -> Self {
         Self {
             offender,
             role,
             proof,
-            provenance,
+            provenance: ProofProvenance::Unverified,
             reporter,
         }
     }
 
-    /// Convenience: a consensus-verified double-sign against the validator role.
-    pub fn consensus_double_sign(
+    /// The consensus layer's constructor. Not `pub` on purpose.
+    pub(crate) fn new_verified(
         offender: Address,
-        height: u64,
-        block_hash_1: String,
-        block_hash_2: String,
-        signature_1: Vec<u8>,
-        signature_2: Vec<u8>,
+        role: RoleId,
+        proof: SlashingProof,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self {
             offender,
-            roles::VALIDATOR,
-            SlashingProof::DoubleSign {
-                height,
-                block_hash_1,
-                block_hash_2,
-                signature_1,
-                signature_2,
-            },
-            ProofProvenance::ConsensusVerified,
+            role,
+            proof,
+            provenance: ProofProvenance::ConsensusVerified,
             reporter,
-        )
+        }
     }
 
-    /// Convenience: a consensus-verified liveness (downtime) fault.
-    #[allow(clippy::too_many_arguments)]
+    /// The report's provenance (BLG-0100: the field is private).
+    #[must_use]
+    pub fn provenance(&self) -> ProofProvenance {
+        self.provenance
+    }
+
+    /// Forces the report back to [`ProofProvenance::Unverified`] - the RPC
+    /// layer's answer to a caller-supplied claim.
+    pub fn demote_to_unverified(&mut self) {
+        self.provenance = ProofProvenance::Unverified;
+    }
+
+    /// Promotes the report on the strength of its own cryptographic proof
+    /// (BLG-0102/P04-F24): a double-sign proof carries two signatures by the
+    /// offender over two different hashes at one height, so it needs no
+    /// trusted sender. Runs [`SlashingReport::verify_double_sign`] first -
+    /// nothing promotes without opening the signatures.
+    ///
+    /// # Errors
+    ///
+    /// [`EvidenceError`] from the verification; the report stays
+    /// [`ProofProvenance::Unverified`] and the caller must refuse it.
+    pub fn promote_self_proven(&mut self) -> Result<(), EvidenceError> {
+        self.verify_double_sign()?;
+        self.provenance = ProofProvenance::ConsensusVerified;
+        Ok(())
+    }
+
+    /// Convenience: a consensus-verified double-sign against the validator
+    /// role. The proof travels whole (BLG-0107/P04-F25: seven separate
+    /// arguments were the shape the stale `too_many_arguments` allow hid).
+    pub fn consensus_double_sign(
+        offender: Address,
+        proof: SlashingProof,
+        reporter: Option<Address>,
+    ) -> Self {
+        Self::new_verified(offender, roles::VALIDATOR, proof, reporter)
+    }
+
+    /// Convenience: a consensus-verified liveness (downtime) fault. The
+    /// window travels whole (BLG-0107/P04-F25).
     pub fn consensus_liveness(
         offender: Address,
         role: RoleId,
-        window_start_epoch: u64,
-        window_end_epoch: u64,
-        missed: u64,
-        expected: u64,
+        proof: SlashingProof,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
-            offender,
-            role,
-            SlashingProof::Liveness {
-                window_start_epoch,
-                window_end_epoch,
-                missed,
-                expected,
-            },
-            ProofProvenance::ConsensusVerified,
-            reporter,
-        )
+        Self::new_verified(offender, role, proof, reporter)
     }
 
     /// Convenience: a consensus-verified invalid-signature-spam fault.
@@ -288,7 +329,7 @@ impl SlashingReport {
         threshold: u64,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self::new_verified(
             offender,
             role,
             SlashingProof::InvalidSignatureSpam {
@@ -296,28 +337,27 @@ impl SlashingReport {
                 count,
                 threshold,
             },
-            ProofProvenance::ConsensusVerified,
-            reporter,
+                        reporter,
         )
     }
 
     /// A relayer invalid proof - griefing, fronting or a wrong relay.
     /// Uses `Other` with tag `relayer_invalid_proof` and maps to MaliciousBehaviour (100% slash in default params).
     /// Per decision reuse_malicious to avoid semver break.
+    #[cfg(test)]
     pub fn consensus_invalid_relay_proof(
         offender: Address,
         reason: String,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self::new_verified(
             offender,
             roles::RELAYER,
             SlashingProof::Other {
                 tag: "relayer_invalid_proof".into(),
                 data: reason.into_bytes(),
             },
-            ProofProvenance::ConsensusVerified,
-            reporter,
+                        reporter,
         )
     }
 
@@ -327,20 +367,20 @@ impl SlashingReport {
     /// `MaliciousBehaviour` (100% slash in default params). Per decision
     /// We reuse the `Other` variant (adding a new `SlashingCondition` would be a
     /// Semver break); the tag is what distinguishes the offence class.
+    #[cfg(test)]
     pub fn consensus_invalid_relay_griefing(
         offender: Address,
         reason: String,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self::new_verified(
             offender,
             roles::RELAYER,
             SlashingProof::Other {
                 tag: "relayer_griefing".into(),
                 data: reason.into_bytes(),
             },
-            ProofProvenance::ConsensusVerified,
-            reporter,
+                        reporter,
         )
     }
 
@@ -348,20 +388,20 @@ impl SlashingReport {
     /// Proof to capture fees / rewards illegitimately (e.g. copying the proof
     /// And submitting it first). Tag `relayer_front_running`, mapped to
     /// `MaliciousBehaviour` (100% slash).
+    #[cfg(test)]
     pub fn consensus_invalid_relay_front_running(
         offender: Address,
         reason: String,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self::new_verified(
             offender,
             roles::RELAYER,
             SlashingProof::Other {
                 tag: "relayer_front_running".into(),
                 data: reason.into_bytes(),
             },
-            ProofProvenance::ConsensusVerified,
-            reporter,
+                        reporter,
         )
     }
 
@@ -369,20 +409,20 @@ impl SlashingReport {
     /// Destination domain, forging relay metadata, or delivering a proof that
     /// Does not correspond to the attested message. Tag `relayer_wrong_relay`,
     /// Mapped to `MaliciousBehaviour` (100% slash).
+    #[cfg(test)]
     pub fn consensus_invalid_relay_wrong_relay(
         offender: Address,
         reason: String,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self::new_verified(
             offender,
             roles::RELAYER,
             SlashingProof::Other {
                 tag: "relayer_wrong_relay".into(),
                 data: reason.into_bytes(),
             },
-            ProofProvenance::ConsensusVerified,
-            reporter,
+                        reporter,
         )
     }
 
@@ -392,15 +432,14 @@ impl SlashingReport {
         reason: String,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self::new_verified(
             offender,
             roles::ATTESTER,
             SlashingProof::Other {
                 tag: "attester_invalid_attestation".into(),
                 data: reason.into_bytes(),
             },
-            ProofProvenance::ConsensusVerified,
-            reporter,
+                        reporter,
         )
     }
 
@@ -410,15 +449,14 @@ impl SlashingReport {
         reason: String,
         reporter: Option<Address>,
     ) -> Self {
-        Self::new(
+        Self::new_verified(
             offender,
             roles::CONTENT_VALIDATOR,
             SlashingProof::Other {
                 tag: "content_validator_malicious".into(),
                 data: reason.into_bytes(),
             },
-            ProofProvenance::ConsensusVerified,
-            reporter,
+                        reporter,
         )
     }
 
@@ -440,6 +478,34 @@ impl SlashingReport {
                 signature_2,
                 ..
             } => {
+                if block_hash_1.len() > MAX_BLOCK_HASH_LEN {
+                    return Err(EvidenceError::FieldTooLarge {
+                        field: "block_hash_1",
+                        len: block_hash_1.len(),
+                        max: MAX_BLOCK_HASH_LEN,
+                    });
+                }
+                if block_hash_2.len() > MAX_BLOCK_HASH_LEN {
+                    return Err(EvidenceError::FieldTooLarge {
+                        field: "block_hash_2",
+                        len: block_hash_2.len(),
+                        max: MAX_BLOCK_HASH_LEN,
+                    });
+                }
+                if signature_1.len() > MAX_SIGNATURE_LEN {
+                    return Err(EvidenceError::FieldTooLarge {
+                        field: "signature_1",
+                        len: signature_1.len(),
+                        max: MAX_SIGNATURE_LEN,
+                    });
+                }
+                if signature_2.len() > MAX_SIGNATURE_LEN {
+                    return Err(EvidenceError::FieldTooLarge {
+                        field: "signature_2",
+                        len: signature_2.len(),
+                        max: MAX_SIGNATURE_LEN,
+                    });
+                }
                 if block_hash_1 == block_hash_2 {
                     return Err(EvidenceError::NonConflictingHashes);
                 }
@@ -454,9 +520,23 @@ impl SlashingReport {
                     return Err(EvidenceError::ImpossibleLivenessWindow);
                 }
             }
-            SlashingProof::Other { tag, .. } => {
+            SlashingProof::Other { tag, data } => {
                 if tag.is_empty() {
                     return Err(EvidenceError::EmptyProofTag);
+                }
+                if tag.len() > MAX_EVIDENCE_TAG_LEN {
+                    return Err(EvidenceError::FieldTooLarge {
+                        field: "tag",
+                        len: tag.len(),
+                        max: MAX_EVIDENCE_TAG_LEN,
+                    });
+                }
+                if data.len() > MAX_EVIDENCE_DATA_LEN {
+                    return Err(EvidenceError::FieldTooLarge {
+                        field: "data",
+                        len: data.len(),
+                        max: MAX_EVIDENCE_DATA_LEN,
+                    });
                 }
             }
             SlashingProof::InvalidSignatureSpam {
@@ -520,11 +600,9 @@ impl SlashingReport {
     /// [`EvidenceError`] naming the first check that failed. A caller must
     /// treat every error as "not proven" rather than "proven innocent": a
     /// malformed report is not evidence of anything.
-    /// Test-only since the CWE-347 fix: the permissionless RPC path no
-    /// longer promotes `Unverified` reports, and the consensus path verifies
-    /// equivocation at ingest against the validator snapshot, so this raw
-    /// signature-over-two-hashes check survives as a regression harness.
-    #[cfg(test)]
+    /// Production again (BLG-0102/P04-F24): the permissionless route earns
+    /// its promotion HERE, by opening the signatures - not by claiming a
+    /// provenance (CWE-347's rule stands: claims certify nothing).
     pub fn verify_double_sign(&self) -> Result<(), EvidenceError> {
         self.validate_shape()?;
 
@@ -589,14 +667,16 @@ mod tests {
     #[test]
     fn double_sign_shape_ok() {
         let r = SlashingReport::consensus_double_sign(
-            addr(1),
-            10,
-            "aa".into(),
-            "bb".into(),
-            vec![1],
-            vec![2],
-            None,
-        );
+                addr(1),
+                SlashingProof::DoubleSign {
+                    height: 10,
+                    block_hash_1: "aa".into(),
+                    block_hash_2: "bb".into(),
+                    signature_1: vec![1],
+                    signature_2: vec![2],
+                },
+                None,
+            );
         assert!(r.validate_shape().is_ok());
         assert_eq!(r.condition(), SlashingCondition::DoubleSign);
         assert!(r.is_actionable().is_ok());
@@ -605,14 +685,16 @@ mod tests {
     #[test]
     fn identical_hashes_rejected() {
         let r = SlashingReport::consensus_double_sign(
-            addr(1),
-            10,
-            "aa".into(),
-            "aa".into(),
-            vec![1],
-            vec![2],
-            None,
-        );
+                addr(1),
+                SlashingProof::DoubleSign {
+                    height: 10,
+                    block_hash_1: "aa".into(),
+                    block_hash_2: "aa".into(),
+                    signature_1: vec![1],
+                    signature_2: vec![2],
+                },
+                None,
+            );
         assert_eq!(r.validate_shape(), Err(EvidenceError::NonConflictingHashes));
     }
 
@@ -627,7 +709,6 @@ mod tests {
                 missed: 5,
                 expected: 10,
             },
-            ProofProvenance::Unverified,
             Some(addr(2)),
         );
         assert!(r.validate_shape().is_ok());
@@ -637,14 +718,16 @@ mod tests {
     #[test]
     fn zero_offender_rejected() {
         let r = SlashingReport::consensus_double_sign(
-            Address::zero(),
-            10,
-            "aa".into(),
-            "bb".into(),
-            vec![1],
-            vec![2],
-            None,
-        );
+                Address::zero(),
+                SlashingProof::DoubleSign {
+                    height: 10,
+                    block_hash_1: "aa".into(),
+                    block_hash_2: "bb".into(),
+                    signature_1: vec![1],
+                    signature_2: vec![2],
+                },
+                None,
+            );
         assert_eq!(r.validate_shape(), Err(EvidenceError::ZeroOffender));
     }
 
@@ -663,18 +746,30 @@ mod tests {
     fn slashing_proof_condition_invariant_double_sign_vs_liveness() {
         let offender = addr(0x42);
         let r = SlashingReport::consensus_double_sign(
-            offender,
-            100,
-            "h1".into(),
-            "h2".into(),
-            vec![1, 2, 3],
-            vec![4, 5, 6],
-            None,
-        );
+                offender,
+                SlashingProof::DoubleSign {
+                    height: 100,
+                    block_hash_1: "h1".into(),
+                    block_hash_2: "h2".into(),
+                    signature_1: vec![1, 2, 3],
+                    signature_2: vec![4, 5, 6],
+                },
+                None,
+            );
         assert_eq!(r.condition(), SlashingCondition::DoubleSign);
 
         let r2 =
-            SlashingReport::consensus_liveness(offender, roles::VALIDATOR, 10, 20, 5, 10, None);
+            SlashingReport::consensus_liveness(
+                offender,
+                roles::VALIDATOR,
+                SlashingProof::Liveness {
+                    window_start_epoch: 10,
+                    window_end_epoch: 20,
+                    missed: 5,
+                    expected: 10,
+                },
+                None,
+            );
         assert_eq!(r2.condition(), SlashingCondition::LivenessFault);
     }
 
@@ -752,7 +847,6 @@ mod tests {
                 signature_1: keys.sign(&hash_1).to_vec(),
                 signature_2: keys.sign(&hash_2).to_vec(),
             },
-            ProofProvenance::Unverified,
             None,
         )
     }
@@ -799,7 +893,6 @@ mod tests {
                 signature_1: vec![0u8; 64],
                 signature_2: vec![0u8; 64],
             },
-            ProofProvenance::Unverified,
             None,
         );
         assert_eq!(
@@ -870,7 +963,17 @@ mod tests {
         // Liveness is a claim about what did not happen over a window. There
         // is no signature to check, so this route must refuse it rather than
         // wave it through as verified.
-        let r = SlashingReport::consensus_liveness(addr(1), roles::VALIDATOR, 1, 10, 9, 10, None);
+        let r = SlashingReport::consensus_liveness(
+                addr(1),
+                roles::VALIDATOR,
+                SlashingProof::Liveness {
+                    window_start_epoch: 1,
+                    window_end_epoch: 10,
+                    missed: 9,
+                    expected: 10,
+                },
+                None,
+            );
         assert_eq!(
             r.verify_double_sign(),
             Err(EvidenceError::WrongProofForVerification)
@@ -887,5 +990,69 @@ mod tests {
             Err(EvidenceError::WrongRoleForProof),
             "only a validator signs the headers this proof is built from"
         );
+    }
+
+    /// BLG-0100 (P04-F18): shape bounds refuse oversized fields, and the
+    /// public constructor cannot certify its own report.
+    #[test]
+    fn shape_bounds_refuse_oversized_fields_and_new_never_certifies() {
+        let offender = Address::from([1u8; 32]);
+        let big = SlashingProof::DoubleSign {
+            height: 7,
+            block_hash_1: "a".repeat(MAX_BLOCK_HASH_LEN + 1),
+            block_hash_2: "b".into(),
+            signature_1: vec![1],
+            signature_2: vec![2],
+        };
+        let r = SlashingReport::new(offender, roles::VALIDATOR, big, None);
+        assert!(matches!(
+            r.validate_shape(),
+            Err(EvidenceError::FieldTooLarge { field: "block_hash_1", .. })
+        ));
+        let big_sig = SlashingProof::DoubleSign {
+            height: 7,
+            block_hash_1: "a".into(),
+            block_hash_2: "b".into(),
+            signature_1: vec![0u8; MAX_SIGNATURE_LEN + 1],
+            signature_2: vec![2],
+        };
+        let r = SlashingReport::new(offender, roles::VALIDATOR, big_sig, None);
+        assert!(matches!(
+            r.validate_shape(),
+            Err(EvidenceError::FieldTooLarge { field: "signature_1", .. })
+        ));
+        // Whatever the caller claims, `new` produces Unverified only.
+        assert_eq!(r.provenance(), ProofProvenance::Unverified);
+    }
+
+    /// BLG-0102 (P04-F24): the promotion flow is real - a report only earns
+    /// ConsensusVerified by opening its own double-sign signatures. Junk
+    /// signatures refuse and the report stays Unverified.
+    #[test]
+    fn promotion_needs_a_self_contained_proof() {
+        let offender = Address::from([1u8; 32]);
+        let proof = SlashingProof::DoubleSign {
+            height: 7,
+            block_hash_1: "aa".into(),
+            block_hash_2: "bb".into(),
+            signature_1: vec![0xAA; 64],
+            signature_2: vec![0xBB; 64],
+        };
+        let mut r = SlashingReport::new(offender, roles::VALIDATOR, proof, None);
+        assert!(r.promote_self_proven().is_err(), "junk signatures cannot certify");
+        assert_eq!(r.provenance(), ProofProvenance::Unverified);
+        // A liveness claim has no self-contained proof at all.
+        let proof = SlashingProof::Liveness {
+            window_start_epoch: 0,
+            window_end_epoch: 10,
+            missed: 9,
+            expected: 10,
+        };
+        let mut r = SlashingReport::new(offender, roles::VALIDATOR, proof, None);
+        assert!(r.promote_self_proven().is_err());
+        assert_eq!(r.provenance(), ProofProvenance::Unverified);
+        // And demote answers a claim that rode in through serde.
+        r.demote_to_unverified();
+        assert_eq!(r.provenance(), ProofProvenance::Unverified);
     }
 }

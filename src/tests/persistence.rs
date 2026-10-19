@@ -83,14 +83,16 @@ fn slashing_history_survives_snapshot_round_trip() {
     // Route a canonical double-sign report through the single slash path; this
     // Both slashes AND records the report into the persistent history.
     let report = SlashingReport::consensus_double_sign(
-        offender,
-        10,
-        "HASH_A".into(),
-        "HASH_B".into(),
-        vec![1u8; 48],
-        vec![2u8; 48],
-        None,
-    );
+                offender,
+                SlashingProof::DoubleSign {
+                    height: 10,
+                    block_hash_1: "HASH_A".into(),
+                    block_hash_2: "HASH_B".into(),
+                    signature_1: vec![1u8; 48],
+                    signature_2: vec![2u8; 48],
+                },
+                None,
+            );
     let outcome = state
         .registry
         .slash_from_report(&report)

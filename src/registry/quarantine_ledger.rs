@@ -89,6 +89,25 @@ impl QuarantineLedger {
         );
     }
 
+    /// Drops alarms older than `retention_blocks` (BLG-0105/P04-F23): the
+    /// alarm log is history, and history that is never trimmed is a disk
+    /// bill paid forever. Quarantine entries are live state - a frozen
+    /// entity stays frozen until [`QuarantineLedger::release_entity`] - so
+    /// they are never pruned by age.
+    ///
+    /// Returns the number of alarms dropped.
+    pub fn prune_expired(&mut self, current_height: u64, retention_blocks: u64) -> usize {
+        let before = self.alarms.len();
+        self.alarms
+            .retain(|_, alarm| alarm.height.saturating_add(retention_blocks) > current_height);
+        before - self.alarms.len()
+    }
+
+    /// Releases a quarantined entity - the ledger half of an unfreeze.
+    pub fn release_entity(&mut self, target_id: &Hash32) {
+        self.quarantined_entities.remove(target_id);
+    }
+
     /// Record a security alarm and return its deterministic id.
     pub fn record_alarm(&mut self, code: &str, message: &str, height: u64, severity: u8) -> Hash32 {
         let mut hasher = Sha3_256::new();
@@ -155,5 +174,26 @@ mod tests {
         let bytes = bincode::serialize(&ledger).expect("bincode encode");
         let back: QuarantineLedger = bincode::deserialize(&bytes).expect("bincode decode");
         assert_eq!(ledger, back);
+    }
+
+    /// BLG-0105 (P04-F23): alarms are trimmed by age; live quarantine
+    /// entries are not (a frozen entity stays frozen until released).
+    #[test]
+    fn alarms_trim_by_age_and_quarantine_survives_until_released() {
+        let mut ledger = QuarantineLedger::new();
+        let old = QuarantineLedger::domain_target(1);
+        let fresh = QuarantineLedger::domain_target(2);
+        ledger.quarantine_entity(old, QuarantineReason::Equivocation("x".into()), 10);
+        ledger.record_alarm("OLD", "an old alarm", 10, 2);
+        ledger.record_alarm("NEW", "a fresh alarm", 90_000, 2);
+        let dropped = ledger.prune_expired(100_000, 100_000);
+        assert_eq!(dropped, 1, "only the old alarm is over the horizon");
+        assert!(ledger.alarms.values().all(|a| a.code == "NEW"));
+        assert!(
+            ledger.quarantined_entities.contains_key(&old),
+            "age must not release a quarantine"
+        );
+        ledger.release_entity(&old);
+        assert!(!ledger.quarantined_entities.contains_key(&old));
     }
 }
