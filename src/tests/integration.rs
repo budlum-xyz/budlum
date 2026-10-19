@@ -1368,6 +1368,12 @@ mod integration_tests {
         let peer_id1 = libp2p::PeerId::from(key1.public());
 
         assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the identity key must be private");
+        }
 
         // Second call: loads existing key
         let key2 = load_or_generate_identity_key(Some(path_str));

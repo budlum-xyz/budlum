@@ -310,6 +310,27 @@ fn handshake_requires_rfc9380_bls_scheme() {
 pub const MAX_PEERS: usize = 50;
 pub const DHT_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(300);
 
+/// Writes the identity key file. On unix the file is created with mode 0600,
+/// so it is never readable by other users, not even briefly.
+fn write_identity_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes)
+    }
+}
+
 pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
     if let Some(p) = path {
         let file_path = std::path::Path::new(p);
@@ -331,7 +352,7 @@ pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
         }
         match key.to_protobuf_encoding() {
             Ok(encoded) => {
-                if let Err(e) = std::fs::write(file_path, &encoded) {
+                if let Err(e) = write_identity_file(file_path, &encoded) {
                     warn!("Failed to save identity key to {p}: {e}");
                 } else {
                     info!("Saved new P2P identity key to {p}");
