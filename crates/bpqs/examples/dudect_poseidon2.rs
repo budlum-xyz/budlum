@@ -759,14 +759,6 @@ fn parity_with_crate() -> bool {
     true
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn local_permutation_matches_the_crate() {
-        assert!(super::parity_with_crate());
-    }
-}
-
 const THRESHOLD: f64 = 4.5;
 
 fn main() {
@@ -966,4 +958,12 @@ fn main() {
     println!("demonstrably returns a positive ({t_leaky:.2}) for a real operand-dependent load");
     println!("and stays at {t_null:.2} on the null. The structural result (no reachable");
     println!("__umodti3 on the secret-fed path) and this statistical one now agree.");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn local_permutation_matches_the_crate() {
+        assert!(super::parity_with_crate());
+    }
 }
