@@ -255,6 +255,11 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
             domain: DomainKey::from_parts(&self.descriptor.id, &evidence.network),
             height: decoded.inputs.block_height,
             state_root: decoded.inputs.final_state_root,
+            // BLG-0133 (P06-F04): the program's event digest is the event
+            // root this attestation covers.
+            attested_block_hash: None,
+            attested_event_root: Some(decoded.inputs.event_digest),
+            attested_tx_root: None,
             finalized_at: decoded.inputs.block_height,
             time_unit: TimeUnit::Height,
             security: SecurityBacking::Zk {

@@ -1939,9 +1939,18 @@ impl Blockchain {
                         crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
                     )
                     .then(crate::cross_domain::external::IntakeState::production_bls);
+                    // BLG-0132 (P06-F03): the policy's `now` must be the
+                    // verification time, not the number frozen at admission.
+                    // The domain's committed external height is the highest
+                    // external time this chain has actually accepted - the
+                    // only clock with evidence behind it.
+                    let mut policy = entry.policy.clone();
+                    if let Some(consensus_domain) = self.domain_registry.get(commitment.domain_id) {
+                        policy.now = policy.now.max(consensus_domain.last_committed_height);
+                    }
                     let bridge = crate::cross_domain::external::ExternalDomainFinalityBridge::new(
                         entry.spec.build(bls, None),
-                        entry.policy.clone(),
+                        policy,
                     );
                     // The bridge was built from the stored spec; its adapter
                     // identity must be the one the evidence named, or the

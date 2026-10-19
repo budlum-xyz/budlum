@@ -554,6 +554,11 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             ),
             height: update.finalized_slot,
             state_root: update.state_root,
+            // BLG-0133 (P06-F04): the signed header root IS the block hash
+            // this attestation covers.
+            attested_block_hash: Some(update.finalized_root),
+            attested_event_root: None,
+            attested_tx_root: None,
             finalized_at: epoch_of_slot(update.finalized_slot),
             time_unit: TimeUnit::Epoch,
             security: SecurityBacking::SignatureSet {
