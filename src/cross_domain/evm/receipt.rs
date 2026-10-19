@@ -356,7 +356,12 @@ mod tests {
     fn neg_trailing_bytes_rejected() {
         let mut env = build_legacy_receipt(true, Vec::new());
         env.push(0x00);
-        assert_eq!(decode_receipt(&env), Err(ReceiptError::InvalidEnvelope));
+        assert_eq!(
+            decode_receipt(&env),
+            Err(ReceiptError::Rlp(
+                crate::cross_domain::evm::rlp::RlpError::TrailingBytes
+            ))
+        );
     }
 
     /// BLG-0126 (P05-F19): the status byte is exactly 0 or 1.

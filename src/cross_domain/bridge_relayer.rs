@@ -279,6 +279,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
         // UNWINDS the burn (`unwind_burn`, BLG-0117/P05-F10) instead of
         // restoring a whole-`BridgeState` clone, and instead of leaving a
         // burned transfer whose unlock message nobody holds.
+        let previous_expiry = self
+            .bridge
+            .get_transfer(&message_id)
+            .map_or(0, |t| t.expiry_height);
         let event = self.bridge.burn_with_event(
             message_id,
             domain,
@@ -294,6 +298,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
                 self.bridge.unwind_burn(
                     &message_id,
                     crate::cross_domain::bridge::BridgeStatus::Minted { domain },
+                    previous_expiry,
                 );
                 return Err(PipelineError::MessageRegistry(e));
             }
@@ -656,10 +661,8 @@ mod tests {
 
         // Pre-register the burn message the next burn will derive.
         let dry_burn = {
-            let mut scratch_rig = pipeline();
-            let scratch = scratch_rig.pipeline();
+            let mut scratch = p.bridge_state().clone();
             scratch
-                .bridge
                 .burn_with_event(lock_msg_id, 2, 200, 0, 1000, [7u8; 20])
                 .unwrap()
                 .message

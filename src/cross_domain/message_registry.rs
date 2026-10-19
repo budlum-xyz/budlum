@@ -200,7 +200,7 @@ mod tests {
         old.expiry_height = 10;
         old.message_id = old.calculate_message_id();
         let mut fresh = make_message(2);
-        fresh.expiry_height = 90_000;
+        fresh.expiry_height = 100_000;
         fresh.message_id = fresh.calculate_message_id();
         registry.insert(old).unwrap();
         registry.insert(fresh).unwrap();

@@ -727,8 +727,10 @@ mod tests {
         let (event_b, message_b) = make_event_and_message(1, 2, 20);
         relayer.enqueue_relay(event_b, &message_b, 20).unwrap();
         // One relay with no expiry at all.
-        let (event_c, mut message_c) = make_event_and_message(1, 2, 30);
+        let (mut event_c, mut message_c) = make_event_and_message(1, 2, 30);
         message_c.expiry_height = 0;
+        message_c.message_id = message_c.calculate_message_id();
+        event_c.message = Some(message_c.clone());
         relayer.enqueue_relay(event_c, &message_c, 30).unwrap();
         assert_ne!(message_a.message_id, message_b.message_id);
         assert_eq!(relayer.pending_count(), 2);
@@ -758,8 +760,12 @@ mod tests {
     #[test]
     fn a_refused_relay_leaves_no_ledger_record_and_keeps_the_pending_entry() {
         let mut relayer = UniversalRelayer::new(RelayerConfig::default());
-        let (mut event, message) = make_event_and_message(1, 2, 10);
-        event.message = None;
+        let (mut event, mut message) = make_event_and_message(1, 2, 10);
+        // The enqueue demands the event and the message be the same relay, so
+        // the tamper is applied to both: the id no longer hashes from the
+        // fields, which only the late integrity check can see.
+        message.nonce = 99;
+        event.message = Some(message.clone());
         relayer.enqueue_relay(event.clone(), &message, 10).unwrap();
         let mut tree = DomainEventTree::new();
         tree.push(event);
@@ -774,7 +780,7 @@ mod tests {
             root,
             15,
         );
-        assert!(matches!(first, Err(RelayerError::Other(_))));
+        assert!(matches!(first, Err(RelayerError::InvalidProof(_))));
         assert!(!relayer.is_relayed(&message.message_id));
         assert_eq!(relayer.pending_count(), 1);
         // A retry gets the same refusal, not AlreadyRelayed.
@@ -786,7 +792,7 @@ mod tests {
             root,
             16,
         );
-        assert!(matches!(second, Err(RelayerError::Other(_))));
+        assert!(matches!(second, Err(RelayerError::InvalidProof(_))));
     }
 
     /// BLG-0119 (P05-F12): at the expiry height itself the relay is already
