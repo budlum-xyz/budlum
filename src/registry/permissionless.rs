@@ -726,9 +726,7 @@ impl PermissionlessRegistry {
         // The history is the ledger of what has already been applied: a
         // repeated liveness report is answered with a no-op instead of a
         // second stake cut.
-        if condition == SlashingCondition::LivenessFault
-            && self.slashing_history.iter().any(|r| r.report == *report)
-        {
+        if self.slashing_history.iter().any(|r| r.report == *report) {
             return Ok(None);
         }
         let ratio = self.params.slash_ratio(condition);
