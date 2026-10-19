@@ -769,6 +769,18 @@ struct Exempt {
     names: BTreeSet<String>,
 }
 
+/// True when the line carries an exemption token followed by some text. A bare
+/// token names no door and exempts nothing.
+fn has_reasoned_token(line: &str) -> bool {
+    EXEMPT_TOKENS.iter().any(|tok| {
+        line.find(tok).is_some_and(|at| {
+            line[at + tok.len()..]
+                .chars()
+                .any(|c| c.is_ascii_alphanumeric())
+        })
+    })
+}
+
 /// Read one file's exemption from its original text, before any scrubbing
 /// erases the doc comments the exemption lives in.
 ///
@@ -784,7 +796,7 @@ fn exemptions_in(text: &str) -> Exempt {
     for line in &lines {
         let t = line.trim_start();
         if t.is_empty() || t.starts_with("//!") || t.starts_with("#![") {
-            if EXEMPT_TOKENS.iter().any(|tok| t.contains(tok)) {
+            if has_reasoned_token(t) {
                 module = true;
             }
             continue;
@@ -830,9 +842,13 @@ fn exemptions_in(text: &str) -> Exempt {
             continue;
         }
         let from = i.saturating_sub(EXEMPT_LOOKBACK);
+        // The note belongs to the nearest declaration below it: another `pub`
+        // line between the note and this item ends its reach.
         let noted = lines[from..i]
             .iter()
-            .any(|l| EXEMPT_TOKENS.iter().any(|tok| l.contains(tok)));
+            .rev()
+            .take_while(|l| !l.trim_start().starts_with("pub "))
+            .any(|l| has_reasoned_token(l));
         if noted {
             names.insert(ident);
         }
@@ -1257,6 +1273,23 @@ fn not_a_caller_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
             let _ = fs::remove_dir_all(tmp);
             return Err(String::from(
                 "canary: an item called only from test-gated code passed as reached",
+            ));
+        }
+    }
+
+    // A note covers the declaration below it, not the next `pub` items too,
+    // and a bare token exempts nothing.
+    for (label, body) in [
+        (
+            "note_shared",
+            "// WIRING: the door lands with the relay slice\npub fn covered() -> u32 { 1 }\npub fn not_covered() -> u32 { 2 }\n",
+        ),
+        ("note_bare", "// WIRING:\npub fn bare() -> u32 { 1 }\n"),
+    ] {
+        if accepts_with(clean, tmp, label, &[("src/idle.rs", body)])? {
+            let _ = fs::remove_dir_all(tmp);
+            return Err(String::from(
+                "canary: an exemption note reached past its own item or had no reason",
             ));
         }
     }
