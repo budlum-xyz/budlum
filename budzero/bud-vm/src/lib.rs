@@ -78,7 +78,7 @@ pub struct Vm {
     pub pc: usize,
     pub stack: Vec<u64>,
     pub memory: Vec<u8>,
-    pub storage: std::collections::HashMap<i32, u64>,
+    pub storage: std::collections::HashMap<u64, u64>,
     pub events: Vec<u64>,
     pub context: Context,
     pub trace: Vec<Step>,
@@ -86,7 +86,7 @@ pub struct Vm {
     pub gas_used: u64,
     pub gas_limit: u64,
     pub error: Option<VmError>,
-    pub state_writes: Vec<(i32, u64)>,
+    pub state_writes: Vec<(u64, u64)>,
     /// F2: Mainnet mode flag. When true, VerifyMerkle is gated behind
     /// `MainnetActivation::full`. Set by `ZkVmExecutor::execute_bytecode`
     /// When network is Mainnet.
@@ -502,9 +502,9 @@ impl Vm {
             }
             Opcode::SRead => {
                 let slot = if inst.imm == -1 {
-                    src2_val as i32
+                    src2_val
                 } else {
-                    inst.imm
+                    i64::from(inst.imm) as u64
                 };
                 let val = *self.storage.get(&slot).unwrap_or(&0);
                 self.registers[dst_idx as usize] = val;
@@ -513,9 +513,9 @@ impl Vm {
             }
             Opcode::SWrite => {
                 let slot = if inst.imm == -1 {
-                    src2_val as i32
+                    src2_val
                 } else {
-                    inst.imm
+                    i64::from(inst.imm) as u64
                 };
                 self.storage.insert(slot, src1_val);
                 self.state_writes.push((slot, src1_val));
@@ -970,7 +970,7 @@ impl Vm {
         let mut acc = [0u64; 8];
         for (slot, val) in &self.state_writes {
             let mut st = [0u64; 8];
-            st[0] = *slot as u64;
+            st[0] = *slot;
             st[1] = *val;
             st[2] = acc[0];
             st[3] = acc[1];
@@ -2238,6 +2238,28 @@ mod tests {
         assert_eq!(vm.trace[1].next_pc, 1);
         assert_eq!(vm.trace[1].dst_val, 0);
         assert!(vm.halted);
+    }
+
+    /// A dynamic storage key keeps all 64 bits: two keys that agree in the
+    /// low 32 bits are two different slots.
+    #[test]
+    fn dynamic_storage_key_is_not_truncated() {
+        let wide = (1u64 << 32) | 3;
+        let program = vec![
+            inst(Opcode::SWrite, 0, 1, 2, -1),
+            inst(Opcode::SWrite, 0, 4, 3, -1),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        vm.registers[1] = 5;
+        vm.registers[2] = wide;
+        vm.registers[3] = 3;
+        vm.registers[4] = 9;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.storage.get(&wide), Some(&5));
+        assert_eq!(vm.storage.get(&3), Some(&9));
+        assert_eq!(vm.state_writes, vec![(wide, 5), (3, 9)]);
     }
 
     /// SRead/SWrite cost more gas than Load/Store.
