@@ -62,8 +62,8 @@ impl ActivationArg {
 struct Cli {
     #[arg(
         long,
-        default_value_t = 1,
-        help = "The unique chain identifier for execution context"
+        default_value_t = 45262,
+        help = "The unique chain identifier for execution context (Budlum: mainnet 45260, testnet 45261, devnet 45262; 0 is refused)"
     )]
     chain_id: u64,
 
@@ -273,8 +273,17 @@ struct ExecutionOutput {
     vm: Vm,
 }
 
+/// Chain id 0 binds a proof to no network at all.
+fn check_chain_id(chain_id: u64) -> Result<(), String> {
+    if chain_id == 0 {
+        return Err("chain id 0 is not a network id".to_string());
+    }
+    Ok(())
+}
+
 fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std::error::Error>> {
     use bud_state::StateBackend;
+    check_chain_id(config.chain_id)?;
 
     debug!("Starting pipeline");
 
@@ -312,10 +321,17 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         vm.context.block_height = bh;
     }
 
+    // Registers 1..=31 carry inputs. An extra argument used to be dropped
+    // silently, so the program was run and proven with fewer inputs than given.
+    if config.args.len() > 31 {
+        return Err(format!(
+            "{} arguments given, at most 31 fit the input registers",
+            config.args.len()
+        )
+        .into());
+    }
     for (i, val) in config.args.iter().enumerate() {
-        if i < 31 {
-            vm.registers[i + 1] = *val;
-        }
+        vm.registers[i + 1] = *val;
     }
 
     let receipt = vm.run_receipt(&config.bytecode);
@@ -351,7 +367,13 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
             let mut acc = state
                 .get_account(s)
                 .ok_or("Sender account not found in state")?;
-            acc.nonce += 1;
+            // The persisted nonce follows the nonce the proof binds
+            // (`--nonce` overrides the account's), not a blind +1.
+            acc.nonce = vm
+                .context
+                .nonce
+                .checked_add(1)
+                .ok_or("transaction nonce overflow")?;
             state.set_account(s, acc);
         }
     }
@@ -913,7 +935,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let bytecode = bud_compiler::compile(&content, profile)
                     .map_err(|e| format!("Compilation of {p} failed: {e}"))?;
 
-                let step_nonce = nonce.map(|n| n + index as u64);
+                let step_nonce = match nonce {
+                    Some(n) => Some(
+                        n.checked_add(index as u64)
+                            .ok_or("transaction nonce overflow")?,
+                    ),
+                    None => None,
+                };
 
                 let out = run_pipeline(ExecutionConfig {
                     bytecode,
@@ -1079,6 +1107,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chain_id_zero_is_refused() {
+        assert!(check_chain_id(0).is_err());
+        assert!(check_chain_id(45262).is_ok());
+    }
 
     /// The VM the CLI constructs must be **in mainnet mode**.
     ///
