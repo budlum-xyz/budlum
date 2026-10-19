@@ -16,8 +16,15 @@
 use sha3::{Digest, Sha3_256};
 
 /// The PoR key (the secret shared with the verifier). Private verifiability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PorKey(pub [u8; 32]);
+
+/// The key is a secret: the debug form never prints its bytes.
+impl std::fmt::Debug for PorKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PorKey(<redacted>)")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PorTag(pub [u8; 32]);
@@ -112,6 +119,13 @@ impl PorKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_debug_form_does_not_print_the_key() {
+        let key = PorKey::new([0xAB; 32]);
+        let shown = format!("{key:?}");
+        assert!(!shown.contains("171") && !shown.contains("ab"), "{shown}");
+    }
 
     fn blocks() -> Vec<Vec<u8>> {
         (0..8u64).map(|i| vec![i as u8; 16]).collect()
