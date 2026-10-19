@@ -6658,6 +6658,10 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn ai_agent_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // BLG-0201 (P10-F11): the score crosses the actor and the wire as a
+        // fixed-point permyriad integer (10_000 = full trust), never as an
+        // f64 - Z8. The unit is stated in the response so a client never has
+        // to guess whether 9000 is 9000.0 or 0.9.
         let ranking = cap_list_response(self.chain.get_ai_agent_ranking().await);
         let entries: Vec<serde_json::Value> = ranking
             .iter()
@@ -6665,6 +6669,7 @@ impl BudlumApiServer for RpcServer {
                 serde_json::json!({
                     "agent": format!("0x{}", addr.to_hex()),
                     "trust_score": score,
+                    "trust_score_basis": 10_000,
                 })
             })
             .collect();

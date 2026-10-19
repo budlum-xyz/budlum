@@ -40,6 +40,8 @@ fn double_sign(offender: Address) -> SlashingReport {
         offender,
         SlashingProof::DoubleSign {
             height: 100,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "hash_aaa".to_string(),
             block_hash_2: "hash_bbb".to_string(),
             signature_1: vec![0xAA; 64],
@@ -136,6 +138,8 @@ fn an_unverified_report_moves_no_stake_while_the_verified_twin_does() {
         roles::VALIDATOR,
         SlashingProof::DoubleSign {
             height: 100,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "aaa".to_string(),
             block_hash_2: "bbb".to_string(),
             signature_1: vec![0xAA; 64],
