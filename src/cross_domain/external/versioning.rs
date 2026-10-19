@@ -242,7 +242,8 @@ impl VersionPolicy {
     }
 
     /// Whether this policy is in a state that can serve at all: at least one
-    /// open window, and no two windows for the same version.
+    /// open-ended window (no sunset), no two windows for the same version, and
+    /// no window that sunsets before it starts.
     #[must_use]
     pub fn is_consistent(&self) -> bool {
         if self.windows.is_empty() {
@@ -261,7 +262,9 @@ impl VersionPolicy {
             }
             seen.push(window.version);
         }
-        true
+        // At least one window must stay open-ended; a policy whose every
+        // window has a sunset serves nothing after the last one ends.
+        self.windows.iter().any(|w| w.sunset_height.is_none())
     }
 }
 
@@ -334,6 +337,14 @@ mod tests {
             Some(102)
         );
         assert!(policy.window(3).is_none());
+    }
+
+    #[test]
+    fn a_policy_whose_only_window_is_sunset_is_not_consistent() {
+        let mut policy = policy();
+        assert!(policy.is_consistent());
+        policy.windows[0].sunset_height = Some(policy.windows[0].valid_from_height + 5);
+        assert!(!policy.is_consistent());
     }
 
     #[test]

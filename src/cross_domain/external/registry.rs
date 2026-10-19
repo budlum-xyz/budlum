@@ -294,14 +294,6 @@ impl ExternalDomainRegistry {
         Ok(domain)
     }
 
-    /// Re-admits a domain under a new probe set - the only way the probe set
-    /// changes. Records the transition, because a domain that was re-admitted
-    /// after failures is a fact a reader is entitled to.
-    ///
-    /// # Errors
-    ///
-    /// An unknown domain, a failed admission, or a report identical to the one
-    /// already registered.
     /// Replaces a domain's version policy. The one sanctioned later mutation
     /// of a registration: an evidence-format fork. The caller (the consensus
     /// intake) is expected to have built the new policy by
@@ -336,6 +328,14 @@ impl ExternalDomainRegistry {
         Ok(())
     }
 
+    /// Re-admits a domain under a new probe set - the only way the probe set
+    /// changes. Records the transition, because a domain that was re-admitted
+    /// after failures is a fact a reader is entitled to.
+    ///
+    /// # Errors
+    ///
+    /// An unknown domain, a failed admission, or (for a domain that is not
+    /// Faulted) a report identical to the one already registered.
     pub fn readmit(
         &mut self,
         domain: &DomainKey,
