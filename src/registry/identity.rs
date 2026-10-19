@@ -730,7 +730,7 @@ impl IdentityRegistry {
             let credential_root = record.credential_root.unwrap_or([0u8; 32]);
             let guardians = hash_fields_bytes(&[
                 b"bud-identity-guardians",
-                record.recovery_threshold.to_le_bytes().as_slice(),
+                (record.recovery_threshold as u64).to_le_bytes().as_slice(),
             ]);
             let mut guardians = guardians;
             for guardian in &record.guardians {
@@ -831,6 +831,7 @@ pub fn credential_id(credential: &CredentialCommitment) -> [u8; 32] {
 /// time. The root inside is the credential's own recomputed root - the
 /// signer commits to "these fields, this order", not to a claimed hash.
 #[must_use]
+#[cfg(test)]
 pub fn credential_issue_digest(credential: &CredentialCommitment, chain_id: u64) -> [u8; 32] {
     hash_fields_bytes(&[
         b"bud-identity-issue-v1",
@@ -849,6 +850,7 @@ pub fn credential_issue_digest(credential: &CredentialCommitment, chain_id: u64)
 /// issuer, so a revocation cannot be replayed against another credential or
 /// attributed to another issuer by accident.
 #[must_use]
+#[cfg(test)]
 pub fn credential_revoke_digest(
     credential: &CredentialCommitment,
     issuer: &Address,

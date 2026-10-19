@@ -138,14 +138,16 @@ fn system_bridge_path_bypasses_relayer_gate() {
 
 fn double_sign_report(offender: Address, reporter: Option<Address>) -> SlashingReport {
     SlashingReport::consensus_double_sign(
-        offender,
-        7,
-        "aa".into(),
-        "bb".into(),
-        vec![1],
-        vec![2],
-        reporter,
-    )
+                offender,
+                SlashingProof::DoubleSign {
+                    height: 7,
+                    block_hash_1: "aa".into(),
+                    block_hash_2: "bb".into(),
+                    signature_1: vec![1],
+                    signature_2: vec![2],
+                },
+                reporter,
+            )
 }
 
 #[test]
@@ -199,7 +201,6 @@ fn an_unprovable_report_is_refused_before_the_fee_is_taken() {
             signature_1: vec![1],
             signature_2: vec![2],
         },
-        ProofProvenance::Unverified,
         Some(reporter),
     );
     assert!(bc.submit_registry_slashing_report(report).is_err());
@@ -232,7 +233,7 @@ fn a_provable_report_from_a_stranger_slashes_and_refunds() {
     bc.state.add_balance(&reporter, fee);
 
     let (h1, h2) = ([0x11u8; 32], [0x22u8; 32]);
-    let report = SlashingReport::new(
+    let report = SlashingReport::new_verified(
         offender,
         roles::VALIDATOR,
         SlashingProof::DoubleSign {
@@ -242,8 +243,7 @@ fn a_provable_report_from_a_stranger_slashes_and_refunds() {
             signature_1: keys.sign(&h1).to_vec(),
             signature_2: keys.sign(&h2).to_vec(),
         },
-        ProofProvenance::ConsensusVerified,
-        Some(reporter),
+                Some(reporter),
     );
 
     let outcome = bc
@@ -294,7 +294,6 @@ fn a_stranger_cannot_slash_a_validator_by_asserting_provenance() {
         },
         // The RPC layer overwrites this to `Unverified`; asserted here to
         // show the chain layer does not depend on the RPC layer to do so.
-        ProofProvenance::Unverified,
         Some(attacker),
     );
 
