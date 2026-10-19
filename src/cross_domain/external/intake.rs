@@ -1321,6 +1321,61 @@ mod tests {
     }
 
     #[test]
+    fn the_same_evidence_cannot_be_slashed_twice() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        let spec = eth_spec();
+        let good = quorum_evidence(&spec, addr(9));
+        let attestation = state
+            .submit_evidence(&good, Some(Box::new(StrictTestBls)))
+            .expect("the poster is bonded and the evidence is valid");
+        let digest = attestation.evidence_digest;
+        let value = 1_000_000;
+        state
+            .registry
+            .slash(&key, addr(9), digest, value, addr(7))
+            .expect("the first slash lands");
+        let err = state
+            .registry
+            .slash(&key, addr(9), digest, value, addr(7))
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::AlreadySlashed { .. }));
+        let bond = state
+            .registry
+            .domain(&key)
+            .expect("domain")
+            .provers
+            .get(&addr(9))
+            .expect("bond");
+        assert_eq!(bond.slashings.len(), 1);
+    }
+
+    #[test]
+    fn readmit_is_the_exit_from_faulted_and_refuses_a_noop_for_a_healthy_domain() {
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        let report = state.entries.get(&key).expect("entry").admission.clone();
+        let err = state
+            .registry
+            .readmit(&key, &report, "no change")
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::AdmissionDigestMismatch { .. }));
+        state
+            .registry
+            .mark_faulted(&key, "test dispute")
+            .expect("domain exists");
+        state
+            .registry
+            .readmit(&key, &report, "operator re-admission")
+            .expect("a faulted domain must be re-admittable on the same digest");
+        let reg = state.registry.domain(&key).expect("domain");
+        assert_eq!(
+            reg.record.state,
+            crate::cross_domain::external::DomainState::Admitted
+        );
+    }
+
+    #[test]
     fn a_faulted_domain_takes_no_attestation() {
         let mut state = IntakeState::new();
         let key = register(&mut state);
