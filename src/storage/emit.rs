@@ -55,6 +55,7 @@ use crate::storage::qr_png::{frame_to_qr_png, matrix_to_png, QrPngError};
 use crate::storage::qr_receive::{ProgressiveReceiver, ReceiveError};
 use crate::storage::qr_recipe::{three_sealed_recipe_commitment, ThreeRecipe, ThreeRecipeSealed};
 use crate::storage::qr_reemit::{RecipeEmitter, ReemitError};
+use crate::storage::qr_verify::{verify_qr_video, ExpectedCommitments, VerifyError};
 use crate::storage::qr_video::{
     png_to_optical_frame, QrVideo, QrVideoError, DEFAULT_FPS, VIDEO_VERSION,
 };
@@ -64,8 +65,7 @@ use crate::storage::three_nft::{
     meta_tracks_public_recipe, MetadataVisibility, PreviewMode, ThreeNftMeta,
 };
 use crate::storage::three_pipe::{
-    concat_round_trip, decode_frames, decode_qr_video, encode_qr_video, recipe_commitment,
-    PipeError,
+    concat_round_trip, decode_frames, encode_qr_video, recipe_commitment, PipeError,
 };
 use crate::storage::three_recipe::{
     recipe_class, RecipeTransform, VideoFrameStream, VideoRecipe, VideoRecipeError,
@@ -77,6 +77,7 @@ use crate::storage::three_visibility::{
 };
 use crate::storage::transformed::{transform_content, CodecFlags, TransformError, TransformOpts};
 use crate::storage::{ContentId, ContentManifest, ShardRef};
+use std::time::Duration;
 
 /// Largest body this path will encode in one call.
 ///
@@ -233,11 +234,12 @@ pub struct FeedPreview {
     pub rotate_key_on_delete: bool,
 }
 
+/// Time allowed for the check of the video this emit has just encoded.
+const VIDEO_VERIFY_DEADLINE: Duration = Duration::from_secs(60);
+
 /// Errors from the emit path.
 #[derive(Debug)]
 pub enum EmitError {
-    /// Empty body: nothing to encode, and an empty frame stream is not a feed.
-    Empty,
     /// Body over [`MAX_PREVIEW_CONTENT_BYTES`].
     TooLarge {
         /// Bytes offered.
@@ -363,6 +365,8 @@ pub enum EmitError {
     Payload(PayloadError),
     /// A stage refused.
     Pipe(PipeError),
+    /// The encoded video did not match the commitments of its own encode.
+    Verify(VerifyError),
     /// A stage refused.
     Receive(ReceiveError),
     /// A stage refused.
@@ -446,7 +450,6 @@ pub enum EmitError {
 impl std::fmt::Display for EmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Empty => write!(f, "empty body"),
             Self::ZeroBlockLen => write!(f, "block_len must be at least 1"),
             Self::TooLarge { len, limit } => {
                 write!(f, "body of {len} bytes over emit cap {limit}")
@@ -509,6 +512,7 @@ impl std::fmt::Display for EmitError {
             Self::Carousel(e) => write!(f, "carousel: {e}"),
             Self::Payload(e) => write!(f, "payload: {e}"),
             Self::Pipe(e) => write!(f, "pipe: {e}"),
+            Self::Verify(e) => write!(f, "verify: {e}"),
             Self::Receive(e) => write!(f, "receive: {e}"),
             Self::Reemit(e) => write!(f, "reemit: {e}"),
             Self::Codec(e) => write!(f, "codec: {e}"),
@@ -573,6 +577,12 @@ impl From<CarouselError> for EmitError {
 impl From<PipeError> for EmitError {
     fn from(e: PipeError) -> Self {
         Self::Pipe(e)
+    }
+}
+
+impl From<VerifyError> for EmitError {
+    fn from(e: VerifyError) -> Self {
+        Self::Verify(e)
     }
 }
 
@@ -676,9 +686,15 @@ fn hex(bytes: [u8; 32]) -> String {
     out
 }
 
+/// Bytes a seal adds to the body: the sealed header (magic, version, nonce24)
+/// plus the 16 byte Poly1305 tag (`payload_crypt` `open_payload` reads the same
+/// `SEALED_HEADER_LEN + 16` minimum). A sealed body is never shorter than this.
+const SEAL_OVERHEAD: usize = SEALED_HEADER_LEN + 16;
+
 /// Everything the ceilings say about a body before a single drop is built.
 ///
-/// The bound is computed on `len + THREE_PAYLOAD_HEADER_LEN`, not on `len`:
+/// The bound is computed on `len + THREE_PAYLOAD_HEADER_LEN + SEAL_OVERHEAD`
+/// (the seal part only for a sealed feed), not on `len`:
 /// A1 may shrink the body but never grows it, so the packed container is the
 /// larger of the two and the carousel locks `k` over it. Charging the request
 /// on the smaller number would let a caller walk up to a ceiling and be told it
@@ -688,9 +704,6 @@ fn hex(bytes: [u8; 32]) -> String {
 ///
 /// [`EmitError`] naming the first ceiling the request crosses.
 fn plan(content: &[u8], policy: &EmitPolicy) -> Result<(u16, u32), EmitError> {
-    if content.is_empty() {
-        return Err(EmitError::Empty);
-    }
     let len = content.len();
     if len > MAX_PREVIEW_CONTENT_BYTES {
         return Err(EmitError::TooLarge {
@@ -743,7 +756,15 @@ fn plan(content: &[u8], policy: &EmitPolicy) -> Result<(u16, u32), EmitError> {
         return Err(EmitError::ZeroBlockLen);
     }
     let blok = usize::from(policy.block_len);
-    let bloklar = len.saturating_add(THREE_PAYLOAD_HEADER_LEN).div_ceil(blok);
+    let sealed_extra = if policy.seal_seed.is_some() {
+        SEAL_OVERHEAD
+    } else {
+        0
+    };
+    let bloklar = len
+        .saturating_add(THREE_PAYLOAD_HEADER_LEN)
+        .saturating_add(sealed_extra)
+        .div_ceil(blok);
     let k = u16::try_from(bloklar).map_err(|_| EmitError::TooManyBlocks {
         k: MAX_K,
         limit: MAX_K,
@@ -906,14 +927,18 @@ pub fn qr_feed_preview(
     if kind2 != kind || body2 != body_len_bytes {
         return Err(EmitError::DecodePathMismatch);
     }
-    let (kind3, video_body, video3) = decode_qr_video(&encoded.video_blob)?;
+    // The expectations come from the encode step, not from the video. A sealed
+    // feed has a random nonce, so its expected body is the one the pipe packed.
+    let expected_body = if key.is_some() {
+        unpack_payload(&pipe.packed)?.1
+    } else {
+        content.to_vec()
+    };
+    let expected = ExpectedCommitments::from_encode(&expected_body, pipe);
+    let (kind3, video_body, video3, _record) =
+        verify_qr_video(&encoded.video_blob, &expected, VIDEO_VERIFY_DEADLINE)?;
     let video_frames = u32::try_from(video3.png_frames.len()).unwrap_or(u32::MAX);
     if kind3 != kind || video_body != body_len_bytes || video_frames != actual {
-        return Err(EmitError::DecodePathMismatch);
-    }
-    if video3.stream_commitment != pipe.stream_commitment
-        || video3.recipe_commitment != recipe_commitment(&pipe.recipe)
-    {
         return Err(EmitError::DecodePathMismatch);
     }
     let decoded_body_len = body_len_bytes.len();
@@ -1373,7 +1398,7 @@ pub fn qr_feed_frames_burst(
     seq_start: u32,
     count: u32,
 ) -> Result<(Vec<Vec<u8>>, [u8; 32]), EmitError> {
-    let (preflight_k, _) = plan(content, policy)?;
+    plan(content, policy)?;
     if count == 0 || count > policy.max_burst_frames {
         return Err(EmitError::BurstTooWide {
             count,
@@ -1388,9 +1413,6 @@ pub fn qr_feed_frames_burst(
             seq: seq_start,
             len: total,
         });
-    }
-    if u32::from(preflight_k) == 0 {
-        return Err(EmitError::Empty);
     }
     // The read path goes through the reveal session rather than opening an
     // emitter beside it: the session is what decides whether these bytes may be
@@ -1437,6 +1459,13 @@ mod tests {
     }
 
     #[test]
+    fn empty_body_passes_the_plan_ceilings() {
+        let (k, drops) = plan(&[], &EmitPolicy::default()).expect("empty plan");
+        assert_eq!(k, 1);
+        assert!(drops >= 1);
+    }
+
+    #[test]
     fn ceilings_refuse_before_anything_is_paid_for() {
         let big = body(MAX_PREVIEW_CONTENT_BYTES + 1);
         assert!(matches!(
@@ -1450,10 +1479,6 @@ mod tests {
         assert!(matches!(
             qr_feed_preview(&body(4096), &tiny_policy, None),
             Err(EmitError::QrOverflow { .. }) | Err(EmitError::WireTooLarge { .. })
-        ));
-        assert!(matches!(
-            qr_feed_preview(&[], &EmitPolicy::default(), None),
-            Err(EmitError::Empty)
         ));
         // A zero block length used to reach `div_ceil` and panic the
         // request; it is a caller error and is reported as one.
@@ -1523,6 +1548,85 @@ mod tests {
         // frames carry the uploader's ciphertext, not plaintext.
         assert!(!p.publicly_reemitable);
         assert!(p.a4_agreement);
+    }
+
+    #[test]
+    fn empty_body_with_a_seal_previews_as_a_gated_feed() {
+        let policy = EmitPolicy {
+            seal_seed: Some([5u8; 32]),
+            ..EmitPolicy::default()
+        };
+        let p = qr_feed_preview(&[], &policy, None).expect("sealed empty preview");
+        assert!(!p.publicly_reemitable);
+    }
+
+    #[test]
+    fn empty_body_burst_is_ok_sealed_and_plain() {
+        let sealed = EmitPolicy {
+            seal_seed: Some([5u8; 32]),
+            ..EmitPolicy::default()
+        };
+        qr_feed_frames_burst(&[], &sealed, 0, 1).expect("sealed empty burst");
+        qr_feed_frames_burst(&[], &EmitPolicy::default(), 0, 1).expect("plain empty burst");
+    }
+
+    fn sealed_policy(block_len: u16) -> EmitPolicy {
+        EmitPolicy {
+            block_len,
+            seal_seed: Some([5u8; 32]),
+            ..EmitPolicy::default()
+        }
+    }
+
+    #[test]
+    fn sealed_preview_is_ok_for_small_block_lens() {
+        for bl in [64u16, 128, 200] {
+            for n in [0usize, 1, 10, 100, 1000] {
+                let p = qr_feed_preview(&body(n), &sealed_policy(bl), None)
+                    .unwrap_or_else(|e| panic!("sealed preview n={n} bl={bl}: {e:?}"));
+                assert!(p.planned_drops <= p.drop_bound);
+                assert!(p.k >= p.preflight_k);
+            }
+        }
+    }
+
+    #[test]
+    fn sealed_burst_is_ok_for_small_block_len() {
+        for n in [0usize, 10] {
+            qr_feed_frames_burst(&body(n), &sealed_policy(64), 0, 1)
+                .unwrap_or_else(|e| panic!("sealed burst n={n} bl=64: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn sealed_overhead_matches_a_real_seal() {
+        let key = PayloadKey::derive(&[5u8; 32]);
+        let sealed = crate::storage::payload_crypt::seal_payload_csprng(&key, &[]).unwrap();
+        assert_eq!(sealed.len(), SEAL_OVERHEAD);
+    }
+
+    #[test]
+    fn unsealed_plan_is_unchanged_by_the_seal_overhead() {
+        for bl in [64u16, 128, 200, 1024] {
+            for n in [0usize, 1, 10, 100, 1000, 5000] {
+                let policy = EmitPolicy {
+                    block_len: bl,
+                    ..EmitPolicy::default()
+                };
+                let (k, drops) = plan(&body(n), &policy).expect("plain plan");
+                let want_k = (n + THREE_PAYLOAD_HEADER_LEN).div_ceil(usize::from(bl));
+                assert_eq!(usize::from(k), want_k, "n={n} bl={bl}");
+                assert_eq!(drops, oneshot_drop_count(k, ONESHOT_REPAIR_PERMILLAGE));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_body_without_seal_or_manifest_stays_gated() {
+        assert!(matches!(
+            qr_feed_preview(&[], &EmitPolicy::default(), None),
+            Err(EmitError::UnsealedGated)
+        ));
     }
 
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {

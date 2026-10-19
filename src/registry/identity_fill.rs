@@ -104,6 +104,9 @@ pub enum FillError {
     WrongRequester,
     /// The receipt does not cover this document.
     WrongDocument,
+    /// The receipt opens more fields than a verifier will check. Each entry
+    /// costs hashing work, and the receipt comes from outside.
+    TooManyEntries { max: usize },
 }
 
 impl std::fmt::Display for FillError {
@@ -136,6 +139,9 @@ impl std::fmt::Display for FillError {
             }
             Self::WrongRequester => write!(f, "this receipt was made for a different requester"),
             Self::WrongDocument => write!(f, "this receipt was made for a different document"),
+            Self::TooManyEntries { max } => {
+                write!(f, "this receipt opens more than {max} fields")
+            }
         }
     }
 }
@@ -495,6 +501,9 @@ pub fn credential_proof(
     disclosure_proof(&credential.field_leaves(), field_index)
 }
 
+/// The most entries `check_receipt` will verify in one receipt.
+pub const MAX_RECEIPT_ENTRIES: usize = 256;
+
 /// Re-verify a receipt the way the receiving side must: bound to this
 /// requester, bound to this document, and - through the registry - backed by
 /// credentials that are still valid at the receipt's epoch. A credential
@@ -511,6 +520,11 @@ pub fn check_receipt(
     requester: &Address,
     document: &str,
 ) -> Result<(), FillError> {
+    if receipt.entries.len() > MAX_RECEIPT_ENTRIES {
+        return Err(FillError::TooManyEntries {
+            max: MAX_RECEIPT_ENTRIES,
+        });
+    }
     if &receipt.requester != requester {
         return Err(FillError::WrongRequester);
     }
@@ -581,6 +595,35 @@ mod tests {
             Err(FillError::MalformedTemplate(_))
         ));
         assert!(matches!(template_slots("{{ }}"), Err(FillError::EmptySlot)));
+    }
+
+    /// BLG-0098: a receipt with an unbounded entry list is refused before
+    /// any entry is hashed.
+    #[test]
+    fn receipt_with_too_many_entries_is_refused() {
+        let registry = IdentityRegistry::new();
+        let requester = Address([1u8; 32]);
+        let entry = ReceiptEntry {
+            slot: "s".to_string(),
+            credential_id: [0u8; 32],
+            field: "f".to_string(),
+            salt: [0u8; 32],
+            value_digest: [0u8; 32],
+            proof: disclosure_proof(&[[0u8; 32]], 0).unwrap(),
+        };
+        let receipt = PresentationReceipt {
+            requester,
+            subject: requester,
+            document_digest: document_digest_of("doc"),
+            epoch: 1,
+            entries: vec![entry; MAX_RECEIPT_ENTRIES + 1],
+        };
+        assert_eq!(
+            check_receipt(&registry, &receipt, &requester, "doc"),
+            Err(FillError::TooManyEntries {
+                max: MAX_RECEIPT_ENTRIES
+            })
+        );
     }
 
     #[test]

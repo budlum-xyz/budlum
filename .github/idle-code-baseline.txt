@@ -117,7 +117,6 @@ bud/src/bud_format_dbdelta.rs	fn	page_delta_decode
 bud/src/bud_format_dbdelta.rs	fn	page_delta_encode
 bud/src/bud_format_dedup.rs	const	DOMAIN
 bud/src/bud_format_dedup.rs	enum	DedupOutcome
-bud/src/bud_format_dedup.rs	fn	solve
 bud/src/bud_format_dedup.rs	fn	unique_chunks
 bud/src/bud_format_dedup.rs	struct	PowChallenge
 bud/src/bud_format_dedup.rs	struct	TenantDedup
@@ -714,7 +713,6 @@ bud/src/gates.rs	fn	kq
 bud/src/gates.rs	fn	kx
 bud/src/gates.rs	struct	GateResult
 bud/src/gates.rs	struct	GateSuite
-bud/src/price.rs	enum	PriceError
 bud/src/price.rs	struct	Expansion
 bud/src/provider.rs	enum	ProviderClass
 bud/src/provider.rs	enum	ProviderError
@@ -762,7 +760,6 @@ bud/src/ratio.rs	struct	RatioResult
 budzero/bud-compiler/src/parser.rs	const	MAX_NESTING_DEPTH
 budzero/bud-compiler/src/sema.rs	fn	is_opaque_bytes32
 budzero/bud-isa/src/lib.rs	enum	DecodeError
-budzero/bud-isa/src/lib.rs	fn	allows
 budzero/bud-isa/src/lib.rs	fn	decode_for_profile
 budzero/bud-isa/src/lib.rs	fn	requires_mainnet_activation
 budzero/bud-node/src/bitswap.rs	fn	decode_request
@@ -826,7 +823,6 @@ budzero/verifier-registry/src/registry.rs	const	MAX_SLASHING_HISTORY
 budzero/verifier-registry/src/registry.rs	fn	add_stake
 budzero/verifier-registry/src/registry.rs	fn	is_slashable
 budzero/verifier-registry/src/registry.rs	fn	registrations_as_seq
-budzero/verifier-registry/src/registry.rs	fn	with_params
 budzero/verifier-registry/src/registry.rs	struct	VerifierRegistry
 crates/budscan/src/arweave.rs	const	MAX_CHUNK_SIZE
 crates/budscan/src/arweave.rs	const	MIN_CHUNK_SIZE
@@ -1200,7 +1196,6 @@ src/chain/blockchain.rs	fn	sovereign_template_root
 src/chain/blockchain.rs	fn	verify_domain_commitment_finality
 src/chain/blockchain.rs	fn	verify_domain_event_proof
 src/chain/chain_actor.rs	enum	ChainCommand
-src/chain/chain_actor.rs	fn	answer_coding_audit
 src/chain/chain_actor.rs	fn	apply_snapshot
 src/chain/chain_actor.rs	fn	bns_set_storage
 src/chain/chain_actor.rs	fn	bond_storage_operator
@@ -1215,7 +1210,6 @@ src/chain/chain_actor.rs	fn	get_state_snapshot_data
 src/chain/chain_actor.rs	fn	get_storage_deals
 src/chain/chain_actor.rs	fn	issue_storage_challenges
 src/chain/chain_actor.rs	fn	lock_bridge_transfer
-src/chain/chain_actor.rs	fn	set_storage_operator_class
 src/chain/chain_actor.rs	fn	storage_prune
 src/chain/chain_actor.rs	fn	submit_storage_proof
 src/chain/fee_market.rs	const	DEFAULT_BASE_FEE_MAX_CHANGE_DENOMINATOR
@@ -1251,7 +1245,6 @@ src/chain/snapshot.rs	fn	migration_report
 src/chain/snapshot.rs	fn	reseal_after_manual_edit
 src/chain/snapshot.rs	fn	save_snapshot
 src/chain/snapshot.rs	fn	sign_manifest
-src/chain/snapshot.rs	fn	try_to_bytes
 src/chain/snapshot.rs	struct	StateSnapshotV2MigrationReport
 src/chain/snapshot.rs	struct	TokenomicsBurnSnapshot
 src/cli/commands.rs	enum	PrivacyLevel
@@ -1290,8 +1283,6 @@ src/consensus/pos.rs	fn	check_vrf_threshold
 src/consensus/pos.rs	fn	epoch_randomness_from_chain
 src/consensus/pos.rs	fn	get_checkpoints
 src/consensus/pos.rs	fn	get_slashing_evidence
-src/consensus/pos.rs	fn	is_before_checkpoint
-src/consensus/pos.rs	fn	is_validator
 src/consensus/pos.rs	fn	last_checkpoint
 src/consensus/pos.rs	fn	save_state
 src/consensus/pos.rs	fn	serialize_state
@@ -1314,7 +1305,6 @@ src/consensus/qc.rs	fn	verify_inclusion
 src/consensus/qc.rs	fn	verify_merkle_root
 src/consensus/qc.rs	struct	PqSignatureEntry
 src/consensus/qc.rs	struct	ZkQcPublicInputs
-src/core/account.rs	const	MAX_BASE_FEE
 src/core/account.rs	const	MAX_BLOCK_REWARD
 src/core/account.rs	const	MIN_BLOCK_REWARD
 src/core/account.rs	fn	account_count
@@ -1414,7 +1404,6 @@ src/cross_domain/evm/rlp.rs	fn	encode_uint
 src/cross_domain/evm/rlp.rs	fn	from_item
 src/cross_domain/evm/rlp.rs	struct	RlpBytes
 src/cross_domain/evm/sync_committee.rs	const	BLS_PUBKEY_LEN
-src/cross_domain/evm/sync_committee.rs	const	BLS_SIGNATURE_LEN
 src/cross_domain/evm/sync_committee.rs	const	PARTICIPATION_THRESHOLD
 src/cross_domain/evm/sync_committee.rs	fn	participation_count
 src/cross_domain/evm/sync_committee.rs	fn	rotate_period
@@ -1447,8 +1436,6 @@ src/crypto/pkcs11.rs	struct	Pkcs11VendorCapability
 src/crypto/primitives.rs	const	PQ_DILITHIUM5_SIGNATURE_LEN
 src/crypto/primitives.rs	const	PQ_ML_DSA_65_SIGNATURE_LEN
 src/crypto/primitives.rs	enum	KeyBackend
-src/crypto/primitives.rs	enum	PqSignatureClass
-src/crypto/primitives.rs	fn	classify_pq_signature_len
 src/crypto/primitives.rs	fn	devnet_default
 src/crypto/primitives.rs	fn	generate_pop
 src/crypto/primitives.rs	fn	load_for_network
@@ -1527,16 +1514,13 @@ src/domain/storage_deal.rs	fn	all_results
 src/domain/storage_deal.rs	fn	answer_challenge
 src/domain/storage_deal.rs	fn	check_self_host_allowed
 src/domain/storage_deal.rs	fn	deals_in_renewal_window
-src/domain/storage_deal.rs	fn	declare_self_host_policy
 src/domain/storage_deal.rs	fn	derive_challenge_range
 src/domain/storage_deal.rs	fn	derive_coding_audit
 src/domain/storage_deal.rs	fn	get_challenge
 src/domain/storage_deal.rs	fn	lifecycle_state
 src/domain/storage_deal.rs	fn	live_shard_count
 src/domain/storage_deal.rs	fn	may_hold_primary
-src/domain/storage_deal.rs	fn	operator_class
 src/domain/storage_deal.rs	fn	permanence_floor
-src/domain/storage_deal.rs	fn	register_manifest_with_source
 src/domain/storage_deal.rs	fn	renew_deal
 src/domain/storage_deal.rs	fn	required_opener_bond
 src/domain/storage_deal.rs	fn	required_replicas_for
@@ -1727,8 +1711,6 @@ src/network/peer_manager.rs	fn	subnet_connection_count
 src/network/peer_manager.rs	fn	tracked_peer_count
 src/network/peer_manager.rs	struct	PeerScore
 src/network/protocol.rs	const	MAX_BLOCK_SIZE
-src/network/protocol.rs	const	MAX_HEADERS_PER_REQUEST
-src/network/protocol.rs	const	MAX_HEADER_LOCATOR_HASHES
 src/network/protocol.rs	const	MAX_TX_SIZE
 src/network/protocol.rs	enum	MessageError
 src/pollen/content_gate.rs	enum	ContentGateError
@@ -1775,7 +1757,6 @@ src/registry/permissionless.rs	fn	register_ai_verifier
 src/registry/permissionless.rs	fn	register_storage_operator
 src/registry/permissionless.rs	fn	register_verifier
 src/registry/permissionless.rs	fn	registrations_as_seq
-src/registry/permissionless.rs	fn	with_params
 src/registry/poa_compliance.rs	enum	ComplianceAction
 src/registry/poa_compliance.rs	enum	PoaComplianceError
 src/registry/poa_compliance.rs	enum	ScreeningStatus
@@ -1900,19 +1881,14 @@ src/storage/dictionary.rs	fn	check_dictionary_reference
 src/storage/dictionary.rs	fn	deletable_dictionaries
 src/storage/dictionary.rs	fn	delete_dictionary
 src/storage/dictionary.rs	fn	dictionary_count
-src/storage/dictionary.rs	fn	dictionary_root
 src/storage/dictionary.rs	fn	empty_registry
-src/storage/dictionary.rs	fn	has_no_dictionaries
 src/storage/dictionary.rs	fn	reference_count
 src/storage/dictionary.rs	fn	register_dictionary
-src/storage/dictionary.rs	fn	release_dictionary
 src/storage/dictionary.rs	struct	DictionaryEntry
-src/storage/erasure.rs	const	MAX_TOTAL_SHARDS
 src/storage/erasure.rs	enum	ErasureError
 src/storage/erasure.rs	fn	encode_object
 src/storage/erasure.rs	fn	encode_parity
 src/storage/erasure.rs	fn	kinds
-src/storage/erasure.rs	fn	reconstruct
 src/storage/erasure.rs	fn	reconstruct_object
 src/storage/erasure.rs	fn	to_manifest
 src/storage/erasure.rs	fn	total_shards
@@ -1956,7 +1932,6 @@ src/storage/manifest.rs	fn	overhead_per_mille
 src/storage/manifest.rs	fn	replication
 src/storage/merkle_trie.rs	fn	bulk_insert
 src/storage/merkle_trie.rs	fn	root_ref
-src/storage/mobile_self.rs	enum	MobileAvailabilityClass
 src/storage/mobile_self.rs	enum	ReplicaRecommendation
 src/storage/mobile_self.rs	fn	availability_label
 src/storage/mobile_self.rs	fn	recommendation_for_content

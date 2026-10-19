@@ -30,6 +30,10 @@ pub trait NameResolver {
     fn resolve_bud(&self, name: &str) -> Result<(ResolvedName, BnsInclusionProof), String>;
     /// The `bns_v1` value written into the state root for `.bud`, when known.
     fn bns_root(&self) -> Option<[u8; 32]>;
+    /// The chain epoch the `bns_v1` root belongs to. It has to come from the
+    /// same verified header as the root, because name expiry is judged
+    /// against it and not against the resolver's own `is_expired` flag.
+    fn current_epoch(&self) -> u64;
     /// An `.eth` name: the raw ENS `contenthash` bytes, and whether the MPT
     /// proof was verified.
     ///
@@ -191,7 +195,12 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
 /// looked for.
 fn plan_bud<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan, String> {
     let (record, proof) = resolver.resolve_bud(name)?;
-    let evidence = bns_proof::evaluate(&record, &proof, resolver.bns_root());
+    let evidence = bns_proof::evaluate(
+        &record,
+        &proof,
+        resolver.bns_root(),
+        resolver.current_epoch(),
+    );
     if !evidence.is_displayable() {
         return Ok(Plan::stop(Page {
             input: raw.to_string(),
@@ -303,9 +312,13 @@ mod tests {
         bud: Option<(ResolvedName, BnsInclusionProof)>,
         root: Option<[u8; 32]>,
         eth: Option<(Vec<u8>, bool)>,
+        epoch: u64,
     }
 
     impl NameResolver for Resolver {
+        fn current_epoch(&self) -> u64 {
+            self.epoch
+        }
         fn resolve_bud(&self, _name: &str) -> Result<(ResolvedName, BnsInclusionProof), String> {
             self.bud.clone().ok_or_else(|| String::from("no such name"))
         }
@@ -357,6 +370,7 @@ mod tests {
                 owner: [1u8; 32],
                 expires_at: 100,
                 content_id: Some(id),
+                storage_root: None,
             }];
             let root = bns_proof::partial_registry_root(100, &entries);
             Resolver {
@@ -369,12 +383,14 @@ mod tests {
                 )),
                 root: Some(root),
                 eth: None,
+                epoch: 0,
             }
         } else {
             Resolver {
                 bud: Some((resolved, BnsInclusionProof::None)),
                 root: None,
                 eth: None,
+                epoch: 0,
             }
         }
     }
@@ -464,6 +480,7 @@ mod tests {
             bud: None,
             root: None,
             eth: Some((ch.clone(), false)),
+            epoch: 0,
         };
         let page = open(&unproven, &t, "x1.eth").unwrap();
         assert_eq!(page.evidence.weakest(), Strength::RpcClaimOnly);
@@ -473,6 +490,7 @@ mod tests {
             bud: None,
             root: None,
             eth: Some((ch, true)),
+            epoch: 0,
         };
         let page = open(&proven, &t, "x1.eth").unwrap();
         assert_eq!(page.evidence.weakest(), Strength::Verified);
@@ -487,6 +505,7 @@ mod tests {
             bud: None,
             root: None,
             eth: Some((ch, true)),
+            epoch: 0,
         };
         let page = open(&r, &table(&[]), "x1.eth").unwrap();
         assert!(!page.is_renderable());
@@ -501,6 +520,7 @@ mod tests {
             bud: None,
             root: None,
             eth: None,
+            epoch: 0,
         };
         let page = open(&r, &t, url).unwrap();
         assert!(page.is_renderable());
@@ -520,6 +540,7 @@ mod tests {
             bud: Some((resolved, BnsInclusionProof::None)),
             root: None,
             eth: None,
+            epoch: 0,
         };
         // The transport is empty: had the fetcher been reached, it would have
         // returned an error.

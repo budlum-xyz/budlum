@@ -7,6 +7,7 @@ name: Dependency Review (PR security gate)
 # tries to add a version with a known vulnerability (dependabot included) it is
 # REJECTED before merging to main. Complementary, not a repetition.
 
+# Enable Dependency graph in repository settings for this check.
 on:
   pull_request:
     branches: [main, fix/architecture-tip-adlari]

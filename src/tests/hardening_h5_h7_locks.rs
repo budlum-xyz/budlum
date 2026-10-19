@@ -62,10 +62,11 @@ mod tests {
     /// Multinode smoke script + workflow wired (structural).
     #[test]
     fn multinode_smoke_artifacts_present() {
-        assert!(Path::new("ops/scripts/devnet-multinode-smoke.sh").is_file());
+        assert!(Path::new("xtask/tools/src/multinode_smoke.rs").is_file());
         let wf = include_str!("../../.github/workflows/docker-smoke.yml");
         assert!(
-            wf.contains("devnet-multinode-smoke") && wf.contains("devnet-multinode-smoke.sh"),
+            wf.contains("devnet-multinode-smoke")
+                && wf.contains("xtask/tools/Cargo.toml -- devnet-multinode-smoke"),
             "docker-smoke must run 4-node multinode job"
         );
     }

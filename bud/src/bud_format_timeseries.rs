@@ -176,7 +176,11 @@ impl TimeSeriesColumnar {
         let mut r = BitReader::new(&self.bits);
         let first_ts = r.read_bits(64)? as i64;
         let first_value = f64::from_bits(r.read_bits(64)?);
-        let mut out = Vec::with_capacity(self.points);
+        // Bound the reservation by what the stream can hold (2 bits per later point).
+        let cap = self
+            .points
+            .min(self.bits.len().checked_mul(4).unwrap_or(self.points));
+        let mut out = Vec::with_capacity(cap);
         out.push((first_ts, first_value));
         let mut prev_ts = first_ts;
         let mut prev_value = first_value;
@@ -261,6 +265,11 @@ impl TimeSeriesColumnar {
         if points == 0 || points > MAX_POINTS {
             return None;
         }
+        // The first point costs 128 bits; every later point costs at least 2 bits.
+        let later_bits = bits.len().checked_mul(8)?.checked_sub(128)?;
+        if points - 1 > later_bits / 2 {
+            return None;
+        }
         Some(TimeSeriesColumnar {
             points,
             first_ts,
@@ -273,6 +282,17 @@ impl TimeSeriesColumnar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blob_claiming_more_points_than_its_bits_can_hold_is_refused() {
+        let t = TimeSeriesColumnar {
+            points: MAX_POINTS,
+            first_ts: 0,
+            first_value: 0.0,
+            bits: vec![0u8; 16],
+        };
+        assert!(TimeSeriesColumnar::from_blob(&t.to_blob()).is_none());
+    }
 
     fn gen_series(n: usize, jitter: bool) -> Vec<(i64, f64)> {
         // Evenly spaced timestamps with telemetry values.

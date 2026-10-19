@@ -175,7 +175,18 @@ pub fn assert_served_name_is_ours(cfg: &ServeConfig) -> Result<(), String> {
             cfg.served_model_name
         ));
     }
-    Ok(())
+    // The name must have the tier shape `ai_inference-{tier}-{version}` for
+    // the configured tier, so a Light bridge cannot be listed under the
+    // Normal name and no third-party model name passes.
+    let prefix = cfg.tier.served_model_name("");
+    match cfg.served_model_name.strip_prefix(prefix.as_str()) {
+        Some(version) if !version.is_empty() => Ok(()),
+        _ => Err(format!(
+            "served_model_name must be {prefix}<version> for the {} tier: {}",
+            cfg.tier.as_str(),
+            cfg.served_model_name
+        )),
+    }
 }
 
 /// Whether this bridge may be put into the consensus path.
@@ -360,10 +371,39 @@ pub fn assert_consensus_ready_on_device(
     semantics: SemanticProfile,
 ) -> Result<ResidencyPlan, String> {
     assert_consensus_ready(cfg)?;
+    plan_on_device(cfg, shards, budget, semantics, true)
+}
+
+/// The device check for a bridge that stays local: the same prompt, residency
+/// and disk-budget checks as [`assert_consensus_ready_on_device`], without the
+/// determinism profile and without the streaming refusal. A streaming bridge
+/// serves locally, which is the point of the disk tier.
+///
+/// # Errors
+///
+/// A prompt or device-level refusal.
+pub fn plan_local_on_device(
+    cfg: &ServeConfig,
+    shards: &[WeightShard],
+    budget: DeviceBudget,
+    semantics: SemanticProfile,
+) -> Result<ResidencyPlan, String> {
+    plan_on_device(cfg, shards, budget, semantics, false)
+}
+
+/// The shared device check. `consensus` adds the refusal to stream from disk.
+fn plan_on_device(
+    cfg: &ServeConfig,
+    shards: &[WeightShard],
+    budget: DeviceBudget,
+    semantics: SemanticProfile,
+    consensus: bool,
+) -> Result<ResidencyPlan, String> {
     // A consensus operator serves the checked prompt or does not serve. Two
     // operators answering the same request from different instructions would
     // produce different bytes and never group, and the failure would look like
-    // a liveness problem rather than a configuration one.
+    // a liveness problem rather than a configuration one. A local operator is
+    // held to the same prompt: it is the text shown to the user.
     checked_system_prompt()?;
 
     let plan = match cfg.disk_budget_bytes {
@@ -384,7 +424,7 @@ pub fn assert_consensus_ready_on_device(
         ),
     })?;
 
-    if plan.streams_from_disk() {
+    if consensus && plan.streams_from_disk() {
         return Err(format!(
             "this device streams weights from disk ({} B on disk); that serves \
              locally but cannot join the consensus path",
@@ -464,6 +504,28 @@ mod tests {
             ..Default::default()
         };
         assert!(assert_served_name_is_ours(&cfg).is_err());
+    }
+
+    #[test]
+    fn a_name_outside_the_tier_shape_is_rejected() {
+        for bad in [
+            "my-custom-model",
+            "llama-3-70b",
+            "ai_inference-normal-v0.1", // Normal name on a Light config
+            "ai_inference-light-",
+            "ai_inference-light",
+        ] {
+            let cfg = ServeConfig {
+                served_model_name: bad.to_string(),
+                ..Default::default()
+            };
+            assert!(
+                assert_served_name_is_ours(&cfg).is_err(),
+                "{bad} must be refused"
+            );
+        }
+        let normal = ServeConfig::for_tier(ModelTier::Normal, "v2");
+        assert!(assert_served_name_is_ours(&normal).is_ok());
     }
 
     #[test]

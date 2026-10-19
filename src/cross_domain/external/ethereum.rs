@@ -358,6 +358,18 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             }
         }
 
+        // The backing of this adapter is never slashable (Altair has no
+        // slashing rule for sync committee messages). A caller that demands
+        // slashable backing must be refused, not given an attestation that
+        // says `slashable: false` after the fact.
+        if policy.require_slashable {
+            return Err(AdapterError::ConsensusRule {
+                rule:
+                    "the policy requires slashable backing; a sync committee set is not slashable"
+                        .to_string(),
+            });
+        }
+
         // Finalized must not be ahead of attested: the attested header is the
         // one the committee signed, and a finalized header beyond it is a
         // claim about something nobody signed.
@@ -592,3 +604,45 @@ impl BlsVerifier for RefuseAllBls {
 /// setup, which matters for a component whose whole job is removing trusted
 /// parties.
 pub const ZK_PROOF_SYSTEM: ProofSystem = ProofSystem::Stark;
+
+#[cfg(test)]
+mod slashable_policy_tests {
+    use super::*;
+    use crate::core::address::Address;
+    use crate::cross_domain::external::spec::ExternalFinalityAdapter;
+
+    fn evidence(adapter: &EthereumSyncAdapter) -> RawConsensusEvidence {
+        let mut payload = vec![0u8; layout::LEN];
+        payload[layout::FINALIZED_SLOT].copy_from_slice(&64u64.to_le_bytes());
+        payload[layout::ATTESTED_SLOT].copy_from_slice(&128u64.to_le_bytes());
+        payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
+        payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
+        payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
+        payload[layout::STATE_ROOT].copy_from_slice(&[0xcc; 32]);
+        RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: 1,
+            network: "testnet".to_string(),
+            payload,
+            declared_height: 64,
+            declared_root: [0xcc; 32],
+            submitter: Address([1; 32]),
+        }
+    }
+
+    #[test]
+    fn a_policy_that_requires_slashable_backing_is_refused() {
+        let adapter = EthereumSyncAdapter::new("testnet", [0; 32], Some(Box::new(AcceptAllBls)));
+        let ev = evidence(&adapter);
+        assert!(adapter
+            .verify(&ev, &VerificationPolicy::strict(1_000))
+            .is_ok());
+        let mut policy = VerificationPolicy::strict(1_000);
+        policy.require_slashable = true;
+        let err = adapter.verify(&ev, &policy).unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "got {err:?}"
+        );
+    }
+}

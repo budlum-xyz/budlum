@@ -90,9 +90,13 @@ pub fn lt_decode(symbols: &[(Vec<u8>, Vec<usize>)], k: usize) -> Option<Vec<Vec<
         }
         let mut mask = 0u64;
         for &i in chosen {
-            if i < 64 {
-                mask |= 1u64 << i;
+            // An index at or above `k` names a block that does not exist. Its
+            // bit would never be eliminated, and the recovered data would
+            // carry the foreign block. Refuse the whole set instead.
+            if i >= k {
+                return None;
             }
+            mask |= 1u64 << i;
         }
         rows.push((mask, data.clone()));
     }
@@ -193,6 +197,21 @@ mod tests {
         let dec = lt_decode(&sym[..24], 8).unwrap();
         for (a, b) in blocks.iter().zip(dec.iter()) {
             assert_eq!(a, b, "LT block lossless");
+        }
+    }
+
+    /// BLG-0615: a symbol that names a block at or above `k` (or at or above
+    /// 64) used to give `Some(wrong blocks)`.
+    #[test]
+    fn lt_decode_refuses_an_index_outside_the_block_range() {
+        let a = vec![1u8; 4];
+        let b = vec![2u8; 4];
+        let ab: Vec<u8> = a.iter().zip(&b).map(|(x, y)| x ^ y).collect();
+        let good = vec![(a.clone(), vec![0]), (ab.clone(), vec![0, 1])];
+        assert_eq!(lt_decode(&good, 2), Some(vec![a.clone(), b.clone()]));
+        for bad_index in [2usize, 5, 64, usize::MAX] {
+            let bad = vec![(a.clone(), vec![0]), (ab.clone(), vec![0, 1, bad_index])];
+            assert_eq!(lt_decode(&bad, 2), None, "index {bad_index}");
         }
     }
 

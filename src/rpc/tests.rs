@@ -1209,6 +1209,55 @@ mod rpc_tests {
         assert_eq!(refused.code(), -32004);
     }
 
+    /// Every operator-gated mutating method answers -32004 on a public
+    /// listener, before any argument is parsed or any state is touched.
+    #[tokio::test]
+    async fn rpc_tests_operator_methods_refused_on_public_listener() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45265, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node_struct = Node::new(chain.clone()).unwrap();
+        let node_client = node_struct.get_client();
+        let public_server = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Public,
+        );
+        let address = format!("0x{}", "01".repeat(32));
+        let codes = [
+            public_server
+                .register_external_domain(serde_json::json!({}))
+                .await
+                .expect_err("registerExternalDomain")
+                .code(),
+            public_server
+                .registry_bond_relayer(address.clone(), 1)
+                .await
+                .expect_err("registryBondRelayer")
+                .code(),
+            public_server
+                .registry_bond_prover(address, 1)
+                .await
+                .expect_err("registryBondProver")
+                .code(),
+            public_server
+                .request_prune(None)
+                .await
+                .expect_err("requestPrune")
+                .code(),
+            public_server
+                .seal_global_header()
+                .await
+                .expect_err("sealGlobalHeader")
+                .code(),
+        ];
+        assert_eq!(codes, [-32004; 5]);
+    }
+
     /// On an operator listener the peer-id format is validated before any
     /// work is handed to the node: a syntactically empty id stops at
     /// -32602 and the mode gate did not fire, proving validation order
@@ -1221,5 +1270,131 @@ mod rpc_tests {
             .await
             .expect_err("empty peer id must fail format validation");
         assert_eq!(empty.code(), -32602);
+    }
+
+    /// Zero bytes are content too: the sealed RPC path emits a feed for them.
+    #[tokio::test]
+    async fn rpc_tests_qr_feed_accepts_empty_content_when_sealed() {
+        let (server, _chain) = setup().await;
+        let seed = "ab".repeat(32);
+        let preview = server
+            .storage_qr_feed_preview(String::new(), 64, None, Some(seed.clone()))
+            .await
+            .expect("sealed empty preview");
+        let key = crate::storage::payload_crypt::PayloadKey::derive(&[0xabu8; 32]);
+        let total = u32::try_from(preview["k"].as_u64().expect("k")).unwrap();
+        let burst = server
+            .storage_qr_feed_frames(String::new(), 64, 0, total, Some(seed))
+            .await
+            .expect("sealed empty frames");
+        assert_eq!(burst["count"], total);
+        let mut dec = crate::storage::qr_carousel::CarouselDecoder::new();
+        for f in burst["frames"].as_array().expect("frames array") {
+            let frame = hex::decode(f.as_str().expect("hex frame")).expect("frame hex");
+            let wire = &frame[crate::storage::qr_frame::THREE_FRAME_HEADER_LEN..];
+            let d = crate::storage::qr_carousel::Drop::from_bytes(wire).expect("drop");
+            dec.push(&d).expect("push");
+        }
+        let packed = dec.finish().expect("carousel finish");
+        let (kind, sealed) = crate::storage::qr_payload::unpack_payload(&packed).expect("unpack");
+        assert_eq!(
+            kind,
+            crate::storage::qr_payload::PayloadKind::EncryptedContent
+        );
+        let clear = crate::storage::payload_crypt::open_payload(&key, &sealed).expect("open");
+        assert!(clear.is_empty());
+    }
+
+    /// Without a seed the gated preview of empty content is still refused as a
+    /// bad request, as it is for any other body.
+    #[tokio::test]
+    async fn rpc_tests_qr_feed_empty_content_without_seed_is_refused() {
+        let (server, _chain) = setup().await;
+        let refused = server
+            .storage_qr_feed_preview(String::new(), 200, None, None)
+            .await
+            .expect_err("unsealed gated preview must be refused");
+        assert_eq!(refused.code(), -32602);
+        assert!(
+            refused
+                .message()
+                .contains("neither sealed nor declared ciphertext"),
+            "unexpected message: {}",
+            refused.message()
+        );
+    }
+
+    /// The external evidence intake carries an unsigned submitter, so the
+    /// public listener must refuse it before the payload is even parsed.
+    #[tokio::test]
+    async fn rpc_tests_submit_external_evidence_refused_on_public_listener() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45265, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node_struct = Node::new(chain.clone()).unwrap();
+        let node_client = node_struct.get_client();
+        let public_server = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Public,
+        );
+        let refused = public_server
+            .submit_external_evidence(serde_json::json!({}))
+            .await
+            .expect_err("public listener must refuse external evidence");
+        assert_eq!(refused.code(), -32004);
+    }
+
+    /// Storage calls that change node-local state outside a block are
+    /// operator-only: the public listener refuses them with -32004.
+    #[tokio::test]
+    async fn rpc_tests_storage_mutations_refused_on_public_listener() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45266, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node_struct = Node::new(chain.clone()).unwrap();
+        let node_client = node_struct.get_client();
+        let public_server = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Public,
+        );
+        let response = crate::domain::storage_deal::RetrievalResponse {
+            challenge_id: 1,
+            _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
+            responder: Address::from([9u8; 32]),
+            response_epoch: 1,
+            responder_signature: None,
+            proof_bytes: None,
+        };
+        let refused = public_server
+            .storage_answer_challenge(response)
+            .await
+            .expect_err("public listener must refuse storage_answer_challenge");
+        assert_eq!(refused.code(), -32004);
+    }
+
+    /// The re-encode check refuses a body over the shared 1 MiB cap before
+    /// it decodes or encodes anything.
+    #[tokio::test]
+    async fn rpc_tests_verify_encoding_refuses_oversized_body() {
+        let (server, _chain) = setup().await;
+        let manifest =
+            crate::storage::ContentManifest::from_bytes_sliced(b"small body", 16).unwrap();
+        let big = "00".repeat(crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES + 1);
+        let refused = server
+            .storage_verify_encoding(big, manifest)
+            .await
+            .expect_err("oversized body must be refused");
+        assert_eq!(refused.code(), -32602);
+        assert!(refused.message().contains("verify cap"));
     }
 }

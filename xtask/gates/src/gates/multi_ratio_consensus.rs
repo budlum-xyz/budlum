@@ -3,6 +3,8 @@
 //! Gate code: `K-MULTI-RATIO-FRACTAL`. A finding or a document that names this code resolves here.
 //!
 //! `MultiRatioConsensus::candidates_for_format` is the list a node votes on.
+//! It measures the ratios of the list that `claimed_candidates` writes, so the
+//! gate reads `claimed_candidates`.
 //! The invariant that keeps the vote honest is not a number in that list, it
 //! is what the list may contain: no candidate may be a generative or optical
 //! pipeline, because those produce a payload the prover cannot reproduce from
@@ -116,8 +118,10 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(format!("no bud_format.rs at {}", f.display()));
     }
     let src = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
-    let body = body_of(&src, "candidates_for_format")
-        .ok_or_else(|| "no `fn candidates_for_format` in `bud/src/bud_format.rs`".to_string())?;
+    // `candidates_for_format` only measures the ratios; the list itself is
+    // written in `claimed_candidates` (BLG-0573).
+    let body = body_of(&src, "claimed_candidates")
+        .ok_or_else(|| "no `fn claimed_candidates` in `bud/src/bud_format.rs`".to_string())?;
     let list = candidates(&body);
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
@@ -211,7 +215,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ratio")?;
     std::fs::create_dir_all(dir.join("bud/src")).map_err(|e| e.to_string())?;
-    let good = "pub fn candidates_for_format(class: BudFormatClass, original: &[u8]) -> Vec<RatioCandidate> {\n    match class {\n        BudFormatClass::Json => vec![\n            RatioCandidate { pipe_id: 1, pipe_name: \"flat\", ratio: 1.2, payload: original.to_vec(), flags: f() },\n        ],\n        BudFormatClass::Ndjson => vec![\n            RatioCandidate { pipe_id: 2, pipe_name: \"CDC16K+zstd\", ratio: 15.5, payload: original.to_vec(), flags: f() },\n        ],\n        BudFormatClass::Binary => vec![\n            RatioCandidate { pipe_id: 3, pipe_name: \"xz9\", ratio: 17.0, payload: original.to_vec(), flags: f() },\n        ],\n        BudFormatClass::Mixed => vec![\n            RatioCandidate { pipe_id: 4, pipe_name: \"zstd19\", ratio: 6.0, payload: original.to_vec(), flags: f() },\n        ],\n    }\n}\n";
+    let good = "fn claimed_candidates(class: BudFormatClass, original: &[u8]) -> Vec<RatioCandidate> {\n    match class {\n        BudFormatClass::Json => vec![\n            RatioCandidate { pipe_id: 1, pipe_name: \"flat\", ratio: 1.2, payload: original.to_vec(), flags: f() },\n        ],\n        BudFormatClass::Ndjson => vec![\n            RatioCandidate { pipe_id: 2, pipe_name: \"CDC16K+zstd\", ratio: 15.5, payload: original.to_vec(), flags: f() },\n        ],\n        BudFormatClass::Binary => vec![\n            RatioCandidate { pipe_id: 3, pipe_name: \"xz9\", ratio: 17.0, payload: original.to_vec(), flags: f() },\n        ],\n        BudFormatClass::Mixed => vec![\n            RatioCandidate { pipe_id: 4, pipe_name: \"zstd19\", ratio: 6.0, payload: original.to_vec(), flags: f() },\n        ],\n    }\n}\n";
     std::fs::write(dir.join("bud/src/bud_format.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);

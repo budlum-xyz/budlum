@@ -293,3 +293,99 @@ fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
         );
     }
 }
+
+/// BLG-1077: `config/archive.toml` said chain id 42 under the testnet
+/// profile. The start-up check exits when the id differs from the profile id,
+/// so the archive profile could not start. Every shipped profile must carry
+/// the same chain id as the genesis file it names.
+#[test]
+fn shipped_profiles_match_the_chain_id_of_their_genesis_file() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut checked = 0usize;
+    for dir in ["config", "config/personas"] {
+        for entry in std::fs::read_dir(root.join(dir)).expect("profile directory is readable") {
+            let path = entry.expect("profile entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path).expect("profile is readable");
+            let parsed: toml::Value = toml::from_str(&raw).expect("profile is valid TOML");
+            let network = parsed.get("network");
+            let (Some(chain_id), Some(genesis_file)) = (
+                network
+                    .and_then(|n| n.get("chain_id"))
+                    .and_then(toml::Value::as_integer),
+                network
+                    .and_then(|n| n.get("genesis_file"))
+                    .and_then(toml::Value::as_str),
+            ) else {
+                continue;
+            };
+            let genesis_raw = std::fs::read_to_string(root.join(genesis_file))
+                .expect("genesis file named by the profile is readable");
+            let genesis: serde_json::Value =
+                serde_json::from_str(&genesis_raw).expect("genesis file is valid JSON");
+            assert_eq!(
+                genesis.get("chain_id").and_then(serde_json::Value::as_i64),
+                Some(chain_id),
+                "{} carries a chain id that differs from {genesis_file}",
+                path.display()
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 7, "only {checked} profiles were checked");
+}
+
+/// Reads the systemd unit without its comment lines.
+fn systemd_unit_lines() -> Vec<String> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(root.join("ops/budlum-core.service"))
+        .expect("systemd unit is readable")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// BLG-1080: a core dump of a validator process can hold key material, so the
+/// unit must switch core dumps off.
+#[test]
+fn systemd_unit_disables_core_dumps() {
+    let lines = systemd_unit_lines();
+    assert!(
+        lines.iter().any(|l| l == "LimitCORE=0"),
+        "the unit must set LimitCORE=0"
+    );
+    assert!(
+        !lines.iter().any(|l| l == "LimitCORE=infinity"),
+        "the unit allows unlimited core dumps"
+    );
+}
+
+/// BLG-1078: the systemd unit set a variable that no code reads, and its
+/// value was a directory path (`%d`), not key content. The node
+/// reads the variable that `BUDLUM_RPC_API_KEY_ENV` names, so the unit has to
+/// name it and has to load its value from a file.
+#[test]
+fn systemd_unit_wires_the_rpc_api_key_the_node_reads() {
+    let lines = systemd_unit_lines();
+    // The dead name is assembled at run time so it is not a second spelling
+    // of an environment name in the source.
+    let dead = ["BUDLUM", "RPC", "KEY"].join("_");
+    assert!(
+        !lines.iter().any(|l| l.contains(dead.as_str())),
+        "the unit sets {dead}, a name the node never reads"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "Environment=BUDLUM_RPC_API_KEY_ENV=BUDLUM_RPC_API_KEY"),
+        "the unit must tell the node which variable holds the RPC key"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("EnvironmentFile=")),
+        "the unit must load the key value from an environment file"
+    );
+}

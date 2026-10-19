@@ -256,15 +256,18 @@ impl RevealGateway {
         self.admit(handle, GrantScope::of(&req), now)
     }
 
-    /// A request that names no budget gets the default cap. Both open paths
-    /// go through here: the gateway is a network-facing table, and
-    /// "uncapped" is not a remote option on either of them. The registry
-    /// path used to pass `None` straight through, so an in-process caller
-    /// that omitted the budget opened an unmetered session.
+    /// A request that names no budget gets the default cap, and a request
+    /// that names a larger one is cut down to it. Both open paths go
+    /// through here: the gateway is a network-facing table, and "uncapped"
+    /// is not a remote option on either of them. The registry path used to
+    /// pass `None` straight through, and a caller supplied `u64::MAX` used
+    /// to replace the cap, so the budget was only a ceiling for callers
+    /// that left the field out.
     const fn with_default_budget(mut req: RevealRequest) -> RevealRequest {
-        if req.meter_budget.is_none() {
-            req.meter_budget = Some(DEFAULT_REVEAL_BUDGET_FRAMES);
-        }
+        req.meter_budget = match req.meter_budget {
+            Some(asked) if asked < DEFAULT_REVEAL_BUDGET_FRAMES => Some(asked),
+            _ => Some(DEFAULT_REVEAL_BUDGET_FRAMES),
+        };
         req
     }
 
@@ -871,6 +874,45 @@ mod gateway_tests {
             }
         }
         assert!(refused, "an unbudgeted registry session was never metered");
+        assert!(served <= DEFAULT_REVEAL_BUDGET_FRAMES);
+    }
+
+    /// A caller supplied budget above the default is cut to the default, so
+    /// the cap holds for a remote caller that names a huge number.
+    #[test]
+    fn a_huge_caller_budget_is_cut_to_the_default() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let mut gw = RevealGateway::new();
+        let id = gw
+            .open(
+                &ViewGrantRegistry::new(),
+                &owner,
+                req(
+                    ThreeRecipe::Public(full),
+                    None,
+                    packed,
+                    addr(2),
+                    owner,
+                    [7u8; 32],
+                    Some(u64::MAX),
+                ),
+                100,
+            )
+            .unwrap();
+        let mut served = 0u64;
+        let mut refused = false;
+        for _ in 0..(DEFAULT_REVEAL_BUDGET_FRAMES / u64::from(MAX_FRAMES_PER_CALL) + 2) {
+            match gw.emit_frames(id, 0, MAX_FRAMES_PER_CALL, 100, true) {
+                Ok(_) => served += u64::from(MAX_FRAMES_PER_CALL),
+                Err(RevealGatewayError::Reveal(_)) => {
+                    refused = true;
+                    break;
+                }
+                Err(other) => panic!("unexpected refusal: {other:?}"),
+            }
+        }
+        assert!(refused, "a u64::MAX budget replaced the cap");
         assert!(served <= DEFAULT_REVEAL_BUDGET_FRAMES);
     }
 

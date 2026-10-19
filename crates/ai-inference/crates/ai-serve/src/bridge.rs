@@ -21,7 +21,7 @@
 use crate::chain::{ChainClient, RpcError};
 use crate::config::{
     assert_consensus_ready_on_device, assert_served_name_is_ours, checked_system_prompt,
-    ServeConfig,
+    plan_local_on_device, ServeConfig,
 };
 use crate::health::Health;
 use crate::residency::{Demand, DeviceBudget, ResidencyPlan, SemanticProfile, WeightShard};
@@ -156,8 +156,15 @@ impl Bridge {
         // 3. Prompt, determinism and residency. This is the composite check:
         //    it verifies the prompt the model will be given, refuses a device
         //    that cannot hold the per-token weights, and returns the plan.
-        let plan = assert_consensus_ready_on_device(&config, shards, budget, semantics)
-            .map_err(StartupRefusal::NotReadyOnDevice)?;
+        //    A configuration with a determinism profile asks to join the
+        //    consensus path and gets the strict check (no disk streaming). A
+        //    configuration without one is local by definition and may stream.
+        let plan = if config.determinism.is_some() {
+            assert_consensus_ready_on_device(&config, shards, budget, semantics)
+        } else {
+            plan_local_on_device(&config, shards, budget, semantics)
+        }
+        .map_err(StartupRefusal::NotReadyOnDevice)?;
 
         // 4. The chain, last, because it is the only step that leaves the
         //    machine. `NotConnected` is a refusal rather than a warning: a
@@ -299,6 +306,61 @@ mod tests {
         assert!(!bridge.plan().streams_from_disk());
         assert_eq!(bridge.health().snapshot().requests, 0, "nothing served yet");
         assert!(bridge.summary().contains("ai_inference-light"));
+    }
+
+    /// A local bridge (no determinism profile) has a startup path.
+    #[test]
+    fn a_local_bridge_without_a_determinism_profile_starts() {
+        let local = ServeConfig::for_tier(ModelTier::Light, "v0.1");
+        assert!(local.determinism.is_none());
+        let bridge = Bridge::start(
+            local,
+            &[9; 32],
+            &shards(),
+            roomy(),
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .expect("a local bridge is allowed");
+        assert!(!bridge.plan().streams_from_disk());
+    }
+
+    /// Streaming is a local mode: allowed without a profile, refused with one.
+    #[test]
+    fn a_streaming_bridge_starts_locally_and_is_refused_for_consensus() {
+        // The dense 1 000 B fills the accelerator; the routed 400 B go to disk.
+        let tight = DeviceBudget {
+            accelerator_bytes: 1_000,
+            system_bytes: 0,
+        };
+        let local = ServeConfig::for_tier(ModelTier::Light, "v0.1");
+        let bridge = Bridge::start(
+            local,
+            &[9; 32],
+            &shards(),
+            tight,
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .expect("streaming serves locally");
+        assert!(bridge.plan().streams_from_disk());
+
+        let err = Bridge::start(
+            cfg(),
+            &[9; 32],
+            &shards(),
+            tight,
+            semantics(),
+            &FixedChain(true),
+            None,
+        )
+        .expect_err("streaming cannot join consensus");
+        assert!(
+            matches!(err, StartupRefusal::NotReadyOnDevice(ref m) if m.contains("streams")),
+            "{err:?}"
+        );
     }
 
     /// The chain is consulted, and its "no" stops the bridge.

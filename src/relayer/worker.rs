@@ -106,6 +106,9 @@ struct PendingResult {
     /// at [`MAX_REQUESTER_LOOKUP_FAILURES`] the entry is dropped and logged.
     #[serde(default)]
     requester_lookups_failed: u32,
+    /// True once the result transaction sits in a finalized block.
+    #[serde(default)]
+    done: bool,
 }
 
 /// The file name of the pending-result store, next to the cursor file.
@@ -314,6 +317,7 @@ impl RelayerWorker {
         let submitted: Vec<(String, String)> = self
             .observed
             .iter()
+            .filter(|(_, p)| !p.done)
             .filter_map(|(request, p)| p.submitted_tx.clone().map(|h| (request.clone(), h)))
             .collect();
         let mut changed = false;
@@ -321,7 +325,9 @@ impl RelayerWorker {
             match self.included_height(&tx_hash).await {
                 Some(height) if height <= finalized => {
                     info!(request, tx = %tx_hash, height, "Relayer: relay result finalized");
-                    self.observed.remove(&request);
+                    if let Some(pending) = self.observed.get_mut(&request) {
+                        pending.done = true;
+                    }
                     changed = true;
                 }
                 Some(_) => {}
@@ -342,6 +348,18 @@ impl RelayerWorker {
             }
         }
         if changed {
+            self.save_pending();
+        }
+    }
+
+    /// Drop the entries whose result is final once the cursor has moved past
+    /// the block of their request. Until then a finalized entry is the only
+    /// record that stops a restart from running the external action again for
+    /// a request in a block the cursor still holds.
+    fn release_behind_cursor(&mut self) {
+        let before = self.observed.len();
+        self.observed.retain(|_, p| !p.done);
+        if self.observed.len() != before {
             self.save_pending();
         }
     }
@@ -706,6 +724,7 @@ impl RelayerWorker {
                 }
                 relayed_through = h;
                 self.save_cursor(relayed_through);
+                self.release_behind_cursor();
                 // Everything in this block is behind the cursor now. The
                 // pending results are not: they stay until finality.
                 self.settled.clear();
@@ -858,6 +877,7 @@ impl RelayerWorker {
                     result: None,
                     submitted_tx: None,
                     requester_lookups_failed: 0,
+                    done: false,
                 },
             );
             self.save_pending();
@@ -1441,6 +1461,7 @@ mod pending_results {
                 result: Some(observation(1)),
                 submitted_tx: Some("tx-a".to_string()),
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.observed.insert(
@@ -1449,6 +1470,7 @@ mod pending_results {
                 result: Some(observation(2)),
                 submitted_tx: None,
                 requester_lookups_failed: 3,
+                done: false,
             },
         );
         w.save_pending();
@@ -1528,6 +1550,7 @@ mod pending_results {
                 result: None,
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         first.save_pending();
@@ -1630,6 +1653,7 @@ mod pending_results {
                 result: Some(observation(1)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.save_pending();
@@ -1645,6 +1669,7 @@ mod pending_results {
                 result: Some(huge),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.save_pending();
@@ -1670,6 +1695,7 @@ mod pending_results {
                 result: Some(observation(6)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         for pass in 1..MAX_REQUESTER_LOOKUP_FAILURES {
@@ -1710,6 +1736,7 @@ mod pending_results {
                 result: Some(observation(6)),
                 submitted_tx: None,
                 requester_lookups_failed: MAX_REQUESTER_LOOKUP_FAILURES - 2,
+                done: false,
             },
         );
         w.save_pending();
@@ -1743,6 +1770,7 @@ mod pending_results {
                 result: Some(observation(3)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.save_pending();
@@ -1774,6 +1802,7 @@ mod pending_results {
                     result: Some(observation(9)),
                     submitted_tx: Some(hash.to_string()),
                     requester_lookups_failed: 0,
+                    done: false,
                 },
             );
         }
@@ -1781,8 +1810,13 @@ mod pending_results {
         w.reap_finalized(11).await;
 
         assert!(
+            w.observed["req-final"].done,
+            "a result in a finalized block is done, and stays until the cursor passes"
+        );
+        w.release_behind_cursor();
+        assert!(
             !w.observed.contains_key("req-final"),
-            "a result in a finalized block is done"
+            "a finalized entry is released once the cursor is past its block"
         );
         assert_eq!(
             w.observed["req-young"].submitted_tx.as_deref(),
@@ -1819,6 +1853,7 @@ mod pending_results {
                 result: Some(observation(5)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
 
@@ -1837,5 +1872,56 @@ mod pending_results {
             w.adapters.supported_chains().is_empty(),
             "no adapter was needed: the stored observation is what gets signed"
         );
+    }
+
+    /// BLG-0716: a finalized result must survive a restart while the cursor
+    /// still holds the request's block, so the replay does not repeat the
+    /// external action.
+    #[tokio::test]
+    async fn a_finalized_entry_survives_a_restart_until_the_cursor_passes() {
+        let included = std::collections::HashMap::from([("tx-final".to_string(), 10u64)]);
+        let handle = actor(
+            included,
+            std::collections::HashSet::new(),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relayer-cursor");
+        let mut w = RelayerWorker::new(handle, Address::from([7u8; 32]))
+            .with_cursor_path(Some(path.clone()));
+        w.observed.insert(
+            "req-a".to_string(),
+            PendingResult {
+                result: Some(observation(1)),
+                submitted_tx: Some("tx-final".to_string()),
+                requester_lookups_failed: 0,
+                done: false,
+            },
+        );
+        w.reap_finalized(11).await;
+
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(1);
+        let key = Arc::new(KeyPair::generate().expect("keypair"));
+        let mut again = RelayerWorker::new(ChainHandle::new(tx2), Address::from([7u8; 32]))
+            .with_cursor_path(Some(path))
+            .with_signing_key(key);
+        again.observed = again.load_pending().expect("load");
+        assert!(again.observed["req-a"].done);
+        let user = Address::from([8u8; 32]);
+        let request = crate::core::transaction::ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x00000000000000000000000000000000000000aa".to_string(),
+            payload: vec![1, 2, 3],
+            external_nonce: 7,
+        };
+        let outcome = again.process_relay("req-a", user, request).await;
+        assert_eq!(
+            outcome,
+            RelayOutcome::Submitted,
+            "no second external action"
+        );
+
+        again.release_behind_cursor();
+        assert!(again.load_pending().expect("load").is_empty());
     }
 }

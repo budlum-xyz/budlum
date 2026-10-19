@@ -160,6 +160,18 @@ impl Mempool {
     }
 
     pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), MempoolError> {
+        // The cheap rejections run first. `Transaction::verify` can cost an
+        // ML-DSA verification, so a duplicate or a below-floor flood must be
+        // refused by a map lookup and an integer compare before it can make
+        // the node spend that CPU (audit P18-F06).
+        if self.transactions.contains_key(&tx.hash) {
+            return Err(MempoolError::DuplicateTransaction);
+        }
+
+        if tx.fee < self.config.min_fee {
+            return Err(MempoolError::FeeTooLow);
+        }
+
         // Verify transaction signature BEFORE
         // Accepting into mempool. Without this, an attacker can flood the
         // Mempool with invalid-signature transactions that propagate via
@@ -174,14 +186,6 @@ impl Mempool {
             return Err(MempoolError::InvalidTransaction(
                 "Invalid transaction signature".into(),
             ));
-        }
-
-        if self.transactions.contains_key(&tx.hash) {
-            return Err(MempoolError::DuplicateTransaction);
-        }
-
-        if tx.fee < self.config.min_fee {
-            return Err(MempoolError::FeeTooLow);
         }
 
         // Eviction is a side effect on somebody else's transaction, so it may
@@ -811,6 +815,34 @@ mod tests {
             pool.add_transaction(tx),
             Err(MempoolError::DuplicateTransaction)
         );
+    }
+
+    /// Cheap checks run before the signature check (audit P18-F06): an
+    /// unsigned transaction below the fee floor is refused as `FeeTooLow`,
+    /// which proves `verify` did not run first.
+    #[test]
+    fn cheap_checks_run_before_signature_verification() {
+        let mut pool = Mempool::default();
+        let mut tx = create_test_tx_from_seed(1, 0, 0);
+        tx.signature = None;
+        assert!(!tx.verify());
+        assert_eq!(pool.add_transaction(tx), Err(MempoolError::FeeTooLow));
+
+        let good = create_test_tx_from_seed(2, 0, 10);
+        pool.add_transaction(good.clone()).unwrap();
+        let mut forged = good;
+        forged.signature = None;
+        assert_eq!(
+            pool.add_transaction(forged),
+            Err(MempoolError::DuplicateTransaction)
+        );
+
+        let mut bad = create_test_tx_from_seed(3, 0, 10);
+        bad.signature = None;
+        assert!(matches!(
+            pool.add_transaction(bad),
+            Err(MempoolError::InvalidTransaction(_))
+        ));
     }
 
     #[test]

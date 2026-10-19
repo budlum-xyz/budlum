@@ -23,6 +23,7 @@
 //! whose `set_hash` differs from the trusted one is rejected, not silently
 //! followed. A set change needs a new trust anchor out-of-band.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
@@ -161,6 +162,10 @@ pub struct LightSyncPlan {
 #[derive(Debug, Clone)]
 pub struct LightClient {
     trusted: TrustedCheckpoint,
+    /// Headers (height to hash) that `verify_header_chain` linked to the
+    /// trust anchor. A checkpoint is only accepted for a header in this map,
+    /// so a finalized header from an unrelated fork cannot move the anchor.
+    linked: BTreeMap<u64, String>,
 }
 
 impl LightClient {
@@ -186,7 +191,10 @@ impl LightClient {
                 trusted.set_hash
             )));
         }
-        Ok(Self { trusted })
+        Ok(Self {
+            trusted,
+            linked: BTreeMap::new(),
+        })
     }
 
     /// The current trust anchor.
@@ -211,7 +219,8 @@ impl LightClient {
     /// Verify a BLS finality certificate checkpoint against the trusted set.
     ///
     /// The checks run in order, each binding the next layer to the previous
-    /// one: the header must hash to itself, the certificate must name exactly
+    /// one: the header must hash to itself and be linked to the trust anchor
+    /// by an earlier `verify_header_chain` call, the certificate must name exactly
     /// that header, the certificate and the snapshot must carry the trusted
     /// validator-set hash, and finally the BLS aggregate signature must carry
     /// the stake and signer quorum (`FinalityCert::verify`).
@@ -231,6 +240,12 @@ impl LightClient {
             return Err(LightClientError::InvalidHeader(format!(
                 "header hash {} is not self-consistent",
                 header.hash
+            )));
+        }
+        if self.linked.get(&header.index) != Some(&header.hash) {
+            return Err(LightClientError::HeaderChain(format!(
+                "header {} at height {} is not linked to the trust anchor; run verify_header_chain first",
+                header.hash, header.index
             )));
         }
         if header.index != cert.checkpoint_height {
@@ -293,6 +308,12 @@ impl LightClient {
             return Err(LightClientError::InvalidHeader(format!(
                 "header hash {} is not self-consistent",
                 header.hash
+            )));
+        }
+        if self.linked.get(&header.index) != Some(&header.hash) {
+            return Err(LightClientError::HeaderChain(format!(
+                "header {} at height {} is not linked to the trust anchor; run verify_header_chain first",
+                header.hash, header.index
             )));
         }
         if header.index != blob.checkpoint_height {
@@ -365,12 +386,15 @@ impl LightClient {
     /// segment from an unrelated fork that reuses the same validator set
     /// (CWE-345).
     ///
+    /// A segment that passes is remembered: `verify_checkpoint` and
+    /// `verify_pq_checkpoint` accept only a header from a linked segment.
+    ///
     /// # Errors
     ///
     /// Returns [`LightClientError::HeaderChain`] for a malformed or
     /// disconnected segment and [`LightClientError::NotForward`] for a header
     /// at or below the anchor.
-    pub fn verify_header_chain(&self, headers: &[BlockHeader]) -> Result<(), LightClientError> {
+    pub fn verify_header_chain(&mut self, headers: &[BlockHeader]) -> Result<(), LightClientError> {
         if headers.is_empty() {
             return Err(LightClientError::HeaderChain(
                 "no headers supplied".to_string(),
@@ -413,6 +437,9 @@ impl LightClient {
                 )));
             }
         }
+        for header in headers {
+            self.linked.insert(header.index, header.hash.clone());
+        }
         Ok(())
     }
 
@@ -446,6 +473,7 @@ impl LightClient {
             block_hash: verified.block_hash.clone(),
             set_hash: verified.set_hash.clone(),
         };
+        self.linked.retain(|height, _| *height > verified.height);
         Ok(())
     }
 
@@ -460,14 +488,15 @@ impl LightClient {
         if interval == 0 || self.trusted.height >= target_height {
             return None;
         }
-        let mut height = self.trusted.height.saturating_add(1);
-        while height <= target_height {
-            if height.is_multiple_of(interval) {
-                return Some(height);
-            }
-            height = height.saturating_add(1);
-        }
-        None
+        // Closed form: one division, not a walk of up to 2^64 heights.
+        let start = self.trusted.height.checked_add(1)?;
+        let rest = start % interval;
+        let next = if rest == 0 {
+            start
+        } else {
+            start.checked_add(interval - rest)?
+        };
+        (next <= target_height).then_some(next)
     }
 
     /// The wire requests a transport must issue from this anchor: a
@@ -611,12 +640,13 @@ mod tests {
         let header = make_block_header_at(10, TEST_CHAIN_ID);
         let cert = make_valid_bls_cert(&snapshot, &sks, &header, 3);
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         let verified = client
             .verify_checkpoint(&header, &cert, &snapshot)
@@ -625,7 +655,6 @@ mod tests {
         assert_eq!(verified.block_hash, header.hash);
         assert_eq!(verified.set_hash, snapshot.set_hash);
 
-        let mut client = client;
         client.advance(&verified).expect("advance");
         assert_eq!(client.trusted().height, 10);
         assert_eq!(client.trusted().block_hash, header.hash);
@@ -638,12 +667,13 @@ mod tests {
         let mut cert = make_valid_bls_cert(&snapshot, &sks, &header, 3);
         cert.checkpoint_hash = "1".repeat(64);
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         assert!(matches!(
             client.verify_checkpoint(&header, &cert, &snapshot),
@@ -658,12 +688,13 @@ mod tests {
         let mut cert = make_valid_bls_cert(&snapshot, &sks, &header, 3);
         cert.set_hash = "f".repeat(64);
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         assert!(matches!(
             client.verify_checkpoint(&header, &cert, &snapshot),
@@ -682,12 +713,13 @@ mod tests {
         let mut cert = make_valid_bls_cert(&snapshot, &sks, &header, 3);
         cert.bitmap = vec![0b0000_0011];
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         assert!(matches!(
             client.verify_checkpoint(&header, &cert, &snapshot),
@@ -739,6 +771,7 @@ mod tests {
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         let verified = client
             .verify_checkpoint(&header, &cert, &snapshot)
@@ -779,19 +812,19 @@ mod tests {
         let header = make_block_header_at(10, TEST_CHAIN_ID);
         let blob = make_pq_blob(&snapshot, &keys, &header);
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         let verified = client
             .verify_pq_checkpoint(&header, &blob, &snapshot)
             .expect("honest PQ checkpoint verifies");
         assert_eq!(verified.height, 10);
 
-        let mut client = client;
         client.advance(&verified).expect("advance");
         assert_eq!(client.trusted().height, 10);
     }
@@ -807,12 +840,13 @@ mod tests {
         blob.pq_signatures.push(dup);
         blob.merkle_root = QcBlob::compute_merkle_root(&blob.pq_signatures);
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         assert!(matches!(
             client.verify_pq_checkpoint(&header, &blob, &snapshot),
@@ -823,7 +857,7 @@ mod tests {
     #[test]
     fn header_chain_requires_contiguity_and_forward_motion() {
         let (snapshot, _sks) = make_bls_snapshot(4, 1000);
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash,
@@ -847,6 +881,76 @@ mod tests {
             client.verify_header_chain(&[anchor_header]),
             Err(LightClientError::NotForward { .. })
         ));
+    }
+
+    /// A finalized header that `verify_header_chain` never linked to the
+    /// anchor is refused, even with a valid certificate (audit P18-F07).
+    #[test]
+    fn checkpoint_requires_a_header_linked_to_the_anchor() {
+        let (snapshot, sks) = make_bls_snapshot(4, 1000);
+        let mut client = LightClient::new(TrustedCheckpoint {
+            height: 0,
+            block_hash: "0".repeat(64),
+            set_hash: snapshot.set_hash.clone(),
+        })
+        .unwrap();
+
+        let mut h1 = make_block_header_at(1, TEST_CHAIN_ID);
+        h1.previous_hash = "0".repeat(64);
+        h1.hash = h1.calculate_hash();
+        let mut h2 = make_block_header_at(2, TEST_CHAIN_ID);
+        h2.previous_hash = h1.hash.clone();
+        h2.hash = h2.calculate_hash();
+
+        // A self-consistent header of an unrelated fork at the same height.
+        let mut fork = make_block_header_at(2, TEST_CHAIN_ID);
+        fork.previous_hash = "9".repeat(64);
+        fork.hash = fork.calculate_hash();
+        let fork_cert = make_valid_bls_cert(&snapshot, &sks, &fork, 3);
+        let cert = make_valid_bls_cert(&snapshot, &sks, &h2, 3);
+
+        // Nothing is linked yet.
+        assert!(matches!(
+            client.verify_checkpoint(&h2, &cert, &snapshot),
+            Err(LightClientError::HeaderChain(_))
+        ));
+
+        client
+            .verify_header_chain(&[h1, h2.clone()])
+            .expect("segment continues the anchor");
+        assert!(client.verify_checkpoint(&h2, &cert, &snapshot).is_ok());
+        assert!(matches!(
+            client.verify_checkpoint(&fork, &fork_cert, &snapshot),
+            Err(LightClientError::HeaderChain(_))
+        ));
+    }
+
+    /// The next checkpoint height is computed in closed form (audit P18-F08):
+    /// a huge target must not loop height by height.
+    #[test]
+    fn next_checkpoint_height_is_closed_form() {
+        let client = LightClient::new(TrustedCheckpoint {
+            height: 4,
+            block_hash: "0".repeat(64),
+            set_hash: "0".repeat(64),
+        })
+        .unwrap();
+        assert_eq!(client.next_checkpoint_height(10, u64::MAX), Some(10));
+        assert_eq!(client.next_checkpoint_height(5, 100), Some(5));
+        assert_eq!(client.next_checkpoint_height(10, 9), None);
+        assert_eq!(client.next_checkpoint_height(0, 100), None);
+        assert_eq!(client.next_checkpoint_height(1, 100), Some(5));
+        assert_eq!(
+            client.next_checkpoint_height(u64::MAX, u64::MAX),
+            Some(u64::MAX)
+        );
+        let top = LightClient::new(TrustedCheckpoint {
+            height: u64::MAX,
+            block_hash: "0".repeat(64),
+            set_hash: "0".repeat(64),
+        })
+        .unwrap();
+        assert_eq!(top.next_checkpoint_height(3, u64::MAX), None);
     }
 
     #[test]

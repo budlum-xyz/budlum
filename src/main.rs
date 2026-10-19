@@ -31,6 +31,47 @@ fn load_signing_key(path: &str) -> Option<KeyPair> {
         .ok()
 }
 
+/// Claims `path` for a new secret key file. It fails when the path already exists, so key
+/// generation never overwrites an operator key. The file is created with mode 0600.
+fn claim_new_key_file(path: &str) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).map(|_| ())
+}
+
+/// Claims `path`, or prints the refusal and exits. On a later write failure the caller
+/// removes the empty claim again with `release_key_file`.
+fn claim_new_key_file_or_exit(path: &str) {
+    if let Err(e) = claim_new_key_file(path) {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            eprintln!("Error: key file {path} already exists; refusing to overwrite it.");
+            eprintln!("Move or delete the existing key file first if you mean to replace it.");
+        } else {
+            eprintln!("Error: cannot create key file {path}: {e}");
+        }
+        std::process::exit(1);
+    }
+}
+
+/// The daemon block-production loop runs for every engine that produces from this process.
+/// PoA is included: the engine signs only when this node is the elected leader, and
+/// `produce_block` returns `None` for the other slots.
+fn daemon_producer_loop_runs(consensus_type: ConsensusType) -> bool {
+    matches!(
+        consensus_type,
+        ConsensusType::PoS | ConsensusType::PoW | ConsensusType::PoA
+    )
+}
+
+fn release_key_file(path: &str) {
+    let _ = std::fs::remove_file(path);
+}
+
 fn write_database_backup(
     storage: &Storage,
     backup_dir: &Path,
@@ -284,6 +325,7 @@ async fn main() {
             // and rejecting every peer's validator registration.
             pq_scheme: network_defaults.pq_scheme.clone(),
             bootstrap_domains: network_defaults.bootstrap_domains.clone(),
+            poa_authorities: Vec::new(),
         };
 
         let data = match serde_json::to_string_pretty(&genesis_config) {
@@ -359,7 +401,9 @@ async fn main() {
                 std::process::exit(1);
             }
         };
+        claim_new_key_file_or_exit(&output);
         keypair.save(&output).unwrap_or_else(|e| {
+            release_key_file(&output);
             eprintln!("Error: cannot write secret key to {output}: {e:?}");
             std::process::exit(1);
         });
@@ -456,7 +500,9 @@ async fn main() {
     if let Some(ref path) = config.gen_key {
         match budlum_core::crypto::primitives::ValidatorKeys::generate() {
             Ok(keys) => {
+                claim_new_key_file_or_exit(path);
                 if let Err(e) = keys.save(path) {
+                    release_key_file(path);
                     eprintln!("Error: could not save validator key to {path}: {e}");
                     std::process::exit(1);
                 }
@@ -466,7 +512,10 @@ async fn main() {
                     Address::from(keys.sig_key.public_key_bytes())
                 );
             }
-            Err(e) => eprintln!("Error generating key: {e}"),
+            Err(e) => {
+                eprintln!("Error generating key: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }
@@ -547,9 +596,21 @@ async fn main() {
     let port = config.port.unwrap_or(network.default_port());
     let chain_id = config.chain_id.unwrap_or(network.chain_id().value());
     let network_params = network.consensus_params();
-    if config.min_stake == 1000 {
-        config.min_stake = network_params.min_stake;
+    // P01-F23: min-stake is a consensus rule. A node started with a
+    // divergent `--min-stake` would validate leaders and validators against a
+    // parameter the rest of the network does not share and split off - while
+    // the staking executor kept enforcing the network parameter, so the two
+    // paths disagreed on the same node. The CLI value is now only accepted
+    // when it matches the network parameter; anything else is a hard error.
+    if config.min_stake != 1000 && config.min_stake != network_params.min_stake {
+        eprintln!(
+            "ERROR: --min-stake {} conflicts with the network consensus parameter {} \
+             (chain id {chain_id}); a node with a divergent min-stake would split off",
+            config.min_stake, network_params.min_stake
+        );
+        std::process::exit(1);
     }
+    config.min_stake = network_params.min_stake;
     let consensus_type = config.consensus.unwrap_or(match network {
         budlum_core::core::chain_config::Network::Mainnet => ConsensusType::PoS,
         budlum_core::core::chain_config::Network::Testnet => ConsensusType::PoS,
@@ -660,21 +721,21 @@ async fn main() {
                 module_path.to_string(),
                 slot_id,
                 pin_env.to_string(),
+                config.pkcs11_key_label.clone(),
             )
         } else {
             budlum_core::crypto::pkcs11::Pkcs11Signer::new(
                 module_path.to_string(),
                 slot_id,
                 pin_env.to_string(),
+                config.pkcs11_key_label.clone(),
             )
         };
         match signer_result.map(|s| {
-            let signer = s
-                .with_vendor_mechanisms(
-                    config.pkcs11_bls_mechanism.clone(),
-                    config.pkcs11_pq_mechanism.clone(),
-                )
-                .with_key_label(config.pkcs11_key_label.clone());
+            let signer = s.with_vendor_mechanisms(
+                config.pkcs11_bls_mechanism.clone(),
+                config.pkcs11_pq_mechanism.clone(),
+            );
             if strict_vendor_native {
                 signer.require_vendor_native_signing()
             } else {
@@ -1031,7 +1092,9 @@ async fn main() {
     }
 
     for validator in &poa_validators {
-        blockchain.state.add_validator(*validator, 1);
+        // A restart must not reset a stored authority to stake 1, active and
+        // not slashed.
+        blockchain.state.ensure_validator(*validator, 1);
     }
 
     let (chain_actor, chain) = ChainActor::new(blockchain);
@@ -1290,7 +1353,7 @@ async fn main() {
             }
             Err(e) => {
                 eprintln!("RPC configuration error: {e}");
-                return;
+                std::process::exit(1);
             }
         };
 
@@ -1356,6 +1419,7 @@ async fn main() {
         tokio::spawn(async move {
             if let Err(e) = pub_server.run(pub_addr.clone()).await {
                 eprintln!("Public RPC Server Error on {pub_addr}: {e}");
+                std::process::exit(1);
             } else {
                 println!("Public JSON-RPC Server running on {pub_addr}");
             }
@@ -1399,6 +1463,7 @@ async fn main() {
             tokio::spawn(async move {
                 if let Err(e) = op_server.run(op_addr.clone()).await {
                     eprintln!("Operator RPC Server Error on {op_addr}: {e}");
+                    std::process::exit(1);
                 } else {
                     println!("Operator JSON-RPC Server running on {op_addr}");
                 }
@@ -1426,7 +1491,7 @@ async fn main() {
             Ok(l) => l,
             Err(e) => {
                 eprintln!("Metrics server bind error: {e}");
-                return;
+                std::process::exit(1);
             }
         };
         println!("Prometheus metrics on {metrics_bind}/metrics");
@@ -1578,7 +1643,7 @@ async fn main() {
         });
     }
 
-    // 2026-07-18: the daemon block-production loop, for PoS and PoW.
+    // 2026-07-18: the daemon block-production loop, for PoS, PoW and PoA.
     //
     // Root cause, proven in CI by multinode smoke job 87990206239: the binary
     // produced blocks only through the interactive stdin "mine" command, so
@@ -1592,7 +1657,7 @@ async fn main() {
     // backlog), and `mine` under PoW (difficulty from the CLI flag; smoke runs
     // difficulty=0). Broadcast goes over the gossipsub "blocks" channel, and
     // peers run the same deterministic commit path.
-    if consensus_type == ConsensusType::PoS || consensus_type == ConsensusType::PoW {
+    if daemon_producer_loop_runs(consensus_type) {
         if let Some(producer) = cli_producer_address {
             let chain_p = chain.clone();
             let client_p = client.clone();
@@ -1703,5 +1768,37 @@ async fn main() {
                 }
             }
         } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{claim_new_key_file, daemon_producer_loop_runs};
+    use budlum_core::cli::ConsensusType;
+
+    #[test]
+    fn key_claim_refuses_to_overwrite_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!("budlum-keygen-claim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("validator.key");
+        let path_str = path.to_str().expect("utf8 path").to_string();
+        std::fs::write(&path, b"existing secret").expect("seed key file");
+
+        let err = claim_new_key_file(&path_str).expect_err("existing key must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).expect("read back"), b"existing secret");
+
+        std::fs::remove_file(&path).expect("remove key file");
+        claim_new_key_file(&path_str).expect("a free path is claimed");
+        let err = claim_new_key_file(&path_str).expect_err("second claim must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn daemon_producer_loop_covers_poa() {
+        assert!(daemon_producer_loop_runs(ConsensusType::PoA));
+        assert!(daemon_producer_loop_runs(ConsensusType::PoS));
+        assert!(daemon_producer_loop_runs(ConsensusType::PoW));
     }
 }

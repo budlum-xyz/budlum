@@ -109,12 +109,23 @@ fn test_modules(src: &str) -> Vec<TestModule> {
 
         let mut glob = false;
         let mut imported = BTreeSet::new();
-        for l in body_lines {
-            let t = l.trim();
-            let Some(spec) = t.strip_prefix("use super::") else {
+        let mut at = 0usize;
+        while let Some(l) = body_lines.get(at) {
+            at += 1;
+            let Some(first) = l.trim().strip_prefix("use super::") else {
                 continue;
             };
-            let spec = spec.trim_end_matches(';');
+            // rustfmt wraps a long import over several lines: read to the `;`.
+            let mut joined = first.to_string();
+            while !joined.contains(';') {
+                let Some(next) = body_lines.get(at) else {
+                    break;
+                };
+                at += 1;
+                joined.push(' ');
+                joined.push_str(next.trim());
+            }
+            let spec = joined.trim().trim_end_matches(';').trim();
             if spec == "*" {
                 glob = true;
                 continue;
@@ -290,6 +301,17 @@ mod tests {
     }
     if !called.contains("helper") {
         return Err("the covered call was not detected".into());
+    }
+
+    // A wrapped import is read to its closing `;`.
+    let wrapped = narrow.replace(
+        "use super::helper;",
+        "use super::{\n        helper,\n        other,\n    };",
+    );
+    let w = test_modules(&wrapped);
+    let wm = w.first().ok_or("no test module in wrapped variant")?;
+    if !wm.imported.contains("helper") || !wm.imported.contains("other") {
+        return Err("a multi-line import was not read".into());
     }
 
     // A glob import must silence it.

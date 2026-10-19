@@ -118,6 +118,11 @@ pub struct AiRegistry {
     /// "verifier says so" to "mathematics prove it."
     #[serde(with = "crate::core::map_keys")]
     pub execution_proofs: BTreeMap<(AiRequestId, [u8; 32]), AiExecutionProof>,
+    /// Proofs that cleared FULL STARK verification against the registered
+    /// guest program (`verify_execution_proof_full`). Only these satisfy a
+    /// `require_proof` escrow release; structural-only attaches live in
+    /// `execution_proofs` alone and never unlock a proof-gated payment.
+    pub fully_verified_proofs: BTreeSet<(AiRequestId, [u8; 32])>,
     /// Verifier Quality of Service registry.
     /// Maps verifier address → QoS metrics. Enables QoS-aware verifier
     /// Selection for the Agentic Economy.
@@ -156,6 +161,7 @@ impl AiRegistry {
             verifier_effort_ceilings: BTreeMap::new(),
             callback_queue: BTreeMap::new(),
             execution_proofs: BTreeMap::new(),
+            fully_verified_proofs: BTreeSet::new(),
             verifier_qos: BTreeMap::new(),
             agent_payments: BTreeMap::new(),
             settled_agent_payments: BTreeMap::new(),
@@ -718,9 +724,18 @@ impl AiRegistry {
     /// - Outcomes that have been finalized + retention_blocks
     /// - Reclaimed and cancelled markers whose request row is gone
     ///
-    /// Returns the number of items pruned.
-    pub fn prune_expired(&mut self, current_block: u64, retention_blocks: u64) -> usize {
+    /// Returns `(pruned, refunds)`. `refunds` holds one `(requester, max_fee)`
+    /// entry for every pruned request row whose escrow was neither reclaimed
+    /// nor cancelled. The row is the last on-chain reference to that escrow,
+    /// so the caller must credit the requester; otherwise the fee vanishes
+    /// from supply accounting without being returned, burned, or paid.
+    pub fn prune_expired(
+        &mut self,
+        current_block: u64,
+        retention_blocks: u64,
+    ) -> (usize, Vec<(Address, u64)>) {
         let mut pruned = 0;
+        let mut refunds: Vec<(Address, u64)> = Vec::new();
 
         // Prune expired, unfinalized requests (and their results). A
         // reclaimed or cancelled request is terminal: nothing can act on it
@@ -747,6 +762,15 @@ impl AiRegistry {
             .collect();
 
         for id in &expired_request_ids {
+            // An unfinalized row that was neither reclaimed nor cancelled
+            // still holds the requester's escrowed max_fee (debited at
+            // request time). Pruning it without a refund would silently
+            // drop the fee out of supply accounting.
+            if !self.reclaimed_fees.contains(id) && !self.cancelled_requests.contains(id) {
+                if let Some(req) = self.requests.get(id) {
+                    refunds.push((req.requester, req.max_fee));
+                }
+            }
             self.requests.remove(id);
             self.results.remove(id);
             pruned += 1;
@@ -810,7 +834,13 @@ impl AiRegistry {
         });
         pruned += before - self.execution_proofs.len();
 
-        pruned
+        let before_verified = self.fully_verified_proofs.len();
+        self.fully_verified_proofs.retain(|(request_id, _)| {
+            !expired_request_ids.contains(request_id) && !prunable_outcomes.contains(request_id)
+        });
+        pruned += before_verified - self.fully_verified_proofs.len();
+
+        (pruned, refunds)
     }
     ///
     /// After a request's deadline has passed without reaching agreement threshold,
@@ -1325,6 +1355,7 @@ impl AiRegistry {
         request_id: &AiRequestId,
         verifier: &Address,
         proof: AiExecutionProof,
+        fully_verified: bool,
     ) -> Result<(), String> {
         // Cancellation is terminal. `submit_result` already refuses results
         // for a cancelled request; a proof attached to a result that was
@@ -1384,6 +1415,14 @@ impl AiRegistry {
         // Store the proof
         self.execution_proofs
             .insert((*request_id, verifier.0), proof);
+        if fully_verified {
+            self.fully_verified_proofs.insert((*request_id, verifier.0));
+        } else {
+            // A structural-only re-attach must never leave a stale
+            // full-verification mark behind for this (request, verifier).
+            self.fully_verified_proofs
+                .remove(&(*request_id, verifier.0));
+        }
         Ok(())
     }
 
@@ -1478,6 +1517,18 @@ impl AiRegistry {
     pub fn has_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
         self.execution_proofs
             .contains_key(&(*request_id, verifier.0))
+    }
+
+    /// True only when the (request, verifier) proof cleared FULL STARK
+    /// verification. `require_proof` escrow release gates on this, not on
+    /// the structural-only `has_execution_proof`: a payer that asked for a
+    /// verified proof must not be settled against envelope-shaped bytes.
+    fn has_verified_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
+        self.execution_proofs
+            .contains_key(&(*request_id, verifier.0))
+            && self
+                .fully_verified_proofs
+                .contains(&(*request_id, verifier.0))
     }
 
     // ===================== Verifier QoS =====================
@@ -1584,9 +1635,11 @@ impl AiRegistry {
                         "Agent payment: recipient is not an agreeing verifier for this outcome",
                     ));
                 }
-                if payment.require_proof && !self.has_execution_proof(rid, &payment.to_agent) {
+                if payment.require_proof
+                    && !self.has_verified_execution_proof(rid, &payment.to_agent)
+                {
                     return Err(String::from(
-                        "Agent payment: execution proof required but not attached",
+                        "Agent payment: fully verified execution proof required but not attached",
                     ));
                 }
             } else {

@@ -88,6 +88,9 @@ pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
         // single zero byte per record there and still exact under a snaplen.
         orig_deltas.push(zigzag(i64::from(orig_len) - incl_len as i64));
         records += 1;
+        if records as usize > PCAP_MAX_RECORDS {
+            return None; // `pcap_restore` would refuse this many records
+        }
         if data_start == 0 {
             data_start = pos + 16;
         }
@@ -120,6 +123,11 @@ pub fn pcap_transform(data: &[u8]) -> Option<Vec<u8>> {
             out.push(0xFC);
         }
         p += 16 + l;
+    }
+    // Lossless or nothing: trailing bytes, a ts_usec of 1e6 or more and any other
+    // input that the restore would not reproduce exactly are refused here.
+    if pcap_restore(&out).as_deref() != Some(data) {
+        return None;
     }
     Some(out)
 }
@@ -353,6 +361,26 @@ mod tests {
             pcap_digest(&sample_pcap()),
             "a truncated capture is a different capture"
         );
+    }
+
+    #[test]
+    fn pcap_transform_refuses_inputs_it_cannot_restore() {
+        // (1) trailing bytes after the last record.
+        let mut p = sample_pcap();
+        p.extend_from_slice(&[1, 2, 3]);
+        assert!(
+            pcap_transform(&p).is_none(),
+            "trailing bytes would be dropped"
+        );
+        // (2) a ts_usec of 1,000,000 or more is renormalised by the restore.
+        let mut p = sample_pcap();
+        p[28..32].copy_from_slice(&1_000_000u32.to_le_bytes());
+        assert!(pcap_transform(&p).is_none(), "a non-canonical ts_usec");
+        // (3) more records than the restore accepts.
+        let mut p = sample_pcap();
+        p.truncate(PCAP_GLOBAL_HDR);
+        p.resize(PCAP_GLOBAL_HDR + (PCAP_MAX_RECORDS + 1) * 16, 0);
+        assert!(pcap_transform(&p).is_none(), "too many records");
     }
 
     #[test]

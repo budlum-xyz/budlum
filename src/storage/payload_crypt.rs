@@ -56,8 +56,6 @@ impl core::fmt::Debug for PayloadKey {
 /// Errors sealing or opening content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SealError {
-    /// Empty plaintext refused.
-    Empty,
     /// Plaintext too large.
     TooLarge {
         /// Observed.
@@ -78,7 +76,6 @@ pub enum SealError {
 impl std::fmt::Display for SealError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Empty => write!(f, "payload seal refuses empty plaintext"),
             Self::TooLarge { len, max } => {
                 write!(f, "plaintext {len} exceeds seal max {max}")
             }
@@ -100,15 +97,12 @@ impl std::error::Error for SealError {}
 ///
 /// # Errors
 ///
-/// Empty / oversized plaintext, bad nonce length, or AEAD failure.
+/// Oversized plaintext, bad nonce length, or AEAD failure.
 fn seal_payload(
     key: &PayloadKey,
     nonce24: &[u8; SEALED_NONCE_LEN],
     plaintext: &[u8],
 ) -> Result<Vec<u8>, SealError> {
-    if plaintext.is_empty() {
-        return Err(SealError::Empty);
-    }
     if plaintext.len() > MAX_SEAL_PLAINTEXT {
         return Err(SealError::TooLarge {
             len: plaintext.len(),
@@ -137,7 +131,7 @@ fn seal_payload(
 ///
 /// # Errors
 ///
-/// Same conditions as `seal_payload`: empty or oversized plaintext, AEAD failure.
+/// Same conditions as `seal_payload`: oversized plaintext, AEAD failure.
 pub fn seal_payload_csprng(key: &PayloadKey, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
     let mut nonce = [0u8; SEALED_NONCE_LEN];
     rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut nonce);
@@ -152,6 +146,15 @@ pub fn seal_payload_csprng(key: &PayloadKey, plaintext: &[u8]) -> Result<Vec<u8>
 pub fn open_payload(key: &PayloadKey, sealed: &[u8]) -> Result<Vec<u8>, SealError> {
     if sealed.len() < SEALED_HEADER_LEN + 16 {
         return Err(SealError::BadBlob);
+    }
+    // The same cap as on seal: a blob that no seal could have produced is
+    // refused before any key or cipher work.
+    let max_blob = SEALED_HEADER_LEN + MAX_SEAL_PLAINTEXT + 16;
+    if sealed.len() > max_blob {
+        return Err(SealError::TooLarge {
+            len: sealed.len() - SEALED_HEADER_LEN - 16,
+            max: MAX_SEAL_PLAINTEXT,
+        });
     }
     let magic = sealed.get(0..4).ok_or(SealError::BadBlob)?;
     if magic != SEALED_MAGIC {
@@ -268,5 +271,53 @@ mod tests {
         let (kind, body) = unpack_payload(&packed).unwrap();
         assert_eq!(kind, PayloadKind::EncryptedContent);
         assert_eq!(open_payload(&key, &body).unwrap(), pt);
+    }
+
+    #[test]
+    fn seal_open_empty_round_trip() {
+        let key = PayloadKey::derive(b"empty-secret");
+        let sealed = seal_payload(&key, &derived_nonce(b"empty"), b"").unwrap();
+        assert_eq!(sealed.len(), SEALED_HEADER_LEN + 16);
+        assert!(open_payload(&key, &sealed).unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_tag_tamper_fails() {
+        let key = PayloadKey::derive(b"empty-secret");
+        let mut sealed = seal_payload(&key, &derived_nonce(b"empty"), b"").unwrap();
+        let last = sealed.len() - 1;
+        sealed[last] ^= 1;
+        assert_eq!(open_payload(&key, &sealed).unwrap_err(), SealError::Decrypt);
+    }
+
+    #[test]
+    fn empty_truncated_is_bad_blob() {
+        let key = PayloadKey::derive(b"empty-secret");
+        let sealed = seal_payload(&key, &derived_nonce(b"empty"), b"").unwrap();
+        let short = &sealed[..SEALED_HEADER_LEN + 15];
+        assert_eq!(open_payload(&key, short).unwrap_err(), SealError::BadBlob);
+    }
+
+    #[test]
+    fn sealed_empty_then_a1_pack() {
+        let key = PayloadKey::derive(b"empty-pipe-secret");
+        let sealed = seal_payload(&key, &derived_nonce(b"empty-pipe"), b"").unwrap();
+        let packed = pack_payload(PayloadKind::EncryptedContent, &sealed).unwrap();
+        let (kind, body) = unpack_payload(&packed).unwrap();
+        assert_eq!(kind, PayloadKind::EncryptedContent);
+        assert!(open_payload(&key, &body).unwrap().is_empty());
+    }
+
+    /// P27-F08 (b): open refuses a blob larger than any seal can produce.
+    #[test]
+    fn open_refuses_a_blob_past_the_seal_cap() {
+        let key = PayloadKey::derive(b"cap");
+        let mut blob = vec![0u8; SEALED_HEADER_LEN + MAX_SEAL_PLAINTEXT + 17];
+        blob[0..4].copy_from_slice(&SEALED_MAGIC);
+        blob[4] = SEALED_VERSION;
+        assert!(matches!(
+            open_payload(&key, &blob),
+            Err(SealError::TooLarge { .. })
+        ));
     }
 }

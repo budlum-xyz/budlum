@@ -33,13 +33,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Python version
-        run: python3 --version
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
       - name: Guard self-test (a gate must prove it can fail)
         run: |
           set -euo pipefail
-          python3 .github/scripts/audit_guard.py --self-test
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- audit-guard --self-test
       - name: Audit workflows and review boundary
         run: |
           set -euo pipefail
-          python3 .github/scripts/audit_guard.py
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- audit-guard

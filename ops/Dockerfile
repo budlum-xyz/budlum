@@ -85,12 +85,15 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 # CVE-2026-86145 and CVE-2026-89161 (both HIGH, fixed in 10.42-1+deb12u1), and
 # an explicit install after `apt-get update` pulls the patched revision without
 # a blanket `apt-get upgrade` (hadolint DL3005).
+# perl-base is listed for the same reason: the pinned digest ships
+# 5.36.0-7+deb12u3, which Trivy flags (3 CRITICAL, 4 HIGH), fixed in deb12u4.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     openssl \
     curl \
     libpcre2-8-0 \
+    perl-base \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core

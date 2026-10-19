@@ -36,9 +36,12 @@
 //! `backup_restore_drill.sh`. Converting these cannot break CI, because CI
 //! does not call them anyway.
 //!
-//! To be moved in the second round: the five scripts called from workflows
+//! Moved in the second round: the five scripts called from workflows
 //! (`audit-deps`, `generate-sbom`, `smoke_rpc`, `docker-smoke-mainnet`,
-//! `devnet-multinode-smoke`), each together with its own workflow change.
+//! `devnet-multinode-smoke`), each together with its own workflow change. Their
+//! modules are `audit_deps`, `sbom`, `smoke_rpc`, `docker_smoke` and
+//! `multinode_smoke`; `rpc` and `json` are the std-only HTTP and JSON helpers
+//! they share.
 //! `coverage-report.sh` was not called and parsed `cargo llvm-cov` output; its
 //! counterpart is the `module-coverage` gate in `xtask/gates`, and the script
 //! is gone.
@@ -46,10 +49,23 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod audit_deps;
+pub mod audit_guard;
 pub mod backup_drill;
+pub mod clippy_extra_report;
 pub mod devnet;
+pub mod docker_smoke;
+pub mod fsf_fit;
+pub mod json;
+pub mod multinode_smoke;
 pub mod prepush;
+pub mod report;
+pub mod rpc;
+pub mod sbom;
 pub mod seed_corpus;
+pub mod smoke_rpc;
+pub mod step_reachability;
+pub mod support;
 
 /// Find the repository root.
 ///

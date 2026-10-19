@@ -33,6 +33,15 @@ pub const MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024; // 16 MiB
 /// Hard lower bound to prevent nonsense "1 byte" domains.
 pub const MIN_CHUNK_SIZE: u32 = 1024; // 1 KiB
 
+/// Minimum operator bond for a storage deal opened in a block.
+///
+/// A block carries no domain parameters, so the in-block path uses this
+/// protocol constant. It equals the default `min_operator_bond`.
+///
+/// WIRING: the in-block deal-open executor passes this as the bond floor to
+/// `deal_open::open_deal_escrowed`; that step follows this one.
+pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
+
 /// Per-domain parameters for a `StorageAttestation` domain.
 ///
 /// The vision document calls these `StorageDomainParams` in §8.1. We follow
@@ -115,6 +124,14 @@ pub fn storage_params_bytes(params: &StorageDomainParams) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_in_block_min_bond_equals_the_default_domain_min_bond() {
+        assert_eq!(
+            STORAGE_MIN_OPERATOR_BOND,
+            StorageDomainParams::default().min_operator_bond
+        );
+    }
 
     fn good_params() -> StorageDomainParams {
         StorageDomainParams {

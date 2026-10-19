@@ -19,9 +19,12 @@ mod tests {
         any::<[u8; 32]>().prop_map(Address::from)
     }
 
-    /// The balance generator - between 0 and 10M.
+    /// The balance generator. The ceiling is the fixed supply divided by the
+    /// largest entry count, so 49 entries at the ceiling reach the supply cap
+    /// and the cap check below can fail. A ceiling of 10M base units could
+    /// never come near the 10^14 cap.
     fn arb_balance() -> impl Strategy<Value = u64> {
-        0..10_000_000u64
+        0..=(BUD_TOTAL_SUPPLY / 49)
     }
 
     proptest! {
@@ -78,17 +81,20 @@ mod tests {
             let mut state = AccountState::new();
             let addr = Address::from([0xAA; 32]);
             state.add_balance(&addr, initial_balance);
+            let supply_before = state.circulating_supply();
 
-            // The burn operation.
-            let _ = state.burn_from(&addr, burn_amount);
+            let burned = state.burn_from(&addr, burn_amount);
 
-            // The balance must not fall below 0.
-            let final_balance = state.get_balance(&addr);
-            assert!(
-                final_balance <= initial_balance,
-                "Balance should not increase after burn"
+            // The burn takes exactly what the balance can pay and nothing
+            // else, the balance never grows, and the supply falls by the
+            // burned amount.
+            let expected = burn_amount.min(initial_balance);
+            assert_eq!(burned, expected);
+            assert_eq!(state.get_balance(&addr), initial_balance - expected);
+            assert_eq!(
+                state.circulating_supply(),
+                supply_before - u128::from(burned)
             );
-            // Because saturating_sub is used, it cannot fall below 0.
         }
 
         /// INVARIANT 3: burn and mint consistency.

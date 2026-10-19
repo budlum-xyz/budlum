@@ -45,15 +45,30 @@ const MOVE_FN: &str = "try_add_balance";
 const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     (
         "src/chain/blockchain.rs",
-        13,
-        "bridge unlock and refund (existing locked money is returned), \
-         storage deal refunds and operator bond refunds (money that was \
-         already owed), and fee distribution (splitting a fee that was already paid). \
-         The two calls that raised the count from 11: the payer-fee refund on a \
-         failed bond lock in the reallocation escrow (returning a fee just \
-         debited in the same call), and `refund_opener_bond` (returning a \
-         challenge bond the opener posted earlier). Both put back money this \
-         ledger already took; none of these create new supply.",
+        9,
+        "nine calls, each one puts back or splits money this ledger already \
+         took from another place. \
+         Two in the relay unlock of a burned bridge transfer: the owner share \
+         and the relayer cut, which together equal the amount that the lock \
+         debited from the owner. \
+         One in `apply_bridge_sweep_to_state`: the refund of an expired lock \
+         to its owner, again the amount the lock debited. \
+         One in the storage reward tick: the operator is paid out of the fee \
+         that `open_deal` debited from the payer, as the difference of two \
+         cumulative totals so the sum cannot pass the escrowed fee. \
+         Two in `distribute_bud_boost_share_in_state`: the operator shares and \
+         the rounding dust of the 4 percent share that the NFT boost carved \
+         out of the booster's debit, and the shares plus dust equal exactly \
+         that pending amount. \
+         One in `refund_opener_bond`: the challenge bond that \
+         `debit_opener_bond` took from the opener. \
+         One in the storage deal expiry sweep: the operator bond that \
+         `open_deal` debited. \
+         One in the block-application storage prune: the operator bond that \
+         `open_deal` debited, returned when the owner burns the content and \
+         the prune ends the deal early. \
+         None of these create new supply. The bridge mint paths use \
+         `try_mint_balance` and are not on this list.",
     ),
     (
         "src/execution/executor.rs",

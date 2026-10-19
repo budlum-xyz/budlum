@@ -147,12 +147,37 @@ impl std::error::Error for GrantAuthError {}
 /// registry believes. Before this existed, `issuer` and `caller` were strings a
 /// caller typed into an RPC field, so any caller could hand out view grants for
 /// content it does not own.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GrantAuthorization {
     /// Account public key whose word this is.
+    #[serde(with = "owner_key_bytes")]
     pub owner_key: [u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
     /// ML-DSA-87 signature over the mutation digest.
     pub signature: Vec<u8>,
+}
+
+/// Serde for the public key as one length-prefixed byte string: serde derives
+/// arrays only up to 32 elements, and a key is 2592 bytes. A wrong length is
+/// a decode error.
+mod owner_key_bytes {
+    use crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        key: &[u8; ML_DSA_87_PUBLIC_KEY_LEN],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(key)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<[u8; ML_DSA_87_PUBLIC_KEY_LEN], D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        <[u8; ML_DSA_87_PUBLIC_KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| {
+            serde::de::Error::invalid_length(bytes.len(), &"an ML-DSA-87 public key of 2592 bytes")
+        })
+    }
 }
 
 impl GrantAuthorization {

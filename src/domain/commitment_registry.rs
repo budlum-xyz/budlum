@@ -1,19 +1,19 @@
 use crate::domain::types::{DomainCommitment, DomainId, Hash32};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DomainCommitmentRegistry {
     #[serde(with = "crate::core::map_keys")]
     commitments: BTreeMap<(DomainId, u64, u64), DomainCommitment>,
-    seen_blocks: HashSet<(DomainId, u64, Hash32)>,
+    seen_blocks: BTreeSet<(DomainId, u64, Hash32)>,
 }
 
 impl DomainCommitmentRegistry {
     pub fn new() -> Self {
         Self {
             commitments: BTreeMap::new(),
-            seen_blocks: HashSet::new(),
+            seen_blocks: BTreeSet::new(),
         }
     }
 
@@ -135,5 +135,23 @@ mod tests {
         let mut registry = DomainCommitmentRegistry::new();
         registry.insert(commitment(0, [1u8; 32])).unwrap();
         assert!(registry.insert(commitment(1, [1u8; 32])).is_err());
+    }
+
+    #[test]
+    fn serialized_bytes_do_not_depend_on_insert_order() {
+        let mut first = DomainCommitmentRegistry::new();
+        let mut second = DomainCommitmentRegistry::new();
+        for seq in 0..16u64 {
+            let hash = [u8::try_from(seq).unwrap_or(0) + 1; 32];
+            first.insert(commitment(seq, hash)).unwrap();
+        }
+        for seq in (0..16u64).rev() {
+            let hash = [u8::try_from(seq).unwrap_or(0) + 1; 32];
+            second.insert(commitment(seq, hash)).unwrap();
+        }
+        assert_eq!(
+            bincode::serialize(&first).unwrap(),
+            bincode::serialize(&second).unwrap()
+        );
     }
 }

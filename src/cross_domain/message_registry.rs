@@ -1,8 +1,13 @@
 use crate::core::hash::hash_fields_bytes;
-use crate::cross_domain::message::{CrossDomainMessage, MessageId};
+use crate::cross_domain::message::{CrossDomainMessage, MessageId, MessageKind};
 use crate::domain::types::Hash32;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Longest `Custom` kind tag the registry accepts. The registry keeps every
+/// message and hashes it into the state root, so an unbounded tag lets one
+/// message cost memory and hashing time without limit.
+const MAX_CUSTOM_KIND_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CrossDomainMessageRegistry {
@@ -20,6 +25,14 @@ impl CrossDomainMessageRegistry {
     pub fn insert(&mut self, message: CrossDomainMessage) -> Result<(), String> {
         if !message.verify_id() {
             return Err("Invalid message id".into());
+        }
+        if let MessageKind::Custom(tag) = &message.kind {
+            if tag.len() > MAX_CUSTOM_KIND_BYTES {
+                return Err(format!(
+                    "Custom message kind is {} bytes, the limit is {MAX_CUSTOM_KIND_BYTES}",
+                    tag.len()
+                ));
+            }
         }
         if self.messages.contains_key(&message.message_id) {
             return Err(format!(
@@ -78,7 +91,7 @@ mod tests {
         crate::core::address::Address::from(b)
     }
 
-    use crate::cross_domain::message::{CrossDomainMessageParams, MessageKind};
+    use crate::cross_domain::message::CrossDomainMessageParams;
 
     fn hash(label: &[u8]) -> Hash32 {
         crate::core::hash::hash_fields_bytes(&[label])
@@ -134,5 +147,28 @@ mod tests {
         r2.insert(make_message(1)).unwrap();
 
         assert_ne!(r1.root(), r2.root());
+    }
+
+    /// P05-F07: a Custom kind tag has a length bound.
+    #[test]
+    fn an_oversized_custom_kind_is_rejected() {
+        let mut registry = CrossDomainMessageRegistry::new();
+        let make = |len: usize| {
+            CrossDomainMessage::new(CrossDomainMessageParams {
+                source_domain: 1,
+                target_domain: 2,
+                source_height: 10,
+                event_index: 0,
+                nonce: 0,
+                sender: test_addr_from_byte(1u8),
+                recipient: test_addr_from_byte(2u8),
+                payload_hash: hash(b"payload"),
+                kind: MessageKind::Custom(vec![7u8; len]),
+                expiry_height: 100,
+            })
+        };
+        assert!(registry.insert(make(MAX_CUSTOM_KIND_BYTES + 1)).is_err());
+        assert!(registry.is_empty());
+        registry.insert(make(MAX_CUSTOM_KIND_BYTES)).unwrap();
     }
 }

@@ -793,75 +793,86 @@ pub fn reconstruct_object(
         )));
     }
 
-    // Verify every reconstructed shard against the manifest, and try another
-    // k-subset when more than k shards survive: taking only the first k
-    // survivors means a single corrupted low-index survivor makes a
-    // recoverable object look unrecoverable (security review, MEDIUM).
-    // The integrity check is the same one the old code ran after
-    // the single attempt; now a failure with spare survivors retries with a
-    // different subset instead of giving up.
-    let verify_all = |all: &[Vec<u8>]| -> Result<(), ErasureError> {
-        for (i, bytes) in all.iter().enumerate() {
-            let idx = i as u32;
-            let Some(reference) = manifest.shards.iter().find(|s| s.index == idx) else {
-                return Err(ErasureError::ShardMismatch(format!(
-                    "manifest has no shard with index {idx}"
-                )));
-            };
-            if reference.shard_id != crate::storage::ContentId::of(bytes) {
-                return Err(ErasureError::IntegrityFailure { index: idx });
-            }
+    // Check every survivor against the manifest before decoding. A survivor
+    // whose bytes do not hash to the manifest's ContentId for its index is
+    // corrupt and is dropped, however many there are, so recovery works
+    // whenever k clean shards remain. One decode follows, not one per
+    // survivor. If fewer than k clean shards remain while k or more
+    // survived, a survivor is corrupt: that is reported as an integrity
+    // failure rather than as lost shards.
+    let mut clean: Vec<Option<Vec<u8>>> = Vec::with_capacity(present.len());
+    let mut first_corrupt: Option<u32> = None;
+    let mut survivors = 0usize;
+    let mut clean_count = 0usize;
+    for (i, shard) in present.iter().enumerate() {
+        let idx = i as u32;
+        let Some(bytes) = shard else {
+            clean.push(None);
+            continue;
+        };
+        survivors += 1;
+        let genuine = manifest
+            .shards
+            .iter()
+            .find(|s| s.index == idx)
+            .is_some_and(|s| s.shard_id == crate::storage::ContentId::of(bytes));
+        if genuine {
+            clean_count += 1;
+            clean.push(Some(bytes.clone()));
+        } else {
+            first_corrupt.get_or_insert(idx);
+            clean.push(None);
         }
-        Ok(())
-    };
-
-    let live: Vec<usize> = present
-        .iter()
-        .enumerate()
-        .filter_map(|(i, shard)| shard.as_ref().map(|_| i))
-        .collect();
-
-    // Candidate attempt closures: the first try uses the whole live set; if
-    // reconstruction with all survivors fails or verifies wrong and there
-    // are spare survivors, drop one survivor at a time and retry.
-    let attempt = |masked: &mut Vec<Option<Vec<u8>>>| -> Result<Vec<u8>, ErasureError> {
-        let all = rs.reconstruct(masked)?;
-        verify_all(&all)?;
-        let k = rs.data_shards();
-        let mut out = Vec::with_capacity(k * all[0].len());
-        for shard in all.iter().take(k) {
-            out.extend_from_slice(shard);
-        }
-        out.truncate(manifest.content_size() as usize);
-        Ok(out)
-    };
-
-    let mut masked = present.to_vec();
-    match attempt(&mut masked) {
-        Ok(out) => return Ok(out),
-        Err(_) if live.len() > rs.data_shards() => {
-            // Spare survivors exist: retry, dropping each live shard in
-            // turn so a corrupted low-index survivor no longer blocks a
-            // recoverable object.
-            for &drop in &live {
-                let mut trial = present.to_vec();
-                trial[drop] = None;
-                if let Ok(out) = attempt(&mut trial) {
-                    return Ok(out);
-                }
-            }
-        }
-        Err(e) => return Err(e),
+    }
+    let k = rs.data_shards();
+    let corruption_blocks = clean_count < k && survivors >= k;
+    if let Some(index) = first_corrupt.filter(|_| corruption_blocks) {
+        return Err(ErasureError::IntegrityFailure { index });
     }
 
-    let all = rs.reconstruct(present)?;
-    verify_all(&all)?;
-    let k = rs.data_shards();
-    let mut out = Vec::with_capacity(k * all[0].len());
+    // The decoded shards are checked again: a clean survivor set must still
+    // decode to the manifest's shards.
+    let all = rs.reconstruct(&clean)?;
+    for (i, bytes) in all.iter().enumerate() {
+        let idx = i as u32;
+        let Some(reference) = manifest.shards.iter().find(|s| s.index == idx) else {
+            return Err(ErasureError::ShardMismatch(format!(
+                "manifest has no shard with index {idx}"
+            )));
+        };
+        if reference.shard_id != crate::storage::ContentId::of(bytes) {
+            return Err(ErasureError::IntegrityFailure { index: idx });
+        }
+    }
+    object_from_data_shards(manifest, &all, k)
+}
+
+/// Join the `k` data shards and trim the stripe padding.
+///
+/// `encode_object` cuts the object into `k` stripes of `ceil(len / k)` bytes,
+/// so the object length is above `(k - 1) * stripe` and at most `k * stripe`.
+/// A `content_size` outside that range does not describe these shards.
+/// `validate_untrusted` only bounds it by all shards including parity, so it
+/// is checked here, before the bytes are handed back.
+fn object_from_data_shards(
+    manifest: &ContentManifest,
+    all: &[Vec<u8>],
+    k: usize,
+) -> Result<Vec<u8>, ErasureError> {
+    let stripe = all.first().map_or(0, Vec::len);
+    let region = (k as u64).saturating_mul(stripe as u64);
+    let floor = (k as u64).saturating_sub(1).saturating_mul(stripe as u64);
+    let size = manifest.content_size();
+    if size > region || size <= floor {
+        return Err(ErasureError::ShardMismatch(format!(
+            "content_size {size} does not fit {k} data shards of {stripe} bytes"
+        )));
+    }
+    let mut out = Vec::with_capacity(region as usize);
     for shard in all.iter().take(k) {
         out.extend_from_slice(shard);
     }
-    out.truncate(manifest.content_size() as usize);
+    out.truncate(size as usize);
     Ok(out)
 }
 
@@ -1495,5 +1506,42 @@ mod tests {
             rs.parity_row(2, &data),
             Err(ErasureError::ShardMismatch(_))
         ));
+    }
+
+    /// P27-F06: a content_size that does not fit the data region is refused.
+    #[test]
+    fn a_content_size_outside_the_data_region_is_refused() {
+        let data: Vec<u8> = (0..=199u8).cycle().take(800).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let enc = encode_object(&data, scheme).unwrap();
+        let present: Vec<Option<Vec<u8>>> = enc.shards.iter().cloned().map(Some).collect();
+        // Shards hold 1200 bytes in all, the data region is 800.
+        let too_big = enc.to_manifest().unwrap().with_content_size(1_000).unwrap();
+        assert!(matches!(
+            reconstruct_object(&too_big, &present),
+            Err(ErasureError::ShardMismatch(_))
+        ));
+        let too_small = enc.to_manifest().unwrap().with_content_size(100).unwrap();
+        assert!(matches!(
+            reconstruct_object(&too_small, &present),
+            Err(ErasureError::ShardMismatch(_))
+        ));
+    }
+
+    /// P27-F07: two corrupted survivors must not block recovery while k clean
+    /// shards remain.
+    #[test]
+    fn two_corrupted_survivors_do_not_block_recovery() {
+        let data: Vec<u8> = (0..=199u8).cycle().take(800).collect();
+        let scheme = ErasureScheme { k: 4, n: 8 };
+        let enc = encode_object(&data, scheme).unwrap();
+        let manifest = enc.to_manifest().unwrap();
+        let mut present: Vec<Option<Vec<u8>>> = enc.shards.iter().cloned().map(Some).collect();
+        for i in [0usize, 5] {
+            if let Some(Some(s)) = present.get_mut(i) {
+                s[0] ^= 0xFF;
+            }
+        }
+        assert_eq!(reconstruct_object(&manifest, &present).unwrap(), data);
     }
 }

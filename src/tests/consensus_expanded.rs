@@ -48,14 +48,30 @@ fn test_blockchain_invalid_previous_hash() {
 
 #[test]
 fn test_blockchain_future_timestamp_buffer() {
+    use crate::consensus::ConsensusEngine;
     let consensus = Arc::new(PoWEngine::new(0));
-    let mut bc = Blockchain::new(consensus, None, 45262, None);
+    let mut bc = Blockchain::new(consensus.clone(), None, 45262, None);
     let mut block = Block::new(1, bc.chain[0].hash.clone(), vec![]);
     block.chain_id = 45262;
-    // Block far in the future (e.g., 1 hour) - most protocols reject.
-    block.timestamp = bc.chain[0].timestamp + 3600 * 1000 + 1000;
+    // One hour ahead of the real clock. The devnet genesis is dated 0, so a
+    // block dated from genesis would be in the past and never reach the
+    // drift gate.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    block.timestamp = now_ms + 3600 * 1000;
+    // The gate itself names the reason.
+    let reason = consensus
+        .validate_timestamp(&block, Some(&bc.chain[0]))
+        .unwrap_err();
+    assert!(
+        reason.0.contains("too far in the future"),
+        "wrong reason: {}",
+        reason.0
+    );
+    // And the chain refuses the block.
     let res = bc.validate_and_add_block(block).map(|_| ());
-    // A block with a future timestamp has to be refused - timestamp drift protection.
     assert!(
         res.is_err(),
         "future-timestamp block must be rejected (timestamp drift protection)"

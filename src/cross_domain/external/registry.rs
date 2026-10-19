@@ -453,17 +453,10 @@ impl ExternalDomainRegistry {
                 if let Some(reg) = self.domains.get_mut(&domain) {
                     reg.record.attestations_refused =
                         reg.record.attestations_refused.saturating_add(1);
-                    let already_faulted = reg.record.state == DomainState::Faulted;
-                    if !already_faulted && reg.record.state.serves() {
-                        let from = reg.record.state;
-                        reg.record.state = DomainState::Faulted;
-                        reg.record.history.push(StateEvent {
-                            at_height: height,
-                            from,
-                            to: DomainState::Faulted,
-                            reason: err.to_string(),
-                        });
-                    }
+                    // A refusal is a fact about the caller's input, not about
+                    // the domain: any caller can make one. It moves the
+                    // counters only. A domain faults through `mark_faulted`,
+                    // when a quorum round freezes in dispute.
                     if let Some(bond) = reg.provers.get_mut(&evidence.submitter) {
                         bond.refused = bond.refused.saturating_add(1);
                     }
@@ -529,6 +522,11 @@ impl ExternalDomainRegistry {
                 .domain
                 .as_bytes())));
         };
+        if !reg.record.state.serves() {
+            return Err(RegistryError::NotServing {
+                state: reg.record.state.as_str().to_string(),
+            });
+        }
         let slot = (attestation.height, attestation.evidence_version);
         if reg.attestations.contains_key(&slot) {
             return Err(RegistryError::DuplicateAttestation {
@@ -669,6 +667,15 @@ impl ExternalDomainRegistry {
         //    format. Without this check a replay would overwrite the first
         //    attestation while incrementing the accepted counter again.
         let domain = DomainKey::from_parts(&descriptor.id, &evidence.network);
+        // A domain that does not serve (Faulted after a dispute) takes no
+        // new attestation. Without this the fault would be a label only.
+        if let Some(reg) = self.domains.get(&domain) {
+            if !reg.record.state.serves() {
+                return Err(RegistryError::NotServing {
+                    state: reg.record.state.as_str().to_string(),
+                });
+            }
+        }
         if self.domains.get(&domain).is_some_and(|reg| {
             reg.attestations
                 .contains_key(&(evidence.declared_height, evidence.evidence_version))

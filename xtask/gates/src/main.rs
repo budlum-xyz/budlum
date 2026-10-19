@@ -1373,7 +1373,7 @@ fn main() {
         }
     };
 
-    let mut failed = 0usize;
+    let mut failed: Vec<&str> = Vec::new();
     for g in selected {
         let outcome = if self_test {
             (g.self_test)()
@@ -1388,12 +1388,20 @@ fn main() {
             Ok(msg) => println!("{msg}"),
             Err(msg) => {
                 eprintln!("FAIL [{}]: {msg}", g.name);
-                failed += 1;
+                failed.push(g.name);
             }
         }
     }
 
-    if failed > 0 {
+    if !failed.is_empty() {
+        // The last line of the log names every failing gate. A gate that
+        // fails early prints its finding mid-log, and the tail of the log is
+        // what a reader sees first.
+        eprintln!(
+            "FAILED: {} gate(s): {}. Search the log for `FAIL [` for each reason.",
+            failed.len(),
+            failed.join(", ")
+        );
         std::process::exit(1);
     }
 }

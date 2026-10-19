@@ -217,6 +217,28 @@ impl RelayerExternalResult {
         hasher.update([u8::from(self.success)]);
         if let Some(ref msg) = self.message {
             hasher.update(msg.message_id);
+            // P18-F03: the executor acts on these message fields (bridge
+            // state, unlock domain, correlation). Left out of the leaf, a
+            // valid anchored result could be reused with a different kind or
+            // correlation id and settle a transfer it never proved.
+            hasher.update(b"BDLM_RELAYER_RESULT_MSG_V1");
+            let kind_bytes =
+                bincode::serialize(&msg.kind).unwrap_or_else(|_| TX_SERIALIZE_FAILED.to_vec());
+            hasher.update(
+                u64::try_from(kind_bytes.len())
+                    .unwrap_or(u64::MAX)
+                    .to_be_bytes(),
+            );
+            hasher.update(&kind_bytes);
+            match msg.correlation_id {
+                Some(correlation) => {
+                    hasher.update([1u8]);
+                    hasher.update(correlation);
+                }
+                None => hasher.update([0u8]),
+            }
+            hasher.update(msg.source_domain.to_be_bytes());
+            hasher.update(msg.target_domain.to_be_bytes());
         }
         hasher.finalize().into()
     }
@@ -400,6 +422,13 @@ pub enum TransactionType {
     /// named in a doc comment here was resolved as if a transaction
     /// carried the whole registry.)
     Vault(crate::socialfi::VaultTx),
+    /// B.U.D. storage write, applied in block. The sender is `tx.from`; the
+    /// payload carries no actor field. The signing preimage commits every
+    /// field of the payload, a registered manifest included, so a relay
+    /// cannot change any of it without changing the hash. (Written without
+    /// naming types: the signing gate reads the enum
+    /// body's identifiers to resolve carried payload types.)
+    Storage(crate::domain::storage_tx::StorageTx),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1193,6 +1222,14 @@ impl Transaction {
             // `NftRegistry` beside their own map, which is exactly what the
             // registry arms already price.
             TransactionType::Vault(_) => schedule.contract_call_gas * 2,
+            // A registry write that re-derives the manifest id over every
+            // shard: priced like the registry arms beside it. Opening a deal
+            // also verifies the operator's consent signature, so it adds
+            // one signature check on top.
+            TransactionType::Storage(crate::domain::storage_tx::StorageTx::OpenDeal(_)) => {
+                schedule.contract_call_gas * 2 + schedule.gas_per_signature
+            }
+            TransactionType::Storage(_) => schedule.contract_call_gas * 2,
         };
         let signature_gas = if self.signature.is_some() {
             schedule.gas_per_signature
@@ -1421,6 +1458,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::StateUpdate { .. } => 44,
         TransactionType::Identity(_) => 45,
         TransactionType::Vault(_) => 46,
+        TransactionType::Storage(_) => 47,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -1497,6 +1535,136 @@ fn encode_vault_tx(tx: &crate::socialfi::VaultTx, out: &mut Vec<u8>) {
             put_u64(out, *member);
         }
     }
+}
+
+/// Canonical preimage of a storage transaction.
+///
+/// A manifest is committed whole: its id, the owner and sizes (written out
+/// again so the signature does not rely on the id alone), and then the
+/// shards, the scheme, the dictionary, the source, the edition and the
+/// encryption claim written out. A relay that rewrites any field changes
+/// the signing hash, so a bad copy cannot take the place of the honest one in
+/// a mempool that dedups on the hash.
+fn encode_storage_tx(tx: &crate::domain::storage_tx::StorageTx, out: &mut Vec<u8>) {
+    match tx {
+        crate::domain::storage_tx::StorageTx::RegisterManifest { manifest } => {
+            put_u8(out, 0);
+            out.extend_from_slice(manifest.manifest_id.as_bytes());
+            out.extend_from_slice(manifest.owner.as_bytes());
+            put_u64(out, manifest.content_size);
+            put_u64(out, manifest.total_size);
+            put_u32(out, manifest.shard_count);
+            encode_manifest_body(manifest, out);
+        }
+        crate::domain::storage_tx::StorageTx::DeclareOperatorClass { class } => {
+            put_u8(out, 1);
+            put_u8(
+                out,
+                match class {
+                    crate::domain::storage_deal::OperatorClass::AlwaysOn => 0,
+                    crate::domain::storage_deal::OperatorClass::Mobile => 1,
+                },
+            );
+        }
+        crate::domain::storage_tx::StorageTx::DeclareSelfHostPolicy {
+            manifest_id,
+            policy,
+            profile,
+        } => {
+            put_u8(out, 2);
+            put_fixed(out, manifest_id.as_bytes());
+            put_fixed(out, policy.content_id.as_bytes());
+            put_fixed(out, policy.owner.as_bytes());
+            put_u8(out, u8::from(policy.critical));
+            out.extend_from_slice(&policy.required_paid_replicas.to_le_bytes());
+            put_u8(out, u8::from(policy.self_host_allowed));
+            put_fixed(out, profile.owner.as_bytes());
+            put_fixed(out, &profile.device_commitment);
+            put_u8(
+                out,
+                match profile.availability {
+                    crate::storage::MobileAvailabilityClass::Opportunistic => 0,
+                    crate::storage::MobileAvailabilityClass::Scheduled => 1,
+                    crate::storage::MobileAvailabilityClass::AlwaysOnReplica => 2,
+                },
+            );
+            put_u64(out, profile.max_storage_bytes);
+            put_u8(out, u8::from(profile.metered_network_ok));
+            put_u8(out, u8::from(profile.battery_saver_aware));
+            put_u64(out, profile.last_seen_block);
+        }
+        crate::domain::storage_tx::StorageTx::OpenDeal(open) => {
+            put_u8(out, 3);
+            put_u32(out, open.domain_id);
+            put_fixed(out, open.manifest_id.as_bytes());
+            put_fixed(out, open.shard_id.as_bytes());
+            put_fixed(out, open.operator.as_bytes());
+            put_u8(out, open.replica_index);
+            put_u64(out, open.start_epoch);
+            put_u64(out, open.end_epoch);
+            put_u64(out, open.economics.operator_bond);
+            put_u64(out, open.economics.fee_per_byte_epoch);
+            put_bytes(out, &open.merkle_proof);
+            put_fixed(out, &open.storage_root);
+            // The consent is committed whole, signature included, so a relay
+            // cannot strip it or swap in another valid one.
+            put_fixed(out, &open.operator_consent.owner_key);
+            put_bytes(out, &open.operator_consent.signature);
+        }
+        crate::domain::storage_tx::StorageTx::AnswerCodingAudit {
+            audit_id,
+            data_column,
+            parity_byte,
+        } => {
+            put_u8(out, 4);
+            put_u64(out, *audit_id);
+            put_bytes(out, data_column);
+            put_u8(out, *parity_byte);
+        }
+    }
+}
+
+/// Every field of a manifest that the id and the fields above leave out or
+/// fold ambiguously, written explicitly. The id preimage appends the source
+/// bytes and the dictionary bytes without tags, so two different splits of
+/// source and dictionary can share an id; writing both here keeps them apart.
+fn encode_manifest_body(manifest: &crate::storage::ContentManifest, out: &mut Vec<u8>) {
+    put_u64(out, manifest.shards.len() as u64);
+    for shard in &manifest.shards {
+        put_u32(out, shard.index);
+        put_fixed(out, shard.shard_id.as_bytes());
+        put_u32(out, shard.size);
+        put_u8(
+            out,
+            match shard.kind {
+                crate::storage::ShardKind::Data => 0,
+                crate::storage::ShardKind::Parity => 1,
+            },
+        );
+    }
+    put_u32(out, manifest.erasure.k);
+    put_u32(out, manifest.erasure.n);
+    match &manifest.dictionary_id {
+        None => put_u8(out, 0),
+        Some(dictionary) => {
+            put_u8(out, 1);
+            put_fixed(out, dictionary.as_bytes());
+        }
+    }
+    // The source commitment is injective: a variant tag plus the digest of
+    // the recipe, so a spec is committed without spelling it out.
+    put_bytes(
+        out,
+        &crate::storage::generated::source_commitment_bytes(&manifest.source),
+    );
+    put_u8(
+        out,
+        match manifest.edition {
+            crate::storage::BudStorageEdition::Classic => 1,
+            crate::storage::BudStorageEdition::Three => 3,
+        },
+    );
+    put_u8(out, manifest.encryption.commitment_tag());
 }
 
 /// Canonical preimage of an identity transaction. Every pub field of every
@@ -1928,6 +2096,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         }
         TransactionType::Identity(identity_tx) => encode_identity_tx(identity_tx, out),
         TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
+        TransactionType::Storage(storage_tx) => encode_storage_tx(storage_tx, out),
     }
 }
 
@@ -2677,5 +2846,60 @@ mod v29_signing_tests {
             tx.hash = tx.calculate_hash();
             assert!(!tx.verify(), "the amount is signed");
         }
+    }
+}
+
+#[cfg(test)]
+mod relayer_result_leaf_tests {
+    use super::*;
+    use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams, MessageKind};
+
+    fn result_with(kind: MessageKind, correlation: Option<[u8; 32]>) -> RelayerExternalResult {
+        let params = CrossDomainMessageParams {
+            source_domain: 1,
+            target_domain: 2,
+            source_height: 10,
+            event_index: 0,
+            nonce: 7,
+            sender: Address::from([1u8; 32]),
+            recipient: Address::from([2u8; 32]),
+            payload_hash: [3u8; 32],
+            kind,
+            expiry_height: 100,
+        };
+        let message = match correlation {
+            Some(c) => CrossDomainMessage::new_correlated(params, c),
+            None => CrossDomainMessage::new(params),
+        };
+        RelayerExternalResult {
+            chain: ExternalChain::Solana,
+            tx_hash: "0xabc".into(),
+            success: true,
+            message: Some(message),
+            receipt_proof: vec![1],
+            external_state_root: [9u8; 32],
+        }
+    }
+
+    /// P18-F03: a valid anchored result cannot be reused under another
+    /// message kind, correlation id, or domain pair.
+    #[test]
+    fn leaf_binds_message_kind_correlation_and_domains() {
+        let lock = result_with(MessageKind::BridgeLock, None);
+        let burn = result_with(MessageKind::BridgeBurn, None);
+        assert_ne!(lock.result_leaf(), burn.result_leaf());
+
+        let uncorrelated = result_with(MessageKind::BridgeBurn, None);
+        let correlated = result_with(MessageKind::BridgeBurn, Some([5u8; 32]));
+        assert_ne!(uncorrelated.result_leaf(), correlated.result_leaf());
+
+        let mut other_domain = result_with(MessageKind::BridgeBurn, None);
+        if let Some(ref mut m) = other_domain.message {
+            m.target_domain = 3;
+        }
+        assert_ne!(uncorrelated.result_leaf(), other_domain.result_leaf());
+
+        let same = result_with(MessageKind::BridgeBurn, None);
+        assert_eq!(uncorrelated.result_leaf(), same.result_leaf());
     }
 }

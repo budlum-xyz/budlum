@@ -126,7 +126,7 @@ mod tests {
 
         let digest = digest_of(&observations);
         println!("GENESIS_HASH={digest}");
-        // The devnet block-0 hash `ops/scripts/docker-smoke-mainnet.sh` pins
+        // The devnet block-0 hash the `docker-smoke-mainnet` tool pins
         // as `DEVNET_GENESIS_HASH`; printed so a header-preimage change can
         // be carried into the pin from this test's output.
         let devnet = GenesisConfig::for_network(Network::Devnet).build_genesis_block();

@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 754;
+pub const TRACE_WIDTH: usize = 854;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -97,6 +97,9 @@ pub const COL_MEM_SAME: usize = 54;
 /// image. The prover cannot invent one: changing any seeded byte changes the
 /// commitment, and the commitment is a public input the verifier already
 /// holds.
+///
+/// The flag is allowed on an active row only, and only on the first row of an
+/// address block: the row after a row of the same address cannot carry it.
 pub const COL_MEM_IS_INIT: usize = 730;
 
 /// Running fold of every initial-image row, checked against
@@ -215,13 +218,10 @@ pub const COL_IS_PRIVACY_COMMIT: usize = 686;
 pub const COL_IS_NULLIFIER_CHECK: usize = 687;
 pub const COL_IS_SUM_CONSERVATION: usize = 688;
 
-// VerifyInference AIR binding.
-// Opcode 0x1F selector + expansion row witness columns.
-// VerifyInference always returns 0 on mainnet (disabled until
-// Full STARK verification AIR is implemented). These columns ensure
-// The opcode is properly constrained in the AIR: the selector is bound
-// To opcode 0x1F, the result is always 0, and expansion rows carry
-// Consistent commitment chain witnesses.
+// Opcode 0x1F is reserved. The selector and the expansion flag are forced
+// to zero on every row, so no proof of a trace with this opcode exists.
+// The columns 689 to 693 stay in the layout so the width and the proof
+// format do not change.
 pub const COL_IS_VERIFY_INFERENCE: usize = 689;
 pub const COL_INFERENCE_IS_EXPAND: usize = 690; // 1 on expansion rows (8 follow-up rows)
 pub const COL_INFERENCE_MODEL_COMMIT: usize = 691; // model commitment limb (u64 → Goldilocks)
@@ -400,6 +400,11 @@ pub const COL_RD_IDX_INV: usize = 734;
 /// read of a non-zero value, folded into an accumulator the AIR checks against
 /// a public input. Anything a prover invents about the starting registers has
 /// to survive that check.
+///
+/// The flag is allowed on an active row only, and only on the first row of a
+/// register block: the row after a row of the same register cannot carry it.
+/// Before that rule a padding row or the middle of a block could carry the
+/// flag and add an entry to the folded image that no first read backs.
 pub const COL_REG_IS_INIT: usize = 735;
 
 /// Running fold of every initial register row, checked against limbs 2 and 3
@@ -429,7 +434,7 @@ pub const COL_REG_INIT_ACC: usize = 736;
 /// and the AIR was doing it with
 ///
 /// ```text
-/// is_real_mem_op = (is_load + is_store) * rs1_idx
+/// is_real_mem_op = (is_load + is_store) * rs1_idx  (before the fix below)
 /// ```
 ///
 /// which is not a flag but a register number. On `Store r0, r7, r2` the
@@ -447,10 +452,12 @@ pub const COL_REG_INIT_ACC: usize = 736;
 /// ```text
 /// z            = rs1_idx * rs1_idx_inv     (boolean)
 /// rs1_idx * (1 - z) == 0                   (rs1_idx != 0 forces z = 1)
-/// is_real_mem_op = (is_load + is_store) * z
+/// is_real_mem_op = is_load * z + is_store
 /// ```
 ///
-/// so the multiplier is one or zero and never a register index.
+/// so the multiplier is one or zero and never a register index. A `Store`
+/// always writes memory, so it is not scaled by `z`; only `Load` with base r0
+/// is load-immediate.
 pub const COL_RS1_IDX_INV: usize = 737;
 
 /// Inverse witnesses proving a bit decomposition is the canonical one.
@@ -603,6 +610,57 @@ pub const COL_SYSCALL_IS_3: usize = 744;
 /// the fixed weight `pre_active` is used, an honest prover produces an
 /// unbalanced LogUp sum and gets `InvalidProof`.
 pub const COL_PROG_MULT: usize = 753;
+
+/// The register table order witness: 32 bits of the step from this register
+/// row to the next one.
+///
+/// The table must be sorted by `(idx, time)` with `time = clk * 4 + sub_clk`,
+/// and every step must be strictly forward. For a pair of active rows the step
+/// is `time' - time - 1` when both rows name one register, and
+/// `idx' - idx - 1` when they do not. The bits sum to that step, so the step
+/// is a 32 bit number. A step that goes backward is a field element near
+/// 2^64 and has no 32 bit form. This is sound because `idx` is below 32 and
+/// `time` is below 2^32, so no honest or forged step wraps into range.
+pub const COL_REG_ORD_BITS_BASE: usize = 754;
+pub const REG_ORD_BITS: usize = 32;
+
+/// Inverse witness pinning `COL_MEM_SAME` to the cell equality it claims.
+///
+/// Same shape as [`COL_REG_SAME_INV`], over `diff = next_key - key`:
+/// `diff * inv` is boolean, `diff * (1 - diff * inv) == 0`, and `m_same` equals
+/// `1 - diff * inv`. Before this column a prover could write zero for
+/// `m_same` on two rows of one address, turning off the value continuity
+/// between them. The first read of the next block then only had to be zero.
+pub const COL_MEM_SAME_INV: usize = 786;
+
+/// The table a memory row belongs to: 1 memory, 2 stack, 3 storage.
+///
+/// The three regions used to share table id 1 and sit apart only by address
+/// bases (`1 << 60` and `2 << 60`). Nothing bounded a `Load` address, so a
+/// pointer of `1 << 60` named a stack cell. The id is now a column of its own
+/// and a part of the sort key, and the address below it is 32 bit.
+pub const COL_MEM_TID: usize = 787;
+
+/// The 32 bits of `COL_MEM_ADDR`. The address is a number inside its table, so
+/// it is below `2^32`. The VM refuses a memory larger than that, and the stack
+/// and storage addresses are far below it.
+///
+/// The bound is what keeps the sort key `tid * 2^32 + addr` a 34 bit number.
+/// Without it a field element near `p` is an address, and a step between two
+/// keys can wrap into the 34 bit range in the wrong direction.
+pub const COL_MEM_ADDR_BITS_BASE: usize = 788;
+pub const MEM_ADDR_BITS: usize = 32;
+
+/// The memory table order witness: 34 bits of the step from this row to the
+/// next one.
+///
+/// Rows are sorted by `(key, clk)` with `key = tid * 2^32 + addr`. For a pair
+/// of active rows the step is `clk' - clk - 1` when both rows name one cell and
+/// `key' - key - 1` when they do not. A step that goes backward is a field
+/// element near `2^64` and has no 34 bit form. This holds because `clk` is
+/// below `MAX_TRACE_LEN` (`2^20`, see `adapter.rs`) and `key` is below `2^34`.
+pub const COL_MEM_ORD_BITS_BASE: usize = 820;
+pub const MEM_ORD_BITS: usize = 34;
 
 /// Fold constants for [`COL_REG_INIT_ACC`].
 ///
@@ -769,7 +827,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             + is_poseidon.clone()
             + is_syscall.clone()
             + is_verify_merkle.clone()
-            + is_verify_inference.clone()
             + is_privacy_commit.clone()
             + is_nullifier_check.clone()
             + is_sum_conservation.clone();
@@ -805,7 +862,11 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         builder.assert_bool(is_poseidon.clone());
         builder.assert_bool(is_syscall.clone());
         builder.assert_bool(is_verify_merkle.clone());
-        builder.assert_bool(is_verify_inference.clone());
+        // Reserved opcode 0x1F: the selector and the expansion flag are zero
+        // on every row. A row that carries opcode 0x1F then matches no
+        // selector, so the exclusivity sum below cannot reach one.
+        builder.assert_zero(is_verify_inference.clone());
+        builder.assert_zero(cur[COL_INFERENCE_IS_EXPAND].into());
         builder.assert_bool(is_privacy_commit.clone());
         builder.assert_bool(is_nullifier_check.clone());
         builder.assert_bool(is_sum_conservation.clone());
@@ -889,6 +950,47 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         builder
             .when_transition()
             .assert_zero(is_cpu.clone() * (nxt_pc.clone() - next_pc.clone()));
+
+        // Control flow: where `next_pc` may point.
+        //
+        // The line above only says the next row sits at this row's `next_pc`.
+        // `next_pc` itself was constrained for the jumps, calls, `Push`,
+        // `Pop` and `Halt`, and for `Ret` through the stack tuple; every
+        // other opcode left it to the prover, so a fall-through could land
+        // anywhere the program table has a row and the instructions in
+        // between were never executed. Two rules close it.
+        //
+        // A row stays on its pc only while it is part of a multi-row
+        // instruction: a `VerifyMerkle` row whose successor is one of its
+        // own expansion rows. The expansion rows are
+        // the only rows that share a pc, and each expansion row has to be
+        // preceded by a row of the same opcode, so the flag cannot be raised
+        // anywhere else.
+        let exp_merkle: AB::Expr = cur[COL_VM_MERKLE_IS_EXPAND].into();
+        let nxt_exp_merkle: AB::Expr = nxt[COL_VM_MERKLE_IS_EXPAND].into();
+        builder.when_last_row().assert_one(is_halt.clone());
+        builder.when_first_row().assert_zero(exp_merkle.clone());
+        builder
+            .when_transition()
+            .assert_zero(nxt_exp_merkle.clone() * (one.clone() - is_verify_merkle.clone()));
+        let stays_on_pc: AB::Expr = is_verify_merkle.clone() * nxt_exp_merkle;
+        builder
+            .when_transition()
+            .assert_zero(stays_on_pc.clone() * (next_pc.clone() - pc.clone()));
+        // Everything else that does not branch, stop or return falls through
+        // to the next instruction. The branching opcodes keep their own rules
+        // below (`Jmp`, `Call`, `Jnz`) or are bound through the stack tuple
+        // (`Ret`); `Halt` is held in place by its own transition.
+        builder.when_transition().assert_zero(
+            (one.clone()
+                - is_jmp.clone()
+                - is_jnz.clone()
+                - is_call.clone()
+                - is_ret.clone()
+                - is_halt.clone()
+                - stays_on_pc)
+                * (next_pc.clone() - pc.clone() - one.clone()),
+        );
 
         // Cpu_active transition and boundary constraints
         let cpu_active: AB::Expr = cur[COL_CPU_ACTIVE].into();
@@ -1361,6 +1463,32 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // because to a reader it looks like it is being checked.
         let on_original_row: AB::Expr =
             is_verify_merkle.clone() * (one.clone() - is_expand.clone());
+
+        // The block is closed on both sides.
+        //
+        // An expansion row has to be a `VerifyMerkle` row: the flag switches
+        // off the program lookup, the register argument and the gas charge,
+        // and without this it could be raised on any other opcode.
+        builder.assert_zero(is_expand.clone() * (one.clone() - is_verify_merkle.clone()));
+        // An original row has to be followed by its expansion rows: the root
+        // comparison on it is only worth anything when the path behind it was
+        // walked, and a path that is not there cannot have been.
+        builder
+            .when_transition()
+            .assert_zero(on_original_row.clone() * (one.clone() - nxt_is_expand.clone()));
+        // And the path runs to its end: the last row of an expansion block is
+        // round 63, so a block cannot stop after the first few rounds.
+        builder.when_transition().assert_zero(
+            is_expand.clone()
+                * (one.clone() - nxt_is_expand.clone())
+                * (merkle_round.clone() - AB::Expr::from(AB::F::from_u8(63))),
+        );
+        // The path buffer address is one value for the whole path. Each
+        // expansion row derives its memory address from `imm`, and `imm` on an
+        // expansion row is exempt from the program table.
+        builder.when_transition().assert_zero(
+            is_verify_merkle.clone() * nxt_is_expand.clone() * (nxt[COL_IMM].into() - imm.clone()),
+        );
         let merkle_final_expected: AB::Expr = cur[COL_MERKLE_FINAL_FLAG].into();
         let nxt_merkle_final_expected: AB::Expr = nxt[COL_MERKLE_FINAL_FLAG].into();
 
@@ -1524,13 +1652,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             + is_poseidon.clone() * ten.clone()
             // Expansion rows reuse opcode 0x1E but must not re-charge gas.
             + is_verify_merkle.clone() * (one.clone() - is_expand.clone()) * ten.clone()
-            // VerifyInference: same cost (10) as VerifyMerkle, charged on
-            // the original row only. (2026-08-28) This term was missing:
-            // the VM charged 10 but the AIR fell through to the unit-cost
-            // fallback, so every VerifyInference proof failed at OOD.
-            + is_verify_inference.clone()
-                * (one.clone() - cur[COL_INFERENCE_IS_EXPAND].into())
-                * ten.clone()
             // Privacy opcodes share Poseidon gas cost (10).
             + is_privacy_commit.clone() * ten.clone()
             + is_nullifier_check.clone() * ten.clone()
@@ -1550,7 +1671,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 - is_swrite.clone()
                 - is_poseidon.clone()
                 - is_verify_merkle.clone()
-                - is_verify_inference.clone()
                 - is_privacy_commit.clone()
                 - is_nullifier_check.clone()
                 - is_sum_conservation.clone()
@@ -2027,6 +2147,39 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // column is load bearing.
         builder.assert_bool(r_same.clone());
 
+        // The table is a prefix: active rows first, padding after. Every rule
+        // of the table is gated by `r_active * nr_active`, so an inactive row
+        // between two active ones would switch all of them off at once.
+        builder.assert_bool(r_active.clone());
+        builder
+            .when_transition()
+            .assert_zero((one.clone() - r_active.clone()) * nr_active.clone());
+
+        // Sorted by `(idx, time)`, strictly. LogUp compares multisets and
+        // cannot see the order, so without this a write could be moved to
+        // another time and a read paired with it.
+        {
+            let four = AB::Expr::from(AB::F::from_u64(4));
+            let clk: AB::Expr = cur[COL_REG_CLK].into();
+            let sub: AB::Expr = cur[COL_REG_SUB_CLK].into();
+            let nclk: AB::Expr = nxt[COL_REG_CLK].into();
+            let nsub: AB::Expr = nxt[COL_REG_SUB_CLK].into();
+            let time = clk * four.clone() + sub;
+            let ntime = nclk * four + nsub;
+            let step = r_same.clone() * (ntime - time - one.clone())
+                + (one.clone() - r_same.clone()) * (nr_idx.clone() - r_idx.clone() - one.clone());
+            let mut bits_sum = AB::Expr::from(AB::F::ZERO);
+            for i in 0..REG_ORD_BITS {
+                let bit: AB::Expr = cur[COL_REG_ORD_BITS_BASE + i].into();
+                builder.assert_bool(bit.clone());
+                bits_sum += bit * AB::Expr::from(AB::F::from_u64(1u64 << i));
+            }
+            builder
+                .when_transition()
+                .when(r_active.clone() * nr_active.clone())
+                .assert_eq(step, bits_sum);
+        }
+
         builder.when_transition().assert_zero(
             r_active.clone()
                 * nr_active.clone()
@@ -2067,6 +2220,13 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // An initial-image row describes the register file before the program
         // ran, so it is a read by definition.
         builder.assert_zero(r_is_init.clone() * r_is_write.clone());
+        // The flag lives on active rows, and only on the first row of a
+        // register block. The fold below is still the weak one described at
+        // `COL_REG_INIT_ACC`; the step that replaces its constants closes that.
+        builder.assert_zero(r_is_init.clone() * (one.clone() - r_active.clone()));
+        builder.when_transition().assert_zero(
+            r_active.clone() * nr_active.clone() * r_same.clone() * nr_is_init.clone(),
+        );
 
         builder.when_first_row().assert_zero(
             r_active.clone()
@@ -2135,6 +2295,85 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // boolean outright means they do not have to.
         builder.assert_bool(m_same.clone());
 
+        // A cell is a table id and an address inside it. The sort key joins
+        // them: `tid * 2^32 + addr`. The address is below `2^32` (bits below),
+        // so two cells have one key only if they are one cell.
+        let two_pow_32 = AB::Expr::from(AB::F::from_u64(1u64 << 32));
+        let m_tid: AB::Expr = cur[COL_MEM_TID].into();
+        let nm_tid: AB::Expr = nxt[COL_MEM_TID].into();
+        let m_key = m_tid.clone() * two_pow_32.clone() + m_addr.clone();
+        let nm_key = nm_tid * two_pow_32 + nm_addr.clone();
+
+        // `m_same` is pinned to the cell equality it claims, with the
+        // inverse witness pattern the register table uses above. The zero rule
+        // below made a cleared flag cost the prover a value, but it still let
+        // a read return zero after a write of the same cell.
+        let mem_pair_live = m_active.clone() * nm_active.clone();
+        let mem_addr_diff = nm_key.clone() - m_key.clone();
+        let mem_same_inv: AB::Expr = cur[COL_MEM_SAME_INV].into();
+        let mem_diff_z = mem_addr_diff.clone() * mem_same_inv;
+        builder
+            .when_transition()
+            .when(mem_pair_live.clone())
+            .assert_bool(mem_diff_z.clone());
+        builder
+            .when_transition()
+            .when(mem_pair_live.clone())
+            .assert_zero(mem_addr_diff * (one.clone() - mem_diff_z.clone()));
+        builder
+            .when_transition()
+            .when(mem_pair_live.clone())
+            .assert_eq(m_same.clone(), one.clone() - mem_diff_z);
+
+        // The table is a prefix: active rows first, padding after. Every rule
+        // of the table is gated by `m_active * nm_active`, so an inactive row
+        // between two active ones would switch all of them off at once.
+        builder.assert_bool(m_active.clone());
+        builder
+            .when_transition()
+            .assert_zero((one.clone() - m_active.clone()) * nm_active.clone());
+
+        // An active row sits in one of the three tables: 1 memory, 2 stack,
+        // 3 storage. Padding rows keep a zero.
+        builder.assert_zero(
+            m_active.clone()
+                * (m_tid.clone() - one.clone())
+                * (m_tid.clone() - AB::Expr::from(AB::F::from_u64(2)))
+                * (m_tid.clone() - AB::Expr::from(AB::F::from_u64(3))),
+        );
+
+        // The address is a 32 bit number. Every row, padding included: a
+        // padding row holds zero and its bits are zero.
+        {
+            let mut bits_sum = AB::Expr::from(AB::F::ZERO);
+            for i in 0..MEM_ADDR_BITS {
+                let bit: AB::Expr = cur[COL_MEM_ADDR_BITS_BASE + i].into();
+                builder.assert_bool(bit.clone());
+                bits_sum += bit * AB::Expr::from(AB::F::from_u64(1u64 << i));
+            }
+            builder.assert_eq(m_addr.clone(), bits_sum);
+        }
+
+        // Sorted by `(key, clk)`, strictly. LogUp compares multisets and
+        // cannot see the order, so without this a write could be moved to
+        // another time, and the events of one cell could be split in two
+        // blocks with a zero read at the start of the second.
+        {
+            let nclk: AB::Expr = nxt[COL_MEM_CLK].into();
+            let step = m_same.clone() * (nclk - m_clk.clone() - one.clone())
+                + (one.clone() - m_same.clone()) * (nm_key.clone() - m_key.clone() - one.clone());
+            let mut bits_sum = AB::Expr::from(AB::F::ZERO);
+            for i in 0..MEM_ORD_BITS {
+                let bit: AB::Expr = cur[COL_MEM_ORD_BITS_BASE + i].into();
+                builder.assert_bool(bit.clone());
+                bits_sum += bit * AB::Expr::from(AB::F::from_u64(1u64 << i));
+            }
+            builder
+                .when_transition()
+                .when(mem_pair_live)
+                .assert_eq(step, bits_sum);
+        }
+
         builder.when_transition().assert_zero(
             m_active.clone()
                 * nm_active.clone()
@@ -2160,6 +2399,13 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // An initial-image row is a read by definition; it describes memory as
         // it was before the program ran.
         builder.assert_zero(m_is_init.clone() * m_is_write.clone());
+        // The flag lives on active rows, and only on the first row of an
+        // address block. The fold below is still the weak one described at
+        // `COL_MEM_INIT_ACC`; the step that replaces its constants closes that.
+        builder.assert_zero(m_is_init.clone() * (one.clone() - m_active.clone()));
+        builder.when_transition().assert_zero(
+            m_active.clone() * nm_active.clone() * m_same.clone() * nm_is_init.clone(),
+        );
 
         builder.when_first_row().assert_zero(
             m_active.clone()
@@ -2179,8 +2425,11 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // Fold every initial-image row into the accumulator.
         //
         //   acc' = acc                       when the next row is not seeded
-        //   acc' = acc*BETA + addr*GAMMA + val   when it is
+        //   acc' = acc*BETA + key*GAMMA + val    when it is
         //
+        // The key is the sort key `tid * 2^32 + addr`, not the bare address.
+        // Memory cell 5 and storage slot 5 share an address, and a bare
+        // address would give them one term, so one root would stand for both.
         // The first row starts the fold from zero, so an empty image gives a
         // zero accumulator and matches an all-zero `initial_state_root` - the
         // behaviour every existing program relies on.
@@ -2190,15 +2439,14 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let acc: AB::Expr = cur[COL_MEM_INIT_ACC].into();
             let nacc: AB::Expr = nxt[COL_MEM_INIT_ACC].into();
             let nm_val_e: AB::Expr = nxt[COL_MEM_VAL].into();
-            let nm_addr_e: AB::Expr = nxt[COL_MEM_ADDR].into();
 
             // First row: acc is the fold of that row alone, or zero.
             builder.when_first_row().assert_eq(
                 acc.clone(),
-                m_is_init.clone() * (m_addr.clone() * gamma.clone() + m_val.clone()),
+                m_is_init.clone() * (m_key * gamma.clone() + m_val.clone()),
             );
 
-            let folded = acc.clone() * beta + nm_addr_e * gamma + nm_val_e;
+            let folded = acc.clone() * beta + nm_key * gamma + nm_val_e;
             builder
                 .when_transition()
                 .assert_eq(nacc, acc.clone() + nm_is_init.clone() * (folded - acc));
@@ -2299,12 +2547,44 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             builder.assert_zero(rd_idx.clone() * (one.clone() - rd_idx_z.clone()));
             let rd_written = rd_val_new.clone() * rd_idx_z;
 
+            // Only the opcodes that write `rd` publish a write. Every other
+            // row reads `rd` at its current value, so the register table, and
+            // not the prover, decides what that value is. The selectors are
+            // mutually exclusive, so the sum is boolean. VerifyInference is
+            // left out: its selector is held at zero above and the opcode is
+            // outside `is_real_op`.
+            // Some selectors were moved into `when(...)` above, so they are
+            // read from the row again here.
+            let sel = |col: usize| -> AB::Expr { cur[col].into() };
+            let writes_rd = sel(COL_IS_ADD)
+                + sel(COL_IS_SUB)
+                + sel(COL_IS_MUL)
+                + sel(COL_IS_DIV)
+                + sel(COL_IS_INV)
+                + sel(COL_IS_AND)
+                + sel(COL_IS_NOT)
+                + sel(COL_IS_LOAD)
+                + sel(COL_IS_POP)
+                + sel(COL_IS_EQ)
+                + sel(COL_IS_NEQ)
+                + sel(COL_IS_LT)
+                + sel(COL_IS_GT)
+                + sel(COL_IS_LTE)
+                + sel(COL_IS_GTE)
+                + sel(COL_IS_SREAD)
+                + sel(COL_IS_POSEIDON)
+                + sel(COL_IS_SYSCALL)
+                + sel(COL_IS_VERIFY_MERKLE)
+                + sel(COL_IS_PRIVACY_COMMIT)
+                + sel(COL_IS_NULLIFIER_CHECK)
+                + sel(COL_IS_SUM_CONSERVATION);
+
             let c_rd = term(
                 table_reg.clone(),
                 clk_rd,
                 rd_idx.clone(),
                 rd_written,
-                one.clone(),
+                writes_rd,
             );
             let c_reg = term(
                 table_reg.clone(),
@@ -2363,7 +2643,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let rs1_idx_z = rs1_idx.clone() * rs1_idx_inv;
             builder.assert_bool(rs1_idx_z.clone());
             builder.assert_zero(rs1_idx.clone() * (one.clone() - rs1_idx_z.clone()));
-            let is_real_mem_op = (is_load.clone() + is_store.clone()) * rs1_idx_z;
+            let is_real_mem_op = is_load.clone() * rs1_idx_z + is_store.clone();
             let is_stack_op = is_push.clone() + is_pop.clone() + is_call.clone() + is_ret.clone();
             let is_storage_op = is_sread.clone() + is_swrite.clone();
             // A `VerifyMerkle` expansion row reads one sibling word from the
@@ -2387,12 +2667,17 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 + is_storage_op.clone()
                 + is_merkle_mem_op.clone();
 
-            let stack_base = AB::Expr::from(AB::F::from_u64(1 << 60));
-            let storage_base = AB::Expr::from(AB::F::from_u64(2 << 60));
-            let stack_addr = stack_base.clone()
-                + (is_push.clone() + is_call.clone()) * cur_stack_ptr.clone()
+            // The region is the table id on the bus, so the address is the
+            // address inside the table: the stack slot, or the storage slot.
+            let stack_addr = (is_push.clone() + is_call.clone()) * cur_stack_ptr.clone()
                 + (is_pop.clone() + is_ret.clone()) * (cur_stack_ptr.clone() - one.clone());
-            let storage_addr = storage_base + cur[COL_IMM].into();
+            let storage_addr: AB::Expr = cur[COL_IMM].into();
+            let two_val_tid = AB::Expr::from(AB::F::from_u64(2));
+            let three_val_tid = AB::Expr::from(AB::F::from_u64(3));
+            let cpu_mem_tid = is_real_mem_op.clone()
+                + is_merkle_mem_op.clone()
+                + two_val_tid * is_stack_op.clone()
+                + three_val_tid * is_storage_op.clone();
 
             // The path buffer starts at the instruction's immediate. The key
             // is the word at `path_addr`; expansion round `r` reads the
@@ -2424,14 +2709,14 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 + is_merkle_key_read * cur[COL_VM_MERKLE_KEY].into();
 
             let c_cpu_mem = term(
-                one.clone(),
+                cpu_mem_tid,
                 clk.clone(),
                 final_mem_addr.clone(),
                 cpu_mem_val.clone(),
                 is_write.clone(),
             );
             let c_mem = term(
-                one.clone(),
+                m_tid.clone(),
                 m_clk.clone(),
                 m_addr.clone(),
                 m_val.clone(),
@@ -2773,71 +3058,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(is_gte)
             .assert_eq(rd_val_new.clone(), one.clone() - cmp_lt_raw.clone());
 
-        // --- (2026-07-23; kademe 3a 2026-08-28): VerifyInference AIR binding ---
-        //
-        // VerifyInference (0x1F) commitment-chain binding (kademe 3a):
-        //   rd = 1 iff output_c == Poseidon(model_c, input_c), else 0
-        //   (fail-closed). The equality constraint lives with the Poseidon
-        //   gadget below (this opcode's main row feeds the shared gadget).
-        //   This block ensures:
-        //   1. Selector is bound to opcode 0x1F (malicious prover cannot
-        //      set is_verify_inference=1 on non-0x1F rows or =0 on 0x1F rows).
-        //   2. Expansion rows (COL_INFERENCE_IS_EXPAND=1) carry consistent
-        //      commitment chain: model/input/output commitments are constant
-        //      across all 8 expansion rows of a single VerifyInference step.
-        //   3. Expansion rows have next_pc = pc (stay on same instruction)
-        //      until the last expansion row which hands off to pc+1.
-        {
-            let opcode_vi: AB::Expr = AB::Expr::from(AB::F::from_u64(0x1F));
-            let opcode_row: AB::Expr = cur[COL_OPCODE].into();
-            // 1. Selector ↔ opcode binding
-            builder.assert_zero(
-                is_verify_inference.clone() * (opcode_row.clone() - opcode_vi.clone()),
-            );
-
-            // Proof-type pinning (imm in {0,1}) lives in 2b below; expansion
-            // rows carry imm = round 0..7 and are excluded there via
-            // (1 - inf_is_expand).
-
-            // 3. Expansion row witness columns
-            let inf_is_expand: AB::Expr = cur[COL_INFERENCE_IS_EXPAND].into();
-            let inf_model: AB::Expr = cur[COL_INFERENCE_MODEL_COMMIT].into();
-            let inf_input: AB::Expr = cur[COL_INFERENCE_INPUT_COMMIT].into();
-            let inf_output: AB::Expr = cur[COL_INFERENCE_OUTPUT_COMMIT].into();
-            let nxt_inf_is_expand: AB::Expr = nxt[COL_INFERENCE_IS_EXPAND].into();
-            let nxt_inf_model: AB::Expr = nxt[COL_INFERENCE_MODEL_COMMIT].into();
-            let nxt_inf_input: AB::Expr = nxt[COL_INFERENCE_INPUT_COMMIT].into();
-            let nxt_inf_output: AB::Expr = nxt[COL_INFERENCE_OUTPUT_COMMIT].into();
-
-            // Inf_is_expand booleanity
-            builder.assert_bool(inf_is_expand.clone());
-
-            // Inf_is_expand can only be 1 when is_verify_inference = 1
-            // (expansion rows reuse the VerifyInference selector)
-            builder
-                .assert_zero(inf_is_expand.clone() * (one.clone() - is_verify_inference.clone()));
-
-            // Commitment chain consistency: when current and next rows are
-            // Both expansion rows (inf_is_expand=1 on both), the commitments
-            // Must be identical across consecutive expansion rows.
-            let both_expand = inf_is_expand.clone() * nxt_inf_is_expand.clone();
-            builder.assert_zero(both_expand.clone() * (inf_model.clone() - nxt_inf_model.clone()));
-            builder.assert_zero(both_expand.clone() * (inf_input.clone() - nxt_inf_input.clone()));
-            builder.assert_zero(both_expand * (inf_output.clone() - nxt_inf_output.clone()));
-
-            // 2b. Proof-type pinning (2026-08-28): on non-expansion
-            // VerifyInference rows the immediate must be 0 (STARK) or 1
-            // (SNARK wrap) - any other value is an undefined proof type and
-            // is rejected. Expansion rows carry imm = round 0..7 and are
-            // excluded via (1 - inf_is_expand); the proof type is only
-            // meaningful on the original row.
-            let imm_col: AB::Expr = cur[COL_IMM].into();
-            let vi_main = is_verify_inference.clone() * (one.clone() - inf_is_expand.clone());
-            builder
-                .when(vi_main)
-                .assert_zero(imm_col.clone() * (imm_col.clone() - one.clone()));
-        }
-
         // --- Poseidon hash gadget (4 rounds, alpha=7) ---
         // Shared by:
         //   * Poseidon opcode (0x19): state=[rs1, rs2, 0..] ; rd = out
@@ -2851,16 +3071,8 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let p_commit: AB::Expr = is_privacy_commit.clone();
             let p_null: AB::Expr = is_nullifier_check.clone();
             let p_sw: AB::Expr = is_swrite.clone();
-            // VerifyInference main row (kademe 3a): non-expansion rows feed
-            // the gadget with state = [model_c, input_c, 0..0].
-            let p_vi: AB::Expr =
-                is_verify_inference.clone() * (AB::Expr::ONE - cur[COL_INFERENCE_IS_EXPAND].into());
             // Any row that needs the Poseidon gadget.
-            let p: AB::Expr = p_poseidon.clone()
-                + p_commit.clone()
-                + p_null.clone()
-                + p_sw.clone()
-                + p_vi.clone();
+            let p: AB::Expr = p_poseidon.clone() + p_commit.clone() + p_null.clone() + p_sw.clone();
 
             // Opcode ↔ selector binding (malicious prover cannot flip selector).
             let opcode_at: AB::Expr = cur[COL_OPCODE].into();
@@ -2899,13 +3111,11 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let expected_s0 = p_poseidon.clone() * rs1_val.clone()
                 + p_commit.clone() * rs1_val.clone()
                 + p_null.clone() * rs2_val.clone()
-                + p_sw.clone() * imm.clone()
-                + p_vi.clone() * cur[COL_INFERENCE_MODEL_COMMIT].into();
+                + p_sw.clone() * imm.clone();
             let expected_s1 = p_poseidon.clone() * rs2_val.clone()
                 + p_commit.clone() * rs2_val.clone()
                 + p_null.clone() * domain_nullifier
-                + p_sw.clone() * rs1_val.clone()
-                + p_vi.clone() * cur[COL_INFERENCE_INPUT_COMMIT].into();
+                + p_sw.clone() * rs1_val.clone();
             let expected_s2 = p_commit.clone() * imm.clone() + p_sw.clone() * acc_lane(0);
             let expected_s3 = p_sw.clone() * acc_lane(1);
             let expected_s4 = p_sw.clone() * acc_lane(2);
@@ -3012,35 +3222,6 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             builder
                 .when(p_poseidon.clone() + p_commit.clone())
                 .assert_eq(rd_val_new.clone(), poseidon_out.clone());
-
-            // VerifyInference (kademe 3a): rd = 1 iff the commitment chain is
-            // valid, output_c == Poseidon(model_c, input_c); fail-closed,
-            // any other chain answers 0. Same per-row equality witness as
-            // NullifierCheck (COL_EQ_DIFF_INV); the selectors are mutually
-            // exclusive so reusing the witness column is sound.
-            {
-                let inf_out: AB::Expr = cur[COL_INFERENCE_OUTPUT_COMMIT].into();
-                let diff = poseidon_out.clone() - inf_out;
-                let diff_inv: AB::Expr = cur[COL_EQ_DIFF_INV].into();
-                let is_nonzero = diff.clone() * diff_inv.clone();
-                // Kademe 3a: equality witness constraints gated on the raw
-                // selector (derece 1) - the prover writes the EQ_DIFF_INV
-                // witness on every VerifyInference row, expansion rows
-                // included (there poseidon_out collapses to zero, so the
-                // witness is inverse(0 - output_c)). The rd equality uses
-                // p_vi so only the main row carries the actual rd semantics.
-                builder
-                    .when(is_verify_inference.clone())
-                    .assert_bool(is_nonzero.clone());
-                builder
-                    .when(is_verify_inference.clone())
-                    .assert_zero(diff.clone() * (AB::Expr::ONE - is_nonzero.clone()));
-                // Rd = 1 iff equal iff is_nonzero == 0
-                builder
-                    .when(p_vi.clone())
-                    .assert_eq(rd_val_new.clone(), AB::Expr::ONE - is_nonzero.clone());
-                builder.when(p_vi.clone()).assert_bool(rd_val_new.clone());
-            }
 
             // NullifierCheck: rd is boolean equality of (poseidon_out == rs1/claimed).
             // Reuse COL_EQ_DIFF_INV as inverse witness for (out - claimed).

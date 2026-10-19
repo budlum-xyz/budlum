@@ -233,24 +233,21 @@ impl VaultRegistry {
     /// members only; leaves cannot contain anything, so the walk terminates
     /// at the forest's bottom and the cycle test stays honest at its top.
     fn reaches(&self, from: u64, target: u64) -> bool {
+        // Explicit stack: nesting depth is user-controlled, so native
+        // recursion here could overflow the stack of every applying node.
         let mut seen = BTreeSet::new();
-        self.reaches_walk(from, target, &mut seen)
-    }
-
-    fn reaches_walk(&self, from: u64, target: u64, seen: &mut BTreeSet<u64>) -> bool {
-        if from == target {
-            return true;
-        }
-        if !seen.insert(from) {
-            return false;
-        }
-        let Some(members) = self.members.get(&from) else {
-            return false;
-        };
-        for member in members {
-            if self.folders.contains(member) && self.reaches_walk(*member, target, seen) {
+        let mut stack = vec![from];
+        while let Some(node) = stack.pop() {
+            if node == target {
                 return true;
             }
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(members) = self.members.get(&node) else {
+                continue;
+            };
+            stack.extend(members.iter().copied().filter(|m| self.folders.contains(m)));
         }
         false
     }
@@ -398,6 +395,23 @@ pub fn execute_vault_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cycle_check_survives_a_very_deep_folder_chain() {
+        // BLG-0712: the walk must not use native recursion.
+        let depth: u64 = 200_000;
+        let mut vault = VaultRegistry::new();
+        for id in 1..=depth {
+            vault.folders.insert(id);
+            vault.members.insert(id, Vec::new());
+        }
+        for id in 1..depth {
+            if let Some(list) = vault.members.get_mut(&id) {
+                list.push(id + 1);
+            }
+        }
+        assert_eq!(vault.add_member(depth, 1), Err(VaultError::Cycle(depth, 1)));
+    }
 
     fn two_folders() -> (VaultRegistry, u64, u64) {
         let mut v = VaultRegistry::new();

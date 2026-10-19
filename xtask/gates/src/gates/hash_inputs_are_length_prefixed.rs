@@ -57,7 +57,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Roots holding shipped library code.
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates/wallet-core"];
 
 /// Types whose byte length is not fixed, so concatenation is ambiguous.
 const VARIABLE_TYPES: &[&str] = &["Vec<u8>", "String", "BoundedBytes", "Vec<String>"];
@@ -811,3 +811,21 @@ const TEST_FIXTURE: &str = "pub fn fixture(k: &Keys, hasher: &mut Sha3_256) {
     hasher.update(&k.a);
     hasher.update(&k.b);
 }";
+
+#[cfg(test)]
+mod scan_root_tests {
+    use super::SCAN_ROOTS;
+
+    /// A scan root that is not a directory is skipped without a word, so a
+    /// wrong path turns the gate off for that tree.
+    #[test]
+    fn every_scan_root_is_a_directory_of_the_repository() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for root in SCAN_ROOTS {
+            assert!(
+                repo.join(root).is_dir(),
+                "scan root `{root}` is not a directory of the repository"
+            );
+        }
+    }
+}

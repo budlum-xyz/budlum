@@ -3,7 +3,7 @@
 //! WIRING: unwired - reached through the `verify` entry points re-exported by
 //! bud-proof, not by name from this workspace.
 
-use p3_air::symbolic::SymbolicAirBuilder;
+use p3_air::symbolic::{get_symbolic_constraints, SymbolicAirBuilder};
 use p3_air::{Air, RowWindow};
 use p3_challenger::{CanObserve, FieldChallenger};
 use p3_commit::{Pcs, PolynomialSpace};
@@ -246,6 +246,58 @@ where
     }
 }
 
+/// True when the AIR adds constraints once the auxiliary (LogUp) trace exists.
+///
+/// The answer comes from the AIR itself, never from the proof. The proof
+/// decides only whether it carries an aux commitment, and a prover that drops
+/// it would switch every constraint behind the aux guard off.
+fn air_requires_aux<F, A>(air: &A, layout: AirLayout) -> bool
+where
+    F: Field,
+    A: Air<SymbolicAirBuilder<F>>,
+{
+    let with_aux = AirLayout {
+        permutation_width: 3,
+        num_permutation_challenges: 3,
+        ..layout
+    };
+    // A width of 0 would hand the AIR an empty permutation window, and the
+    // symbolic builder panics when the AIR reads it. One column and no
+    // challenges keep the aux guard off, which is what "without aux" means.
+    let without_aux = AirLayout {
+        permutation_width: 1,
+        num_permutation_challenges: 0,
+        ..layout
+    };
+    let n_with = get_symbolic_constraints(air, with_aux).len();
+    let n_without = get_symbolic_constraints(air, without_aux).len();
+    n_with > n_without
+}
+
+/// Shape of the opened aux rows.
+///
+/// With an aux trace the local row must have the expected width. The next row
+/// must have it when the AIR reads next rows, and must be absent otherwise:
+/// `verify_constraints` feeds the next row to the AIR, so an opening the
+/// commitment round never asked for must not be accepted (P15-F05).
+fn aux_openings_match<T>(
+    has_aux_trace: bool,
+    main_next: bool,
+    local: Option<&[T]>,
+    next: Option<&[T]>,
+    expected_width: usize,
+) -> bool {
+    if !has_aux_trace {
+        return local.is_none() && next.is_none();
+    }
+    let next_ok = if main_next {
+        next.is_some_and(|v| v.len() == expected_width)
+    } else {
+        next.is_none()
+    };
+    local.is_some_and(|v| v.len() == expected_width) && next_ok
+}
+
 #[instrument(skip_all)]
 pub fn verify<SC, A>(
     config: &SC,
@@ -336,6 +388,21 @@ where
     }
 
     let has_aux_trace = commitments.aux_trace.is_some();
+    // P15-F01: the proof must not choose to run without the aux trace. An AIR
+    // whose constraints depend on it (BudAir: register, memory and program
+    // LogUps) is checked in full or not at all. Only a proof that already
+    // lacks the aux commitment pays for the extra symbolic evaluation.
+    if !has_aux_trace {
+        let base_layout = AirLayout {
+            preprocessed_width,
+            main_width: air.width(),
+            num_public_values: air.num_public_values(),
+            ..Default::default()
+        };
+        if air_requires_aux::<Val<SC>, A>(air, base_layout) {
+            return Err(VerificationError::InvalidProofShape);
+        }
+    }
     let permutation_width = if has_aux_trace { 3 } else { 0 };
     let layout = AirLayout {
         preprocessed_width,
@@ -384,19 +451,13 @@ where
         opened_values.trace_next.is_none()
     };
     let expected_aux_base_width = permutation_width * SC::Challenge::DIMENSION;
-    let aux_shape_ok = if has_aux_trace {
-        opened_values
-            .aux_trace_local
-            .as_ref()
-            .is_some_and(|v| v.len() == expected_aux_base_width)
-            && (!main_next
-                || opened_values
-                    .aux_trace_next
-                    .as_ref()
-                    .is_some_and(|v| v.len() == expected_aux_base_width))
-    } else {
-        opened_values.aux_trace_local.is_none() && opened_values.aux_trace_next.is_none()
-    };
+    let aux_shape_ok = aux_openings_match(
+        has_aux_trace,
+        main_next,
+        opened_values.aux_trace_local.as_deref(),
+        opened_values.aux_trace_next.as_deref(),
+        expected_aux_base_width,
+    );
     let valid_shape = opened_values.trace_local.len() == air_width
         && trace_next_ok
         && aux_shape_ok
@@ -656,3 +717,38 @@ where
 }
 
 impl<PcsErr> std::error::Error for VerificationError<PcsErr> where PcsErr: core::fmt::Debug {}
+
+#[cfg(test)]
+mod tests {
+    use p3_goldilocks::Goldilocks;
+
+    use super::*;
+    use crate::plonky3_air::{BudAir, PREPROCESSED_WIDTH};
+
+    #[test]
+    fn aux_next_row_is_refused_without_main_next() {
+        let row: &[u8] = &[1, 2, 3];
+        assert!(aux_openings_match(true, true, Some(row), Some(row), 3));
+        assert!(aux_openings_match(true, false, Some(row), None, 3));
+        assert!(!aux_openings_match(true, false, Some(row), Some(row), 3));
+        assert!(!aux_openings_match(true, true, Some(row), None, 3));
+        assert!(!aux_openings_match(true, false, Some(row), None, 2));
+        assert!(aux_openings_match::<u8>(false, true, None, None, 3));
+        assert!(!aux_openings_match(false, true, Some(row), None, 3));
+    }
+
+    #[test]
+    fn bud_air_requires_the_aux_trace() {
+        let air = BudAir {
+            num_steps: 1,
+            program: vec![0],
+        };
+        let layout = AirLayout {
+            preprocessed_width: PREPROCESSED_WIDTH,
+            main_width: <BudAir as p3_air::BaseAir<Goldilocks>>::width(&air),
+            num_public_values: <BudAir as p3_air::BaseAir<Goldilocks>>::num_public_values(&air),
+            ..Default::default()
+        };
+        assert!(air_requires_aux::<Goldilocks, BudAir>(&air, layout));
+    }
+}

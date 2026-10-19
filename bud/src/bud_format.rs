@@ -186,8 +186,10 @@ impl BudHeader {
             chunk_count: 1,
             dictionary_hash: [0u8; 32],
             tier: 1,
-            erasure_k: 18,
-            erasure_p: 3,
+            // v1 stores no erasure code: (0, 0) says so. Real repair needs
+            // bud_format_erasure and a stored layout (see BLG-0568).
+            erasure_k: 0,
+            erasure_p: 0,
             version_number: 1,
             previous_version_hash: [0u8; 32],
         }
@@ -224,9 +226,6 @@ fn hash(data: &[u8]) -> [u8; 32] {
     h.update(data);
     h.finalize().into()
 }
-fn xor(a: &[u8], b: &[u8]) -> Vec<u8> {
-    a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
-}
 
 impl BudFile {
     pub fn encode(
@@ -242,12 +241,12 @@ impl BudFile {
         let cid = hash(&payload);
         let orig = hash(original);
         let ch = hash(&payload);
-        let p1 = xor(&payload, &vec![0xAA; payload.len()]);
-        let p2 = xor(&payload, &vec![0x55; payload.len()]);
+        // No parity: the old shards were the payload XOR a constant, each one
+        // a full copy and no k-of-n code.
         let chunk = BudChunk {
             hash: ch,
             data: payload,
-            parity_shards: vec![p1, p2],
+            parity_shards: vec![],
         };
         let hdr = BudHeader::new(class, mime, w, h, cid, orig, pipe_id, flags);
         Self {
@@ -284,6 +283,10 @@ impl BudFile {
             total += chunk.data.len();
             if total > Self::MAX_DECOMPRESSED_BYTES {
                 return Err("K-BUD-STREAM: total > 100MB (OOM)");
+            }
+            // Never hand unverified bytes to the sink.
+            if hash(&chunk.data) != chunk.hash {
+                return Err("K-BUD-STREAM: chunk hash mismatch");
             }
             sink(&chunk.data)?;
         }
@@ -349,9 +352,19 @@ impl BudFile {
             return Err("K-BUD: no chunks and no files");
         }
         if !self.chunks.is_empty() {
+            // v1 holds exactly one chunk. A second chunk would carry bytes that
+            // no hash covers, and decode returns the first chunk only.
+            if self.chunks.len() != 1 || self.header.chunk_count != 1 {
+                return Err("K-BUD: v1 holds exactly one chunk");
+            }
             let payload = &self.chunks[0].data;
             if hash(payload) != self.header.content_id {
                 return Err("K-BUD: content_id mismatch");
+            }
+            // The stored chunk hash is recomputed here, so the root below is
+            // the hash of the data and not a stored field.
+            if hash(payload) != self.chunks[0].hash {
+                return Err("K-BUD: chunk hash mismatch");
             }
             if self.merkle_root != self.chunks[0].hash {
                 return Err("K-BUD: merkle mismatch");
@@ -373,13 +386,25 @@ impl BudFile {
         }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// Serialise without silent truncation: a field that does not fit its
+    /// length prefix is an error (BLG-0574).
+    fn try_to_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        fn len16(n: usize) -> Result<[u8; 2], &'static str> {
+            u16::try_from(n)
+                .map(u16::to_le_bytes)
+                .map_err(|_| "K-BUD: field over 65535 bytes")
+        }
+        fn len32(n: usize) -> Result<[u8; 4], &'static str> {
+            u32::try_from(n)
+                .map(u32::to_le_bytes)
+                .map_err(|_| "K-BUD: field over 4 GiB")
+        }
         let mut out = Vec::new();
         out.extend_from_slice(&BUD_MAGIC);
         out.extend_from_slice(&self.header.version.to_le_bytes());
         out.extend_from_slice(&(self.header.format_class as u16).to_le_bytes());
         let mime = self.header.original_mime.as_bytes();
-        out.extend_from_slice(&(mime.len() as u16).to_le_bytes());
+        out.extend_from_slice(&len16(mime.len())?);
         out.extend_from_slice(mime);
         out.extend_from_slice(&self.header.width.to_le_bytes());
         out.extend_from_slice(&self.header.height.to_le_bytes());
@@ -396,34 +421,48 @@ impl BudFile {
         out.extend_from_slice(&self.header.previous_version_hash);
         for chunk in &self.chunks {
             out.extend_from_slice(&chunk.hash);
-            out.extend_from_slice(&(chunk.data.len() as u32).to_le_bytes());
+            out.extend_from_slice(&len32(chunk.data.len())?);
             out.extend_from_slice(&chunk.data);
-            out.push(chunk.parity_shards.len() as u8);
+            let parity_count = u8::try_from(chunk.parity_shards.len())
+                .map_err(|_| "K-BUD: over 255 parity shards")?;
+            out.push(parity_count);
             for p in &chunk.parity_shards {
-                out.extend_from_slice(&(p.len() as u32).to_le_bytes());
+                out.extend_from_slice(&len32(p.len())?);
                 out.extend_from_slice(p);
             }
         }
         out.extend_from_slice(&self.merkle_root);
         if let Some(sig) = &self.pq_signature {
-            out.extend_from_slice(&(sig.len() as u16).to_le_bytes());
+            out.extend_from_slice(&len16(sig.len())?);
             out.extend_from_slice(sig);
         } else {
             out.extend_from_slice(&0u16.to_le_bytes());
         }
         if let Some(kw) = &self.encryption_key_wrapped {
-            out.extend_from_slice(&(kw.len() as u16).to_le_bytes());
+            out.extend_from_slice(&len16(kw.len())?);
             out.extend_from_slice(kw);
         } else {
             out.extend_from_slice(&0u16.to_le_bytes());
         }
         if let Some(token) = &self.pollen_consent_token {
-            out.extend_from_slice(&(token.len() as u16).to_le_bytes());
+            out.extend_from_slice(&len16(token.len())?);
             out.extend_from_slice(token.as_bytes());
         } else {
             out.extend_from_slice(&0u16.to_le_bytes());
         }
-        out
+        // Optional trailing field: the PQ verification key. It is written only
+        // when present, so a file without a key keeps its old bytes.
+        if let Some(pk) = &self.pq_public_key {
+            out.extend_from_slice(&len16(pk.len())?);
+            out.extend_from_slice(pk);
+        }
+        Ok(out)
+    }
+
+    /// Infallible form. A field that does not fit gives an empty vector,
+    /// which `from_bytes` refuses; use `try_to_bytes` to see the reason.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.try_to_bytes().unwrap_or_default()
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
@@ -450,7 +489,9 @@ impl BudFile {
         if data.len() < off + mime_len {
             return Err("K-BUD: mime");
         }
-        let mime = String::from_utf8_lossy(&data[off..off + mime_len]).to_string();
+        let mime = std::str::from_utf8(&data[off..off + mime_len])
+            .map_err(|_| "K-BUD: mime not utf8")?
+            .to_string();
         off += mime_len;
         if data.len() < off + 4 + 4 + 32 + 32 + 2 + 2 + 4 + 32 + 3 + 4 + 32 {
             return Err("K-BUD: hdr");
@@ -573,11 +614,33 @@ impl BudFile {
             if data.len() < off + tok_len {
                 return Err("K-BUD: token");
             }
-            let t = String::from_utf8_lossy(&data[off..off + tok_len]).to_string();
+            let t = std::str::from_utf8(&data[off..off + tok_len])
+                .map_err(|_| "K-BUD: token not utf8")?
+                .to_string();
+            off += tok_len;
             Some(t)
         } else {
             None
         };
+        let pq_pk = if off < data.len() {
+            if data.len() < off + 2 {
+                return Err("K-BUD: pklen");
+            }
+            let pk_len = u16::from_le_bytes([data[off], data[off + 1]]) as usize;
+            off += 2;
+            if pk_len == 0 || data.len() < off + pk_len {
+                return Err("K-BUD: pk");
+            }
+            let k = data[off..off + pk_len].to_vec();
+            off += pk_len;
+            Some(k)
+        } else {
+            None
+        };
+        // Two byte strings must not parse to one file.
+        if off != data.len() {
+            return Err("K-BUD: trailing bytes");
+        }
         let hdr = BudHeader {
             version,
             format_class: class,
@@ -601,7 +664,7 @@ impl BudFile {
             chunks,
             merkle_root: merkle,
             pq_signature: pq_sig,
-            pq_public_key: None,
+            pq_public_key: pq_pk,
             encryption_key_wrapped: kw,
             pollen_consent_token: token,
             files: vec![],
@@ -623,7 +686,28 @@ pub struct RatioCandidate {
 pub struct MultiRatioConsensus;
 
 impl MultiRatioConsensus {
+    /// The ratio of a candidate, measured from its payload. A hand-written
+    /// literal is a claim, not a measurement (BLG-0573).
+    fn measured_ratio(original_len: usize, payload_len: usize) -> f64 {
+        if payload_len == 0 {
+            return 1.0;
+        }
+        original_len as f64 / payload_len as f64
+    }
+
     pub fn candidates_for_format(class: BudFormatClass, original: &[u8]) -> Vec<RatioCandidate> {
+        Self::claimed_candidates(class, original)
+            .into_iter()
+            .map(|mut c| {
+                // The listed ratio is the target of the pipe. Nothing here
+                // compresses, so the ratio that counts is the measured one.
+                c.ratio = Self::measured_ratio(original.len(), c.payload.len());
+                c
+            })
+            .collect()
+    }
+
+    fn claimed_candidates(class: BudFormatClass, original: &[u8]) -> Vec<RatioCandidate> {
         // Generation was removed from the lists: no regenerative, optical
         // prompt, diffusion or code recipe. Deterministic and proven only, with
         // no repo dependency.
@@ -869,6 +953,96 @@ impl BudGates {
 mod tests {
     use super::*;
     #[test]
+    fn v1_encode_stores_no_fake_parity() {
+        let payload = b"payload bytes".to_vec();
+        let f = BudFile::encode(
+            &payload,
+            BudFormatClass::Json,
+            "application/json",
+            0,
+            0,
+            3,
+            BudFlags::new(true, true, false, false, false, false),
+            payload.clone(),
+        );
+        assert!(f.chunks[0].parity_shards.is_empty());
+        assert_eq!((f.header.erasure_k, f.header.erasure_p), (0, 0));
+        // The file is about one payload, not three.
+        assert!(f.to_bytes().len() < 3 * payload.len() + 300);
+        let back = BudFile::from_bytes(&f.to_bytes()).unwrap();
+        assert_eq!(back.decode().unwrap(), payload);
+    }
+    fn one_chunk_file() -> BudFile {
+        BudFile::encode(
+            b"abc",
+            BudFormatClass::Json,
+            "application/json",
+            0,
+            0,
+            3,
+            BudFlags::new(true, true, false, false, false, false),
+            b"abc".to_vec(),
+        )
+    }
+    #[test]
+    fn decode_rejects_unauthenticated_extra_chunk() {
+        let mut f = one_chunk_file();
+        assert!(f.decode().is_ok());
+        f.chunks.push(BudChunk {
+            hash: [9u8; 32],
+            data: b"smuggled".to_vec(),
+            parity_shards: vec![],
+        });
+        f.header.chunk_count = 2;
+        assert!(f.decode().is_err());
+        // The streaming path refuses the chunk whose hash does not match.
+        let mut seen = Vec::new();
+        let r = f.decode_streaming(|c| {
+            seen.extend_from_slice(c);
+            Ok(())
+        });
+        assert!(r.is_err());
+        assert!(!seen.windows(8).any(|w| w == b"smuggled"));
+    }
+    #[test]
+    fn decode_recomputes_the_chunk_hash() {
+        let mut f = one_chunk_file();
+        f.chunks[0].hash = [7u8; 32];
+        f.merkle_root = [7u8; 32];
+        assert!(f.decode().is_err());
+    }
+    #[test]
+    fn a_pq_signed_file_survives_serialisation() {
+        let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed(&[5u8; 32].into());
+        let mut f = one_chunk_file();
+        f.header.flags = BudFlags(BudFlags::PQ_SIGNED);
+        f.sign_pq(&sk).unwrap();
+        let back = BudFile::from_bytes(&f.to_bytes()).unwrap();
+        assert_eq!(back.pq_public_key, f.pq_public_key);
+        assert_eq!(back.decode().unwrap(), b"abc");
+    }
+    #[test]
+    fn writer_refuses_truncation_and_reader_refuses_noise() {
+        let mut f = one_chunk_file();
+        f.header.original_mime = "a".repeat(70_000);
+        assert!(f.try_to_bytes().is_err());
+        assert!(BudFile::from_bytes(&f.to_bytes()).is_err());
+        let mut f = one_chunk_file();
+        f.chunks[0].parity_shards = vec![vec![1u8]; 256];
+        assert!(f.try_to_bytes().is_err());
+        let f = one_chunk_file();
+        let good = f.try_to_bytes().unwrap();
+        // Trailing bytes are refused.
+        let mut trailing = good.clone();
+        trailing.push(0);
+        assert!(BudFile::from_bytes(&trailing).is_err());
+        // Invalid UTF-8 in the mime is refused, not normalised.
+        let mut bad = good.clone();
+        bad[14] = 0xFF;
+        assert!(BudFile::from_bytes(&bad).is_err());
+        assert!(BudFile::from_bytes(&good).is_ok());
+    }
+    #[test]
     fn generative_removed() {
         let f = BudFile::encode(
             b"data",
@@ -977,12 +1151,21 @@ mod tests {
     }
     #[test]
     fn multi_ratio_best_all_files() {
-        let best_video =
-            MultiRatioConsensus::candidates_for_format(BudFormatClass::Video, b"video");
-        assert!(best_video.iter().any(|c| c.ratio >= 100.0));
-        let best_image =
-            MultiRatioConsensus::candidates_for_format(BudFormatClass::Image, b"image");
-        assert!(best_image.iter().any(|c| c.ratio >= 20.0));
+        // The payloads are the original bytes, so every measured ratio is 1.
+        for (class, data) in [
+            (BudFormatClass::Video, &b"video"[..]),
+            (BudFormatClass::Image, &b"image"[..]),
+            (BudFormatClass::Log, &b"log log log"[..]),
+        ] {
+            let cands = MultiRatioConsensus::candidates_for_format(class, data);
+            assert!(!cands.is_empty());
+            for c in cands {
+                assert_eq!(c.ratio, 1.0, "{}: ratio must be measured", c.pipe_name);
+            }
+        }
+        // A claim of 13750x is no longer selectable.
+        let log = MultiRatioConsensus::candidates_for_format(BudFormatClass::Log, b"x");
+        assert!(MultiRatioConsensus::select_best(log, 100.0).is_none());
     }
     #[test]
     fn from_bytes_never_panics_on_truncation() {

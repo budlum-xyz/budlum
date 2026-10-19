@@ -186,6 +186,8 @@ pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, WalletError> {
         })?;
         words.push(word);
     }
+    // The bits are the entropy, one byte per bit.
+    bits.zeroize();
 
     Ok(words.join(" "))
 }
@@ -229,11 +231,14 @@ pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
     for j in 0..checksum_bits {
         checksum = (checksum << 1) | (bits[entropy_bits + j] as u8);
     }
+    // Zeroizing a Vec empties it, so the bits are wiped after the last read.
+    bits.zeroize();
 
     // Verify checksum
     let hash = Sha256::digest(&entropy);
     let expected_checksum = hash[0] >> (8 - checksum_bits);
     if checksum != expected_checksum {
+        entropy.zeroize();
         return Err(WalletError::InvalidMnemonic(
             "checksum mismatch - invalid mnemonic".into(),
         ));
@@ -616,8 +621,7 @@ pub struct Wallet {
 // state does not outlive the wallet either.
 impl Drop for Wallet {
     fn drop(&mut self) {
-        self.mnemonic.zeroize();
-        self.seed.zeroize();
+        self.zeroize_secrets();
     }
 }
 
@@ -952,6 +956,13 @@ impl MultisigPolicy {
 }
 
 impl Wallet {
+    /// Wipe every secret the wallet itself holds: mnemonic, seed and the
+    /// view key. Called from `Drop`; kept separate so a test can observe it.
+    fn zeroize_secrets(&mut self) {
+        self.mnemonic.zeroize();
+        self.seed.zeroize();
+        self.privacy.view_key.zeroize();
+    }
     /// Create a new wallet (random entropy -> mnemonic -> seed -> keypair).
     ///
     /// `word_count`: 12 (128-bit entropy) or 24 (256-bit entropy).
@@ -969,7 +980,7 @@ impl Wallet {
 
         // Production CSPRNG: real random entropy via getrandom
         #[cfg(feature = "production")]
-        let entropy = {
+        let mut entropy = {
             let mut buf = vec![0u8; entropy_len];
             getrandom::getrandom(&mut buf)
                 .map_err(|e| WalletError::ProductionEntropyUnavailable(e.to_string()))?;
@@ -990,7 +1001,11 @@ impl Wallet {
         }
 
         #[cfg(feature = "production")]
-        Self::from_entropy(&entropy)
+        {
+            let wallet = Self::from_entropy(&entropy);
+            entropy.zeroize();
+            wallet
+        }
     }
 
     /// Build a wallet from entropy (BIP39 mnemonic + ML-DSA-87 seed).
@@ -1013,10 +1028,11 @@ impl Wallet {
         let mut hasher = Sha3_256::new();
         hasher.update(b"BUDLUM_MLDSA87_SEED_V1");
         hasher.update(entropy);
-        let seed_bytes = hasher.finalize();
+        let mut seed_bytes: [u8; 32] = hasher.finalize().into();
 
         let mut seed = [0u8; ML_DSA_87_SEED_LEN];
         seed.copy_from_slice(&seed_bytes);
+        seed_bytes.zeroize();
 
         let signing_key = signing_key_from_seed(&seed);
 
@@ -1033,15 +1049,17 @@ impl Wallet {
     /// Restore a wallet from a mnemonic (with BIP39 checksum verification).
     pub fn from_mnemonic(mnemonic: &str) -> Result<Self, WalletError> {
         // BIP39 reverse: mnemonic -> entropy (with checksum verification)
-        let entropy = mnemonic_to_entropy(mnemonic)?;
+        let mut entropy = mnemonic_to_entropy(mnemonic)?;
 
         let mut hasher = Sha3_256::new();
         hasher.update(b"BUDLUM_MLDSA87_SEED_V1");
         hasher.update(&entropy);
-        let seed_bytes = hasher.finalize();
+        entropy.zeroize();
+        let mut seed_bytes: [u8; 32] = hasher.finalize().into();
 
         let mut seed = [0u8; ML_DSA_87_SEED_LEN];
         seed.copy_from_slice(&seed_bytes);
+        seed_bytes.zeroize();
 
         let signing_key = signing_key_from_seed(&seed);
 
@@ -1646,6 +1664,17 @@ mod tests {
              whichever one landed"
         );
         assert!(!caps.exports_seed_material);
+    }
+
+    #[test]
+    fn zeroize_secrets_wipes_seed_mnemonic_and_view_key() {
+        let mut wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
+        let _ = wallet.ensure_view_key();
+        assert!(wallet.privacy.view_key.is_some());
+        wallet.zeroize_secrets();
+        assert_eq!(wallet.seed, [0u8; ML_DSA_87_SEED_LEN]);
+        assert!(wallet.mnemonic.is_empty());
+        assert!(wallet.privacy.view_key.is_none());
     }
 
     #[test]

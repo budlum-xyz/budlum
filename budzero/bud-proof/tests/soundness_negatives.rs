@@ -147,6 +147,7 @@ fn a_tampered_public_input_is_refused() {
         ("sender", |p| p.sender ^= 1),
         ("nonce", |p| p.nonce ^= 1),
         ("block_height", |p| p.block_height ^= 1),
+        ("gas_limit", |p| p.gas_limit ^= 1),
         ("gas_used", |p| p.gas_used ^= 1),
         ("exit_code", |p| p.exit_code ^= 1),
         ("trace_len", |p| p.trace_len ^= 1),

@@ -93,7 +93,7 @@ allow-git = ["https://github.com/libp2p/rust-libp2p"]
 # The only justification for this decision is that the warnings stay visible somewhere else. Until
 # 2026-07-31 this line said "the cargo audit in the CI dependency-audit job reports
 # unmaintained warnings on every run" and that WAS NOT TRUE:
-# `scripts/audit-deps.sh` wrote the findings with `--json` into a temporary file and the raw output
+# the old `audit-deps.sh` wrote the findings with `--json` into a temporary file and the raw output
 # into `target/audit/DEPENDENCY_AUDIT.md`; no workflow uploaded that report
 # as an artifact. The job came back green and not a single advisory name appeared
 # in the log.
@@ -105,7 +105,7 @@ allow-git = ["https://github.com/libp2p/rust-libp2p"]
 # same tree only one result was readable - the visibility the "warn, no fail" decision
 # rested on stood on one leg.
 #
-# `audit-deps.sh` now prints the raw output of both lockfiles into the log and summarises the
+# the `audit-deps` tool (xtask/tools) now prints the raw output of both lockfiles into the log and summarises the
 # RUSTSEC identifiers it saw in a single list. The justification for this line holds only as long
 # as that output stays there; if it is removed this decision must be reconsidered
 # as well.

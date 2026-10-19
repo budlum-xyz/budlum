@@ -103,6 +103,10 @@ pub fn attempt_proof(witness: &[WitnessStep], prover: Option<&Path>) -> Result<Z
         Ok(o) if o.stdout.is_empty() => Ok(ZkTrust::Unproduced {
             reason: "prover produced no proof bytes".to_string(),
         }),
+        // a proof must carry the trace root it is bound to: a banner or an echo is not a proof
+        Ok(o) if !o.stdout.windows(root.len()).any(|w| w == root) => Ok(ZkTrust::Unproduced {
+            reason: "prover output is not bound to the trace root".to_string(),
+        }),
         Ok(o) => Ok(ZkTrust::ProvenExternally {
             rows: row_count,
             proof_bytes: o.stdout.len(),
@@ -215,7 +219,11 @@ mod tests {
     fn a_fake_prover_output_is_recorded_but_still_not_verified() {
         let dir = std::env::temp_dir();
         let script = dir.join("budzk-test-prover.sh");
-        std::fs::write(&script, "#!/bin/sh\nprintf 'fake-proof-bytes'\n").expect("script");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'fake-proof-bytes'\nhead -c 49 \"$1\" | tail -c 32\n",
+        )
+        .expect("script");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -227,12 +235,31 @@ mod tests {
         match trust {
             ZkTrust::ProvenExternally { rows, proof_bytes } => {
                 assert!(rows > 0);
-                assert_eq!(proof_bytes, 16);
+                assert_eq!(proof_bytes, 48);
             }
             ZkTrust::Unproduced { reason } => panic!("prover ran: {reason}"),
         }
         // The produced proof is recorded, not verified: the refusal stands.
         assert!(!in_tree_verification_possible());
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn an_echoing_prover_is_not_a_proof() {
+        let script = std::env::temp_dir().join("budzk-test-echo.sh");
+        std::fs::write(&script, "#!/bin/sh\nprintf 'usage: prover FILE'\n").expect("script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("exec bit");
+        }
+        let witness = witness_for(&b"echo prover test data ".repeat(60));
+        let trust = attempt_proof(&witness, Some(&script)).expect("typed, not an error path");
+        match trust {
+            ZkTrust::Unproduced { reason } => assert!(reason.contains("bound"), "{reason}"),
+            ZkTrust::ProvenExternally { .. } => panic!("an unbound output must not count"),
+        }
         let _ = std::fs::remove_file(&script);
     }
 

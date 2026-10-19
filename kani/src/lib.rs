@@ -15,27 +15,45 @@
 //! operators in order to make a check pass, so the harnesses live in a
 //! standalone package instead.
 //!
-//! # Why a mirror is sound here
+//! # Why a mirror is used here
 //!
-//! [`penalty_for`] is the expression from
-//! `PermissionlessRegistry::slash_role_only`, character for character. It is
-//! not called through the registry because that needs a populated `BTreeMap`
+//! [`penalty_for`] is the expression from `core::chain_config::slash_penalty`
+//! (called by `PermissionlessRegistry::slash_role_only`). It is not called
+//! through the registry because that needs a populated `BTreeMap`
 //! of registrations, which a bit-precise model checker would have to unroll,
 //! the arithmetic is what is under proof, not the map.
 //!
-//! A copy can rot. Two things stop it: `budlum-core`'s
-//! `bond_arithmetic_matches_the_kani_mirror` recomputes both and fails on any
-//! divergence, and `scripts/check-kani.sh` fails if the number of harnesses
-//! Kani ran drops below the number declared here.
+//! A copy can rot, and this package has no link that stops it. The kani
+//! package does not depend on `budlum-core` and `budlum-core` does not depend
+//! on it, so no test calls the functions in this file. Facts, as of this
+//! writing:
+//!
+//! * Production slashing calls `core::chain_config::slash_penalty`. This
+//!   file's [`penalty_for`] is a second copy of that function.
+//! * `budlum-core`'s `bond_arithmetic_matches_the_kani_mirror`, the Merkle
+//!   mirror test and the PQ length test each compare production with a third,
+//!   hand-written copy that sits inside the test. They do not look at this
+//!   file.
+//! * The only guard on this file is the harness-count gate
+//!   (`xtask/gates/src/gates/kani.rs`), which checks that every declared
+//!   harness ran. It does not check that the logic equals production.
+//!
+//! So the proofs hold for the text of this file. That they hold for
+//! production depends on a human keeping the copies equal. Closing the gap
+//! needs one shared definition, for example a path dependency from
+//! `budlum-core` (dev-dependencies) on this package so a test can call these
+//! functions directly. That changes the root manifest and is tracked as a
+//! decision, not done here.
 
 /// Fixed-point denominator, mirroring `core::chain_config::FIXED_POINT_SCALE`.
 pub const FIXED_POINT_SCALE: u64 = 1_000_000;
 
-/// The penalty computation exactly as `slash_role_only` performs it.
+/// The penalty computation exactly as `core::chain_config::slash_penalty`
+/// performs it (production slashing calls that function).
 ///
 /// ```text
-/// let penalty =
-///     ((reg.stake as u128 * slash_ratio_fixed as u128) / FIXED_POINT_SCALE as u128) as u64;
+/// let quotient = (stake as u128 * ratio as u128) / FIXED_POINT_SCALE as u128;
+/// // clamped to `stake` instead of narrowed with `as u64`
 /// ```
 #[must_use]
 pub fn penalty_for(stake: u64, slash_ratio_fixed: u64) -> u64 {
@@ -301,38 +319,44 @@ pub fn pq_signature_len_acceptable(len: usize, expected: PqSigClass) -> bool {
 // itself stays behind the `bls12_381` crate; the accumulation is what decides
 // whether a certificate carries the quorum before that check runs.
 
-/// Maximum validators the bounded bitmap mirror accepts. The mirror test runs
-/// the same sizes against the production walk, so a drift is caught.
+/// Maximum validators the bounded bitmap mirror accepts.
 pub const MAX_MIRROR_VALIDATORS: usize = 4;
 
-/// Voted-stake accumulation, mirroring `FinalityCert::verify`'s bitmap walk.
+/// Voted-stake accumulation, mirroring `FinalityCert::verify`'s bitmap walk in
+/// `chain::finality`: a `u128` accumulator and a plain `+=`, as in production.
+/// The sum of at most `MAX_MIRROR_VALIDATORS` values of `u64` cannot overflow
+/// a `u128`, so no saturation is needed or used.
+///
+/// No test in `budlum-core` compares this copy with the production walk. The
+/// bound `voted <= total` is true for any non-negative terms, so the harness
+/// below also proves the exact selection rule (see its comment).
 #[must_use]
 pub fn bitmap_voted_stake(
     stakes: &[u64; MAX_MIRROR_VALIDATORS],
     n: usize,
     bitmap: &[u8; 1],
-) -> u64 {
-    let mut voted_stake: u64 = 0;
+) -> u128 {
+    let mut voted_stake: u128 = 0;
     let mut idx = 0;
     while idx < n {
         let byte_idx = idx / 8;
         let bit_idx = idx % 8;
         if byte_idx < bitmap.len() && (bitmap[byte_idx] & (1 << bit_idx)) != 0 {
-            voted_stake = voted_stake.saturating_add(stakes[idx]);
+            voted_stake += u128::from(stakes[idx]);
         }
         idx += 1;
     }
     voted_stake
 }
 
-/// The saturating sum of all stakes, the upper bound the accumulation above is
-/// checked against.
+/// The sum of all stakes in the set, the upper bound the accumulation above
+/// is checked against.
 #[must_use]
-pub fn saturating_stake_sum(stakes: &[u64; MAX_MIRROR_VALIDATORS], n: usize) -> u64 {
-    let mut total: u64 = 0;
+pub fn stake_sum(stakes: &[u64; MAX_MIRROR_VALIDATORS], n: usize) -> u128 {
+    let mut total: u128 = 0;
     let mut idx = 0;
     while idx < n {
-        total = total.saturating_add(stakes[idx]);
+        total += u128::from(stakes[idx]);
         idx += 1;
     }
     total
@@ -427,7 +451,10 @@ pub fn saturating_stake_sum(stakes: &[u64; MAX_MIRROR_VALIDATORS], n: usize) -> 
 // wall as everything else here. The pair is not the problem; a symbolic
 // product wider than about 24 bits is.
 //
-// These three are not CI-budget harnesses. The property they were
+// These three are not CI-budget harnesses, and none of them has a recorded
+// completed run: the slash penalty's monotonicity in the ratio is therefore
+// UNPROVED. (The `ratio == 0` half was split out as `zero_ratio_takes_nothing`
+// and is proved on every pull request.) The property they were
 // guarding, `penalty <= stake`, is now proved in a second by a harness that
 // does not need them. They are left in place, timing out honestly, rather
 // than deleted to make the job green: deleting them would remove the only
@@ -437,9 +464,9 @@ mod proofs {
     use super::{
         bitmap_voted_stake, classify_pq_signature_len, merkle_parent_layer_fold,
         merkle_rebuild_root_u64, merkle_root_u64, merkle_sibling_index, penalty_for,
-        pq_signature_len_acceptable, raw_quotient, saturating_stake_sum, PqSigClass,
-        FIXED_POINT_SCALE, MAX_MIRROR_LEAVES, MAX_MIRROR_VALIDATORS, PQ_SIG_LEN_DILITHIUM5,
-        PQ_SIG_LEN_ML_DSA_65, PQ_SIG_LEN_ML_DSA_87,
+        pq_signature_len_acceptable, raw_quotient, stake_sum, PqSigClass, FIXED_POINT_SCALE,
+        MAX_MIRROR_LEAVES, MAX_MIRROR_VALIDATORS, PQ_SIG_LEN_DILITHIUM5, PQ_SIG_LEN_ML_DSA_65,
+        PQ_SIG_LEN_ML_DSA_87,
     };
 
     /// A slash can never take more stake than the member has.
@@ -489,12 +516,32 @@ mod proofs {
         );
     }
 
-    /// The two endpoints are exact.
+    /// A zero ratio takes nothing.
+    ///
+    /// Split out of `ratio_endpoints_are_exact`: with `ratio == 0` the product
+    /// collapses to zero, so this half is proved in well under a second on a
+    /// full `u64` stake and runs on every pull request. Left inside the slow
+    /// harness it was never checked, because that harness never finishes.
+    #[kani::proof]
+    fn zero_ratio_takes_nothing() {
+        let stake: u64 = kani::any();
+
+        assert!(
+            penalty_for(stake, 0) == 0,
+            "a 0% ratio must not touch the bond"
+        );
+    }
+
+    /// The full-ratio endpoint is exact.
     ///
     /// `malicious_slash_ratio_fixed` defaults to `FIXED_POINT_SCALE` - "proven
-    /// malice burns the whole bond" - and a zero ratio must take nothing.
-    /// Rounding at either end would leave dust in a bond that should be gone,
-    /// or take stake when none was owed.
+    /// malice burns the whole bond" - and rounding at this end would leave
+    /// dust in a bond that should be gone. The zero end is
+    /// `zero_ratio_takes_nothing`.
+    ///
+    /// STATUS: UNPROVED. This harness has no recorded completed run. It stays
+    /// symbolic over a full `u64` stake and times out (see kani-slow.yml,
+    /// which tolerates that by design). Do not read the name as a proof.
     // SLOW: see the measurement above. Runs on a schedule, not on the PR.
     #[kani::proof]
     fn ratio_endpoints_are_exact() {
@@ -504,13 +551,12 @@ mod proofs {
             penalty_for(stake, FIXED_POINT_SCALE) == stake,
             "a 100% ratio must burn the whole bond, leaving no rounding dust"
         );
-        assert!(
-            penalty_for(stake, 0) == 0,
-            "a 0% ratio must not touch the bond"
-        );
     }
 
     /// Slashing harder never costs the offender less.
+    ///
+    /// STATUS: UNPROVED. No recorded run of this harness has completed, so the
+    /// monotonicity of the penalty in the ratio is an open claim, not a proof.
     ///
     /// Governance relies on this when it raises a ratio. The fixed-point
     /// divide truncates, and a non-monotonic truncation would mean a higher
@@ -555,6 +601,8 @@ mod proofs {
     // SLOW: see the measurement above. Runs on a schedule, not on the PR.
     #[kani::proof]
     /// A one-unit ratio increase must never reduce the penalty, at any stake.
+    ///
+    /// STATUS: UNPROVED. No recorded run of this harness has completed.
     ///
     /// **This is the harness that was timing out**, and it took a per-harness
     /// measurement to find out. Everything before it had been blamed on
@@ -601,79 +649,26 @@ mod proofs {
         );
     }
 
-    /// Without the bound, the penalty is no longer capped by the bond.
+    /// Without the bound, the raw quotient is no longer capped by the bond.
     ///
     /// The harnesses above *assume* `ratio <= FIXED_POINT_SCALE`. If
     /// `RegistryParams::validate` ever stopped enforcing it, they would all
     /// still pass while production became unsound, because an assumption is
     /// not a check. Here the precondition is dropped on purpose and the
-    /// consequence is asserted, so the bound is recorded as load-bearing.
+    /// consequence is asserted on the crate functions: `raw_quotient` takes at
+    /// least the bond, strictly more once `stake * excess` reaches one unit of
+    /// `FIXED_POINT_SCALE`, and `penalty_for` contains it at the bond.
     ///
-    /// The claim is `>=`, not `>`. Kani rejected the strict version and was
-    /// right to: at `stake = 1, ratio = 1_000_001` the quotient truncates back
-    /// down to 1, so the penalty equals the bond rather than exceeding it.
-    /// `an_unbounded_ratio_can_strictly_exceed_the_bond` pins the strict case.
+    /// The claim is `>=` in general, not `>`: at `stake = 1, ratio = 1_000_001`
+    /// the quotient truncates back down to 1. The strict case is asserted
+    /// under the exact condition that makes it true.
     ///
-    /// # Why the ratios are written out instead of iterated
-    ///
-    /// This harness was cancelled at the CI timeout five times while the
-    /// suspect was the arithmetic. It is not the arithmetic. The neighbouring
-    /// `an_unbounded_ratio_can_strictly_exceed_the_bond` does *more* work - a
-    /// 128-bit multiply **and** a 128-bit divide, on a symbolic stake - and
-    /// finishes in 0.04s. The only structural difference between the two was
-    /// that this one wrapped its asserts in a `for` loop over an array.
-    ///
-    /// CBMC unwinds loops. With no `--unwind` bound and no
-    /// `#[kani::unwind(n)]`, it has no reason to stop at the array's four
-    /// elements, so it keeps unwinding and never reaches a decision. Every
-    /// earlier attempt changed the operands and left the loop in place, which
-    /// is why each one produced the same cancellation and each diagnosis was
-    /// wrong:
-    ///
-    /// | attempt | changed | loop | result |
-    /// | :-- | :-- | :-- | :-- |
-    /// | 1 | symbolic `u64` ratio | yes | cancelled at 45m |
-    /// | 2 | ratio pair `{SCALE+1, 2*SCALE}` | yes | cancelled at 90m |
-    /// | 3 | dropped the division | yes | cancelled at 90m |
-    /// | 4 | concrete `u128` ratio list | yes | cancelled at 90m |
-    /// | - | neighbour harness, no loop | **no** | **0.04s** |
-    ///
-    /// Four asserts written out was not the whole fix either, and neither was
-    /// the first rewrite of this comment. The table now runs to six rows,
-    /// every one of them measured:
-    ///
-    /// | attempt | changed | symbolic operands | result |
-    /// | :-- | :-- | :-- | :-- |
-    /// | 1 | symbolic `u64` ratio | 2 | cancelled at 45m |
-    /// | 2 | ratio pair `{SCALE+1, 2*SCALE}` | 1 | cancelled at 90m |
-    /// | 3 | dropped the division | 1 | cancelled at 90m |
-    /// | 4 | concrete `u128` ratio list | 1 | cancelled at 90m |
-    /// | 5 | loop unrolled into four asserts | 1 | timed out at 90m |
-    /// | 6 | symbolic `u32` excess, `u64` `checked_mul` | **2** | still running at 20m |
-    ///
-    /// Attempt 6 was mine, and it went the wrong way. The harness next door
-    /// (`penalty_is_monotonic_in_the_ratio`) already records the rule -
-    /// "two symbolic operands in a 128-bit multiply is what CBMC cannot close
-    /// in CI time" - and narrows its pair to `u16` for exactly that reason. I
-    /// replaced four constant ratios with a symbolic one, which reads like
-    /// broader coverage and hands the solver a second free operand.
-    ///
-    /// What the earlier attempts got right and I lost: with a constant ratio
-    /// there is one unknown, and the multiply is a shift-and-add over known
-    /// bits. With both sides symbolic it is a full 64x64 product.
-    ///
-    /// So: one symbolic operand, and narrow. `stake` is `u16` here rather than
-    /// `u32`, which is the same trade the monotonicity harness makes, the
-    /// property is about the *shape* of the arithmetic, and no boundary in it
-    /// lives above 65535. The ratio stays a constant, and the four that
-    /// mattered are covered by four separate harnesses instead of four asserts
-    /// in one: a solver that has closed one has no work carried into the next,
-    /// which is not true of four asserts sharing a symbol.
-    ///
-    /// The claim itself never needed a solver at all. For `stake > 0` and
-    /// `k > 0`, `stake * (SCALE + k) >= stake * SCALE` reduces to
-    /// `stake * k >= 0`. What is worth checking is that the product does not
-    /// wrap, which is why `checked_mul` stays.
+    /// Each harness has one symbolic operand (`stake`, `u16`) and a constant
+    /// ratio. Loops and a second symbolic operand are what made the earlier
+    /// forms of this harness time out; the constant ratio keeps the quotient a
+    /// shift-and-add over known bits, the shape the sibling harness
+    /// `an_unbounded_ratio_can_strictly_exceed_the_bond` proves in under a
+    /// second.
     ///
     /// This is not a claim about a reachable state: every `set_params` caller
     /// runs `validate()` first.
@@ -682,19 +677,22 @@ mod proofs {
         kani::assume(stake > 0);
         let stake = u64::from(stake);
 
-        const SCALE: u64 = FIXED_POINT_SCALE;
-        let ratio = SCALE + excess;
-
-        let penalty = stake
-            .checked_mul(ratio)
-            .expect("a u16 stake times a ratio near SCALE fits in u64");
-        let bond = stake
-            .checked_mul(SCALE)
-            .expect("a u16 stake times SCALE fits in u64");
+        let ratio = FIXED_POINT_SCALE + excess;
+        let quotient = raw_quotient(stake, ratio);
 
         assert!(
-            penalty > bond,
-            "a ratio above FIXED_POINT_SCALE must take strictly more than the bond"
+            quotient >= u128::from(stake),
+            "a ratio above FIXED_POINT_SCALE must take at least the bond"
+        );
+        if u128::from(stake) * u128::from(excess) >= u128::from(FIXED_POINT_SCALE) {
+            assert!(
+                quotient > u128::from(stake),
+                "an excess of one full unit or more must take strictly more than the bond"
+            );
+        }
+        assert!(
+            penalty_for(stake, ratio) == stake,
+            "the clamp must hold the overshoot at the bond"
         );
     }
 
@@ -770,11 +768,14 @@ mod proofs {
         );
     }
 
-    /// And a concrete witness that it really does exceed the bond.
+    /// And a witness that the raw quotient really does exceed the bond.
     ///
     /// `>=` alone would be satisfied by a rule that merely reaches the bond.
-    /// This pins a case where the penalty is strictly larger, so the harness
-    /// above cannot be read as saying the overshoot is only theoretical.
+    /// This pins a case where the unclamped quotient is strictly larger, and
+    /// that the clamp then brings it back to the bond, so the harness above
+    /// cannot be read as saying the overshoot is only theoretical. Both
+    /// statements call crate functions: replacing `raw_quotient` with a
+    /// clamped form, or deleting the clamp in `penalty_for`, fails here.
     #[kani::proof]
     fn an_unbounded_ratio_can_strictly_exceed_the_bond() {
         let stake: u32 = kani::any();
@@ -782,10 +783,13 @@ mod proofs {
         kani::assume(stake >= 2);
 
         let ratio = 2 * FIXED_POINT_SCALE;
-        let quotient = (u128::from(stake) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
         assert!(
-            quotient > u128::from(stake),
+            raw_quotient(stake, ratio) > u128::from(stake),
             "a 200% ratio must take strictly more than the bond"
+        );
+        assert!(
+            penalty_for(stake, ratio) == stake,
+            "the clamp must hold a 200% ratio at the bond"
         );
     }
 
@@ -954,18 +958,33 @@ mod proofs {
     /// failure mode the length check exists to prevent.
     #[kani::proof]
     fn pq_signature_lengths_are_pairwise_distinct() {
-        assert_ne!(PQ_SIG_LEN_DILITHIUM5, PQ_SIG_LEN_ML_DSA_65);
-        assert_ne!(PQ_SIG_LEN_DILITHIUM5, PQ_SIG_LEN_ML_DSA_87);
-        assert_ne!(PQ_SIG_LEN_ML_DSA_65, PQ_SIG_LEN_ML_DSA_87);
+        // Through the classifier, not by comparing the constants: two equal
+        // lengths make the first branch win and the second assert fail.
+        assert_eq!(
+            classify_pq_signature_len(PQ_SIG_LEN_DILITHIUM5),
+            PqSigClass::Dilithium5
+        );
+        assert_eq!(
+            classify_pq_signature_len(PQ_SIG_LEN_ML_DSA_65),
+            PqSigClass::MlDsa65
+        );
+        assert_eq!(
+            classify_pq_signature_len(PQ_SIG_LEN_ML_DSA_87),
+            PqSigClass::MlDsa87
+        );
     }
 
-    /// A finality bitmap can never vote more stake than the set holds.
+    /// A finality bitmap can never vote more stake than the set holds, and votes
+    /// exactly the stake of the validators it selects.
     ///
-    /// `FinalityCert::verify` compares the accumulated vote against the
-    /// quorum; an accumulation that could exceed the set's own total would
-    /// make the comparison meaningless. Saturating addition makes the bound
-    /// exact: votes are non-negative, so a subset's saturating sum never
-    /// exceeds the set's saturating sum.
+    /// `voted <= total` alone holds for any sum of non-negative terms, so it
+    /// would pass for a walk that ignored the bitmap. The harness therefore
+    /// also pins the selection rule, each of which fails on a different
+    /// broken walk:
+    ///
+    /// * an empty bitmap votes nothing,
+    /// * a bitmap with every in-range bit set votes the whole set,
+    /// * setting one more in-range bit adds exactly that validator's stake.
     #[kani::proof]
     #[kani::unwind(6)]
     fn bitmap_cannot_vote_more_stake_than_the_set_holds() {
@@ -975,16 +994,36 @@ mod proofs {
         }
         let n: usize = kani::any();
         kani::assume(n <= MAX_MIRROR_VALIDATORS);
-        let mut bitmap = [0u8; 1];
-        for byte in bitmap.iter_mut() {
-            *byte = kani::any();
-        }
+        let bitmap = [kani::any::<u8>(); 1];
 
         let voted = bitmap_voted_stake(&stakes, n, &bitmap);
-        let total = saturating_stake_sum(&stakes, n);
+        let total = stake_sum(&stakes, n);
         assert!(
             voted <= total,
             "the vote can never exceed the stake the set actually holds"
+        );
+
+        assert_eq!(
+            bitmap_voted_stake(&stakes, n, &[0u8]),
+            0,
+            "an empty bitmap must vote nothing"
+        );
+
+        let all_in_range = ((1u16 << n) - 1) as u8;
+        assert_eq!(
+            bitmap_voted_stake(&stakes, n, &[all_in_range]),
+            total,
+            "a full bitmap must vote the whole set"
+        );
+
+        let pick: usize = kani::any();
+        kani::assume(pick < n);
+        let bit = 1u8 << pick;
+        kani::assume(bitmap[0] & bit == 0);
+        assert_eq!(
+            bitmap_voted_stake(&stakes, n, &[bitmap[0] | bit]),
+            voted + u128::from(stakes[pick]),
+            "one more signer bit must add exactly that validator's stake"
         );
     }
 }

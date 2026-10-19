@@ -93,7 +93,7 @@ pub enum Token {
     Hex(String),
 
     #[regex(r"//[^\n]*", logos::skip, allow_greedy = true)]
-    #[regex(r"/\*([^*]|\*[^/])*\*/", logos::skip)]
+    #[regex(r"/\*([^*]|\*+[^*/])*\*+/", logos::skip)]
     #[regex(r"[ \t\n\f]+", logos::skip)]
     Error,
 }

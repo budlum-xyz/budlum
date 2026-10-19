@@ -205,6 +205,24 @@ impl PruningManager {
         }
         (1..safe_prune_up_to).collect()
     }
+    /// The height of the newest snapshot file in the snapshot directory, or
+    /// 0 when there is none. Pruning must never delete blocks above this
+    /// height: a restart without them resumes from a snapshot it cannot
+    /// reach, because `load_chain` stops at the first deleted parent and the
+    /// node exits without genesis (P10-F03).
+    pub fn latest_snapshot_height(&self) -> u64 {
+        let dir = std::path::Path::new(&self.snapshot_dir);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+            .filter_map(|entry| get_snapshot_height(&entry.path()))
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn quarantine_snapshots_above_height(&self, max_height: u64) -> Result<usize, String> {
         use std::fs;
         use std::path::Path;
@@ -405,6 +423,13 @@ impl PruningManager {
                     continue;
                 }
             };
+            // A V1 file or a file from a newer release is not corrupt. Skip it
+            // without quarantine so the V1 fallback and a newer binary can
+            // still read it.
+            if let Some(reason) = v2_loader_skip_reason(&data) {
+                tracing::warn!("V2 loader skips {} ({reason})", path.display());
+                continue;
+            }
             let snapshot: StateSnapshotV2 = match serde_json::from_str(&data) {
                 Ok(s) => s,
                 Err(e) => {
@@ -438,6 +463,29 @@ impl PruningManager {
         }
         Ok(None)
     }
+}
+
+/// Why the V2 startup loader must leave a candidate file alone, if it must.
+///
+/// A file with no `schema_version` is a V1 snapshot; a file whose version is
+/// outside the supported window comes from another release. Neither is
+/// corrupt. A file that does not parse, or whose version is not a number, is
+/// not skipped here: the caller quarantines it.
+fn v2_loader_skip_reason(data: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    let object = value.as_object()?;
+    let Some(raw) = object.get("schema_version") else {
+        return Some("no schema_version, V1 file".to_string());
+    };
+    let version = raw.as_u64()?;
+    if version < u64::from(MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION)
+        || version > u64::from(CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION)
+    {
+        return Some(format!(
+            "schema_version {version} is outside the supported window"
+        ));
+    }
+    None
 }
 
 fn get_snapshot_height(path: &std::path::Path) -> Option<u64> {
@@ -1259,6 +1307,43 @@ mod tests {
         assert!(dir.path().join("snapshot_30.json.reorg").exists());
     }
 
+    /// BLG-0208: the V2 startup loader leaves V1 and foreign-version files alone.
+    #[test]
+    fn v2_loader_does_not_quarantine_v1_or_out_of_window_files() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let v1 = dir.path().join("snapshot_10.json");
+        let future = dir.path().join("snapshot_20.json");
+        fs::write(&v1, r#"{"height":10}"#).unwrap();
+        let future_blob = format!(
+            r#"{{"schema_version":{}}}"#,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION + 1
+        );
+        fs::write(&future, future_blob).unwrap();
+        let manager = PruningManager::new(100, 1000, dir.path().to_string_lossy().to_string());
+
+        assert!(manager.load_latest_snapshot_v2().unwrap().is_none());
+        assert!(v1.exists(), "a V1 file must not be renamed");
+        assert!(future.exists(), "a newer-release file must not be renamed");
+    }
+
+    /// BLG-0208: a corrupt file is still quarantined.
+    #[test]
+    fn v2_loader_still_quarantines_a_file_that_does_not_parse() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let bad = dir.path().join("snapshot_5.json");
+        fs::write(&bad, "not json").unwrap();
+        let manager = PruningManager::new(100, 1000, dir.path().to_string_lossy().to_string());
+
+        assert!(manager.load_latest_snapshot_v2().is_err());
+        assert!(dir.path().join("snapshot_5.json.corrupted").exists());
+    }
+
     /// A character cannot move from `block_hash` into `genesis_hash`.
     ///
     /// `calculate_digest` appended the two `String`s with nothing between
@@ -1370,6 +1455,41 @@ mod tests {
         let quarantined_path = dir.path().join("snapshot_50.json.corrupted");
         assert!(quarantined_path.exists());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn latest_snapshot_height_bounds_rpc_pruning() {
+        use std::fs;
+        use tempfile::tempdir;
+        // P10-F03: the RPC-driven prune passed the tip height as the "latest
+        // snapshot", so the snapshot bound never applied and bud_requestPrune
+        // deleted blocks (with their finality certs) that the next restart
+        // needs: load_chain stops at the first deleted parent and the node
+        // cannot boot. Quarantined files (.json.corrupted) must not count.
+        let dir = tempdir().unwrap();
+        let mut pm = PruningManager::new(10, 100, dir.path().to_string_lossy().to_string());
+        pm.archive_mode = false;
+
+        // No snapshot on disk: nothing may be pruned, whatever the tip and
+        // finality heights say.
+        assert_eq!(pm.latest_snapshot_height(), 0);
+        assert!(pm
+            .get_prunable_blocks_with_retention(1000, pm.latest_snapshot_height(), 900, 10)
+            .is_empty());
+
+        // Snapshots at height 9 and 100: numerical order, not lexicographic.
+        fs::write(dir.path().join("snapshot_9.json"), "{}").unwrap();
+        fs::write(dir.path().join("snapshot_100.json"), "{}").unwrap();
+        fs::write(dir.path().join("snapshot_500.json.corrupted"), "{}").unwrap();
+        assert_eq!(pm.latest_snapshot_height(), 100);
+
+        // keep=10 at tip=1000 would prune up to 990, but the snapshot bound
+        // caps it below the newest snapshot.
+        let prunable =
+            pm.get_prunable_blocks_with_retention(1000, pm.latest_snapshot_height(), 900, 10);
+        assert_eq!(prunable.first().copied(), Some(1));
+        assert_eq!(prunable.last().copied(), Some(99));
+        assert!(!prunable.contains(&100));
     }
 
     #[test]

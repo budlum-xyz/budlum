@@ -59,7 +59,6 @@ paths-ignore:
   - benches/**
   - fuzz/**
   - budzero/**
-  - wallet-core/**
   - examples/**
   - scripts/**
   - proto/**

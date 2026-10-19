@@ -25,6 +25,18 @@ pub struct PqSignatureEntry {
     pub dilithium_signature: Vec<u8>,
 }
 
+/// The disputed attestation an `InvalidDilithiumV1` proof carries (P01-F26).
+///
+/// Named rather than passed as three loose constructor fields, so
+/// `QcFaultProof::new_invalid_dilithium` stays under the argument limit
+/// without a lint waiver.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvalidDilithiumEvidence {
+    pub dilithium_signature: Vec<u8>,
+    pub merkle_proof: Vec<Vec<u8>>,
+    pub leaf_index: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QcFaultProof {
     pub version: u8,
@@ -101,10 +113,15 @@ impl QcBlob {
     /// ratio, so a second `(address, signature)` pair hashing to an accepted
     /// leaf is a second story a fault proof can tell about the same slot.
     ///
+    /// The domain tag (P01-F27) puts leaves in their own preimage set: the
+    /// inner-node combine tags its inputs differently, so no leaf can stand
+    /// in for a node or the other way round.
+    ///
     /// See `crate::crypto::key_set_preimage` for the same failure in the
     /// validator key set.
     fn leaf_hash(entry: &PqSignatureEntry) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
+        hasher.update(b"BDLM_QC_LEAF_V2");
         hasher.update(entry.validator_index.to_le_bytes());
         let address = entry.validator_address.as_bytes();
         hasher.update((address.len() as u64).to_le_bytes());
@@ -371,9 +388,11 @@ impl QcBlob {
                         self.checkpoint_hash.clone(),
                         entry.validator_index,
                         entry.validator_address.clone(),
-                        entry.dilithium_signature.clone(),
-                        merkle_proof,
-                        leaf_index as u32,
+                        InvalidDilithiumEvidence {
+                            dilithium_signature: entry.dilithium_signature.clone(),
+                            merkle_proof,
+                            leaf_index: leaf_index as u32,
+                        },
                     ));
                 }
             }
@@ -384,18 +403,22 @@ impl QcBlob {
 }
 
 impl QcFaultProof {
-    pub const CURRENT_VERSION: u8 = 1;
+    /// Version 2 (P01-F27): proofs are produced and checked against the
+    /// domain-tagged Merkle tree. A version-1 proof walked the untagged
+    /// combine and no longer reproduces a stored root; `validate` refuses it
+    /// by version instead of failing with a confusing root mismatch.
+    pub const CURRENT_VERSION: u8 = 2;
 
-    #[allow(clippy::too_many_arguments)]
+    /// Build an `InvalidDilithiumV1` fault proof around a disputed
+    /// attestation (P01-F26: the payload is one named value, not three
+    /// loose arguments).
     pub fn new_invalid_dilithium(
         epoch: u64,
         checkpoint_height: u64,
         checkpoint_hash: String,
         validator_index: u32,
         validator_address: String,
-        dilithium_signature: Vec<u8>,
-        merkle_proof: Vec<Vec<u8>>,
-        leaf_index: u32,
+        evidence: InvalidDilithiumEvidence,
     ) -> Self {
         QcFaultProof {
             version: Self::CURRENT_VERSION,
@@ -405,9 +428,9 @@ impl QcFaultProof {
             validator_index,
             validator_address,
             kind: QcProofKind::InvalidDilithiumV1 {
-                dilithium_signature,
-                merkle_proof,
-                leaf_index,
+                dilithium_signature: evidence.dilithium_signature,
+                merkle_proof: evidence.merkle_proof,
+                leaf_index: evidence.leaf_index,
             },
         }
     }
@@ -435,54 +458,50 @@ impl QcFaultProof {
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    fn invalid_dilithium_fields(&self) -> Option<(&Vec<u8>, &Vec<Vec<u8>>, u32)> {
-        match &self.kind {
-            QcProofKind::InvalidDilithiumV1 {
-                dilithium_signature,
-                merkle_proof,
-                leaf_index,
-            } => Some((dilithium_signature, merkle_proof, *leaf_index)),
-            QcProofKind::ZkInvalidAttestationV1 { .. } => None,
-        }
-    }
-
+    /// Rebuild the committed Merkle root from the proof alone and compare.
+    ///
+    /// The walk is `merkle_tree::merkle_root_from_proof` (P01-F25): the
+    /// hand-rolled copy that used to live here was the same algorithm
+    /// restated, and the two drifted whenever one was fixed. The shared walk
+    /// also carries the domain-tagged node combine (P01-F27), matching the
+    /// tree the root was built with.
     pub fn verify_inclusion(&self, merkle_root: &str) -> Result<(), String> {
-        let (dilithium_signature, merkle_proof, leaf_index) =
-            self.invalid_dilithium_fields().ok_or_else(|| {
-                "Merkle inclusion is not available for this QC proof kind".to_string()
-            })?;
+        let QcProofKind::InvalidDilithiumV1 {
+            dilithium_signature,
+            merkle_proof,
+            leaf_index,
+        } = &self.kind
+        else {
+            return Err("Merkle inclusion is not available for this QC proof kind".to_string());
+        };
 
-        let mut current = QcBlob::leaf_hash(&PqSignatureEntry {
+        let leaf = QcBlob::leaf_hash(&PqSignatureEntry {
             validator_index: self.validator_index,
             validator_address: self.validator_address.clone(),
             dilithium_signature: dilithium_signature.clone(),
         });
 
-        let mut idx = leaf_index;
-        for proof_element in merkle_proof {
-            if proof_element.as_slice() == merkle_tree::odd_promotion_sentinel() {
-                // The prover recorded a promotion: this digest had no
-                // sibling at this level and was hashed under the promotion
-                // tag alone.
-                let promoted = merkle_tree::promote_sha3(&current);
-                current.copy_from_slice(&promoted);
-            } else {
-                let mut hasher = Sha3_256::new();
-                if idx % 2 == 0 {
-                    hasher.update(current);
-                    hasher.update(proof_element);
-                } else {
-                    hasher.update(proof_element);
-                    hasher.update(current);
-                }
-                let result = hasher.finalize();
-                current.copy_from_slice(&result);
+        let mut siblings = Vec::with_capacity(merkle_proof.len());
+        for element in merkle_proof {
+            if element.len() != 32 {
+                return Err(format!(
+                    "Merkle proof element must be 32 bytes, got {}",
+                    element.len()
+                ));
             }
-            idx /= 2;
+            let mut digest = [0u8; 32];
+            digest.copy_from_slice(element);
+            siblings.push(digest);
         }
 
-        let computed_root = hex::encode(current);
+        let computed = merkle_tree::merkle_root_from_proof(
+            &leaf,
+            (*leaf_index) as usize,
+            &siblings,
+            merkle_tree::combine_sha3,
+            merkle_tree::promote_sha3,
+        );
+        let computed_root = hex::encode(computed);
         if computed_root != merkle_root {
             return Err(format!(
                 "Merkle proof invalid: computed {computed_root} != expected {merkle_root}"
@@ -596,6 +615,22 @@ impl QcFaultProof {
                 {
                     return Err("Fault proof targets a valid Dilithium signature".into());
                 }
+                // P01-F22: a signature that does NOT verify is not evidence
+                // against the named validator. It is equally consistent with a
+                // forged entry that names a non-participant, so slashing on it
+                // would make `bud_submitQcFaultProof` a free, permissionless
+                // frame-up rail - garbage bytes cost nothing to produce, despite
+                // the surface comment claiming a forgery would. The importer
+                // already refuses blobs with invalid entries, so this shape was
+                // unreachable; the verdict is refused explicitly instead of
+                // waiting for some future path to activate the trap. A sound
+                // evidence form (two attested checkpoints at one height, both
+                // signatures valid) is the double-sign `SlashingEvidence` path.
+                return Err(
+                    "A signature that fails to verify is not evidence against the named \
+                     validator (equally consistent with a forged entry); no verdict is issued"
+                        .into(),
+                );
             }
             QcProofKind::ZkInvalidAttestationV1 { public_inputs, .. } => {
                 if public_inputs.merkle_root != blob.merkle_root {
@@ -929,11 +964,14 @@ mod tests {
         let proofs = blob.detect_fault_proofs(&snapshot);
         assert_eq!(proofs.len(), 1);
         assert_eq!(proofs[0].validator_index, 1);
-        let verdict = proofs[0].verify_against_blob(&blob, &snapshot).unwrap();
-        assert_eq!(verdict.action, QcProofAction::InvalidateFinality);
-        assert_eq!(verdict.invalidate_from_height, Some(100));
-        // InvalidDilithium is proven malicious → slash.
-        assert!(verdict.slash_validator);
+        // P01-F22: detection still reports the broken entry, but a signature
+        // that fails to verify is not evidence against the named validator -
+        // the same bytes could name a non-participant - so no verdict issues.
+        let err = proofs[0].verify_against_blob(&blob, &snapshot).unwrap_err();
+        assert!(
+            err.contains("not evidence"),
+            "the refusal must name the frame-up reason, got: {err}"
+        );
     }
 
     #[test]
@@ -947,9 +985,11 @@ mod tests {
             "cp".into(),
             0,
             snapshot.validators[0].address.to_string(),
-            blob.pq_signatures[0].dilithium_signature.clone(),
-            blob.merkle_proof(0).unwrap(),
-            0,
+            InvalidDilithiumEvidence {
+                dilithium_signature: blob.pq_signatures[0].dilithium_signature.clone(),
+                merkle_proof: blob.merkle_proof(0).unwrap(),
+                leaf_index: 0,
+            },
         );
         assert!(proof.verify_against_blob(&blob, &snapshot).is_err());
     }
@@ -1056,18 +1096,17 @@ mod tests {
         }
     }
 
-    /// (security audit §4) the QcFaultProof can be built
-    /// From a real QcBlob and verified end-to-end. This is the
-    /// Proof surface that the new permissionless RPC endpoint
-    /// `bud_submitQcFaultProof` exposes; the test pins that the
-    /// Construction and verification contract still works after
-    /// Changes.
+    /// (security audit §4) the QcFaultProof surface end-to-end: detection
+    /// still reports a broken entry, and verification refuses to issue a
+    /// verdict on it (P01-F22 - a failing signature is not evidence against
+    /// the named validator). This is the contract `bud_submitQcFaultProof`
+    /// exposes.
     #[test]
     fn qc_fault_proof_construction_and_verification_e2e() {
         let (snapshot, keys) = make_snapshot_with_pq_keys(2);
         let mut entries = make_signed_entries(&snapshot, &keys, "cp");
         // Corrupt validator 1's dilithium signature so the blob
-        // Has a verifiable fault.
+        // Has a detectable broken entry.
         entries[1].dilithium_signature[0] ^= 0xAA;
         let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
 
@@ -1075,14 +1114,15 @@ mod tests {
         assert_eq!(proofs.len(), 1, "exactly one fault should be detected");
         let proof = &proofs[0];
 
-        // Verify the proof against the blob end-to-end.
-        let verdict = proof
+        // Verify the proof against the blob end-to-end: refused, with the
+        // frame-up reason named.
+        let err = proof
             .verify_against_blob(&blob, &snapshot)
-            .expect("valid fault proof must verify");
-        assert_eq!(verdict.action, QcProofAction::InvalidateFinality);
-        assert_eq!(verdict.invalidate_from_height, Some(100));
-        // Invalid Dilithium fault is slashable.
-        assert!(verdict.slash_validator);
+            .expect_err("a failing signature must not produce a verdict");
+        assert!(
+            err.contains("not evidence"),
+            "the refusal must name the frame-up reason, got: {err}"
+        );
     }
 
     /// A blob may not carry more signature entries than the validator set has

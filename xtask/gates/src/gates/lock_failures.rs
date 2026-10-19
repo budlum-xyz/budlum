@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates/wallet-core"];
 
 /// Remove `#[cfg(test)] mod ... { }` blocks (only `mod` items, mirroring the
 /// shell regex).
@@ -207,4 +207,22 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "lock-failures canary OK: a guard PASSes and a fail-open FAILs.",
     ))
+}
+
+#[cfg(test)]
+mod scan_root_tests {
+    use super::SCAN_ROOTS;
+
+    /// A scan root that is not a directory is skipped without a word, so a
+    /// wrong path turns the gate off for that tree.
+    #[test]
+    fn every_scan_root_is_a_directory_of_the_repository() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for root in SCAN_ROOTS {
+            assert!(
+                repo.join(root).is_dir(),
+                "scan root `{root}` is not a directory of the repository"
+            );
+        }
+    }
 }

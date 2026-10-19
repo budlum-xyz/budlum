@@ -90,7 +90,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
     println!("Phase: Verifying V3-Anchored state root determinism...");
     // Snapshot the live state before the restart; the map-level diff is
     // The diagnostic layer for any replay divergence.
-    let live_state = bc.state.clone();
+    let mut live_state = bc.state.clone();
     let live_accounts = bc.state.accounts.clone();
 
     // Simulate restart and reload (same funded genesis => same genesis hash,
@@ -105,7 +105,7 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
         Some(funded_genesis()),
     );
 
-    let state2 = bc2.state.clone();
+    let mut state2 = bc2.state.clone();
 
     // The state root is a pure function of (pubkey, balance, nonce) over the
     // Accounts map - diagnose at map level first so any replay divergence
@@ -133,29 +133,13 @@ async fn test_chaos_v2_heavy_load_under_pressure() {
         panic!("{} accounts differ after replay", mismatches.len());
     }
 
-    // The V2 root also hashes the four commit-path overlay fields
-    // (bridge_root, message_root, settlement_root, global_header_summary).
-    // Those are projections from Blockchain-level structures captured
-    // As-of-production-height; the reload replay loop does not (yet) mirror
-    // Them per-block - that mirroring is the V3 replay-anchoring work item.
-    // The executable consensus surface - accounts, validators, unbonding,
-    // Epoch, base_fee, block_reward - is fully replayable and MUST be
-    // Bit-identical. Normalize the overlays on both sides and compare.
-    let mut live_masked = live_state.clone();
-    live_masked.bridge_root = [0u8; 32];
-    live_masked.message_root = [0u8; 32];
-    live_masked.settlement_root = [0u8; 32];
-    live_masked.global_header_summary = [0u8; 32];
-    let mut replay_h = state2.clone();
-    replay_h.bridge_root = [0u8; 32];
-    replay_h.message_root = [0u8; 32];
-    replay_h.settlement_root = [0u8; 32];
-    replay_h.global_header_summary = [0u8; 32];
-
+    // The full root, overlay fields included, must be identical after a
+    // restart. Masking the bridge, message, settlement and header summary
+    // roots on both sides would hide a fork after restart.
     assert_eq!(
-        live_masked.calculate_state_root(),
-        replay_h.calculate_state_root(),
-        "Executable consensus state must be bit-identical after heavy load and restart"
+        live_state.calculate_state_root(),
+        state2.calculate_state_root(),
+        "the full state root must be bit-identical after heavy load and restart"
     );
     println!("LOAD TEST SUCCESS: 1000 txs processed, state consistent.");
 }

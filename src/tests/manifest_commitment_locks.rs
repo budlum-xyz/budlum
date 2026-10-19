@@ -486,7 +486,7 @@ mod self_host_policy {
         // written to catch, and nothing was calling the check.
         let mut reg = StorageRegistry::new();
         let err = reg
-            .declare_self_host_policy(policy(true, 0, true), &profile())
+            .declare_self_host_policy(ContentId([1u8; 32]), policy(true, 0, true), &profile())
             .expect_err("critical content needs paid replicas");
         assert!(matches!(err, StorageError::SelfHostRefusedByPolicy { .. }));
     }
@@ -496,7 +496,9 @@ mod self_host_policy {
         let mut reg = StorageRegistry::new();
         let mut p = policy(false, 0, true);
         p.owner = crate::core::address::Address([99u8; 32]);
-        assert!(reg.declare_self_host_policy(p, &profile()).is_err());
+        assert!(reg
+            .declare_self_host_policy(ContentId([1u8; 32]), p, &profile())
+            .is_err());
     }
 
     #[test]
@@ -506,7 +508,7 @@ mod self_host_policy {
         // be off while looking enforced.
         let mut reg = StorageRegistry::new();
         assert!(reg
-            .declare_self_host_policy(policy(true, 2, true), &profile())
+            .declare_self_host_policy(ContentId([1u8; 32]), policy(true, 2, true), &profile())
             .is_ok());
     }
 
@@ -523,7 +525,7 @@ mod self_host_policy {
     #[test]
     fn self_hosting_turned_off_is_refused() {
         let mut reg = StorageRegistry::new();
-        reg.declare_self_host_policy(policy(false, 0, false), &profile())
+        reg.declare_self_host_policy(ContentId([1u8; 32]), policy(false, 0, false), &profile())
             .expect("a non-critical declaration with no replicas is coherent");
 
         let err = reg
@@ -537,7 +539,7 @@ mod self_host_policy {
         // The finding, stated as a test: the owner asked for two paid
         // replicas before self-hosting, and none are open.
         let mut reg = StorageRegistry::new();
-        reg.declare_self_host_policy(policy(true, 2, true), &profile())
+        reg.declare_self_host_policy(ContentId([1u8; 32]), policy(true, 2, true), &profile())
             .expect("the declaration is coherent");
 
         let err = reg
@@ -607,8 +609,12 @@ mod self_host_policy {
 
         let mut reg = StorageRegistry::new();
         reg.set_operator_class(phone, OperatorClass::Mobile);
-        reg.declare_self_host_policy(policy_for(shard_id, true, 2), &profile())
-            .expect("two paid replicas for critical content is a coherent ask");
+        reg.declare_self_host_policy(
+            manifest.manifest_id,
+            policy_for(shard_id, true, 2),
+            &profile(),
+        )
+        .expect("two paid replicas for critical content is a coherent ask");
 
         let err = open_for(&mut reg, &manifest, shard_id, phone, 1)
             .expect_err("the owner's own policy has to refuse this placement");
@@ -646,8 +652,12 @@ mod self_host_policy {
         let server = crate::core::address::Address([8u8; 32]);
 
         let mut reg = StorageRegistry::new();
-        reg.declare_self_host_policy(policy_for(shard_id, true, 2), &profile())
-            .expect("the declaration is coherent");
+        reg.declare_self_host_policy(
+            manifest.manifest_id,
+            policy_for(shard_id, true, 2),
+            &profile(),
+        )
+        .expect("the declaration is coherent");
 
         open_for(&mut reg, &manifest, shard_id, server, 1)
             .expect("an always-on operator is what the owner asked for");
@@ -681,8 +691,12 @@ mod self_host_policy {
 
         let mut reg = StorageRegistry::new();
         reg.set_operator_class(phone, OperatorClass::Mobile);
-        reg.declare_self_host_policy(policy_for(shard_id, true, 2), &profile())
-            .expect("the declaration is coherent");
+        reg.declare_self_host_policy(
+            manifest.manifest_id,
+            policy_for(shard_id, true, 2),
+            &profile(),
+        )
+        .expect("the declaration is coherent");
 
         open_for(
             &mut reg,

@@ -503,18 +503,34 @@ impl BudV2File {
     /// is, Huffman -> decompress, Zstd -> decompress). No panics; zstd
     /// decompression is bounded by the K25 ceiling (ZSTD_MAX_DECOMPRESSED).
     pub fn restore_original(&self) -> Option<Vec<u8>> {
-        let mut out = Vec::new();
+        self.restore_original_within(Self::MAX_TOTAL_BYTES)
+    }
+
+    /// Like [`Self::restore_original`], with a ceiling on the TOTAL output.
+    /// The per-chunk ceiling alone lets many small chunks each expand to the
+    /// full limit; here every chunk may only use what is left of `max_total`.
+    fn restore_original_within(&self, max_total: u64) -> Option<Vec<u8>> {
+        let mut out: Vec<u8> = Vec::new();
         for c in &self.chunks {
+            let left = max_total.checked_sub(out.len() as u64)?;
             match self.chunk_codec {
-                ChunkCodec::Raw => out.extend_from_slice(&c.data),
+                ChunkCodec::Raw => {
+                    if c.data.len() as u64 > left {
+                        return None;
+                    }
+                    out.extend_from_slice(&c.data);
+                }
                 ChunkCodec::Huffman => {
                     let d = crate::bud_format_huffman::HuffmanCoder::decompress(&c.data)?;
+                    if d.len() as u64 > left {
+                        return None;
+                    }
                     out.extend_from_slice(&d);
                 }
                 ChunkCodec::Zstd => {
                     let d = crate::bud_format_real::zstd_decompress_safe(
                         &c.data,
-                        crate::bud_format_real::ZSTD_MAX_DECOMPRESSED,
+                        left.min(crate::bud_format_real::ZSTD_MAX_DECOMPRESSED),
                     )?;
                     out.extend_from_slice(&d);
                 }
@@ -957,6 +973,25 @@ mod tests {
         assert!(BudV2File::decode(&[]).is_none());
         assert!(BudV2File::decode(&enc[..20]).is_none());
         assert!(BudV2File::decode(&enc[..59]).is_none());
+    }
+
+    /// BLG-0586: the output ceiling is shared by all chunks, not granted to
+    /// each chunk again.
+    #[test]
+    fn restore_original_bounds_the_total_output() {
+        let zeros = vec![0u8; 400 * 1024];
+        let chunks: Vec<StructuralChunk> = (0..4)
+            .map(|_| StructuralChunk {
+                content_id: content_id(&zeros),
+                data: zeros.clone(),
+            })
+            .collect();
+        let file = BudV2File::new_zstd(FormatCodec::Unknown, chunks).expect("container");
+        let all = file.restore_original().expect("within the ceiling");
+        assert_eq!(all.len(), 4 * zeros.len());
+        // 1 MiB is below the 1.6 MiB the four chunks expand to.
+        assert!(file.restore_original_within(1024 * 1024).is_none());
+        assert!(file.restore_original_within(all.len() as u64).is_some());
     }
 
     #[test]
