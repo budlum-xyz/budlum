@@ -304,6 +304,20 @@ impl AiModelSpec {
             }
             None => hasher.update([0u8]),
         }
+        // P31-F02: execution_dims select the guest program a proof is checked
+        // against and modalities gate request admission. Both are behavior
+        // controlling spec fields, so the registry root must commit to them.
+        match &self.execution_dims {
+            Some(dims) => {
+                hasher.update([1u8]);
+                hasher.update((dims.len() as u64).to_le_bytes());
+                for d in dims {
+                    hasher.update(d.to_le_bytes());
+                }
+            }
+            None => hasher.update([0u8]),
+        }
+        hasher.update(self.modalities.bits().to_le_bytes());
         hasher.finalize().into()
     }
 }
@@ -1267,6 +1281,20 @@ mod tests {
         let mut s = valid_spec();
         s.execution_class = 1;
         assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn spec_leaf_commits_to_execution_dims_and_modalities() {
+        let base = valid_spec().calculate_leaf();
+        let mut s = valid_spec();
+        s.execution_dims = Some(vec![2, 1]);
+        let with_dims = s.calculate_leaf();
+        assert_ne!(base, with_dims, "P31-F02: dims must change the leaf");
+        s.execution_dims = Some(vec![2, 2]);
+        assert_ne!(with_dims, s.calculate_leaf(), "dims values must change the leaf");
+        let mut m = valid_spec();
+        m.modalities = crate::ai_inference::perception::ModalitySet::none();
+        assert_ne!(base, m.calculate_leaf(), "P31-F02: modalities must change the leaf");
     }
 
     #[test]
