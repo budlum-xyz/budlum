@@ -5164,6 +5164,11 @@ impl Blockchain {
         Self::apply_epoch_close_liveness(&mut next_state, block, preceding_chain);
         for (content_id, _) in burn_cids {
             let epoch = next_state.epoch_index;
+            // The fee for epochs the deal will no longer serve goes back to
+            // the payer. Read before the prune, which expires the deals.
+            let fee_refunds = next_state
+                .storage_registry
+                .prune_fee_refunds(&content_id, epoch);
             let (_pruned, bond_returns) = next_state
                 .storage_registry
                 .prune_content(&content_id, epoch);
@@ -5182,6 +5187,11 @@ impl Blockchain {
                     .map_err(|error| {
                         format!("storage bond return overflow for {operator}: {error}")
                     })?;
+            }
+            for (payer, refund) in fee_refunds {
+                next_state
+                    .try_add_balance(&payer, refund)
+                    .map_err(|error| format!("storage fee refund overflow for {payer}: {error}"))?;
             }
         }
         let previous_epoch = base_state.epoch_index;
