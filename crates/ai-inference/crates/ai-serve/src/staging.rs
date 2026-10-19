@@ -50,6 +50,8 @@ pub enum StripeError {
     NoUsableDevice,
     /// The sum of the measured weights overflowed.
     WeightOverflow,
+    /// Two entries name the same device.
+    DuplicateDevice,
 }
 
 impl std::fmt::Display for StripeError {
@@ -59,6 +61,7 @@ impl std::fmt::Display for StripeError {
             Self::NoDevice => write!(f, "staging: no device to stripe across"),
             Self::NoUsableDevice => write!(f, "staging: no device measured usable bandwidth"),
             Self::WeightOverflow => write!(f, "staging: measured weights overflow"),
+            Self::DuplicateDevice => write!(f, "staging: a device is listed more than once"),
         }
     }
 }
@@ -89,14 +92,19 @@ pub struct StripeChunk {
 /// # Errors
 ///
 /// [`StripeError::NothingToStripe`], [`StripeError::NoDevice`],
-/// [`StripeError::NoUsableDevice`], or [`StripeError::WeightOverflow`] as
-/// described on the variants.
+/// [`StripeError::NoUsableDevice`], [`StripeError::WeightOverflow`], or
+/// [`StripeError::DuplicateDevice`] as described on the variants.
 pub fn stripe_plan(len: u64, devices: &[StorageDevice]) -> Result<Vec<StripeChunk>, StripeError> {
     if len == 0 {
         return Err(StripeError::NothingToStripe);
     }
     if devices.is_empty() {
         return Err(StripeError::NoDevice);
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    if !devices.iter().all(|dev| seen.insert(dev.id)) {
+        return Err(StripeError::DuplicateDevice);
     }
 
     let mut total_weight: u64 = 0;
@@ -193,6 +201,14 @@ mod staging_tests {
             id: [id; 32],
             bandwidth_kib_s: bw,
         }
+    }
+
+    #[test]
+    fn a_device_listed_twice_is_refused() {
+        assert_eq!(
+            stripe_plan(100, &[dev(1, 10), dev(1, 20)]),
+            Err(StripeError::DuplicateDevice)
+        );
     }
 
     fn total(chunks: &[StripeChunk]) -> u64 {
