@@ -50,7 +50,7 @@ fn usage() -> String {
      \x20 step-reachability     which workflow steps can run (guards that point nowhere)\n\
      \x20 clippy-extra-report   per-lint tally and addresses from clippy JSON\n\
      \x20 fsf-project-fit       generate or check docs/FSF_PROJECT_FIT.md\n\
-     \x20 --self-test           run every tool's canary\n\
+     \x20 --self-test           run the canaries of seed-corpus, devnet, backup-drill, pre-push\n\
      \x20 --list                print the tool names\n"
         .to_string()
 }
@@ -165,5 +165,15 @@ fn main() {
             eprintln!("FAIL: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_usage_does_not_overstate_the_self_test() {
+        assert!(!usage().contains("every tool"));
     }
 }
