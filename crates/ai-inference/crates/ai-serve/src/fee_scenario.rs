@@ -548,7 +548,10 @@ mod fee_scenario_tests {
         for rate in [-38.2, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let mut wallet = PromptWallet::new(1.0);
             assert!(wallet.charge(1_000, rate).is_err(), "rate {rate}");
-            assert!(approx(wallet.balance_usd, 1.0), "rate {rate} changed the balance");
+            assert!(
+                approx(wallet.balance_usd, 1.0),
+                "rate {rate} changed the balance"
+            );
         }
         let mut broke = PromptWallet::new(-1.0);
         assert!(broke.charge(0, 38.2).is_err());

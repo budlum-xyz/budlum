@@ -516,7 +516,10 @@ mod tests {
         let r = redact_text(&input);
         assert!(r.text().contains(REDACTION_TOKEN));
         assert!(!r.text().contains(secret));
-        assert!(r.text().ends_with(','), "the punctuation after the value stays");
+        assert!(
+            r.text().ends_with(','),
+            "the punctuation after the value stays"
+        );
         assert!(r.report().changed());
     }
 
