@@ -29,7 +29,14 @@ fn code_of(root: &Path, rel: &str) -> Result<String, String> {
     if !f.is_file() {
         return Err(format!("expected file missing: {}", f.display()));
     }
-    std::fs::read_to_string(&f).map_err(|e| e.to_string())
+    let text = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+    Ok(production_text(&text))
+}
+
+/// The text without test items, comments and string literals: a needle in a
+/// comment, a string or a unit test is no evidence about production code.
+fn production_text(text: &str) -> String {
+    super::capability_modules_are_wired::code_only(text)
 }
 
 /// The text between `start` (inclusive) and `end` (exclusive, searched from
@@ -303,4 +310,19 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "consensus-state-only-changes-in-blocks canary OK (clean PASSes, broken FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod production_text_tests {
+    use super::*;
+
+    #[test]
+    fn needles_in_comments_strings_and_tests_are_gone() {
+        let src = "// final_hasher.update(self.bridge_root)\nlet s = \"MAX_STATE_UPDATES\";\n#[cfg(test)]\nmod t { fn x() { save_cross_domain_message(); } }\nfn real() {}\n";
+        let out = production_text(src);
+        assert!(!out.contains("bridge_root"));
+        assert!(!out.contains("MAX_STATE_UPDATES"));
+        assert!(!out.contains("save_cross_domain_message"));
+        assert!(out.contains("fn real"));
+    }
 }
