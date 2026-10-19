@@ -68,7 +68,12 @@ mod rpc_tests {
             MethodKind, SlotDisclosure, VerificationMethod,
         };
         let poa = crate::domain::ConsensusKind::PoA;
-        let subject = Address::from([1u8; 32]);
+        // The receipt is signed by the subject's account key (BLG-0097), and
+        // the V4 address IS that key, so the subject is derived from it.
+        let subject_keys = crate::crypto::primitives::KeyPair::generate().expect("keypair");
+        let subject = Address::from(
+            <[u8; 32]>::try_from(subject_keys.public_key_bytes()).expect("32-byte ed25519 key"),
+        );
         let issuer = Address::from([2u8; 32]);
         let requester = Address::from([3u8; 32]);
         let mut registry = IdentityRegistry::new();
@@ -124,7 +129,7 @@ mod rpc_tests {
                 0,
             )
             .expect("issue against the seeded records");
-        let (filled, receipt) = build_presentation(
+        let (filled, mut receipt) = build_presentation(
             &registry,
             &requester,
             &subject,
@@ -139,6 +144,7 @@ mod rpc_tests {
             0,
         )
         .expect("the fixture must fill");
+        receipt.sign(&subject_keys);
         (
             registry, subject, requester, receipt, filled, id, credential,
         )
@@ -762,7 +768,13 @@ mod rpc_tests {
         // The relayed submit path requires the sender to be an active relayer.
         // Fund and register a relayer (staking == registration), then use it as
         // The message sender.
-        let relayer = Address::from_hex(&"07".repeat(32)).unwrap();
+        // The message envelope is signed (BLG-0113): the V4 address IS the
+        // Ed25519 public key, so the relayer is derived from the key that
+        // signs.
+        let relayer_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let relayer = Address::from(
+            <[u8; 32]>::try_from(relayer_keys.public_key_bytes()).expect("32-byte ed25519 key"),
+        );
         chain
             .credit_development_account(&relayer, 5_000)
             .await
@@ -772,7 +784,7 @@ mod rpc_tests {
             .await
             .unwrap();
 
-        let cross_domain_msg = crate::cross_domain::CrossDomainMessage::new(
+        let mut cross_domain_msg = crate::cross_domain::CrossDomainMessage::new(
             crate::cross_domain::message::CrossDomainMessageParams {
                 source_domain: 1,
                 target_domain: 2,
@@ -786,6 +798,7 @@ mod rpc_tests {
                 expiry_height: 100,
             },
         );
+        cross_domain_msg.sign_sender_ed25519(&relayer_keys);
 
         let msg_result = server
             .submit_cross_domain_message(cross_domain_msg.clone())
