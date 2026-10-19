@@ -442,6 +442,20 @@ mod rpc_tests {
     }
 
     #[tokio::test]
+    async fn social_delete_is_refused_outside_a_block() {
+        let (_server, bc) = setup().await;
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: [0u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+            signature: Vec::new(),
+        };
+        let err = bc
+            .social_delete(crate::storage::ContentId::of(b"x"), auth, 1)
+            .await
+            .unwrap_err();
+        assert!(err.contains("block transaction"), "{err}");
+    }
+
+    #[tokio::test]
     async fn test_rpc_block_methods() {
         let (server, bc) = setup().await;
         let block_number = server.block_number().await.unwrap();

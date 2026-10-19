@@ -3049,6 +3049,10 @@ impl ChainActor {
         "view grants are state-root bearing and cannot be mutated over RPC; grant changes must ride a block transaction".into()
     }
 
+    fn social_delete_rpc_mutation_error() -> String {
+        "social delete changes state-root bearing rows and cannot be applied over RPC; it must ride a block transaction".into()
+    }
+
     fn run_storage_maintenance(&mut self, block_height: u64) {
         if self.storage_economics_disabled_on_mainnet() {
             return;
@@ -4356,23 +4360,13 @@ impl ChainActor {
                     let _ = response.send(Err(Self::view_grant_rpc_mutation_error()));
                     continue;
                 }
-                ChainCommand::SocialDelete {
-                    content_id,
-                    auth,
-                    at_epoch,
-                    response,
-                } => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let res = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .social_delete(self.blockchain.chain_id, content_id, &auth, at_epoch)
-                        .map_err(|e| e.to_string());
-                    let _ = response.send(res);
+                ChainCommand::SocialDelete { response, .. } => {
+                    // A delete rewrites the grant book and the rows keyed by the
+                    // content, all state-root bearing. Applied between blocks it
+                    // changes this node's root alone, so it is refused on every
+                    // chain until it rides a block transaction.
+                    let _ = response.send(Err(Self::social_delete_rpc_mutation_error()));
+                    continue;
                 }
                 ChainCommand::GetViewGrants {
                     content_id,
