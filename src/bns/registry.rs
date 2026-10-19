@@ -4,10 +4,16 @@ use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BnsRegistry {
     pub names: BTreeMap<String, NameRecord>,
     pub base_cost: u64,
+}
+
+impl Default for BnsRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BnsRegistry {
