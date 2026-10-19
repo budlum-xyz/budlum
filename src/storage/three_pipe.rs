@@ -390,11 +390,11 @@ mod tests {
     #[test]
     fn decode_refuses_an_invalid_frame_after_a_complete_prefix() {
         let encoded = encode_qr_video(b"complete prefix", 256, None).unwrap();
-        let mut frames = encoded.frames.clone();
+        let mut frames = encoded.pipe.frames.clone();
         frames.push(frames[0].clone());
-        assert!(decode_frames(&encoded.stream_commitment, &frames).is_ok());
+        assert!(decode_frames(&encoded.pipe.stream_commitment, &frames).is_ok());
         frames.push(vec![0; 10]);
-        assert!(decode_frames(&encoded.stream_commitment, &frames).is_err());
+        assert!(decode_frames(&encoded.pipe.stream_commitment, &frames).is_err());
     }
 
     #[test]
