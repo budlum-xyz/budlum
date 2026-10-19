@@ -349,12 +349,17 @@ pub enum DerivedError {
     PrefixSpanDegenerate { kept_bytes: u64, master_bytes: u64 },
     /// The prefix runs past the end of the master.
     PrefixPastEnd { kept_bytes: u64, master_bytes: u64 },
+    /// Prefix commitments must not carry ignored crop geometry.
+    NonCanonicalPrefixFields,
 }
 
 impl std::fmt::Display for DerivedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyRegion => write!(f, "a derived region must have a non-zero area"),
+            Self::NonCanonicalPrefixFields => {
+                write!(f, "prefix derivations require zero crop geometry")
+            }
             Self::DerivationCountOverflow { master_id } => {
                 write!(f, "derivation count exhausted for master {master_id:?}")
             }
@@ -458,6 +463,19 @@ impl DerivedSpec {
             });
         }
         if let Some(span) = self.prefix {
+            // BLG-0417: these fields are hashed but ignored by Prefix.
+            // Canonical zeroes prevent many ids describing the same bytes.
+            if [
+                self.block_x,
+                self.block_y,
+                self.block_w,
+                self.block_h,
+                self.master_blocks_w,
+                self.master_blocks_h,
+            ] != [0; 6]
+            {
+                return Err(DerivedError::NonCanonicalPrefixFields);
+            }
             return Self::check_prefix_span(span);
         }
         if self.block_w == 0 || self.block_h == 0 {
@@ -868,6 +886,28 @@ mod tests {
                 kept_bytes: 23_726,
                 master_bytes: 474_537,
             }),
+        }
+    }
+
+    #[test]
+    fn prefix_rejects_every_ignored_crop_field() {
+        let canonical = prefix_spec();
+        assert!(canonical.check_region().is_ok());
+        for field in 0..6 {
+            let mut alias = canonical.clone();
+            match field {
+                0 => alias.block_x = 1,
+                1 => alias.block_y = 1,
+                2 => alias.block_w = 1,
+                3 => alias.block_h = 1,
+                4 => alias.master_blocks_w = 1,
+                _ => alias.master_blocks_h = 1,
+            }
+            assert_eq!(alias.prefix, canonical.prefix);
+            assert_eq!(
+                alias.check_region(),
+                Err(DerivedError::NonCanonicalPrefixFields)
+            );
         }
     }
 
