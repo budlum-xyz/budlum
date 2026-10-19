@@ -323,7 +323,7 @@ impl Executor {
                         }
                     }
                 }
-                state.sync_validator_registration(&tx.from);
+                state.sync_validator_registration_with_floor(&tx.from, min_stake);
             }
             TransactionType::RegisterConsensusKeys(registration) => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
@@ -514,7 +514,9 @@ impl Executor {
                 // Is what the liveness / invalid-vote slashing paths and the
                 // RPC member views consult, and `registry.root()` is hashed
                 // Into the state root, so the stale entry was consensus state.
-                state.sync_validator_registration(&tx.from);
+                let unstake_floor = crate::core::chain_config::Network::from_chain_id(tx.chain_id)
+                    .map_or(1, |network| network.min_stake());
+                state.sync_validator_registration_with_floor(&tx.from, unstake_floor);
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -2942,6 +2944,37 @@ mod tests {
         assert!(Executor::apply_transaction(&mut state, &tx).is_err());
         assert_eq!(state.get_validator(&who).map(|v| v.stake), Some(1_000));
         assert!(state.unbonding_queue.is_empty());
+    }
+
+    #[test]
+    fn stake_below_the_network_floor_is_not_registered() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::chain_config::Network;
+        use crate::core::transaction::{Transaction, TransactionType};
+        use crate::execution::executor::Executor;
+
+        let who = Address::from([8u8; 32]);
+        let mut state = AccountState::new();
+        let fee = state.base_fee.max(1);
+        let stake = Network::Mainnet.min_stake() / 1_000;
+        state.add_balance(&who, stake + fee);
+        let mut tx = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            stake,
+            fee,
+            0,
+            vec![],
+            Network::Mainnet.chain_id().0,
+            TransactionType::Stake,
+        );
+        tx.hash = tx.calculate_hash();
+        Executor::apply_transaction(&mut state, &tx).expect("a bond is accepted");
+        assert!(state
+            .registry
+            .get(&who, crate::registry::role::roles::VALIDATOR)
+            .is_none());
     }
 
     #[test]
