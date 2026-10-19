@@ -133,6 +133,13 @@ pub struct BlsKeypair {
     pub public_key: Vec<u8>,
 }
 
+/// F11: zero the secret scalar when the pair is dropped.
+impl Drop for BlsKeypair {
+    fn drop(&mut self) {
+        self.secret_key = Scalar::zero();
+    }
+}
+
 impl BlsKeypair {
     pub fn generate() -> Result<Self, CryptoError> {
         use rand::Rng;
@@ -164,14 +171,21 @@ impl BlsKeypair {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        // Validate G2 encoding AND that pk matches sk.
-        if bytes.len() < 32 + 96 {
+        // Validate G2 encoding AND that pk matches sk. F10: the length is
+        // exact — trailing garbage is not silently ignored — and the zero
+        // scalar is refused (its public key is the identity point).
+        if bytes.len() != 32 + 96 {
             return Err(CryptoError::InvalidKey(
                 "Invalid BLS keypair bytes length".into(),
             ));
         }
         let mut sk_bytes = [0u8; 32];
         sk_bytes.copy_from_slice(&bytes[0..32]);
+        if sk_bytes == [0u8; 32] {
+            return Err(CryptoError::InvalidKey(
+                "Refusing a zero BLS secret key".into(),
+            ));
+        }
         let sk_opt = Scalar::from_bytes(&sk_bytes);
         // `Option::from` consumes the `CtOption` once; the previous form
         // branched on `is_none()` and then called `unwrap()`, which reads the
@@ -320,10 +334,19 @@ impl PqKeyPair {
                 secret_key.len()
             )));
         }
-        Ok(Self {
+        let kp = Self {
             public_key: public_key.to_vec(),
             secret_key: secret_key.to_vec(),
-        })
+        };
+        // F10: the halves must pair. A public key that does not match the
+        // secret half would announce one identity and sign with another, so
+        // a fixed probe is signed and verified at parse time.
+        const PAIRING_PROBE: &[u8] = b"BUDLUM_KEYFILE_PAIRING_PROBE_V1";
+        let probe = kp.sign(PAIRING_PROBE).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        Self::verify(public_key, PAIRING_PROBE, &probe).map_err(|_| {
+            CryptoError::InvalidKey("PQ public and secret halves do not match".into())
+        })?;
+        Ok(kp)
     }
 
     pub fn public_key_bytes(&self) -> &[u8] {
@@ -391,10 +414,17 @@ impl PqKeyPair {
                 secret_key.len()
             )));
         }
-        Ok(Self {
+        let kp = Self {
             public_key: public_key.to_vec(),
             secret_key: secret_key.to_vec(),
-        })
+        };
+        // F10: the halves must pair; see the dilithium impl above.
+        const PAIRING_PROBE: &[u8] = b"BUDLUM_KEYFILE_PAIRING_PROBE_V1";
+        let probe = kp.sign(PAIRING_PROBE).map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        Self::verify(public_key, PAIRING_PROBE, &probe).map_err(|_| {
+            CryptoError::InvalidKey("PQ public and secret halves do not match".into())
+        })?;
+        Ok(kp)
     }
 
     pub fn public_key_bytes(&self) -> &[u8] {
@@ -537,6 +567,10 @@ impl ValidatorKeys {
             bytes.extend_from_slice(&bls_key.to_bytes());
         }
         write_key_file(path.as_ref(), &bytes)?;
+        // F11: the plaintext key buffer does not outlive the write.
+        for b in &mut bytes {
+            *b = 0;
+        }
         Ok(())
     }
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
@@ -583,11 +617,17 @@ impl ValidatorKeys {
         #[cfg(not(any(feature = "pq-dilithium", feature = "pq-ml-dsa")))]
         let pq_key: Option<PqKeyPair> = None;
 
-        let bls_key = if bytes.len() >= cursor + 128 {
-            let bls = BlsKeypair::from_bytes(&bytes[cursor..cursor + 128])?;
-            Some(bls)
-        } else {
-            None
+        // F10: the tail after the optional PQ block is either absent or
+        // exactly one BLS keypair. A 1..127-byte tail used to be dropped
+        // silently, losing the BLS key; extra bytes were ignored.
+        let bls_key = match bytes.len().saturating_sub(cursor) {
+            0 => None,
+            128 => Some(BlsKeypair::from_bytes(&bytes[cursor..cursor + 128])?),
+            _ => {
+                return Err(CryptoError::InvalidKey(
+                    "Key file has a partial or trailing BLS tail".into(),
+                ))
+            }
         };
 
         Ok(ValidatorKeys {
@@ -824,6 +864,14 @@ pub fn pq_signature_len_acceptable(len: usize, expected: PqSignatureClass) -> bo
 #[derive(Clone)]
 pub struct WalletKeyPair {
     signing_key: ml_dsa::SigningKey<ml_dsa::MlDsa87>,
+}
+
+/// F11: overwrite the wallet signing key when the pair is dropped.
+#[cfg(feature = "wallet-ml-dsa")]
+impl Drop for WalletKeyPair {
+    fn drop(&mut self) {
+        self.signing_key = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed((&[0u8; 32]).into());
+    }
 }
 
 #[cfg(feature = "wallet-ml-dsa")]
