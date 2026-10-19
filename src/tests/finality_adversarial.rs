@@ -540,7 +540,7 @@ fn equivocation_generates_slashing_evidence() {
     );
     assert_eq!(
         after.stake, 5_000,
-        "double-sign %50 kesmeli (10000 -> 5000)"
+        "double-sign must slash 50 percent (10000 -> 5000)"
     );
     // The honest validator is unaffected.
     let honest_reg = bc.state.registry.get(&honest, roles::VALIDATOR).unwrap();
@@ -746,7 +746,7 @@ fn repeated_invalid_signatures_trigger_slash() {
     // The MaliciousBehaviour rate is 100% (approved decision): the stake is zeroed.
     assert_eq!(
         after.stake, 0,
-        "invalid-sig spam MaliciousBehaviour %100 kesmeli"
+        "invalid-sig spam must slash 100 percent as MaliciousBehaviour"
     );
     // There is an InvalidSignatureSpam record in the persistent history.
     let hist = bc.state.registry.slashing_history_for(&spammer);
