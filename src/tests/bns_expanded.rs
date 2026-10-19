@@ -73,13 +73,13 @@ fn test_bns_subdomains_owner_only() {
         .unwrap();
 
     // Alice can create subdomain
-    reg.register_subdomain("alice.bud", "app".to_string(), bob, &alice)
+    reg.register_subdomain("alice.bud", "app".to_string(), bob, &alice, 0)
         .unwrap();
 
     assert_eq!(reg.resolve_subdomain("alice.bud", "app", 100), Some(bob));
 
     // Bob (not owner of parent) cannot create subdomain under alice.bud
-    let res = reg.register_subdomain("alice.bud", "malicious".to_string(), bob, &bob);
+    let res = reg.register_subdomain("alice.bud", "malicious".to_string(), bob, &bob, 0);
     assert!(res.is_err());
 }
 
@@ -123,10 +123,10 @@ fn test_bns_transfer() {
     reg.transfer("transfer.bud", &alice, bob, 10).unwrap();
     assert_eq!(reg.resolve("transfer.bud", 100), Some(bob));
     assert!(matches!(
-        reg.register_subdomain("transfer.bud", "ghost".to_string(), alice, &alice),
+        reg.register_subdomain("transfer.bud", "ghost".to_string(), alice, &alice, 10),
         Err(BnsError::NotOwner)
     ));
-    reg.register_subdomain("transfer.bud", "app".to_string(), alice, &bob)
+    reg.register_subdomain("transfer.bud", "app".to_string(), alice, &bob, 10)
         .unwrap();
     assert_eq!(
         reg.resolve_subdomain("transfer.bud", "app", 100),
@@ -227,12 +227,13 @@ fn test_bns_transfer_clears_previous_owner_pointers() {
     let bob = addr(2);
     reg.register("pointers.bud".to_string(), alice, 0, 1000)
         .unwrap();
-    reg.register_subdomain("pointers.bud", "app".to_string(), alice, &alice)
+    reg.register_subdomain("pointers.bud", "app".to_string(), alice, &alice, 0)
         .unwrap();
     reg.set_content(
         "pointers.bud",
         &alice,
         crate::storage::content_id::ContentId([9u8; 32]),
+        0,
     )
     .unwrap();
 
@@ -241,4 +242,25 @@ fn test_bns_transfer_clears_previous_owner_pointers() {
     assert_eq!(resolved.address, Some(bob));
     assert_eq!(resolved.content_id, None);
     assert_eq!(reg.resolve_subdomain("pointers.bud", "app", 100), None);
+}
+
+#[test]
+fn test_bns_expired_name_refuses_writes() {
+    let mut reg = BnsRegistry::new();
+    let alice = addr(1);
+    reg.register("stale.bud".to_string(), alice, 0, 100)
+        .unwrap();
+    assert!(matches!(
+        reg.register_subdomain("stale.bud", "app".to_string(), alice, &alice, 100),
+        Err(BnsError::Expired)
+    ));
+    assert!(matches!(
+        reg.set_content(
+            "stale.bud",
+            &alice,
+            crate::storage::content_id::ContentId([1u8; 32]),
+            100
+        ),
+        Err(BnsError::Expired)
+    ));
 }

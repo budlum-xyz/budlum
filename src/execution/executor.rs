@@ -805,7 +805,7 @@ impl Executor {
 
                 state
                     .bns_registry
-                    .set_content(&name, &tx.from, cid)
+                    .set_content(&name, &tx.from, cid, state.epoch_index)
                     .map_err(|e| {
                         BudlumError::validation("bns_set_content_failed", e.to_string())
                     })?;
@@ -823,7 +823,7 @@ impl Executor {
 
                 state
                     .bns_registry
-                    .register_subdomain(&parent, label, sub_owner, &tx.from)
+                    .register_subdomain(&parent, label, sub_owner, &tx.from, state.epoch_index)
                     .map_err(|e| BudlumError::validation("bns_subdomain_failed", e.to_string()))?;
 
                 let sender = state.get_or_create(&tx.from);

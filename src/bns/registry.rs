@@ -215,6 +215,7 @@ impl BnsRegistry {
         sub_label: String,
         owner: Address,
         caller: &Address,
+        current_epoch: u64,
     ) -> Result<(), BnsError> {
         if !Self::is_valid_label(&sub_label) {
             return Err(BnsError::InvalidName);
@@ -225,6 +226,9 @@ impl BnsRegistry {
             .ok_or(BnsError::InvalidName)?;
         if &parent.owner != caller {
             return Err(BnsError::NotOwner);
+        }
+        if parent.expires_at <= current_epoch {
+            return Err(BnsError::Expired);
         }
         // Cap subdomains per name - fail-closed.
         if parent.subdomains.len() >= Self::MAX_SUBDOMAINS_PER_NAME {
@@ -253,10 +257,14 @@ impl BnsRegistry {
         name: &str,
         owner: &Address,
         cid: ContentId,
+        current_epoch: u64,
     ) -> Result<(), BnsError> {
         let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
         if &record.owner != owner {
             return Err(BnsError::NotOwner);
+        }
+        if record.expires_at <= current_epoch {
+            return Err(BnsError::Expired);
         }
         record.content_id = Some(cid);
         Ok(())
