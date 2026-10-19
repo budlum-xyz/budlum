@@ -97,6 +97,9 @@ impl VideoSuggestion {
     }
 }
 
+/// The byte stride of the frame difference sample.
+const SAMPLE_STRIDE: usize = 61;
+
 /// Content class detection: the mean pixel difference of consecutive YUV420
 /// frames.
 ///
@@ -112,7 +115,8 @@ pub fn classify_content(
     if w == 0 || h == 0 || frames == 0 {
         return None;
     }
-    let frame_bytes = w * h * 3 / 2;
+    // The size comes from caller numbers: a product that overflows is refused.
+    let frame_bytes = w.checked_mul(h)?.checked_mul(3)? / 2;
     if frame_bytes == 0 || yuv.len() < frame_bytes * 2 {
         return None;
     }
@@ -121,20 +125,21 @@ pub fn classify_content(
         return None;
     }
     let mut total_diff: u64 = 0;
+    let mut samples: u64 = 0;
     for f in 0..n {
         let a = &yuv[f * frame_bytes..(f + 1) * frame_bytes];
         let b = &yuv[(f + 1) * frame_bytes..(f + 2) * frame_bytes];
-        // Sampling every 64th byte, for speed; the Y plane dominates.
+        // Sampling every 61st byte, for speed; the Y plane dominates. The stride
+        // is prime, so it does not line up with a row width that is a multiple
+        // of 64 and keep hitting the same few columns.
         let mut diff: u64 = 0;
-        let mut cnt: u64 = 0;
-        for i in (0..frame_bytes).step_by(64) {
+        for i in (0..frame_bytes).step_by(SAMPLE_STRIDE) {
             diff += (a[i] as i64 - b[i] as i64).unsigned_abs();
-            cnt += 1;
+            samples += 1;
         }
-        let _ = cnt; // the sample counter, usable for statistics
         total_diff += diff;
     }
-    let avg = total_diff as f64 / (n as f64 * (frame_bytes as f64 / 64.0));
+    let avg = total_diff as f64 / samples as f64;
     let class = if avg < 1.0 {
         VideoContentClass::Static
     } else if avg < 8.0 {
@@ -243,6 +248,26 @@ mod tests {
 
     fn static_frame() -> Vec<u8> {
         vec![0u8; 320 * 240 * 3 / 2]
+    }
+
+    #[test]
+    fn a_moving_column_is_seen_when_the_width_is_a_multiple_of_64() {
+        let (w, h) = (128usize, 64usize);
+        let frame_bytes = w * h * 3 / 2;
+        let a = vec![0u8; frame_bytes];
+        let mut b = a.clone();
+        for row in 0..h {
+            b[row * w + 10] = 255;
+        }
+        let mut yuv = a;
+        yuv.extend_from_slice(&b);
+        let (class, _) = classify_content(&yuv, w, h, 1).expect("two frames");
+        assert_ne!(class, VideoContentClass::Static);
+    }
+
+    #[test]
+    fn a_frame_size_that_overflows_is_refused() {
+        assert!(classify_content(&[0u8; 8], usize::MAX, 2, 1).is_none());
     }
 
     #[test]
