@@ -19,10 +19,6 @@
 //!   bad actor cannot stall the round (see
 //!   `finality_recovers_honest_subset_after_invalid_signature`).
 
-// These tests pair the parallel arrays `sks[i]` and `snap.validators[i]` by the SAME index;
-// an index-based loop reads better here than `enumerate`.
-#![allow(clippy::needless_range_loop)]
-
 use crate::chain::blockchain::Blockchain;
 use crate::chain::finality::{
     checkpoint_signing_message, pop_signing_message, sign_bls, sign_bls_pop, FinalityAggregator,
@@ -140,8 +136,8 @@ fn drive_prevote_quorum(
     height: u64,
     hash: &str,
 ) {
-    for i in 0..count {
-        let pv = signed_prevote(&sks[i], epoch, height, hash, snap.validators[i].address);
+    for (sk, v) in sks.iter().zip(snap.validators.iter()).take(count) {
+        let pv = signed_prevote(sk, epoch, height, hash, v.address);
         agg.add_prevote(pv).expect("prevote must be accepted");
     }
 }
@@ -261,8 +257,8 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
     assert!(err.contains("Invalid precommit signature"));
 
     // Honest 3/4 precommits -> quorum met.
-    for i in 0..3 {
-        let pc = signed_precommit(&sks[i], epoch, height, hash, snap.validators[i].address);
+    for (sk, v) in sks.iter().zip(snap.validators.iter()).take(3) {
+        let pc = signed_precommit(sk, epoch, height, hash, v.address);
         agg.add_precommit(pc).expect("honest precommit accepted");
     }
     assert!(
@@ -293,8 +289,8 @@ fn finality_valid_quorum_produces_verifiable_cert() {
     let mut agg = FinalityAggregator::new(epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 3, epoch, height, hash);
-    for i in 0..3 {
-        let pc = signed_precommit(&sks[i], epoch, height, hash, snap.validators[i].address);
+    for (sk, v) in sks.iter().zip(snap.validators.iter()).take(3) {
+        let pc = signed_precommit(sk, epoch, height, hash, v.address);
         agg.add_precommit(pc).expect("precommit accepted");
     }
     let cert = agg.try_produce_cert().expect("cert produced");
@@ -315,15 +311,15 @@ fn finality_prevents_split_brain_on_partition() {
 
     // Grup A: validator 0,1 -> HASH_A
     let mut agg_a = FinalityAggregator::new(epoch, height, "HASH_A".into(), snap.clone());
-    for i in 0..2 {
-        let pv = signed_prevote(&sks[i], epoch, height, "HASH_A", snap.validators[i].address);
+    for (sk, v) in sks.iter().zip(snap.validators.iter()).take(2) {
+        let pv = signed_prevote(sk, epoch, height, "HASH_A", v.address);
         agg_a.add_prevote(pv).expect("group A prevote");
     }
 
     // Grup B: validator 2,3 -> HASH_B
     let mut agg_b = FinalityAggregator::new(epoch, height, "HASH_B".into(), snap.clone());
-    for i in 2..4 {
-        let pv = signed_prevote(&sks[i], epoch, height, "HASH_B", snap.validators[i].address);
+    for (sk, v) in sks.iter().zip(snap.validators.iter()).skip(2).take(2) {
+        let pv = signed_prevote(sk, epoch, height, "HASH_B", v.address);
         agg_b.add_prevote(pv).expect("group B prevote");
     }
 
@@ -354,8 +350,8 @@ fn finality_ignores_late_votes_after_cert() {
     let mut agg = FinalityAggregator::new(epoch, height, hash.into(), snap.clone());
 
     drive_prevote_quorum(&mut agg, &snap, &sks, 3, epoch, height, hash);
-    for i in 0..3 {
-        let pc = signed_precommit(&sks[i], epoch, height, hash, snap.validators[i].address);
+    for (sk, v) in sks.iter().zip(snap.validators.iter()).take(3) {
+        let pc = signed_precommit(sk, epoch, height, hash, v.address);
         agg.add_precommit(pc).expect("precommit accepted");
     }
     let cert = agg.try_produce_cert().expect("cert produced");
@@ -402,8 +398,8 @@ fn finality_honest_quorum_survives_byzantine_noise() {
     let mut agg = FinalityAggregator::new(epoch, height, honest_hash.into(), snap.clone());
 
     // Let the byzantine noise arrive FIRST (conflicting hash) -> must be refused.
-    for i in 5..7 {
-        let noise = signed_prevote(&sks[i], epoch, height, byz_hash, snap.validators[i].address);
+    for (sk, v) in sks.iter().zip(snap.validators.iter()).skip(5).take(2) {
+        let noise = signed_prevote(sk, epoch, height, byz_hash, v.address);
         assert!(
             agg.add_prevote(noise).is_err(),
             "byzantine (conflicting-hash) noise must be refused"
@@ -418,16 +414,13 @@ fn finality_honest_quorum_survives_byzantine_noise() {
     );
 
     // Let the byzantine noise try again in the precommit phase -> refused again.
-    for i in 5..7 {
+    for (sk, v) in sks.iter().zip(snap.validators.iter()).skip(5).take(2) {
         let noise = Precommit {
             epoch,
             checkpoint_height: height,
             checkpoint_hash: byz_hash.to_string(),
-            voter_id: snap.validators[i].address,
-            sig_bls: sign_bls(
-                &sks[i],
-                &checkpoint_signing_message(epoch, height, byz_hash),
-            ),
+            voter_id: v.address,
+            sig_bls: sign_bls(sk, &checkpoint_signing_message(epoch, height, byz_hash)),
             auth_sig: Vec::new(),
         };
         assert!(
@@ -437,14 +430,8 @@ fn finality_honest_quorum_survives_byzantine_noise() {
     }
 
     // 5 honest precommits -> quorum, the cert is produced and VERIFIES.
-    for i in 0..5 {
-        let pc = signed_precommit(
-            &sks[i],
-            epoch,
-            height,
-            honest_hash,
-            snap.validators[i].address,
-        );
+    for (sk, v) in sks.iter().zip(snap.validators.iter()).take(5) {
+        let pc = signed_precommit(sk, epoch, height, honest_hash, v.address);
         agg.add_precommit(pc).expect("honest precommit accepted");
     }
     assert!(agg.precommit_quorum_reached);
