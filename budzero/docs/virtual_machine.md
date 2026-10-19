@@ -91,7 +91,7 @@ That small guard matters a lot to the prover. We do not produce a fake instructi
 
 ## Gas metering
 
-`Vm::new(memory_size)` comes with a default gas limit of `1_000_000`. For tests and chain integrations `Vm::with_gas_limit(memory_size, gas_limit)` can be used.
+`Vm::new(memory_size)` comes with a default gas limit of `1_000_000`. For tests and L1 integrations `Vm::with_gas_limit(memory_size, gas_limit)` can be used.
 
 Gas costs are deliberately kept simple:
 
@@ -101,7 +101,7 @@ Gas costs are deliberately kept simple:
 * `Syscall` is `5` gas,
 * `Poseidon` and `VerifyMerkle` are `10` gas.
 
-If the limit is exceeded the VM stops with an `Out of gas` error. In the Budlum chain integration that error becomes a transaction failure and the sender state stays atomically unchanged.
+If the limit is exceeded the VM stops with an `Out of gas` error. In the Budlum L1 integration that error becomes a transaction failure and the sender state stays atomically unchanged.
 
 Gas behaviour is pinned by tests. On small programs like `Load + Push + Syscall + Halt`, `gas_used` gives exactly the expected total cost. The infinite-loop example `Jmp 0` is cut off with `Out of gas` when the limit is crossed.
 
