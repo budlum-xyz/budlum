@@ -179,6 +179,12 @@ pub struct IdentityRecord {
     /// the first credential is issued - there is no "empty root" state a
     /// reader could mistake for "issued, then revoked".
     pub credential_root: Option<[u8; 32]>,
+    /// BLG-0095 (P04-F13): every credential root ever asserted here. The
+    /// single `credential_root` above is the LATEST; validity accepts any
+    /// root still on record, so issuing a second credential no longer
+    /// silently invalidates the first.
+    #[serde(default)]
+    pub credential_roots: BTreeSet<[u8; 32]>,
     pub guardians: Vec<Address>,
     pub recovery_threshold: usize,
 }
@@ -203,6 +209,7 @@ impl IdentityRecord {
             subject,
             methods,
             credential_root: None,
+            credential_roots: BTreeSet::new(),
             guardians,
             recovery_threshold,
         };
@@ -595,14 +602,12 @@ impl IdentityRegistry {
                     .ok_or_else(|| IdentityError::UnknownSubject {
                         did: did_of(&subject),
                     })?;
-            // The issuer must be a registered DID or hold a live registered
-            // key on the subject; "signed by an anonymous key" is how a
-            // credential farm starts.
-            let issuer_known = self.records.contains_key(&issuer)
-                || record
-                    .methods
-                    .iter()
-                    .any(|m| m.key_id == *issuer.as_bytes() && m.is_live_at(now));
+            // BLG-0095 (P04-F13): the issuer must be a REGISTERED DID - or
+            // the subject themself (self-issuance). The old check also let
+            // "any key_id on the SUBJECT's record" vouch for the issuer,
+            // which an unregistered issuer could pass.
+            let issuer_known =
+                self.records.contains_key(&issuer) || issuer == subject;
             if !issuer_known {
                 return Err(IdentityError::UnknownSubject {
                     did: did_of(&issuer),
@@ -617,6 +622,10 @@ impl IdentityRegistry {
         self.credentials.insert(hex32(&id), credential);
         if let Some(record) = self.records.get_mut(&subject) {
             record.credential_root = Some(root);
+            // BLG-0095 (P04-F13): the root joins the record's live set
+            // instead of replacing it - issuing a second credential no
+            // longer silently invalidates the first.
+            record.credential_roots.insert(root);
         }
         Ok(())
     }
@@ -735,8 +744,26 @@ impl IdentityRegistry {
                 &guardians,
             ]);
         }
-        for id in self.credentials.keys() {
+        // BLG-0096 (P04-F14): the id folds root, issuer and issued_at only,
+        // yet validity reads the subject, the schema and the expiry. The
+        // fold below commits every field the validity check decides on, so
+        // the root and the decision can no longer disagree.
+        for (id, credential) in &self.credentials {
             acc = hash_fields_bytes(&[&acc, b"cred", id.as_bytes()]);
+            acc = hash_fields_bytes(&[&acc, b"cred-subject", credential.subject.as_bytes()]);
+            acc = hash_fields_bytes(&[
+                &acc,
+                b"cred-schema",
+                credential.schema.as_bytes(),
+            ]);
+            match credential.expires_at {
+                Some(expiry) => {
+                    acc = hash_fields_bytes(&[&acc, b"cred-expiry", &expiry.to_le_bytes()]);
+                }
+                None => {
+                    acc = hash_fields_bytes(&[&acc, b"cred-no-expiry"]);
+                }
+            }
         }
         for id in &self.revoked {
             acc = hash_fields_bytes(&[&acc, b"revoked", id.as_bytes()]);
@@ -771,7 +798,12 @@ impl IdentityRegistry {
                 .ok_or_else(|| IdentityError::UnknownSubject {
                     did: did_of(&credential.subject),
                 })?;
-        if record.credential_root != Some(credential.root()) {
+        // BLG-0095 (P04-F13): any root still on record is valid - the
+        // latest-only comparison invalidated every earlier credential the
+        // moment a second one landed.
+        if record.credential_root != Some(credential.root())
+            && !record.credential_roots.contains(&credential.root())
+        {
             return Err(IdentityError::RootMismatch {
                 did: did_of(&credential.subject),
             });
@@ -864,7 +896,16 @@ pub enum IdentityTx {
     /// Register the sender's own DID document.
     Register { record: IdentityRecord },
     /// Issue a credential commitment to a registered subject.
-    Issue { credential: CredentialCommitment },
+    ///
+    /// BLG-0095 (P04-F13): unless the subject IS the issuer, the subject
+    /// must consent - a signature by one of the subject's live methods over
+    /// the issue-consent digest. Issuing to somebody else used to need only
+    /// "sender == issuer", so any registered DID could plant credentials in
+    /// (and overwrite the credential root of) any record.
+    Issue {
+        credential: CredentialCommitment,
+        consent: Option<SubjectConsent>,
+    },
     /// Revoke a credential the sender issued.
     Revoke { credential: CredentialCommitment },
     /// Rotate the DID to a new key on a guardian quorum.
@@ -882,6 +923,29 @@ pub enum IdentityTx {
 pub struct GuardianApproval {
     pub public_key: Vec<u8>,
     pub signature: Vec<u8>,
+}
+
+/// The subject's word on an issuance aimed at them (BLG-0095), at the
+/// transaction door: the full method key and its signature over
+/// [`issue_consent_digest`]. The key's wallet address must be a live
+/// verification method of the subject record - a consent from a key the
+/// subject never registered speaks for nobody.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubjectConsent {
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+/// The digest a subject's issuance consent is made over: the credential's
+/// id (which folds the fields root, the issuer and the issuance time) and
+/// this chain.
+#[must_use]
+pub fn issue_consent_digest(credential: &CredentialCommitment, chain_id: u64) -> Vec<u8> {
+    let mut msg = Vec::new();
+    msg.extend_from_slice(b"BUDLUM_ID_ISSUE_CONSENT_V1");
+    msg.extend_from_slice(&credential_id(credential));
+    msg.extend_from_slice(&chain_id.to_le_bytes());
+    msg
 }
 
 /// Verify every approval at the crypto door, then run the rotation. The
@@ -924,6 +988,48 @@ pub fn authorize_recovery(
     registry.guardian_recovery(subject, new_key, &guardians, epoch)
 }
 
+/// BLG-0095 (P04-F13): verify the subject's consent at the crypto door -
+/// the same rules as [`authorize_recovery`]: the consenting key's wallet
+/// address must be a LIVE verification method of the subject, and the
+/// signature must speak the issue-consent digest of THIS credential on
+/// THIS chain. A build without `wallet-ml-dsa` refuses every consent
+/// through this door, which is the grant layer's behavior and stays.
+pub fn authorize_issue_consent(
+    registry: &IdentityRegistry,
+    credential: &CredentialCommitment,
+    consent: &SubjectConsent,
+    epoch: u64,
+    chain_id: u64,
+) -> Result<(), IdentityError> {
+    let digest = issue_consent_digest(credential, chain_id);
+    let signer = crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(
+        &consent.public_key,
+    )
+    .map_err(|e| IdentityError::BadApproval(format!("consent key: {e}")))?;
+    crate::crypto::primitives::verify_ml_dsa_87_signature(
+        &digest,
+        &consent.signature,
+        &consent.public_key,
+    )
+    .map_err(|e| IdentityError::BadApproval(format!("consent signature: {e}")))?;
+    let record = registry
+        .record(&credential.subject)
+        .ok_or_else(|| IdentityError::UnknownSubject {
+            did: did_of(&credential.subject),
+        })?;
+    let key_live = record
+        .methods
+        .iter()
+        .any(|m| m.key_id == *signer.as_bytes() && m.is_live_at(epoch));
+    if !key_live {
+        return Err(IdentityError::BadApproval(format!(
+            "consent: {} is not a live method of the subject",
+            did_of(&signer)
+        )));
+    }
+    Ok(())
+}
+
 /// WIRING: the executor's single `TransactionType::Identity` arm (proto
 /// slice) delegates here; it is exercised at full depth by the tests beside
 /// it, so the arm will add no untested semantics.
@@ -963,13 +1069,23 @@ pub fn execute_identity_tx(
             }
             registry.apply(domain, IdentityOp::Register { record }, epoch)
         }
-        IdentityTx::Issue { credential } => {
+        IdentityTx::Issue { credential, consent } => {
             if &credential.issuer != from {
                 return Err(IdentityError::BadApproval(format!(
                     "issue: sender {} is not the issuer {}",
                     did_of(from),
                     did_of(&credential.issuer)
                 )));
+            }
+            // BLG-0095 (P04-F13): the subject consents unless the subject IS
+            // the issuer (self-issuance - the sender already proves both).
+            if credential.subject != credential.issuer {
+                let consent = consent.ok_or_else(|| {
+                    IdentityError::BadApproval(
+                        "issue: the subject must consent to a third-party issuance".to_string(),
+                    )
+                })?;
+                authorize_issue_consent(registry, &credential, &consent, epoch, chain_id)?;
             }
             registry.apply(domain, IdentityOp::Issue { credential }, epoch)
         }
@@ -1739,6 +1855,7 @@ mod tests {
             &other,
             IdentityTx::Issue {
                 credential: credential.clone(),
+                consent: None,
             },
             &ConsensusKind::PoA,
             100,
@@ -1755,17 +1872,32 @@ mod tests {
                 100,
             )
             .unwrap();
-        execute_identity_tx(
+        // BLG-0095 (P04-F13): the issuer to a THIRD-PARTY subject needs the
+        // subject's consent - refused at the door without one. The Op layer
+        // below sets up the Revoke flow as the direct write it has always
+        // been (consent is a door rule, like the sender rule above).
+        let err = execute_identity_tx(
             &mut registry,
             &credential.issuer,
             IdentityTx::Issue {
                 credential: credential.clone(),
+                consent: None,
             },
             &ConsensusKind::PoA,
             100,
             1,
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(err.to_string().contains("consent"), "{err}");
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: credential.clone(),
+                },
+                100,
+            )
+            .unwrap();
         // A wrong domain still refuses after the sender rule passes: the
         // gate is not decoration the tx body can route around.
         assert!(matches!(
@@ -1842,5 +1974,140 @@ mod tests {
         };
         assert_eq!(empty.root(), [0u8; 32]);
         assert!(matches!(empty.validate(), Err(IdentityError::NoFields)));
+    }
+
+    /// BLG-0095 (P04-F13): a third-party issuance needs the subject's
+    /// consent, signed by a live method key over the exact credential and
+    /// this chain. Without one - or with a junk one - the door refuses and
+    /// no credential lands. A self-issue needs no consent: the subject is
+    /// the issuer.
+    #[test]
+    fn a_third_party_issuance_needs_the_subjects_consent() {
+        let mut registry = IdentityRegistry::new();
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: issuer_record(),
+                },
+                100,
+            )
+            .unwrap();
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: subject_record(),
+                },
+                100,
+            )
+            .unwrap();
+        let (credential, _) = credential();
+        assert_ne!(
+            credential.issuer, credential.subject,
+            "the fixture must be a third-party issuance"
+        );
+        let err = execute_identity_tx(
+            &mut registry,
+            &credential.issuer,
+            IdentityTx::Issue {
+                credential: credential.clone(),
+                consent: None,
+            },
+            &ConsensusKind::PoA,
+            200,
+            1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("consent"), "{err}");
+        let junk = crate::registry::identity::SubjectConsent {
+            public_key: vec![0u8; 4],
+            signature: vec![],
+        };
+        let err = execute_identity_tx(
+            &mut registry,
+            &credential.issuer,
+            IdentityTx::Issue {
+                credential: credential.clone(),
+                consent: Some(junk),
+            },
+            &ConsensusKind::PoA,
+            200,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(err, IdentityError::BadApproval(_)), "{err:?}");
+        assert!(
+            !registry.credential(&credential_id(&credential)).is_some(),
+            "a refused issuance landed in the registry"
+        );
+        // Self-issue: subject == issuer, no consent gate at all.
+        let mut self_cred = credential.clone();
+        self_cred.subject = self_cred.issuer;
+        execute_identity_tx(
+            &mut registry,
+            &credential.issuer,
+            IdentityTx::Issue {
+                credential: self_cred,
+                consent: None,
+            },
+            &ConsensusKind::PoA,
+            200,
+            1,
+        )
+        .unwrap();
+    }
+
+    /// BLG-0096 (P04-F14): a second issue must not orphan the first. The
+    /// record keeps every root it ever accepted and validity consults all
+    /// of them, while the record root still answers to each issuance.
+    #[test]
+    fn a_second_issue_keeps_the_first_credential_valid() {
+        let mut registry = IdentityRegistry::new();
+        let issuer = issuer_record();
+        let issuer_id = issuer.subject;
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register { record: issuer },
+                100,
+            )
+            .unwrap();
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: subject_record(),
+                },
+                100,
+            )
+            .unwrap();
+        let (first, _) = credential();
+        let mut second = first.clone();
+        second.schema = "kycc-plus-v1".to_string();
+        let first_id = credential_id(&first);
+        let second_id = credential_id(&second);
+        assert_ne!(first_id, second_id);
+        // Setup through the Op layer: the consent door is pinned elsewhere.
+        registry
+            .apply(&ConsensusKind::PoA, IdentityOp::Issue { credential: first.clone() }, 150)
+            .unwrap();
+        let root_after_first = registry.record(&issuer_id).unwrap().root();
+        registry
+            .apply(&ConsensusKind::PoA, IdentityOp::Issue { credential: second.clone() }, 150)
+            .unwrap();
+        let record = registry.record(&issuer_id).unwrap();
+        let root_after_second = record.root();
+        assert_ne!(
+            root_after_first, root_after_second,
+            "the record root must answer to the second issuance too"
+        );
+        assert!(
+            record.credential_roots.contains(&first.root())
+                && record.credential_roots.contains(&second.root()),
+            "the record must keep every accepted root, not just the latest"
+        );
+        assert!(registry.is_credential_valid(&first_id, 200).is_ok());
+        assert!(registry.is_credential_valid(&second_id, 200).is_ok());
     }
 }
