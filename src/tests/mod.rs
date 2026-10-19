@@ -92,8 +92,8 @@ pub mod prover;
 pub mod regeneration_recovery;
 #[cfg(test)]
 pub mod relayer_liveness;
-// L1 relayer proof kripto-doorulama + M5 budlumxyz fee + M4 BNS fee
-// Regresyon kapilari (Q-A, 2026-07-16).
+// chain relayer proof cryptographic verification + M5 budlumxyz fee + M4 BNS fee
+// Regression gates (Q-A, 2026-07-16).
 #[cfg(test)]
 pub mod relayer_gates;
 // A relayer may stay silent; it may not sign an external outcome it never

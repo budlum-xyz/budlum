@@ -9,23 +9,21 @@
 
 #![forbid(unsafe_code)]
 
-/// Find a real file (the first one that exists).
-#[allow(dead_code)]
-fn real_file(candidates: &[&str]) -> Option<Vec<u8>> {
-    for c in candidates {
-        if let Ok(m) = std::fs::read(c) {
-            if !m.is_empty() {
-                return Some(m);
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::bud_format_engine::{engine_restore_full, engine_store};
+
+    /// Find a real file (the first one that exists).
+    fn real_file(candidates: &[&str]) -> Option<Vec<u8>> {
+        for c in candidates {
+            if let Ok(m) = std::fs::read(c) {
+                if !m.is_empty() {
+                    return Some(m);
+                }
+            }
+        }
+        None
+    }
 
     #[test]
     fn a_real_elf_survives_the_engine_losslessly() {

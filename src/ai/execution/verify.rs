@@ -126,7 +126,7 @@ pub fn expected_initial_state_root(
     ))
 }
 
-/// Full L1 path: structural checks plus the STARK, one call, `program` and the
+/// Full chain path: structural checks plus the STARK, one call, `program` and the
 /// public inputs supplied together.
 ///
 /// This is the entry point the transaction path uses. It exists so the two

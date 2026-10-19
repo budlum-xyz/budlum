@@ -6,7 +6,7 @@
 # source to a trustworthy audit record (Mozilla, Google, Bytecode Alliance, ISRG,
 # Embark, Zcash imports). When a dependency is compromised and a malicious version
 # is published the advisory appears days or months later; the absence of an audit
-# record is visible from the first minute. For an L1 chain's crypto/FFI surface
+# record is visible from the first minute. For a chain's crypto/FFI surface
 # this gap must be closed.
 #
 # IMPORTANT, this is not "wiring an existing tool into CI", it is RUNNING THE TOOL

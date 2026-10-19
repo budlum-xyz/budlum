@@ -143,7 +143,7 @@ It is not enough for the VM to stop when the gas limit is exceeded; it must be v
 
 ## 3. Serialization and public input security (the public inputs envelope)
 
-Once ZK-STARK proofs are produced they travel between networks (L1/L2 nodes). Weaknesses in this transport and verification layer can bring the whole system down.
+Once ZK-STARK proofs are produced they travel between networks (chain/L2 nodes). Weaknesses in this transport and verification layer can bring the whole system down.
 
 ### `ExecutionPublicInputs` and the Keccak256 binding
 
@@ -181,7 +181,7 @@ To block this the proof transport layer was wrapped in a **`ProofEnvelope`**:
   let envelope: ProofEnvelope = reader.deserialize(bytes)?;
   ```
 
-This simple but critical measure protects production L1 verification nodes against DoS attacks.
+This simple but critical measure protects production the chain verification nodes against DoS attacks.
 
 ---
 
@@ -211,7 +211,7 @@ Instead, the execution pipeline (`run_pipeline`) performs all state access throu
 
 ### A 64-depth sparse Merkle tree (SMT) state root
 
-In early versions the state root was a flat Keccak256 hash of all accounts. Flat hash models do not suit ZK systems, because they do not let L1/L2 nodes verify partial state (inclusion) proofs.
+In early versions the state root was a flat Keccak256 hash of all accounts. Flat hash models do not suit ZK systems, because they do not let chain/L2 nodes verify partial state (inclusion) proofs.
 
 The BudZKVM state root infrastructure was rebuilt on a **64-depth sparse Merkle tree (SMT)** architecture:
 
