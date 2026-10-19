@@ -1,6 +1,10 @@
 #![allow(clippy::pedantic, clippy::nursery)]
 
-//! F10.4 EvmChainAdapter - the real ChainAdapter impl (the H4 fully live path).
+//! F10.4 EvmChainAdapter - the ChainAdapter impl for the EVM leg. NOT a
+//! fully live path (BLG-0135/P06-F06): the off-chain half is a stub that
+//! refuses at broadcast, so the Ethereum-to-Budlum leg has no live end-to-end
+//! route. The on-chain verification below is real and deterministic; what it
+//! verifies today is produced only in tests.
 //!
 //! Two sides:
 //!
@@ -26,9 +30,9 @@
 //! bridge_address).
 //!
 //! Security boundary: the wire format changed - the off-chain relayer tool
-//! must produce the leaf with the same formula. `verify_deposit` (the real safe
-//! path) is unaffected: it already does MPT + header chain + status + log match
-//! over the full `EvmDepositProof`.
+//! must produce the leaf with the same formula. `verify_deposit` does MPT +
+//! header chain + status + log match over the full `EvmDepositProof`, but it
+//! is UNREACHABLE today (BLG-0135): no production path calls it.
 
 use crate::core::hash::hash_fields_bytes;
 use crate::core::transaction::{ExternalChain, ExternalTransaction, RelayerExternalResult};
@@ -51,12 +55,13 @@ const MAX_DEPOSIT_PACKAGE_BYTES: u64 = 1024 * 1024;
 /// set with the chain config during the ceremony. A placeholder here (CI test).
 pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 
-/// EvmChainAdapter - the real ChainAdapter for Ethereum.
+/// EvmChainAdapter - the ChainAdapter for Ethereum.
 ///
-/// `verify_receipt_proof` on-chain deterministik. Off-chain metodlar
-/// (`generate_receipt_proof`/`submit_transaction`/`wait_for_confirmation`)
-/// connect to Ethereum RPC in the relayer binary; in this impl they are in
-/// offline-test mode (the StubAdapter pattern) - production RPC is separate.
+/// `verify_receipt_proof` is deterministic in Budlum consensus. The off-chain
+/// methods (`generate_receipt_proof`/`submit_transaction`/
+/// `wait_for_confirmation`) are an offline-test stub (the StubAdapter
+/// pattern) that REFUSES at broadcast - there is no live Ethereum RPC route
+/// (BLG-0135/P06-F06).
 ///
 /// `Debug` so a caller can `expect` on a `Result` carrying one. All three
 /// fields are public configuration already: a contract address, an event
@@ -173,8 +178,9 @@ impl ChainAdapter for EvmChainAdapter {
 
     /// Off-chain (the relayer binary): produce a receipt + MPT proof from Ethereum RPC.
     ///
-    /// This impl is an offline-test stub (the StubAdapter pattern). The production
-    /// RPC client lives in `src/bin/budlum-relayer.rs` (after mainnet, reqwest/alloy).
+    /// This impl is an offline-test stub (the StubAdapter pattern) and
+    /// REFUSES - there is no live Ethereum RPC route (BLG-0135/P06-F06).
+    /// A production RPC client does not exist in this tree.
     async fn generate_receipt_proof(
         &self,
         tx_hash: &str,
@@ -293,7 +299,21 @@ impl ChainAdapter for EvmChainAdapter {
                     .into(),
             ));
         }
-        Ok(())
+        // BLG-0136 (P06-F07, decision B interim): no sync attestation, no
+        // accepted observation. `DepositProofPackage` cannot yet carry the
+        // attestation and finality branch (decision A lands with the
+        // committee work), and this seam built its proof with
+        // `sync_attestation: None`, which let fabricated header chains read
+        // as final behind the confirmation count. The verification above
+        // still runs (so its specific refusals fire first); the seam itself
+        // refuses to ACCEPT the result until the package can carry the
+        // evidence.
+        Err(AdapterError::ProofVerificationFailed(
+            "the deposit package carries no sync attestation; BLG-0136 interim: this \
+             observation seam refuses until the package can carry the attestation and \
+             finality branch"
+                .into(),
+        ))
     }
 
     fn verify_receipt_proof(
@@ -423,7 +443,9 @@ impl EvmChainAdapter {
                 proof.required_confirmations, self.required_confirmations
             )));
         }
-        verify_evm_receipt(proof)
+        // BLG-0111 (P05-F04): the operator's trusted checkpoint is the
+        // interim finality anchor when the proof carries no sync attestation.
+        verify_evm_receipt(proof, self.trusted_checkpoint.as_ref())
     }
 }
 
@@ -843,14 +865,22 @@ mod tests {
         adapter
     }
 
-    /// The positive half: a package that proves the deposit is accepted.
+    /// BLG-0136 (P06-F07, decision B interim): even a fully proven package
+    /// is REFUSED at this seam while it cannot carry a sync attestation. The
+    /// old positive pinned the missing rule: an attestation-less package
+    /// verified as final. Until the package gains the attestation and
+    /// finality branch (decision A), acceptance is impossible here.
     #[test]
-    fn a_full_deposit_package_is_accepted() {
+    fn a_full_deposit_package_without_an_attestation_is_refused() {
         let adapter = floor_three();
         let observation = observation_for(&adapter, 3);
-        adapter
+        let err = adapter
             .verify_observation(&observation)
-            .expect("a proven deposit at the floor verifies");
+            .expect_err("no sync attestation, no accepted observation (BLG-0136 interim)");
+        // Either refusal is the contract: the 0111 finality rule (no
+        // attestation and no checkpoint) or this seam's own attestation
+        // gate. What is pinned is that attestation-less is not accepted.
+        assert!(format!("{err}").contains("attestation"), "got: {err}");
     }
 
     /// A bare Merkle path, the shape the trait default accepts and the

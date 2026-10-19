@@ -17,10 +17,12 @@
 //! bytes per key instead of 96; any persisted copy written by the old
 //! variant is from before mainnet launch and is discarded, not migrated.
 //!
-//! This strengthens N-confirmation finality: the sync committee, 512 validators
-//! over a period of about 27 hours, gives real PoS finality through a BLS12-381
-//! aggregate signature. N-confirmation remains as the fallback, for when there
-//! is no sync committee or the period rotation fails.
+//! The sync committee, 512 validators over a period of about 27 hours, is
+//! verified here as a BLS12-381 aggregate over the caller-supplied state.
+//! That state is NOT yet authenticated to a finalized beacon state
+//! (BLG-0137/P06-F08, decision B interim): the rotation refuses without the
+//! finality branch, and this module makes no PoS finality claim beyond what
+//! the supplied state and aggregate prove.
 //!
 //! # The model, Ethereum Altair `BeaconSyncCommittee`
 //!
@@ -83,6 +85,9 @@ pub enum SyncCommitteeError {
     /// The beacon header's slot falls outside the period the committee
     /// state is for, so the 512 keys are not the ones that signed it.
     PeriodMismatch { slot_period: u64, state_period: u64 },
+    /// Period rotation without the branch that proves `next_sync_committee`
+    /// to the finalized state (BLG-0137, decision B interim).
+    RotationBranchRequired,
 }
 
 impl std::fmt::Display for SyncCommitteeError {
@@ -112,6 +117,11 @@ impl std::fmt::Display for SyncCommitteeError {
             } => write!(
                 f,
                 "sync: beacon slot is in period {slot_period}, committee state is for period {state_period}"
+            ),
+            SyncCommitteeError::RotationBranchRequired => write!(
+                f,
+                "sync: period rotation refused - no branch proving next_sync_committee \
+                 to the finalized state (BLG-0137 interim)"
             ),
         }
     }
@@ -440,9 +450,17 @@ pub fn verify_execution_block_finality(
 
 /// The period rotation: on a finalized header, `next_sync_committee` becomes
 /// the current one.
-pub fn rotate_period(state: &mut SyncCommitteeState) {
-    state.current_sync_committee = state.next_sync_committee;
-    state.current_period = state.current_period.saturating_add(1);
+///
+/// BLG-0137 (P06-F08, decision B interim): a rotation without the branch
+/// that proves `next_sync_committee` to the finalized state is REFUSED. The
+/// previous unconditional swap let any holder of a `SyncCommitteeState`
+/// inject a chosen committee on the next period - the finding's "controlled
+/// committee: always possible". The branch format (decision A) lands with
+/// the committee work; until then no rotation runs. `state` is taken so the
+/// signature does not pretend rotation is possible without evidence.
+pub fn rotate_period(state: &mut SyncCommitteeState) -> Result<(), SyncCommitteeError> {
+    let _never_rotates_without_the_branch = state.current_period;
+    Err(SyncCommitteeError::RotationBranchRequired)
 }
 
 /// Test-only builders shared with `verify.rs`.
@@ -555,14 +573,20 @@ mod tests {
         );
     }
 
+    /// BLG-0137 (P06-F08, decision B interim): rotation without the branch
+    /// proving `next_sync_committee` to the finalized state REFUSES. The old
+    /// test pinned the unconditional swap - a controlled committee handed in
+    /// on a `SyncCommitteeState` became the signer on the next period. What
+    /// is pinned now is that the swap cannot happen without evidence.
     #[test]
-    fn rotate_period_advances() {
+    fn rotate_period_without_the_branch_refuses() {
         let mut state = dummy_state();
         state.next_sync_committee[0] = [0xAA; BLS_PUBKEY_LEN];
         let original_period = state.current_period;
-        rotate_period(&mut state);
-        assert_eq!(state.current_period, original_period + 1);
-        assert_eq!(state.current_sync_committee[0], [0xAA; BLS_PUBKEY_LEN]);
+        let original_committee = state.current_sync_committee.clone();
+        assert_eq!(rotate_period(&mut state), Err(SyncCommitteeError::RotationBranchRequired));
+        assert_eq!(state.current_period, original_period);
+        assert_eq!(state.current_sync_committee, original_committee);
     }
 
     #[test]

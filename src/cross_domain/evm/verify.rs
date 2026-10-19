@@ -7,8 +7,11 @@
 //!
 //! # Verification flow
 //!
-//! 1. `header_chain`: target plus confirmations, N-confirmation finality
-//!    (RFC Q2, N-conf).
+//! 1. `header_chain`: target plus confirmations. The chain is linked by
+//!    parent hash and number - that alone is not finality. Finality comes
+//!    from `sync_attestation` (verified) or the trusted checkpoint that the
+//!    chain must touch (BLG-0111 interim); the deposit refuses with
+//!    neither (RFC Q2, N-conf).
 //! 2. `proof_nodes` plus `target_header.receipts_root`: MPT verify yields the
 //!    receipt bytes.
 //! 3. `receipt` RLP decode (F10.2 `receipt.rs`) yields `{status, logs}`.
