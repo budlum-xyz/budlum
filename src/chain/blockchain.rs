@@ -3299,10 +3299,27 @@ impl Blockchain {
         request: crate::cross_domain::external::RegistrationRequest,
         bls: Option<Box<dyn crate::cross_domain::external::BlsVerifier>>,
     ) -> Result<crate::cross_domain::external::DomainKey, String> {
-        let key = self
-            .external_intake
-            .register_domain(request, bls)
-            .map_err(|e| e.to_string())?;
+        // BLG-0155 (P07-F10): the bond is escrowed money, not a declared
+        // number. The poster's balance is debited BEFORE the registry sees
+        // the registration, and credited back if the registration refuses -
+        // a refusal must never leave money behind.
+        let bond = u64::try_from(request.bond_atoms).map_err(|_| {
+            format!(
+                "bond {} does not fit the balance type",
+                request.bond_atoms
+            )
+        })?;
+        let poster = request.poster;
+        self.state.lock_external_bond(&poster, bond)?;
+        let key = match self.external_intake.register_domain(request, bls) {
+            Ok(key) => key,
+            Err(e) => {
+                // roll the escrow back: nothing was registered, nothing is
+                // held
+                let _ = self.state.release_external_bond(&poster, bond);
+                return Err(e.to_string());
+            }
+        };
         self.persist_external_intake();
         Ok(key)
     }
@@ -3522,8 +3539,18 @@ impl Blockchain {
             .registry
             .slash(key, prover, evidence_digest, value_atoms, challenger)
             .map_err(|e| e.to_string());
+        let (taken, reward) = result?;
+        // BLG-0155 (P07-F10): the slash moves real money - the penalty
+        // leaves the escrow, the challenger reward lands in the challenger's
+        // balance, and the remainder is burned.
+        let taken_u64 = u64::try_from(taken)
+            .map_err(|_| format!("slash {taken} does not fit the balance type"))?;
+        let reward_u64 = u64::try_from(reward)
+            .map_err(|_| format!("reward {reward} does not fit the balance type"))?;
+        self.state
+            .slash_external_bond(&prover, taken_u64, reward_u64, &challenger)?;
         self.persist_external_intake();
-        result
+        Ok((taken, reward))
     }
 
     /// Bonds an additional prover to a registered external domain, so a
@@ -3539,12 +3566,16 @@ impl Blockchain {
         prover: Address,
         bond_atoms: u128,
     ) -> Result<(), String> {
-        let result = self
-            .external_intake
-            .bond_prover(key, prover, bond_atoms)
-            .map_err(|e| e.to_string());
+        // BLG-0155 (P07-F10): the prover's bond is escrowed money.
+        let bond = u64::try_from(bond_atoms)
+            .map_err(|_| format!("bond {bond_atoms} does not fit the balance type"))?;
+        self.state.lock_external_bond(&prover, bond)?;
+        if let Err(e) = self.external_intake.bond_prover(key, prover, bond_atoms) {
+            let _ = self.state.release_external_bond(&prover, bond);
+            return Err(e.to_string());
+        }
         self.persist_external_intake();
-        result
+        Ok(())
     }
 
     /// Installs a multi-prover quorum policy for a registered external
