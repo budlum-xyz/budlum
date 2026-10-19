@@ -54,7 +54,9 @@ impl ShardRef {
             kind: ShardKind::Data,
             index,
             shard_id: ContentId::of(chunk),
-            size: chunk.len() as u32,
+            // A chunk longer than u32::MAX would wrap and understate its size;
+            // saturate so the manifest size checks still see an oversize shard.
+            size: u32::try_from(chunk.len()).unwrap_or(u32::MAX),
         }
     }
 }
@@ -954,7 +956,9 @@ impl ContentManifest {
             let slice = &data[off..end];
             shards.push(ShardRef::from_bytes(i, slice));
             off = end;
-            i += 1;
+            i = i
+                .checked_add(1)
+                .ok_or_else(|| "ContentManifest shard count exceeds u32".to_string())?;
         }
         Self::from_shards(shards)
     }
@@ -1104,6 +1108,13 @@ pub fn manifest_id_from_parts_stored(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shard_ref_from_bytes_records_the_exact_chunk_length() {
+        let shard = ShardRef::from_bytes(3, &[7u8; 10]);
+        assert_eq!(shard.size, 10);
+        assert_eq!(shard.index, 3);
+    }
 
     #[test]
     fn manifest_id_is_deterministic() {
