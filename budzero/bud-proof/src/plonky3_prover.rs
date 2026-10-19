@@ -6205,6 +6205,36 @@ mod tests {
         assert_eq!(encoded & 0xFF, 0x1E);
     }
 
+    /// P12-F01 (K9-C: the AIR is not touched): each VerifyMerkle level hashes
+    /// with a single Poseidon round, which has no second preimage resistance,
+    /// so the opcode must stay closed in production. This pins the closed
+    /// gate where proofs are consumed: the default activation refuses the
+    /// opcode, and the mainnet decode path rejects it.
+    #[test]
+    fn verify_merkle_stays_closed_under_default_activation() {
+        let default = bud_isa::MainnetActivation::default();
+        assert!(
+            !default.verify_merkle_enabled,
+            "VerifyMerkle must stay gated until the Poseidon round is replaced"
+        );
+        assert!(!default.allows(bud_isa::Opcode::VerifyMerkle));
+
+        let raw = bud_isa::Instruction {
+            opcode: bud_isa::Opcode::VerifyMerkle,
+            rd: 1,
+            rs1: 2,
+            rs2: 3,
+            imm: 0,
+        }
+        .encode();
+        let err = bud_isa::Instruction::decode_for_mainnet(raw, default)
+            .expect_err("the default mainnet decode must refuse VerifyMerkle");
+        assert!(matches!(
+            err,
+            bud_isa::DecodeError::MainnetActivationRequired(bud_isa::Opcode::VerifyMerkle)
+        ));
+    }
+
     /// (security audit) partial-fix test for the
     /// Selector binding. Take a valid Add+Halt program, mutate the
     /// Trace so the *last* real row's `is_verify_merkle` column is
