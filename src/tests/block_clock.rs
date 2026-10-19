@@ -47,6 +47,12 @@ fn produced_timestamp_keeps_the_slot_formula() {
 
 #[test]
 fn restored_state_carries_the_tip_clock() {
-    let bc = fresh_chain();
+    let mut bc = fresh_chain();
+    bc.produce_block(Address::from([0x33; 32])).unwrap();
+    assert_ne!(
+        bc.current_unix_secs(),
+        0,
+        "the tip clock must be a real value, not the zero default"
+    );
     assert_eq!(bc.state.current_block_unix_secs, bc.current_unix_secs());
 }
