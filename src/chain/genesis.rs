@@ -342,6 +342,32 @@ impl GenesisConfig {
         Ok(())
     }
 
+    /// Everything `build_state` credits to balances at genesis - the plain
+    /// allocations and the tokenomics distribution - stays within the fixed
+    /// supply (P08-F01). Validator stake is a bond, not a balance credit.
+    ///
+    /// Each part was checked alone, so a ceremony could pass every check and
+    /// still seed more than `BUD_TOTAL_SUPPLY`.
+    ///
+    /// # Errors
+    ///
+    /// Names the total that would be minted and the supply it exceeds.
+    pub fn validate_total_issuance(&self) -> Result<(), String> {
+        let allocations: u128 = self.allocations.iter().map(|(_, a)| u128::from(*a)).sum();
+        let distribution = self
+            .bud_tokenomics
+            .as_ref()
+            .map_or(0, |params| u128::from(params.total()));
+        let total = allocations + distribution;
+        if total > u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY) {
+            return Err(format!(
+                "Genesis mints {total} base units, above the fixed supply of {}",
+                crate::tokenomics::BUD_TOTAL_SUPPLY
+            ));
+        }
+        Ok(())
+    }
+
     /// The `bud_tokenomics` distribution, if present, sums to the fixed
     /// supply, and its team vesting is at least as long as its cliff.
     ///
@@ -430,6 +456,7 @@ impl GenesisConfig {
             }
         }
         self.validate_tokenomics_supply()?;
+        self.validate_total_issuance()?;
         let validator_set = self
             .validators
             .iter()
@@ -996,6 +1023,23 @@ mod tests {
             .is_err());
         assert_eq!(config.build_state().circulating_supply(), 0);
         assert_eq!(config.build_state().burn_reserve_address, None);
+    }
+
+    /// P08-F01: a ceremony whose plain allocations come on top of a balanced
+    /// distribution mints more than the fixed supply and is refused.
+    #[test]
+    fn a_genesis_minting_above_the_fixed_supply_is_refused() {
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        assert!(config.validate_total_issuance().is_ok());
+        config.allocations.push((address(0x77), 1));
+        let error = config
+            .validate_total_issuance()
+            .expect_err("an over-supply genesis must be refused");
+        assert!(error.contains("above the fixed supply"), "{error}");
+        assert!(config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .is_err());
     }
 
     /// A team vesting shorter than its cliff is a cliff without a schedule:
