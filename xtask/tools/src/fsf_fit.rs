@@ -290,8 +290,11 @@ pub fn cli(args: &[&str], root: &Path) -> Report {
             _ => return usage(),
         }
     }
+    if write && check {
+        return usage();
+    }
     let errors = check_policy();
-    if self_test {
+    if self_test && !check {
         if !errors.is_empty() {
             return Report::fail_with(format!("{}\n", errors.join("\n")), 1);
         }
@@ -326,6 +329,16 @@ pub fn cli(args: &[&str], root: &Path) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_test_with_check_still_compares_the_document() {
+        let dir = std::env::temp_dir().join(format!("fsf-fit-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let report = cli(&["--self-test", "--check"], &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(report.code, 1);
+    }
 
     #[test]
     fn the_curation_passes_its_own_policy() {
