@@ -259,6 +259,9 @@ impl QuantumAccount {
         self.verify_multisig_threshold()?;
         self.verify_recovery_policy()?;
         self.verify_storage_bound()?;
+        if self.guardian_root != Self::guardian_root(&self.guardians) {
+            return Err("KQ-WALLET-GUARDIAN-SET: root does not match guardians");
+        }
         Ok(())
     }
 }
@@ -405,6 +408,16 @@ impl BftGuardianFinality {
         if guardians.is_empty() {
             return Err("K-BUD-BFT-GUARDIAN: no guardians");
         }
+        if guardians.len() > MAX_MULTISIG_OWNERS {
+            return Err("K-BUD-BFT-GUARDIAN: too many guardians");
+        }
+        // BLG-0276: vote deduplication does not validate the guardian SET.
+        // Reject a padded list before computing a quorum over its length.
+        for (i, guardian) in guardians.iter().enumerate() {
+            if guardians[..i].contains(guardian) {
+                return Err("K-BUD-BFT-GUARDIAN: duplicate guardian in policy");
+            }
+        }
         if threshold == 0 || threshold > guardians.len() {
             return Err("K-BUD-BFT-GUARDIAN: threshold outside 1..=guardians");
         }
@@ -516,6 +529,16 @@ mod tests {
         assert!(dup.validate_all().is_err(), "a padded guardian list must die at validation");
         let clean = account(vec![a, b]);
         assert!(clean.validate_all().is_ok());
+        let mut corrupt_root = clean.clone();
+        corrupt_root.guardian_root[0] ^= 1;
+        assert_eq!(
+            corrupt_root.validate_all(),
+            Err("KQ-WALLET-GUARDIAN-SET: root does not match guardians")
+        );
+        let padded = [a, a, b];
+        let error = BftGuardianFinality::finalize(Vec::new(), &padded, 2, &[0; 32])
+            .expect_err("duplicate policy keys must fail before vote verification");
+        assert_eq!(error, "K-BUD-BFT-GUARDIAN: duplicate guardian in policy");
         assert_eq!(
             QuantumAccount::guardian_root(&[a, b]),
             QuantumAccount::guardian_root(&[b, a]),
