@@ -3469,37 +3469,14 @@ impl ChainActor {
                     let _ = res_tx.send(res);
                 }
                 ChainCommand::StoragePrune(cid) => {
-                    // Manual prune trigger from CLI/RPC
-                    let now_epoch = self.blockchain.state.epoch_index;
-                    let cid_obj = crate::storage::content_id::ContentId(cid);
-                    let (pruned_deals, bond_returns) = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .prune_content(&cid_obj, now_epoch);
-                    // P23-F01: the same settlement the block-application
-                    // path runs. A deal expired by the prune still holds its
-                    // operator bond, and the maturity sweep only pays out
-                    // `Active` deals, so crediting here is the bond's last
-                    // chance. A repeated prune finds no active deals and
-                    // cannot pay twice.
-                    for (operator, bond) in bond_returns {
-                        if bond == 0 {
-                            continue;
-                        }
-                        if let Err(error) = self.blockchain.state.try_add_balance(&operator, bond) {
-                            tracing::error!(
-                                %operator,
-                                bond,
-                                %error,
-                                "Storage bond return overflow on manual prune; bond left uncredited"
-                            );
-                        }
-                    }
-                    tracing::info!(
+                    // The storage registry root is part of the state root, and
+                    // a bond return moves balances. Changing either outside a
+                    // block splits the root between nodes. Registry pruning
+                    // runs only inside block application (NftBurn), so a
+                    // manual trigger is refused.
+                    tracing::warn!(
                         cid = %hex::encode(cid),
-                        pruned_deals,
-                        "Manual B.U.D. Hard Prune: storage registry entry removed"
+                        "Manual storage prune refused: registry state changes only inside blocks"
                     );
                 }
                 ChainCommand::GetTransactionByHash(hash, tx) => {
@@ -5132,6 +5109,23 @@ mod proof_cache_tests {
         let after = actor.account_proof(&who);
         assert_eq!(after.balance, 150);
         assert_ne!(before.root, after.root);
+    }
+
+    #[tokio::test]
+    async fn manual_storage_prune_does_not_change_the_registry() {
+        let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let (mut actor, handle) = ChainActor::new(bc);
+        let manifest = crate::storage::ContentManifest::from_bytes_sliced(b"prune me", 8)
+            .expect("manifest builds");
+        let id = manifest.manifest_id;
+        actor
+            .blockchain
+            .state
+            .storage_registry
+            .register_manifest(&manifest);
+        tokio::spawn(actor.run());
+        handle.storage_prune(id.0).await;
+        assert!(handle.get_storage_manifest(id).await.is_some());
     }
 
     #[test]
