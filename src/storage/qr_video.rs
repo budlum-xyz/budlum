@@ -724,6 +724,17 @@ mod tests {
         assert_eq!(decode_png_grey(&bomb), Err("png side too large".into()));
     }
 
+    /// The ceiling is tied to the geometry the encoder can emit (largest
+    /// honest side is (177 + 8) * 4 = 740 px), not to a far larger value.
+    /// A side just over the honest maximum is refused before inflate.
+    #[test]
+    fn side_over_the_honest_encoder_maximum_is_refused() {
+        let over = 1025;
+        let hostile =
+            png_with_ihdr_and_idat(over, over, &[0x78, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff]);
+        assert_eq!(decode_png_grey(&hostile), Err("png side too large".into()));
+    }
+
     /// A tiny IDAT that inflates far past the IHDR-declared size (zip bomb)
     /// must stop at the expected byte count instead of allocating the full
     /// stream.
