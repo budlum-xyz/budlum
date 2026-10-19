@@ -91,8 +91,22 @@ impl SessionTracker {
 
     /// Updates the session state from an incoming message.
     pub fn observe(&mut self, item: &serde_json::Value) {
-        if crate::is_success_connected_or_authed(item) {
-            self.state = ConnState::Authenticated;
+        let kind = item.get("T").and_then(serde_json::Value::as_str);
+        if kind == Some("error") {
+            self.state = ConnState::Failed;
+            return;
+        }
+        if !crate::is_success_connected_or_authed(item) {
+            return;
+        }
+        match item.get("msg").and_then(serde_json::Value::as_str) {
+            Some("connected") if self.state != ConnState::Authenticated => {
+                self.state = ConnState::Connected;
+            }
+            Some("authenticated") if self.state == ConnState::Connected => {
+                self.state = ConnState::Authenticated;
+            }
+            _ => {}
         }
     }
 
@@ -120,6 +134,19 @@ mod tests {
         let mut tracker = SessionTracker::new();
         assert_eq!(tracker.state(), ConnState::Disconnected);
         tracker.observe(&serde_json::json!({"T": "success", "msg": "authenticated"}));
+        assert_eq!(tracker.state(), ConnState::Disconnected);
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
+        assert_eq!(tracker.state(), ConnState::Connected);
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "authenticated"}));
         assert_eq!(tracker.state(), ConnState::Authenticated);
+        tracker.observe(&serde_json::json!({"T": "error", "msg": "auth failed"}));
+        assert_eq!(tracker.state(), ConnState::Failed);
+    }
+
+    #[test]
+    fn connected_message_alone_is_not_authenticated() {
+        let mut tracker = SessionTracker::new();
+        tracker.observe(&serde_json::json!({"T": "success", "msg": "connected"}));
+        assert_eq!(tracker.state(), ConnState::Connected);
     }
 }
