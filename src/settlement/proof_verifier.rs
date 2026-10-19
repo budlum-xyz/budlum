@@ -19,6 +19,8 @@ pub enum ProofVerificationError {
     EventHeightMismatch,
     EventIndexMismatch,
     EventLeafMismatch,
+    /// BLG-0081: the message body does not hash to its claimed id.
+    EventMessageIdMismatch,
     InvalidMerkleProof,
     CommitmentBlockHashMismatch,
 }
@@ -81,6 +83,15 @@ impl SettlementProofVerifier {
         if event.leaf_hash() != proof.leaf {
             return Err(ProofVerificationError::EventLeafMismatch);
         }
+        // BLG-0081 (P03-F24): a carried cross-domain message must be
+        // self-consistent — its id has to match its body. The bridge checks
+        // this on mint (bridge.rs); the verifier accepted any body under any
+        // id, and only the id is bound into the leaf.
+        if let Some(message) = &event.message {
+            if !message.verify_id() {
+                return Err(ProofVerificationError::EventMessageIdMismatch);
+            }
+        }
         if !proof.verify(commitment.event_root) {
             return Err(ProofVerificationError::InvalidMerkleProof);
         }
@@ -96,7 +107,7 @@ impl SettlementProofVerifier {
         domain_id: DomainId,
         domain_height: u64,
         sequence: u64,
-        expected_block_hash: Option<Hash32>,
+        expected_block_hash: Hash32,
         event: DomainEvent,
         proof: &MerkleProof,
     ) -> Result<VerifiedDomainEvent, ProofVerificationError> {
@@ -108,10 +119,11 @@ impl SettlementProofVerifier {
             },
         )?;
 
-        if let Some(expected_block_hash) = expected_block_hash {
-            if commitment.domain_block_hash != expected_block_hash {
-                return Err(ProofVerificationError::CommitmentBlockHashMismatch);
-            }
+        // BLG-0081: the block hash check is not optional. It used to be a
+        // `None`-skippable Option; every caller knew the hash, and the skip
+        // path was pure bypass surface.
+        if commitment.domain_block_hash != expected_block_hash {
+            return Err(ProofVerificationError::CommitmentBlockHashMismatch);
         }
 
         Self::verify_event_against_commitment(commitment, event, proof)

@@ -268,25 +268,41 @@ impl TokenomicsParams {
         // through this function re-deriving it. Devnet keeps its own
         // deterministic (faster) payout cadence through its own
         // `epochs_per_year` value.
-        let annual_yield = (u128::from(validator_stake)
-            * u128::from(self.validator_annual_yield_ratio_fixed))
-            / u128::from(FIXED_POINT_SCALE);
+        // BLG-0077/0078 (P03-F20/F21): the yield ratio is capped at 100%
+        // here too, not only at genesis — the cap is a property of the
+        // formula, so a hand-built parameter set cannot mint u64::MAX money.
+        let ratio = self
+            .validator_annual_yield_ratio_fixed
+            .min(crate::core::chain_config::FIXED_POINT_SCALE);
+        let annual_yield = (u128::from(validator_stake) * u128::from(ratio))
+            / u128::from(crate::core::chain_config::FIXED_POINT_SCALE);
         let epochs_per_year = u128::from(self.epochs_per_year.max(1));
         let epoch_yield = annual_yield / epochs_per_year;
-        u64::try_from(epoch_yield).unwrap_or(u64::MAX)
+        // With the cap, epoch_yield <= validator_stake and fits u64. The
+        // fallback saturates to the stake instead of the old u64::MAX, which
+        // was an imaginary reward.
+        u64::try_from(epoch_yield).unwrap_or(validator_stake)
     }
 
     pub fn annual_burn_amount(&self) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        ((u128::from(self.burn_reserve) * u128::from(self.annual_burn_ratio_fixed))
-            / u128::from(FIXED_POINT_SCALE)) as u64
+        // BLG-0077 (P03-F20): no `as u64` truncation. With the ratio capped
+        // the quotient cannot exceed the reserve; the fallback says exactly
+        // that rather than silently wrapping.
+        let ratio = self.annual_burn_ratio_fixed.min(FIXED_POINT_SCALE);
+        let amount = (u128::from(self.burn_reserve) * u128::from(ratio))
+            / u128::from(FIXED_POINT_SCALE);
+        u64::try_from(amount).unwrap_or(self.burn_reserve)
     }
 
     /// The metabolic burn taken from a single `fee`.
     pub fn metabolic_burn(&self, fee: u64) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        ((u128::from(fee) * u128::from(self.tx_fee_burn_ratio_fixed))
-            / u128::from(FIXED_POINT_SCALE)) as u64
+        // BLG-0077: same rule — a burn can never exceed the fee it comes
+        // from, and the arithmetic says so instead of truncating.
+        let ratio = self.tx_fee_burn_ratio_fixed.min(FIXED_POINT_SCALE);
+        let amount = (u128::from(fee) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
+        u64::try_from(amount).unwrap_or(fee)
     }
 }
 

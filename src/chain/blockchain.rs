@@ -2099,7 +2099,9 @@ impl Blockchain {
         domain_id: crate::domain::DomainId,
         domain_height: u64,
         sequence: u64,
-        expected_block_hash: Option<crate::domain::Hash32>,
+        // BLG-0081 (P03-F24): required. The old `Option` allowed a caller to
+        // skip the block-hash binding entirely.
+        expected_block_hash: crate::domain::Hash32,
         event: DomainEvent,
         proof: &MerkleProof,
     ) -> Result<VerifiedDomainEvent, ProofVerificationError> {
@@ -2171,7 +2173,7 @@ impl Blockchain {
                 source_domain,
                 source_height,
                 sequence,
-                Some(expected_block_hash),
+                expected_block_hash,
                 event,
                 proof,
             )
@@ -2480,7 +2482,7 @@ impl Blockchain {
                 target_domain,
                 target_height,
                 sequence,
-                Some(expected_block_hash),
+                expected_block_hash,
                 event,
                 proof,
             )
