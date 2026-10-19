@@ -278,7 +278,12 @@ impl UniversalRelayer {
             .clone();
 
         // 2. Expiry check
-        if pending.expiry_height > 0 && current_height > pending.expiry_height {
+        // BLG-0119 (P05-F12): the boundary is exclusive - at
+        // `current_height == expiry_height` the sweep is already legal
+        // (the expiry queue pops at `..=height`), so the relay must NOT be.
+        // Two nodes ordering the pair differently could otherwise split
+        // the outcome across the network.
+        if pending.expiry_height > 0 && current_height >= pending.expiry_height {
             return Err(RelayerError::Expired {
                 message_id,
                 expiry: pending.expiry_height,
@@ -358,7 +363,7 @@ impl UniversalRelayer {
     pub fn expired_relays(&self, current_height: u64) -> Vec<&PendingRelay> {
         self.pending
             .values()
-            .filter(|r| r.expiry_height > 0 && current_height > r.expiry_height)
+            .filter(|r| r.expiry_height > 0 && current_height >= r.expiry_height)
             .collect()
     }
 
@@ -782,5 +787,30 @@ mod tests {
             16,
         );
         assert!(matches!(second, Err(RelayerError::Other(_))));
+    }
+
+    /// BLG-0119 (P05-F12): at the expiry height itself the relay is already
+    /// refused - the sweep is legal there (`..=height`), so the boundary must
+    /// not belong to both sides.
+    #[test]
+    fn relay_is_refused_at_the_expiry_height_itself() {
+        let mut relayer = UniversalRelayer::new(RelayerConfig::default());
+        // height 10 -> expiry 110.
+        let (event, message) = make_event_and_message(1, 2, 10);
+        relayer.enqueue_relay(event, &message, 10);
+        let err = relayer
+            .process_relay(
+                message.message_id,
+                Address::from([0xAA; 32]),
+                &[],
+                1,
+                [0u8; 32],
+                110,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RelayerError::Expired { current_height: 110, .. }),
+            "got: {err}"
+        );
     }
 }
