@@ -627,6 +627,7 @@ mod tests {
             difficulty: 1,
             target_block_time: 10,
             adjustment_interval: 100,
+            ..Default::default()
         });
         let state = AccountState::new();
 
@@ -677,6 +678,7 @@ mod tests {
             difficulty: 1,
             target_block_time: 10,
             adjustment_interval: 4,
+            ..Default::default()
         });
         assert_eq!(engine.get_difficulty(), 1);
 
@@ -737,6 +739,7 @@ mod tests {
             difficulty: 2,
             target_block_time: 10,
             adjustment_interval: 3,
+            ..Default::default()
         });
         let mut chain: Vec<Block> = Vec::new();
         let mut genesis = Block::new(0, "0".repeat(64), vec![]);
@@ -774,6 +777,7 @@ mod tests {
             difficulty: 3,
             target_block_time: 10,
             adjustment_interval: 0,
+            ..Default::default()
         });
         let mut flat_expected = U256::ZERO;
         for _ in 1..chain.len() {
@@ -837,6 +841,7 @@ mod tests {
             difficulty: 2,
             target_block_time: real_slot_secs,
             adjustment_interval: 100,
+            ..Default::default()
         });
         // 100 blocks x 1 s = 100 s elapsed, and 100 s expected.
         let d = engine.adjusted_difficulty_for_test(2, 100);
@@ -897,6 +902,7 @@ mod tests {
             difficulty: 2,
             target_block_time: 1,
             adjustment_interval: 100,
+            ..Default::default()
         });
         // Expected 100 s. 4x too fast: one digit up (was 8 with linear scaling).
         assert_eq!(engine.adjusted_difficulty_for_test(2, 25), 3);
