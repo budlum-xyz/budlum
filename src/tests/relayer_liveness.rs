@@ -190,6 +190,8 @@ fn double_sign_report(offender: Address, reporter: Option<Address>) -> SlashingR
         offender,
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "aa".into(),
             block_hash_2: "bb".into(),
             signature_1: vec![1],
@@ -245,6 +247,8 @@ fn an_unprovable_report_is_refused_before_the_fee_is_taken() {
         roles::VALIDATOR,
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "aa".into(),
             block_hash_2: "bb".into(),
             signature_1: vec![1],
@@ -287,6 +291,8 @@ fn a_provable_report_from_a_stranger_slashes_and_refunds() {
         roles::VALIDATOR,
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: hex::encode(h1),
             block_hash_2: hex::encode(h2),
             signature_1: keys.sign(&h1).to_vec(),
@@ -335,6 +341,8 @@ fn a_stranger_cannot_slash_a_validator_by_asserting_provenance() {
         roles::VALIDATOR,
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: hex::encode(h1),
             block_hash_2: hex::encode(h2),
             // Signed by the attacker's key, filed against the victim.

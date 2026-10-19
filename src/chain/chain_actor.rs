@@ -130,6 +130,13 @@ pub enum ChainCommand {
         Box<crate::domain::sovereign::AuditExportBundle>,
         oneshot::Sender<Result<(), String>>,
     ),
+    // BLG-0199 (P10-F09): the raw, unverified-commitment path is test-only to
+    // the last hop. Production RPC answers `bud_submitDomainCommitment` with a
+    // refusal, and there is no longer any command route from the actor into
+    // `Blockchain::accept_domain_commitment` in a release build - a path that
+    // merely "returns Err in prod today" still compiles the unsafe body in
+    // every future build. Test suites keep their harness entry below.
+    #[cfg(test)]
     SubmitDomainCommitment(
         crate::domain::DomainCommitment,
         oneshot::Sender<Result<(), String>>,
@@ -328,7 +335,9 @@ pub enum ChainCommand {
         agent: crate::core::address::Address,
         response: oneshot::Sender<Option<crate::ai::types::AiAgentReputation>>,
     },
-    GetAiAgentRanking(oneshot::Sender<Vec<(crate::core::address::Address, f64)>>),
+    // BLG-0201 (P10-F11): fixed-point permyriad score, not an `f64` - the
+    // actor boundary does not carry floats (Z8).
+    GetAiAgentRanking(oneshot::Sender<Vec<(crate::core::address::Address, u64)>>),
     GetPruneStatus(oneshot::Sender<serde_json::Value>),
     RequestPrune(Option<u64>, oneshot::Sender<Result<u64, String>>),
     BuildGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
@@ -1640,6 +1649,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    #[cfg(test)]
     pub async fn submit_domain_commitment(
         &self,
         commitment: crate::domain::DomainCommitment,
@@ -2362,7 +2372,7 @@ impl ChainHandle {
         rx.await.ok()?
     }
 
-    pub async fn get_ai_agent_ranking(&self) -> Vec<(crate::core::address::Address, f64)> {
+    pub async fn get_ai_agent_ranking(&self) -> Vec<(crate::core::address::Address, u64)> {
         let (tx, rx) = oneshot::channel();
         if self
             .tx
@@ -3621,7 +3631,27 @@ impl ChainActor {
                     let _ = tx.send(removed);
                 }
                 ChainCommand::TryReorg(fork, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.try_reorg(fork).map_err(|e| e.to_string()));
+                    let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.to_string());
+                    // BLG-0195 (P10-F05): after a successful reorg the old tip's
+                    // finality round is dead (0186 invalidated it), but nobody
+                    // restarted voting - the node just sat there and the post-
+                    // fork chain finalized nothing until the NEXT checkpoint
+                    // block happened to arrive through AddBlock. Resume the
+                    // prevote task on the new tip when it is itself a
+                    // checkpoint height, mirroring ValidateAndAddBlock.
+                    if matches!(outcome, Ok(true)) {
+                        let tip = self.blockchain.chain.last().cloned();
+                        if let Some(tip) = tip {
+                            if crate::chain::finality::is_checkpoint_height_for_chain(
+                                tip.index,
+                                self.blockchain.chain_id,
+                            ) {
+                                self.blockchain
+                                    .start_prevote_task(tip.index, tip.hash.clone());
+                            }
+                        }
+                    }
+                    let _ = res_tx.send(outcome);
                 }
                 ChainCommand::GetChainInfo(tx) => {
                     let info = format!(
@@ -3728,6 +3758,7 @@ impl ChainActor {
                             .validate_sovereign_audit_export(bundle.as_ref()),
                     );
                 }
+                #[cfg(test)]
                 ChainCommand::SubmitDomainCommitment(commitment, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_domain_commitment(commitment));
                 }
@@ -4033,7 +4064,11 @@ impl ChainActor {
                     let _ = response.send(rep);
                 }
                 ChainCommand::GetAiAgentRanking(res_tx) => {
-                    let ranking = self.blockchain.state.ai_registry.agents_by_trust_score();
+                    let ranking = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .agents_by_trust_score_permille();
                     let _ = res_tx.send(ranking);
                 }
                 ChainCommand::GetPruneStatus(res_tx) => {
