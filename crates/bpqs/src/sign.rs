@@ -430,14 +430,20 @@ mod tests {
     fn check_canonical_refuses_nonzero_used_lane_padding() {
         let mut sig = signed();
         sig.chains[0][T::N] = 1;
-        assert!(matches!(check_canonical(&sig), Err(BpqsError::Malformed(_))));
+        assert!(matches!(
+            check_canonical(&sig),
+            Err(BpqsError::Malformed(_))
+        ));
     }
 
     #[test]
     fn check_canonical_refuses_nonzero_unused_lane() {
         let mut sig = signed();
         sig.chains[T::LEN][0] = 1;
-        assert!(matches!(check_canonical(&sig), Err(BpqsError::Malformed(_))));
+        assert!(matches!(
+            check_canonical(&sig),
+            Err(BpqsError::Malformed(_))
+        ));
     }
 
     #[test]

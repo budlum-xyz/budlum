@@ -819,7 +819,7 @@ mod settlement_prod_tests {
                 pow.id,
                 44,
                 0,
-                Some(expected_block_hash),
+                expected_block_hash,
                 event.clone(),
                 &proof,
             )
@@ -827,7 +827,7 @@ mod settlement_prod_tests {
         assert_eq!(verified.event.event_index, 1);
 
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 44, 0, Some([0u8; 32]), event.clone(), &proof)
+            .verify_domain_event_proof(pow.id, 44, 0, [0u8; 32], event.clone(), &proof)
             .is_err());
 
         let mut wrong_index = proof.clone();
@@ -837,7 +837,7 @@ mod settlement_prod_tests {
                 pow.id,
                 44,
                 0,
-                Some(expected_block_hash),
+                expected_block_hash,
                 event,
                 &wrong_index
             )
