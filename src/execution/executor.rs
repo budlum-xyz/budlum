@@ -87,6 +87,12 @@ fn privacy_transfers_enabled(chain_id: u64) -> bool {
 }
 
 impl Executor {
+    /// Apply one transaction's state effect. Admission control is NOT here:
+    /// `validate_transaction` has already run over this transaction at the
+    /// ingest gate, including the `tx.nonce == account.nonce` check - the
+    /// per-arm nonce bump is `saturating_add(1)`, not a re-validation. Any
+    /// new caller that bypasses the gate owns the nonce invariant (BLG-0296,
+    /// P18-F11; stated in full at `Blockchain::apply_block_effects`).
     pub fn apply_transaction(state: &mut AccountState, tx: &Transaction) -> Result<(), String> {
         Self::apply_transaction_checked(state, tx).map_err(|e| e.message().to_string())
     }
