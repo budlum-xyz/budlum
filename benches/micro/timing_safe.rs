@@ -324,6 +324,12 @@ fn main() -> ExitCode {
             std::str::from_utf8(b).expect("ascii key"),
         )
     };
+    let ct_len_safe = |a: &[u8], b: &[u8]| -> bool {
+        match (std::str::from_utf8(a), std::str::from_utf8(b)) {
+            (Ok(x), Ok(y)) => constant_time_eq_str(x, y),
+            _ => false,
+        }
+    };
     let (ct_a, ct_b) = measure_min_per_batch(
         ct,
         diff_first.as_bytes(),
@@ -455,6 +461,50 @@ fn main() -> ExitCode {
         effect_ratio * 100.0,
         EFFECT_RATIO_THRESHOLD * 100.0
     );
+
+    // Extra classes: a mismatch in the middle byte against the first byte, and a
+    // length mismatch against a same-length mismatch. Same verdict rule as above.
+    let mut diff_mid = secret.clone();
+    let mid_byte = secret.as_bytes()[32];
+    diff_mid.replace_range(32..33, if mid_byte == b'A' { "B" } else { "A" });
+    let short_key = &secret[..63];
+    for (name, left, right) in [
+        (
+            "first vs middle byte",
+            diff_first.as_bytes(),
+            diff_mid.as_bytes(),
+        ),
+        (
+            "same length vs short key",
+            diff_last.as_bytes(),
+            short_key.as_bytes(),
+        ),
+    ] {
+        let (x, y) =
+            measure_min_per_batch(ct_len_safe, left, right, secret.as_bytes(), batches, iters);
+        let t = welch_t(&x, &y);
+        let delta = (mean(&x) - mean(&y)).abs();
+        let ratio = delta / control_delta;
+        let t_eff = if t.is_finite() {
+            t.abs()
+        } else if delta > 0.0 && completely_separated(&x, &y) {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+        println!(
+            "class {name:<24}: delta={delta:.2}ns |t|={t_eff:.2} ratio={:.1}%",
+            ratio * 100.0
+        );
+        if t_eff >= T_THRESHOLD && ratio >= EFFECT_RATIO_THRESHOLD {
+            eprintln!(
+                "FAIL(regression): constant_time_eq_str timing differs for class '{name}' \
+                 (|t|={t_eff:.2}, ratio={:.1}%).",
+                ratio * 100.0
+            );
+            return ExitCode::from(1);
+        }
+    }
 
     // Both conditions together: statistical evidence AND practical magnitude. Neither
     // substitutes for the other - t alone counts 1 ns as a violation, and the ratio alone
