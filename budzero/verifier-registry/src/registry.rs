@@ -51,7 +51,7 @@
 //!   caller's responsibility.
 
 use crate::address::Address;
-use crate::evidence::{EvidenceError, SlashingReport};
+use crate::evidence::{EvidenceError, SlashingProof, SlashingReport};
 use crate::params::{slash_penalty, RegistryParams};
 use crate::role::RoleId;
 use serde::{Deserialize, Serialize};
@@ -702,11 +702,22 @@ impl VerifierRegistry {
     // ─── State Root ────────────────────────────────────────────────────
 
     pub fn state_root(&self) -> [u8; 32] {
-        if self.is_empty() {
-            return [0u8; 32];
-        }
+        // P16-F14 (BLG-0257): the root used to commit to the registration
+        // table ONLY. Parameters and slashing history were excluded, so a
+        // snapshot carrying this root could not tell apart a registry whose
+        // unbonding window, min stake or slash ratios had been rewritten -
+        // or one whose history had been truncated. V2 folds everything the
+        // struct holds; there is no longer an empty-table zero shortcut,
+        // because an empty registry with different params is not the same
+        // registry.
         let mut hasher = Sha256::default();
-        hasher.update(b"BDLM_VERIFIER_REGISTRY_V1");
+        hasher.update(b"BDLM_VERIFIER_REGISTRY_V2");
+        let p = &self.params;
+        hasher.update(p.min_stake.to_le_bytes());
+        hasher.update(p.unbonding_epochs.to_le_bytes());
+        hasher.update(p.double_sign_slash_ratio_fixed.to_le_bytes());
+        hasher.update(p.liveness_slash_ratio_fixed.to_le_bytes());
+        hasher.update(p.malicious_slash_ratio_fixed.to_le_bytes());
         for (key, reg) in &self.registrations {
             hasher.update(key.0.as_bytes());
             hasher.update(key.1.as_bytes());
@@ -720,6 +731,63 @@ impl VerifierRegistry {
                 }
                 MemberStatus::Slashed => hasher.update(b"slashed"),
             }
+        }
+        hasher.update((self.slashing_history.len() as u64).to_le_bytes());
+        for record in &self.slashing_history {
+            hasher.update(record.penalty.to_le_bytes());
+            hasher.update(record.remaining_stake.to_le_bytes());
+            hasher.update(record.report.offender.as_bytes());
+            hasher.update(record.report.role.as_bytes());
+            // No serde_json dependency in this crate: the proof is folded
+            // variant-by-variant. Every field is a number, string or byte
+            // vector, so the walk is deterministic by construction.
+            let proof_bytes = match &record.report.proof {
+                SlashingProof::DoubleSign {
+                    height,
+                    block_hash_1,
+                    block_hash_2,
+                    signature_1,
+                    signature_2,
+                    ..
+                } => {
+                    let mut b = height.to_le_bytes().to_vec();
+                    b.extend_from_slice(block_hash_1.as_bytes());
+                    b.extend_from_slice(block_hash_2.as_bytes());
+                    b.extend_from_slice(signature_1);
+                    b.extend_from_slice(signature_2);
+                    b
+                }
+                SlashingProof::Liveness {
+                    window_start_epoch,
+                    window_end_epoch,
+                    missed,
+                    expected,
+                } => {
+                    let mut b = window_start_epoch.to_le_bytes().to_vec();
+                    b.extend_from_slice(window_end_epoch.to_le_bytes());
+                    b.extend_from_slice(missed.to_le_bytes());
+                    b.extend_from_slice(expected.to_le_bytes());
+                    b
+                }
+                SlashingProof::Other { tag, data } => {
+                    let mut b = tag.as_bytes().to_vec();
+                    b.extend_from_slice(data);
+                    b
+                }
+                SlashingProof::InvalidSignatureSpam {
+                    epoch,
+                    count,
+                    threshold,
+                } => {
+                    let mut b = epoch.to_le_bytes().to_vec();
+                    b.extend_from_slice(count.to_le_bytes());
+                    b.extend_from_slice(threshold.to_le_bytes());
+                    b
+                }
+            };
+            hasher.update(&(record.report.proof.condition() as u8).to_le_bytes());
+            hasher.update((proof_bytes.len() as u64).to_le_bytes());
+            hasher.update(&proof_bytes);
         }
         hasher.finalize().into()
     }
@@ -1215,5 +1283,59 @@ mod tests {
             .unwrap();
         assert!(reg.is_active_ai_operator(&addr(20)));
         assert!(reg.is_active_content_validator(&addr(21)));
+    }
+
+    /// BLG-0257 (P16-F14): the root commits to EVERYTHING the struct holds.
+    /// V1 hashed the registration table only - parameters and the slashing
+    /// history were invisible, so a snapshot could not tell apart registries
+    /// whose unbonding window, min stake, slash ratios, or truncation of the
+    /// history had been rewritten.
+    #[test]
+    fn state_root_commits_to_params_and_history() {
+        let empty = VerifierRegistry::default();
+        let other_params = VerifierRegistry::with_params(RegistryParams {
+            min_stake: 99,
+            ..RegistryParams::default()
+        });
+        assert_ne!(
+            empty.state_root(),
+            other_params.state_root(),
+            "parameters are part of the state root (BLG-0257)"
+        );
+
+        let mut with_history = VerifierRegistry::default();
+        let record = SlashingRecord {
+            report: SlashingReport::new(
+                addr(1),
+                roles::MASTER_VERIFIER,
+                SlashingProof::Other {
+                    tag: "t".into(),
+                    data: vec![1],
+                },
+                None,
+            ),
+            penalty: 5,
+            remaining_stake: 7,
+        };
+        with_history.slashing_history.push(record.clone());
+        assert_ne!(
+            empty.state_root(),
+            with_history.state_root(),
+            "slashing history is part of the state root (BLG-0257)"
+        );
+        let mut other_history = VerifierRegistry::default();
+        other_history.slashing_history.push(SlashingRecord {
+            penalty: 6,
+            ..record
+        });
+        assert_ne!(
+            with_history.state_root(),
+            other_history.state_root(),
+            "the history's content, not just its length, changes the root"
+        );
+
+        // Determinism: equal content, equal root - the fold must not read a
+        // map or any order-unstable structure.
+        assert_eq!(empty.state_root(), VerifierRegistry::default().state_root());
     }
 }
