@@ -75,9 +75,8 @@ fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
             continue;
         };
         // A job may deliberately want another compiler, but it must do so **with a
-        // written justification**. If the file carries the `DELIBERATE-TOOLCHAIN-DIVERGENCE`
-        // marker is looked for; when it is present the versions in that file are checked against the pin
-        // denetlenmez.
+        // written justification**. The `DELIBERATE-TOOLCHAIN-DIVERGENCE` marker is
+        // looked for; when it is present the versions in that file are not checked against the pin.
         //
         // Today the only legitimate example is `diverse-double-compiling.yml`: the whole
         // point of the job is to build the same source with a second compiler, so

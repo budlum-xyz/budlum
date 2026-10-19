@@ -32,6 +32,11 @@ fn line_matches(line: &str, name: &str) -> bool {
 /// when the log file is missing. The `subject` fills the message the shell
 /// gate printed (e.g. "Fork-choice").
 pub fn check_log(log: &Path, tests: &[&str], subject: &str) -> Result<String, String> {
+    if tests.is_empty() {
+        return Err(format!(
+            "{subject} gate has no required test names, so it would check nothing"
+        ));
+    }
     if !log.is_file() {
         return Err(format!("test log missing: {}", log.display()));
     }
@@ -54,6 +59,11 @@ pub fn check_log(log: &Path, tests: &[&str], subject: &str) -> Result<String, St
 /// required test must pass, and the same log minus the first test must fail.
 /// This is the shell gate's self-test, one for one.
 pub fn self_test(tests: &[&str], subject: &str) -> Result<String, String> {
+    if tests.is_empty() {
+        return Err(format!(
+            "{subject} self-test: the required test list is empty"
+        ));
+    }
     // The log lives in a directory this call created exclusively, so a
     // pre-planted symlink at a guessable name cannot redirect the write.
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-named")?;
@@ -72,7 +82,7 @@ pub fn self_test(tests: &[&str], subject: &str) -> Result<String, String> {
     }
 
     let mut missing = String::new();
-    for n in &tests[1..] {
+    for n in tests.iter().skip(1) {
         writeln!(missing, "test {n} ... ok").expect("writing to a String cannot fail");
     }
     fs::write(&log, &missing).map_err(|e| format!("cannot stage bad log: {e}"))?;
@@ -121,5 +131,16 @@ mod tests {
             "test tests::burn_is_capped ... ignored",
             "burn_is_capped"
         ));
+    }
+}
+
+#[cfg(test)]
+mod empty_list_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_name_list_is_an_error_not_a_pass() {
+        assert!(check_log(std::path::Path::new("/nonexistent"), &[], "x").is_err());
+        assert!(self_test(&[], "x").is_err());
     }
 }
