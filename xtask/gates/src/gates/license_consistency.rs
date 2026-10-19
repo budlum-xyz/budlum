@@ -147,15 +147,19 @@ fn collect_manifests(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn check_licence_texts(root: &Path, problems: &mut Vec<String>) -> Result<(), String> {
-    let lic_path = root.join("LICENSE.md");
-    let lic =
-        std::fs::read(&lic_path).map_err(|e| format!("cannot read {}: {e}", lic_path.display()))?;
-    if lic.len() < CANONICAL_LENGTH
-        || hex32(&keccak256(&lic[..CANONICAL_LENGTH])) != CANONICAL_KECCAK
-    {
-        problems.push(String::from(
-            "LICENSE.md does not start with the canonical PolyForm Shield 1.0.0 text",
-        ));
+    // Both copies carry the canonical PolyForm Shield 1.0.0 text first, and both
+    // are pinned by hash. A body edit in either one fails.
+    for rel in ["LICENSE.md", "budzero/LICENSE"] {
+        let lic_path = root.join(rel);
+        let lic = std::fs::read(&lic_path)
+            .map_err(|e| format!("cannot read {}: {e}", lic_path.display()))?;
+        if lic.len() < CANONICAL_LENGTH
+            || hex32(&keccak256(&lic[..CANONICAL_LENGTH])) != CANONICAL_KECCAK
+        {
+            problems.push(format!(
+                "{rel} does not start with the canonical PolyForm Shield 1.0.0 text"
+            ));
+        }
     }
     for rel in ["LICENSE.md", "budzero/LICENSE"] {
         let path = root.join(rel);
@@ -183,6 +187,11 @@ fn check_licence_texts(root: &Path, problems: &mut Vec<String>) -> Result<(), St
     Ok(())
 }
 
+/// Is this line the `[package]` header, with or without a trailing comment?
+fn is_package_header(line: &str) -> bool {
+    line.split('#').next().unwrap_or("").trim() == "[package]"
+}
+
 fn check_manifests(root: &Path, problems: &mut Vec<String>) -> usize {
     let mut manifests = Vec::new();
     collect_manifests(root, &mut manifests);
@@ -196,7 +205,8 @@ fn check_manifests(root: &Path, problems: &mut Vec<String>) -> usize {
             problems.push(format!("{rel}: cannot be read"));
             continue;
         };
-        let is_package = text.lines().any(|l| l.trim() == "[package]");
+        // A trailing comment after the header (`[package] # x`) is still the header.
+        let is_package = text.lines().any(is_package_header);
         if !is_package {
             // A virtual workspace root carries no licence of its own; its
             // `[workspace.package]` is checked through the members.
@@ -210,7 +220,10 @@ fn check_manifests(root: &Path, problems: &mut Vec<String>) -> usize {
             Declared::Workspace => match workspace_root_of(manifest, root) {
                 Some(ws) => {
                     let ws_rel = ws.strip_prefix(root).unwrap_or(&ws).display().to_string();
-                    let ws_text = std::fs::read_to_string(&ws).unwrap_or_default();
+                    let Ok(ws_text) = std::fs::read_to_string(&ws) else {
+                        problems.push(format!("{ws_rel}: cannot be read"));
+                        continue;
+                    };
                     match declared_in(&ws_text, "workspace.package") {
                         Declared::Literal(expr) if expr == SPDX => {}
                         Declared::Literal(expr) => problems.push(format!(
@@ -435,4 +448,16 @@ fn self_test_in(dir: &Path) -> Result<String, String> {
     Ok(String::from(
         "licence canary OK: a missing licence, a drifted workspace licence, a metadata-only key, an old licence text and a dropped attribution all FAIL; the consistent tree PASSES.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_header_with_comment_is_a_package() {
+        let t = "[package] # the crate\nname = \"x\"\n";
+        assert!(t.lines().any(is_package_header));
+        assert!(!"[package.metadata]".lines().any(is_package_header));
+    }
 }
