@@ -201,10 +201,11 @@ mod tests {
         bridge.register_asset(a, 1).unwrap();
         let owner = Address::from([1u8; 32]);
         let recipient = Address::from([2u8; 32]);
-        let (transfer, _) = bridge
+        let (transfer, event) = bridge
             .lock(1, 2, 10, 0, a, owner, recipient, 100, 500)
             .unwrap();
         let id = transfer.message_id;
+        let lock_message = event.message.unwrap();
         let err = build_bud_to_eth_claim(
             &bridge,
             &id,
@@ -217,7 +218,9 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, BudToEthError::NotBurned);
 
-        // Burned, but the finality proof is empty: FinalityProofMissing.
+        // Burned (a burn needs the mint first), but the finality proof is
+        // empty: FinalityProofMissing.
+        bridge.mint(&lock_message, 11).unwrap();
         bridge
             .burn_with_event(id, 2, 20, 0, 500, [9u8; 20])
             .unwrap();

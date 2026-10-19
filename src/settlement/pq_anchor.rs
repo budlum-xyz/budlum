@@ -1089,7 +1089,8 @@ mod tests {
 
         fn certs(state: &ColdWalletState, at_height: u64, reason: &str) -> Vec<DeviceSignature> {
             let mut payload = Vec::new();
-            payload.extend_from_slice(b"BDLM_PQ_ANCHOR_ROTATION_V1");
+            payload.extend_from_slice(b"BDLM_PQ_ANCHOR_ROTATION_V2");
+            payload.extend_from_slice(&state.policy.chain_id.to_le_bytes());
             payload.extend_from_slice(&at_height.to_le_bytes());
             payload.extend_from_slice(&(state.key_epoch as u64).to_le_bytes());
             payload.extend_from_slice(&crate::core::hash::hash_fields_bytes(&[
@@ -1207,7 +1208,13 @@ mod tests {
             stark_root: None,
             crossdomain_root: None,
             key_epoch: 7,
-            signatures: Vec::new(),
+            // A non-empty list: the empty list is refused first, as a
+            // missing algorithm, and this test pins the epoch rule.
+            signatures: vec![AnchorSignature {
+                algorithm: AnchorSignatureAlgorithm::MlDsa87,
+                public_key: vec![1u8; 32],
+                signature: vec![2u8; 64],
+            }],
         };
         let err = verify_anchor_full(&anchor, &[], 8).unwrap_err();
         assert_eq!(err.kind(), "anchor-stale-epoch");
