@@ -2171,8 +2171,9 @@ mod tests {
         );
         assert!(snapshot.verify(), "the fixture must verify as issued");
 
+        // The attack: serve the same snapshot with the admission records
+        // emptied. No reseal - the stored digest is the issuer's.
         snapshot.poa_onboarding = Some(crate::registry::poa_onboarding::PoAOnboarding::new());
-        snapshot.reseal_after_manual_edit();
         assert!(
             !snapshot.verify(),
             "the admission records crossed the wire outside the digest"
@@ -2451,6 +2452,8 @@ mod tests {
             "trust_policy",
             // admission records (a serde-default field with no version bump)
             "poa_onboarding",
+            // compliance ledger (schema-7 wave: default-filled AND digested)
+            "poa_compliance",
             // identity registry (schema-5 wave: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 wave: same discipline)
