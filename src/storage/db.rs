@@ -113,7 +113,7 @@ fn decode<T: DeserializeOwned>(value: &[u8]) -> std::io::Result<T> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Storage {
     db: Db,
     /// BLG-0190 (P09-F11): a test-only knob that makes the storage-economics
@@ -122,6 +122,19 @@ pub struct Storage {
     /// production behaviour reads it.
     #[cfg(test)]
     fail_economics_writes: std::sync::atomic::AtomicBool,
+}
+
+impl Clone for Storage {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            #[cfg(test)]
+            fail_economics_writes: std::sync::atomic::AtomicBool::new(
+                self.fail_economics_writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
+        }
+    }
 }
 
 /// Sled's file-lock release is not synchronous with `Db::drop`: the flusher
@@ -414,7 +427,11 @@ impl Storage {
             // Reopen races with it and flakes (tur13_5, 2026-07-18). The
             // Semantics are unchanged - the checks run on the freshly
             // Restored data exactly as `Storage::new` would run them.
-            let restored = Self { db };
+            let restored = Self {
+                db,
+                #[cfg(test)]
+                fail_economics_writes: std::sync::atomic::AtomicBool::new(false),
+            };
             restored.apply_migrations()?;
             restored.recover_interrupted_commit()?;
             let errors = restored.check_integrity().map_err(std::io::Error::other)?;
