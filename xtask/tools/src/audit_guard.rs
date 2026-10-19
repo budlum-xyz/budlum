@@ -129,7 +129,24 @@ fn is_sha_pinned(reference: &str) -> bool {
 
 fn is_write_permission(line: &str) -> bool {
     let line = line.trim_start();
-    for key in ["contents", "actions", "pull-requests"] {
+    if line
+        .strip_prefix("permissions:")
+        .is_some_and(|rest| rest.trim() == "write-all")
+    {
+        return true;
+    }
+    for key in [
+        "contents",
+        "actions",
+        "pull-requests",
+        "id-token",
+        "packages",
+        "checks",
+        "issues",
+        "statuses",
+        "deployments",
+        "pages",
+    ] {
         if let Some(rest) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) {
             let value = rest.trim();
             return value == "write" || value == "write-all";
@@ -230,7 +247,19 @@ pub fn workflow_text_audit(rel: &str, text: &str, errors: &mut Vec<String>) {
         }
     }
 
-    let has_pull_request = text.lines().any(|line| line.trim() == "pull_request:");
+    let has_pull_request = uncommented.iter().any(|line| {
+        let t = line.trim();
+        t == "pull_request:"
+            || t.strip_prefix("on:").is_some_and(|rest| {
+                let rest = rest.trim();
+                rest == "pull_request"
+                    || (rest.starts_with('[')
+                        && rest
+                            .trim_matches(|c| c == '[' || c == ']')
+                            .split(',')
+                            .any(|e| e.trim() == "pull_request"))
+            })
+    });
     if has_pull_request {
         for (index, line) in uncommented.iter().enumerate() {
             if is_write_permission(line) {
@@ -587,6 +616,22 @@ mod tests {
         let mut errors = Vec::new();
         workflow_text_audit(rel, text, &mut errors);
         errors
+    }
+
+    #[test]
+    fn write_scopes_and_inline_triggers_are_seen() {
+        for trigger in ["on: [push, pull_request]", "on: pull_request"] {
+            let text = format!("{trigger}\npermissions:\n  id-token: write\n");
+            let errors = audit_text("x.yml", &text);
+            assert!(
+                errors.iter().any(|e| e.contains("write permission")),
+                "{trigger}: {errors:?}"
+            );
+        }
+        let all = "on:\n  pull_request:\npermissions: write-all\n";
+        assert!(audit_text("x.yml", all)
+            .iter()
+            .any(|e| e.contains("write permission")));
     }
 
     #[test]
