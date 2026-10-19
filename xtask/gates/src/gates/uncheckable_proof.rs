@@ -27,7 +27,7 @@ fn code_of(root: &Path) -> Result<String, String> {
 }
 
 fn has_fn(code: &str, name: &str) -> bool {
-    code.contains(&format!("fn {name}("))
+    rust_literals::has_live_test(code, name)
 }
 
 /// # Errors

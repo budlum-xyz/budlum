@@ -203,7 +203,7 @@ fn check_pins(src: &str) -> Result<(), String> {
 
 fn check_ordering(src: &str) -> Result<(), String> {
     // A test must order two thresholds that are known to differ.
-    if !src.contains("fn each_lever_has_its_own_crossing_point") {
+    if !super::rust_literals::has_live_test(src, "each_lever_has_its_own_crossing_point") {
         return Err(String::from(
             "FAIL: no test orders two levers' thresholds against each other",
         ));
@@ -254,7 +254,10 @@ fn check_arithmetic(src: &str) -> Result<(), String> {
              size from a manifest can end the process. Refuse the product instead",
         ));
     }
-    if !src.contains("fn a_product_that_leaves_u128_is_refused_rather_than_aborting") {
+    if !super::rust_literals::has_live_test(
+        src,
+        "a_product_that_leaves_u128_is_refused_rather_than_aborting",
+    ) {
         return Err(String::from(
             "FAIL: no test shows a product past u128 returning an error rather than \
              aborting",
@@ -302,7 +305,7 @@ fn check_hysteresis(src: &str) -> Result<(), String> {
              belongs to the transition cost",
         ));
     }
-    if !src.contains("fn the_dead_band_is_the_same_width_on_both_sides") {
+    if !super::rust_literals::has_live_test(src, "the_dead_band_is_the_same_width_on_both_sides") {
         return Err(String::from(
             "FAIL: no test pins the width of the dead band on each side of the \
              crossing point, so the constant's documentation and the code can drift \
@@ -332,14 +335,14 @@ pub fn run(root: &Path) -> Result<String, String> {
     check_hysteresis(&src)?;
 
     // A decaying estimate that cannot decay is a counter with extra steps.
-    if !src.contains("fn an_access_estimate_halves_every_half_life") {
+    if !super::rust_literals::has_live_test(src, "an_access_estimate_halves_every_half_life") {
         return Err(String::from(
             "FAIL: no test shows the access estimate actually decaying",
         ));
     }
 
     // The disagreement test must name the two answers it expects.
-    if !src.contains("fn operators_with_different_hardware_may_disagree") {
+    if !super::rust_literals::has_live_test(src, "operators_with_different_hardware_may_disagree") {
         return Err(String::from(
             "FAIL: no test shows two operators reaching different answers for one \
              object",

@@ -186,6 +186,41 @@ pub fn scrub(text: &str) -> String {
     strip_line_comments(&after_blocks)
 }
 
+/// Does `src` define `fn name(` as a live test? Comments and strings are
+/// ignored. The attributes right above the function must include `#[test]`
+/// (or a `tokio::test`) and none may mention `ignore` or `cfg`.
+pub fn has_live_test(src: &str, name: &str) -> bool {
+    let code = scrub(src);
+    let needle = format!("fn {name}(");
+    let lines: Vec<&str> = code.lines().collect();
+    lines.iter().enumerate().any(|(i, line)| {
+        let Some(at) = line.find(&needle) else {
+            return false;
+        };
+        let before = line[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+        let mut is_test = false;
+        for above in lines[..i].iter().rev() {
+            let t = above.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if !t.starts_with("#[") {
+                break;
+            }
+            if t.contains("ignore") || t.contains("cfg") {
+                return false;
+            }
+            if t.starts_with("#[test]") || t.starts_with("#[tokio::test") {
+                is_test = true;
+            }
+        }
+        is_test
+    })
+}
+
 /// A fresh, exclusively created scratch directory under the system
 /// temporary directory.
 ///
@@ -275,5 +310,21 @@ mod tests {
         assert!(out.contains("let c = 3;"));
         assert!(!out.contains("line"));
         assert!(!out.contains("fake"));
+    }
+}
+
+#[cfg(test)]
+mod live_test_tests {
+    use super::has_live_test;
+
+    #[test]
+    fn only_an_enabled_test_function_counts() {
+        assert!(has_live_test("#[test]\nfn a() {}\n", "a"));
+        assert!(has_live_test("#[test]\n/// doc\nfn a() {}\n", "a"));
+        assert!(!has_live_test("fn a() {}\n", "a"));
+        assert!(!has_live_test("#[test]\n#[ignore]\nfn a() {}\n", "a"));
+        assert!(!has_live_test("#[cfg(any())]\n#[test]\nfn a() {}\n", "a"));
+        assert!(!has_live_test("// fn a() {}\n", "a"));
+        assert!(!has_live_test("#[test]\nfn ab() {}\n", "a"));
     }
 }

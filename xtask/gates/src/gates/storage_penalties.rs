@@ -345,7 +345,7 @@ fn body_of(code: &str, header: &str) -> Option<String> {
 }
 
 fn has_test(deal_src: &str, name: &str) -> bool {
-    deal_src.contains(&format!("fn {name}("))
+    super::rust_literals::has_live_test(deal_src, name)
 }
 
 /// Evaluate a plain u64 constant expression like `6 * 60 * 60`.
