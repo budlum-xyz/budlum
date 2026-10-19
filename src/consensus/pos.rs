@@ -149,28 +149,7 @@ impl PoSEngine {
     }
 
     pub fn verify_evidence(&self, evidence: &SlashingEvidence) -> bool {
-        if evidence.header1.index != evidence.header2.index {
-            return false;
-        }
-        if evidence.header1.producer != evidence.header2.producer {
-            return false;
-        }
-        if evidence.header1.producer.is_none() {
-            return false;
-        }
-
-        if !evidence.header1.verify_signature(&evidence.signature1) {
-            return false;
-        }
-        if !evidence.header2.verify_signature(&evidence.signature2) {
-            return false;
-        }
-
-        if evidence.header1.hash == evidence.header2.hash {
-            return false;
-        }
-
-        true
+        slashing_evidence_is_valid(evidence)
     }
 
     /// Prune old slashing evidence to prevent unbounded growth.
@@ -643,6 +622,28 @@ impl PoSEngine {
         ))
     }
 }
+/// The one structural check for double-sign evidence (P01-F25).
+///
+/// `Blockchain::verify_slashing_evidence` and `PoSEngine::verify_evidence`
+/// used to restate this independently. Two copies of a consensus check drift,
+/// and the drift is invisible until the two disagree about an equivocation.
+pub fn slashing_evidence_is_valid(evidence: &SlashingEvidence) -> bool {
+    if evidence.header1.index != evidence.header2.index {
+        return false;
+    }
+    if evidence.header1.producer != evidence.header2.producer {
+        return false;
+    }
+    if evidence.header1.producer.is_none() {
+        return false;
+    }
+    if evidence.header1.hash == evidence.header2.hash {
+        return false;
+    }
+    evidence.header1.verify_signature(&evidence.signature1)
+        && evidence.header2.verify_signature(&evidence.signature2)
+}
+
 impl ConsensusEngine for PoSEngine {
     fn preview_block(
         &self,

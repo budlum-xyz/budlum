@@ -103,7 +103,7 @@ pub trait ConsensusEngine: Send + Sync {
     ///
     /// `AccountState::execution_domain` is stamped from this at every point
     /// a state is built or replaced, and it is what the identity write gate
-    /// consults. The default is `PoS`, which is mainnet L1's fact and keeps
+    /// consults. The default is `PoS`, which is the Budlum mainnet fact and keeps
     /// the master registry closed: an engine that does not declare itself
     /// does not open a gated write. `PoAEngine` overrides; nothing else may.
     fn domain_kind(&self) -> crate::domain::ConsensusKind {
