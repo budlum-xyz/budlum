@@ -57,7 +57,7 @@ async fn main() {
             let sender_idx = i % sender_count;
             let mut tx = Transaction::new_with_fee(
                 Address::from(keypairs[sender_idx].public_key_bytes()),
-                Address::zero(),
+                Address::from(keypairs[(sender_idx + 1) % sender_count].public_key_bytes()),
                 1,
                 1,
                 (i / sender_count) as u64,
