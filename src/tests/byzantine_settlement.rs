@@ -29,6 +29,15 @@ mod byzantine_settlement_tests {
         domain_height: u64,
         updates: Vec<(Address, u64)>,
     ) -> Result<(), String> {
+        // BLG-0286 (P18-F01): the executor now requires the sender to hold
+        // the seat the real builder signs from - an eligible validator.
+        // Registering it here is the honest fixture for that role, not a
+        // bypass: without a seat, this helper must fail, and a test below
+        // pins exactly that.
+        node.state
+            .validators
+            .entry(sender)
+            .or_insert_with(|| crate::core::account::Validator::new(sender, 1));
         let nonce = node.state.get_nonce(&sender);
         let tx = crate::core::transaction::Transaction::new_with_chain_id(
             sender,
@@ -344,6 +353,42 @@ mod byzantine_settlement_tests {
         assert_eq!(
             node_a.state.get_nonce(&alice_a),
             node_b.state.get_nonce(&alice_b)
+        );
+    }
+
+    #[tokio::test]
+    async fn state_update_from_a_non_committer_is_refused() {
+        // BLG-0286 (P18-F01): the freeze-the-victim path. A funded attacker
+        // with no validator seat tries the exact move the finding names -
+        // push the victim's nonce just under the ceiling, which the old
+        // ceiling/monotonicity guards happily waved through.
+        let consensus = std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0));
+        let mut node = Blockchain::new(consensus, None, 45262, None);
+        let attacker = test_addr_from_byte(0xAD);
+        let victim = test_addr_from_byte(0xB0);
+        node.state.add_balance(&attacker, 1_000_000);
+        node.state.add_balance(&victim, 500);
+        let tx = crate::core::transaction::Transaction::new_with_chain_id(
+            attacker,
+            Address::zero(),
+            0,
+            1,
+            node.state.get_nonce(&attacker),
+            Vec::new(),
+            45262,
+            crate::core::transaction::TransactionType::StateUpdate {
+                domain_id: 1,
+                domain_height: 1,
+                state_updates: vec![(victim, u64::MAX - 1001)],
+            },
+        );
+        let err = crate::execution::executor::Executor::apply_transaction(&mut node.state, &tx)
+            .expect_err("an attacker without a validator seat must not move another account's nonce");
+        assert!(err.contains("state_update_authority"), "wrong refusal: {err}");
+        assert_eq!(
+            node.state.get_nonce(&victim),
+            0,
+            "the refused update must leave the victim untouched"
         );
     }
 
