@@ -518,12 +518,14 @@ fn check_impl(
     out.structs += 1;
     let rel = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
 
+    // A mention in a comment or a string does not bind a field.
+    let code = crate::gates::rust_literals::scrub(&derivation);
     for (field, doc) in fields {
         if *field == id_field {
             continue;
         }
         out.fields += 1;
-        let bound = bound_in(&derivation, field);
+        let bound = bound_in(&code, field);
         let declared = identity_excluded(doc);
         if !bound && declared.is_none() {
             out.problems.push(format!(
@@ -715,4 +717,18 @@ pub fn self_test() -> Result<String, String> {
          fixtures are not bindings, a struct without verify_id is skipped, and \
          a tree with nothing to measure reports so.",
     ))
+}
+
+#[cfg(test)]
+mod comment_binding_tests {
+    use super::bound_in;
+    use crate::gates::rust_literals::scrub;
+
+    #[test]
+    fn a_comment_or_string_mention_does_not_bind_a_field() {
+        let text = "// self.amount is hashed elsewhere\nlet s = \"self.amount\";\nhash(self.owner)";
+        let code = scrub(text);
+        assert!(!bound_in(&code, "amount"));
+        assert!(bound_in(&code, "owner"));
+    }
 }
