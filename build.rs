@@ -5,6 +5,8 @@
 
 fn main() {
     println!("cargo:rerun-if-changed=proto/budlum/network/protocol.proto");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=PROTOC");
 
     // Find protoc: PROTOC env > known locations > PATH. In the Docker image
     // prost-build could not find it on PATH and said "Could not find protoc"
