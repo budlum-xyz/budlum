@@ -82,7 +82,7 @@ pub(crate) fn strip_test_mods(src: &str) -> String {
         // that calls `registry/quarantine_ledger.rs`, so a wired module read
         // as unwired. `test_item_end` skips strings and comments and stops at
         // the item's own terminator instead.
-        if bytes[i] == '#' && src[byte_index(&bytes, i)..].starts_with("#[cfg(test)]") {
+        if bytes[i] == '#' && is_test_cfg(&src[byte_index(&bytes, i)..]) {
             i = test_item_end(&bytes, i);
             continue;
         }
@@ -90,6 +90,33 @@ pub(crate) fn strip_test_mods(src: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// Does the text start with a `cfg` attribute that is true only under test?
+///
+/// `all(test, ..)` is test-only as well. `any(test, ..)` is not, but a call
+/// inside it is not production evidence either, so both are treated as test.
+fn is_test_cfg(text: &str) -> bool {
+    ["#[cfg(test)]", "#[cfg(all(test", "#[cfg(any(test"]
+        .iter()
+        .any(|p| text.starts_with(p))
+}
+
+/// End of a char literal such as `'{'` or `'\n'` that starts at `j`.
+///
+/// Returns `None` for a lifetime or a label.
+fn char_literal_end(chars: &[char], j: usize) -> Option<usize> {
+    if chars.get(j) != Some(&'\'') {
+        return None;
+    }
+    if chars.get(j + 1) == Some(&'\\') {
+        let close = (j + 3..(j + 12).min(chars.len())).find(|&k| chars[k] == '\'')?;
+        return Some(close + 1);
+    }
+    if chars.get(j + 2) == Some(&'\'') {
+        return Some(j + 3);
+    }
+    None
 }
 
 /// Index just past the item a `#[cfg(test)]` attribute at `start` attaches to.
@@ -137,6 +164,10 @@ fn test_item_end(chars: &[char], start: usize) -> usize {
             j = string_end(chars, j);
             continue;
         }
+        if let Some(e) = char_literal_end(chars, j) {
+            j = e;
+            continue;
+        }
         // A `;` before any brace ends the item: a const, use or statement.
         if chars[j] == ';' {
             return j + 1;
@@ -166,6 +197,10 @@ fn test_item_end(chars: &[char], start: usize) -> usize {
                         j += 1;
                     }
                     j = (j + 2).min(n);
+                    continue;
+                }
+                if let Some(e) = char_literal_end(chars, j) {
+                    j = e;
                     continue;
                 }
                 if chars[j] == '{' {
@@ -1099,4 +1134,25 @@ pub fn self_test() -> Result<String, String> {
          plain calls, turbofish calls, own-module paths and bare type mentions are accepted; \
          name extraction and the unwired marker behave.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_test_cfg_is_stripped() {
+        let src = "#[cfg(all(test, feature = \"x\"))]\nmod t { fn only_test() {} }\nfn prod() {}\n";
+        let out = strip_test_mods(src);
+        assert!(!out.contains("only_test"));
+        assert!(out.contains("fn prod"));
+    }
+
+    #[test]
+    fn char_brace_in_test_module_does_not_end_it_early() {
+        let src = "#[cfg(test)]\nmod t { fn a() { let c = '}'; leaked_call(); } }\nfn prod() {}\n";
+        let out = strip_test_mods(src);
+        assert!(!out.contains("leaked_call"));
+        assert!(out.contains("fn prod"));
+    }
 }
