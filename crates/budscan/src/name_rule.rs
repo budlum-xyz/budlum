@@ -225,7 +225,11 @@ pub fn display_form(name: &str) -> String {
         if i > 0 {
             out.push('.');
         }
-        if label.is_ascii() {
+        if label.chars().any(char::is_control) {
+            // A control character or an escape sequence never reaches the
+            // address bar or a terminal.
+            out.push_str("[?]");
+        } else if label.is_ascii() {
             out.push_str(label);
         } else if let Some(encoded) = crate::punycode::encode_label(label) {
             out.push_str("xn--");
@@ -320,6 +324,12 @@ mod tests {
         );
         assert!(check_resolvable("ayaz.bud").is_ok());
         assert!(check_resolvable("ayaz.eth").is_ok());
+    }
+
+    #[test]
+    fn display_form_hides_control_characters() {
+        assert_eq!(display_form("ayaz.bud\u{0}x"), "ayaz.[?]");
+        assert_eq!(display_form("\u{1b}[31mred.bud"), "[?].bud");
     }
 
     #[test]
