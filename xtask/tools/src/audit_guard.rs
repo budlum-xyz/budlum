@@ -155,6 +155,66 @@ fn is_write_permission(line: &str) -> bool {
     false
 }
 
+fn guard_workflow_checks(rel: &str, text: &str, errors: &mut Vec<String>) {
+    // The guard workflow is itself part of the review boundary. Removing its
+    // self-test, its real audit, or its fail-closed shell mode must turn this
+    // audit red rather than silently reducing coverage.
+    let self_test_call = format!("{INVOKE} --self-test");
+    let is_workflow = |name: &str| rel == name || rel.ends_with(&format!("/{name}"));
+    if is_workflow(".github/workflows/audit-guard.yml") {
+        if !text.contains(&self_test_call) {
+            errors.push(format!("{rel}: guard self-test is missing"));
+        }
+        if !text.lines().any(|line| line.trim() == INVOKE) {
+            errors.push(format!("{rel}: real audit invocation is missing"));
+        }
+        if has_pair(text, "continue-on-error", "true") {
+            errors.push(format!("{rel}: audit guard may not continue on error"));
+        }
+        if swallows_failure(text) {
+            errors.push(format!("{rel}: audit guard may not swallow failures"));
+        }
+    }
+    if is_workflow(".github/workflows/ci.yml") {
+        if !text.contains(&self_test_call) {
+            errors.push(format!(
+                "{rel}: gates aggregator is missing Audit Guard self-test"
+            ));
+        }
+        if !text.lines().any(|line| line.trim() == INVOKE) {
+            errors.push(format!(
+                "{rel}: gates aggregator is missing the real Audit Guard"
+            ));
+        }
+    }
+}
+
+fn checkout_checks(rel: &str, lines: &[&str], errors: &mut Vec<String>) {
+    for (start, line) in lines.iter().enumerate() {
+        if !line.contains(CHECKOUT) || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let end = (start + 12).min(lines.len());
+        let indent = line.len() - line.trim_start().len();
+        // The window ends where the next step of the same list begins.
+        let step_end = (start + 1..end)
+            .find(|&j| {
+                let l = lines[j];
+                l.trim_start().starts_with("- ") && l.len() - l.trim_start().len() <= indent
+            })
+            .unwrap_or(end);
+        if !lines[start..step_end]
+            .iter()
+            .any(|l| l.contains("persist-credentials: false"))
+        {
+            errors.push(format!(
+                "{rel}:{}: checkout must disable persisted credentials",
+                start + 1
+            ));
+        }
+    }
+}
+
 /// Audit one workflow text. Kept pure so the red team can mutate it.
 pub fn workflow_text_audit(rel: &str, text: &str, errors: &mut Vec<String>) {
     let uncommented: Vec<&str> = text
@@ -193,37 +253,7 @@ pub fn workflow_text_audit(rel: &str, text: &str, errors: &mut Vec<String>) {
         errors.push(format!("{rel}: `|| true` swallows a failing command"));
     }
 
-    // The guard workflow is itself part of the review boundary. Removing its
-    // self-test, its real audit, or its fail-closed shell mode must turn this
-    // audit red rather than silently reducing coverage.
-    let self_test_call = format!("{INVOKE} --self-test");
-    let is_workflow = |name: &str| rel == name || rel.ends_with(&format!("/{name}"));
-    if is_workflow(".github/workflows/audit-guard.yml") {
-        if !text.contains(&self_test_call) {
-            errors.push(format!("{rel}: guard self-test is missing"));
-        }
-        if !text.lines().any(|line| line.trim() == INVOKE) {
-            errors.push(format!("{rel}: real audit invocation is missing"));
-        }
-        if has_pair(text, "continue-on-error", "true") {
-            errors.push(format!("{rel}: audit guard may not continue on error"));
-        }
-        if swallows_failure(text) {
-            errors.push(format!("{rel}: audit guard may not swallow failures"));
-        }
-    }
-    if is_workflow(".github/workflows/ci.yml") {
-        if !text.contains(&self_test_call) {
-            errors.push(format!(
-                "{rel}: gates aggregator is missing Audit Guard self-test"
-            ));
-        }
-        if !text.lines().any(|line| line.trim() == INVOKE) {
-            errors.push(format!(
-                "{rel}: gates aggregator is missing the real Audit Guard"
-            ));
-        }
-    }
+    guard_workflow_checks(rel, text, errors);
 
     let lines: Vec<&str> = text.lines().collect();
     for (index, line) in lines.iter().enumerate() {
@@ -241,29 +271,7 @@ pub fn workflow_text_audit(rel: &str, text: &str, errors: &mut Vec<String>) {
         }
     }
 
-    for (start, line) in lines.iter().enumerate() {
-        if !line.contains(CHECKOUT) || line.trim_start().starts_with('#') {
-            continue;
-        }
-        let end = (start + 12).min(lines.len());
-        let indent = line.len() - line.trim_start().len();
-        // The window ends where the next step of the same list begins.
-        let step_end = (start + 1..end)
-            .find(|&j| {
-                let l = lines[j];
-                l.trim_start().starts_with("- ") && l.len() - l.trim_start().len() <= indent
-            })
-            .unwrap_or(end);
-        if !lines[start..step_end]
-            .iter()
-            .any(|l| l.contains("persist-credentials: false"))
-        {
-            errors.push(format!(
-                "{rel}:{}: checkout must disable persisted credentials",
-                start + 1
-            ));
-        }
-    }
+    checkout_checks(rel, &lines, errors);
 
     let has_pull_request = uncommented.iter().any(|line| {
         let t = line.trim();
@@ -682,8 +690,8 @@ mod tests {
     }
 
     #[test]
-    fn the_red_team_rejects_all_ten_mutants() {
-        assert_eq!(red_team(), Ok(10));
+    fn the_red_team_rejects_all_fourteen_mutants() {
+        assert_eq!(red_team(), Ok(14));
     }
 
     #[test]

@@ -213,62 +213,13 @@ pub fn run(root: &Path) -> Result<String, String> {
     ))
 }
 
-pub fn self_test() -> Result<String, String> {
-    let good_mod = "pub mod regen_health;\npub mod regeneration_stage;\n";
-    let good_stage = concat!(
-        "pub fn revert_after_forgery( self ) ReversionError::LedgerIsValid ",
-        "ForgedTrailTargetNotPolyp { to } wired through the health layer"
-    );
-    let good_health = concat!(
-        "pub enum HealthVerdict pub enum AlarmReason pub struct HealthPolicy ",
-        "pub fn assess( { let _ = ledger.validate(); ",
-        "let _ = canonical(ledger.stage, ledger.height); ",
-        "let _ = cheapest_target(damaged_below); ",
-        "let _ = reversion_beats_repair(a, b, c, d); ",
-        "HealthVerdict::RevertTo { target, stress } }"
-    );
-    let good_chaos = concat!(
-        "const RECOVERY_WINDOW_BLOCKS: u64 = 64;\n",
-        "#[test]\nfn chaos_corrupt_view_recovers_within_n_blocks_via_canonical_reversion() {}\n",
-        "#[test]\nfn chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks() {}\n",
-        "#[test]\nfn chaos_compromised_anchor_reversion_follows_the_canonical_source_by_design() {}\n",
-        "#[test]\nfn chaos_no_canonical_source_alarms_and_never_reverts_blind() {}\n"
-    );
-
-    let mut problems: Vec<String> = Vec::new();
-
-    // Canary 1: the module declaration is removed silently.
-    {
-        let mut p: Vec<String> = Vec::new();
-        probe(
-            "pub mod regeneration_stage;\n",
-            good_stage,
-            good_health,
-            good_chaos,
-            &mut p,
-        );
-        if p.is_empty() {
-            problems.push("canary failed: deleted health-layer declaration not caught".into());
-        }
-    }
-    // Canary 2: an entry point drifts back to unwired.
-    {
-        let mut p: Vec<String> = Vec::new();
-        let tampered = format!("{good_stage} // WIRING: unwired - nobody calls this");
-        probe(good_mod, &tampered, good_health, good_chaos, &mut p);
-        if p.is_empty() {
-            problems.push("canary failed: re-unwired entry point not caught".into());
-        }
-    }
-    // Canary 3: the forgery door is deleted.
-    {
-        let mut p: Vec<String> = Vec::new();
-        let tampered = good_stage.replace("revert_after_forgery(", "revert_after_forg(");
-        probe(good_mod, &tampered, good_health, good_chaos, &mut p);
-        if p.is_empty() {
-            problems.push("canary failed: deleted forgery door not caught".into());
-        }
-    }
+fn self_test_late(
+    good_mod: &str,
+    good_stage: &str,
+    good_health: &str,
+    good_chaos: &str,
+    problems: &mut Vec<String>,
+) {
     // Canary 4: the decision ordering is scrambled (verdict before canonicality).
     {
         let mut p: Vec<String> = Vec::new();
@@ -344,6 +295,65 @@ pub fn self_test() -> Result<String, String> {
             problems.push("canary failed: a gated module declaration not caught".into());
         }
     }
+}
+
+pub fn self_test() -> Result<String, String> {
+    let good_mod = "pub mod regen_health;\npub mod regeneration_stage;\n";
+    let good_stage = concat!(
+        "pub fn revert_after_forgery( self ) ReversionError::LedgerIsValid ",
+        "ForgedTrailTargetNotPolyp { to } wired through the health layer"
+    );
+    let good_health = concat!(
+        "pub enum HealthVerdict pub enum AlarmReason pub struct HealthPolicy ",
+        "pub fn assess( { let _ = ledger.validate(); ",
+        "let _ = canonical(ledger.stage, ledger.height); ",
+        "let _ = cheapest_target(damaged_below); ",
+        "let _ = reversion_beats_repair(a, b, c, d); ",
+        "HealthVerdict::RevertTo { target, stress } }"
+    );
+    let good_chaos = concat!(
+        "const RECOVERY_WINDOW_BLOCKS: u64 = 64;\n",
+        "#[test]\nfn chaos_corrupt_view_recovers_within_n_blocks_via_canonical_reversion() {}\n",
+        "#[test]\nfn chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks() {}\n",
+        "#[test]\nfn chaos_compromised_anchor_reversion_follows_the_canonical_source_by_design() {}\n",
+        "#[test]\nfn chaos_no_canonical_source_alarms_and_never_reverts_blind() {}\n"
+    );
+
+    let mut problems: Vec<String> = Vec::new();
+
+    // Canary 1: the module declaration is removed silently.
+    {
+        let mut p: Vec<String> = Vec::new();
+        probe(
+            "pub mod regeneration_stage;\n",
+            good_stage,
+            good_health,
+            good_chaos,
+            &mut p,
+        );
+        if p.is_empty() {
+            problems.push("canary failed: deleted health-layer declaration not caught".into());
+        }
+    }
+    // Canary 2: an entry point drifts back to unwired.
+    {
+        let mut p: Vec<String> = Vec::new();
+        let tampered = format!("{good_stage} // WIRING: unwired - nobody calls this");
+        probe(good_mod, &tampered, good_health, good_chaos, &mut p);
+        if p.is_empty() {
+            problems.push("canary failed: re-unwired entry point not caught".into());
+        }
+    }
+    // Canary 3: the forgery door is deleted.
+    {
+        let mut p: Vec<String> = Vec::new();
+        let tampered = good_stage.replace("revert_after_forgery(", "revert_after_forg(");
+        probe(good_mod, &tampered, good_health, good_chaos, &mut p);
+        if p.is_empty() {
+            problems.push("canary failed: deleted forgery door not caught".into());
+        }
+    }
+    self_test_late(good_mod, good_stage, good_health, good_chaos, &mut problems);
 
     if !problems.is_empty() {
         return Err(problems.join("\n  "));

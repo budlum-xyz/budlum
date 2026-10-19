@@ -45,6 +45,43 @@ fn parse_manifest(manifest_path: &Path) -> Result<(Vec<String>, Vec<String>), St
     Ok((declared, paths))
 }
 
+fn read_workflow_text(workflows_dir: &Path) -> Result<String, String> {
+    let mut workflow_text = String::new();
+    if workflows_dir.is_dir() {
+        let rd = std::fs::read_dir(workflows_dir).map_err(|e| e.to_string())?;
+        let mut files: Vec<String> = Vec::new();
+        for e in rd.filter_map(Result::ok) {
+            let n = e.file_name().to_string_lossy().to_string();
+            let ext = e
+                .path()
+                .extension()
+                .and_then(|x| x.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "yml" || ext == "yaml" {
+                files.push(n);
+            }
+        }
+        files.sort();
+        for f in files {
+            if let Ok(t) = std::fs::read_to_string(workflows_dir.join(&f)) {
+                // A comment saying "run abc" is not a schedule.
+                for line in t.lines().filter(|l| !l.trim_start().starts_with('#')) {
+                    workflow_text.push_str(line);
+                    workflow_text.push('\n');
+                }
+            }
+        }
+    }
+    if workflow_text.is_empty() {
+        return Err(format!(
+            "no workflow files under {}; gate would be vacuous",
+            workflows_dir.display()
+        ));
+    }
+    Ok(workflow_text)
+}
+
 /// # Errors
 ///
 /// Returns a finding per unwired fuzz target, or a vacuity failure.
@@ -76,39 +113,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
     let (declared, paths) = parse_manifest(&manifest_path)?;
-    let mut workflow_text = String::new();
-    if workflows_dir.is_dir() {
-        let rd = std::fs::read_dir(&workflows_dir).map_err(|e| e.to_string())?;
-        let mut files: Vec<String> = Vec::new();
-        for e in rd.filter_map(Result::ok) {
-            let n = e.file_name().to_string_lossy().to_string();
-            let ext = e
-                .path()
-                .extension()
-                .and_then(|x| x.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if ext == "yml" || ext == "yaml" {
-                files.push(n);
-            }
-        }
-        files.sort();
-        for f in files {
-            if let Ok(t) = std::fs::read_to_string(workflows_dir.join(&f)) {
-                // A comment saying "run abc" is not a schedule.
-                for line in t.lines().filter(|l| !l.trim_start().starts_with('#')) {
-                    workflow_text.push_str(line);
-                    workflow_text.push('\n');
-                }
-            }
-        }
-    }
-    if workflow_text.is_empty() {
-        return Err(format!(
-            "no workflow files under {}; gate would be vacuous",
-            workflows_dir.display()
-        ));
-    }
+    let workflow_text = read_workflow_text(&workflows_dir)?;
 
     let mut problems: Vec<String> = Vec::new();
     for name in &harnesses {

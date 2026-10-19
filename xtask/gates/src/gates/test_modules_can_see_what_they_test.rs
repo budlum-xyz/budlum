@@ -44,8 +44,7 @@ fn parent_functions(src: &str) -> BTreeSet<String> {
             continue;
         }
         let mut rest = t;
-        loop {
-            let Some(next) = [
+        while let Some(next) = [
                 "pub(crate) ",
                 "pub(super) ",
                 "pub ",
@@ -54,9 +53,8 @@ fn parent_functions(src: &str) -> BTreeSet<String> {
                 "unsafe ",
             ]
             .iter()
-            .find_map(|p| rest.strip_prefix(p)) else {
-                break;
-            };
+            .find_map(|p| rest.strip_prefix(p))
+        {
             rest = next;
         }
         let Some(rest) = rest.strip_prefix("fn ") else {

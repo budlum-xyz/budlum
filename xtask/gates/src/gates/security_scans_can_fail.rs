@@ -377,6 +377,62 @@ pub fn run(root: &Path) -> Result<String, String> {
     Err(msg)
 }
 
+fn check_softener_shapes(problems: &mut Vec<String>) {
+    // Softener shapes beyond the two literal ones.
+    let shapes = "\
+jobs:
+  a:
+    steps:
+      - run: cargo test ||true
+  b:
+    steps:
+      - run: cargo test || exit 0
+  c:
+    steps:
+      - run: cargo test; true
+  d:
+    continue-on-error: ${{ matrix.soft }}
+    steps:
+      - run: x
+  e:
+    continue-on-error: True
+    steps:
+      - run: x
+  f:
+    continue-on-error: false
+    steps:
+      - run: x
+";
+    let shape_jobs: BTreeSet<String> = softeners_in(Path::new("x.yml"), shapes)
+        .into_iter()
+        .map(|s| s.job)
+        .collect();
+    let expected: BTreeSet<String> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|j| (*j).to_string())
+        .collect();
+    if shape_jobs != expected {
+        problems.push(format!(
+            "BROKEN: softener shapes read as {shape_jobs:?}, expected {expected:?}"
+        ));
+    }
+}
+
+fn check_allowed_type(problems: &mut Vec<String>) {
+    // The allow-list is empty on the tree, so `Allowed` would never be
+    // constructed outside this canary; keep the type live and pin the rule
+    // that re-growing the list is a deliberate act, never a leftover.
+    let kept_alive = Allowed {
+        file: "x.yml",
+        what: "self-test",
+        reason: "constructed only so an empty allow-list never turns the type into dead code",
+    };
+    if kept_alive.file != "x.yml" || kept_alive.what != "self-test" || kept_alive.reason.is_empty()
+    {
+        problems.push(String::from("BROKEN: the Allowed type drifted"));
+    }
+}
+
 /// # Errors
 ///
 /// The canaries that did not behave.
@@ -421,44 +477,7 @@ jobs:
         problems.push(String::from("VACUOUS: a strict job was called softened"));
     }
 
-    // Softener shapes beyond the two literal ones.
-    let shapes = "\
-jobs:
-  a:
-    steps:
-      - run: cargo test ||true
-  b:
-    steps:
-      - run: cargo test || exit 0
-  c:
-    steps:
-      - run: cargo test; true
-  d:
-    continue-on-error: ${{ matrix.soft }}
-    steps:
-      - run: x
-  e:
-    continue-on-error: True
-    steps:
-      - run: x
-  f:
-    continue-on-error: false
-    steps:
-      - run: x
-";
-    let shape_jobs: BTreeSet<String> = softeners_in(Path::new("x.yml"), shapes)
-        .into_iter()
-        .map(|s| s.job)
-        .collect();
-    let expected: BTreeSet<String> = ["a", "b", "c", "d", "e"]
-        .iter()
-        .map(|j| (*j).to_string())
-        .collect();
-    if shape_jobs != expected {
-        problems.push(format!(
-            "BROKEN: softener shapes read as {shape_jobs:?}, expected {expected:?}"
-        ));
-    }
+    check_softener_shapes(&mut problems);
 
     // A must-block job that disappeared must be reported.
     if missing_must_block(&[]).len() != MUST_BLOCK.len() {
@@ -497,18 +516,7 @@ jobs:
         ));
     }
 
-    // The allow-list is empty on the tree, so `Allowed` would never be
-    // constructed outside this canary; keep the type live and pin the rule
-    // that re-growing the list is a deliberate act, never a leftover.
-    let kept_alive = Allowed {
-        file: "x.yml",
-        what: "self-test",
-        reason: "constructed only so an empty allow-list never turns the type into dead code",
-    };
-    if kept_alive.file != "x.yml" || kept_alive.what != "self-test" || kept_alive.reason.is_empty()
-    {
-        problems.push(String::from("BROKEN: the Allowed type drifted"));
-    }
+    check_allowed_type(&mut problems);
 
     if !problems.is_empty() {
         return Err(problems.join("\n  "));

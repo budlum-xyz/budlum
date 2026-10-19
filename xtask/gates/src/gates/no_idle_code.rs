@@ -904,7 +904,7 @@ struct Scan {
     exempt_keys: BTreeSet<String>,
 }
 
-fn scan(root: &Path) -> Scan {
+fn read_sources(root: &Path) -> Vec<(String, String)> {
     let mut files: Vec<PathBuf> = Vec::new();
     for r in PROD_ROOTS {
         let p = root.join(r);
@@ -925,6 +925,11 @@ fn scan(root: &Path) -> Scan {
             .replace('\\', "/");
         sources.push((rel, text));
     }
+    sources
+}
+
+fn scan(root: &Path) -> Scan {
+    let sources = read_sources(root);
     let test_only: Vec<String> = sources
         .iter()
         .flat_map(|(rel, text)| test_module_paths(rel, text))
@@ -1294,6 +1299,16 @@ fn not_a_caller_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
         }
     }
 
+    nested_import_canaries(clean, tmp)
+}
+
+/// Imports that sit inside a nested module, behind an item body, under a
+/// restricted path, or only in prose.
+///
+/// # Errors
+///
+/// Returns the first canary that misbehaves.
+fn nested_import_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
     // An import inside a nested module, or one that follows an item body,
     // is still an import. Found only at the head of a `;` segment, a
     // `use` after `mod m {` or after a `}` stayed in the text and the name

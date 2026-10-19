@@ -264,7 +264,7 @@ pub fn self_test() -> Result<String, String> {
 mod entry_tests {
     use super::*;
 
-    fn doc(extra: Value) -> serde_json::Map<String, Value> {
+    fn doc(extra: &Value) -> serde_json::Map<String, Value> {
         let mut m = serde_json::Map::new();
         for (k, v) in extra.as_object().cloned().unwrap_or_default() {
             m.insert(k, v);
@@ -276,14 +276,14 @@ mod entry_tests {
     fn duplicate_bad_hex_and_empty_after_ceremony_are_refused() {
         let mut errs = Vec::new();
         check_entries(
-            &doc(serde_json::json!({"allocations": [["aa", 1], ["AA", 2]], "validators": ["zz"]})),
+            &doc(&serde_json::json!({"allocations": [["aa", 1], ["AA", 2]], "validators": ["zz"]})),
             &mut errs,
         );
         assert_eq!(errs.len(), 2, "{errs:?}");
         let mut errs = Vec::new();
         check_entries(
             &doc(
-                serde_json::json!({"allocations": [], "validators": [], "ceremony_status": "done"}),
+                &serde_json::json!({"allocations": [], "validators": [], "ceremony_status": "done"}),
             ),
             &mut errs,
         );
@@ -291,7 +291,7 @@ mod entry_tests {
         let mut errs = Vec::new();
         check_entries(
             &doc(
-                serde_json::json!({"allocations": [], "validators": [], "ceremony_status": "template_ready"}),
+                &serde_json::json!({"allocations": [], "validators": [], "ceremony_status": "template_ready"}),
             ),
             &mut errs,
         );

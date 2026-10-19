@@ -298,7 +298,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("fixture");
         let file = dir.join("budlum-1.budbak");
         std::fs::write(&file, b"x").expect("fixture");
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let later = std::time::SystemTime::now() + std::time::Duration::from_hours(1);
         let out = ensure_fresh(&file, later);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(out.is_err());

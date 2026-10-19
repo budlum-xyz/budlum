@@ -19,6 +19,7 @@
 //!
 //! The self-test proves the gate can fail by tampering with a workflow copy.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 /// The gate subcommands CI must invoke for the protection to be live.
@@ -332,13 +333,13 @@ const FIXTURE_HEAD: &str =
 fn workflow_with(extra: &str, lines: impl Fn(&str) -> Vec<String>) -> String {
     let mut out = String::from(FIXTURE_HEAD);
     for gate in PROTECTED_GATES {
-        out.push_str(&format!("      - name: {gate} + canary\n"));
+        writeln!(out, "      - name: {gate} + canary").expect("writing to a String cannot fail");
         if !extra.is_empty() {
-            out.push_str(&format!("        {extra}\n"));
+            writeln!(out, "        {extra}").expect("writing to a String cannot fail");
         }
         out.push_str("        run: |\n");
         for l in lines(gate) {
-            out.push_str(&format!("          {l}\n"));
+            writeln!(out, "          {l}").expect("writing to a String cannot fail");
         }
     }
     out
