@@ -96,6 +96,8 @@ pub enum CarouselError {
     BadMagic,
     /// Header version is not [`DROP_VERSION`].
     BadVersion(u8),
+    /// V1 reserved flags or padding are non-zero.
+    NonCanonicalHeader,
     /// Declared body length does not match `block_len`.
     BodyLenMismatch {
         /// Declared block length.
@@ -139,6 +141,9 @@ impl std::fmt::Display for CarouselError {
             Self::Truncated => write!(f, "carousel drop truncated"),
             Self::BadMagic => write!(f, "carousel drop bad magic"),
             Self::BadVersion(v) => write!(f, "carousel drop unsupported version {v}"),
+            Self::NonCanonicalHeader => {
+                write!(f, "carousel drop has non-zero reserved header bytes")
+            }
             Self::BodyLenMismatch { block_len, got } => {
                 write!(f, "carousel body len {got} != block_len {block_len}")
             }
@@ -288,13 +293,16 @@ impl Drop {
         if version != DROP_VERSION {
             return Err(CarouselError::BadVersion(version));
         }
-        // flags at 5 ignored for v1
+        // BLG-0431: V1 defines no flags and its padding byte is zero.
+        // Refuse aliases instead of interpreting reserved bytes differently.
+        if bytes.get(5) != Some(&0) || bytes.get(19) != Some(&0) {
+            return Err(CarouselError::NonCanonicalHeader);
+        }
         let seq = u32_from_le(bytes, 6)?;
         let k = u16_from_le(bytes, 10)?;
         let block_len = u16_from_le(bytes, 12)?;
         let total_len = u32_from_le(bytes, 14)?;
         let degree = *bytes.get(18).ok_or(CarouselError::Truncated)?;
-        // pad at 19
         let body_hash = u32_from_le(bytes, 20)?;
         let body = bytes
             .get(DROP_HEADER_LEN..)
@@ -1296,6 +1304,23 @@ mod tests {
             "a refused drop cannot select stream parameters"
         );
         assert!(!dec.is_complete());
+    }
+
+    #[test]
+    fn nonzero_reserved_header_bytes_are_refused() {
+        let enc = CarouselEncoder::new(b"canonical carousel", 8).unwrap();
+        let canonical = enc.drop_at(0).to_bytes();
+        assert!(Drop::from_bytes(&canonical).is_ok());
+        for offset in [5, 19] {
+            for value in [1, 0x80, 0xff] {
+                let mut wire = canonical.clone();
+                wire[offset] = value;
+                assert_eq!(
+                    Drop::from_bytes(&wire),
+                    Err(CarouselError::NonCanonicalHeader)
+                );
+            }
+        }
     }
 
     #[test]
