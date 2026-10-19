@@ -280,6 +280,13 @@ pub struct NodeConfig {
     /// Vendor-native PQ mechanism ID for PKCS#11.
     #[arg(long)]
     pub pkcs11_pq_mechanism: Option<String>,
+    /// Operator-configured BLS public key (hex), cross-checked against the
+    /// HSM-held PUBLIC_KEY object at startup (P02-F01 decision B).
+    #[arg(long)]
+    pub pkcs11_bls_public_key: Option<String>,
+    /// Operator-configured PQ public key (hex), cross-checked the same way.
+    #[arg(long)]
+    pub pkcs11_pq_public_key: Option<String>,
 
     #[arg(long)]
     pub features_governance: bool,
@@ -425,6 +432,8 @@ impl Default for NodeConfig {
             hsm_socket_path: "./data/hsm/socket.sock".to_string(),
             pkcs11_bls_mechanism: None,
             pkcs11_pq_mechanism: None,
+            pkcs11_bls_public_key: None,
+            pkcs11_pq_public_key: None,
             features_governance: false,
             features_zkvm_contracts: false,
             features_pruning: false,
@@ -550,6 +559,10 @@ pub struct Pkcs11Section {
     /// Hex or decimal string (e.g. "0x80000001" or "2147483649").
     /// If absent, BLS signing falls back to software (data object).
     pub bls_mechanism: Option<String>,
+    /// Operator-configured BLS/PQ public keys (hex) for the startup
+    /// cross-check (P02-F01 decision B).
+    pub bls_public_key: Option<String>,
+    pub pq_public_key: Option<String>,
     /// Vendor-native PQ/Dilithium mechanism ID.
     pub pq_mechanism: Option<String>,
 }
@@ -873,6 +886,12 @@ impl NodeConfig {
                     }
                     if self.pkcs11_pq_mechanism.is_none() {
                         self.pkcs11_pq_mechanism = pkcs11.pq_mechanism;
+                    }
+                    if self.pkcs11_bls_public_key.is_none() {
+                        self.pkcs11_bls_public_key = pkcs11.bls_public_key;
+                    }
+                    if self.pkcs11_pq_public_key.is_none() {
+                        self.pkcs11_pq_public_key = pkcs11.pq_public_key;
                     }
                 }
                 if let Some(socket) = signer.hsm_socket_path {
