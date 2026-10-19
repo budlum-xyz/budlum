@@ -142,6 +142,14 @@ pub fn save_field_trace(path: &Path, rows: &[[u64; 10]], root: &[u8; 32]) -> Res
 /// this is the in-tree verification the tree actually performs: the trace
 /// determinism, not a STARK proof.
 pub fn load_field_trace(path: &Path) -> Result<(Vec<[u64; 10]>, [u8; 32]), String> {
+    // The size is checked before the read: a file past the cap is never loaded.
+    let size = std::fs::metadata(path)
+        .map_err(|e| format!("trace read error {}: {e}", path.display()))?
+        .len();
+    let cap = (HEAD_BYTES as u64).saturating_add(ZK_MAX_ROWS.saturating_mul(ROW_BYTES as u64));
+    if size > cap {
+        return Err(format!("trace file is larger than the cap ({size} bytes)"));
+    }
     let bytes =
         std::fs::read(path).map_err(|e| format!("trace read error {}: {e}", path.display()))?;
     if bytes.len() < HEAD_BYTES || bytes[0..8] != ZK_PROOF_MAGIC {
@@ -194,6 +202,18 @@ mod tests {
     fn witness_for(data: &[u8]) -> Vec<WitnessStep> {
         let res = engine_store(data, false, 42).expect("engine runs");
         engine_to_witness(&res)
+    }
+
+    #[test]
+    fn a_trace_file_past_the_cap_is_refused_before_it_is_read() {
+        let path = std::env::temp_dir().join(format!("budzk-big-{}.trace", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let file = std::fs::File::create(&path).expect("create");
+        let cap = HEAD_BYTES as u64 + ZK_MAX_ROWS * ROW_BYTES as u64;
+        file.set_len(cap + 1).expect("sparse length");
+        let err = load_field_trace(&path).expect_err("too large");
+        let _ = std::fs::remove_file(&path);
+        assert!(err.contains("larger than the cap"), "{err}");
     }
 
     #[test]
