@@ -88,27 +88,33 @@ fn tamper_refuses<H: BpqsHash, P: BpqsParams>() {
 }
 
 /// Per-call randomizer semantics (2026-09-22, bar-1 record): the same tuple
-/// signs byte-identically (determinism; KAT stability), while a second
-/// message under the same (signer, epoch, count) draws a different
-/// randomizer - the anti-adaptive property of the PRF-derived r.
+/// signs byte-identically (determinism; KAT stability), while a different
+/// message draws a different randomizer - the anti-adaptive property of the
+/// PRF-derived r. The tuple's count slot is the signer's own (BLG-0041), so
+/// determinism is pinned across independent signers minting their first
+/// signature of the epoch.
 fn randomizer_bound_and_deterministic<H: BpqsHash, P: BpqsParams>() {
     let mut signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     let a = signer
-     .sign_at_height(1, MSG)
-     .unwrap_or_else(|e| panic!("a: {e}"));
-    let a2 = signer
-     .sign_at_height(1, MSG)
-     .unwrap_or_else(|e| panic!("a2: {e}"));
+        .sign_at_height(1, MSG)
+        .unwrap_or_else(|e| panic!("a: {e}"));
+    let mut twin = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
+        .unwrap_or_else(|e| panic!("keygen: {e}"));
+    let a2 = twin
+        .sign_at_height(1, MSG)
+        .unwrap_or_else(|e| panic!("a2: {e}"));
     assert_eq!(
         a,
         a2,
         "{}: identical tuple must sign byte-identically",
         P::NAME
     );
-    let b = signer
-     .sign_at_height(1, b"bpqs-backend-differential-payload-2")
-     .unwrap_or_else(|e| panic!("b: {e}"));
+    let mut other = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
+        .unwrap_or_else(|e| panic!("keygen: {e}"));
+    let b = other
+        .sign_at_height(1, b"bpqs-backend-differential-payload-2")
+        .unwrap_or_else(|e| panic!("b: {e}"));
     assert_ne!(
         a.randomizer,
         b.randomizer,
