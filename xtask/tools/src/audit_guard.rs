@@ -246,7 +246,15 @@ pub fn workflow_text_audit(rel: &str, text: &str, errors: &mut Vec<String>) {
             continue;
         }
         let end = (start + 12).min(lines.len());
-        if !lines[start..end]
+        let indent = line.len() - line.trim_start().len();
+        // The window ends where the next step of the same list begins.
+        let step_end = (start + 1..end)
+            .find(|&j| {
+                let l = lines[j];
+                l.trim_start().starts_with("- ") && l.len() - l.trim_start().len() <= indent
+            })
+            .unwrap_or(end);
+        if !lines[start..step_end]
             .iter()
             .any(|l| l.contains("persist-credentials: false"))
         {
@@ -652,6 +660,20 @@ mod tests {
         assert!(errors.iter().any(|e| e.contains("|| true")));
         let commented = format!("{CLEAN}\n# run: make || true\n");
         assert_eq!(audit_text("other.yml", &commented), Vec::<String>::new());
+    }
+
+    #[test]
+    fn credentials_of_the_next_step_do_not_count() {
+        let text = "permissions:\n  contents: read\njobs:\n  a:\n    steps:\n      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567\n      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567\n        with:\n          persist-credentials: false\n";
+        let errors = audit_text("x.yml", text);
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|e| e.contains("persisted credentials"))
+                .count(),
+            1,
+            "{errors:?}"
+        );
     }
 
     #[test]
