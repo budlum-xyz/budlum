@@ -119,7 +119,9 @@ impl TimeSeriesColumnar {
         let mut prev_value = first_value;
         for (ts, v) in points.iter().skip(1) {
             // The difference between consecutive timestamps.
-            let delta = *ts - prev_ts;
+            // A difference that does not fit an i64 could not be decoded back:
+            // refuse the series here rather than write a wrapped code.
+            let delta = ts.checked_sub(prev_ts)?;
             // Timestamp delta coding: zero writes a single '0', and a narrow range
             // gets a short code.
             if delta == 0 {
@@ -270,18 +272,50 @@ impl TimeSeriesColumnar {
         if points - 1 > later_bits / 2 {
             return None;
         }
-        Some(TimeSeriesColumnar {
+        let parsed = TimeSeriesColumnar {
             points,
             first_ts,
             first_value,
             bits,
-        })
+        };
+        // One series has one blob: the stream must decode, the header must
+        // agree with it, and encoding the result must give the same bits back
+        // (no spare bits, no padding other than zero).
+        let series = parsed.decode()?;
+        let again = TimeSeriesColumnar::encode(&series)?;
+        if again.first_ts != parsed.first_ts
+            || again.first_value.to_bits() != parsed.first_value.to_bits()
+            || again.bits != parsed.bits
+        {
+            return None;
+        }
+        Some(parsed)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encode_refuses_a_delta_that_overflows() {
+        assert!(TimeSeriesColumnar::encode(&[(i64::MIN, 1.0), (i64::MAX, 2.0)]).is_none());
+    }
+
+    #[test]
+    fn a_blob_has_one_form() {
+        let series = [(10i64, 1.5f64), (11, 1.5), (13, 2.25)];
+        let t = TimeSeriesColumnar::encode(&series).unwrap();
+        assert!(TimeSeriesColumnar::from_blob(&t.to_blob()).is_some());
+        // A header that disagrees with the stream is refused.
+        let mut lie = t.clone();
+        lie.first_ts += 1;
+        assert!(TimeSeriesColumnar::from_blob(&lie.to_blob()).is_none());
+        // A spare byte after the stream is refused.
+        let mut long = t.clone();
+        long.bits.push(0);
+        assert!(TimeSeriesColumnar::from_blob(&long.to_blob()).is_none());
+    }
 
     #[test]
     fn a_blob_claiming_more_points_than_its_bits_can_hold_is_refused() {
