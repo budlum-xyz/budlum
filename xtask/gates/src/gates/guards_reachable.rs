@@ -26,6 +26,36 @@ const GUARD_PREFIXES: &[&str] = &[
     "guard_",
 ];
 
+/// Is this path a test file? A `tests.rs` is a whole test module with no
+/// inner attribute, so it is excluded like `*_tests.rs` and `tests/`.
+fn is_test_file(rel: &str) -> bool {
+    rel.contains("/tests/") || rel.ends_with("_tests.rs") || rel.ends_with("/tests.rs")
+}
+
+/// The name of a `pub fn` header, with any visibility restriction and the
+/// `async`, `const` and `unsafe` qualifiers.
+fn pub_fn_name(line: &str) -> Option<String> {
+    let mut rest = line.trim_start().strip_prefix("pub")?;
+    if let Some(r) = rest.strip_prefix('(') {
+        rest = &r[r.find(')')? + 1..];
+    }
+    let mut rest = rest.strip_prefix(' ')?.trim_start();
+    loop {
+        if let Some(r) = rest.strip_prefix("fn ") {
+            rest = r;
+            break;
+        }
+        rest = ["async ", "const ", "unsafe "]
+            .iter()
+            .find_map(|q| rest.strip_prefix(q))?;
+    }
+    Some(
+        rest.chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect(),
+    )
+}
+
 /// Collect production `.rs` files (tests excluded).
 fn prod_files(root: &Path) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
@@ -54,7 +84,7 @@ fn prod_files(root: &Path) -> BTreeMap<String, String> {
                     .unwrap_or(&path)
                     .to_string_lossy()
                     .replace('\\', "/");
-                if rel.contains("/tests/") || rel.ends_with("_tests.rs") {
+                if is_test_file(&rel) {
                     continue;
                 }
                 if let Ok(text) = std::fs::read_to_string(&path) {
@@ -155,6 +185,11 @@ fn is_called(name: &str, prod: &BTreeMap<String, String>) -> bool {
     let needle = format!("{name}(");
     let def = format!("fn {name}(");
     for text in prod.values() {
+        // A module that declares itself unwired is not reached from the node,
+        // so a call from it is no wiring.
+        if has_file_level_unwired_marker(text) {
+            continue;
+        }
         let c = code(text);
         for line in c.lines() {
             if !line.contains(&needle) {
@@ -174,7 +209,10 @@ fn is_called(name: &str, prod: &BTreeMap<String, String>) -> bool {
 /// Returns a finding when the unwired count rose or the baseline is stale.
 pub fn run(root: &Path) -> Result<String, String> {
     if !root.join("src").is_dir() {
-        return Ok(String::from("0"));
+        return Err(format!(
+            "no src directory under {}: the gate would measure nothing",
+            root.display()
+        ));
     }
     let prod = prod_files(root);
 
@@ -185,16 +223,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
         let body = strip_test_mods(text);
         for line in body.lines() {
-            let t = line.trim_start();
-            let Some(rest) = t.strip_prefix("pub ") else {
-                continue;
-            };
-            let rest = rest.strip_prefix("async ").unwrap_or(rest);
-            if let Some(rest) = rest.strip_prefix("fn ") {
-                let name: String = rest
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                    .collect();
+            if let Some(name) = pub_fn_name(line) {
                 if is_guard_fn(&name) {
                     guards.push((path.clone(), name));
                 }
@@ -290,4 +319,50 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "guards-reachable canary OK: an uncalled guard is counted, a called one is not, and a call written on a definition line is not mistaken for a definition.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visibility_qualifiers_and_tests_rs_are_handled() {
+        assert_eq!(
+            pub_fn_name("pub fn check_a(x: u8)").as_deref(),
+            Some("check_a")
+        );
+        assert_eq!(
+            pub_fn_name("pub(crate) fn check_b()").as_deref(),
+            Some("check_b")
+        );
+        assert_eq!(
+            pub_fn_name("    pub const fn check_c()").as_deref(),
+            Some("check_c")
+        );
+        assert_eq!(
+            pub_fn_name("pub unsafe fn check_d()").as_deref(),
+            Some("check_d")
+        );
+        assert_eq!(
+            pub_fn_name("pub async fn check_e()").as_deref(),
+            Some("check_e")
+        );
+        assert_eq!(pub_fn_name("pub struct X;"), None);
+        assert!(is_test_file("src/rpc/tests.rs"));
+        assert!(!is_test_file("src/rpc/mod.rs"));
+    }
+
+    #[test]
+    fn call_from_an_unwired_module_is_not_wiring() {
+        let mut prod = BTreeMap::new();
+        prod.insert(
+            String::from("src/a.rs"),
+            String::from("//! WIRING: unwired - x\nfn f() { check_it(1); }\n"),
+        );
+        prod.insert(
+            String::from("src/b.rs"),
+            String::from("pub fn check_it(x: u8) {}\n"),
+        );
+        assert!(!is_called("check_it", &prod));
+    }
 }
