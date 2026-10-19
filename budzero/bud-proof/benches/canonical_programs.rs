@@ -159,7 +159,10 @@ fn matmul_guest_program_2_3_2() -> Vec<u64> {
     // little-endian words is exactly the bench's own program_hash.
     const CANONICAL_MATMUL_2_3_2: &str =
         "4c4e86b4d34230df02acb991eb3111e459fb8bf06dd2b65b78c143b7f8b7e8c7";
-    let hash_hex: String = program_hash(&prog).iter().map(|b| format!("{b:02x}")).collect();
+    let hash_hex: String = program_hash(&prog)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     assert_eq!(
         hash_hex.as_str(),
         CANONICAL_MATMUL_2_3_2,
@@ -199,12 +202,7 @@ fn seed_storage_challenge(vm: &mut Vm) {
     vm.registers[3] = leaf;
 }
 
-fn run_one_with_seed(
-    name: &str,
-    program: &[u64],
-    samples: u32,
-    seed: impl Fn(&mut Vm),
-) {
+fn run_one_with_seed(name: &str, program: &[u64], samples: u32, seed: impl Fn(&mut Vm)) {
     let mut prove_total = Duration::ZERO;
     let mut verify_total = Duration::ZERO;
     let mut proof_bytes = 0usize;
