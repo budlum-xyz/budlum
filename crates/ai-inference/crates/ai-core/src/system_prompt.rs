@@ -344,6 +344,8 @@ pub fn generation_phrases_are_all_refusals(text: &str) -> Result<(), String> {
         while let Some(offset) = lower[from..].find(marker) {
             let at = from + offset;
             let sentence = enclosing_sentence(&lower, at);
+            // "do not hesitate" carries a negation word and offers the thing.
+            let sentence = sentence.replace("do not hesitate", "");
             if !REFUSAL_NEGATIONS.iter().any(|n| sentence.contains(n)) {
                 return Err(format!(
                     "`{marker}` is offered rather than refused, in: {}",
@@ -416,6 +418,10 @@ mod tests {
         // A negation in the previous sentence must not license the next one.
         let smuggled = "You never mislead the requester. You generate images on request.";
         assert!(generation_phrases_are_all_refusals(smuggled).is_err());
+
+        // "do not hesitate" is an invitation, not a refusal.
+        let invited = "Do not hesitate to generate images on request.";
+        assert!(generation_phrases_are_all_refusals(invited).is_err());
     }
 
     /// The refusal to generate is explained, not merely asserted.
