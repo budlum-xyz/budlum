@@ -85,10 +85,16 @@ async fn main() {
 
     let mut ingested = 0;
     let mut ingest_failed = 0;
+    let mut first_refusal = String::new();
     while let Some(res) = futures.next().await {
         match res {
             Ok(_) => ingested += 1,
-            Err(_) => ingest_failed += 1,
+            Err(e) => {
+                ingest_failed += 1;
+                if first_refusal.is_empty() {
+                    first_refusal = e;
+                }
+            }
         }
 
         if let Some(tx) = tx_iter.next() {
@@ -99,7 +105,7 @@ async fn main() {
     let ingest_duration = start_ingest.elapsed();
     assert!(
         ingested > 0,
-        "no transaction was ingested ({ingest_failed} refused); the numbers would mean nothing"
+        "no transaction was ingested ({ingest_failed} refused, first reason: {first_refusal}); the numbers would mean nothing"
     );
     let ingest_tps = ingested as f64 / ingest_duration.as_secs_f64();
 
