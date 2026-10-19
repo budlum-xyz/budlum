@@ -8493,10 +8493,7 @@ mod tests {
             .public_key_bytes()
             .to_vec();
 
-        let config = PoSConfig {
-            slashing_penalty: (50 * crate::core::chain_config::FIXED_POINT_SCALE) / 100,
-            ..Default::default()
-        };
+        let config = PoSConfig::default();
 
         let engine = Arc::new(PoSEngine::new(config.clone(), Some(alice_keys.clone())));
 
