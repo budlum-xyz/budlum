@@ -44,6 +44,48 @@ fn compact<T: ToTokens>(t: &T) -> String {
         .collect()
 }
 
+/// Extra nesting overrides shared by the three direct-member visitors: code
+/// under `while`, `for`, an async block, a nested method or a labelled block
+/// may never run, so it is not a direct member.
+macro_rules! more_nesting {
+    () => {
+        fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+            self.nesting += 1;
+            visit::visit_expr_while(self, node);
+            self.nesting -= 1;
+        }
+
+        fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+            self.nesting += 1;
+            visit::visit_expr_for_loop(self, node);
+            self.nesting -= 1;
+        }
+
+        fn visit_expr_async(&mut self, node: &'ast syn::ExprAsync) {
+            self.nesting += 1;
+            visit::visit_expr_async(self, node);
+            self.nesting -= 1;
+        }
+
+        fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+            self.nesting += 1;
+            visit::visit_impl_item_fn(self, node);
+            self.nesting -= 1;
+        }
+
+        fn visit_expr_block(&mut self, node: &'ast syn::ExprBlock) {
+            let labelled = node.label.is_some();
+            if labelled {
+                self.nesting += 1;
+            }
+            visit::visit_expr_block(self, node);
+            if labelled {
+                self.nesting -= 1;
+            }
+        }
+    };
+}
+
 /// Is it an `Ok(())` call? The last path segment is `Ok` and the single argument is the empty tuple.
 fn is_ok_unit_call(node: &ExprCall) -> bool {
     matches!(node.func.as_ref(), Expr::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Ok"))
@@ -82,6 +124,8 @@ struct VerifySuccess {
 }
 
 impl<'ast> Visit<'ast> for VerifySuccess {
+    more_nesting!();
+
     fn visit_expr_call(&mut self, node: &'ast ExprCall) {
         if self.nesting == 0 && is_ok_unit_call(node) {
             self.found = true;
@@ -261,6 +305,8 @@ struct GuardErrCheck {
 }
 
 impl<'ast> Visit<'ast> for GuardErrCheck {
+    more_nesting!();
+
     fn visit_expr_return(&mut self, node: &'ast ExprReturn) {
         if self.nesting == 0 {
             if let Some(expr) = &node.expr {
@@ -432,6 +478,8 @@ struct TopLevelTrue {
 }
 
 impl<'ast> Visit<'ast> for TopLevelTrue {
+    more_nesting!();
+
     fn visit_expr_return(&mut self, node: &'ast ExprReturn) {
         if self.nesting == 0 {
             if let Some(expr) = &node.expr {
@@ -1071,5 +1119,13 @@ mod tests {
     fn gov_weak_condition_is_sticky() {
         let both = "if d == evidence_hash { return true; } if d != evidence_hash { return true; }";
         assert!(!judge_file(&gov_src(both), GOV_ONLY).is_empty());
+    }
+
+    #[test]
+    fn loop_and_nested_method_are_not_direct() {
+        let w = "if !a.verify_measurement(t) { while false { return Err(E); } }";
+        assert!(!judge_file(&tee_src(w, B, R, ""), TEE_ONLY).is_empty());
+        let f = "if !a.verify_measurement(t) { for _ in x { return Err(E); } }";
+        assert!(!judge_file(&tee_src(f, B, R, ""), TEE_ONLY).is_empty());
     }
 }
