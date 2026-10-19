@@ -1094,12 +1094,33 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::NftTag { nft_id, tag } => {
-                let _ = (nft_id, tag);
+                let nft = state
+                    .nft_registry
+                    .get_nft(*nft_id)
+                    .ok_or(BudlumError::validation("nft_not_found", "NFT not found"))?;
+                if nft.owner != tx.from {
+                    return Err(BudlumError::validation(
+                        "not_owner",
+                        "Only the NFT owner can tag it",
+                    ));
+                }
+                // Validate before any state change so a refused tag leaves nothing behind.
+                if tag.is_empty()
+                    || tag.len() > crate::socialfi::MAX_TAG_BYTES
+                    || (!nft.tags.contains(tag)
+                        && nft.tags.len() >= crate::socialfi::MAX_TAGS_PER_NFT)
+                {
+                    return Err(BudlumError::validation("nft_tag", "Invalid NFT tag"));
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
+                state
+                    .nft_registry
+                    .add_tag(*nft_id, tag.clone())
+                    .map_err(|e| BudlumError::validation("nft_tag", e.to_string()))?;
             }
             TransactionType::UniversalRelay(ext_tx) => {
                 tracing::info!(chain = ?ext_tx.chain, target = %ext_tx.target_address, from = %tx.from, "Universal Relayer: permissionless relay request (fee-paid)");
