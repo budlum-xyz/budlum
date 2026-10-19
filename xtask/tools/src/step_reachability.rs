@@ -387,7 +387,12 @@ fn default_workflows(root: &Path) -> Vec<(String, PathBuf)> {
         .flatten()
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| Path::new(n).extension().is_some_and(|x| x == "yml") && !n.starts_with('.'))
+        .filter(|n| {
+            Path::new(n)
+                .extension()
+                .is_some_and(|x| x == "yml" || x == "yaml")
+                && !n.starts_with('.')
+        })
         .collect();
     names.sort();
     names
@@ -462,8 +467,10 @@ fn self_test(root: &Path) -> Report {
     if !real.is_empty() {
         let mut n = 0;
         for (shown, path) in &real {
-            let content = std::fs::read_to_string(path).unwrap_or_default();
-            n += check(&content, shown).map_or(1, |f| f.len());
+            n += match std::fs::read_to_string(path) {
+                Ok(content) => check(&content, shown).map_or(1, |f| f.len()),
+                Err(_) => 1,
+            };
         }
         rc |= expect(
             n == 0,
@@ -519,7 +526,13 @@ pub fn cli(args: &[&str], root: &Path) -> Report {
         if let Some(value) = a.strip_prefix("--fail=") {
             fail = Some(value.to_string());
         } else if a == "--fail" {
-            fail = it.next().map(|v| (*v).to_string());
+            let Some(value) = it.next() else {
+                return Report::fail_with(
+                    "FAIL [step-reachability]: --fail needs a value\n".to_string(),
+                    2,
+                );
+            };
+            fail = Some((*value).to_string());
         } else {
             kept.push(a);
         }
@@ -594,6 +607,13 @@ mod tests {
         assert!(found[0].contains("job 'dangling', step 'Guarded on nothing'"));
         assert!(found[0].contains("`steps.nothere`"));
         assert!(found[1].contains("declared later"));
+    }
+
+    #[test]
+    fn fail_without_a_value_is_refused() {
+        let dir = std::env::temp_dir();
+        let report = cli(&["--fail"], &dir);
+        assert_eq!(report.code, 2);
     }
 
     #[test]
