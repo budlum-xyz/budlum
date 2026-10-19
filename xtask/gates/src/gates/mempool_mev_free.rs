@@ -47,12 +47,17 @@ fn bidding_index(src: &str) -> Vec<String> {
     let mut widen = Vec::new();
     for l in src.lines() {
         let line = l.trim_start();
-        if !line.contains(": HashMap<") && !line.contains(": BTreeMap<") {
+        if !line.contains(": HashMap<")
+            && !line.contains(": BTreeMap<")
+            && !line.contains(": BinaryHeap<")
+        {
             continue;
         }
         let name = line.split(':').next().unwrap_or_default().trim();
         if name.starts_with("by_")
-            && (name.contains("priority") || name.contains("boost") || name.contains("bid"))
+            && ["priority", "boost", "bid", "tip", "lane"]
+                .iter()
+                .any(|w| name.contains(w))
         {
             widen.push(name.to_string());
         }
@@ -60,9 +65,6 @@ fn bidding_index(src: &str) -> Vec<String> {
     widen
 }
 
-/// # Errors
-///
-/// Returns the list of violated claims.
 /// Formats the findings the way every gate in this crate reports them.
 fn report(problems: &[String]) -> String {
     let mut msg = String::new();
@@ -72,12 +74,18 @@ fn report(problems: &[String]) -> String {
     msg
 }
 
+/// # Errors
+///
+/// Returns the list of violated claims.
 pub fn run(root: &Path) -> Result<String, String> {
     let f = root.join("src/mempool/pool.rs");
     if !f.is_file() {
         return Err(format!("no mempool/pool.rs at {}", f.display()));
     }
-    let src = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+    let raw = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+    // Comments and string literals are blanked: the field text, the call and
+    // the test name must be code, not prose.
+    let src = super::rust_literals::scrub(&raw);
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
@@ -120,7 +128,10 @@ pub fn run(root: &Path) -> Result<String, String> {
                 .to_string(),
         );
     }
-    if src.contains("fn test_same_fee_canonical_order_by_hash") {
+    if super::capability_modules_are_wired::test_is_live(
+        &src,
+        "test_same_fee_canonical_order_by_hash",
+    ) {
         checked += 1;
     } else {
         problems.push(
@@ -168,7 +179,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-pool")?;
     std::fs::create_dir_all(dir.join("src/mempool")).map_err(|e| e.to_string())?;
-    let good = "pub struct Pool {\n    by_sender: HashMap<Address, BTreeMap<u64, String>>,\n    by_fee: BTreeMap<u64, BTreeSet<String>>,\n    min_fee: u64,\n}\n\nfn charged_bytes(tx: &Transaction) -> usize { tx.data.len() }\n\nimpl Pool {\n    pub fn get_sorted_transactions(&self, limit: usize) -> Vec<Transaction> {\n        for (_, hashes) in self.by_fee.iter().rev() { for h in hashes { push(h); } }\n        out\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    fn test_same_fee_canonical_order_by_hash() {}\n}\n";
+    let good = "pub struct Pool {\n    by_sender: HashMap<Address, BTreeMap<u64, String>>,\n    by_fee: BTreeMap<u64, BTreeSet<String>>,\n    min_fee: u64,\n}\n\nfn charged_bytes(tx: &Transaction) -> usize { tx.data.len() }\n\nimpl Pool {\n    pub fn get_sorted_transactions(&self, limit: usize) -> Vec<Transaction> {\n        for (_, hashes) in self.by_fee.iter().rev() { for h in hashes { push(h); } }\n        out\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn test_same_fee_canonical_order_by_hash() { assert_eq!(1, 1); }\n}\n";
     std::fs::write(dir.join("src/mempool/pool.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
