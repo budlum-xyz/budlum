@@ -21,6 +21,43 @@ mod tests {
         );
     }
 
+    /// A domain registered on the abandoned chain is gone after a reorg.
+    #[test]
+    fn a_reorg_clears_a_domain_registered_on_the_abandoned_chain() {
+        use crate::chain::blockchain::Blockchain;
+        use crate::consensus::pow::PoWEngine;
+        use crate::core::address::Address;
+        use crate::domain::plugin::default_domain;
+        use crate::domain::ConsensusKind;
+        use std::sync::Arc;
+
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut chain_a = Blockchain::new(consensus.clone(), None, 45262, None);
+        let mut chain_b = Blockchain::new(consensus, None, 45262, None);
+        let producer = Address::from([0x50; 32]);
+
+        let domain = default_domain(7, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
+        chain_a
+            .register_consensus_domain(domain)
+            .expect("domain registers");
+        assert!(chain_a.domain_registry.domains().iter().any(|d| d.id == 7));
+
+        for _ in 0..3 {
+            let _ = chain_a.produce_block(producer);
+        }
+        for _ in 0..5 {
+            let _ = chain_b.produce_block(producer);
+        }
+        chain_a
+            .try_reorg(chain_b.chain.clone())
+            .expect("the longer chain is adopted");
+
+        assert!(
+            !chain_a.domain_registry.domains().iter().any(|d| d.id == 7),
+            "a domain from the abandoned chain must not survive the reorg"
+        );
+    }
+
     /// Canary: calculate_seed deterministic + non-zero verir.
     /// Poison path (Err→fallback hash) kodda mevcut; bu test temel
     /// It verifies determinism. The poison itself is a separate integration
