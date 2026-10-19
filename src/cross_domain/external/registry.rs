@@ -64,6 +64,8 @@ pub enum RegistryError {
     Adapter(AdapterError),
     #[error("the version gate refused: {0}")]
     Version(AdapterError),
+    #[error("the evidence {evidence} was already slashed against this prover")]
+    AlreadySlashed { evidence: String },
     #[error("the admission report's digest {found} does not match the one registered {expected}")]
     AdmissionDigestMismatch { expected: String, found: String },
     #[error("admission adapter version {found} does not match the descriptor's {expected}")]
@@ -352,7 +354,13 @@ impl ExternalDomainRegistry {
             });
         }
         let digest = admission.digest();
-        if digest == reg.admission_digest {
+        // Admission is deterministic, so a re-run on the same binary yields the
+        // digest already on record. For a healthy domain an equal digest means
+        // nothing changed and the call is refused. A Faulted domain has no
+        // other way out (a dispute is not a probe set change), so for it the
+        // operator's explicit re-admission is accepted with the same digest
+        // (P07-F05).
+        if digest == reg.admission_digest && reg.record.state != DomainState::Faulted {
             return Err(RegistryError::AdmissionDigestMismatch {
                 expected: hex(&reg.admission_digest),
                 found: hex(&digest),
@@ -803,6 +811,17 @@ impl ExternalDomainRegistry {
         let Some(bond) = reg.provers.get_mut(&prover) else {
             return Err(RegistryError::UnknownProver(hex(prover.as_bytes())));
         };
+        // One piece of evidence is one offence: repeating the call would
+        // drain the bond for the same attestation (P07-F11).
+        if bond
+            .slashings
+            .iter()
+            .any(|slashing| slashing.evidence_digest == evidence_digest)
+        {
+            return Err(RegistryError::AlreadySlashed {
+                evidence: hex(&evidence_digest),
+            });
+        }
         let penalty = reg.economics.penalty_for(value_atoms, bond.live_atoms());
         let reward = reg.economics.challenge.for_slash(penalty);
         let taken = bond.slash(height, evidence_digest, penalty, challenger, reward);
