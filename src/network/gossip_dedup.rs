@@ -219,6 +219,18 @@ impl GossipDedup {
         DedupResult::New
     }
 
+    /// Forget a message recorded by [`Self::check_and_record`].
+    ///
+    /// Used when the message was dropped for a reason that says nothing about
+    /// its content, such as a sender that has not finished the handshake. The
+    /// same bytes must stay processable when an honest peer delivers them.
+    pub fn forget(&mut self, message_bytes: &[u8]) {
+        let hash = hash_message(message_bytes);
+        if self.seen_set.remove(&hash) {
+            self.seen_order.retain(|seen| *seen != hash);
+        }
+    }
+
     /// Record a valid message from a peer (called after successful processing).
     pub fn record_valid(&mut self, peer: &libp2p::PeerId, timestamp_ms: u64) {
         let score = self.peer_scores.entry(*peer).or_default();
@@ -413,6 +425,21 @@ fn hash_message(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forgotten_message_is_new_again() {
+        let mut dedup = GossipDedup::new(64);
+        let peer = libp2p::PeerId::random();
+        assert!(matches!(
+            dedup.check_and_record(b"block bytes", &peer),
+            DedupResult::New
+        ));
+        dedup.forget(b"block bytes");
+        assert!(matches!(
+            dedup.check_and_record(b"block bytes", &peer),
+            DedupResult::New
+        ));
+    }
 
     /// A relay that forwards one old message every minute must not drift
     /// to a ban, because the duplicate charge fades.
