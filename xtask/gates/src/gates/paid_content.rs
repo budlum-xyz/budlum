@@ -18,6 +18,7 @@
 //! 5. The declaration path actually calls `check_content_may_be_public`.
 //! 6. Every RPC endpoint that publishes a shard id asks Pollen first.
 //! 7. The AI runtime cannot reach storage bytes except through Pollen.
+//! 8. The gateway asks Pollen before it serves or renders a name (P53-F12).
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -244,6 +245,19 @@ fn ai_storage_reach(dir: &Path) -> Vec<String> {
     out
 }
 
+/// Calls of the gateway Pollen guard in a source text, comments stripped.
+/// The definition line (`fn refuse_if_pollen_protected`) is not a call.
+fn gateway_guard_calls(text: &str) -> usize {
+    strip_line_comments(text)
+        .lines()
+        .filter(|l| l.contains("refuse_if_pollen_protected(") && !l.contains("fn "))
+        .count()
+}
+
+/// The gateway has two serving paths (raw fetch and render). Both must call
+/// the guard, and the guard must consult Pollen.
+const GATEWAY_MIN_GUARD_CALLS: usize = 2;
+
 /// `grep -c 'check_content_may_be_public'` over the file with comments
 /// stripped; `0` when the file is absent.
 fn declaration_call_count(actor: &Path) -> usize {
@@ -371,6 +385,23 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(msg);
     }
 
+    // 8. The gateway serves names only after the Pollen guard.
+    let gateway = root.join("src/gateway/service.rs");
+    let gateway_src = std::fs::read_to_string(&gateway).map_err(|e| {
+        format!(
+            "FAIL: cannot read {}: {e}; the gateway read path is outside the gate",
+            gateway.display()
+        )
+    })?;
+    if gateway_guard_calls(&gateway_src) < GATEWAY_MIN_GUARD_CALLS
+        || !strip_line_comments(&gateway_src).contains("pollen_asset_for_content")
+    {
+        return Err(String::from(
+            "FAIL: the gateway serves or renders storage bytes without asking Pollen \
+             on every path: paid content is readable for free through a name",
+        ));
+    }
+
     Ok(String::from(
         "OK: paid content needs a live grant, stays out of the public class, and is \
          bound permanently",
@@ -404,6 +435,8 @@ const AI_REACH: &str = "    let manifest = chain.get_storage_manifest(id).await;
 const AI_MEDIATED: &str = "    let ok = pollen.authorize_content_read(&id, &who, grant, block)?;\n    let manifest = chain.get_storage_manifest(id).await;\n";
 const AI_CLEAN: &str = "    let out = model.infer(&request.input_ref);\n";
 const UNCALLED: &str = "ChainCommand::RegisterStorageManifest { manifest, response } => {\n    if let Err(e) = manifest.validate_untrusted() { continue; }\n    self.blockchain.state.storage_registry.register_manifest(&manifest);\n}\n";
+const GW_UNGUARDED: &str = "    async fn refuse_if_pollen_protected(&self) {}\n    // self.refuse_if_pollen_protected(&r).await?;\n    let m = self.chain.get_storage_manifest(cid).await;\n";
+const GW_GUARDED: &str = "    async fn refuse_if_pollen_protected(&self) {}\n    self.refuse_if_pollen_protected(&r).await?;\n    self.refuse_if_pollen_protected(&r).await?;\n";
 const CALLED: &str = "if matches!(manifest.encryption, ContentEncryption::Plaintext) {\n    if let Err(e) = self.blockchain.state.marketplace\n        .check_content_may_be_public(&manifest.manifest_id) { continue; }\n}\n";
 
 /// Write `content` to a temp file under `sub` and return the directory.
@@ -578,6 +611,20 @@ fn canaries_files(canaries: &mut usize) -> Result<(), String> {
     expect_bool(
         count != 0,
         "a declaration path that does call the refusal was rejected",
+        canaries,
+    )?;
+
+    // 17. A gateway whose guard is only defined or commented out is caught.
+    expect_bool(
+        gateway_guard_calls(GW_UNGUARDED) < GATEWAY_MIN_GUARD_CALLS,
+        "a gateway with no live guard call was not detected",
+        canaries,
+    )?;
+
+    // 18. A gateway that guards both serving paths passes.
+    expect_bool(
+        gateway_guard_calls(GW_GUARDED) >= GATEWAY_MIN_GUARD_CALLS,
+        "a gateway guarding both paths was rejected",
         canaries,
     )?;
     Ok(())
