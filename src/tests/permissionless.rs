@@ -250,14 +250,16 @@ fn actionable_report_slashes_registered_validator() {
     assert!(state.registry.is_active(&offender, roles::VALIDATOR));
 
     let report = SlashingReport::consensus_double_sign(
-        offender,
-        7,
-        "aa".into(),
-        "bb".into(),
-        vec![1],
-        vec![2],
-        None,
-    );
+                offender,
+                SlashingProof::DoubleSign {
+                    height: 7,
+                    block_hash_1: "aa".into(),
+                    block_hash_2: "bb".into(),
+                    signature_1: vec![1],
+                    signature_2: vec![2],
+                },
+                None,
+            );
     let outcome = state.registry.slash_from_report(&report).unwrap().unwrap();
     // Default double-sign ratio is 50%.
     assert_eq!(outcome.penalty, amount / 2);
@@ -283,7 +285,6 @@ fn unverified_report_does_not_slash() {
             signature_1: vec![1],
             signature_2: vec![2],
         },
-        ProofProvenance::Unverified,
         Some(addr(0x99)),
     );
     // Registry refuses to act.
@@ -298,14 +299,16 @@ fn unverified_report_does_not_slash() {
 fn report_against_unregistered_is_noop() {
     let mut state = AccountState::new();
     let report = SlashingReport::consensus_double_sign(
-        addr(0x33),
-        7,
-        "aa".into(),
-        "bb".into(),
-        vec![1],
-        vec![2],
-        None,
-    );
+                addr(0x33),
+                SlashingProof::DoubleSign {
+                    height: 7,
+                    block_hash_1: "aa".into(),
+                    block_hash_2: "bb".into(),
+                    signature_1: vec![1],
+                    signature_2: vec![2],
+                },
+                None,
+            );
     assert_eq!(state.registry.slash_from_report(&report).unwrap(), None);
 }
 
