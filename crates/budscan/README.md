@@ -27,7 +27,8 @@ The user types `ayaz.bud` into the address bar:
 The fifth step is this browser's reason to exist. On today's web a browser does
 not know that the bytes the server sent are the right bytes: TLS says only
 **who** sent them, not **what** was sent. On a content-addressed network
-`manifest_id` is the hash of the bytes, so verification is a comparison and the
+`manifest_id` is the hash of the manifest and the manifest lists the hash of
+every shard, so verification is a chain of comparisons and the
 browser never has to decide whom to trust.
 
 ## Verification strength: four values

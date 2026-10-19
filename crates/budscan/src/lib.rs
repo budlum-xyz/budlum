@@ -21,8 +21,9 @@
 //! The fifth step is why this browser exists. On today's web a browser does
 //! not know that the bytes the server sent are the right bytes; TLS only says
 //! who the counterparty is, not what the content is. On a content-addressed
-//! network this is different: `manifest_id` is the hash of the bytes, so
-//! verification is a comparison.
+//! network this is different: `manifest_id` is the hash of the manifest, and the
+//! manifest lists the hash of every shard, so verification is a chain of
+//! comparisons (manifest to id, shards to manifest, bytes to shards).
 //!
 //! # The engine is not written, it is patched
 //!
