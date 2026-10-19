@@ -670,10 +670,8 @@ impl FinalityAggregator {
             Some((prev_hash, prev_sig)) if prev_hash != &vote.checkpoint_hash => {
                 self.record_equivocation(
                     vote.voter_id,
-                    prev_hash.clone(),
-                    prev_sig.clone(),
-                    vote.checkpoint_hash.clone(),
-                    vote.sig_bls.clone(),
+                    (prev_hash.clone(), prev_sig.clone()),
+                    (vote.checkpoint_hash.clone(), vote.sig_bls.clone()),
                     crate::registry::evidence::DoubleSignKind::Prevote,
                     vote.epoch,
                 );
@@ -694,10 +692,8 @@ impl FinalityAggregator {
             Some((prev_hash, prev_sig)) if prev_hash != &vote.checkpoint_hash => {
                 self.record_equivocation(
                     vote.voter_id,
-                    prev_hash.clone(),
-                    prev_sig.clone(),
-                    vote.checkpoint_hash.clone(),
-                    vote.sig_bls.clone(),
+                    (prev_hash.clone(), prev_sig.clone()),
+                    (vote.checkpoint_hash.clone(), vote.sig_bls.clone()),
                     crate::registry::evidence::DoubleSignKind::Precommit,
                     vote.epoch,
                 );
@@ -723,10 +719,8 @@ impl FinalityAggregator {
     fn record_equivocation(
         &mut self,
         voter: Address,
-        hash_1: String,
-        sig_1: Vec<u8>,
-        hash_2: String,
-        sig_2: Vec<u8>,
+        (hash_1, sig_1): (String, Vec<u8>),
+        (hash_2, sig_2): (String, Vec<u8>),
         kind: crate::registry::evidence::DoubleSignKind,
         epoch: u64,
     ) {
