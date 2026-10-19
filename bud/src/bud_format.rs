@@ -918,14 +918,6 @@ impl BudGates {
         }
         Ok(())
     }
-    pub fn k_bud_repo_dep(_f: &BudFile) -> Result<(), &'static str> {
-        // is there a repo hash? self-contained is OK
-        Ok(())
-    }
-    pub fn k_bud_report_exists() -> Result<(), &'static str> {
-        // check whether the report exists (file system)
-        Ok(())
-    }
     pub fn k_bud_video_revolutionary(ratio: f64) -> Result<(), &'static str> {
         if ratio < 100.0 {
             return Err("K-BUD-VIDEO-REVOLUTIONARY: ratio<100 not revolutionary");
