@@ -68,6 +68,12 @@ fn daemon_producer_loop_runs(consensus_type: ConsensusType) -> bool {
     )
 }
 
+/// The producer address for the interactive `mine` command. A node without a configured
+/// producer address refuses the command, so a block never pays its reward to the zero address.
+fn console_producer(configured: Option<Address>) -> Result<Address, &'static str> {
+    configured.ok_or("mine needs a configured producer address (--validator-address)")
+}
+
 fn release_key_file(path: &str) {
     let _ = std::fs::remove_file(path);
 }
@@ -1727,7 +1733,13 @@ async fn main() {
                             client.broadcast("transactions".to_string(), NetworkMessage::Transaction(tx)).await;
                         }
                         "block" | "mine" => {
-                            let producer = cli_producer_address.unwrap_or(Address::zero());
+                            let producer = match console_producer(cli_producer_address) {
+                                Ok(producer) => producer,
+                                Err(reason) => {
+                                    println!("{reason}");
+                                    continue;
+                                }
+                            };
                             if let Some((block, pruned_cids)) = chain.produce_block(producer).await {
                                 println!("Produced block #{} with {} txs", block.index, block.transactions.len());
                                 for cid in pruned_cids {
@@ -1765,7 +1777,7 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{claim_new_key_file, daemon_producer_loop_runs};
+    use super::{claim_new_key_file, console_producer, daemon_producer_loop_runs};
     use budlum_core::cli::ConsensusType;
 
     #[test]
@@ -1792,5 +1804,12 @@ mod tests {
         assert!(daemon_producer_loop_runs(ConsensusType::PoA));
         assert!(daemon_producer_loop_runs(ConsensusType::PoS));
         assert!(daemon_producer_loop_runs(ConsensusType::PoW));
+    }
+
+    #[test]
+    fn console_mine_refuses_the_zero_address_producer() {
+        assert!(console_producer(None).is_err());
+        let configured = budlum_core::core::address::Address::from([0x07u8; 32]);
+        assert_eq!(console_producer(Some(configured)), Ok(configured));
     }
 }
