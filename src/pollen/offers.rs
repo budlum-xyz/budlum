@@ -680,6 +680,31 @@ impl MarketplaceRegistry {
         Ok(Some(reference.grant_id))
     }
 
+    /// A request that names an asset in its perception declaration without a
+    /// Pollen reference must not point at an asset another account owns.
+    /// Without a grant only the owner may name its own asset.
+    ///
+    /// # Errors
+    ///
+    /// The declared asset exists and belongs to another account.
+    pub fn validate_ai_declared_asset(
+        &self,
+        input_ref: &[u8],
+        declared_asset: &AssetId,
+        requester: &Address,
+    ) -> Result<(), String> {
+        if AiDataInputRef::decode(input_ref)?.is_some() {
+            return Ok(());
+        }
+        match self.data_assets.get(declared_asset) {
+            Some(asset) if asset.owner != *requester => Err(
+                "AI data read denied: declared asset belongs to another account and no grant was given"
+                    .into(),
+            ),
+            _ => Ok(()),
+        }
+    }
+
     /// Put stored content behind an asset's paywall.
     ///
     /// Looks the asset's owner up here rather than trusting a caller-supplied
@@ -1371,6 +1396,23 @@ mod tests {
         let json = serde_json::to_string(&registry).unwrap();
         assert!(!json.contains("decrypt"));
         assert!(!json.contains("private_key"));
+    }
+
+    #[test]
+    fn declared_foreign_asset_without_reference_is_denied() {
+        let mut registry = MarketplaceRegistry::new();
+        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        registry.register_data_asset(asset.clone()).unwrap();
+        let err = registry
+            .validate_ai_declared_asset(b"opaque", &asset.asset_id, &addr(2))
+            .unwrap_err();
+        assert!(err.contains("another account"), "{err}");
+        registry
+            .validate_ai_declared_asset(b"opaque", &asset.asset_id, &addr(1))
+            .unwrap();
+        registry
+            .validate_ai_declared_asset(b"opaque", &AssetId([9; 32]), &addr(2))
+            .unwrap();
     }
 
     #[test]
