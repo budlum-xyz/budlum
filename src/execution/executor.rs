@@ -2460,6 +2460,33 @@ impl Executor {
                 domain_height,
                 ref state_updates,
             } => {
+                // BLG-0286 (P18-F01): the arm moves OTHER accounts' nonces,
+                // so "paid the fee" is not an authority - the builder is
+                // `Blockchain::build_state_update_transaction`, which signs
+                // with the local consensus signer, and every such signer is
+                // an eligible validator in this very state. Demanding that
+                // the sender hold that seat is the same fact the builder
+                // relies on, checked from the other side: without it any
+                // funded account could push a victim's nonce next to
+                // u64::MAX and freeze the account below the ceiling.
+                // The domain_id/domain_height-to-commitment binding stays
+                // with the registry: the commitment was already finality-
+                // verified before the builder existed (accept path in
+                // `blockchain.rs`), and the state carries no second ledger
+                // of heights for the executor to re-check against - inventing
+                // one to re-validate what the accept path already validated
+                // would be a weaker copy of the same fact.
+                let committer_authority = state
+                    .get_validator(&tx.from)
+                    .is_some_and(|v| v.is_eligible(state.epoch_index));
+                if !committer_authority {
+                    return Err(BudlumError::validation(
+                        "state_update_authority",
+                        format!(
+                            "state update for domain {domain_id} from a sender outside the eligible validator set"
+                        ),
+                    ));
+                }
                 // The rules that used to guard the out-of-block commitment
                 // nonce writes now run here, inside block execution (C3,
                 // decision 50): ceiling, monotonicity, near-u64::MAX.
