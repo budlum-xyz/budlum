@@ -178,7 +178,10 @@ fn unguarded_endpoints(src: &str) -> Vec<String> {
                 }
                 inbody = false;
             }
-        } else if let Some(rest) = line.strip_prefix("    async fn ") {
+        } else if let Some(rest) = line
+            .strip_prefix("    async fn ")
+            .or_else(|| line.strip_prefix("    pub async fn "))
+        {
             name = rest.split('(').next().unwrap_or("").trim().to_string();
             inbody = true;
             emits = false;
@@ -231,7 +234,8 @@ fn ai_storage_reach(dir: &Path) -> Vec<String> {
         if !text.lines().any(line_reaches_storage) {
             continue;
         }
-        let lower = text.to_lowercase();
+        // A mention in a comment does not make the file go through Pollen.
+        let lower = strip_line_comments(&text).to_lowercase();
         let mentions_pollen = lower.contains("pollen") || lower.contains("authorize_content_read");
         if mentions_pollen {
             continue;
@@ -286,8 +290,15 @@ pub fn run(root: &Path) -> Result<String, String> {
     if !offers.is_file() {
         return Err(format!("FAIL: missing {}", offers.display()));
     }
-    let gate_src = std::fs::read_to_string(&gate).unwrap_or_default();
-    let offers_src = std::fs::read_to_string(&offers).unwrap_or_default();
+    // Comments are stripped: a refusal named only in prose is no refusal.
+    let gate_src = strip_line_comments(
+        &std::fs::read_to_string(&gate)
+            .map_err(|e| format!("FAIL: cannot read {}: {e}", gate.display()))?,
+    );
+    let offers_src = strip_line_comments(
+        &std::fs::read_to_string(&offers)
+            .map_err(|e| format!("FAIL: cannot read {}: {e}", offers.display()))?,
+    );
 
     // 1. The authorisation path refuses when no grant is presented.
     if count_in_range(&gate_src, "fn authorize_read", "    }", "GrantRequired") == 0 {
@@ -312,7 +323,17 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     // 3. No unbind.
-    let unbind = unbind_lines(&gate_src);
+    let mut unbind = unbind_lines(&gate_src);
+    // A call that rustfmt wrapped (`self.bindings\n    .remove(`) has no
+    // single-line match; the whitespace-free text still shows it.
+    let squeezed: String = gate_src.chars().filter(|c| !c.is_whitespace()).collect();
+    if unbind.is_empty()
+        && ["remove", "clear", "retain"]
+            .iter()
+            .any(|op| squeezed.contains(&format!("bindings.{op}(")))
+    {
+        unbind.push((0, String::from("a wrapped `bindings.<op>(` call")));
+    }
     if !unbind.is_empty() {
         let mut msg = String::new();
         for (nr, line) in &unbind {
@@ -355,20 +376,21 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     // 6. Every RPC endpoint that publishes a shard id asks Pollen first.
+    // A moved file must not skip the step: the file is required.
     let rpc = root.join("src/rpc/server.rs");
-    if rpc.is_file() {
-        let unguarded = unguarded_endpoints(&std::fs::read_to_string(&rpc).unwrap_or_default());
-        if !unguarded.is_empty() {
-            let mut msg = String::new();
-            for u in &unguarded {
-                let _ = writeln!(msg, "{u}");
-            }
-            msg.push_str(
-                "FAIL: RPC endpoint(s) publish shard ids without asking Pollen: the \
-                 handles for fetching paid bytes are served to anyone",
-            );
-            return Err(msg);
+    let rpc_src = std::fs::read_to_string(&rpc)
+        .map_err(|e| format!("FAIL: cannot read {}: {e}", rpc.display()))?;
+    let unguarded = unguarded_endpoints(&rpc_src);
+    if !unguarded.is_empty() {
+        let mut msg = String::new();
+        for u in &unguarded {
+            let _ = writeln!(msg, "{u}");
         }
+        msg.push_str(
+            "FAIL: RPC endpoint(s) publish shard ids without asking Pollen: the \
+             handles for fetching paid bytes are served to anyone",
+        );
+        return Err(msg);
     }
 
     // 7. The AI runtime cannot reach storage bytes except through Pollen.
@@ -640,4 +662,25 @@ pub fn self_test() -> Result<String, String> {
     Ok(format!(
         "paid content gate self-test OK: {canaries} canaries"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pub_async_endpoints_are_scanned() {
+        let src = "impl X {\n    pub async fn leak(&self) -> V {\n        json!({\"shardId\": 1})\n    }\n}\n";
+        assert_eq!(unguarded_endpoints(src), vec![String::from("leak")]);
+    }
+
+    #[test]
+    fn a_comment_does_not_satisfy_a_range_count() {
+        let src =
+            strip_line_comments("fn authorize_read() {\n    // GrantRequired\n    ok\n    }\n");
+        assert_eq!(
+            count_in_range(&src, "fn authorize_read", "    }", "GrantRequired"),
+            0
+        );
+    }
 }
