@@ -338,14 +338,14 @@ pub fn run(root: &Path) -> Result<String, String> {
     check_hysteresis(&src)?;
 
     // A decaying estimate that cannot decay is a counter with extra steps.
-    if !super::rust_literals::has_live_test(src, "an_access_estimate_halves_every_half_life") {
+    if !super::rust_literals::has_live_test(&src, "an_access_estimate_halves_every_half_life") {
         return Err(String::from(
             "FAIL: no test shows the access estimate actually decaying",
         ));
     }
 
     // The disagreement test must name the two answers it expects.
-    if !super::rust_literals::has_live_test(src, "operators_with_different_hardware_may_disagree") {
+    if !super::rust_literals::has_live_test(&src, "operators_with_different_hardware_may_disagree") {
         return Err(String::from(
             "FAIL: no test shows two operators reaching different answers for one \
              object",
