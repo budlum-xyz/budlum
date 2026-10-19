@@ -10653,7 +10653,7 @@ mod tests {
         let mut program_hash = [0u8; 32];
         hasher.finalize(&mut program_hash);
 
-        let pi = ExecutionPublicInputs {
+        let mut pi = ExecutionPublicInputs {
             chain_id: 1,
             program_hash,
             initial_state_root: crate::adapter::initial_state_root_of(
