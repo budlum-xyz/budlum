@@ -13,8 +13,17 @@ fn parse_manifest(manifest_path: &Path) -> Result<(Vec<String>, Vec<String>), St
     let manifest_text = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
     let mut declared: Vec<String> = Vec::new();
     let mut paths: Vec<String> = Vec::new();
+    // Only keys inside a `[[bin]]` table: `[package] name` is not a target.
+    let mut in_bin = false;
     for l in manifest_text.lines() {
         let t = l.trim_start();
+        if t.starts_with('[') {
+            in_bin = t.starts_with("[[bin]]");
+            continue;
+        }
+        if !in_bin {
+            continue;
+        }
         if let Some(rest) = t.strip_prefix("name") {
             if let Some(eq) = rest.find('=') {
                 let v = rest[eq + 1..].trim().trim_matches('"');
@@ -86,7 +95,11 @@ pub fn run(root: &Path) -> Result<String, String> {
         files.sort();
         for f in files {
             if let Ok(t) = std::fs::read_to_string(workflows_dir.join(&f)) {
-                workflow_text.push_str(&t);
+                // A comment saying "run abc" is not a schedule.
+                for line in t.lines().filter(|l| !l.trim_start().starts_with('#')) {
+                    workflow_text.push_str(line);
+                    workflow_text.push('\n');
+                }
             }
         }
     }
@@ -182,4 +195,26 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "fuzz-wiring canary OK: a wired target PASSes and an unwired one FAILs.",
     ))
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    #[test]
+    fn package_name_is_not_a_fuzz_target() {
+        let dir = std::env::temp_dir().join(format!("fuzz-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Cargo.toml");
+        std::fs::write(
+            &file,
+            "[package]\nname = \"budlum-fuzz\"\n\n[[bin]]\nname = \"t1\"\npath = \"fuzz_targets/t1.rs\"\n",
+        )
+        .unwrap();
+        let parsed = parse_manifest(&file);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let (declared, paths) = parsed.unwrap();
+        assert_eq!(declared, vec![String::from("t1")]);
+        assert_eq!(paths, vec![String::from("t1")]);
+    }
 }
