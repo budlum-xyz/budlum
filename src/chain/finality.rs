@@ -1399,6 +1399,66 @@ mod tests {
         assert!(result.unwrap_err().contains("Insufficient quorum"));
     }
 
+    /// The bounded harness in `kani/src/lib.rs` proves facts about
+    /// `bitmap_voted_stake`, a copy of the walk in `FinalityCert::verify`.
+    /// This test holds the copy and production in step: for every bitmap over
+    /// a four validator set it compares the copy's sum with the stake that
+    /// `verify` reports, including stakes that overflow a `u64` when added.
+    #[test]
+    fn bitmap_stake_accounting_matches_the_kani_mirror() {
+        // Mirrors `kani/src/lib.rs::bitmap_voted_stake`, kept literal on purpose.
+        fn kani_mirror(stakes: &[u64; 4], n: usize, bitmap: &[u8; 1]) -> u128 {
+            let mut voted_stake: u128 = 0;
+            let mut idx = 0;
+            while idx < n {
+                let byte_idx = idx / 8;
+                let bit_idx = idx % 8;
+                if byte_idx < bitmap.len() && (bitmap[byte_idx] & (1 << bit_idx)) != 0 {
+                    voted_stake += u128::from(stakes[idx]);
+                }
+                idx += 1;
+            }
+            voted_stake
+        }
+
+        let stakes = [u64::MAX, u64::MAX - 7, 5, 1];
+        let (base, _) = make_snapshot_with_keys(4, 1);
+        let validators: Vec<ValidatorEntry> = base
+            .validators
+            .iter()
+            .zip(stakes)
+            .map(|(v, stake)| ValidatorEntry { stake, ..v.clone() })
+            .collect();
+        let snap = ValidatorSetSnapshot::new(1, validators);
+        let quorum = snap.quorum_stake();
+
+        for bits in 1u8..16 {
+            let cert = FinalityCert {
+                epoch: 1,
+                checkpoint_height: 10,
+                checkpoint_hash: "cp_hash".into(),
+                agg_sig_bls: vec![0u8; 48],
+                bitmap: vec![bits],
+                set_hash: snap.set_hash.clone(),
+            };
+            let mirrored = kani_mirror(&stakes, 4, &[bits]);
+            let err = cert
+                .verify(&snap)
+                .expect_err("an unsigned certificate never verifies");
+            if mirrored < quorum {
+                assert!(
+                    err.starts_with(&format!("Insufficient quorum: {mirrored} <")),
+                    "bitmap {bits:#06b}: verify reported {err}, the mirror sums {mirrored}"
+                );
+            } else {
+                assert!(
+                    !err.starts_with("Insufficient quorum"),
+                    "bitmap {bits:#06b}: the mirror reaches quorum but verify said {err}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn finality_cert_requires_validator_count_quorum_even_with_large_stake() {
         let mut sks = Vec::new();
