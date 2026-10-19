@@ -187,7 +187,11 @@ mod p01_consensus_rounds_tests {
             .expect("recording the boundary block must succeed");
         engine.note_finalized_height(second_boundary.index, &chain, None);
         let checkpoints = engine.get_checkpoints().unwrap();
-        assert_eq!(checkpoints.len(), 1, "only the finalised checkpoint is promoted");
+        assert_eq!(
+            checkpoints.len(),
+            1,
+            "only the finalised checkpoint is promoted"
+        );
         assert_eq!(checkpoints[0].block_index, second_boundary.index);
         assert_eq!(checkpoints[0].block_hash, second_boundary.hash);
     }
@@ -292,10 +296,7 @@ mod p01_consensus_rounds_tests {
         let error = engine
             .validate_block(&block, &[parent], &state)
             .expect_err("an unknown producer must be refused");
-        assert!(
-            error.0.contains("Unknown block producer"),
-            "got: {error:?}"
-        );
+        assert!(error.0.contains("Unknown block producer"), "got: {error:?}");
     }
 
     #[test]
@@ -313,7 +314,13 @@ mod p01_consensus_rounds_tests {
             .expect("fixture keys are consensus-ready");
         // A real VRF so validation reaches the evidence checks behind it.
         let seed = engine
-            .calculate_seed_with_chain(block.chain_id, block.epoch, block.slot, 0, &[parent.clone()])
+            .calculate_seed_with_chain(
+                block.chain_id,
+                block.epoch,
+                block.slot,
+                0,
+                &[parent.clone()],
+            )
             .expect("seed derivation succeeds");
         let (vrf_io, vrf_proof, _) = keys
             .vrf_key

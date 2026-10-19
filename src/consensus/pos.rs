@@ -1016,9 +1016,10 @@ impl ConsensusEngine for PoSEngine {
                     block_hash: block.hash.clone(),
                     timestamp: block.timestamp,
                 };
-                let mut pending = self.pending_checkpoints.write().map_err(|_| {
-                    ConsensusError("Lock error on pending_checkpoints".to_string())
-                })?;
+                let mut pending = self
+                    .pending_checkpoints
+                    .write()
+                    .map_err(|_| ConsensusError("Lock error on pending_checkpoints".to_string()))?;
                 if !pending.iter().any(|c| {
                     c.block_index == checkpoint.block_index && c.block_hash == checkpoint.block_hash
                 }) {
@@ -1644,5 +1645,4 @@ mod tests {
             "the cap round must price at (cap + 1)x"
         );
     }
-
 }

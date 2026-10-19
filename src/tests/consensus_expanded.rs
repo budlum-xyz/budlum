@@ -123,4 +123,3 @@ fn block_production_works_across_producer_addresses() {
         assert_eq!(bc.chain.len(), 2);
     }
 }
-

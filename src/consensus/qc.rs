@@ -628,11 +628,11 @@ impl QcFaultProof {
                 // waiting for some future path to activate the trap. A sound
                 // evidence form (two attested checkpoints at one height, both
                 // signatures valid) is the double-sign `SlashingEvidence` path.
-                return Err(
+                Err(
                     "A signature that fails to verify is not evidence against the named \
                      validator (equally consistent with a forged entry); no verdict is issued"
                         .into(),
-                );
+                )
             }
             QcProofKind::ZkInvalidAttestationV1 { public_inputs, .. } => {
                 if public_inputs.merkle_root != blob.merkle_root {
@@ -651,26 +651,14 @@ impl QcFaultProof {
                 // Security impact: ZK domain QC blobs are accepted (BLS quorum
                 // Verified) but cannot be challenged. For mainnet, consider
                 // Disabling ZK domain QC import until verifier is ready.
-                return Err(
+                Err(
                     "ZK QC fault proof verifier not implemented - ZK domain attestations \
                      cannot be challenged until ZK verifier integration. This is fail-closed: \
                      no invalid ZK attestation can be finalized via this path."
                         .into(),
-                );
+                )
             }
         }
-
-        Ok(QcProofVerdict {
-            action: QcProofAction::InvalidateFinality,
-            invalidate_from_height: Some(self.checkpoint_height),
-            // A valid QC fault proof is the strongest
-            // Possible evidence of malicious consensus participation (the
-            // Validator signed an invalid Dilithium signature that was
-            // Included in a QC blob). Not slashing means zero cost for
-            // This attack. The slash is applied by apply_qc_fault_verdict
-            // Using MaliciousBehaviour ratio from RegistryParams.
-            slash_validator: true,
-        })
     }
 }
 
