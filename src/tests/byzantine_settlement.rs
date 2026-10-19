@@ -785,7 +785,7 @@ mod byzantine_settlement_tests {
     }
 
     #[tokio::test]
-    async fn test_old_partition_replay_message_rejected() {
+    async fn test_old_partition_replay_message_is_idempotent() {
         let mut node = make_node();
         let alice = Address::from([0xA1u8; 32]);
         node.state.add_balance(&alice, 1000);
@@ -1056,7 +1056,7 @@ mod byzantine_settlement_tests {
     }
 
     #[tokio::test]
-    async fn test_out_of_order_domain_height_buffering_or_rejection() {
+    async fn test_out_of_order_domain_height_is_buffered_then_applied() {
         let mut node = make_node();
         let alice = Address::from([0xA1u8; 32]);
         node.state.add_balance(&alice, 1000);
