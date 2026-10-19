@@ -143,7 +143,7 @@ mod tests {
     fn determinism_workflow_present() {
         let wf = include_str!("../../.github/workflows/determinism.yml");
         assert!(
-            wf.contains("Genesis") || wf.contains("genesis") || wf.contains("determinism"),
+            wf.contains("genesis-reproducibility:") && wf.contains("Genesis hash (run 1)"),
             "determinism workflow must exist for H6.1"
         );
         assert!(Path::new("config/mainnet-genesis.json").is_file());
@@ -221,7 +221,8 @@ mod tests {
         let sec = include_str!("../../docs/SECURITY.md");
         let lower = sec.to_lowercase();
         assert!(
-            lower.contains("security@") || lower.contains("advisor") || lower.contains("report"),
+            lower.contains("## reporting a vulnerability")
+                && lower.contains("private security advisory"),
             "SECURITY.md must state how to report a vulnerability"
         );
     }
