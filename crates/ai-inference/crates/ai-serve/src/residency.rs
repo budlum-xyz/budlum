@@ -313,9 +313,8 @@ impl ResidencyPlan {
     ///
     /// # Errors
     ///
-    /// [`PlanError`] from the re-run. For a plan produced under the same
-    /// budget this cannot fail, but the signature stays honest instead of
-    /// panicking.
+    /// [`PlanError`] from the re-run, and [`PlanError::DiskPartDoesNotFit`]
+    /// when the heat order would read more bytes from disk than this plan.
     pub fn rebalance(&self, heat: &RoutingHeat, budget: DeviceBudget) -> Result<Self, PlanError> {
         let shards: Vec<WeightShard> = self
             .placements
@@ -326,7 +325,19 @@ impl ResidencyPlan {
                 demand: p.demand,
             })
             .collect();
-        Self::plan_with_heat(&shards, budget, self.semantics, heat)
+        let rebalanced = Self::plan_with_heat(&shards, budget, self.semantics, heat)?;
+        // The current plan already passed its disk bound. A heat order can
+        // leave more bytes on disk than the size order did, so the new plan
+        // may not read more from disk than the plan it replaces.
+        let allowed = self.bytes_in(Tier::Disk);
+        let needed = rebalanced.bytes_in(Tier::Disk);
+        if needed > allowed {
+            return Err(PlanError::DiskPartDoesNotFit {
+                needed,
+                available: allowed,
+            });
+        }
+        Ok(rebalanced)
     }
 
     fn place_internal(
@@ -967,6 +978,43 @@ mod heat_tests {
 
         assert_eq!(tier_of(&rebalanced, 4), Tier::System);
         assert_eq!(tier_of(&rebalanced, 1), Tier::Disk);
+    }
+
+    #[test]
+    fn rebalance_refuses_a_plan_that_reads_more_from_disk() {
+        let shards = vec![
+            WeightShard {
+                content_id: id(0),
+                bytes: 1000,
+                demand: Demand::EveryToken,
+            },
+            WeightShard {
+                content_id: id(1),
+                bytes: 800,
+                demand: Demand::WhenRouted,
+            },
+            WeightShard {
+                content_id: id(2),
+                bytes: 100,
+                demand: Demand::WhenRouted,
+            },
+        ];
+        let budget = DeviceBudget {
+            accelerator_bytes: 0,
+            system_bytes: 1850,
+        };
+        let plan = ResidencyPlan::plan(&shards, budget, profile()).unwrap();
+        assert_eq!(plan.bytes_in(Tier::Disk), 100);
+
+        let mut heat = RoutingHeat::default();
+        heat.record(id(2));
+        assert_eq!(
+            plan.rebalance(&heat, budget),
+            Err(PlanError::DiskPartDoesNotFit {
+                needed: 800,
+                available: 100,
+            })
+        );
     }
 
     #[test]
