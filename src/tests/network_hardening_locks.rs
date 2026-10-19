@@ -212,8 +212,9 @@ mod tests {
         // now that scoring exists - they cover different things: PeerManager
         // bans on protocol violations, scoring degrades on mesh behaviour.
         assert!(
-            NODE_RS.contains("check_rate_limit"),
-            "PeerManager rate limiting must stay alongside peer scoring"
+            NODE_RS.contains("peer_manager_lock().check_rate_limit(&peer_id)"),
+            "PeerManager rate limiting must stay alongside peer scoring, \
+             called on the inbound message path"
         );
     }
 
@@ -271,6 +272,16 @@ mod tests {
              means 300s and 60s of wall clock; deriving them keeps both the \
              normal and mobile paths honest with one expression"
         );
+        for expr in ["(300 / heartbeat.as_secs())", "(60 / heartbeat.as_secs())"] {
+            let at = NODE_RS
+                .find(expr)
+                .expect("the derived tick expression must exist");
+            let tail = &NODE_RS[at + expr.len()..(at + expr.len() + 12).min(NODE_RS.len())];
+            assert!(
+                tail.starts_with(".max(1)"),
+                "{expr} is not floored right where it is derived: {tail:?}"
+            );
+        }
         assert!(
             NODE_RS.contains(".max(1)"),
             "the derived tick counts lost their floor. A heartbeat longer than \
