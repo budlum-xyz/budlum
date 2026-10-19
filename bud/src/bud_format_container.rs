@@ -243,7 +243,9 @@ pub struct BudV2Header {
 impl BudV2Header {
     pub const MAGIC: [u8; 8] = *b"\xB5\x55\x44\xB0\x02\x00\x00\x00";
 
-    pub fn new(codec: FormatCodec, chunks: &[StructuralChunk]) -> Self {
+    // Private: only `BudV2File::new_with_codec` has bounded the count and the
+    // sizes that this constructor casts and sums.
+    fn new(codec: FormatCodec, chunks: &[StructuralChunk]) -> Self {
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_V2");
         for c in chunks {
@@ -404,6 +406,11 @@ impl BudV2File {
             .iter()
             .any(|c| c.data.len() as u64 > Self::MAX_CHUNK_BYTES)
         {
+            return None;
+        }
+        // A supplied id must match its data, or the file written here could
+        // not be read back.
+        if chunks.iter().any(|c| c.content_id != content_id(&c.data)) {
             return None;
         }
         let header = BudV2Header::new(codec, &chunks);
@@ -1036,6 +1043,15 @@ mod tests {
         let chunks = vec![StructuralChunk {
             content_id: content_id(&big),
             data: big,
+        }];
+        assert!(BudV2File::new(FormatCodec::Text, chunks).is_none());
+    }
+
+    #[test]
+    fn bud_v2_file_new_rejects_a_wrong_chunk_id() {
+        let chunks = vec![StructuralChunk {
+            content_id: [7u8; 32],
+            data: b"payload".to_vec(),
         }];
         assert!(BudV2File::new(FormatCodec::Text, chunks).is_none());
     }
