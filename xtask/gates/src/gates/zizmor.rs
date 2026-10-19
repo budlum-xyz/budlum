@@ -80,9 +80,9 @@ fn bin_path() -> Result<ZizmorBin, String> {
         .arg(&tgz)
         .arg(&url)
         .status()
-        .map_err(|e| format!("zizmor indirilemedi (curl): {e}"))?;
+        .map_err(|e| format!("zizmor download failed (curl): {e}"))?;
     if !ok.success() {
-        return Err(String::from("zizmor indirilemedi (curl exit != 0)"));
+        return Err(String::from("zizmor download failed (curl exit != 0)"));
     }
     // Verify the pinned sha256 before extracting; a tampered download is
     // refused the same way the shell gate refused it.
