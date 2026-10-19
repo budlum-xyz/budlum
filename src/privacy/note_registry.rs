@@ -269,13 +269,23 @@ impl L1NoteRegistry {
     }
 
     /// Derive nullifier from commitment and proof.
-    /// Nullifier = SHA-256("BDLM_NULLIFIER_DERIVE_V1" || commitment || proof)
+    ///
+    /// BLG-0061 (P03-F04): the result is a *packed note hash* — a canonical
+    /// Goldilocks element in the low eight bytes and zeros above — because a
+    /// raw SHA-256 output fails `is_note_hash` and every derived nullifier
+    /// would be refused at the transaction boundary. The digest is reduced
+    /// modulo `GOLDILOCKS_P` (V2). The earlier V1 form (`SHA-256(tag || c ||
+    /// p)` verbatim) is no longer produced.
     pub fn derive_nullifier(commitment: &NoteHash, proof: &NoteHash) -> NoteHash {
         let mut h = Sha256::new();
-        h.update(b"BDLM_NULLIFIER_DERIVE_V1");
+        h.update(b"BDLM_NULLIFIER_DERIVE_V2");
         h.update(commitment);
         h.update(proof);
-        h.finalize().into()
+        let digest: [u8; 32] = h.finalize().into();
+        let mut low = [0u8; 8];
+        low.copy_from_slice(&digest[..8]);
+        let fe = u64::from_le_bytes(low) % budlum_note_packing::GOLDILOCKS_P;
+        budlum_note_packing::hash_from_field(fe)
     }
 
     /// Enforce bounded storage via hard caps.
@@ -301,6 +311,16 @@ impl L1NoteRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BLG-0061: a derived nullifier must be note-shaped or the transaction
+    /// boundary (is_note_hash) would refuse every proof-bound transfer.
+    #[test]
+    fn derived_nullifiers_are_note_shaped() {
+        let c = budlum_note_packing::hash_from_field(0x0102_0304_0506_0708);
+        let p = budlum_note_packing::hash_from_field(0x1122_3344_5566_7788);
+        let n = L1NoteRegistry::derive_nullifier(&c, &p);
+        assert!(is_note_hash(&n), "derived nullifier must pass the shape gate");
+    }
 
     fn h(b: u8) -> NoteHash {
         let mut x = [0u8; 32];
