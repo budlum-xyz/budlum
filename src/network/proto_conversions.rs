@@ -191,6 +191,12 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::RoleBond { role } => (
+                pb::ProtoTransactionType::RoleBond as i32,
+                Some(pb::proto_transaction::TypePayload::RoleBond(
+                    pb::ProtoRoleBond { role: *role },
+                )),
+            ),
             TransactionType::Vault(vault_tx) => (
                 pb::ProtoTransactionType::Vault as i32,
                 Some(pb::proto_transaction::TypePayload::Vault(
@@ -1035,6 +1041,13 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid PoA onboarding payload: {e}"))?,
                 )
+            }
+            pb::ProtoTransactionType::RoleBond => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::RoleBond(p)) => p,
+                    _ => return Err("Missing or mismatched RoleBond payload".into()),
+                };
+                TransactionType::RoleBond { role: payload.role }
             }
             pb::ProtoTransactionType::Vault => {
                 let payload = match proto.type_payload {
