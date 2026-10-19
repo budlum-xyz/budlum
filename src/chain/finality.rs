@@ -203,10 +203,19 @@ impl Prevote {
     /// BLG-0083 (P04-F01): the message the voter authenticates with their
     /// registered key. Domain-separated from the vote message so one
     /// signature cannot serve as the other.
+    ///
+    /// BLG-0300 (P10-F12): V2 also covers `sig_bls`. V1 bound only
+    /// (epoch, height, hash), so a captured auth from an honest vote could be
+    /// paired with ANY garbage vote-signature on the same tuple - and every
+    /// pairing is a fresh "invalid signature" attributed to the key holder.
+    /// That is griefing, not self-incrimination. Binding the vote-signature
+    /// means an auth can only ever vouch for the exact signature its signer
+    /// produced.
     pub fn auth_signing_message(&self) -> Vec<u8> {
         let mut msg = Vec::new();
-        msg.extend_from_slice(b"BUDLUM_VOTE_AUTH_V1");
+        msg.extend_from_slice(b"BUDLUM_VOTE_AUTH_V2");
         msg.extend_from_slice(&self.signing_message());
+        msg.extend_from_slice(&self.sig_bls);
         msg
     }
 }
@@ -217,11 +226,12 @@ impl Precommit {
     }
 
     /// BLG-0083 (P04-F01): the vote-authentication message; see
-    /// [`Prevote::auth_signing_message`].
+    /// [`Prevote::auth_signing_message`] (V2 binds `sig_bls`, BLG-0300).
     pub fn auth_signing_message(&self) -> Vec<u8> {
         let mut msg = Vec::new();
-        msg.extend_from_slice(b"BUDLUM_VOTE_AUTH_V1");
+        msg.extend_from_slice(b"BUDLUM_VOTE_AUTH_V2");
         msg.extend_from_slice(&self.signing_message());
+        msg.extend_from_slice(&self.sig_bls);
         msg
     }
 }
@@ -664,6 +674,8 @@ impl FinalityAggregator {
                     prev_sig.clone(),
                     vote.checkpoint_hash.clone(),
                     vote.sig_bls.clone(),
+                    crate::registry::evidence::DoubleSignKind::Prevote,
+                    vote.epoch,
                 );
             }
             Some(_) => { /* same hash: not equivocation (duplicate handled later) */ }
@@ -686,6 +698,8 @@ impl FinalityAggregator {
                     prev_sig.clone(),
                     vote.checkpoint_hash.clone(),
                     vote.sig_bls.clone(),
+                    crate::registry::evidence::DoubleSignKind::Precommit,
+                    vote.epoch,
                 );
             }
             Some(_) => {}
@@ -713,6 +727,8 @@ impl FinalityAggregator {
         sig_1: Vec<u8>,
         hash_2: String,
         sig_2: Vec<u8>,
+        kind: crate::registry::evidence::DoubleSignKind,
+        epoch: u64,
     ) {
         if !self.flagged_equivocators.insert(voter) {
             return;
@@ -721,6 +737,12 @@ impl FinalityAggregator {
             voter,
             crate::registry::evidence::SlashingProof::DoubleSign {
                 height: self.checkpoint_height,
+                // BLG-0196 (P10-F06): the kind and the epoch travel with the
+                // evidence so any third party can rebuild the signed root and
+                // re-open both signatures; a report that stands only on the
+                // local ConsensusVerified label is not a proof.
+                kind,
+                epoch: Some(epoch),
                 block_hash_1: hash_1,
                 block_hash_2: hash_2,
                 signature_1: sig_1,
@@ -1457,6 +1479,29 @@ mod tests {
         assert!(result.unwrap_err().contains("set hash mismatch"));
     }
 
+    /// A genuine on-curve small-subgroup G2 encoding (BLG-0200 / P10-F10).
+    ///
+    /// Perturbs the payload bytes of the canonical generator encoding until
+    /// one decodes to a curve point that is NOT in the prime-order subgroup.
+    /// That point is the actual attack object: it survives the decoder, so
+    /// only the torsion gate can stop it. All-zero or non-decodable blobs -
+    /// what the older test fed in - merely exercise the decoder.
+    fn small_subgroup_g2_encoding() -> [u8; 96] {
+        let base = G2Affine::generator().to_compressed();
+        for i in 1..96usize {
+            for delta in 1u8..=12u8 {
+                let mut cand = base;
+                cand[i] = cand[i].wrapping_add(delta);
+                if let Some(p) = G2Affine::from_compressed(&cand).into_option() {
+                    if !bool::from(p.is_identity()) && !bool::from(p.is_torsion_free()) {
+                        return cand;
+                    }
+                }
+            }
+        }
+        panic!("payload perturbations produced no on-curve non-torsion-free G2 point")
+    }
+
     /// (security audit §5) `verify_bls_sig` must reject
     /// Public keys and signatures that are not in the prime-order
     /// Subgroup. Without the subgroup check an attacker can supply
@@ -1497,6 +1542,17 @@ mod tests {
             verify_bls_sig(&pk2, msg2, &sig2).is_ok(),
             "valid pubkey+sig must pass the new subgroup check"
         );
+
+        // BLG-0200 (P10-F10): the case the check exists for - a small-subgroup
+        // point that DECODES. A pairing with it collapses to a subgroup that
+        // verifies against any message, so the gate must reject it by name.
+        let attack_pk = small_subgroup_g2_encoding();
+        let err = verify_bls_sig(&attack_pk, msg2, &sig2)
+            .expect_err("on-curve small-subgroup key must be rejected");
+        assert!(
+            err.contains("subgroup"),
+            "small-subgroup key must fail with the subgroup rejection, got: {err}"
+        );
     }
 
     /// (security audit §5) `verify_pop` must reject PoP
@@ -1535,19 +1591,29 @@ mod tests {
             "verify_pop must reject identity key/signature encodings"
         );
 
-        // An entry whose public key decodes to a valid G2 point but
-        // Is NOT in the prime-order subgroup must be rejected. We
-        // Build one by encoding a random-looking low-order point
-        // (a non-trivial BLS12-381 cofactor-element). The simplest
-        // Approach is to take the identity encoding (which IS a
-        // Small-subgroup point): BLS12-381 reserves the
-        // "compression flag with infinity bit set" encoding for
-        // The identity. Hand-constructing one is non-trivial
-        // Without a known non-torsion-free generator, so we instead
-        // Exercise the `is_none` rejection (covered above) and the
-        // Happy path (covered by `test_verify_pop`). The critical
-        // Guarantee - that a non-decodable public key is rejected
-        // By `verify_pop` - is what the test above pins.
+        // BLG-0200 (P10-F10): the case the gate exists for. Both encodings
+        // below decode to valid points, so a rejection can only come from the
+        // torsion check - exactly the branch that stops a validator from
+        // registering a small-subgroup key and farming trivially-passing
+        // aggregates.
+        let attack_pk = small_subgroup_g2_encoding();
+        let attack_entry = ValidatorEntry {
+            address: Address::from([3u8; 32]),
+            stake: 1000,
+            bls_public_key: attack_pk.to_vec(),
+            pop_signature: G1Affine::generator().to_compressed().to_vec(),
+            pq_public_key: Vec::new(),
+        };
+        assert!(
+            G2Affine::from_compressed(&attack_pk)
+                .into_option()
+                .is_some(),
+            "the attack key must survive decoding, or the test proves nothing"
+        );
+        assert!(
+            !verify_pop(&attack_entry, crate::core::transaction::DEFAULT_CHAIN_ID),
+            "verify_pop must reject an on-curve key outside the prime-order subgroup"
+        );
     }
 
     /// A checkpoint signature must not verify on another network.

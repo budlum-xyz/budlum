@@ -35,6 +35,8 @@ mod tests {
             val,
             SlashingProof::DoubleSign {
                 height: 100,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "hash_aaa".to_string(),
                 block_hash_2: "hash_bbb".to_string(), // different → equivocation
                 signature_1: vec![0xAA; 64],
@@ -145,6 +147,8 @@ mod tests {
             roles::VALIDATOR,
             SlashingProof::DoubleSign {
                 height: 100,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aaa".to_string(),
                 block_hash_2: "bbb".to_string(),
                 signature_1: vec![0xAA; 64],
@@ -179,6 +183,8 @@ mod tests {
             val1,
             SlashingProof::DoubleSign {
                 height: 100,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aaa".to_string(),
                 block_hash_2: "bbb".to_string(),
                 signature_1: vec![0xAA; 64],
@@ -192,6 +198,8 @@ mod tests {
             val2,
             SlashingProof::DoubleSign {
                 height: 200,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "ccc".to_string(),
                 block_hash_2: "ddd".to_string(),
                 signature_1: vec![0xCC; 64],
@@ -219,6 +227,8 @@ mod tests {
             val,
             SlashingProof::DoubleSign {
                 height: 100,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aaa".to_string(),
                 block_hash_2: "bbb".to_string(),
                 signature_1: vec![0xAA; 64],
@@ -249,6 +259,8 @@ mod tests {
             val,
             SlashingProof::DoubleSign {
                 height: 100,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aaa".to_string(),
                 block_hash_2: "bbb".to_string(),
                 signature_1: vec![0xAA; 64],

@@ -3007,6 +3007,8 @@ mod tests {
             who,
             crate::registry::evidence::SlashingProof::DoubleSign {
                 height: 7,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aa".into(),
                 block_hash_2: "bb".into(),
                 signature_1: vec![1],
@@ -3035,6 +3037,8 @@ mod tests {
             who,
             crate::registry::evidence::SlashingProof::DoubleSign {
                 height: 7,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aa".into(),
                 block_hash_2: "bb".into(),
                 signature_1: vec![1],
@@ -3060,6 +3064,8 @@ mod tests {
             who,
             crate::registry::evidence::SlashingProof::DoubleSign {
                 height: 8,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "cc".into(),
                 block_hash_2: "dd".into(),
                 signature_1: vec![3],
@@ -3720,6 +3726,8 @@ mod tests {
             who,
             crate::registry::evidence::SlashingProof::DoubleSign {
                 height: 7,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aa".into(),
                 block_hash_2: "bb".into(),
                 signature_1: vec![1],

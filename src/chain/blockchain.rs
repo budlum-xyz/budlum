@@ -1444,18 +1444,12 @@ impl Blockchain {
         valid
     }
 
-    #[cfg(not(test))]
-    pub fn submit_domain_commitment(
-        &mut self,
-        _commitment: DomainCommitment,
-    ) -> Result<(), String> {
-        Err(
-            "Raw domain commitment submission is disabled; verified finality proof is required"
-                .into(),
-        )
-    }
-
     /// Test-only entry that skips the finality proof and the anchor step.
+    ///
+    /// BLG-0199 (P10-F09): the `#[cfg(not(test))]` twin that "always Errs"
+    /// is gone - with it removed the raw name does not exist in a release
+    /// build at all, so no future call site can wire the unverified path
+    /// back up without tripping the compiler.
     ///
     /// BLG-0176 (P08-F10): this shim is why tests could not catch BLG-0169 -
     /// production runs `submit_verified_domain_commitment` (proof + anchor),
@@ -6747,10 +6741,13 @@ impl Blockchain {
         // key, over the domain-separated auth message. The receiving side
         // refuses to attribute an invalid vote to this validator unless the
         // auth signature proves key control first.
+        // BLG-0300 (P10-F12): V2 covers the vote signature itself, so a
+        // captured auth cannot vouch for a swapped-in garbage sig_bls.
         let auth_msg = {
             let mut m = Vec::new();
-            m.extend_from_slice(b"BUDLUM_VOTE_AUTH_V1");
+            m.extend_from_slice(b"BUDLUM_VOTE_AUTH_V2");
             m.extend_from_slice(&msg);
+            m.extend_from_slice(&sig);
             m
         };
         let auth_sig = if let Some(sk) = self.consensus.bls_secret_key() {
@@ -6797,11 +6794,13 @@ impl Blockchain {
         };
 
         // BLG-0083 (P04-F01): the precommit carries the same vote
-        // authentication the prevote does.
+        // authentication the prevote does; BLG-0300 (P10-F12): V2, bound to
+        // the vote signature as well.
         let auth_msg = {
             let mut m = Vec::new();
-            m.extend_from_slice(b"BUDLUM_VOTE_AUTH_V1");
+            m.extend_from_slice(b"BUDLUM_VOTE_AUTH_V2");
             m.extend_from_slice(&msg);
+            m.extend_from_slice(&sig);
             m
         };
         let auth_sig = if let Some(sk) = self.consensus.bls_secret_key() {
@@ -6825,6 +6824,32 @@ impl Blockchain {
     }
 
     pub fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
+        // BLG-0195 (P10-F05): the single aggregator slot used to be clobbered
+        // on every call. Two consequences are pinned here:
+        // 1. Re-starting the SAME checkpoint (a re-delivered block, a gossip
+        //    echo) must not throw away the votes already collected - if the
+        //    height and hash match, the task is already running.
+        // 2. When a NEWER checkpoint displaces one that had prevote quorum
+        //    but never got precommit quorum, that older round is abandoned
+        //    without ever finalizing. V14 does not multiplex pending rounds,
+        //    so abandonment is the design - but it must be LOUD, because a
+        //    silently-dropped round is indistinguishable from a stall.
+        if let Some(existing) = self.finality_aggregator.as_ref() {
+            if existing.checkpoint_height == checkpoint_height
+                && existing.checkpoint_hash == checkpoint_hash
+            {
+                tracing::debug!(
+                    "prevote task for checkpoint height={checkpoint_height} already active - keeping collected votes"
+                );
+                return;
+            }
+            if existing.prevote_quorum_reached && !existing.precommit_quorum_reached {
+                warn!(
+                    "checkpoint height={} displaced an active round at height={} with prevote quorum but no precommit quorum; the older round will never finalize (single-slot aggregator, BLG-0195)",
+                    checkpoint_height, existing.checkpoint_height
+                );
+            }
+        }
         let epoch =
             checkpoint_height / crate::core::chain_config::epoch_len_for_chain_id(self.chain_id);
         // The aggregator is always started for the current epoch, so the set
@@ -9981,6 +10006,8 @@ mod bond_and_reorg_tests {
             crate::registry::roles::VALIDATOR,
             crate::registry::evidence::SlashingProof::DoubleSign {
                 height: 7,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aa".into(),
                 block_hash_2: "bb".into(),
                 signature_1: vec![1; 64],

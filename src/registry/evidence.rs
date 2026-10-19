@@ -73,9 +73,18 @@ pub enum ProofProvenance {
 /// Crate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SlashingProof {
-    /// Two conflicting signed headers at the same height (equivocation).
+    /// Two conflicting signed votes or headers (equivocation).
+    ///
+    /// BLG-0196 (P10-F06): a report must let a THIRD PARTY rebuild the signed
+    /// bytes. The voting messages are domain-separated by kind (prevote vs
+    /// precommit) and bound to an epoch, so the old payload - two hashes and
+    /// two signatures - only verified against the local node's memory.
+    /// `kind` and `epoch` carry what the reconstruction needs; block-header
+    /// double-signs have no epoch and send `None`.
     DoubleSign {
         height: u64,
+        kind: DoubleSignKind,
+        epoch: Option<u64>,
         block_hash_1: String,
         block_hash_2: String,
         signature_1: Vec<u8>,
@@ -102,6 +111,19 @@ pub enum SlashingProof {
         count: u64,
         threshold: u64,
     },
+}
+
+/// Which message a [`SlashingProof::DoubleSign`] evidence pair consists of.
+/// The signing root differs by kind; naming it is what makes the proof
+/// independently checkable (BLG-0196/P10-F06).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoubleSignKind {
+    /// Two conflicting block headers at one height (PoS block equivocation).
+    BlockHeader,
+    /// Two conflicting BLS prevotes at one checkpoint.
+    Prevote,
+    /// Two conflicting BLS precommits at one checkpoint.
+    Precommit,
 }
 
 impl SlashingProof {
@@ -472,6 +494,8 @@ impl SlashingReport {
         }
         match &self.proof {
             SlashingProof::DoubleSign {
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1,
                 block_hash_2,
                 signature_1,
@@ -611,6 +635,8 @@ impl SlashingReport {
         }
 
         let SlashingProof::DoubleSign {
+            kind: DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1,
             block_hash_2,
             signature_1,
@@ -668,6 +694,8 @@ mod tests {
             addr(1),
             SlashingProof::DoubleSign {
                 height: 10,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aa".into(),
                 block_hash_2: "bb".into(),
                 signature_1: vec![1],
@@ -686,6 +714,8 @@ mod tests {
             addr(1),
             SlashingProof::DoubleSign {
                 height: 10,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aa".into(),
                 block_hash_2: "aa".into(),
                 signature_1: vec![1],
@@ -719,6 +749,8 @@ mod tests {
             Address::zero(),
             SlashingProof::DoubleSign {
                 height: 10,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aa".into(),
                 block_hash_2: "bb".into(),
                 signature_1: vec![1],
@@ -747,6 +779,8 @@ mod tests {
             offender,
             SlashingProof::DoubleSign {
                 height: 100,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "h1".into(),
                 block_hash_2: "h2".into(),
                 signature_1: vec![1, 2, 3],
@@ -839,6 +873,8 @@ mod tests {
             roles::VALIDATOR,
             SlashingProof::DoubleSign {
                 height: 7,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: hex::encode(hash_1),
                 block_hash_2: hex::encode(hash_2),
                 signature_1: keys.sign(&hash_1).to_vec(),
@@ -885,6 +921,8 @@ mod tests {
             roles::VALIDATOR,
             SlashingProof::DoubleSign {
                 height: 7,
+                kind: DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: hex::encode([1u8; 32]),
                 block_hash_2: hex::encode([2u8; 32]),
                 signature_1: vec![0u8; 64],
@@ -921,6 +959,8 @@ mod tests {
         let hash = [0xABu8; 32];
         let mut r = signed_double_sign(&keys, hash, hash);
         let SlashingProof::DoubleSign {
+            kind: DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1,
             block_hash_2,
             ..
@@ -996,6 +1036,8 @@ mod tests {
         let offender = Address::from([1u8; 32]);
         let big = SlashingProof::DoubleSign {
             height: 7,
+            kind: DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "a".repeat(MAX_BLOCK_HASH_LEN + 1),
             block_hash_2: "b".into(),
             signature_1: vec![1],
@@ -1011,6 +1053,8 @@ mod tests {
         ));
         let big_sig = SlashingProof::DoubleSign {
             height: 7,
+            kind: DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "a".into(),
             block_hash_2: "b".into(),
             signature_1: vec![0u8; MAX_SIGNATURE_LEN + 1],
@@ -1036,6 +1080,8 @@ mod tests {
         let offender = Address::from([1u8; 32]);
         let proof = SlashingProof::DoubleSign {
             height: 7,
+            kind: DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "aa".into(),
             block_hash_2: "bb".into(),
             signature_1: vec![0xAA; 64],

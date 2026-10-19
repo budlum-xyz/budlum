@@ -86,6 +86,8 @@ fn slashing_history_survives_snapshot_round_trip() {
         offender,
         SlashingProof::DoubleSign {
             height: 10,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "HASH_A".into(),
             block_hash_2: "HASH_B".into(),
             signature_1: vec![1u8; 48],

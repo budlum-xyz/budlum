@@ -253,6 +253,8 @@ fn actionable_report_slashes_registered_validator() {
         offender,
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "aa".into(),
             block_hash_2: "bb".into(),
             signature_1: vec![1],
@@ -280,6 +282,8 @@ fn unverified_report_does_not_slash() {
         roles::VALIDATOR,
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "aa".into(),
             block_hash_2: "bb".into(),
             signature_1: vec![1],
@@ -302,6 +306,8 @@ fn report_against_unregistered_is_noop() {
         addr(0x33),
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "aa".into(),
             block_hash_2: "bb".into(),
             signature_1: vec![1],

@@ -1950,6 +1950,23 @@ impl AiRegistry {
         self.agents_by_trust_score().into_iter().take(n).collect()
     }
 
+    /// The ranking in fixed-point permyriad scores (1/10_000 of a unit
+    /// trust), ordered as `agents_by_trust_score` orders. BLG-0201
+    /// (P10-F11): the actor and RPC boundary carries this, not the raw
+    /// `f64` - a float crossing process boundaries is the Z8 rule, and
+    /// quantizing once, here, keeps every consumer's ordering identical
+    /// without re-deriving a sort key from a float.
+    #[must_use]
+    pub fn agents_by_trust_score_permille(&self) -> Vec<(Address, u64)> {
+        self.agents_by_trust_score()
+            .into_iter()
+            .map(|(addr, score)| {
+                let q = (score * 10_000.0).round().clamp(0.0, u64::MAX as f64) as u64;
+                (addr, q)
+            })
+            .collect()
+    }
+
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.
     /// Domain-separated map roots prevent cross-map
     /// Collision attacks. Each map gets a unique domain prefix
