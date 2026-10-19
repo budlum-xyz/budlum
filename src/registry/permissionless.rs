@@ -552,7 +552,12 @@ impl PermissionlessRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        if !matches!(reg.status, MemberStatus::Active) {
+        // BLG-0087 (P04-F05, decision A): a Slashed member may exit. The
+        // alternative - only Active can unbond, only Unbonding can withdraw,
+        // and re-register says AlreadyRegistered - left the remaining bond
+        // locked for good. Unbonding is not an escape from a later slash: the
+        // unbonding queue is cut on any further report (BLG-0085).
+        if !matches!(reg.status, MemberStatus::Active | MemberStatus::Slashed) {
             return Err(RegistryError::NotActive { account, role });
         }
         let release_epoch = current_epoch.saturating_add(unbonding_epochs);
@@ -650,7 +655,14 @@ impl PermissionlessRegistry {
 
         let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
         reg.stake = reg.stake.saturating_sub(penalty);
-        reg.status = MemberStatus::Slashed;
+        // BLG-0087 (P04-F05, decision B): a liveness fault is a timed jail,
+        // not a permanent slash. The stake is cut, but the status stays
+        // Active so the jail expiry at the validators map can actually
+        // release the validator - `MemberStatus::Slashed` had no exit
+        // (begin_unbonding needed Active, withdraw needed Unbonding).
+        if condition != SlashingCondition::LivenessFault {
+            reg.status = MemberStatus::Slashed;
+        }
 
         Ok(SlashOutcome {
             condition,
@@ -663,7 +675,7 @@ impl PermissionlessRegistry {
         &mut self,
         account: Address,
         primary_role: RoleId,
-        _condition: SlashingCondition,
+        condition: SlashingCondition,
         slash_ratio_fixed: u64,
     ) {
         let other_keys: Vec<RoleId> = self
@@ -685,7 +697,12 @@ impl PermissionlessRegistry {
                 }
                 let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
                 reg.stake = reg.stake.saturating_sub(penalty);
-                reg.status = MemberStatus::Slashed;
+                // BLG-0087 (decision B): the liveness cross-role sweep cuts
+                // the stake but keeps the entries Active, as the primary
+                // role does.
+                if condition != SlashingCondition::LivenessFault {
+                    reg.status = MemberStatus::Slashed;
+                }
             }
         }
     }
@@ -696,6 +713,16 @@ impl PermissionlessRegistry {
     ) -> Result<Option<SlashOutcome>, EvidenceError> {
         report.is_actionable()?;
         let condition = report.condition();
+        // BLG-0087 (P04-F05, decision B): a liveness fault no longer lands in
+        // `Slashed`, so the `AlreadySlashed` replay guard does not cover it.
+        // The history is the ledger of what has already been applied: a
+        // repeated liveness report is answered with a no-op instead of a
+        // second stake cut.
+        if condition == SlashingCondition::LivenessFault
+            && self.slashing_history.iter().any(|r| r.report == *report)
+        {
+            return Ok(None);
+        }
         let ratio = self.params.slash_ratio(condition);
         match self.slash(report.offender, report.role, condition, ratio) {
             Ok(outcome) => {
@@ -1052,6 +1079,62 @@ mod tests {
         // A smaller total still applies, including a full exit.
         reg.upsert_stake(addr(11), roles::VALIDATOR, 0, 2);
         assert_eq!(reg.get(&addr(11), roles::VALIDATOR).unwrap().stake, 0);
+
+    /// BLG-0087 (P04-F05, decision A): Slashed is not a dead end. The member
+    /// can unbond the remaining stake and withdraw it after the delay;
+    /// unbonding is not an escape from a later slash (the unbonding queue is
+    /// still cut on any further report).
+    #[test]
+    fn a_slashed_member_can_exit_through_unbonding() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(7), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
+        reg.slash_role_only(
+            addr(7),
+            roles::VALIDATOR,
+            SlashingCondition::DoubleSign,
+            200,
+        )
+        .unwrap();
+        assert!(matches!(
+            reg.registrations
+                .get(&(roles::VALIDATOR, addr(7)))
+                .unwrap()
+                .status,
+            MemberStatus::Slashed
+        ));
+        let release = reg.begin_unbonding(addr(7), roles::VALIDATOR, 5).unwrap();
+        assert_eq!(release, 5 + reg.params().unbonding_epochs);
+        assert!(reg.withdraw(addr(7), roles::VALIDATOR, release).is_ok());
+    }
+
+    /// BLG-0087 (P04-F05, decision B): a liveness fault is a timed jail. The
+    /// entry is not Slashed at the registry level, so the release after the
+    /// jail expiry actually works.
+    #[test]
+    fn a_liveness_fault_does_not_slash_the_registry_entry() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(8), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
+        let report = SlashingReport::consensus_liveness(
+            addr(8),
+            roles::VALIDATOR,
+            1,
+            2,
+            9,
+            10,
+            None,
+        );
+        let outcome = reg.slash_from_report(&report).unwrap();
+        assert!(outcome.is_some());
+        let entry = reg.registrations.get(&(roles::VALIDATOR, addr(8))).unwrap();
+        assert!(
+            matches!(entry.status, MemberStatus::Active),
+            "a liveness fault must not write Slashed: {:?}",
+            entry.status
+        );
+        assert!(entry.stake < MIN_REGISTRATION_STAKE, "the stake is still cut");
+    }
     }
 
     #[test]
