@@ -151,15 +151,20 @@ pub const MAX_GENERATION_CACHE_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Default)]
 struct GenerationCache {
     /// The entries held in insertion order.
-    entries: std::collections::VecDeque<(ContentId, Vec<u8>)>,
+    entries: std::collections::VecDeque<(ContentId, std::sync::Arc<Vec<u8>>)>,
 }
 
 impl GenerationCache {
-    fn get(&self, id: &ContentId) -> Option<Vec<u8>> {
+    fn get_shared(&self, id: &ContentId) -> Option<std::sync::Arc<Vec<u8>>> {
         self.entries
             .iter()
             .find(|(key, _)| key == id)
-            .map(|(_, bytes)| bytes.clone())
+            .map(|(_, bytes)| std::sync::Arc::clone(bytes))
+    }
+
+    #[cfg(test)]
+    fn get(&self, id: &ContentId) -> Option<Vec<u8>> {
+        self.get_shared(id).map(|bytes| bytes.as_ref().clone())
     }
 
     fn insert(&mut self, id: ContentId, bytes: Vec<u8>) {
@@ -178,7 +183,7 @@ impl GenerationCache {
                 None => break,
             }
         }
-        self.entries.push_back((id, bytes));
+        self.entries.push_back((id, std::sync::Arc::new(bytes)));
     }
 }
 
@@ -260,10 +265,15 @@ impl BudGateway {
         // the request is refused.
         // Cache first: rerunning the same recipe for the same bytes buys
         // nothing. The lock is held only for the lookup.
-        if let Ok(cache) = self.generation_cache.lock() {
-            if let Some(bytes) = cache.get(&cid) {
-                return checked_gateway_content("generation cache", bytes);
-            }
+        // Only the shared handle is taken under the lock; the bytes are
+        // copied after it is released.
+        let hit = self
+            .generation_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get_shared(&cid));
+        if let Some(bytes) = hit {
+            return checked_gateway_content("generation cache", bytes.as_ref().clone());
         }
 
         if let Some(manifest) = self.chain.get_storage_manifest(cid).await {
@@ -603,6 +613,16 @@ mod tests {
                 .is_none(),
             "hybrid cannot be produced from the recipe alone"
         );
+    }
+
+    #[test]
+    fn a_cache_hit_hands_out_a_shared_handle_not_a_copy() {
+        let mut cache = GenerationCache::default();
+        let id = ContentId([7u8; 32]);
+        cache.insert(id, vec![1, 2, 3]);
+        let a = cache.get_shared(&id).expect("held");
+        let b = cache.get_shared(&id).expect("held");
+        assert!(std::sync::Arc::ptr_eq(&a, &b));
     }
 
     /// The generation cache does not exceed its bound and returns the right bytes.
