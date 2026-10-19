@@ -1072,7 +1072,9 @@ fn manifest_id_from_parts(
     // The dictionary commitment follows the same rule as the source commitment.
     // With no dictionary, no byte is written, so the preimage of manifests
     // recorded before this field does not change and their ids are preserved.
+    // A label separates it from the source bytes before it.
     if let Some(dict) = dictionary_id {
+        buf.extend_from_slice(b"BDLM_DICTIONARY");
         buf.push(1u8);
         buf.extend_from_slice(&dict.0);
     }
