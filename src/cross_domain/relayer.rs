@@ -173,28 +173,13 @@ impl RelayLedger {
 const RELAY_RETENTION_BLOCKS: u64 = 10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH;
 
 /// Configuration for the Universal Relayer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelayerConfig {
-    /// Maximum number of blocks a relayer has to relay before expiry.
-    pub relay_window_blocks: u64,
-    /// Minimum stake required to act as a relayer (in base units).
-    pub min_relayer_stake: u64,
-    /// Slash ratio for failed/invalid relays (0-100).
-    pub slash_ratio_invalid: u64,
-    /// Slash ratio for expired (missed deadline) relays (0-100).
-    pub slash_ratio_expired: u64,
-}
-
-impl Default for RelayerConfig {
-    fn default() -> Self {
-        Self {
-            relay_window_blocks: 100,
-            min_relayer_stake: 10_000_000,
-            slash_ratio_invalid: 50,
-            slash_ratio_expired: 25,
-        }
-    }
-}
+///
+/// BLG-0115 (P05-F08, karar B): the `relay_window_blocks`, `min_relayer_stake`
+/// and `slash_ratio_*` fields are gone - nothing outside this file ever read
+/// them, and a config field nobody reads is a promise nobody keeps. Serde
+/// ignores them if an old config still carries them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RelayerConfig {}
 
 /// The Universal Relayer orchestrator.
 ///
@@ -611,10 +596,6 @@ mod tests {
     #[test]
     fn relay_config_defaults_are_reasonable() {
         let config = RelayerConfig::default();
-        assert_eq!(config.relay_window_blocks, 100);
-        assert_eq!(config.min_relayer_stake, 10_000_000);
-        assert_eq!(config.slash_ratio_invalid, 50);
-        assert_eq!(config.slash_ratio_expired, 25);
     }
 
     #[test]

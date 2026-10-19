@@ -168,6 +168,72 @@ fn bridge_lock_mint_burn_unlock_lifecycle() {
     let _ = message_id; // silence unused warning (kept for the regression witness)
 }
 
+/// BLG-0108 (P05-F01): a full lock/mint/burn/unlock cycle conserves the
+/// total supply. Burn is the debit half of mint: without it, each cycle
+/// mints one transfer amount out of thin air (the F01 inflation bug).
+#[test]
+fn bridge_lock_mint_burn_unlock_conserves_supply() {
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
+        d.operator = Some(operator);
+        d.operator_bond = 100_000;
+        d.bridge_enabled = true;
+        bc.register_consensus_domain(d).expect("domain");
+    }
+    bc.register_bridge_asset(asset_id(), 1).expect("asset");
+    let owner = addr(77);
+    let recipient = addr(12);
+    bc.state.add_balance(&owner, 1_000);
+    bc.state.add_balance(&recipient, 0);
+
+    let sum = |bc: &Blockchain| -> u64 {
+        bc.state.get_balance(&owner) + bc.state.get_balance(&recipient)
+    };
+    let start = sum(&bc);
+    assert_eq!(start, 1_000);
+
+    // Lock: the owner's units move into the bridge.
+    let (_transfer, lock_event) = bc
+        .lock_bridge_transfer(1, 2, 20, 0, asset_id(), owner, recipient, 400, 1_000)
+        .expect("lock");
+    assert_eq!(sum(&bc), start, "lock must move units, not destroy them");
+    let lock_message = lock_event.message.clone().expect("lock carries a message");
+
+    // Mint on the target side: the production mint credits the recipient.
+    bc.state
+        .bridge_state
+        .mint(&lock_message, 20)
+        .expect("mint the locked transfer");
+    bc.state.get_or_create(&recipient).balance += 400;
+    assert_eq!(sum(&bc), start, "mint is the credit half of lock");
+
+    // Burn on the target side: the fix - the burn TAKES the units back.
+    let message_id = lock_message.message_id;
+    let burn_event = bc
+        .burn_bridge_transfer_with_event(message_id, 2, 40, 0, 0)
+        .expect("burn the minted transfer");
+    assert_eq!(
+        sum(&bc),
+        start - 400,
+        "burn must debit the minted units (BLG-0108)"
+    );
+
+    // Unlock on the source side: the owner is credited back.
+    let burn_message = burn_event.message.clone().expect("burn carries a message");
+    bc.state
+        .bridge_state
+        .unlock(&message_id, 2, 40)
+        .expect("unlock the burned transfer");
+    bc.state.get_or_create(&owner).balance += 400;
+    assert_eq!(
+        sum(&bc),
+        start,
+        "the full cycle must conserve supply exactly"
+    );
+    let _ = burn_message;
+}
+
 /// Sweep at multiple heights: an expired lock is released, a non-expired
 /// Lock is preserved, and the released lock stays `Active` on repeated
 /// Calls (idempotency).
