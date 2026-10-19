@@ -393,21 +393,20 @@ mod tests {
     /// the registry state is untouched, so a full registry still answers
     /// its recorded claims and still classifies duplicates correctly.
     /// Filling 100k keys is a loop of BTreeMap inserts; keep it cheap by
-    /// testing the boundary: pre-fill to cap-1 with distinct keys.
+    /// testing the boundary: fill exactly to capacity with distinct keys.
     #[test]
     fn registry_refuses_past_the_cap() {
         let mut reg = ProofClaimRegistry::new();
-        for h in 0..(MAX_PROOF_CLAIMS as u64 - 1) {
+        for h in 0..MAX_PROOF_CLAIMS as u64 {
             reg.record(AcceptedProofClaim {
                 key: key(h),
                 final_state_root: [1u8; 32],
                 prover: Address::from([9u8; 32]),
                 rewarded: false,
             })
-            .map_err(|e| e.to_string())
-            .unwrap_or_else(|e| unreachable!("fill below the cap cannot fail: {e}"));
+            .expect("every insertion through the capacity boundary must succeed");
         }
-        assert_eq!(reg.len(), MAX_PROOF_CLAIMS - 1);
+        assert_eq!(reg.len(), MAX_PROOF_CLAIMS);
         let err = reg
             .record(AcceptedProofClaim {
                 key: key(MAX_PROOF_CLAIMS as u64),
@@ -417,7 +416,7 @@ mod tests {
             })
             .expect_err("one past the cap must be refused");
         assert!(matches!(err, ProofError::RegistryFull { cap } if cap == MAX_PROOF_CLAIMS));
-        assert_eq!(reg.len(), MAX_PROOF_CLAIMS - 1, "refusal must not mutate");
+        assert_eq!(reg.len(), MAX_PROOF_CLAIMS, "refusal must not mutate");
         assert_eq!(
             reg.classify(key(0), [1u8; 32]).unwrap(),
             ClaimDecision::Duplicate,
