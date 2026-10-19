@@ -225,9 +225,14 @@ mod poseidon_lock_tests {
     fn poseidon4_hash3_canonical_output_lock() {
         let h = poseidon4_hash3(1, 2, 3);
         assert_ne!(h, 0, "hash must be non-zero");
-        // Lock: this exact output must match bud-vm poseidon4_hash3(1, 2, 3)
-        // If MDS or RC drift, this value changes and the test breaks.
-        let h2 = poseidon4_hash3(1, 2, 3);
-        assert_eq!(h, h2, "deterministic");
+        // Lock: these exact outputs were computed from the bud-vm constants
+        // (4 rounds, same RC and MDS). If MDS or RC drift in either crate,
+        // the value here no longer matches and the test breaks.
+        assert_eq!(h, 17_200_853_039_219_255_194, "hash3 must match bud-vm");
+        assert_eq!(
+            poseidon4_hash(1, 2),
+            7_468_504_783_086_785_855,
+            "hash2 must match bud-vm"
+        );
     }
 }
