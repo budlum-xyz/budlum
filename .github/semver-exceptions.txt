@@ -21,3 +21,19 @@
 # cargo-semver-checks detects that a new method was added; on this 0.x version
 # line a minor addition is accepted. Approval: STATUS_ONLINE 2026-07-21.
 AccountState::distribute_block_fees | EIP-1559 fee distribution wiring (step G) - a new public method wired into block finalization | STATUS_ONLINE 2026-07-21 approval
+
+# PR12 intentional breakages (P01-P06 waves): every entry is a finding fix
+# that changes a public API before mainnet, approved by the corresponding
+# BLG decision recorded on PR #9's decision comment (karar). The 0.x line
+# accepts these as deliberate pre-mainnet cleanup; none is accidental.
+BridgeState::lock | bridge lock takes the full 9-argument envelope (recipient_eth, unwind paths) - BLG-0037/0041 kararı | PR #9 decision comment (BLG-0037=A+B, BLG-0041=A)
+BridgeState::mint | mint takes the message reference plus the current height for expiry sweeps - BLG-0083 kararı | PR #9 decision comment (BLG-0083=B+A+C)
+bridge_burn_payload_hash | burn payload hash binds (asset, amount, eth recipient) - BLG-0087 kararı | PR #9 decision comment (BLG-0087=A+B)
+BridgeRelayerPipeline::from_parts | pipeline stages are explicit and enqueue_stage-carrying - BLG-0083 kararı | PR #9 decision comment (BLG-0083=A+C)
+verify_evm_receipt | verification takes the operator trusted checkpoint for the BLG-0111 finality rule - BLG-0111/0115 kararı | PR #9 decision comment (BLG-0111=B A-interim, BLG-0115=B)
+EthereumSyncAdapter::new | constructor takes the pinned committee (period, aggregate key, next root) - BLG-0130/0131 kararı | PR #9 decision comment (BLG-0130/0131=B)
+FinalityAttestation | attestation binds attested block hash and event/tx roots - BLG-0132/0133 kararı | PR #9 decision comment (BLG-0132/0133=NO ROWS, coded per finding text)
+ZkVmFinalityAdapter::new | constructor pins program hash and chain id; unpinned admission is closed - BLG-0134 kararı | PR #9 decision comment (BLG-0134=A now)
+AdapterSpec::ZkVm | the registry spec carries the program hash and chain id pins - BLG-0134 kararı | PR #9 decision comment (BLG-0134=A now)
+rotate_period | rotation returns Result and refuses without the finality branch - BLG-0137 kararı | PR #9 decision comment (BLG-0137=A later/B interim)
+SyncCommitteeError | new RotationBranchRequired variant for the refused rotation - BLG-0137 kararı | PR #9 decision comment (BLG-0137=B interim)
