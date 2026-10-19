@@ -19,7 +19,10 @@ use crate::source::DataError;
 /// - `HashMismatch` if the digest does not match.
 pub fn verify_sha256(data: &[u8], expected_hex: &str) -> Result<(), DataError> {
     let expected: Vec<u8> = hex_bytes(expected_hex).ok_or_else(|| DataError::HashMismatch {
-        detail: format!("the expected hex could not be decoded: {}", shown(expected_hex)),
+        detail: format!(
+            "the expected hex could not be decoded: {}",
+            shown(expected_hex)
+        ),
     })?;
     if expected.len() != 32 {
         return Err(DataError::HashMismatch {
