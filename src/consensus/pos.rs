@@ -12,12 +12,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct PoSConfig {
     pub min_stake: u64,
-    pub slot_duration: u64,
     pub epoch_length: u64,
-    pub annual_reward_rate: u64,
-    pub slashing_penalty: u64,
-    pub double_sign_penalty: u64,
-    pub unbonding_epochs: u64,
 }
 impl Default for PoSConfig {
     /// Devnet-shaped defaults.
@@ -38,22 +33,15 @@ impl Default for PoSConfig {
     /// Production paths (`main.rs`) already build the config explicitly from
     /// `network_params.epoch_len`; this only fixes the fallback.
     fn default() -> Self {
-        use crate::core::chain_config::FIXED_POINT_SCALE;
         PoSConfig {
             min_stake: 1000,
-            slot_duration: 6,
+            // P01-F21: the reward/penalty/unbonding knobs were never read by
+            // any code path and are gone; slashing ratios come from
+            // `RegistryParams`, unbonding from `UNBONDING_EPOCHS`, rewards
+            // from tokenomics. A knob nobody reads is a lie to operators.
             epoch_length: crate::core::chain_config::Network::Devnet
                 .consensus_params()
                 .epoch_len,
-            // F-184/185/186 (findings report 2026-07-27): the f64 constant
-            // expression was replaced with integer arithmetic. Measured: both
-            // expressions produce [50000, 100000, 500000]; the behaviour is
-            // identical, and no floating point remains in the consensus
-            // constants.
-            annual_reward_rate: (FIXED_POINT_SCALE * 5) / 100,
-            slashing_penalty: FIXED_POINT_SCALE / 10,
-            double_sign_penalty: FIXED_POINT_SCALE / 2,
-            unbonding_epochs: crate::core::account::UNBONDING_EPOCHS,
         }
     }
 }
@@ -185,13 +173,6 @@ impl PoSEngine {
         true
     }
 
-    pub fn get_slashing_evidence(&self) -> Result<Vec<SlashingEvidence>, ConsensusError> {
-        self.slashing_evidence
-            .read()
-            .map(|guard| guard.clone())
-            .map_err(|_| ConsensusError("Failed to acquire read lock on slashing evidence".into()))
-    }
-
     /// Prune old slashing evidence to prevent unbounded growth.
     /// Keeps only evidence with header1.index >= `min_height`.
     pub fn prune_slashing_evidence(&self, min_height: u64) -> Result<usize, ConsensusError> {
@@ -203,6 +184,9 @@ impl PoSEngine {
         Ok(before - guard.len())
     }
 
+    /// Test inspection of the committed checkpoint list (P01-F21: no
+    /// production caller; the production surface is `last_checkpoint`).
+    #[cfg(test)]
     pub fn get_checkpoints(&self) -> Result<Vec<Checkpoint>, ConsensusError> {
         self.checkpoints
             .read()
@@ -435,6 +419,8 @@ impl PoSEngine {
     /// Backward-compatible diagnostic helper. Consensus production and
     /// Validation use `calculate_seed_with_chain`; this method only exposes the
     /// Latest replay-derived cache to callers that used the former API.
+    /// Test-only (P01-F21): no production caller.
+    #[cfg(test)]
     pub fn calculate_seed(
         &self,
         chain_id: u64,
@@ -461,10 +447,6 @@ impl PoSEngine {
         hasher.finalize().into()
     }
 
-    pub fn calculate_vrf_threshold(&self, stake: u64, total_stake: u64) -> u64 {
-        self.calculate_vrf_threshold_for_round(stake, total_stake, 0)
-    }
-
     /// The round-widened leadership threshold (P01-F01).
     ///
     /// Round `r` multiplies the base threshold by `r + 1`, so eligibility
@@ -473,7 +455,7 @@ impl PoSEngine {
     /// stake is guaranteed a turn. The base threshold alone left a slot dead
     /// whenever the sampled leader was offline, because the retry drew the
     /// same sample again.
-    pub fn calculate_vrf_threshold_for_round(&self, stake: u64, total_stake: u64, round: u64) -> u64 {
+    fn calculate_vrf_threshold_for_round(&self, stake: u64, total_stake: u64, round: u64) -> u64 {
         use crate::core::chain_config::{FIXED_POINT_SCALE, VRF_BASE_PROB};
         if total_stake == 0 || stake == 0 {
             return 0;
@@ -506,12 +488,19 @@ impl PoSEngine {
         let y = u64::from_le_bytes(hash[0..8].try_into().unwrap_or([0; 8]));
         y < threshold
     }
+    /// Test mirror of the validator-admission rule (P01-F21: no production
+    /// caller; `validate_block` enforces the same predicate inline).
+    #[cfg(test)]
     pub fn is_validator(&self, pubkey: &Address, state: &AccountState) -> bool {
         state
             .get_validator(pubkey)
             .is_some_and(|v| v.active && !v.slashed && v.stake >= self.config.min_stake)
     }
 
+    /// Lock-order fixture (P01-F21): the POS_STATE writer is gone; this
+    /// stays only so `consensus_lock_order_loom` can pin the checkpoints ->
+    /// slashing_evidence lock order.
+    #[cfg(test)]
     pub fn serialize_state(&self) -> Result<Vec<u8>, String> {
         let epoch_seed = self
             .epoch_seed
@@ -531,85 +520,6 @@ impl PoSEngine {
         });
         serde_json::to_vec(&state).map_err(|e| format!("Serialization error: {e}"))
     }
-    pub fn save_state(&self, db: &sled::Db) -> Result<(), String> {
-        let data = self.serialize_state()?;
-        db.insert("POS_STATE", data)
-            .map_err(|e| format!("DB insert error: {e}"))?;
-        db.flush().map_err(|e| format!("DB flush error: {e}"))?;
-        info!(
-            "PoS state saved: {} new checkpoints",
-            self.checkpoints
-                .read()
-                .map_err(|_| "Lock error".to_string())?
-                .len()
-        );
-        Ok(())
-    }
-    pub fn load_state(&mut self, db: &sled::Db) -> Result<(), String> {
-        let data = match db.get("POS_STATE") {
-            Ok(Some(d)) => d,
-            Ok(None) => {
-                info!("No saved PoS state found, starting fresh");
-                return Ok(());
-            }
-            Err(e) => return Err(format!("DB read error: {e}")),
-        };
-        let state: serde_json::Value =
-            serde_json::from_slice(&data).map_err(|e| format!("Deserialization error: {e}"))?;
-
-        if let Some(checkpoints_data) = state.get("checkpoints").and_then(|c| c.as_array()) {
-            let mut checkpoints = self
-                .checkpoints
-                .write()
-                .map_err(|_| "Lock error".to_string())?;
-            for cp in checkpoints_data {
-                let block_index = cp
-                    .get("block_index")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                let block_hash = cp
-                    .get("block_hash")
-                    .and_then(|h| h.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let timestamp = u128::from(
-                    cp.get("timestamp")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0),
-                );
-                checkpoints.push(Checkpoint {
-                    block_index,
-                    block_hash,
-                    timestamp,
-                });
-            }
-        }
-
-        // Restore epoch_seed from persisted state
-        if let Some(seed_data) = state.get("epoch_seed").and_then(|s| s.as_array()) {
-            if seed_data.len() == 32 {
-                let mut seed = [0u8; 32];
-                for (i, val) in seed_data.iter().enumerate() {
-                    if let Some(v) = val.as_u64() {
-                        seed[i] = v as u8;
-                    }
-                }
-                if let Ok(mut guard) = self.epoch_seed.write() {
-                    *guard = seed;
-                }
-            }
-        }
-
-        info!(
-            "PoS state loaded: {} checkpoints",
-            self.checkpoints
-                .read()
-                .map_err(|_| "Lock error".to_string())?
-                .len()
-        );
-        Ok(())
-    }
-
     fn preview_common(
         &self,
         block: &mut Block,
@@ -994,29 +904,6 @@ impl ConsensusEngine for PoSEngine {
             self.checkpoints.read().map_or(0, |c| c.len())
         )
     }
-    fn select_best_chain<'a>(&self, chains: &[&'a [Block]]) -> Option<&'a [Block]> {
-        let mut best: Option<&'a [Block]> = None;
-        for &chain in chains {
-            match best {
-                None => best = Some(chain),
-                Some(current) => {
-                    let current_score = self.fork_choice_score(current);
-                    let candidate_score = self.fork_choice_score(chain);
-                    let candidate_wins = candidate_score > current_score
-                        || (candidate_score == current_score
-                            && resolve_split_tie(
-                                &SplitCandidate::from_chain_tip(current, current_score),
-                                &SplitCandidate::from_chain_tip(chain, candidate_score),
-                            ) == SplitDecision::RightWins);
-                    if candidate_wins {
-                        best = Some(chain);
-                    }
-                }
-            }
-        }
-        best
-    }
-
     fn fork_choice_score(&self, chain: &[Block]) -> u128 {
         // A candidate that abandons the checkpoint scores zero rather than
         // scoring low. Previously the checkpoint height was a *term* in the
@@ -1404,7 +1291,7 @@ mod tests {
         Executor::apply_transaction(&mut state, &tx).unwrap();
 
         let engine = PoSEngine::new(PoSConfig::default(), None);
-        let threshold = engine.calculate_vrf_threshold(1000, 1000);
+        let threshold = engine.calculate_vrf_threshold_for_round(1000, 1000, 0);
         assert_eq!(threshold, u64::MAX);
     }
 
@@ -1728,15 +1615,34 @@ mod tests {
         );
     }
 
+    /// F-184/185/186: the consensus penalty constants are integer
+    /// fixed-point, not f64 expressions. P01-F21 removed the never-read
+    /// `PoSConfig` knobs this used to assert on; the live constants are the
+    /// `RegistryParams` slash ratios, which are what is pinned now.
     #[test]
     fn pos_default_fixed_point_constants_are_exact_integers() {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        let config = PoSConfig::default();
-        assert_eq!(config.annual_reward_rate, (FIXED_POINT_SCALE * 5) / 100);
-        assert_eq!(config.slashing_penalty, FIXED_POINT_SCALE / 10);
-        assert_eq!(config.double_sign_penalty, FIXED_POINT_SCALE / 2);
-        assert_eq!(config.annual_reward_rate, 50_000);
-        assert_eq!(config.slashing_penalty, 100_000);
-        assert_eq!(config.double_sign_penalty, 500_000);
+        let params = crate::registry::params::RegistryParams::default();
+        assert_eq!(params.double_sign_slash_ratio_fixed, FIXED_POINT_SCALE / 2);
+        assert_eq!(params.liveness_slash_ratio_fixed, FIXED_POINT_SCALE / 100);
+        assert_eq!(params.malicious_slash_ratio_fixed, FIXED_POINT_SCALE);
     }
+    #[test]
+    fn pos_vrf_threshold_widens_with_the_round() {
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let base = engine.calculate_vrf_threshold_for_round(1_000, 4_000, 0);
+        let round1 = engine.calculate_vrf_threshold_for_round(1_000, 4_000, 1);
+        let round_cap = engine.calculate_vrf_threshold_for_round(1_000, 4_000, MAX_LEADER_ROUNDS);
+        assert_eq!(
+            round1,
+            base.saturating_mul(2),
+            "round 1 must double the threshold (P01-F01)"
+        );
+        assert_eq!(
+            round_cap,
+            base.saturating_mul(MAX_LEADER_ROUNDS + 1),
+            "the cap round must price at (cap + 1)x"
+        );
+    }
+
 }

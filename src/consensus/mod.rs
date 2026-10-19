@@ -243,6 +243,9 @@ pub trait ConsensusEngine: Send + Sync {
         }
         chains.iter().max_by_key(|c| c.len()).copied()
     }
+    /// Test-only depth probe (P01-F21: `try_reorg` enforces the depth limit
+    /// on the live path; nothing production-side calls this).
+    #[cfg(test)]
     fn can_reorg(&self, current_chain: &[Block], new_chain: &[Block]) -> bool {
         if new_chain.len() <= current_chain.len() {
             return false;

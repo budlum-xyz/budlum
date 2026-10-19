@@ -22,7 +22,7 @@ use tracing::{info, warn};
 /// Derivation stays deterministic and identical across the network. Callers on
 /// Both the propose and the verify path must use this helper so the two sides
 /// Can never disagree about the entropy.
-pub(crate) fn leader_entropy(hash: &str) -> Vec<u8> {
+fn leader_entropy(hash: &str) -> Vec<u8> {
     match hex::decode(hash) {
         Ok(bytes) if bytes.len() == 32 => bytes,
         // Domain-separated sentinel: distinct from any well-formed 32-byte hash.
@@ -31,7 +31,6 @@ pub(crate) fn leader_entropy(hash: &str) -> Vec<u8> {
 }
 #[derive(Debug, Clone)]
 pub struct PoAConfig {
-    pub block_period: u64,
     pub epoch_length: u64,
     pub quorum_numerator: u64,
     pub quorum_denominator: u64,
@@ -48,7 +47,6 @@ pub struct PoAConfig {
 impl Default for PoAConfig {
     fn default() -> Self {
         PoAConfig {
-            block_period: 5,
             epoch_length: 30000,
             quorum_numerator: 2,
             quorum_denominator: 3,
@@ -184,6 +182,9 @@ impl PoAEngine {
     /// `block_index` and the active validator set fingerprint so the next
     /// Leader is not a trivial sequential prediction. Still fully
     /// Deterministic (all nodes agree); full VRF can replace this later.
+    /// Test-only convenience wrapper (P01-F21: production routes through
+    /// `expected_proposer_with_entropy`).
+    #[cfg(test)]
     pub fn expected_proposer<'a>(
         &self,
         block_index: u64,
@@ -215,6 +216,8 @@ impl PoAEngine {
     /// Public inputs (block_index + validator set), allowing DoS/bribery
     /// Attacks. Now the leader is unpredictable until the previous block
     /// Is produced, since its hash is unknown beforehand.
+    /// Test-only convenience wrapper (P01-F21).
+    #[cfg(test)]
     pub fn leader_slot(block_index: u64, active_validators: &[&Validator]) -> Option<usize> {
         Self::leader_slot_with_entropy(block_index, active_validators, &[0u8; 32], 0)
     }
@@ -974,4 +977,54 @@ mod tests {
             "a good signature from the wrong authority must still be refused"
         );
     }
+    fn poa_state_with(addresses: &[Address]) -> AccountState {
+        let mut state = AccountState::new();
+        for address in addresses {
+            state
+                .validators
+                .insert(*address, Validator::new(*address, 1_000));
+            state.validators.get_mut(address).unwrap().active = true;
+        }
+        state
+    }
+
+    #[test]
+    fn poa_validate_rejects_the_wrong_leader() {
+        let alice = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let bob = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let alice_address = Address::from(alice.public_key_bytes());
+        let bob_address = Address::from(bob.public_key_bytes());
+        let state = poa_state_with(&[alice_address, bob_address]);
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+
+        let mut parent = Block::genesis();
+        parent.timestamp = 1_000_000;
+        parent.hash = parent.calculate_hash();
+        let active = state.get_active_validators();
+        let entropy = crate::consensus::poa::leader_entropy(&parent.hash);
+        let expected = engine
+            .expected_proposer_with_entropy(1, &active, &entropy, 0)
+            .expect("active set is non-empty");
+
+        // Sign with whichever key is NOT the expected leader.
+        let (wrong_key, wrong_address) = if expected.address == alice_address {
+            (bob, bob_address)
+        } else {
+            (alice, alice_address)
+        };
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.timestamp = parent.timestamp + MIN_BLOCK_INTERVAL_MS;
+        block.producer = Some(wrong_address);
+        block.nonce = 0;
+        block.sign(&wrong_key);
+
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("a block from the wrong leader must be refused");
+        assert!(
+            error.0.contains("expected proposer") || error.0.contains("leader"),
+            "the refusal must name the leader rule, got: {error:?}"
+        );
+    }
+
 }

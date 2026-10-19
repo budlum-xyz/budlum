@@ -794,9 +794,7 @@ async fn main() {
             }
             let pos_config = PoSConfig {
                 min_stake: config.min_stake,
-                slot_duration: (network_params.slot_ms / 1000).max(1),
                 epoch_length: network_params.epoch_len,
-                ..Default::default()
             };
             // Mainnet forbids disk-backed ValidatorKeys
             // (BLS + Dilithium secrets stay plaintext on disk today).
@@ -1054,9 +1052,7 @@ async fn main() {
                     Arc::new(PoSEngine::new(
                         PoSConfig {
                             min_stake: config.min_stake,
-                            slot_duration: (network_params.slot_ms / 1000).max(1),
                             epoch_length: network_params.epoch_len,
-                            ..Default::default()
                         },
                         None,
                     ))

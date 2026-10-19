@@ -31,7 +31,7 @@ pub struct PqSignatureEntry {
 /// `QcFaultProof::new_invalid_dilithium` stays under the argument limit
 /// without a lint waiver.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InvalidDilithiumEvidence {
+struct InvalidDilithiumEvidence {
     pub dilithium_signature: Vec<u8>,
     pub merkle_proof: Vec<Vec<u8>>,
     pub leaf_index: u32,
@@ -412,7 +412,7 @@ impl QcFaultProof {
     /// Build an `InvalidDilithiumV1` fault proof around a disputed
     /// attestation (P01-F26: the payload is one named value, not three
     /// loose arguments).
-    pub fn new_invalid_dilithium(
+    fn new_invalid_dilithium(
         epoch: u64,
         checkpoint_height: u64,
         checkpoint_hash: String,
@@ -435,6 +435,8 @@ impl QcFaultProof {
         }
     }
 
+    /// Test-only constructor for the stubbed ZK kind (P01-F21).
+    #[cfg(test)]
     pub fn new_zk_invalid_attestation(
         epoch: u64,
         checkpoint_height: u64,
@@ -687,6 +689,9 @@ pub fn pq_signing_message(
     msg
 }
 
+/// Test-only attestation helper (P01-F21: production blobs come from the
+/// validators' own PQ signing paths).
+#[cfg(test)]
 pub fn sign_attestation(
     pq_key: &PqKeyPair,
     epoch: u64,

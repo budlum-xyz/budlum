@@ -81,14 +81,6 @@ src/chain/genesis.rs:with_validator
 src/chain/snapshot.rs:reseal_after_manual_edit
 src/chain/snapshot.rs:save_snapshot
 src/consensus/poa.rs:active_validator_count
-src/consensus/poa.rs:expected_proposer
-src/consensus/poa.rs:leader_slot
-src/consensus/pos.rs:calculate_seed
-src/consensus/pos.rs:get_checkpoints
-src/consensus/pos.rs:get_slashing_evidence
-src/consensus/pos.rs:save_state
-src/consensus/qc.rs:new_zk_invalid_attestation
-src/consensus/qc.rs:sign_attestation
 src/core/account.rs:add_role
 src/core/account.rs:clear_dirty
 src/core/account.rs:dirty_account_count
