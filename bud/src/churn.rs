@@ -31,7 +31,8 @@ impl QuadRing {
     /// its tail, and the function returned the wrong bytes as the recovered
     /// block with no way for the caller to tell.
     pub fn repair_one_missing(blocks: &[Vec<u8>], parity: &[u8]) -> Option<Vec<u8>> {
-        if blocks.iter().any(|b| b.len() != parity.len()) {
+        // With no survivor the "repair" would hand back the parity itself.
+        if blocks.is_empty() || blocks.iter().any(|b| b.len() != parity.len()) {
             return None;
         }
         let mut out = parity.to_vec();
@@ -215,6 +216,10 @@ mod tests {
             vec![7, 7, 7, 7],
         ];
         assert!(QuadRing::repair_one_missing(&long, &parity).is_none());
+        assert!(
+            QuadRing::repair_one_missing(&[], &parity).is_none(),
+            "no survivors: the parity is not a lost block"
+        );
     }
 
     #[test]
