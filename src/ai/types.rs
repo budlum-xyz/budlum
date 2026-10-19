@@ -74,18 +74,6 @@ impl crate::core::map_keys::MapKey for AiRequestId {
     }
 }
 
-/// Canonical AI Inference Result Identifier (`[u8; 32]`).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
-)]
-pub struct AiResultId(pub [u8; 32]);
-
-impl AiResultId {
-    pub fn new(id: [u8; 32]) -> Self {
-        Self(id)
-    }
-}
-
 /// Bounded byte wrapper verifying length bounds (`<= MAX_INFERENCE_REF_BYTES`).
 ///
 /// Deserialization goes through `try_new`, so a serde path (snapshot JSON,
