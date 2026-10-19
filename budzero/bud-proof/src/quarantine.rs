@@ -48,6 +48,18 @@ impl QuarantineReason {
         }
     }
 
+    /// Inverse of [`Self::as_byte`]; `None` for an unknown byte.
+    #[must_use]
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::NonCanonicalProgram),
+            1 => Some(Self::TransferViolation),
+            2 => Some(Self::InvalidProof),
+            3 => Some(Self::PublicInputsMismatch),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -138,6 +150,50 @@ impl QuarantineLedger {
         self.entries.is_empty()
     }
 
+    /// One line per entry, oldest first: `<program hash hex> <reason byte>`.
+    /// Replaying the lines through [`Self::from_text`] rebuilds the same
+    /// ledger, rule ids included, because the rule id is derived.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        let mut rows: Vec<&QuarantineEntry> = self.entries.values().collect();
+        rows.sort_by_key(|e| e.seq);
+        let mut out = String::new();
+        for e in rows {
+            for byte in e.program_hash {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out.push(' ');
+            out.push_str(&e.reason.as_byte().to_string());
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Parse the text written by [`Self::to_text`]. A malformed line is an
+    /// error: a ledger that silently dropped a ban would lift it.
+    pub fn from_text(text: &str) -> Result<Self, String> {
+        let mut ledger = Self::new();
+        for (index, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let bad = || format!("quarantine line {} is malformed", index + 1);
+            let (hash_hex, reason_text) = line.split_once(' ').ok_or_else(bad)?;
+            if hash_hex.len() != 64 || !hash_hex.is_ascii() {
+                return Err(bad());
+            }
+            let mut program_hash = [0u8; 32];
+            for (slot, pair) in program_hash.iter_mut().zip(hash_hex.as_bytes().chunks(2)) {
+                let digits = std::str::from_utf8(pair).map_err(|_| bad())?;
+                *slot = u8::from_str_radix(digits, 16).map_err(|_| bad())?;
+            }
+            let reason_byte: u8 = reason_text.trim().parse().map_err(|_| bad())?;
+            let reason = QuarantineReason::from_byte(reason_byte).ok_or_else(bad)?;
+            ledger.ban(program_hash, reason);
+        }
+        Ok(ledger)
+    }
+
     fn evict_if_needed(&mut self) {
         while self.entries.len() >= MAX_QUARANTINE_ENTRIES {
             let oldest = self
@@ -177,6 +233,22 @@ mod tests {
             QuarantineLedger::derive_rule_id(&hash_of(2)),
             "different programs derive different rules"
         );
+    }
+
+    #[test]
+    fn text_round_trip_keeps_every_ban() {
+        let mut ledger = QuarantineLedger::new();
+        ledger.ban(hash_of(1), QuarantineReason::InvalidProof);
+        ledger.ban(hash_of(2), QuarantineReason::TransferViolation);
+        let restored = QuarantineLedger::from_text(&ledger.to_text()).unwrap();
+        assert_eq!(restored.len(), 2);
+        assert!(restored.is_banned(&hash_of(1)));
+        assert_eq!(
+            restored.entry(&hash_of(2)).map(|e| e.reason),
+            Some(QuarantineReason::TransferViolation)
+        );
+        assert!(QuarantineLedger::from_text("zz 1\n").is_err());
+        assert!(QuarantineLedger::from_text(&format!("{} 9\n", "00".repeat(32))).is_err());
     }
 
     #[test]
