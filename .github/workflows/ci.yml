@@ -179,6 +179,40 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
+  budlum-bpqs:
+    # P02-F04 (BLG-0040): crates/bpqs was a package no workflow tested - the
+    # fuzz target and a cargo-hack check were not a test gate. The research
+    # line's KAT freeze, its quota counter and its verifier refusals all live
+    # here, and a silent break in them is exactly what a gate exists for.
+    name: Budlum-BPQS (research crate gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-bpqs
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/bpqs/Cargo.toml --all -- --check
+      - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path crates/bpqs/Cargo.toml --all-targets -- -D warnings
+      - name: Test
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path crates/bpqs/Cargo.toml --verbose 2>&1 | tee /tmp/bpqstests.log
   budlum-quality:
     name: Budlum Core quality
     runs-on: ubuntu-latest
