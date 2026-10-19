@@ -409,8 +409,11 @@ impl AiRegistry {
         // Equivocation detection:
         // If this verifier already submitted a result with a DIFFERENT
         // Commitment for the same request, that is equivocation.
-        let entries = self.results.entry(result.request_id).or_default();
-        if let Some(existing) = entries.iter().find(|r| r.verifier == result.verifier) {
+        let already_submitted = self
+            .results
+            .get(&result.request_id)
+            .and_then(|entries| entries.iter().find(|r| r.verifier == result.verifier));
+        if let Some(existing) = already_submitted {
             if existing.output_commitment == result.output_commitment {
                 return Err("Verifier has already submitted a result for this request".into());
             } else {
@@ -452,6 +455,7 @@ impl AiRegistry {
                 result.request_id.to_hex()
             ));
         }
+        let entries = self.results.entry(result.request_id).or_default();
         entries.push(result.clone());
 
         // Record verifier QoS metrics.

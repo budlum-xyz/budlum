@@ -3557,6 +3557,20 @@ mod tests {
     }
 
     #[test]
+    fn test_refused_result_on_cancelled_request_leaves_no_results_row() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        assert!(submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 16).is_err());
+
+        assert!(!registry.results.contains_key(&req_id));
+    }
+
+    #[test]
     fn test_prune_includes_new_fields() {
         // Prune_expired should clean up cancelled_requests
         // That are past the retention window.
