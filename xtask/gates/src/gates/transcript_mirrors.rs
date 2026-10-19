@@ -72,6 +72,8 @@ fn classify(arg: &str) -> &'static str {
 /// the sequence.
 fn absorptions(text: &str) -> Vec<Absorb> {
     let mut out = Vec::new();
+    // Test-only absorptions after the test module marker are not transcript.
+    let text = text.split("\n#[cfg(test)]").next().unwrap_or(text);
     for line in text.lines() {
         let t = line.trim();
         if t.starts_with("//") || t.starts_with("///") {
@@ -200,4 +202,15 @@ pub fn self_test() -> Result<String, String> {
          in a comment are all told apart"
             .into(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_only_absorptions_are_not_counted() {
+        let src = "fn f() {\n    challenger.observe(root);\n}\n#[cfg(test)]\nmod t {\n    fn g() { challenger.observe(root); }\n}\n";
+        assert_eq!(absorptions(src).len(), 1);
+    }
 }
