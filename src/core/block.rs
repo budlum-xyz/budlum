@@ -54,6 +54,92 @@ pub struct BlockHeader {
 /// the hash identical everywhere.
 const EVIDENCE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/slashing-evidence";
 
+/// Borrowed view of the fields both `BlockHeader` and `Block` fold into the
+/// block hash, so the preimage is written once (P20-F11).
+struct BlockPreimage<'a> {
+    index: u64,
+    timestamp: u128,
+    previous_hash: &'a str,
+    tx_root: &'a str,
+    nonce: u64,
+    producer: Option<&'a Address>,
+    slashing_evidence: Option<&'a Vec<SlashingEvidence>>,
+    chain_id: u64,
+    state_root: &'a str,
+    epoch: u64,
+    slot: u64,
+    vrf_output: &'a [u8],
+    vrf_proof: &'a [u8],
+    validator_set_hash: &'a str,
+    storage_root: Option<crate::domain::types::Hash32>,
+    shards_root: Option<&'a [u8; 32]>,
+}
+
+fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
+    let producer_bytes = p
+        .producer
+        .map(|addr| addr.as_bytes().to_vec())
+        .unwrap_or_default();
+
+    let evidence_bytes = p
+        .slashing_evidence
+        .map(|e| {
+            // SECURITY: block hash input must not silently
+            // Hash empty bytes on serialize failure (collision risk).
+            bincode::serialize(e).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec())
+        })
+        .unwrap_or_default();
+
+    let index_bytes = p.index.to_le_bytes();
+    let timestamp_bytes = p.timestamp.to_le_bytes();
+    let nonce_bytes = p.nonce.to_le_bytes();
+    let chain_id_bytes = p.chain_id.to_le_bytes();
+    let epoch_bytes = p.epoch.to_le_bytes();
+    let slot_bytes = p.slot.to_le_bytes();
+    // Presence-tagged: an absent root and a present all-zero root used to
+    // fold into the same 32 zero bytes, so two distinct headers hashed
+    // (and signed) identically. The tag byte keeps them apart, the way
+    // `shards_root` below already is; the domain tag moved to V4 so no
+    // V3 hash can be replayed as a V4 one.
+    //
+    // Hash-format activation policy (this header hash, the full-block
+    // hash below, and the settlement global header alike):
+    // `BDLM_BLOCK_V4` is the only hash domain from the USL genesis
+    // onward. There is no V3-imaged chain state to carry over - mainnet
+    // has not launched (its genesis timestamp is still TBD) and
+    // devnet/testnet data resets with its genesis - so no dual-path
+    // verification, persisted hash-format version or activation height
+    // exists or is needed. The cost is deliberate: any node holding
+    // pre-USL blocks must resync from the new genesis. A format change
+    // AFTER launch is a different matter: it needs an explicit
+    // activation height, a persisted format version, and verification
+    // routed through the preimage of the block's own format, recorded
+    // in the same commit as the new tag.
+    let storage_root_bytes = presence_tagged(p.storage_root);
+    let mut fields: Vec<&[u8]> = vec![
+        b"BDLM_BLOCK_V4",
+        &index_bytes,
+        &timestamp_bytes,
+        p.previous_hash.as_bytes(),
+        p.tx_root.as_bytes(),
+        &nonce_bytes,
+        &producer_bytes,
+        &evidence_bytes,
+        &chain_id_bytes,
+        p.state_root.as_bytes(),
+        &epoch_bytes,
+        &slot_bytes,
+        &p.vrf_output,
+        &p.vrf_proof,
+        p.validator_set_hash.as_bytes(),
+        &storage_root_bytes,
+    ];
+    if let Some(shards_root) = &p.shards_root {
+        fields.push(shards_root.as_slice());
+    }
+    hash_fields_bytes(&fields)
+}
+
 impl BlockHeader {
     pub fn from_block(block: &Block) -> Self {
         BlockHeader {
@@ -82,70 +168,24 @@ impl BlockHeader {
     }
 
     pub fn calculate_hash_bytes(&self) -> [u8; 32] {
-        let producer_bytes = self
-            .producer
-            .as_ref()
-            .map(|p| p.as_bytes().to_vec())
-            .unwrap_or_default();
-
-        let evidence_bytes = self
-            .slashing_evidence
-            .as_ref()
-            .map(|e| {
-                // SECURITY: block hash input must not silently
-                // Hash empty bytes on serialize failure (collision risk).
-                bincode::serialize(e).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec())
-            })
-            .unwrap_or_default();
-
-        let index_bytes = self.index.to_le_bytes();
-        let timestamp_bytes = self.timestamp.to_le_bytes();
-        let nonce_bytes = self.nonce.to_le_bytes();
-        let chain_id_bytes = self.chain_id.to_le_bytes();
-        let epoch_bytes = self.epoch.to_le_bytes();
-        let slot_bytes = self.slot.to_le_bytes();
-        // Presence-tagged: an absent root and a present all-zero root used to
-        // fold into the same 32 zero bytes, so two distinct headers hashed
-        // (and signed) identically. The tag byte keeps them apart, the way
-        // `shards_root` below already is; the domain tag moved to V4 so no
-        // V3 hash can be replayed as a V4 one.
-        //
-        // Hash-format activation policy (this header hash, the full-block
-        // hash below, and the settlement global header alike):
-        // `BDLM_BLOCK_V4` is the only hash domain from the USL genesis
-        // onward. There is no V3-imaged chain state to carry over - mainnet
-        // has not launched (its genesis timestamp is still TBD) and
-        // devnet/testnet data resets with its genesis - so no dual-path
-        // verification, persisted hash-format version or activation height
-        // exists or is needed. The cost is deliberate: any node holding
-        // pre-USL blocks must resync from the new genesis. A format change
-        // AFTER launch is a different matter: it needs an explicit
-        // activation height, a persisted format version, and verification
-        // routed through the preimage of the block's own format, recorded
-        // in the same commit as the new tag.
-        let storage_root_bytes = presence_tagged(self.storage_root);
-        let mut fields: Vec<&[u8]> = vec![
-            b"BDLM_BLOCK_V4",
-            &index_bytes,
-            &timestamp_bytes,
-            self.previous_hash.as_bytes(),
-            self.tx_root.as_bytes(),
-            &nonce_bytes,
-            &producer_bytes,
-            &evidence_bytes,
-            &chain_id_bytes,
-            self.state_root.as_bytes(),
-            &epoch_bytes,
-            &slot_bytes,
-            &self.vrf_output,
-            &self.vrf_proof,
-            self.validator_set_hash.as_bytes(),
-            &storage_root_bytes,
-        ];
-        if let Some(shards_root) = &self.shards_root {
-            fields.push(shards_root.as_slice());
-        }
-        hash_fields_bytes(&fields)
+        hash_block_preimage(&BlockPreimage {
+            index: self.index,
+            timestamp: self.timestamp,
+            previous_hash: &self.previous_hash,
+            tx_root: &self.tx_root,
+            nonce: self.nonce,
+            producer: self.producer.as_ref(),
+            slashing_evidence: self.slashing_evidence.as_ref(),
+            chain_id: self.chain_id,
+            state_root: &self.state_root,
+            epoch: self.epoch,
+            slot: self.slot,
+            vrf_output: &self.vrf_output,
+            vrf_proof: &self.vrf_proof,
+            validator_set_hash: &self.validator_set_hash,
+            storage_root: self.storage_root,
+            shards_root: self.shards_root.as_ref(),
+        })
     }
 
     pub fn verify_signature(&self, signature: &[u8]) -> bool {
@@ -341,57 +381,24 @@ impl Block {
     }
 
     pub fn calculate_hash_bytes(&self) -> [u8; 32] {
-        let producer_bytes = self
-            .producer
-            .as_ref()
-            .map(|p| p.as_bytes().to_vec())
-            .unwrap_or_default();
-        let evidence_bytes = self
-            .slashing_evidence
-            .as_ref()
-            .map(|e| {
-                // SECURITY: block hash input must not silently
-                // Hash empty bytes on serialize failure (collision risk).
-                bincode::serialize(e).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec())
-            })
-            .unwrap_or_default();
-
-        let index_bytes = self.index.to_le_bytes();
-        let timestamp_bytes = self.timestamp.to_le_bytes();
-        let nonce_bytes = self.nonce.to_le_bytes();
-        let chain_id_bytes = self.chain_id.to_le_bytes();
-        let epoch_bytes = self.epoch.to_le_bytes();
-        let slot_bytes = self.slot.to_le_bytes();
-        // Presence-tagged: an absent root and a present all-zero root used to
-        // fold into the same 32 zero bytes, so two distinct headers hashed
-        // (and signed) identically. The tag byte keeps them apart, the way
-        // `shards_root` below already is; the domain tag moved to V4 so no
-        // V3 hash can be replayed as a V4 one. Hash-format activation
-        // policy: see `BlockHeader::calculate_hash_bytes` - V4 is the only
-        // domain from the USL genesis onward.
-        let storage_root_bytes = presence_tagged(self.storage_root);
-        let mut fields: Vec<&[u8]> = vec![
-            b"BDLM_BLOCK_V4",
-            &index_bytes,
-            &timestamp_bytes,
-            self.previous_hash.as_bytes(),
-            self.tx_root.as_bytes(),
-            &nonce_bytes,
-            &producer_bytes,
-            &evidence_bytes,
-            &chain_id_bytes,
-            self.state_root.as_bytes(),
-            &epoch_bytes,
-            &slot_bytes,
-            &self.vrf_output,
-            &self.vrf_proof,
-            self.validator_set_hash.as_bytes(),
-            &storage_root_bytes,
-        ];
-        if let Some(shards_root) = &self.shards_root {
-            fields.push(shards_root.as_slice());
-        }
-        hash_fields_bytes(&fields)
+        hash_block_preimage(&BlockPreimage {
+            index: self.index,
+            timestamp: self.timestamp,
+            previous_hash: &self.previous_hash,
+            tx_root: &self.tx_root,
+            nonce: self.nonce,
+            producer: self.producer.as_ref(),
+            slashing_evidence: self.slashing_evidence.as_ref(),
+            chain_id: self.chain_id,
+            state_root: &self.state_root,
+            epoch: self.epoch,
+            slot: self.slot,
+            vrf_output: &self.vrf_output,
+            vrf_proof: &self.vrf_proof,
+            validator_set_hash: &self.validator_set_hash,
+            storage_root: self.storage_root,
+            shards_root: self.shards_root.as_ref(),
+        })
     }
     pub fn sign(&mut self, keypair: &KeyPair) {
         // Block producer signatures are intentionally still Ed25519 in V3
@@ -568,6 +575,19 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_and_block_share_one_hash_preimage() {
+        let mut block = Block::new(3, "ab".repeat(32), vec![]);
+        block.shards_root = Some([5u8; 32]);
+        block.storage_root = Some([6u8; 32]);
+        block.nonce = 9;
+        let header = BlockHeader::from_block(&block);
+        assert_eq!(header.calculate_hash(), block.calculate_hash());
+        block.shards_root = None;
+        let header = BlockHeader::from_block(&block);
+        assert_eq!(header.calculate_hash(), block.calculate_hash());
+    }
 
     #[test]
     fn mine_stops_at_nonce_exhaustion_and_impossible_difficulty() {
