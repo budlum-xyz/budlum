@@ -1526,6 +1526,7 @@ src/execution/proof_verifier.rs	const	GAS_PER_DEGREE_BIT
 src/execution/proof_verifier.rs	const	MAX_DEGREE_BITS
 src/execution/proof_verifier.rs	const	MIN_PROOF_FORMAT_VERSION
 src/execution/proof_verifier.rs	enum	ProofVerifyError
+src/execution/proof_verifier.rs	fn	verify
 src/execution/proof_verifier.rs	struct	VerifiedProof
 src/execution/zkvm.rs	fn	execute_bytecode_mainnet
 src/execution/zkvm.rs	fn	prove_bytecode
@@ -1617,6 +1618,8 @@ src/ai_inference/storage.rs	fn	is_training_corpus
 src/ai_inference/storage.rs	struct	AiDatasetStorageDeal
 src/ai_inference/verify.rs	fn	generate_and_verify_proof
 src/ai_inference/verify.rs	fn	verify_inference_stark
+src/mempool/pool.rs	fn	drain
+src/mempool/pool.rs	fn	max_pool_bytes
 src/network/gossip_dedup.rs	const	DEFAULT_DEDUP_WINDOW
 src/network/gossip_dedup.rs	const	MAX_DUPLICATE_COUNT
 src/network/gossip_dedup.rs	const	MAX_PEER_SCORE
