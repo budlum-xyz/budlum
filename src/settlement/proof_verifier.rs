@@ -45,6 +45,9 @@ impl std::fmt::Display for ProofVerificationError {
             ProofVerificationError::EventIndexMismatch => {
                 write!(f, "Event index does not match Merkle proof index")
             }
+            ProofVerificationError::EventMessageIdMismatch => {
+                write!(f, "cross-domain message body does not match its id")
+            }
             ProofVerificationError::EventLeafMismatch => {
                 write!(f, "Event leaf hash does not match Merkle proof leaf")
             }

@@ -1178,5 +1178,4 @@ mod tests {
         let err = verify_anchor_light(&anchor, &[], 8).unwrap_err();
         assert_eq!(err.kind(), "anchor-stale-epoch");
     }
-
 }

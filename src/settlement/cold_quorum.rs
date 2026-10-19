@@ -274,10 +274,16 @@ impl std::fmt::Display for QuorumError {
                 "cold quorum needs identities for all {device_count} devices, got {presented}"
             ),
             Self::DuplicateVerifyingKey { device_id } => {
-                write!(f, "cold quorum verifying key reused at device id {device_id}")
+                write!(
+                    f,
+                    "cold quorum verifying key reused at device id {device_id}"
+                )
             }
             Self::FixtureIdentity { device_id } => {
-                write!(f, "cold quorum refuses dev fixture identity at device id {device_id}")
+                write!(
+                    f,
+                    "cold quorum refuses dev fixture identity at device id {device_id}"
+                )
             }
             Self::EpochMismatch {
                 signer_epoch,
@@ -658,5 +664,4 @@ mod tests {
         let err = verify_quorum(&p, &identities, payload, 1, &signatures).unwrap_err();
         assert_eq!(err.kind(), "quorum-duplicate-verifying-key");
     }
-
 }
