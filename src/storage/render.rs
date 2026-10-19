@@ -294,6 +294,10 @@ fn zlib_stored(data: &[u8]) -> Vec<u8> {
 /// [`RenderError::MissingParam`] when the format needs a parameter the
 /// recipe did not carry (a non-square buffer, or an oversized PNG request).
 pub fn render(spec: &GeneratedSpec, format: &RenderFormat) -> Result<Vec<u8>, RenderError> {
+    // BLG-0418: refuse SVG expansion before generating the source raster.
+    if matches!(format, RenderFormat::Svg) {
+        svg_capacity(spec.output_len as usize)?;
+    }
     let pixels = generate_content(spec)?;
     match format {
         RenderFormat::Svg => render_svg(spec, &pixels),
@@ -336,14 +340,29 @@ fn square_side(output_len: u32) -> Result<u16, RenderError> {
     u16::try_from(side).map_err(|_| RenderError::MissingParam("square side"))
 }
 
+// At most 128 bytes per rect (u16 side, coordinates scaled by eight),
+// plus 256 bytes for the document wrapper. This bounds allocation and CPU
+// before writing any rect, rather than rejecting a 270 MB result at the gateway.
+fn svg_capacity(pixel_count: usize) -> Result<usize, RenderError> {
+    let bound = pixel_count
+        .checked_mul(128)
+        .and_then(|bytes| bytes.checked_add(256))
+        .ok_or(RenderError::MissingParam("svg output size"))?;
+    if bound > MAX_GENERATED_BYTES as usize {
+        return Err(RenderError::MissingParam("svg output size"));
+    }
+    Ok(bound)
+}
+
 fn render_svg(spec: &GeneratedSpec, pixels: &[u8]) -> Result<Vec<u8>, RenderError> {
+    let capacity = svg_capacity(pixels.len())?;
     let side = square_side(spec.output_len)?;
     // One pixel = one rect. For a 32x32 avatar that is 1024 rects, which is
     // small; larger buffers should use a path-based renderer (a separate
     // versioned step). The scale keeps coordinates in a readable range.
     let scale = 8u64;
     let view = u64::from(side) * scale;
-    let mut svg = String::with_capacity(pixels.len() * 12 + 128);
+    let mut svg = String::with_capacity(capacity);
     let _ = write!(
         svg,
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{view}\" height=\"{view}\" viewBox=\"0 0 {view} {view}\">"
@@ -628,6 +647,30 @@ pub fn render_and_verify(
 mod tests {
     use super::*;
     use crate::storage::generated::GeneratorId;
+
+    #[test]
+    fn svg_expansion_is_bounded_before_rendering() {
+        let max_pixels = (MAX_GENERATED_BYTES as usize - 256) / 128;
+        assert!(super::svg_capacity(max_pixels).is_ok());
+        assert_eq!(
+            super::svg_capacity(max_pixels + 1),
+            Err(RenderError::MissingParam("svg output size"))
+        );
+        assert!(super::svg_capacity(usize::MAX).is_err());
+        let mut spec = avatar_spec();
+        spec.output_len = MAX_GENERATED_BYTES;
+        // Even a bad generation budget must not run ahead of the size gate.
+        spec.step_budget = 0;
+        assert_eq!(
+            render(&spec, &RenderFormat::Svg),
+            Err(RenderError::MissingParam("svg output size"))
+        );
+        let ordinary = avatar_spec();
+        let bytes = render(&ordinary, &RenderFormat::Svg).expect("small SVG still renders");
+        assert!(bytes.len() <= super::svg_capacity(ordinary.output_len as usize).unwrap());
+        assert!(bytes.starts_with(b"<svg "));
+        assert!(bytes.ends_with(b"</svg>"));
+    }
 
     fn avatar_spec() -> GeneratedSpec {
         GeneratedSpec {
