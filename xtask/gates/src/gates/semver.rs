@@ -125,18 +125,102 @@ fn line_is_breakage(line: &str) -> bool {
         || line.contains("requires new minor version")
 }
 
-/// Does the exceptions file carry at least one non-comment, non-blank line?
-fn has_justified_entries(path: &Path) -> Result<Vec<String>, String> {
+/// One accepted breakage from `.github/semver-exceptions.txt`:
+/// `<lint name or API surface> | <justification> | <approval evidence>`.
+struct Exception {
+    /// The first field: a semver-checks lint name, or an API surface that
+    /// must occur in a reported item.
+    surface: String,
+    /// The whole line, for the verdict text.
+    line: String,
+}
+
+/// The live (non-comment, non-blank) lines of the exceptions file, each
+/// checked for the three required fields. A line without a surface, a
+/// justification and an approval reference is refused rather than counted,
+/// so a stray word cannot become a blanket exception.
+fn read_exceptions(path: &Path) -> Result<Vec<Exception>, String> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
     let content =
         fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    Ok(content
+    let mut out = Vec::new();
+    for line in content
         .lines()
         .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
-        .map(str::to_string)
-        .collect())
+    {
+        let fields: Vec<&str> = line.split('|').map(str::trim).collect();
+        if fields.len() < 3 || fields.iter().take(3).any(|f| f.is_empty()) {
+            return Err(format!(
+                "SEMVER GATE: FAIL - malformed exception line (need `<surface> | \
+                 <justification> | <approval evidence>`): {line}"
+            ));
+        }
+        out.push(Exception {
+            surface: fields[0].to_string(),
+            line: line.to_string(),
+        });
+    }
+    Ok(out)
+}
+
+/// One failure block of a cargo-semver-checks report.
+struct Failure {
+    /// The lint name from `--- failure <lint>: <description> ---`.
+    lint: String,
+    /// The items under `Failed in:`.
+    items: Vec<String>,
+}
+
+/// Parse the failure blocks out of a report.
+fn parse_failures(report: &str) -> Vec<Failure> {
+    let mut out: Vec<Failure> = Vec::new();
+    let mut in_items = false;
+    for line in report.lines() {
+        let t = line.trim();
+        let header = t
+            .strip_prefix("--- failure ")
+            .or_else(|| t.strip_prefix("--- warning "));
+        if let Some(rest) = header {
+            let lint = rest.split(':').next().unwrap_or(rest).trim().to_string();
+            out.push(Failure {
+                lint,
+                items: Vec::new(),
+            });
+            in_items = false;
+            continue;
+        }
+        if t.starts_with("---") {
+            in_items = false;
+            continue;
+        }
+        if t.starts_with("Failed in:") {
+            in_items = true;
+            continue;
+        }
+        if in_items {
+            if t.is_empty() {
+                in_items = false;
+            } else if let Some(cur) = out.last_mut() {
+                cur.items.push(t.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Is every item of the failure accepted by some exception? A failure with
+/// no listed items is accepted only by an exception naming its lint.
+fn failure_is_covered(failure: &Failure, exceptions: &[Exception]) -> bool {
+    if exceptions.iter().any(|e| e.surface == failure.lint) {
+        return true;
+    }
+    !failure.items.is_empty()
+        && failure
+            .items
+            .iter()
+            .all(|item| exceptions.iter().any(|e| item.contains(e.surface.as_str())))
 }
 
 /// Classification: report text + exceptions file -> verdict.
@@ -144,6 +228,10 @@ fn has_justified_entries(path: &Path) -> Result<Vec<String>, String> {
 /// 0 = pass, 1 = reject, carried as `Ok`/`Err` so the gate can be called from
 /// a test without a process exit. The canaries run this directly, which is
 /// what the shell gate's `--self-test` did with `classify_semver_report`.
+///
+/// An exception applies to the breakage it names and to nothing else: every
+/// failure item in the report must be matched by a live exception line. One
+/// live line used to turn every breakage in the crate into a pass.
 fn classify_report(report: &str, exc: &Path) -> Verdict {
     let stripped = strip_ansi(report);
     let lines: Vec<&str> = stripped.lines().collect();
@@ -161,25 +249,46 @@ fn classify_report(report: &str, exc: &Path) -> Verdict {
              infrastructure error (fail-closed classification).",
         ));
     }
-    let entries = has_justified_entries(exc)?;
-    if !entries.is_empty() {
+    let exceptions = read_exceptions(exc)?;
+    let failures = parse_failures(&stripped);
+    let uncovered: Vec<&Failure> = failures
+        .iter()
+        .filter(|f| !failure_is_covered(f, &exceptions))
+        .collect();
+    if !failures.is_empty() && uncovered.is_empty() {
         let mut msg = String::from(
-            "SEMVER GATE: PASS-EXCEPTION - .github/semver-exceptions.txt contains a \
-             justified acceptance:\n",
+            "SEMVER GATE: PASS-EXCEPTION - every reported breakage is covered by a line of \
+             .github/semver-exceptions.txt:\n",
         );
-        for entry in entries {
-            msg.push_str("  ISTISNA: ");
-            msg.push_str(&entry);
+        for e in &exceptions {
+            msg.push_str("  EXCEPTION: ");
+            msg.push_str(&e.line);
             msg.push('\n');
         }
         return Ok(msg);
     }
 
-    Err(String::from(
-        "SEMVER GATE: FAIL - a public API breakage with no exception.\n\
-         Options: (a) revert the breakage, (b) if MAJOR/MINOR is intended and \
-         approved, add a justified line to .github/semver-exceptions.txt.",
-    ))
+    let mut msg = String::from("SEMVER GATE: FAIL - a public API breakage with no exception");
+    if failures.is_empty() {
+        msg.push_str(
+            ": the report names breakage but no failure block could be read, so no exception \
+             can be matched to it",
+        );
+    } else {
+        msg.push_str(" covering:");
+        for f in &uncovered {
+            msg.push_str(&format!("\n  {} ({} item(s))", f.lint, f.items.len()));
+            for item in f.items.iter().take(5) {
+                msg.push_str(&format!("\n    {item}"));
+            }
+        }
+    }
+    msg.push_str(
+        "\nOptions: (a) revert the breakage, (b) if MAJOR/MINOR is intended and \
+         approved, add a justified line to .github/semver-exceptions.txt naming the \
+         lint or the API surface.",
+    );
+    Err(msg)
 }
 
 /// # Errors
@@ -460,7 +569,11 @@ pub fn self_test() -> Result<String, String> {
     let empty_exc = tmp.join("none");
     let filled_exc = tmp.join("some");
     fs::write(&empty_exc, "# comment\n\n").map_err(|e| e.to_string())?;
-    fs::write(&filled_exc, "BDLM-1: a known breakage, approved\n").map_err(|e| e.to_string())?;
+    fs::write(
+        &filled_exc,
+        "struct_missing | a known breakage | approved\n",
+    )
+    .map_err(|e| e.to_string())?;
 
     // An infra crash must be rejected even when the exceptions file is full:
     // a crash says "unknown", not "no breakage". Each case carries a real
@@ -513,6 +626,32 @@ pub fn self_test() -> Result<String, String> {
         let _ = fs::remove_dir_all(&tmp);
         return Err(String::from(
             "self-test: a justified exception was not accepted (the gate refuses everything)",
+        ));
+    }
+
+    // An exception names the breakage it accepts and nothing else: the same
+    // line must not accept a different lint, and a line without a
+    // justification and an approval is refused outright.
+    let other = "--- failure function_missing: pub function removed\n\nFailed in:\n  function other_fn in file src/x.rs:1\n";
+    if classify_report(other, &filled_exc).is_ok() {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "self-test: an exception for one lint accepted a different breakage",
+        ));
+    }
+    let mixed = "--- failure struct_missing: pub struct removed\n\nFailed in:\n  struct Gone in file src/x.rs:1\n\n--- failure function_missing: pub function removed\n\nFailed in:\n  function other_fn in file src/x.rs:1\n";
+    if classify_report(mixed, &filled_exc).is_ok() {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "self-test: one covered failure let an uncovered one through",
+        ));
+    }
+    let bare = tmp.join("bare");
+    fs::write(&bare, "BDLM-1: a known breakage, approved\n").map_err(|e| e.to_string())?;
+    if classify_report(breaking, &bare).is_ok() {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "self-test: an exception line with no justification and approval was accepted",
         ));
     }
 
@@ -653,7 +792,7 @@ mod tests {
     fn infra_is_never_masked() {
         let d = scratch();
         let exc = d.join("some");
-        fs::write(&exc, "BDLM-1: onayli\n").expect("fixture");
+        fs::write(&exc, "struct_missing | accepted | approval\n").expect("fixture");
         for case in [
             "error: could not document `budlum-core`",
             "error[E0432]: unresolved import",
@@ -666,12 +805,39 @@ mod tests {
     }
 
     #[test]
+    fn an_exception_covers_only_what_it_names() {
+        let d = scratch();
+        let exc = d.join("exc");
+        fs::write(&exc, "BridgeState::lock | new envelope | decision\n").expect("fixture");
+        let covered = "--- failure method_parameter_count_changed: count changed ---\n\nFailed in:\n  BridgeState::lock in file src/a.rs:1\n";
+        let other = "--- failure function_missing: removed ---\n\nFailed in:\n  function gone in file src/a.rs:1\n";
+        assert!(classify_report(covered, &exc).is_ok());
+        assert!(classify_report(other, &exc).is_err());
+        assert!(classify_report(&format!("{covered}\n{other}"), &exc).is_err());
+        // A report that names breakage but has no readable failure block
+        // cannot be matched to an exception.
+        assert!(classify_report("crate requires new major version\n", &exc).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_malformed_exception_line_is_refused() {
+        let d = scratch();
+        let exc = d.join("exc");
+        fs::write(&exc, "just a word\n").expect("fixture");
+        let breaking =
+            "--- failure struct_missing: gone\n\nFailed in:\n  struct X in file a.rs:1\n";
+        assert!(classify_report(breaking, &exc).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn breakage_with_and_without_exception() {
         let d = scratch();
         let empty = d.join("empty");
         let filled = d.join("filled");
         fs::write(&empty, "# comment only\n").expect("fixture");
-        fs::write(&filled, "method_missing: X | justification | approval\n").expect("fixture");
+        fs::write(&filled, "struct_missing | justification | approval\n").expect("fixture");
         let breaking = "--- failure struct_missing: pub struct removed\n";
         assert!(classify_report(breaking, &empty).is_err());
         assert!(classify_report(breaking, &filled).is_ok());
