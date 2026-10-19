@@ -22,7 +22,7 @@ pub enum ConnState {
 }
 
 /// The connection configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WsConfig {
     pub url: String,
     /// The wait between reconnection attempts (in seconds).
@@ -30,6 +30,17 @@ pub struct WsConfig {
     /// The maximum number of consecutive reconnection attempts (0 means
     /// unlimited).
     pub max_reconnects: u32,
+}
+
+/// The url may carry credentials, so `Debug` never prints it.
+impl std::fmt::Debug for WsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WsConfig")
+            .field("url", &"<redacted>")
+            .field("reconnect_delay_secs", &self.reconnect_delay_secs)
+            .field("max_reconnects", &self.max_reconnects)
+            .finish()
+    }
 }
 
 /// The kill signal: broadcast to every listener; once `trigger()` is called,
@@ -119,6 +130,16 @@ impl SessionTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_does_not_show_the_url() {
+        let config = WsConfig {
+            url: "wss://host/stream?key=hunter2".into(),
+            reconnect_delay_secs: 1,
+            max_reconnects: 3,
+        };
+        assert!(!format!("{config:?}").contains("hunter2"));
+    }
 
     #[test]
     fn kill_signal_is_idempotent() {
