@@ -4429,6 +4429,20 @@ impl ChainActor {
                         let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
                         continue;
                     }
+                    let current_epoch = self.blockchain.last_block().index
+                        / crate::core::chain_config::epoch_len_for_chain_id(
+                            self.blockchain.chain_id,
+                        );
+                    if let Err(e) =
+                        crate::domain::storage_deal::StorageRegistry::validate_challenge_window(
+                            request.challenge_epoch,
+                            request.deadline_epoch,
+                            current_epoch,
+                        )
+                    {
+                        let _ = response.send(Err(e.to_string()));
+                        continue;
+                    }
                     let opener = request
                         .opener
                         .unwrap_or(crate::core::address::Address::zero());
