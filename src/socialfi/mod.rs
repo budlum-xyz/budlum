@@ -12,6 +12,11 @@ use std::collections::BTreeMap;
 pub mod vault;
 pub use vault::{execute_vault_tx, VaultError, VaultRegistry, VaultTx};
 
+/// Longest tag in bytes.
+pub const MAX_TAG_BYTES: usize = 64;
+/// Most tags one NFT can carry.
+pub const MAX_TAGS_PER_NFT: usize = 16;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NftRegistry {
     /// Id -> nft
@@ -78,8 +83,14 @@ impl NftRegistry {
     }
 
     pub fn add_tag(&mut self, id: u64, tag: String) -> Result<(), NftError> {
+        if tag.is_empty() || tag.len() > MAX_TAG_BYTES {
+            return Err(NftError::InvalidTag);
+        }
         let nft = self.nfts.get_mut(&id).ok_or(NftError::NotFound)?;
         if !nft.tags.contains(&tag) {
+            if nft.tags.len() >= MAX_TAGS_PER_NFT {
+                return Err(NftError::TooManyTags);
+            }
             nft.tags.push(tag);
         }
         Ok(())
