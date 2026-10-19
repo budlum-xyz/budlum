@@ -1198,6 +1198,8 @@ jobs:
           cargo test --manifest-path crates/wallet-core/Cargo.toml 2>&1 | tee /tmp/wallet-core-gate.txt
           cargo test --manifest-path crates/wallet-core/Cargo.toml --features uniffi --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
           cargo test --manifest-path crates/wallet-core/Cargo.toml --features wasm --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
+          # The production feature is the build that reads OS entropy and signs hedged.
+          cargo test --manifest-path crates/wallet-core/Cargo.toml --features production --lib
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-core-gate /tmp/wallet-core-gate.txt
 
   # ============================ Budscan (web3 tarayici cekirdegi) ============================
