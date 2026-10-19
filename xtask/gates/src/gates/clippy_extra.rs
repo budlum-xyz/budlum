@@ -4,11 +4,9 @@
 //! --message-format=json` stream and counts `clippy::*` warnings; the count
 //! must not exceed the baseline in `.github/clippy-extra-baseline.txt`.
 //!
-//! The crate deliberately has no dependencies (a gate sits in the trust
-//! boundary), so the JSON is parsed with a minimal line-level scanner rather
-//! than `serde_json`: a `compiler-message` reason, a `warning` level and a
-//! `clippy::` code on the same line. That is exactly the field triple the
-//! shell gate's python counted, matched without pulling in a JSON parser.
+//! Each line is parsed with `serde_json`. A line counts when it has the
+//! `compiler-message` reason, a `warning` level and a `clippy::` code. That is
+//! exactly the field triple the shell gate's python counted.
 //!
 //! ## The ratchet has two directions
 //!

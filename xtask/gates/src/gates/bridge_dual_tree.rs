@@ -40,9 +40,6 @@ fn root_body(src: &str) -> Option<String> {
     None
 }
 
-/// # Errors
-///
-/// Returns the list of violated claims.
 /// Formats the findings the way every gate in this crate reports them.
 fn report(problems: &[String]) -> String {
     let mut msg = String::new();
@@ -52,6 +49,9 @@ fn report(problems: &[String]) -> String {
     msg
 }
 
+/// # Errors
+///
+/// Returns the list of violated claims.
 pub fn run(root: &Path) -> Result<String, String> {
     let f = root.join("src/cross_domain/bridge.rs");
     if !f.is_file() {
