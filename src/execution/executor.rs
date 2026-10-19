@@ -2537,9 +2537,29 @@ impl Executor {
                     &mut state.poa_onboarding,
                     &tx.from,
                     poa_tx.clone(),
-                    state.epoch_index,
+                    state.current_block_height,
                 )
                 .map_err(|e| BudlumError::validation("poa_onboarding_tx_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::RoleBond { role } => {
+                // BLG-0092 (P04-F10): the verifier family's production
+                // registration door. The bond is the signed amount; the role
+                // seat is the signed id; nothing else crosses.
+                if tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "role_bond_shape",
+                        "a role bond requires zero recipient and empty data",
+                    ));
+                }
+                let role = crate::registry::role::RoleId(*role);
+                state
+                    .bond_role(&tx.from, role, tx.amount)
+                    .map_err(|e| BudlumError::validation("role_bond_failed", e.to_string()))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
