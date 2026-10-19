@@ -10,11 +10,11 @@ const PQ_DATA_LABEL: &str = "BUD_PQ_KEY";
 const ED25519_BINDING_TEST_MESSAGE: &[u8] = b"BUDLUM_PKCS11_ED25519_BINDING_V1";
 
 pub struct Pkcs11Signer {
-    #[allow(dead_code)]
+    /// Read by [`Self::connection_info`] (F12): no dead-code allow here.
     module_path: String,
-    #[allow(dead_code)]
+    /// Read by [`Self::connection_info`] (F12).
     slot_id: u64,
-    #[allow(dead_code)]
+    /// Read by [`Self::connection_info`] (F12).
     token_pin_env: String,
     /// Label that picks the consensus key when the slot holds more than one Ed25519 pair.
     key_label: Option<String>,
@@ -50,41 +50,41 @@ impl Pkcs11Signer {
         token_pin_env: String,
         key_label: Option<String>,
     ) -> Result<Self, CryptoError> {
-        Self::new_with_software_fallback_policy(
-            module_path,
-            slot_id,
-            token_pin_env,
-            key_label,
-            true,
-        )
+        Self::connect(module_path, slot_id, token_pin_env, key_label)
     }
 
     /// Construct a PKCS#11 signer without loading extractable BLS/PQ secret
-    /// Material into process memory. Mainnet vendor-native validators must use
-    /// This path: BLS/PQ signing is served only through configured vendor
-    /// Mechanisms and any vendor failure is fail-closed by
+    /// material into process memory. Mainnet vendor-native validators must use
+    /// this path: BLS/PQ signing is served only through configured vendor
+    /// mechanisms and any vendor failure is fail-closed by
     /// [`Self::require_vendor_native_signing`].
+    ///
+    /// F12: there is no software fallback left to load, so this is the same
+    /// extractable-free session as [`Self::new`]; the two names are kept
+    /// because callers use both and the semantics each name promises.
     pub fn new_without_software_fallback(
         module_path: String,
         slot_id: u64,
         token_pin_env: String,
         key_label: Option<String>,
     ) -> Result<Self, CryptoError> {
-        Self::new_with_software_fallback_policy(
-            module_path,
-            slot_id,
-            token_pin_env,
-            key_label,
-            false,
+        Self::connect(module_path, slot_id, token_pin_env, key_label)
+    }
+
+    /// The HSM connection identity this signer is bound to (F12). Logged at
+    /// startup so an operator can confirm which module and slot answered.
+    pub fn connection_info(&self) -> String {
+        format!(
+            "PKCS#11 module '{}' slot {} pin-env '{}'",
+            self.module_path, self.slot_id, self.token_pin_env
         )
     }
 
-    fn new_with_software_fallback_policy(
+    fn connect(
         module_path: String,
         slot_id: u64,
         token_pin_env: String,
         key_label: Option<String>,
-        _load_software_fallback: bool,
     ) -> Result<Self, CryptoError> {
         let pin = std::env::var(&token_pin_env).map_err(|e| {
             CryptoError::KeyGeneration(format!(
