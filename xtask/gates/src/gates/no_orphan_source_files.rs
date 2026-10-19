@@ -455,11 +455,18 @@ fn exempt(rel: &str) -> bool {
         if p == "bin" && i > 0 && parts[i - 1] == "src" {
             return true;
         }
-        if matches!(p, "tests" | "benches" | "examples") {
+        if is_target_dir(&parts, i) {
             return true;
         }
     }
     false
+}
+
+/// Is `parts[i]` a `tests`, `benches` or `examples` directory that Cargo
+/// discovers? Only a sibling of `src` counts. Below a `src` component such a
+/// directory is a module tree (`src/tests/`) that a `mod` has to declare.
+fn is_target_dir(parts: &[&str], i: usize) -> bool {
+    matches!(parts[i], "tests" | "benches" | "examples") && !parts[..i].contains(&"src")
 }
 
 /// A crate root: the compiler starts here without anyone declaring it.
@@ -480,7 +487,7 @@ fn is_crate_root(rel: &str) -> bool {
         if parts[i] == "bin" && i > 0 && parts[i - 1] == "src" {
             return true;
         }
-        if matches!(parts[i], "tests" | "benches" | "examples") {
+        if is_target_dir(&parts, i) {
             return true;
         }
     }
@@ -890,5 +897,19 @@ mod root_tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(missing.is_err());
         assert!(orphan.is_err());
+    }
+}
+
+#[cfg(test)]
+mod target_dir_tests {
+    use super::*;
+
+    #[test]
+    fn a_tests_directory_below_src_is_a_module_tree() {
+        assert!(exempt("budzero/bud-vm/tests/x.rs"));
+        assert!(is_crate_root("crates/bpqs/examples/x.rs"));
+        assert!(!exempt("src/tests/undeclared.rs"));
+        assert!(!is_crate_root("src/tests/undeclared.rs"));
+        assert!(exempt("src/tests/mod.rs"));
     }
 }
