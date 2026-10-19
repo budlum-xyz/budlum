@@ -60,12 +60,14 @@ pub const fn activation_delay_epochs(p_type: &ProposalType) -> u64 {
         ProposalType::VerifyHubApp { .. }
         | ProposalType::SetEncryptionPolicy(_)
         | ProposalType::SetConstitutionParameter(_)
-        | ProposalType::UnfreezeConsensusDomain { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
+        | ProposalType::UnfreezeConsensusDomain { .. }
+        | ProposalType::PoaAddAdmin { .. } => GOVERNANCE_POLICY_ACTIVATION_DELAY_EPOCHS,
 
         // Actions aimed at one account.
         ProposalType::SlashValidator { .. }
         | ProposalType::WhitelistVerifier { .. }
-        | ProposalType::DewhitelistVerifier { .. } => GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS,
+        | ProposalType::DewhitelistVerifier { .. }
+        | ProposalType::PoaRemoveAdmin { .. } => GOVERNANCE_TARGETED_ACTION_DELAY_EPOCHS,
     }
 }
 
@@ -236,6 +238,20 @@ pub enum ProposalType {
         domain_id: u32,
         expected_validator_set_hash: [u8; 32],
         justification_hash: [u8; 32],
+    },
+    /// Bootstrap or extend a PoA domain's admin set (BLG-0089 / P04-F07).
+    /// Governance is the trust root: the first admin of a domain arrives
+    /// here, never through a transaction that appoints itself.
+    PoaAddAdmin {
+        domain_id: u32,
+        admin: Address,
+    },
+    /// Remove a PoA domain's admin by governance decision (BLG-0094). This
+    /// is the only path that may take the last admin - the admin door
+    /// refuses it, because unpermissioning a domain is a governance act.
+    PoaRemoveAdmin {
+        domain_id: u32,
+        admin: Address,
     },
 }
 
@@ -717,7 +733,9 @@ impl GovernanceState {
                 | ProposalType::ChangeBlockReward(_)
                 | ProposalType::SlashValidator { .. }
                 | ProposalType::ParameterUpdate(_, _)
-                | ProposalType::VerifyHubApp { .. } => None,
+                | ProposalType::VerifyHubApp { .. }
+                | ProposalType::PoaAddAdmin { .. }
+                | ProposalType::PoaRemoveAdmin { .. } => None,
             };
             if let Some(a) = action {
                 proposal.status = ProposalStatus::Executed;
@@ -743,6 +761,20 @@ pub enum GovernanceAction {
         domain_id: u32,
         expected_validator_set_hash: [u8; 32],
         justification_hash: [u8; 32],
+    },
+    /// Bootstrap or extend a PoA domain's admin set (BLG-0089 / P04-F07).
+    /// Governance is the trust root: the first admin of a domain arrives
+    /// here, never through a transaction that appoints itself.
+    PoaAddAdmin {
+        domain_id: u32,
+        admin: Address,
+    },
+    /// Remove a PoA domain's admin by governance decision (BLG-0094). This
+    /// is the only path that may take the last admin - the admin door
+    /// refuses it, because unpermissioning a domain is a governance act.
+    PoaRemoveAdmin {
+        domain_id: u32,
+        admin: Address,
     },
 }
 
