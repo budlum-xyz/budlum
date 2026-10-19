@@ -363,8 +363,13 @@ fn merkleize_chunks(chunks: &[[u8; 32]]) -> [u8; 32] {
 
 impl BeaconBinding {
     /// The sync-committee period the signed slot belongs to.
+    ///
+    /// BLG-0138 (P06-F09): the committee in force is the one at the
+    /// SIGNATURE slot, which is the block after the signed header. For the
+    /// last slot of a period `slot / N` named the previous period and refused
+    /// a genuine aggregate; the signature slot is `slot + 1`.
     fn period(&self) -> u64 {
-        self.slot / SLOTS_PER_SYNC_COMMITTEE_PERIOD
+        self.slot.saturating_add(1) / SLOTS_PER_SYNC_COMMITTEE_PERIOD
     }
 
     /// `hash_tree_root(BeaconBlockHeader)`: five fields, padded to eight.
@@ -687,6 +692,24 @@ mod tests {
         state.current_sync_committee[3] = [0xFF; BLS_PUBKEY_LEN];
         let err = verify_sync_aggregate(&state, &agg, msg).unwrap_err();
         assert_eq!(err, SyncCommitteeError::InvalidPubkey);
+    }
+
+    /// BLG-0138 (P06-F09): the committee that signs the last slot of a
+    /// period is the next period's (the signature slot is one later).
+    #[test]
+    fn the_last_slot_of_a_period_belongs_to_the_next_committee() {
+        let at = |slot: u64| BeaconBinding {
+            slot,
+            proposer_index: 0,
+            parent_root: [0; 32],
+            state_root: [0; 32],
+            body_root: [0; 32],
+            execution_block_hash_branch: Vec::new(),
+        };
+        let n = SLOTS_PER_SYNC_COMMITTEE_PERIOD;
+        assert_eq!(at(n - 2).period(), 0);
+        assert_eq!(at(n - 1).period(), 1);
+        assert_eq!(at(n).period(), 1);
     }
 
     /// The header, domain and signing-root construction against values

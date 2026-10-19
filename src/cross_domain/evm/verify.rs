@@ -119,6 +119,10 @@ pub struct VerifiedDeposit {
     /// receipts trie, `RLP(tx_index)`. `(block_hash, receipt_key)` names one
     /// receipt on one chain; it is the replay key.
     pub receipt_key: Vec<u8>,
+    /// Position of the proven deposit log inside the receipt. The replay key
+    /// is `(block_hash, receipt_key, log_index)`: without the third part a
+    /// receipt holding two deposit logs paid one of them under one key.
+    pub log_index: usize,
     /// The log extracted from the bridge contract; its data field is the
     /// deposit payload.
     pub deposit_log_data: Vec<u8>,
@@ -285,8 +289,10 @@ pub fn verify_evm_receipt(
     }
 
     // 5. Deposit log match.
-    let log = receipt
-        .find_log(proof.emitter_address, proof.deposit_topic0)
+    // BLG-0139 (P06-F10): the log WITH its position. A receipt can hold two
+    // deposit logs; the replay identity names the one that was proven.
+    let (log_index, log) = receipt
+        .find_log_indexed(proof.emitter_address, proof.deposit_topic0)
         .ok_or(VerifyError::LogNotFound)?;
 
     // 5b. PoS attestation, when the relayer supplied one.
@@ -336,6 +342,7 @@ pub fn verify_evm_receipt(
         tx_hash: proof.tx_hash.to_string(),
         block_hash: target.hash,
         receipt_key: proof.receipt_key.to_vec(),
+        log_index,
         deposit_log_data: log.data.clone(),
         block_number: target.number,
         receipts_root: target.receipts_root,
@@ -521,6 +528,10 @@ mod tests {
         };
         let verified = verify_fixture(&proof).unwrap();
         assert_eq!(verified.tx_hash, "0xabc123");
+        assert_eq!(
+            verified.log_index, 0,
+            "the fixture holds one deposit log, at position 0"
+        );
         assert_eq!(verified.deposit_log_data, data);
         assert_eq!(verified.block_number, 100);
         assert_eq!(verified.receipts_root, f.receipts_root);
