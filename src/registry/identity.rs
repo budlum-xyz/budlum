@@ -317,6 +317,12 @@ pub fn field_pair_hash(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     hash_fields_bytes(&[b"bud-vc-v1-node", left, right])
 }
 
+/// Promotion of an unpaired tail under its own tag, so it can never equal a pair hash.
+#[must_use]
+fn field_promote_hash(node: &[u8; 32]) -> [u8; 32] {
+    hash_fields_bytes(&[b"bud-vc-v1-promote", node])
+}
+
 /// The Verifiable-Credential side: issuer, subject, schema, and the closed
 /// field list. Values are not here; they cannot be, by construction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,24 +413,17 @@ pub fn disclosure_proof(leaves: &[[u8; 32]], leaf_index: usize) -> Option<Disclo
     let mut index = leaf_index;
     let mut siblings = Vec::new();
     while level.len() > 1 {
-        let pair = if index.is_multiple_of(2) {
-            index + 1
-        } else {
-            index - 1
-        };
-        // `index` stays in range by construction (halved as the level
-        // shrinks), but the indexing gate refuses `level[index]` at runtime:
-        // an absent own-node means the walk is broken, and `None` says so
-        // instead of aborting the process.
         let own = level.get(index).copied()?;
-        siblings.push(level.get(pair).copied().unwrap_or(own));
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for chunk in level.chunks(2) {
-            let left = chunk[0];
-            let right = chunk.get(1).copied().unwrap_or(left);
-            next.push(field_pair_hash(&left, &right));
+        // An odd last node has no partner. It is promoted under its own tag,
+        // so a list and the same list with its tail repeated never share a root.
+        if index.is_multiple_of(2) {
+            if let Some(sibling) = level.get(index + 1).copied() {
+                siblings.push(sibling);
+            }
+        } else {
+            siblings.push(level.get(index - 1).copied().unwrap_or(own));
         }
-        level = next;
+        level = next_level(&level);
         index /= 2;
     }
     Some(DisclosureProof {
@@ -449,30 +448,32 @@ pub fn verify_disclosure(
 ) -> bool {
     let mut level = proof.leaf_count;
     let mut index = proof.leaf_index;
-    if level == 0 || index >= level || proof.siblings.len() != sibling_count(level) {
+    if level == 0 || index >= level {
         return false;
     }
     let mut current = field_commitment(schema, name, salt, value_digest);
-    for sibling in &proof.siblings {
-        current = if index.is_multiple_of(2) {
-            field_pair_hash(&current, sibling)
+    let mut siblings = proof.siblings.iter();
+    while level > 1 {
+        if index.is_multiple_of(2) && index + 1 == level {
+            current = field_promote_hash(&current);
         } else {
-            field_pair_hash(sibling, &current)
-        };
+            let Some(sibling) = siblings.next() else {
+                return false;
+            };
+            current = if index.is_multiple_of(2) {
+                field_pair_hash(&current, sibling)
+            } else {
+                field_pair_hash(sibling, &current)
+            };
+        }
         level = level.div_ceil(2);
         index /= 2;
     }
-    &current == root
+    siblings.next().is_none() && &current == root
 }
 
-fn sibling_count(leaves: usize) -> usize {
-    let mut count = 0;
-    let mut level = leaves;
-    while level > 1 {
-        count += 1;
-        level = level.div_ceil(2);
-    }
-    count
+fn next_level(level: &[[u8; 32]]) -> Vec<[u8; 32]> {
+    crate::consensus::merkle_tree::merkle_parent_layer(level, field_pair_hash, field_promote_hash)
 }
 
 #[must_use]
@@ -480,17 +481,7 @@ pub fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
     if leaves.is_empty() {
         return [0u8; 32];
     }
-    let mut level: Vec<[u8; 32]> = leaves.to_vec();
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for chunk in level.chunks(2) {
-            let left = chunk[0];
-            let right = chunk.get(1).copied().unwrap_or(left);
-            next.push(field_pair_hash(&left, &right));
-        }
-        level = next;
-    }
-    level[0]
+    crate::consensus::merkle_tree::merkle_root(leaves, field_pair_hash, field_promote_hash)
 }
 
 /// The registry. Pure state: it never touches a clock or a block. Every
@@ -1290,6 +1281,22 @@ mod tests {
 
     fn addr(byte: u8) -> Address {
         Address([byte; 32])
+    }
+
+    #[test]
+    fn an_odd_tail_never_mimics_a_repeated_leaf() {
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let c = [3u8; 32];
+        assert_ne!(merkle_root(&[a, b, c]), merkle_root(&[a, b, c, c]));
+        let root = merkle_root(&[a, b, c]);
+        for index in 0..3 {
+            let proof = disclosure_proof(&[a, b, c], index).expect("proof");
+            assert!(proof.leaf_count == 3 && proof.leaf_index == index);
+        }
+        let proof = disclosure_proof(&[a, b, c], 2).expect("tail proof");
+        assert_eq!(proof.siblings.len(), 1);
+        assert_ne!(root, [0u8; 32]);
     }
 
     fn field(name: &str, salt: u8, value: u8) -> (FieldCommitment, [u8; 32]) {
