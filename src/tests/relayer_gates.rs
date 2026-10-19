@@ -1,4 +1,4 @@
-// (Q-A 2026-07-16) L1 relayer proof
+// (Q-A 2026-07-16) chain relayer proof
 // Cryptographic verification, the M5 budlumxyz anti-sybil fee and the M4 BNS fee
 // regression.
 //

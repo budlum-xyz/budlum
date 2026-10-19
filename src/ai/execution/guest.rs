@@ -484,9 +484,9 @@ mod tests {
 
 // ── (2026-07-23): Production gas metering for AI execution proofs ──
 //
-// Dynamic gas model for L1 verification of AI execution proofs.
+// Dynamic gas model for the chain verification of AI execution proofs.
 // The VM opcode gas (flat 10) covers the instruction execution; this
-// Covers the L1 structural + STARK verification cost which scales with
+// Covers the chain structural + STARK verification cost which scales with
 // Model complexity and proof size.
 
 /// Base gas cost for structural verification (commitment checks, model binding).
