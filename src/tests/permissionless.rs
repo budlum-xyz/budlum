@@ -1014,8 +1014,10 @@ fn onboarding_rejects_below_floor_as_active() {
         bc.chain_id,
         fee,
     );
-    // May enter mempool and apply; economic floor means not Active in registry.
-    let _ = bc.add_transaction(tx);
+    // The transaction is well formed, so it enters the mempool; the economic
+    // floor decides whether the registration becomes Active.
+    bc.add_transaction(tx)
+        .expect("a well formed below-floor stake transaction is admitted");
     let _ = bc.produce_block(staker);
 
     assert!(
