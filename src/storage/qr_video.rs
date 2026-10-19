@@ -356,7 +356,7 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
                 || !matches!(channels, 3 | 4)
                 || len == 0
                 || len > 768
-                || len % 3 != 0
+                || !len.is_multiple_of(3)
             {
                 return Err("png palette placement".into());
             }
