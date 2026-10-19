@@ -779,6 +779,69 @@ mod tests {
         assert_eq!(vm.events, vec![100]);
     }
 
+    fn run_events(source: &str) -> Vec<u64> {
+        let bytecode = compile(source, IsaProfile::Production).expect("source must compile");
+        let mut vm = bud_vm::Vm::new(MIN_VM_MEMORY_BYTES);
+        vm.run(&bytecode).expect("VM should run");
+        vm.events.clone()
+    }
+
+    /// P35-F01: a non-identifier scrutinee lives in a temporary register;
+    /// the pattern Load must not reuse it.
+    #[test]
+    fn match_on_expression_scrutinee_picks_the_right_arm() {
+        let source = r#"
+            contract M {
+                pub fn main() {
+                    let a = 1;
+                    let b = 1;
+                    match (a + b) {
+                        0 => { emit R(100); },
+                        1 => { emit R(200); },
+                        2 => { emit R(300); },
+                        _ => { emit R(999); },
+                    };
+                }
+            }
+        "#;
+        assert_eq!(run_events(source), vec![300]);
+    }
+
+    /// P35-F02: `let b = a;` must copy, not alias.
+    #[test]
+    fn let_binding_does_not_alias_its_source() {
+        let source = r#"
+            contract A {
+                pub fn main() {
+                    let a = 5;
+                    let b = a;
+                    a = a + 1;
+                    emit R(b);
+                    emit R(a);
+                }
+            }
+        "#;
+        assert_eq!(run_events(source), vec![5, 6]);
+    }
+
+    /// P35-F03: a struct literal nested inside another literal must get its
+    /// own heap block.
+    #[test]
+    fn nested_struct_literal_does_not_overlap_outer_block() {
+        let source = r#"
+            contract N {
+                struct Inner { pad: u64, y: u64, }
+                struct Outer { inner: Inner, }
+                pub fn main() {
+                    let o = Outer { inner: Inner { pad: 1, y: 42 } };
+                    emit E(o.inner.pad);
+                    emit E(o.inner.y);
+                }
+            }
+        "#;
+        assert_eq!(run_events(source), vec![1, 42]);
+    }
+
     /// `match` arms can have a *block* body (multiple statements).
     /// Verifies that the body of an arm runs to completion before the
     /// Post-match control flow continues.
