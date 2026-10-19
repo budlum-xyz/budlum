@@ -338,7 +338,7 @@ mod tests {
     }
 
     impl Transport for Table {
-        fn fetch(&self, target: &Target) -> Result<Vec<u8>, String> {
+        fn fetch(&self, target: &Target, _max_bytes: usize) -> Result<Vec<u8>, String> {
             let key = match target {
                 Target::Bud(id) => id.to_string(),
                 Target::Ipfs(s) | Target::Https(s) => s.clone(),
