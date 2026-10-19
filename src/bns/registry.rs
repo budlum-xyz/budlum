@@ -114,7 +114,7 @@ impl BnsRegistry {
         }
         // Cap total name count - fail-closed.
         // Reuse slots from expired names first; only reject if truly at capacity.
-        if self.names.len() >= Self::MAX_NAMES {
+        if self.names.len() >= Self::MAX_NAMES && !self.names.contains_key(&name) {
             // Try to evict the oldest expired name to make room
             let expired_key = self
                 .names
@@ -127,7 +127,10 @@ impl BnsRegistry {
                 return Err(BnsError::NameTaken); // at capacity, no evictable names
             }
         }
-        let record = NameRecord::new(name.clone(), owner, current_epoch + duration);
+        let expires_at = current_epoch
+            .checked_add(duration)
+            .ok_or(BnsError::InvalidName)?;
+        let record = NameRecord::new(name.clone(), owner, expires_at);
         self.names.insert(name, record);
         Ok(())
     }
