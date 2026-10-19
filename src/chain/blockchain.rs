@@ -3956,6 +3956,19 @@ impl Blockchain {
                 .to_string());
         }
 
+        // The provenance field is a claim, not a proof. A block header
+        // double sign is checked against the offender's own key here, so a
+        // caller cannot slash a validator with made-up hashes or signatures.
+        if matches!(
+            report.proof,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                ..
+            }
+        ) {
+            report.verify_double_sign().map_err(|e| e.to_string())?;
+        }
+
         let fee = self.state.registry.params().slashing_report_fee;
         let mut charged_fee = false;
         if let Some(reporter) = report.reporter {
