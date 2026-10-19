@@ -125,7 +125,7 @@ pub mod pact_binding;
 pub use view_grant::{
     confidential_commit_digest, grant_issue_digest, grant_revoke_digest, social_delete_digest,
     view_claim_digest, ConfidentialBodyCommit, ConfidentialProofKind, GrantAuthError,
-    GrantAuthorization, ViewGrant, ViewGrantError, ViewGrantRegistry, ViewPolicy,
+    GrantAuthorization, GrantIssueTerms, ViewGrant, ViewGrantError, ViewGrantRegistry, ViewPolicy,
     VIEW_CLAIM_MAX_AGE_SECS,
 };
 
