@@ -92,21 +92,66 @@ fn ws_seq(text: &str, needles: &[&str]) -> bool {
     false
 }
 
-/// Blank line comments, the one sanitization the shell version applies before
-/// searching the AIR (`re.sub(r"//[^\n]*", "", air_src)`).
+/// Blank block comments (`/* .. */`, nested) and line comments. A constraint
+/// left inside either must not satisfy a text match. Newlines are kept.
 fn strip_line_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
-    for line in text.split_inclusive('\n') {
-        let Some(pos) = line.find("//") else {
-            out.push_str(line);
-            continue;
-        };
-        out.push_str(&line[..pos]);
-        for c in line[pos..].chars() {
-            out.push(if c == '\n' { '\n' } else { ' ' });
+    let mut i = 0usize;
+    let mut block_depth = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        if block_depth > 0 {
+            if c == '*' && next == Some('/') {
+                block_depth -= 1;
+                out.push_str("  ");
+                i += 2;
+            } else if c == '/' && next == Some('*') {
+                block_depth += 1;
+                out.push_str("  ");
+                i += 2;
+            } else {
+                out.push(if c == '\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+        } else if c == '/' && next == Some('*') {
+            block_depth = 1;
+            out.push_str("  ");
+            i += 2;
+        } else if c == '/' && next == Some('/') {
+            while i < chars.len() && chars[i] != '\n' {
+                out.push(' ');
+                i += 1;
+            }
+        } else {
+            out.push(c);
+            i += 1;
         }
     }
     out
+}
+
+/// Does the prover compute the canonicity difference with `wrapping_sub`?
+///
+/// The argument is compared lowercase and without digit separators, so
+/// `0xffffffff`, `0xFFFF_FFFF` and `HI_MASK` all count.
+fn prover_uses_wrapping_sub(prover_src: &str) -> bool {
+    let code = strip_line_comments(prover_src).to_ascii_lowercase();
+    let mut from = 0usize;
+    while let Some(pos) = code[from..].find("wrapping_sub(") {
+        let abs = from + pos + "wrapping_sub(".len();
+        let arg: String = code[abs..]
+            .chars()
+            .take_while(|&c| c != ')')
+            .filter(|c| !c.is_whitespace() && *c != '_')
+            .collect();
+        if arg == "0xffffffff" || arg.contains("himask") || arg.contains("himax") {
+            return true;
+        }
+        from = abs;
+    }
+    false
 }
 
 /// The bit locals the AIR reads out of `cur[BASE + i]`, matching
@@ -341,9 +386,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     // The subtraction has to happen in the field. For a high half of 0,
     // `wrapping_sub` gives 0xFFFFFFFF00000001 while the field difference is
     // `P - 0xFFFFFFFF`, and those are different elements.
-    if air_src.contains("COL_CMP_RS1_HI_INV")
-        && ws_seq(&prover_src, &["wrapping_sub(", "0xFFFF_FFFF"])
-    {
+    if air_src.contains("COL_CMP_RS1_HI_INV") && prover_uses_wrapping_sub(&prover_src) {
         problems.push(String::from(
             "prover: the canonicity difference is computed with `wrapping_sub` \
              rather than in the field. Those disagree for every high half below \
@@ -559,4 +602,26 @@ pub fn self_test() -> Result<String, String> {
          difference, an unfilled witness and a missing tree are all rejected; \
          the canonical tree passes.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_comment_does_not_hide_or_supply_a_constraint() {
+        let c = strip_line_comments("a /* assert_bool(z) \n x */ b");
+        assert!(!c.contains("assert_bool"));
+        assert_eq!(c.matches('\n').count(), 1);
+    }
+
+    #[test]
+    fn wrapping_sub_spellings_are_found() {
+        for arg in ["0xFFFF_FFFF", "0xFFFFFFFF", "0xffff_ffff", "HI_MASK"] {
+            let src = format!("let d = hi.wrapping_sub({arg});");
+            assert!(prover_uses_wrapping_sub(&src), "{arg}");
+        }
+        assert!(!prover_uses_wrapping_sub("let a = x.wrapping_sub(1);"));
+        assert!(!prover_uses_wrapping_sub("// hi.wrapping_sub(0xFFFF_FFFF)"));
+    }
 }
