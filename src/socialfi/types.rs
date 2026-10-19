@@ -34,4 +34,6 @@ pub enum NftError {
     InvalidTag,
     #[error("Too many tags")]
     TooManyTags,
+    #[error("Too many NFTs for one owner")]
+    TooManyNfts,
 }
