@@ -356,20 +356,10 @@ pub const VIEW_CLAIM_MAX_AGE_SECS: u64 = 300;
 /// another cipher or another object.
 #[must_use]
 pub fn confidential_commit_digest(commit: &ConfidentialBodyCommit, owner: &Address) -> [u8; 32] {
-    let enc_byte: u8 = match commit.encryption {
-        crate::storage::ContentEncryption::Plaintext => 0,
-        crate::storage::ContentEncryption::ClientSide(cipher) => match cipher {
-            crate::storage::ContentCipher::Aes256Gcm => 1,
-            crate::storage::ContentCipher::ChaCha20Poly1305 => 2,
-            crate::storage::ContentCipher::XChaCha20Poly1305 => 3,
-        },
-    };
-    let proof_byte: u8 = match commit.proof_kind {
-        ConfidentialProofKind::RetrievalChallenge => 1,
-        ConfidentialProofKind::ZkStorageProof => 2,
-        ConfidentialProofKind::TeeAttested => 3,
-        ConfidentialProofKind::HybridZkTee => 4,
-    };
+    // One tag table for the digest and for `commitment()`, so the two byte
+    // encodings of the same enums cannot drift apart.
+    let enc_byte: u8 = commit.encryption.commitment_tag();
+    let proof_byte: u8 = commit.proof_kind.tag();
     hash_fields_bytes(&[
         b"BDLM_CONFIDENTIAL_COMMIT_V1",
         commit.content_id.as_bytes(),
@@ -771,6 +761,19 @@ pub enum ConfidentialProofKind {
     HybridZkTee,
 }
 
+impl ConfidentialProofKind {
+    /// The byte this kind enters every digest as. Frozen: a change moves
+    /// every commitment already on chain.
+    const fn tag(self) -> u8 {
+        match self {
+            Self::RetrievalChallenge => 1,
+            Self::ZkStorageProof => 2,
+            Self::TeeAttested => 3,
+            Self::HybridZkTee => 4,
+        }
+    }
+}
+
 impl ConfidentialBodyCommit {
     /// # Errors
     ///
@@ -798,12 +801,7 @@ impl ConfidentialBodyCommit {
     #[must_use]
     pub fn commitment(&self) -> [u8; 32] {
         let enc = [self.encryption.commitment_tag()];
-        let kind = [match self.proof_kind {
-            ConfidentialProofKind::RetrievalChallenge => 1u8,
-            ConfidentialProofKind::ZkStorageProof => 2u8,
-            ConfidentialProofKind::TeeAttested => 3u8,
-            ConfidentialProofKind::HybridZkTee => 4u8,
-        }];
+        let kind = [self.proof_kind.tag()];
         hash_fields_bytes(&[
             b"BDLM_CONFIDENTIAL_BODY_V1",
             &self.content_id.0,
@@ -876,6 +874,25 @@ mod tests {
         );
         assert!(reg.get(id).unwrap().is_live());
         reg.revoke(id, addr(2), 10).unwrap();
+    }
+
+    /// P28-F19: the digest and the commitment share one tag table, and the
+    /// bytes stay what they were on chain.
+    #[test]
+    fn confidential_proof_and_cipher_tags_are_frozen() {
+        assert_eq!(ConfidentialProofKind::RetrievalChallenge.tag(), 1);
+        assert_eq!(ConfidentialProofKind::ZkStorageProof.tag(), 2);
+        assert_eq!(ConfidentialProofKind::TeeAttested.tag(), 3);
+        assert_eq!(ConfidentialProofKind::HybridZkTee.tag(), 4);
+        assert_eq!(ContentEncryption::Plaintext.commitment_tag(), 0);
+        assert_eq!(
+            ContentEncryption::ClientSide(ContentCipher::Aes256Gcm).commitment_tag(),
+            1
+        );
+        assert_eq!(
+            ContentEncryption::ClientSide(ContentCipher::XChaCha20Poly1305).commitment_tag(),
+            3
+        );
     }
 
     #[test]
