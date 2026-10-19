@@ -2099,10 +2099,11 @@ impl Executor {
                 }
                 state
                     .note_registry
-                    .apply_transfer(
+                    .apply_transfer_with_proofs(
                         &sub.spent_commitments,
                         &sub.nullifiers,
                         &sub.output_commitments,
+                        &sub.nullifier_proofs,
                     )
                     .map_err(|e| BudlumError::validation("private_transfer_apply", e))?;
                 let sender = state.get_or_create(&tx.from);

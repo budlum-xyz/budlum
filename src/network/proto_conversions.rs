@@ -411,6 +411,11 @@ impl From<&Transaction> for pb::ProtoTransaction {
                             .collect(),
                         authorization_sig: sub.authorization_sig.clone(),
                         public_digest: sub.public_digest.to_vec(),
+                        nullifier_proofs: sub
+                            .nullifier_proofs
+                            .iter()
+                            .map(|p| p.to_vec())
+                            .collect(),
                     },
                 )),
             ),
@@ -1423,10 +1428,16 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     .iter()
                     .map(|c| to32(c, "output"))
                     .collect();
+                let proofs: Result<Vec<_>, _> = payload
+                    .nullifier_proofs
+                    .iter()
+                    .map(|c| to32(c, "proof"))
+                    .collect();
                 TransactionType::PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit {
                     spent_commitments: spent?,
                     nullifiers: nulls?,
                     output_commitments: outs?,
+                    nullifier_proofs: proofs?,
                     authorization_sig: payload.authorization_sig,
                     public_digest: to32(&payload.public_digest, "digest")?,
                 })
