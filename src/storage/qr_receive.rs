@@ -12,7 +12,7 @@
 
 use crate::storage::qr_carousel::{CarouselDecoder, CarouselError, Drop, MAX_K};
 use crate::storage::qr_frame::{unpack_frame, FrameError};
-use crate::storage::qr_payload::{unpack_payload, PayloadError, PayloadKind};
+use crate::storage::qr_payload::{payload_commitment, unpack_payload, PayloadError, PayloadKind};
 
 /// Errors from the progressive receiver.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +23,12 @@ pub enum ReceiveError {
     Carousel(CarouselError),
     /// Nested payload error on finish.
     Payload(PayloadError),
+    /// The recovered bytes and the stream parameters do not hash to the
+    /// stream commitment the receiver was bound to (a forged or foreign
+    /// stream, or a poisoned drop). The receiver should be [`reset`].
+    ///
+    /// [`reset`]: ProgressiveReceiver::reset
+    StreamMismatch,
     /// Finish called before the carousel is complete.
     Incomplete {
         /// Missing source blocks.
@@ -42,6 +48,12 @@ impl std::fmt::Display for ReceiveError {
             Self::Frame(e) => write!(f, "receive frame: {e}"),
             Self::Carousel(e) => write!(f, "receive carousel: {e}"),
             Self::Payload(e) => write!(f, "receive payload: {e}"),
+            Self::StreamMismatch => {
+                write!(
+                    f,
+                    "receive recovered bytes do not match the bound stream commitment"
+                )
+            }
             Self::Incomplete { missing } => {
                 write!(f, "receive incomplete, {missing} blocks missing")
             }
@@ -193,7 +205,32 @@ impl ProgressiveReceiver {
                 missing: self.missing(),
             });
         }
-        Ok(self.decoder.finish()?)
+        let packed = self.decoder.finish()?;
+        // The commitment the receiver was bound to is checked against what was
+        // actually recovered. Without this it was only a label: the frame
+        // digest is unkeyed, so a self-consistent forged stream decoded fine.
+        let params = self
+            .decoder
+            .params()
+            .ok_or(ReceiveError::Incomplete { missing: 0 })?;
+        let recomputed = params.stream_commitment(&payload_commitment(&packed));
+        if recomputed != self.stream_commitment {
+            return Err(ReceiveError::StreamMismatch);
+        }
+        Ok(packed)
+    }
+
+    /// Forget every drop and start over, keeping the bound stream commitment.
+    ///
+    /// The first body seen for a `seq` stays in the decoder and the frame
+    /// digest is unkeyed, so one forged drop shown before the honest one
+    /// poisons a recovery. After [`ReceiveError::StreamMismatch`] the caller
+    /// resets and feeds the stream again instead of rebuilding the receiver.
+    pub fn reset(&mut self) {
+        self.decoder = CarouselDecoder::new();
+        self.seen.clear();
+        self.frames_accepted = 0;
+        self.frames_rejected = 0;
     }
 
     /// Finish and unpack A1 → (kind, raw body bytes).
@@ -302,6 +339,37 @@ mod tests {
             rx.push_drop(enc.drop_at(seq)).unwrap();
         }
         assert_eq!(rx.finish_packed().unwrap(), packed);
+    }
+
+    /// P29-F01: a self-consistent forged stream framed under the pinned
+    /// commitment is refused at finish, and after a reset the honest stream
+    /// recovers (P29-F02 recovery).
+    #[test]
+    fn a_forged_stream_is_refused_at_finish_and_reset_recovers() {
+        let honest = pack_payload(PayloadKind::ContentBytes, b"honest-body-bytes-honest").unwrap();
+        let commit = payload_commitment(&honest);
+        let enc = CarouselEncoder::new(&honest, 32).unwrap();
+        let stream = enc.params().stream_commitment(&commit);
+
+        let forged = pack_payload(PayloadKind::ContentBytes, b"forged-body-bytes-forged").unwrap();
+        let fenc = CarouselEncoder::new(&forged, 32).unwrap();
+
+        let mut rx = ProgressiveReceiver::new(stream);
+        for seq in 0..u32::from(fenc.params().k) {
+            rx.push_frame(&pack_frame(&stream, &fenc.drop_at(seq)).unwrap())
+                .unwrap();
+        }
+        assert!(rx.is_complete());
+        assert_eq!(rx.finish_packed(), Err(ReceiveError::StreamMismatch));
+        assert_eq!(rx.finish_unpacked(), Err(ReceiveError::StreamMismatch));
+
+        rx.reset();
+        assert!(!rx.is_complete());
+        for seq in 0..u32::from(enc.params().k) {
+            rx.push_frame(&pack_frame(&stream, &enc.drop_at(seq)).unwrap())
+                .unwrap();
+        }
+        assert_eq!(rx.finish_packed().unwrap(), honest);
     }
 
     /// The dedup map is bounded, and a drop the decoder refuses takes no
