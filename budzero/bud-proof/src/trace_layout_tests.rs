@@ -8,13 +8,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::plonky3_air::{
-    COL_ASSERT_INV, COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_MEM_ADDR_BITS_BASE,
+    COL_ASSERT_INV, COL_CHAIN_ID, COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_EVENT_DIGEST_0,
+    COL_EXIT_CODE, COL_FINAL_ROOT_0, COL_GAS_LIMIT, COL_INIT_ROOT_0, 
+    COL_INFERENCE_OUTPUT_COMMIT, COL_IS_PRIVACY_COMMIT, COL_IS_VERIFY_INFERENCE,
+    COL_MERKLE_DIFF_INV, COL_MERKLE_FINAL_FLAG,
+    COL_MERKLE_KEY_REM, COL_MERKLE_POSEIDON_X2_0, COL_MERKLE_POSEIDON_X4_0, COL_MEM_ADDR_BITS_BASE,
     COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MEM_ORD_BITS_BASE, COL_MEM_SAME_INV, COL_MEM_TID,
-    COL_MERKLE_KEY_REM, COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE,
+    COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE,
     COL_POSEIDON_X4_BASE, COL_PROG_MULT, COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT,
     COL_REG_ORD_BITS_BASE, COL_REG_SAME_INV, COL_RS1_IDX_INV, COL_STATE_WRITES_0, COL_SYSCALL_IS_1,
-    COL_SYSCALL_IS_2, COL_SYSCALL_IS_3, COL_SYSCALL_IS_6, MEM_ADDR_BITS, MEM_ORD_BITS,
-    REG_ORD_BITS, TRACE_WIDTH,
+    COL_SYSCALL_IS_2, COL_SYSCALL_IS_3, COL_SYSCALL_IS_6, COL_TRACE_LEN_CTR, COL_VM_MERKLE_KEY,
+    MEM_ADDR_BITS, MEM_ORD_BITS, REG_ORD_BITS, TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -104,80 +108,86 @@ fn all_ranges() -> Vec<ColRange> {
             start: COL_POSEIDON_X4_BASE,
             end: COL_POSEIDON_END,
         },
-        // Public-input bindings
+        // Public-input bindings.
+        //
+        // BLG-0229 (P13-F09): every range that HAS a named AIR constant is now
+        // written from that constant instead of a mirrored number. A hand-kept
+        // copy of the layout updates only when someone remembers to update it;
+        // a derived copy moves with the layout and lets the coverage assertion
+        // below be a real check.
         ColRange {
             name: "final_root",
-            start: 670,
-            end: 678,
+            start: COL_FINAL_ROOT_0,
+            end: COL_FINAL_ROOT_0 + 8,
         },
         ColRange {
             name: "init_root",
-            start: 678,
-            end: 686,
+            start: COL_INIT_ROOT_0,
+            end: COL_INIT_ROOT_0 + 8,
         },
         // Privacy opcode selectors (consumed from former reserved gap)
         ColRange {
             name: "privacy_selectors",
-            start: 686,
-            end: 689,
+            start: COL_IS_PRIVACY_COMMIT,
+            end: COL_IS_PRIVACY_COMMIT + 3,
         },
         // VerifyInference AIR binding columns
         // (consumed remaining reserved gap 373..378)
         ColRange {
             name: "verify_inference",
-            start: 689,
-            end: 694,
+            start: COL_IS_VERIFY_INFERENCE,
+            end: COL_INFERENCE_OUTPUT_COMMIT + 1,
         },
         ColRange {
             name: "trace_len_ctr",
-            start: 694,
-            end: 695,
+            start: COL_TRACE_LEN_CTR,
+            end: COL_TRACE_LEN_CTR + 1,
         },
         ColRange {
             name: "gas_limit",
-            start: 695,
-            end: 696,
+            start: COL_GAS_LIMIT,
+            end: COL_GAS_LIMIT + 1,
         },
         ColRange {
             name: "event_digest",
-            start: 696,
-            end: 704,
+            start: COL_EVENT_DIGEST_0,
+            end: COL_EVENT_DIGEST_0 + 8,
         },
         ColRange {
             name: "exit_code",
-            start: 704,
-            end: 705,
+            start: COL_EXIT_CODE,
+            end: COL_EXIT_CODE + 1,
         },
         ColRange {
             name: "chain_id",
-            start: 705,
-            end: 706,
+            start: COL_CHAIN_ID,
+            end: COL_CHAIN_ID + 1,
         },
         // VerifyMerkle path expansion
         ColRange {
             name: "verify_merkle",
-            start: 706,
-            end: 712,
+            start: COL_VM_MERKLE_KEY,
+            end: COL_MERKLE_POSEIDON_X2_0,
         },
         ColRange {
             name: "merkle_poseidon_x2",
-            start: 712,
-            end: 720,
+            start: COL_MERKLE_POSEIDON_X2_0,
+            end: COL_MERKLE_POSEIDON_X4_0,
         },
         ColRange {
             name: "merkle_poseidon_x4",
-            start: 720,
-            end: 728,
+            start: COL_MERKLE_POSEIDON_X4_0,
+            end: COL_MERKLE_DIFF_INV,
         },
         ColRange {
             name: "merkle_diff_inv",
-            start: 728,
-            end: 729,
+            start: COL_MERKLE_DIFF_INV,
+            end: COL_MERKLE_DIFF_INV + 1,
         },
         ColRange {
             name: "merkle_final_flag",
-            start: 729,
-            end: 730,
+            start: COL_MERKLE_FINAL_FLAG,
+            end: COL_MERKLE_FINAL_FLAG + 1,
         },
         // Initial-memory commitment. Appended past the old end of the
         // layout so the columns before it did not have to move again.
@@ -377,6 +387,31 @@ fn trace_layout_no_overlap_and_within_bounds() {
          If you added columns, update TRACE_WIDTH or document the reserved gap.",
         max_end, TRACE_WIDTH
     );
+
+    // BLG-0229 (P13-F09): the check the table was missing. A layout
+    // lock that verifies "no overlaps, all in bounds, ends at the width" still
+    // lets an UNMENTIONED block of columns slip by: the range list simply does
+    // not name them, and nothing says so. Require every column of the trace to
+    // be covered by exactly one range - a gap (columns nobody declared) and an
+    // overlap (columns two owners claim) now fail the same test, whichever
+    // direction the mistake moves in.
+    let mut covered = vec![false; TRACE_WIDTH];
+    for a in &ranges {
+        covered[a.start..a.end].fill(true);
+    }
+    if let Some(gap) = covered.iter().position(|c| !*c) {
+        let mut end = gap;
+        while end + 1 < TRACE_WIDTH && !covered[end + 1] {
+            end += 1;
+        }
+        panic!(
+            "trace layout gap: columns {gap}..={} are owned by no range in \
+             `all_ranges` - a column the AIR can read but the lock does not name \
+             is an unowned witness slot (BLG-0229; overlaps are caught by the
+             pairwise check above, gaps are this assertion's job)",
+            end + 1
+        );
+    }
 }
 
 #[test]

@@ -151,10 +151,60 @@ fn matmul_guest_program_2_3_2() -> Vec<u64> {
     prog.push(instruction(Opcode::Log, 0, R_HASH, 0, 0));
     prog.push(instruction(Opcode::Halt, 0, 0, 0, 0));
     assert_eq!(prog.len(), 90, "matmul [2,3,2] must be 90 instructions");
+    // BLG-0238 (P14-F08): the length is the shape of the emitter, not its
+    // identity - an emitter that drifted in ORDER still measured 90 rows and
+    // the benchmark proved a program that is not the canonical guest. Pin the
+    // same hash the tree pins (src/ai/execution/guest.rs
+    // `canonical_matmul_program_hash_pins`, dims [2,3,2]); keccak over the
+    // little-endian words is exactly the bench's own program_hash.
+    const CANONICAL_MATMUL_2_3_2: &str =
+        "4c4e86b4d34230df02acb991eb3111e459fb8bf06dd2b65b78c143b7f8b7e8c7";
+    let hash_hex: String = program_hash(&prog).iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(
+        hash_hex.as_str(),
+        CANONICAL_MATMUL_2_3_2,
+        "the mini-emitter drifted from the canonical matmul [2,3,2] program"
+    );
     prog
 }
 
-fn run_one(name: &str, program: &[u64], samples: u32) {
+/// BLG-0238 (P14-F08): seed the VerifyMerkle inputs into the VM. The
+/// challenge used to run on an all-zero memory: 64 expansion rows over zero
+/// siblings measure the prover's cost for a run that no verifier would ever
+/// see (the honest path has real path data), and a zero-filled run can only
+/// ever exercise one direction-bit pattern. Same seeding shape as the
+/// prover's own Merkle tests: key + 64 siblings from address 256, with the
+/// pre-computed root and leaf in the registers the instruction reads.
+fn seed_storage_challenge(vm: &mut Vm) {
+    let key: u64 = 7;
+    let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
+    let leaf: u64 = 0xBEEF;
+    let mut current = leaf;
+    for (i, &sibling) in siblings.iter().enumerate() {
+        let bit = (key >> i) & 1;
+        current = if bit == 0 {
+            bud_vm::merkle_poseidon_round(current, sibling)
+        } else {
+            bud_vm::merkle_poseidon_round(sibling, current)
+        };
+    }
+    vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
+    for (i, &sibling) in siblings.iter().enumerate() {
+        let off = 264 + i * 8;
+        vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
+    }
+    // inst(VerifyMerkle, rd=1, rs1=2, rs2=3, imm=256): rs1 holds the root
+    // the path is checked against, rs2 the claimed leaf.
+    vm.registers[2] = current;
+    vm.registers[3] = leaf;
+}
+
+fn run_one_with_seed(
+    name: &str,
+    program: &[u64],
+    samples: u32,
+    seed: impl Fn(&mut Vm),
+) {
     let mut prove_total = Duration::ZERO;
     let mut verify_total = Duration::ZERO;
     let mut proof_bytes = 0usize;
@@ -162,6 +212,7 @@ fn run_one(name: &str, program: &[u64], samples: u32) {
 
     for _ in 0..samples {
         let mut vm = Vm::new(8192);
+        seed(&mut vm);
         let receipt = vm.run_receipt(program);
         assert!(receipt.success, "{name} execution failed");
         trace_rows = vm.trace.len();
@@ -217,6 +268,10 @@ fn run_one(name: &str, program: &[u64], samples: u32) {
     );
 }
 
+fn run_one(name: &str, program: &[u64], samples: u32) {
+    run_one_with_seed(name, program, samples, |_| {});
+}
+
 fn main() {
     let samples = std::env::var("BUDZERO_BENCH_SAMPLES")
         .ok()
@@ -224,7 +279,12 @@ fn main() {
         .unwrap_or(1)
         .clamp(1, 20);
 
-    run_one("storage-challenge", &storage_challenge_program(), samples);
+    run_one_with_seed(
+        "storage-challenge",
+        &storage_challenge_program(),
+        samples,
+        seed_storage_challenge,
+    );
     run_one(
         "private-transfer",
         &private_transfer::build_private_transfer_check_program().unwrap(),
