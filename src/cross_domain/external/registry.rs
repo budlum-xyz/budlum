@@ -1126,7 +1126,7 @@ mod tests {
 
     #[test]
     fn the_duplicate_slot_rule_holds() {
-        let (mut registry, key, att) = registered();
+        let (mut registry, _key, att) = registered();
         let err = registry
             .commit_attestation(&att, Address::from([7u8; 32]))
             .unwrap_err();

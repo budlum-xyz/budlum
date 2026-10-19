@@ -18,24 +18,6 @@ fn checked_gateway_content(source: &str, data: Vec<u8>) -> Result<Vec<u8>, Strin
     Ok(data)
 }
 
-/// Every content id a name points at that a Pollen guard must look at.
-///
-/// The gateway serves `storage_root`, so that id is always first. `content_id`
-/// is added when it differs: a name must not pass the guard through one id and
-/// serve another.
-fn pollen_guard_ids(resolved: &crate::bns::types::BnsResolved) -> Vec<ContentId> {
-    let mut ids = Vec::new();
-    if let Some(root) = resolved.storage_root {
-        ids.push(ContentId(root));
-    }
-    if let Some(cid) = resolved.content_id {
-        if !ids.contains(&cid) {
-            ids.push(cid);
-        }
-    }
-    ids
-}
-
 fn verified_gateway_content(
     source: &str,
     cid: &ContentId,
