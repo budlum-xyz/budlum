@@ -114,25 +114,73 @@ fn body_of(src: &str, name: &str) -> Option<String> {
     Some(src[a..b].to_string())
 }
 
-/// Every ordered-map field declared in `pub struct StorageRegistry`.
-fn map_fields(struct_body: &str) -> Vec<String> {
+/// Every field declared in `pub struct StorageRegistry`, whatever its type.
+///
+/// A field is consensus state when it holds a table or a registry, and the
+/// type tells nothing reliable: `dictionaries` is a `DictionaryRegistry`
+/// (a struct around a `BTreeMap`) and `self_host_policies` carries its
+/// `BTreeMap` type on the line after the name. Filtering by a `BTreeMap<` on
+/// the name's line made both invisible to the gate, so every field has to be
+/// folded or named in [`UNFOLDED`]. A declaration may span lines; it ends at
+/// the first line that closes with `,` outside brackets.
+fn struct_fields(struct_text: &str) -> Vec<String> {
+    let body = struct_text
+        .split_once('{')
+        .map_or(struct_text, |(_, rest)| rest);
     let mut out = Vec::new();
-    for l in struct_body.lines() {
-        let t = l.trim_start();
-        let Some((name, rest)) = t.split_once(':') else {
+    let mut decl = String::new();
+    let mut depth = 0i32;
+    for l in body.lines() {
+        let t = l.trim();
+        if t.is_empty() || t.starts_with("//") || t.starts_with("#[") {
             continue;
-        };
-        let name = name.trim_start_matches("pub ").trim();
-        if (rest.contains("BTreeMap<") || rest.contains("BTreeSet<"))
-            && !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        {
-            out.push(name.to_string());
+        }
+        decl.push_str(t);
+        decl.push(' ');
+        for c in t.chars() {
+            match c {
+                '<' | '(' | '[' => depth += 1,
+                '>' | ')' | ']' => depth -= 1,
+                _ => {}
+            }
+        }
+        if depth <= 0 && t.ends_with(',') {
+            if let Some((name, _)) = decl.split_once(':') {
+                let name = name
+                    .trim()
+                    .trim_start_matches("pub(crate) ")
+                    .trim_start_matches("pub ")
+                    .trim();
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                {
+                    out.push(name.to_string());
+                }
+            }
+            decl.clear();
+            depth = 0;
         }
     }
     out
+}
+
+/// Is `name` used as a whole identifier in `code`? A substring match let
+/// `deals` be satisfied by `deals_by_shard`.
+fn mentions_ident(code: &str, name: &str) -> bool {
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut from = 0usize;
+    while let Some(pos) = code[from..].find(name) {
+        let abs = from + pos;
+        let before = code[..abs].chars().next_back();
+        let after = code[abs + name.len()..].chars().next();
+        if !before.is_some_and(is_ident) && !after.is_some_and(is_ident) {
+            return true;
+        }
+        from = abs + name.len();
+    }
+    false
 }
 
 /// The three properties the fold must keep about *how* it folds, not what it
@@ -196,10 +244,10 @@ pub fn run(root: &Path) -> Result<String, String> {
     let struct_end = src[struct_at..]
         .find("\n}")
         .map_or(src.len(), |i| struct_at + i);
-    let fields = map_fields(&src[struct_at..struct_end]);
+    let fields = struct_fields(&src[struct_at..struct_end]);
     if fields.len() < 8 {
         problems.push(format!(
-            "the registry declares {} ordered maps; the fold covers twelve. A field quietly \
+            "the registry declares {} fields; the fold covers at least twelve. A field quietly \
              dropped is a table that stops being part of the state root, and nothing else \
              notices.",
             fields.len()
@@ -211,8 +259,11 @@ pub fn run(root: &Path) -> Result<String, String> {
     let body = body_of(&src, "root").ok_or_else(|| "no `fn root(` to inspect".to_string())?;
     let mut missing: Vec<String> = Vec::new();
     let mut excused = 0usize;
+    // Comments and literals are blanked, so a field named in a comment above
+    // the fold does not count as folded.
+    let fold_code = crate::gates::rust_literals::scrub(&body);
     for name in &fields {
-        if body.contains(name.as_str()) {
+        if mentions_ident(&fold_code, name) {
             checked += 1;
             continue;
         }
@@ -246,7 +297,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     if !missing.is_empty() {
         problems.push(format!(
-            "these ordered maps are in the registry but not in the root fold: {}. Two nodes \
+            "these fields are in the registry but not in the root fold: {}. Two nodes \
              that agree on every block can disagree on the state, and only the next block hash \
              reveals it.",
             missing.join(", ")
@@ -262,7 +313,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(report(&problems));
     }
     Ok(format!(
-        "state-root determinism OK: {checked} checks, {} ordered maps folded, {excused} \
+        "state-root determinism OK: {checked} checks, {} fields folded, {excused} \
          excused by a single writer, fold begins with the domain tag",
         fields.len()
     ))
@@ -314,6 +365,54 @@ pub fn self_test() -> Result<String, String> {
             "canary: a new table nobody folds passed silently",
         ));
     }
+    // A registry-typed field and a multi-line typed field are consensus
+    // state too; neither shows a `BTreeMap<` on the name's line.
+    for extra in [
+        "    dictionaries: DictionaryRegistry,",
+        "    self_host_policies:\n        BTreeMap<u64, u64>,",
+    ] {
+        let hidden = good.replace(
+            "    access_events: BTreeMap<u64, u64>,",
+            &format!("    access_events: BTreeMap<u64, u64>,\n{extra}"),
+        );
+        std::fs::write(dir.join("src/domain/storage_deal.rs"), hidden)
+            .map_err(|e| e.to_string())?;
+        if run(&dir).is_ok() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!(
+                "canary: an unfolded field `{extra}` passed because of its type shape"
+            ));
+        }
+    }
+    // A field name that is only a prefix of a folded one is not folded, and a
+    // comment naming it is not a fold.
+    let prefix = good.replace(
+        "    access_events: BTreeMap<u64, u64>,",
+        "    access_events: BTreeMap<u64, u64>,\n    map: BTreeMap<u64, u64>,",
+    );
+    std::fs::write(dir.join("src/domain/storage_deal.rs"), prefix).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a field satisfied by a longer name (`map` vs `map_0`) passed",
+        ));
+    }
+    let commented = good
+        .replace(
+            "    access_events: BTreeMap<u64, u64>,",
+            "    access_events: BTreeMap<u64, u64>,\n    side_table: BTreeMap<u64, u64>,",
+        )
+        .replace(
+            "        h.finalize().into()",
+            "        // side_table is folded elsewhere\n        h.finalize().into()",
+        );
+    std::fs::write(dir.join("src/domain/storage_deal.rs"), commented).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a field named only in a comment passed as folded",
+        ));
+    }
     let second = good.replace(
         "        self.access_events.entry(id).or_default();",
         "        self.access_events.entry(id).or_default();\n        self.access_events.insert(7, 8);",
@@ -362,4 +461,18 @@ pub fn self_test() -> Result<String, String> {
          behind a non-ASCII comment; a dropped fold, an unfolded new table and a second \
          writer each FAIL).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn self_test_passes() {
+        super::self_test().expect("parallel-execution self-test");
+    }
+
+    #[test]
+    fn struct_fields_reads_multi_line_and_registry_types() {
+        let text = "pub struct R {\n    a: u64,\n    pub b: crate::x::Registry,\n    pub c:\n        BTreeMap<u64, u64>,\n    d: BTreeMap<(u8, u8), Vec<u64>>,\n}";
+        assert_eq!(super::struct_fields(text), ["a", "b", "c", "d"]);
+    }
 }
