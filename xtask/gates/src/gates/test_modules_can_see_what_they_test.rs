@@ -40,17 +40,26 @@ fn parent_functions(src: &str) -> BTreeSet<String> {
     for line in src.lines() {
         let t = line.trim_start();
         // Only column-0 items: nested `fn`s are not reachable as `super::x`.
-        if !line.starts_with("pub fn ")
-            && !line.starts_with("fn ")
-            && !line.starts_with("pub(crate) fn ")
-        {
+        if line.starts_with(char::is_whitespace) {
             continue;
         }
-        let after = t
-            .strip_prefix("pub(crate) ")
-            .or_else(|| t.strip_prefix("pub "))
-            .unwrap_or(t);
-        let Some(rest) = after.strip_prefix("fn ") else {
+        let mut rest = t;
+        loop {
+            let Some(next) = [
+                "pub(crate) ",
+                "pub(super) ",
+                "pub ",
+                "const ",
+                "async ",
+                "unsafe ",
+            ]
+            .iter()
+            .find_map(|p| rest.strip_prefix(p)) else {
+                break;
+            };
+            rest = next;
+        }
+        let Some(rest) = rest.strip_prefix("fn ") else {
             continue;
         };
         let name: String = rest
@@ -343,7 +352,7 @@ fn the_walker_does_not_follow_symlinks() -> Result<(), String> {
 
 #[cfg(all(unix, test))]
 fn walker_symlink_check() -> Result<(), String> {
-    let dir = std::env::temp_dir().join(format!("gate-walk-{}", std::process::id()));
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("gate-walk")?;
     let inner = dir.join("inner");
     std::fs::create_dir_all(&inner).map_err(|e| format!("dirs: {e}"))?;
     // A cycle: inner/loop points back at the tree root. A following walker
@@ -358,4 +367,14 @@ fn walker_symlink_check() -> Result<(), String> {
         return Err(format!("clean file must stay clean: {findings:?}"));
     }
     Ok(())
+}
+
+#[test]
+fn const_async_and_restricted_functions_are_parent_functions() {
+    let src = "const fn a() {}\npub const fn b() {}\npub(super) fn c() {}\nasync fn d() {}\npub async fn e() {}\n    fn nested() {}\nconst X: u8 = 1;\n";
+    let names = parent_functions(src);
+    for n in ["a", "b", "c", "d", "e"] {
+        assert!(names.contains(n), "missing {n}");
+    }
+    assert!(!names.contains("nested"));
 }
