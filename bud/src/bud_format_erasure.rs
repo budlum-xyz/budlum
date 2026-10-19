@@ -147,17 +147,32 @@ impl CauchyMds {
             return None; // MDS: fewer than k survivors cannot be recovered
         }
         let shard_len = survivors[0].1.len();
+        if shard_len == 0 || shard_len > MAX_SHARD_BYTES {
+            return None;
+        }
         for (_, s) in survivors {
             if s.len() != shard_len {
                 return None;
             }
         }
-        // Choose k survivors, the first k, since MDS works with any k-subset.
-        let chosen: Vec<(usize, &Vec<u8>)> = survivors
-            .iter()
-            .take(self.k)
-            .map(|(i, s)| (*i, s))
-            .collect();
+        // Choose k survivors, since MDS works with any k-subset. An index
+        // outside 0..k+p, or one seen before, is not a usable survivor and is
+        // skipped, so it cannot hide the good ones behind it.
+        let mut seen = vec![false; self.k + self.p];
+        let mut chosen: Vec<(usize, &Vec<u8>)> = Vec::with_capacity(self.k);
+        for (i, s) in survivors {
+            if chosen.len() == self.k {
+                break;
+            }
+            if *i >= seen.len() || seen[*i] {
+                continue;
+            }
+            seen[*i] = true;
+            chosen.push((*i, s));
+        }
+        if chosen.len() < self.k {
+            return None;
+        }
         // Build the k by k coefficient matrix: each row is a surviving shard's
         // contribution to the data shards. For data shard j: if shard i is data
         // the entry is 1 when i == j, and if it is parity the entry is
@@ -173,7 +188,7 @@ impl CauchyMds {
                         0
                     }
                 } else {
-                    self.cauchy(si - self.k, c).unwrap_or(0)
+                    self.cauchy(si - self.k, c)?
                 };
             }
         }
@@ -251,6 +266,32 @@ impl CauchyMds {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bad_and_duplicate_survivor_indices_are_skipped() {
+        let mds = CauchyMds::new(4, 2).unwrap();
+        let data: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i + 1; 16]).collect();
+        let shards = mds.encode(&data).unwrap();
+        // A duplicate and an index outside 0..6 come first; four good ones follow.
+        let survivors = vec![
+            (0usize, shards[0].clone()),
+            (0usize, shards[0].clone()),
+            (9usize, shards[1].clone()),
+            (1usize, shards[1].clone()),
+            (4usize, shards[4].clone()),
+            (5usize, shards[5].clone()),
+        ];
+        assert_eq!(mds.decode(&survivors), Some(data.clone()));
+        // Only three distinct valid survivors: refused, not guessed.
+        let three = vec![
+            (0usize, shards[0].clone()),
+            (0usize, shards[0].clone()),
+            (7usize, shards[1].clone()),
+            (2usize, shards[2].clone()),
+            (3usize, shards[3].clone()),
+        ];
+        assert!(mds.decode(&three).is_none());
+    }
 
     #[test]
     fn gf8_arithmetic() {
