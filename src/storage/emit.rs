@@ -856,34 +856,8 @@ pub fn qr_feed_preview(
             actual: u32::from(policy.fps),
         });
     }
-    let encoded = encode_qr_video(content, policy.block_len, key.as_ref())?;
-    let pipe = &encoded.pipe;
-    // A0 measured here on purpose: the pipe keeps the payload it built, and the
-    // preview reports the transform's own answer next to the container's. One
-    // pass serves both the report and the cross-check below, so the two cannot
-    // describe different encodes.
-    let a0 = transform_content(content, TransformOpts::default())?;
-    // The carousel locks `k` over the packed container, so that is what the
-    // plan is measured against here; `k` from the request is only ever a bound.
-    let params = CarouselParams::from_payload(&pipe.packed, policy.block_len)?;
-    let planned = oneshot_drop_count(params.k, ONESHOT_REPAIR_PERMILLAGE);
-    let ceiling = planned_drop_count(params.k, ONESHOT_REPAIR_PERMILLAGE);
-    let repair_margin = repair_margin_for(params.k, ONESHOT_REPAIR_PERMILLAGE, 0);
-    let actual = u32::try_from(pipe.frames.len()).map_err(|_| EmitError::PlanMismatch {
-        planned,
-        actual: u32::MAX,
-    })?;
-    meter.record_frames(actual.into())?;
-    if actual != planned || actual > ceiling || actual > drop_bound {
-        return Err(EmitError::PlanMismatch { planned, actual });
-    }
-    if params.k != pipe.pipe_recipe_k() {
-        return Err(EmitError::PlanMismatch {
-            planned: u32::from(params.k),
-            actual: u32::from(pipe.pipe_recipe_k()),
-        });
-    }
-
+    // The manifest checks, including the regeneration of a recipe body, run
+    // before the encode is paid for (P28-F04): a refusal there costs no encode.
     let mut regenerated_len = None;
     let mut seed_is_public = false;
     if let Some(manifest) = manifest {
@@ -935,6 +909,34 @@ pub fn qr_feed_preview(
             }
             regenerated_len = Some(regen.len());
         }
+    }
+
+    let encoded = encode_qr_video(content, policy.block_len, key.as_ref())?;
+    let pipe = &encoded.pipe;
+    // A0 measured here on purpose: the pipe keeps the payload it built, and the
+    // preview reports the transform's own answer next to the container's. One
+    // pass serves both the report and the cross-check below, so the two cannot
+    // describe different encodes.
+    let a0 = transform_content(content, TransformOpts::default())?;
+    // The carousel locks `k` over the packed container, so that is what the
+    // plan is measured against here; `k` from the request is only ever a bound.
+    let params = CarouselParams::from_payload(&pipe.packed, policy.block_len)?;
+    let planned = oneshot_drop_count(params.k, ONESHOT_REPAIR_PERMILLAGE);
+    let ceiling = planned_drop_count(params.k, ONESHOT_REPAIR_PERMILLAGE);
+    let repair_margin = repair_margin_for(params.k, ONESHOT_REPAIR_PERMILLAGE, 0);
+    let actual = u32::try_from(pipe.frames.len()).map_err(|_| EmitError::PlanMismatch {
+        planned,
+        actual: u32::MAX,
+    })?;
+    meter.record_frames(actual.into())?;
+    if actual != planned || actual > ceiling || actual > drop_bound {
+        return Err(EmitError::PlanMismatch { planned, actual });
+    }
+    if params.k != pipe.pipe_recipe_k() {
+        return Err(EmitError::PlanMismatch {
+            planned: u32::from(params.k),
+            actual: u32::from(pipe.pipe_recipe_k()),
+        });
     }
 
     // What a viewer holding every frame can rebuild, measured here rather than
@@ -1447,16 +1449,26 @@ pub fn qr_feed_frames_burst(
     seq_start: u32,
     count: u32,
 ) -> Result<(Vec<Vec<u8>>, [u8; 32]), EmitError> {
-    plan(content, policy)?;
+    let (_, drop_bound) = plan(content, policy)?;
     if count == 0 || count > policy.max_burst_frames {
         return Err(EmitError::BurstTooWide {
             count,
             limit: policy.max_burst_frames,
         });
     }
+    // The A9 budget applies to a burst as it does to a preview (P28-F04): a
+    // burst re-encodes the whole body, so it is metered for the pack, the
+    // drops it plans and the seal before the encode is paid for.
+    let mut meter = ThreeMeter::with_budget(policy.meter_budget);
+    meter.record_pack()?;
+    meter.record_drops(drop_bound.into())?;
+    if policy.seal_seed.is_some() {
+        meter.record_seal()?;
+    }
     let key = policy.seal_seed.map(|seed| PayloadKey::derive(&seed));
     let encoded = encode_qr_video(content, policy.block_len, key.as_ref())?;
     let total = u32::try_from(encoded.pipe.frames.len()).unwrap_or(u32::MAX);
+    meter.record_frames(total.into())?;
     if seq_start.saturating_add(count) > total {
         return Err(EmitError::FrameOutOfRange {
             seq: seq_start,
@@ -1635,6 +1647,26 @@ mod tests {
         let p = qr_feed_preview(&data, &policy, None).expect("sealed preview");
         let plain_container = pack_payload(PayloadKind::ContentBytes, &data).unwrap();
         assert_ne!(p.content_id, ContentId::of(&plain_container));
+    }
+
+    /// P28-F04: a burst is metered like a preview, so a budget too small for
+    /// the planned drops refuses it before the encode.
+    #[test]
+    fn a_burst_is_metered() {
+        let content = body(6000);
+        let starved = EmitPolicy {
+            meter_budget: Some(1),
+            ..EmitPolicy::default()
+        };
+        assert!(matches!(
+            qr_feed_frames_burst(&content, &starved, 0, 1),
+            Err(EmitError::Meter(_))
+        ));
+        let unlimited = EmitPolicy {
+            meter_budget: None,
+            ..EmitPolicy::default()
+        };
+        qr_feed_frames_burst(&content, &unlimited, 0, 1).expect("lab policy is unmetered");
     }
 
     #[test]
