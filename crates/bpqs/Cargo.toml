@@ -31,5 +31,11 @@ ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "ra
 slh-dsa = "0.1.0"
 rand_core = { version = "=0.6.4", features = [] } # slh-dsa 0.1.0's trait major; ml-dsa side needs no rng (from_seed)
 
+# The example carries a parity test against the shipped permutation. Examples
+# are built but not tested by default, so it is switched on here.
+[[example]]
+name = "dudect_poseidon2"
+test = true
+
 [profile.release]
 overflow-checks = true
