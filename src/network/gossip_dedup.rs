@@ -172,6 +172,9 @@ pub struct GossipDedup {
 
 impl GossipDedup {
     pub fn new(window_size: usize) -> Self {
+        // A zero window would never evict: the set would grow without bound and the
+        // utilization ratio would divide by zero.
+        let window_size = window_size.max(1);
         Self {
             seen_set: HashSet::with_capacity(window_size),
             seen_order: VecDeque::with_capacity(window_size),
@@ -688,6 +691,18 @@ mod tests {
 
         assert_eq!(dedup.total_processed(), 3); // 3 new
         assert_eq!(dedup.total_duplicates(), 1); // 1 dup
+    }
+
+    #[test]
+    fn a_zero_window_is_clamped_and_stays_bounded() {
+        let mut dedup = GossipDedup::new(0);
+        let p = libp2p::PeerId::random();
+        for i in 0..50u8 {
+            dedup.check_and_record(&[i], &p);
+        }
+        assert_eq!(dedup.seen_set.len(), 1);
+        assert_eq!(dedup.seen_order.len(), 1);
+        assert!(dedup.window_utilization().is_finite());
     }
 
     #[test]
