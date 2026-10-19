@@ -4263,6 +4263,19 @@ mod tests {
         assert_ne!(root_before, registry.state_root());
     }
 
+    /// P32-F02: the STARK public inputs are prover claims (initial state root,
+    /// event digest, sender, nonce, block height are not bound to the request).
+    /// Until they are, the flag stays off and proof-required models cannot
+    /// register. Whoever flips the flag must first replace this lock with
+    /// tests of the missing bindings.
+    #[test]
+    fn full_stark_verification_flag_is_locked_off_until_inputs_are_bound() {
+        assert!(
+            !FULL_AI_STARK_VERIFICATION_LIVE,
+            "P32-F02: STARK public inputs are not bound to the request yet"
+        );
+    }
+
     #[test]
     fn require_proof_release_needs_fully_verified_proof() {
         // BLG-0469 / P32-F03: a structural-only attach against a model that
