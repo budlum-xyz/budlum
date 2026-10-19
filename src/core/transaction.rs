@@ -1536,12 +1536,12 @@ fn encode_poa_onboarding_tx(
     match tx {
         T::AddAdmin { domain, admin } => {
             put_u8(out, 0);
-            put_u64(out, *domain);
+            put_u32(out, *domain);
             put_fixed(out, admin.as_bytes());
         }
         T::RemoveAdmin { domain, admin } => {
             put_u8(out, 1);
-            put_u64(out, *domain);
+            put_u32(out, *domain);
             put_fixed(out, admin.as_bytes());
         }
         T::SubmitApplication {
@@ -1549,7 +1549,7 @@ fn encode_poa_onboarding_tx(
             kyc_commitment,
         } => {
             put_u8(out, 2);
-            put_u64(out, *domain);
+            put_u32(out, *domain);
             put_fixed(out, kyc_commitment);
         }
         T::Approve {
@@ -1558,7 +1558,7 @@ fn encode_poa_onboarding_tx(
             validity_horizon,
         } => {
             put_u8(out, 3);
-            put_u64(out, *domain);
+            put_u32(out, *domain);
             put_fixed(out, member.as_bytes());
             put_u64(out, *validity_horizon);
         }
@@ -1568,7 +1568,7 @@ fn encode_poa_onboarding_tx(
             reason,
         } => {
             put_u8(out, 4);
-            put_u64(out, *domain);
+            put_u32(out, *domain);
             put_fixed(out, member.as_bytes());
             put_string(out, reason);
         }
@@ -1578,7 +1578,7 @@ fn encode_poa_onboarding_tx(
             reason,
         } => {
             put_u8(out, 5);
-            put_u64(out, *domain);
+            put_u32(out, *domain);
             put_fixed(out, member.as_bytes());
             put_string(out, reason);
         }
@@ -1589,7 +1589,7 @@ fn encode_poa_onboarding_tx(
             validity_horizon,
         } => {
             put_u8(out, 6);
-            put_u64(out, *domain);
+            put_u32(out, *domain);
             put_fixed(out, member.as_bytes());
             put_fixed(out, kyc_commitment);
             put_u64(out, *validity_horizon);
