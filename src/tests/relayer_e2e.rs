@@ -309,11 +309,8 @@ fn full_internal_relay_cycle_lock_mint() {
     // 3. Register relayer
     let relayer = relayer_addr();
     bc.state.add_balance(&relayer, 100_000_000);
-    let epoch = bc.state.epoch_index;
-    bc.state
-        .registry
-        .register_relayer(relayer, 50_000_000, epoch)
-        .unwrap();
+    // Bonding debits the relayer balance, as production onboarding does.
+    bc.state.bond_relayer(&relayer, 50_000_000).unwrap();
 
     // 4. Lock on Domain 1
     bc.state.add_balance(&owner(), 1000);
@@ -368,9 +365,8 @@ fn full_internal_relay_cycle_lock_mint() {
     //   Under 100 units free for the relayer, so the floor is the fix and 90
     //   Is the correct number - not a regression.
     //
-    //   Note: registry stake tracking is bookkeeping-only at this layer; it
-    //   Does NOT debit the relayer's native balance, so the relayer stays
-    //   At its initial 100M plus the fee.
+    //   The bond of 50M was debited from the relayer, so the relayer ends
+    //   at 50M plus the fee.
     let params = bc.state.registry.params();
     let (expected_recipient, expected_fee) = crate::cross_domain::bridge::split_bridge_fee(
         crate::core::money::Bud::new(100),
@@ -387,7 +383,7 @@ fn full_internal_relay_cycle_lock_mint() {
     assert_eq!(bc.state.get_balance(&recipient()), expected_recipient.get());
     assert_eq!(
         bc.state.get_balance(&relayer),
-        100_000_000 + expected_fee.get()
+        50_000_000 + expected_fee.get()
     );
 }
 
