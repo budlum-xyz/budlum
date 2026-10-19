@@ -686,13 +686,39 @@ impl AiExecutionProof {
     /// Calculate domain-separated hash of this proof for state root inclusion.
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_AI_EXEC_PROOF_V1");
+        hasher.update(b"BDLM_AI_EXEC_PROOF_V2");
         hasher.update(self.model_id.0);
         hasher.update(self.input_commitment);
         hasher.update(self.output_commitment);
         hasher.update(self.program_hash);
         hasher.update(self.steps.to_le_bytes());
         hasher.update(self.gas_used.to_le_bytes());
+        match &self.weights_digest {
+            Some(digest) => {
+                hasher.update([1u8]);
+                hasher.update(digest);
+            }
+            None => hasher.update([0u8]),
+        }
+        match &self.public_inputs {
+            Some(pi) => {
+                hasher.update([1u8]);
+                hasher.update(pi.chain_id.to_le_bytes());
+                hasher.update(pi.program_hash);
+                hasher.update(pi.initial_state_root);
+                hasher.update(pi.final_state_root);
+                hasher.update(pi.sender.to_le_bytes());
+                hasher.update(pi.nonce.to_le_bytes());
+                hasher.update(pi.block_height.to_le_bytes());
+                hasher.update(pi.gas_limit.to_le_bytes());
+                hasher.update(pi.gas_used.to_le_bytes());
+                hasher.update(pi.exit_code.to_le_bytes());
+                hasher.update(pi.trace_len.to_le_bytes());
+                hasher.update(pi.event_digest);
+                hasher.update(pi.state_writes_digest);
+            }
+            None => hasher.update([0u8]),
+        }
         // Note: proof_bytes is NOT hashed (too large, and the
         // Program_hash + commitments already uniquely identify the proof).
         hasher.finalize().into()
@@ -1020,7 +1046,7 @@ impl AiAgentReputation {
     pub fn calculate_leaf(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_AI_AGENT_REPUTATION_V1");
+        hasher.update(b"BDLM_AI_AGENT_REPUTATION_V2");
         hasher.update(self.agent.as_bytes());
         hasher.update(self.payments_completed.to_le_bytes());
         hasher.update(self.payments_defaulted.to_le_bytes());
@@ -1029,6 +1055,8 @@ impl AiAgentReputation {
         hasher.update(self.results_finalized.to_le_bytes());
         hasher.update(self.equivocations.to_le_bytes());
         hasher.update(self.active_block_span.to_le_bytes());
+        hasher.update(self.first_active_block.to_le_bytes());
+        hasher.update(self.last_active_block.to_le_bytes());
         hasher.finalize().into()
     }
 }
@@ -1385,5 +1413,46 @@ mod tests {
         assert!(no_request.request_commitment.is_none());
         assert!(zero_request.request_commitment.is_some());
         assert_ne!(no_request.receipt_id, zero_request.receipt_id);
+    }
+
+    fn sample_proof() -> AiExecutionProof {
+        AiExecutionProof {
+            model_id: AiModelId([1u8; 32]),
+            input_commitment: [2u8; 32],
+            output_commitment: [3u8; 32],
+            program_hash: [4u8; 32],
+            proof_bytes: vec![1],
+            steps: 5,
+            gas_used: 6,
+            weights_digest: None,
+            public_inputs: None,
+        }
+    }
+
+    #[test]
+    fn exec_proof_leaf_binds_weights_digest_and_public_inputs() {
+        let base = sample_proof();
+        let mut with_weights = sample_proof();
+        with_weights.weights_digest = Some([7u8; 32]);
+        assert_ne!(base.calculate_leaf(), with_weights.calculate_leaf());
+
+        let mut with_inputs = sample_proof();
+        with_inputs.public_inputs = Some(AiExecutionPublicInputs::default());
+        assert_ne!(base.calculate_leaf(), with_inputs.calculate_leaf());
+
+        let mut other_inputs = with_inputs.clone();
+        if let Some(pi) = other_inputs.public_inputs.as_mut() {
+            pi.trace_len = 9;
+        }
+        assert_ne!(with_inputs.calculate_leaf(), other_inputs.calculate_leaf());
+    }
+
+    #[test]
+    fn reputation_leaf_binds_activity_window() {
+        let mut a = AiAgentReputation::new(addr(1));
+        a.record_request(10);
+        let mut b = AiAgentReputation::new(addr(1));
+        b.record_request(11);
+        assert_ne!(a.calculate_leaf(), b.calculate_leaf());
     }
 }
