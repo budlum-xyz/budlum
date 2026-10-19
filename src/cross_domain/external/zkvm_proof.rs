@@ -93,10 +93,21 @@ impl ZkFinalityEvidence {
                 ),
             });
         }
-        let decoded: Self = bincode::deserialize(payload).map_err(|e| AdapterError::Malformed {
-            offset: 0,
-            reason: format!("payload does not decode: {e}"),
-        })?;
+        // BLG-0143 (P06-F14): trailing bytes decode to the same value under a
+        // different evidence digest, so one proof could be re-wrapped into
+        // many distinct commitments. They are refused, and the decode is
+        // bounded by the payload cap. Same wire encoding as
+        // `bincode::serialize`.
+        use bincode::Options;
+        let decoded: Self = bincode::options()
+            .with_fixint_encoding()
+            .with_limit(MAX_PAYLOAD_BYTES as u64)
+            .reject_trailing_bytes()
+            .deserialize(payload)
+            .map_err(|e| AdapterError::Malformed {
+                offset: 0,
+                reason: format!("payload does not decode: {e}"),
+            })?;
         decoded
             .envelope
             .validate_shape()
@@ -707,6 +718,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// BLG-0143 (P06-F14): trailing bytes decoded to the same value under a
+    /// different evidence digest.
+    #[test]
+    fn trailing_bytes_after_the_evidence_are_refused() {
+        let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, None);
+        let mut evidence = honest_evidence(&adapter, canonical);
+        assert!(ZkFinalityEvidence::decode(&evidence.payload).is_ok());
+        evidence.payload.push(0);
+        let err = ZkFinalityEvidence::decode(&evidence.payload).unwrap_err();
+        assert!(matches!(err, AdapterError::Malformed { .. }), "got {err:?}");
     }
 
     #[test]
