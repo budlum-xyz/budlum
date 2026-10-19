@@ -589,7 +589,9 @@ impl RegenerationLedger {
         if let Err(rule) = self.validate() {
             return Err(ReversionError::InvalidLedger { rule });
         }
-        if snapshot.stage != self.stage.later().unwrap_or(self.stage) {
+        // At the last stage there is nothing to grow into. `unwrap_or(self)`
+        // used to make Medusa to Medusa the "next" stage (P24-F07).
+        if self.stage.later() != Some(snapshot.stage) {
             return Err(ReversionError::GrowthNotNext {
                 from: self.stage,
                 to: snapshot.stage,
@@ -990,6 +992,18 @@ mod tests {
                 &canonical,
             )
             .expect("one stage back is not a full reversion");
+    }
+
+    #[test]
+    fn growth_from_the_last_stage_is_refused() {
+        let mut ledger =
+            RegenerationLedger::at(10, canonical(Stage::Medusa, 10).unwrap_or([0; 32]));
+        ledger.stage = Stage::Medusa;
+        let err = ledger
+            .grow(&snapshot(Stage::Medusa, 100), &canonical)
+            .unwrap_err();
+        assert!(matches!(err, ReversionError::GrowthNotNext { .. }));
+        assert_eq!(ledger.height, 10);
     }
 
     #[test]
