@@ -15,7 +15,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   surface:
@@ -83,14 +82,9 @@ jobs:
             fi
           fi
 
-      - name: Comment the surfaces
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+      - name: Write the surfaces to the job summary
         run: |
-          marker="<!-- diff-surface -->"
           {
-            echo "$marker"
             echo "## Diagnostic surfaces (fmt / clippy / tests)"
             if [ "${{ steps.fmt.outputs.clean }}" = "true" ]; then
               echo "- rustfmt: clean"
@@ -122,13 +116,4 @@ jobs:
             echo
             echo "_Posted by the diff-surface workflow; it reports reasons only._"
           } > /tmp/comment.md
-          jq -Rs '{body: .}' /tmp/comment.md > /tmp/payload.json
-          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-            --jq "[.[] | select(.body | startswith(\"$marker\"))][0].id")
-          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$existing" \
-              --input /tmp/payload.json
-          else
-            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              --input /tmp/payload.json
-          fi
+          cat /tmp/comment.md >> "$GITHUB_STEP_SUMMARY"

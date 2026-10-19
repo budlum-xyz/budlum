@@ -5,7 +5,7 @@ use bls12_381::{
     G1Affine, G1Projective, G2Affine, G2Projective, Scalar,
 };
 use serde::{Deserialize, Serialize};
-use sha2_09::Sha256;
+use sha2_010::Sha256;
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 
@@ -350,7 +350,10 @@ fn hash_to_g1(msg: &[u8]) -> G1Affine {
     // SWU, random-oracle encoding. Unlike the removed scalar-times-generator
     // Construction, the discrete logarithm of this point is not known.
     G1Affine::from(
-        <G1Projective as HashToCurve<ExpandMsgXmd<Sha256>>>::hash_to_curve(msg, BLS_SIGNATURE_DST),
+        <G1Projective as HashToCurve<ExpandMsgXmd<Sha256>>>::hash_to_curve(
+            std::iter::once(msg),
+            BLS_SIGNATURE_DST,
+        ),
     )
 }
 
@@ -362,7 +365,7 @@ fn hash_to_g1(msg: &[u8]) -> G1Affine {
 pub fn hash_to_g2(msg: &[u8]) -> G2Affine {
     G2Affine::from(
         <G2Projective as HashToCurve<ExpandMsgXmd<Sha256>>>::hash_to_curve(
-            msg,
+            std::iter::once(msg),
             BLS_SIGNATURE_G2_DST,
         ),
     )
@@ -370,7 +373,10 @@ pub fn hash_to_g2(msg: &[u8]) -> G2Affine {
 
 pub fn hash_pop_to_g1(msg: &[u8]) -> G1Affine {
     G1Affine::from(
-        <G1Projective as HashToCurve<ExpandMsgXmd<Sha256>>>::hash_to_curve(msg, BLS_POP_DST),
+        <G1Projective as HashToCurve<ExpandMsgXmd<Sha256>>>::hash_to_curve(
+            std::iter::once(msg),
+            BLS_POP_DST,
+        ),
     )
 }
 
@@ -1059,7 +1065,7 @@ mod tests {
             "a5f1f566ed67bb6be0e8c67e2e81a4cc68ee29813bb7994998f3eae0c9c6a265"
         );
         let point = <G1Projective as HashToCurve<ExpandMsgXmd<Sha256>>>::hash_to_curve(
-            b"",
+            std::iter::once(&b""[..]),
             b"QUUX-V01-CS02-with-BLS12381G1_XMD:SHA-256_SSWU_RO_",
         );
         assert_eq!(
