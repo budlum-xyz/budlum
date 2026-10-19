@@ -9,7 +9,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates", "bud/src"];
 
 /// Balanced brace body starting at `open` (index of `{`).
 /// Skip a regular string literal starting at `b[j] == b'"'`. Returns the
@@ -468,7 +468,8 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-refusals")?;
     let _ = std::fs::create_dir_all(dir.join("src"));
     let _ = std::fs::create_dir_all(dir.join("budzero"));
-    let _ = std::fs::create_dir_all(dir.join("wallet-core"));
+    let _ = std::fs::create_dir_all(dir.join("crates/demo/src"));
+    let _ = std::fs::create_dir_all(dir.join("bud/src"));
 
     // Good: refusal before remove, or insert after.
     let good = "fn f(&mut self) -> Result<(), E> {\n    if !self.valid() { return Err(E::X); }\n    self.m.remove(&k);\n    Ok(())\n}\nfn g(&mut self) -> Result<(), E> {\n    let v = self.m.remove(&k)?;\n    let r = do_work()?;\n    self.m.insert(k, v);\n    Ok(())\n}\n";
@@ -485,6 +486,20 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: Err after remove passed"));
     }
+
+    // A partial write under a standalone crate or the bud tree is scanned
+    // like one under src.
+    std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
+    for rel in ["crates/demo/src/lib.rs", "bud/src/lib.rs"] {
+        std::fs::write(dir.join(rel), bad).map_err(|e| e.to_string())?;
+        let missed = run(&dir).is_ok();
+        let _ = std::fs::remove_file(dir.join(rel));
+        if missed {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("canary: a partial write in {rel} was not scanned"));
+        }
+    }
+    std::fs::write(dir.join("src/lib.rs"), good).map_err(|e| e.to_string())?;
 
     // A test module is not production code, whatever it does to its own
     // maps. The strip used to leave the tail of every `#[cfg(test)] mod`
