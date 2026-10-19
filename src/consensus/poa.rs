@@ -343,12 +343,9 @@ impl PoAEngine {
 
         // No affordable round names us. Name the round-0 leader so callers
         // that only display or route the slot still see who owns it.
-        let expected_signer_addr = if let Some(expected) = self.expected_proposer_with_entropy(
-            block.index,
-            &active_refs,
-            &prev_hash_bytes,
-            0,
-        ) {
+        let expected_signer_addr = if let Some(expected) =
+            self.expected_proposer_with_entropy(block.index, &active_refs, &prev_hash_bytes, 0)
+        {
             expected.address
         } else if block.index == 0 {
             Address::zero()
@@ -1026,5 +1023,4 @@ mod tests {
             "the refusal must name the leader rule, got: {error:?}"
         );
     }
-
 }
