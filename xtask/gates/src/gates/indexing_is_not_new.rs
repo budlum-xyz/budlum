@@ -119,40 +119,10 @@ const BASELINE: &[&str] = &[
     "src/tokenomics/mod.rs",
 ];
 
-/// Strip `#[cfg(test)] mod tests { ... }` bodies, brace-counted.
+/// Strip every `#[cfg(test)]` item. A body-less item (`use`, `mod tests;`)
+/// ends at its own `;` and must not swallow the next production block.
 fn strip_test_modules(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(pos) = rest.find("#[cfg(test)]") {
-        out.push_str(&rest[..pos]);
-        let after = &rest[pos..];
-        let Some(brace) = after.find('{') else {
-            break;
-        };
-        let mut depth = 0usize;
-        let mut end = None;
-        // `brace` is a byte offset; iterate from that byte. Skipping that
-        // many chars instead overshot the brace whenever a multi-byte
-        // character stood before it, and the first `}` then took `depth`
-        // below zero.
-        for (i, c) in after[brace..].char_indices() {
-            if c == '{' {
-                depth += 1;
-            } else if c == '}' {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    end = Some(brace + i + 1);
-                    break;
-                }
-            }
-        }
-        match end {
-            Some(e) => rest = &after[e..],
-            None => return out,
-        }
-    }
-    out.push_str(rest);
-    out
+    super::capability_modules_are_wired::strip_test_mods(text)
 }
 
 /// Does this line index into something at runtime?
@@ -387,4 +357,17 @@ pub fn self_test() -> Result<String, String> {
          (array types, repeat exprs, comments, attributes, literal indexes) passed, \
          test modules skipped with the brace counter intact.",
     ))
+}
+
+#[cfg(test)]
+mod strip_tests {
+    use super::*;
+
+    #[test]
+    fn bodyless_test_item_does_not_hide_the_next_function() {
+        let src =
+            "#[cfg(test)]\npub mod tests;\nfn prod(v: &[u8], i: usize) -> u8 {\n    v[i]\n}\n";
+        let body = strip_test_modules(src);
+        assert!(body.lines().any(indexes_at_runtime));
+    }
 }
