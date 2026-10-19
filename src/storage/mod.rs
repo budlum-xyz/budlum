@@ -163,7 +163,7 @@ pub use transformed::{
 };
 
 pub use reveal_gateway::{
-    GrantScope, RevealGateway, RevealGatewayError, DEFAULT_REVEAL_BUDGET_FRAMES,
+    GrantScope, PreparedReveal, RevealGateway, RevealGatewayError, DEFAULT_REVEAL_BUDGET_FRAMES,
     MAX_FRAMES_PER_CALL, MAX_REVEAL_SESSIONS, REVEAL_SESSION_TTL_SECS,
 };
 pub use three_nft::{
