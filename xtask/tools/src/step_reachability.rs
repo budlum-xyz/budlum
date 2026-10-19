@@ -221,6 +221,13 @@ fn evaluate(expr: &str, ids: &HashMap<String, String>, failed: bool) -> Result<b
     }
 }
 
+/// Does the expression call a status function?
+fn has_status_function(guard: &str) -> bool {
+    ["success()", "failure()", "always()", "cancelled()"]
+        .iter()
+        .any(|f| guard.contains(f))
+}
+
 /// Every `steps.<id>.` reference in an expression, like `re.findall`.
 fn step_refs(guard: &str) -> Vec<String> {
     let mut refs = Vec::new();
@@ -301,7 +308,9 @@ pub fn reachability(text: &str, fail_job: &str, fail_step: &str) -> Result<Vec<R
     for s in steps_of(text, fail_job)? {
         let run = match &s.guard {
             Some(guard) => match evaluate(guard, &ids, failed) {
-                Ok(v) => v,
+                // The runner wraps an `if:` with no status function in
+                // `success() &&`.
+                Ok(v) => v && (has_status_function(guard) || !failed),
                 Err(message) => {
                     rows.push((s.name, "UNKNOWN", message));
                     continue;
@@ -585,6 +594,14 @@ mod tests {
         assert!(found[0].contains("job 'dangling', step 'Guarded on nothing'"));
         assert!(found[0].contains("`steps.nothere`"));
         assert!(found[1].contains("declared later"));
+    }
+
+    #[test]
+    fn a_guard_without_a_status_function_is_skipped_after_a_failure() {
+        let text = "name: t\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - id: first\n        name: First\n        run: exit 1\n      - name: Outcome only\n        if: steps.first.outcome == 'failure'\n        run: echo x\n";
+        let rows = reachability(text, "j", "First").expect("job exists");
+        let row = rows.iter().find(|r| r.0 == "Outcome only");
+        assert_eq!(row.map(|r| r.1), Some("SKIP"));
     }
 
     #[test]
