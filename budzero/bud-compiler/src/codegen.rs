@@ -22,10 +22,11 @@ struct VarInfo {
     struct_type: Option<String>,
 }
 
-#[allow(dead_code)]
 pub struct Codegen {
     instructions: Vec<u64>,
     next_reg: u8,
+    /// Read only by the experimental opcode gate in `emit`.
+    #[cfg(feature = "experimental")]
     profile: IsaProfile,
     error: Option<CompileError>,
     unpatched_calls: Vec<(usize, String)>,
@@ -50,6 +51,7 @@ impl Codegen {
         Self {
             instructions: Vec::new(),
             next_reg: 1,
+            #[cfg(feature = "experimental")]
             profile: IsaProfile::Production,
             error: None,
             unpatched_calls: Vec::new(),
@@ -60,9 +62,12 @@ impl Codegen {
     }
 
     pub fn new_with_profile(profile: IsaProfile) -> Self {
+        #[cfg(not(feature = "experimental"))]
+        let _ = profile;
         Self {
             instructions: Vec::new(),
             next_reg: 1,
+            #[cfg(feature = "experimental")]
             profile,
             error: None,
             unpatched_calls: Vec::new(),
