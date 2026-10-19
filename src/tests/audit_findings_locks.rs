@@ -125,7 +125,7 @@ mod tests {
              below it"
         );
         assert!(
-            pos_rs.contains("save_checkpoint(&checkpoint)"),
+            pos_rs.contains("save_checkpoint(checkpoint)"),
             "the checkpoint write disappeared entirely"
         );
     }

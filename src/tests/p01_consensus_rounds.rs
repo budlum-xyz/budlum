@@ -319,7 +319,7 @@ mod p01_consensus_rounds_tests {
                 block.epoch,
                 block.slot,
                 0,
-                &[parent.clone()],
+                std::slice::from_ref(&parent),
             )
             .expect("seed derivation succeeds");
         let (vrf_io, vrf_proof, _) = keys
