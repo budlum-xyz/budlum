@@ -219,3 +219,26 @@ fn bns_renewal_is_unreachable_and_re_registering_loses_the_remaining_term() {
          this test"
     );
 }
+
+#[test]
+fn test_bns_transfer_clears_previous_owner_pointers() {
+    let mut reg = BnsRegistry::new();
+    let alice = addr(1);
+    let bob = addr(2);
+    reg.register("pointers.bud".to_string(), alice, 0, 1000)
+        .unwrap();
+    reg.register_subdomain("pointers.bud", "app".to_string(), alice, &alice)
+        .unwrap();
+    reg.set_content(
+        "pointers.bud",
+        &alice,
+        crate::storage::content_id::ContentId([9u8; 32]),
+    )
+    .unwrap();
+
+    reg.transfer("pointers.bud", &alice, bob, 10).unwrap();
+    let resolved = reg.resolve_full("pointers.bud", 100).unwrap();
+    assert_eq!(resolved.address, Some(bob));
+    assert_eq!(resolved.content_id, None);
+    assert_eq!(reg.resolve_subdomain("pointers.bud", "app", 100), None);
+}
