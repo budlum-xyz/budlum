@@ -76,6 +76,9 @@ impl StateSnapshot {
             hasher.update(key.0);
             hasher.update(self.nonces[key].to_le_bytes());
         }
+        if counted {
+            hasher.update((self.validators.len() as u64).to_le_bytes());
+        }
         let mut validator_keys: Vec<_> = self.validators.keys().collect();
         validator_keys.sort();
         for key in validator_keys {
@@ -516,7 +519,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// and the field shipped outside the digest was exactly the forgery surface
 /// the note-registry lesson closed. Pre-schema-7 pinned digests stay
 /// byte-exact: at 6 and below the two fields cannot affect the digest.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 7;
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -900,6 +903,13 @@ impl StateSnapshotV2 {
         hasher.update(genesis_hash);
         hasher.update(self.chain_id.to_le_bytes());
 
+        // Schema 8 and above: every variable-length run carries its entry
+        // count. Balances and nonces share one entry width, so without the
+        // count an entry moved across the boundary kept the digest.
+        let counted = self.schema_version >= 8;
+        if counted {
+            hasher.update((self.balances.len() as u64).to_le_bytes());
+        }
         let mut balance_keys: Vec<_> = self.balances.keys().collect();
         balance_keys.sort();
         for key in balance_keys {
@@ -907,6 +917,9 @@ impl StateSnapshotV2 {
             hasher.update(self.balances[key].to_le_bytes());
         }
 
+        if counted {
+            hasher.update((self.nonces.len() as u64).to_le_bytes());
+        }
         let mut nonce_keys: Vec<_> = self.nonces.keys().collect();
         nonce_keys.sort();
         for key in nonce_keys {
@@ -938,6 +951,9 @@ impl StateSnapshotV2 {
             );
         }
 
+        if counted {
+            hasher.update((self.unbonding_queue.len() as u64).to_le_bytes());
+        }
         for entry in &self.unbonding_queue {
             hasher.update(entry.address.0);
             hasher.update(entry.amount.to_le_bytes());
@@ -1203,6 +1219,15 @@ impl StateSnapshotV2 {
         // the schema-4 snapshot_hash + AllowUnsigned (devnet transition).
         // A RequireSigned production loader expects a signature (sign_manifest).
         if snapshot.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
+            // The old blob must match the digest of ITS OWN schema before it
+            // is rewritten; the rewrite recomputes the hash, so an edited
+            // legacy file would otherwise always pass.
+            if !snapshot.verify() {
+                return Err(format!(
+                    "legacy snapshot schema {} does not match its own digest",
+                    snapshot.schema_version
+                ));
+            }
             snapshot.schema_version = CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION;
             snapshot.snapshot_hash = snapshot.calculate_hash();
         }
@@ -1763,6 +1788,33 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_binds_the_balance_nonce_boundary() {
+        let account_state = AccountState::new();
+        let mut a = StateSnapshotV2::from_state(&account_state, legacy_params(9));
+        let k = Address::from([7u8; 32]);
+        a.balances.insert(k, 5);
+        let mut b = a.clone();
+        b.balances.remove(&k);
+        b.nonces.insert(k, 5);
+        assert_ne!(
+            a.calculate_digest(),
+            b.calculate_digest(),
+            "an entry moved from balances to nonces must change the digest"
+        );
+    }
+
+    #[test]
+    fn edited_legacy_blob_is_refused() {
+        let account_state = AccountState::new();
+        let mut snap = StateSnapshotV2::from_state(&account_state, legacy_params(9));
+        snap.schema_version = 5;
+        snap.reseal_after_manual_edit();
+        snap.balances.insert(Address::from([9u8; 32]), 1_000);
+        let blob = serde_json::to_vec(&snap).unwrap();
+        assert!(StateSnapshotV2::from_bytes(&blob).is_err());
+    }
+
+    #[test]
     fn schema5_digest_includes_identity_and_schema4_stays_exact() {
         // The bump is the mechanism: at version 5 None and Some(default) are
         // different tags and the digest moves; at version 4 the field cannot
@@ -2256,6 +2308,11 @@ mod tests {
             "schema_version".to_string(),
             serde_json::Value::from(version),
         );
+        // An honest old blob carries the digest of its own schema; a loader
+        // refuses one that does not.
+        let mut sealed: StateSnapshotV2 = serde_json::from_value(value.clone()).unwrap();
+        sealed.reseal_after_manual_edit();
+        value["snapshot_hash"] = serde_json::Value::from(sealed.snapshot_hash);
         serde_json::to_vec(&value).unwrap()
     }
 
