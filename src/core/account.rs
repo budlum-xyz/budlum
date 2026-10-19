@@ -2884,14 +2884,16 @@ mod tests {
             release_epoch: 10,
         });
         let report = crate::registry::evidence::SlashingReport::consensus_double_sign(
-            who,
-            7,
-            "aa".into(),
-            "bb".into(),
-            vec![1],
-            vec![2],
-            None,
-        );
+                who,
+                crate::registry::evidence::SlashingProof::DoubleSign {
+                    height: 7,
+                    block_hash_1: "aa".into(),
+                    block_hash_2: "bb".into(),
+                    signature_1: vec![1],
+                    signature_2: vec![2],
+                },
+                None,
+            );
         assert_eq!(state.slash_from_report(&report).unwrap(), None);
         let ratio = state.registry.params().slash_ratio(report.condition());
         let cut = crate::core::chain_config::slash_penalty(1_000, ratio);
@@ -2910,14 +2912,16 @@ mod tests {
         let who = Address::from([9u8; 32]);
         state.add_validator(who, 1_000);
         let report = crate::registry::evidence::SlashingReport::consensus_double_sign(
-            who,
-            7,
-            "aa".into(),
-            "bb".into(),
-            vec![1],
-            vec![2],
-            None,
-        );
+                who,
+                crate::registry::evidence::SlashingProof::DoubleSign {
+                    height: 7,
+                    block_hash_1: "aa".into(),
+                    block_hash_2: "bb".into(),
+                    signature_1: vec![1],
+                    signature_2: vec![2],
+                },
+                None,
+            );
         let outcome = state
             .slash_from_report(&report)
             .unwrap()
@@ -2933,14 +2937,16 @@ mod tests {
         // A second report cannot cut the same bond twice: the ledger flag
         // marks it already slashed, so the mirror is skipped.
         let again = crate::registry::evidence::SlashingReport::consensus_double_sign(
-            who,
-            8,
-            "cc".into(),
-            "dd".into(),
-            vec![3],
-            vec![4],
-            None,
-        );
+                who,
+                crate::registry::evidence::SlashingProof::DoubleSign {
+                    height: 8,
+                    block_hash_1: "cc".into(),
+                    block_hash_2: "dd".into(),
+                    signature_1: vec![3],
+                    signature_2: vec![4],
+                },
+                None,
+            );
         let _ = state.slash_from_report(&again);
         assert_eq!(
             state.get_validator(&who).unwrap().stake,
@@ -3591,14 +3597,16 @@ mod tests {
             });
         }
         let report = crate::registry::evidence::SlashingReport::consensus_double_sign(
-            who,
-            7,
-            "aa".into(),
-            "bb".into(),
-            vec![1],
-            vec![2],
-            None,
-        );
+                who,
+                crate::registry::evidence::SlashingProof::DoubleSign {
+                    height: 7,
+                    block_hash_1: "aa".into(),
+                    block_hash_2: "bb".into(),
+                    signature_1: vec![1],
+                    signature_2: vec![2],
+                },
+                None,
+            );
         assert!(state.slash_from_report(&report).unwrap().is_some());
         let record_bytes =
             bincode::serialize(&state.registry.slashing_history()[0].report).unwrap_or_default();

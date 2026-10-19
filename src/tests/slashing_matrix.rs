@@ -33,11 +33,13 @@ mod tests {
 
         let report = SlashingReport::consensus_double_sign(
             val,
-            100, // height
-            "hash_aaa".to_string(),
-            "hash_bbb".to_string(), // different → equivocation
-            vec![0xAA; 64],
-            vec![0xBB; 64],
+            SlashingProof::DoubleSign {
+                height: 100,
+                block_hash_1: "hash_aaa".to_string(),
+                block_hash_2: "hash_bbb".to_string(), // different → equivocation
+                signature_1: vec![0xAA; 64],
+                signature_2: vec![0xBB; 64],
+            },
             Some(addr(0x01)), // reporter
         );
 
@@ -87,7 +89,7 @@ mod tests {
         reg.register(val, roles::VALIDATOR, 10_000, 0)
             .expect("register must succeed");
 
-        let report = SlashingReport::new(
+        let report = SlashingReport::new_verified(
             val,
             roles::VALIDATOR,
             SlashingProof::Liveness {
@@ -96,8 +98,7 @@ mod tests {
                 missed: 50,
                 expected: 100,
             },
-            ProofProvenance::ConsensusVerified,
-            Some(addr(0x01)),
+                        Some(addr(0x01)),
         );
 
         let result = reg.slash_from_report(&report);
@@ -114,7 +115,7 @@ mod tests {
         reg.register(val, roles::VALIDATOR, 10_000, 0)
             .expect("register must succeed");
 
-        let report = SlashingReport::new(
+        let report = SlashingReport::new_verified(
             val,
             roles::VALIDATOR,
             SlashingProof::InvalidSignatureSpam {
@@ -122,8 +123,7 @@ mod tests {
                 count: 25,
                 threshold: 20,
             },
-            ProofProvenance::ConsensusVerified,
-            Some(addr(0x01)),
+                        Some(addr(0x01)),
         );
 
         let result = reg.slash_from_report(&report);
@@ -150,7 +150,6 @@ mod tests {
                 signature_1: vec![0xAA; 64],
                 signature_2: vec![0xBB; 64],
             },
-            ProofProvenance::Unverified,
             Some(addr(0x01)),
         );
 
@@ -177,25 +176,29 @@ mod tests {
         reg.register(val2, roles::VALIDATOR, 10_000, 0).unwrap();
 
         let r1 = SlashingReport::consensus_double_sign(
-            val1,
-            100,
-            "aaa".to_string(),
-            "bbb".to_string(),
-            vec![0xAA; 64],
-            vec![0xBB; 64],
-            Some(addr(0x01)),
-        );
+                val1,
+                SlashingProof::DoubleSign {
+                    height: 100,
+                    block_hash_1: "aaa".to_string(),
+                    block_hash_2: "bbb".to_string(),
+                    signature_1: vec![0xAA; 64],
+                    signature_2: vec![0xBB; 64],
+                },
+                Some(addr(0x01)),
+            );
         let _ = reg.slash_from_report(&r1);
 
         let r2 = SlashingReport::consensus_double_sign(
-            val2,
-            200,
-            "ccc".to_string(),
-            "ddd".to_string(),
-            vec![0xCC; 64],
-            vec![0xDD; 64],
-            Some(addr(0x01)),
-        );
+                val2,
+                SlashingProof::DoubleSign {
+                    height: 200,
+                    block_hash_1: "ccc".to_string(),
+                    block_hash_2: "ddd".to_string(),
+                    signature_1: vec![0xCC; 64],
+                    signature_2: vec![0xDD; 64],
+                },
+                Some(addr(0x01)),
+            );
         let _ = reg.slash_from_report(&r2);
 
         assert_eq!(
@@ -213,14 +216,16 @@ mod tests {
         reg.register(val, roles::VALIDATOR, 10_000, 0).unwrap();
 
         let report = SlashingReport::consensus_double_sign(
-            val,
-            100,
-            "aaa".to_string(),
-            "bbb".to_string(),
-            vec![0xAA; 64],
-            vec![0xBB; 64],
-            Some(addr(0x01)),
-        );
+                val,
+                SlashingProof::DoubleSign {
+                    height: 100,
+                    block_hash_1: "aaa".to_string(),
+                    block_hash_2: "bbb".to_string(),
+                    signature_1: vec![0xAA; 64],
+                    signature_2: vec![0xBB; 64],
+                },
+                Some(addr(0x01)),
+            );
         let _ = reg.slash_from_report(&report);
 
         let history = reg.slashing_history_for(&val);
@@ -241,14 +246,16 @@ mod tests {
         reg.register(val, roles::VALIDATOR, 10_000, 0).unwrap();
 
         let report = SlashingReport::consensus_double_sign(
-            val,
-            100,
-            "aaa".to_string(),
-            "bbb".to_string(),
-            vec![0xAA; 64],
-            vec![0xBB; 64],
-            Some(addr(0x01)),
-        );
+                val,
+                SlashingProof::DoubleSign {
+                    height: 100,
+                    block_hash_1: "aaa".to_string(),
+                    block_hash_2: "bbb".to_string(),
+                    signature_1: vec![0xAA; 64],
+                    signature_2: vec![0xBB; 64],
+                },
+                Some(addr(0x01)),
+            );
 
         let r1 = reg.slash_from_report(&report);
         assert!(r1.is_ok());

@@ -3152,8 +3152,9 @@ impl BudlumApiServer for RpcServer {
         // Security: never trust caller-supplied provenance. An external
         // Submitter cannot self-certify a report as ConsensusVerified to force a
         // Slash - the RPC path is always Unverified. Only the node's own
-        // Consensus layer emits ConsensusVerified reports internally.
-        report.provenance = crate::registry::ProofProvenance::Unverified;
+        // Consensus layer emits ConsensusVerified reports internally; a
+        // caller's claim is demoted first (BLG-0102/P04-F24).
+        report.demote_to_unverified();
         // A reporter is required so the anti-spam fee can be charged.
         if report.reporter.is_none() {
             return Err(ErrorObjectOwned::owned(
@@ -3162,7 +3163,21 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        // Permissionless submission; the chain layer decides actionability.
+        // BLG-0102 (P04-F24): the promotion flow the module docs promise.
+        // A double-sign proof is self-contained - two signatures by the
+        // offender over two different hashes at one height - so it earns
+        // ConsensusVerified by opening those signatures HERE, before any
+        // fee or action. Other conditions need consensus context and are
+        // refused rather than pretended.
+        if let Err(e) = report.promote_self_proven() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "Rejected slashing report: no self-contained proof ({e});                      liveness and relay claims travel the consensus path"
+                ),
+                None::<()>,
+            ));
+        }
         match self.chain.submit_registry_slashing_report(report).await {
             Ok(Some(outcome)) => Ok(serde_json::json!({
                 "slashed": true,
@@ -6737,7 +6752,7 @@ impl BudlumApiServer for RpcServer {
                     "condition": format!("{:?}", entry.report.condition()),
                     "penalty": entry.penalty,
                     "remainingStake": entry.remaining_stake,
-                    "provenance": format!("{:?}", entry.report.provenance),
+                    "provenance": format!("{:?}", entry.report.provenance()),
                     "reporter": entry.report.reporter.map(|a: crate::core::address::Address| Self::to_0x_hash(a.to_hex())),
                 })
             })

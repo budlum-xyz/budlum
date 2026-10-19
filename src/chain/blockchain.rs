@@ -55,6 +55,10 @@ pub const FINALITY_DEPTH: usize = 50;
 pub const MAX_VALIDATOR_SNAPSHOTS: usize = 100;
 /// Upper bound of the slashing evidence pool. The pool is copied into the next
 /// block, so it must stay small.
+/// BLG-0105 (P04-F23): how long an alarm stays in the ledger.
+/// Orders of magnitude past any honest audit window and still finite -
+/// "never trimmed" was the finding.
+const ALARM_RETENTION_BLOCKS: u64 = 100_000;
 const MAX_PENDING_SLASHING_EVIDENCE: usize = 64;
 #[cfg(test)]
 pub const EPOCH_LENGTH: u64 = 10;
@@ -138,6 +142,9 @@ pub struct Blockchain {
     /// through the storage layer; deliberately not folded into the state root
     /// (see `registry/quarantine_ledger.rs`).
     pub quarantine_ledger: crate::registry::QuarantineLedger,
+    /// BLG-0105 (P04-F23): the ledger is written once per block while this
+    /// is set, not once per event.
+    pub quarantine_dirty: bool,
     /// Universal Relayer - permissionless cross-domain relay orchestrator.
     /// Tracks pending relays, validates Merkle proofs, records relay ledger.
     pub universal_relayer: UniversalRelayer,
@@ -961,6 +968,7 @@ impl Blockchain {
             global_headers,
             plugin_registry: DomainPluginRegistry::new(),
             quarantine_ledger,
+            quarantine_dirty: false,
             universal_relayer,
             external_intake,
             pending_slashing_evidence: Vec::new(),
@@ -1658,11 +1666,10 @@ impl Blockchain {
             .quarantine_entity(target, reason, height);
         self.quarantine_ledger
             .record_alarm(code, message, height, severity);
-        if let Some(store) = &self.storage {
-            if let Err(e) = store.save_quarantine_ledger(&self.quarantine_ledger) {
-                tracing::error!(error = %e, "Failed to persist quarantine ledger");
-            }
-        }
+        // BLG-0105 (P04-F23): no whole-ledger rewrite per event - the
+        // ledger is persisted once at block close (next to the pending
+        // queues), tagged dirty here.
+        self.quarantine_dirty = true;
     }
 
     fn apply_pending_commitments(
@@ -3808,7 +3815,7 @@ impl Blockchain {
         // A full fix (checking the rival block's own body against the proof's
         // height) is a wire-format change and is tracked separately; this
         // refusal closes the slash-any-validator path without one.
-        if report.provenance == crate::registry::ProofProvenance::Unverified {
+        if report.provenance() == crate::registry::ProofProvenance::Unverified {
             return Err("unverified slashing reports are refused: this node cannot \
                  verify that the two hashes in a double-sign proof belong to \
                  two blocks at the same height, because it does not hold the \
@@ -5136,6 +5143,18 @@ impl Blockchain {
         // Governance-controlled domain unfreeze (5.C)
         let _unfrozen = self.apply_pending_domain_unfreezes();
         let _compliance = self.apply_pending_poa_compliance();
+        // BLG-0105 (P04-F23): the alarm log is trimmed by age and the
+        // ledger is written once per block, not once per event.
+        self.quarantine_ledger
+            .prune_expired(self.chain.len() as u64, ALARM_RETENTION_BLOCKS);
+        if self.quarantine_dirty {
+            self.quarantine_dirty = false;
+            if let Some(store) = &self.storage {
+                if let Err(e) = store.save_quarantine_ledger(&self.quarantine_ledger) {
+                    tracing::error!(error = %e, "Failed to persist quarantine ledger");
+                }
+            }
+        }
         self.sweep_retired_relays(block.index);
 
         self.record_validator_snapshot(self.state.epoch_index);
@@ -6961,6 +6980,13 @@ impl Blockchain {
                         domain_id,
                         hex::encode(req.justification_hash)
                     );
+                    // BLG-0105 (P04-F23): an unfrozen domain is released
+                    // from the quarantine ledger too - the freeze that
+                    // quarantined it is over.
+                    self.quarantine_ledger.release_entity(
+                        &crate::registry::QuarantineLedger::domain_target(domain_id),
+                    );
+                    self.quarantine_dirty = true;
                     if let Some(store) = &self.storage {
                         if let Some(d) = self.domain_registry.get(domain_id) {
                             if let Err(e) = store.save_consensus_domain(d) {
@@ -7459,6 +7485,7 @@ impl Clone for Blockchain {
             global_headers: self.global_headers.clone(),
             plugin_registry: DomainPluginRegistry::new(),
             quarantine_ledger: self.quarantine_ledger.clone(),
+            quarantine_dirty: self.quarantine_dirty,
             universal_relayer: self.universal_relayer.clone(),
             external_intake: self.external_intake.clone(),
             pending_slashing_evidence: self.pending_slashing_evidence.clone(),
@@ -9756,7 +9783,6 @@ mod bond_and_reorg_tests {
                 signature_1: vec![1; 64],
                 signature_2: vec![2; 64],
             },
-            crate::registry::evidence::ProofProvenance::Unverified,
             Some(reporter),
         );
         let result = bc.submit_registry_slashing_report(report);
