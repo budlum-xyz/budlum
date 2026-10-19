@@ -14,6 +14,8 @@
 //! number and the total, and verified joining, through a SHA3-256 digest. This
 //! is the transport leg of the "on-device open or closed" user condition.
 
+#![forbid(unsafe_code)]
+
 use sha3::{Digest, Sha3_256};
 
 pub const OPTX_MAGIC: [u8; 8] = *b"\xB5OPTX\0\0\0";
