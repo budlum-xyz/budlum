@@ -546,7 +546,7 @@ mod tests {
                 ValidatorEntry {
                     address: addr,
                     stake: stake_each,
-                    bls_public_key: key.public_key,
+                    bls_public_key: key.public_key.clone(),
                     pop_signature: pop_sig,
                     pq_public_key: Vec::new(),
                 }

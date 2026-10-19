@@ -243,10 +243,7 @@ mod tests {
     fn rejects_softhsm_behind_neutral_symlink() {
         // BLG-0044: a symlink with a neutral name must not hide a software
         // token, so the resolved path is checked too.
-        let dir = std::env::temp_dir().join(format!(
-            "bud_softhsm_link_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("bud_softhsm_link_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let real = dir.join("libsofthsm2.so");
         std::fs::write(&real, b"fake").unwrap();

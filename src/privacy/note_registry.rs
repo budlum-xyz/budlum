@@ -319,7 +319,10 @@ mod tests {
         let c = budlum_note_packing::hash_from_field(0x0102_0304_0506_0708);
         let p = budlum_note_packing::hash_from_field(0x1122_3344_5566_7788);
         let n = L1NoteRegistry::derive_nullifier(&c, &p);
-        assert!(is_note_hash(&n), "derived nullifier must pass the shape gate");
+        assert!(
+            is_note_hash(&n),
+            "derived nullifier must pass the shape gate"
+        );
     }
 
     fn h(b: u8) -> NoteHash {
@@ -348,7 +351,6 @@ mod tests {
     #[test]
     fn a_nullifier_packed_the_way_the_wallet_packs_it_is_found_by_the_registry() {
         let commitment = budlum_note_packing::hash_from_field(0x0102_0304_0506_0708);
-        let nullifier = budlum_note_packing::hash_from_field(0xDEAD_BEEF_CAFE_F00D);
         // A zero-output transfer must be rejected.
         let change = budlum_note_packing::hash_from_field(0x1122_3344_5566_7788);
 
@@ -419,7 +421,8 @@ mod tests {
         r.insert_note(c).unwrap();
         let pc = budlum_note_packing::hash_from_field(41);
         let n = L1NoteRegistry::derive_nullifier(&c, &pc);
-        r.apply_transfer_with_proofs(&[c], &[n], &[out], &[pc]).unwrap();
+        r.apply_transfer_with_proofs(&[c], &[n], &[out], &[pc])
+            .unwrap();
         assert!(r.insert_note(n).is_err());
         let spare = budlum_note_packing::hash_from_field(22);
         let ps = budlum_note_packing::hash_from_field(42);

@@ -124,9 +124,9 @@ mod tests {
     fn submit_with_sig(len: usize) -> PrivateTransferSubmit {
         let commitment = budlum_note_packing::hash_from_field(3);
         let proof = budlum_note_packing::hash_from_field(1);
-        let nullifiers = vec![crate::privacy::note_registry::L1NoteRegistry::derive_nullifier(
-            &commitment, &proof,
-        )];
+        let nullifiers = vec![
+            crate::privacy::note_registry::L1NoteRegistry::derive_nullifier(&commitment, &proof),
+        ];
         let outputs = vec![budlum_note_packing::hash_from_field(2)];
         PrivateTransferSubmit {
             spent_commitments: vec![commitment],

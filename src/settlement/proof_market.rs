@@ -1597,5 +1597,4 @@ mod tests {
         assert_eq!(market.prune_paid_receipts(), 1);
         assert!(market.pending_receipts.is_empty());
     }
-
 }
