@@ -298,12 +298,14 @@ fn conflicting_claim_same_domain_height_rejected() {
         r[0] ^= 0xFF; // guaranteed different
         r
     };
-    bc.proof_claims.record(AcceptedProofClaim {
-        key,
-        final_state_root: conflicting_root,
-        prover: addr(0x08),
-        rewarded: false,
-    });
+    bc.proof_claims
+        .record(AcceptedProofClaim {
+            key,
+            final_state_root: conflicting_root,
+            prover: addr(0x08),
+            rewarded: false,
+        })
+        .expect("seed claim fits the registry");
     assert_eq!(bc.proof_claims.len(), 1);
 
     // A genuinely valid proof asserting a different root for the same

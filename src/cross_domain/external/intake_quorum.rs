@@ -54,8 +54,7 @@
 
 use crate::core::address::Address;
 use crate::cross_domain::external::quorum::{
-    decide, group_answers, lead_is_unassailable, Answer, AnswerGroup, DisputeBehavior,
-    LowParticipantsBehavior, QuorumOutcome, QuorumPolicy,
+    decide, group_answers, lead_is_unassailable, Answer, AnswerGroup, QuorumOutcome, QuorumPolicy,
 };
 use crate::cross_domain::external::selftest::RefusalKind;
 use crate::cross_domain::external::spec::{

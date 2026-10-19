@@ -4329,7 +4329,7 @@ impl Blockchain {
 
     fn apply_qc_fault_verdict(
         &mut self,
-        proof: &QcFaultProof,
+        _proof: &QcFaultProof,
         verdict: QcProofVerdict,
     ) -> Result<(), String> {
         if verdict.slash_validator || verdict.action == QcProofAction::SlashValidator {
