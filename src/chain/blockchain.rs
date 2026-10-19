@@ -9207,6 +9207,28 @@ mod tests {
             .contains("No active finality aggregator"));
     }
 
+    /// BLG-0099 (P04-F17): a vote naming an epoch far ahead of the chain
+    /// must not count and must not move the tracker - the F06 seam, pinned
+    /// at the door that refuses it.
+    #[test]
+    fn a_vote_from_a_far_future_epoch_must_not_move_the_tracker() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let before = bc.state.invalid_votes.current_epoch;
+        bc.note_invalid_vote(u64::MAX, Address::from([1u8; 32]));
+        assert_eq!(
+            bc.state.invalid_votes.current_epoch, before,
+            "a u64::MAX-epoch vote moved the tracker forward"
+        );
+        assert!(
+            bc.state.invalid_votes.counts.is_empty(),
+            "the far-ahead vote was counted anyway"
+        );
+        // The current epoch still counts: the guard is a bound, not a lockout.
+        bc.note_invalid_vote(bc.state.epoch_index, Address::from([1u8; 32]));
+        assert_eq!(bc.state.invalid_votes.counts.len(), 1);
+    }
+
     #[test]
     fn test_handle_precommit_rejects_when_no_aggregator() {
         let consensus = Arc::new(PoWEngine::new(0));

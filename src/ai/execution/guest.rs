@@ -549,8 +549,8 @@ pub fn estimate_full_gas(spec: &FixedPointMlpSpec, proof_bytes_len: usize) -> u6
 /// constants to the test fixtures rather than to any measurement of work.
 ///
 /// Pricing verification is real work and belongs in a change that introduces
-/// a gas price. Until then, the caller passes `u64::MAX`, which is visible at
-/// the call site and cannot be mistaken for a budget that was checked.
+/// a gas price. Until then there is no ceiling to pass at all - the fee
+/// unit and the gas unit do not compare, so the API takes none.
 ///
 /// # Errors
 ///
@@ -558,21 +558,18 @@ pub fn estimate_full_gas(spec: &FixedPointMlpSpec, proof_bytes_len: usize) -> u6
 pub fn validate_gas_budget(
     spec: &FixedPointMlpSpec,
     proof_bytes_len: usize,
-    max_fee_same_unit_as_gas: u64,
 ) -> Result<u64, String> {
+    // BLG-0099 (P04-F17): no ceiling parameter. `max_fee` is an escrowed
+    // balance in fee units and the estimate is in gas units - the two do
+    // not compare, and the API that accepted both was the mistake. The
+    // size bound is the only gate here; the gas estimate is returned so a
+    // caller that grows a real ceiling can compare in its own units.
     if proof_bytes_len > MAX_PROOF_BYTES {
         return Err(format!(
             "proof_bytes {proof_bytes_len} exceeds MAX_PROOF_BYTES {MAX_PROOF_BYTES}"
         ));
     }
-    let gas = estimate_full_gas(spec, proof_bytes_len);
-    if gas > max_fee_same_unit_as_gas {
-        return Err(format!(
-            "estimated gas {gas} exceeds the supplied ceiling \
-             {max_fee_same_unit_as_gas}"
-        ));
-    }
-    Ok(gas)
+    Ok(estimate_full_gas(spec, proof_bytes_len))
 }
 
 #[cfg(test)]
@@ -615,38 +612,16 @@ mod gas_tests {
         );
 
         // And the wired half still refuses what it is meant to refuse.
-        let err = validate_gas_budget(&spec, MAX_PROOF_BYTES + 1, u64::MAX)
+        let err = validate_gas_budget(&spec, MAX_PROOF_BYTES + 1)
             .expect_err("an oversized proof must be refused whatever the ceiling");
         assert!(err.contains("MAX_PROOF_BYTES"), "got: {err}");
 
         // A proof within bounds passes when no ceiling is asserted.
-        validate_gas_budget(&spec, 1024, u64::MAX)
+        validate_gas_budget(&spec, 1024)
             .expect("a well-sized proof must pass when no gas ceiling is claimed");
     }
 
     /// The executor asks for the size bound and asserts no gas ceiling.
-    ///
-    /// Pinned at the source, because passing the real `max_fee` here is the
-    /// mistake this decision exists to prevent and it would look correct.
-    #[test]
-    fn the_execution_path_does_not_compare_gas_against_the_escrowed_fee() {
-        let executor_src = include_str!("../../execution/executor.rs");
-        let production = executor_src
-            .split_once("#[cfg(test)]")
-            .map_or(executor_src, |(before, _)| before);
-
-        let at = production
-            .find("validate_gas_budget(")
-            .expect("the executor must ask for the size bound");
-        let call = &production[at..(at + 200).min(production.len())];
-
-        assert!(
-            call.contains("u64::MAX"),
-            "the executor is supplying a real ceiling to a gas estimate. \
-             `max_fee` is an escrowed balance and the estimate is in gas \
-             units; there is no conversion between them in this tree"
-        );
-    }
 
     #[test]
     fn gas_scales_with_model_size() {
@@ -684,29 +659,21 @@ mod gas_tests {
             weights: vec![1, 2],
             biases: vec![0],
         };
-        assert!(validate_gas_budget(&spec, MAX_PROOF_BYTES + 1, u64::MAX).is_err());
+        assert!(validate_gas_budget(&spec, MAX_PROOF_BYTES + 1).is_err());
     }
 
+    /// BLG-0099 (P04-F17): the fee ceiling is gone with its parameter (fee
+    /// units and gas units never compared) - what remains is the size gate
+    /// and the estimate it hands back.
     #[test]
-    fn gas_budget_rejects_insufficient_fee() {
+    fn gas_budget_returns_the_estimate_for_an_in_size_proof() {
         let spec = FixedPointMlpSpec {
             dims: vec![2, 1],
             weights: vec![1, 2],
             biases: vec![0],
         };
-        assert!(validate_gas_budget(&spec, 10_000, 1).is_err());
-    }
-
-    #[test]
-    fn gas_budget_accepts_sufficient_fee() {
-        let spec = FixedPointMlpSpec {
-            dims: vec![2, 1],
-            weights: vec![1, 2],
-            biases: vec![0],
-        };
-        let gas = validate_gas_budget(&spec, 10_000, 1_000_000);
-        assert!(gas.is_ok());
-        assert!(gas.unwrap() > 0);
+        let gas = validate_gas_budget(&spec, 10_000).unwrap();
+        assert!(gas > 0);
     }
 }
 

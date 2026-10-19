@@ -1363,6 +1363,13 @@ mod tests {
 
         // Same account can hold all three new roles
         reg.register_attester(addr(30), 5_000, 0).unwrap();
+        // BLG-0099 (P04-F17): bond on bond is refused - a second
+        // registration of the same role must not stack stake or reset
+        // cooldowns (F04's seam).
+        assert!(
+            reg.register_attester(addr(30), 6_000, 0).is_err(),
+            "bonding an attester role twice must refuse"
+        );
         reg.register_ai_operator(addr(30), 3_000, 0).unwrap();
         reg.register_content_validator(addr(30), 2_000, 0).unwrap();
         assert!(reg.is_active_attester(&addr(30)));

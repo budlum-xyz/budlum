@@ -1586,7 +1586,12 @@ mod tests {
                 100,
             )
             .unwrap();
-        registry.is_credential_valid(&good, 500).unwrap_or(());
+        // BLG-0099 (P04-F17): the result is the point - the edited
+        // credential's id is unknown, and the refusal says so.
+        assert!(matches!(
+            registry.is_credential_valid(&good, 500),
+            Err(IdentityError::UnknownCredential)
+        ));
     }
 
     #[test]
@@ -2109,5 +2114,89 @@ mod tests {
         );
         assert!(registry.is_credential_valid(&first_id, 200).is_ok());
         assert!(registry.is_credential_valid(&second_id, 200).is_ok());
+    }
+
+    /// BLG-0099 (P04-F17): the happy paths that need a real wallet signature
+    /// - a consented third-party Issue and a guardian-quorum Recover. They
+    /// live behind `wallet-ml-dsa`: the build that carries the wallet is the
+    /// build that can sign. The refusal paths run unguarded everywhere.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_real_consent_and_a_real_quorum_pass_the_door() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let mut registry = IdentityRegistry::new();
+        let issuer = issuer_record();
+        registry
+            .apply(&ConsensusKind::PoA, IdentityOp::Register { record: issuer }, 100)
+            .unwrap();
+        // The subject registers a wallet key as a live method (its wallet
+        // address is the method handle) and two guardians as the quorum.
+        let subject_key = WalletKeyPair::generate();
+        let g1 = WalletKeyPair::generate();
+        let g2 = WalletKeyPair::generate();
+        let mut key_id = [0u8; 32];
+        key_id.copy_from_slice(subject_key.address().as_bytes());
+        let record = IdentityRecord::new(
+            addr(1),
+            vec![VerificationMethod::new(key_id, MethodKind::MlDsa87)],
+            vec![g1.address(), g2.address()],
+            2,
+        )
+        .unwrap();
+        registry
+            .apply(&ConsensusKind::PoA, IdentityOp::Register { record }, 100)
+            .unwrap();
+        // A real consent over the real digest passes the Issue door.
+        let (credential, _) = credential();
+        let msg = issue_consent_digest(&credential, 1);
+        let consent = SubjectConsent {
+            public_key: subject_key.public_key_bytes().to_vec(),
+            signature: subject_key.sign(&msg).to_vec(),
+        };
+        execute_identity_tx(
+            &mut registry,
+            &credential.issuer,
+            IdentityTx::Issue {
+                credential: credential.clone(),
+                consent: Some(consent),
+            },
+            &ConsensusKind::PoA,
+            200,
+            1,
+        )
+        .unwrap();
+        assert!(registry.credential(&credential_id(&credential)).is_some());
+        // A real guardian quorum over the real recovery digest passes.
+        let subject = addr(1);
+        let new_key = [9u8; 32];
+        let msg = recovery_digest(&subject, &new_key, 200, 1);
+        let approvals = vec![
+            GuardianApproval {
+                public_key: g1.public_key_bytes().to_vec(),
+                signature: g1.sign(&msg).to_vec(),
+            },
+            GuardianApproval {
+                public_key: g2.public_key_bytes().to_vec(),
+                signature: g2.sign(&msg).to_vec(),
+            },
+        ];
+        execute_identity_tx(
+            &mut registry,
+            &subject,
+            IdentityTx::Recover {
+                subject,
+                new_key,
+                approvals,
+            },
+            &ConsensusKind::PoA,
+            200,
+            1,
+        )
+        .unwrap();
+        let record = registry.record(&subject).unwrap();
+        assert!(
+            record.live_method(&new_key, 200).is_some(),
+            "the quorum must have rotated the DID to the new key"
+        );
     }
 }
