@@ -162,6 +162,13 @@ struct GatewaySession {
     grant: Option<GrantScope>,
 }
 
+/// A session whose emitter is built but not yet in the table.
+#[derive(Debug)]
+pub struct PreparedReveal {
+    handle: RevealHandle,
+    grant: Option<GrantScope>,
+}
+
 /// The session table a gateway/RPC handler owns.
 #[derive(Debug, Clone)]
 pub struct RevealGateway {
@@ -271,21 +278,57 @@ impl RevealGateway {
         req
     }
 
+    /// Do the expensive part of an open with a grant decision the chain actor
+    /// already made, without touching the table.
+    ///
+    /// The emitter builds a whole one-shot pass to check the recipe's stream
+    /// pin. That work needs no table, so a handler runs it before it takes
+    /// the gateway lock and the lock only covers [`Self::open_prepared`].
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::Reveal`] when the decision or the emitter
+    /// refuses.
+    pub fn prepare_prechecked(
+        req: RevealRequest,
+        grant_allows: bool,
+    ) -> Result<PreparedReveal, RevealGatewayError> {
+        let req = Self::with_default_budget(req);
+        let handle = open_reveal_session_prechecked(&req, grant_allows)?;
+        Ok(PreparedReveal {
+            grant: GrantScope::of(&req),
+            handle,
+        })
+    }
+
+    /// Admit a session prepared by [`Self::prepare_prechecked`].
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::SessionLimit`] at the cap.
+    pub fn open_prepared(
+        &mut self,
+        prepared: PreparedReveal,
+        now: u64,
+    ) -> Result<u64, RevealGatewayError> {
+        self.admit(prepared.handle, prepared.grant, now)
+    }
+
     /// Open a session with a grant decision the chain actor already made.
     ///
     /// # Errors
     ///
     /// [`RevealGatewayError::Reveal`] when the decision or the emitter
     /// refuses; [`RevealGatewayError::SessionLimit`] at the cap.
+    #[cfg(test)]
     pub fn open_prechecked(
         &mut self,
         req: RevealRequest,
         grant_allows: bool,
         now: u64,
     ) -> Result<u64, RevealGatewayError> {
-        let req = Self::with_default_budget(req);
-        let handle = open_reveal_session_prechecked(&req, grant_allows)?;
-        self.admit(handle, GrantScope::of(&req), now)
+        let prepared = Self::prepare_prechecked(req, grant_allows)?;
+        self.open_prepared(prepared, now)
     }
 
     /// Shared admission: sweep first (an expired session cannot be pinned by
@@ -484,6 +527,31 @@ mod gateway_tests {
             key_id,
             meter_budget: budget,
         }
+    }
+
+    /// P30-F04: the expensive half of an open needs no table, so a handler
+    /// can run it before it takes the gateway lock. The prepared session is
+    /// admitted later and is the same session an open would have made.
+    #[test]
+    fn a_session_is_prepared_without_the_table_and_admitted_later() {
+        let (full, packed) = sample();
+        let make = || {
+            req(
+                ThreeRecipe::Public(full.clone()),
+                None,
+                packed.clone(),
+                addr(1),
+                addr(2),
+                [3u8; 32],
+                None,
+            )
+        };
+        let prepared = RevealGateway::prepare_prechecked(make(), false).unwrap();
+        let mut gw = RevealGateway::new();
+        assert_eq!(gw.session_count(), 0, "preparing must not touch the table");
+        let id = gw.open_prepared(prepared, 100).unwrap();
+        assert_eq!(gw.session_count(), 1);
+        assert!(gw.emit_frames(id, 0, 1, 101, false).is_ok());
     }
 
     /// A public recipe opens without a grant and serves frames back, with a
