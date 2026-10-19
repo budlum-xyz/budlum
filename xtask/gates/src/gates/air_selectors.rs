@@ -35,6 +35,16 @@ fn strip_block_comments(text: &str) -> String {
     out
 }
 
+/// Does the `'` at `i` open a char literal? A lifetime (`<'a>`) does not.
+fn is_char_literal(b: &[u8], i: usize) -> bool {
+    match b.get(i + 1) {
+        Some(b'\\') => true,
+        Some(c) if *c >= 0x80 => b[i + 2..].iter().take(4).any(|x| *x == b'\''),
+        Some(_) => b.get(i + 2) == Some(&b'\''),
+        None => false,
+    }
+}
+
 fn strip_non_code(text: &str) -> String {
     let mut out = String::new();
     for l in text.lines() {
@@ -48,7 +58,7 @@ fn strip_non_code(text: &str) -> String {
     let b = out.as_bytes();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'"' || b[i] == b'\'' {
+        if b[i] == b'"' || (b[i] == b'\'' && is_char_literal(b, i)) {
             let q = b[i];
             out2.push(if q == b'"' { '"' } else { '\'' });
             i += 1;
