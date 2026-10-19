@@ -979,13 +979,13 @@ mod tests {
         assert!(bridge
             .lock(1, 2, 11, 0, asset, owner, recipient, 100, 1000)
             .is_err());
-        assert!(bridge.burn(transfer.message_id, 2).is_err());
+        assert!(bridge.burn(transfer.message_id, 2, [9u8; 20]).is_err());
         assert!(bridge.unlock(transfer.message_id, 1, 0).is_err());
 
         let message = event.message.unwrap();
         bridge.mint(&message, 0).unwrap();
         assert!(bridge.unlock(transfer.message_id, 1, 0).is_err());
-        bridge.burn(transfer.message_id, 2).unwrap();
+        bridge.burn(transfer.message_id, 2, [9u8; 20]).unwrap();
         // Regression: unlock must originate from the burn domain (target=2),
         // NOT the original lock source (1). Old code checked source_domain, so
         // Production (msg.source_domain = burn domain = 2) was always rejected.
@@ -1004,7 +1004,7 @@ mod tests {
             .unwrap();
         let message = event.message.unwrap();
         bridge.mint(&message, 0).unwrap();
-        bridge.burn(transfer.message_id, 2).unwrap();
+        bridge.burn(transfer.message_id, 2, [9u8; 20]).unwrap();
         bridge
             .unlock(transfer.message_id, 2, unlock_height)
             .unwrap();
@@ -1085,7 +1085,7 @@ mod tests {
             .lock(1, 2, 12, 0, burned, owner, owner, 1, u64::MAX)
             .unwrap();
         bridge.mint(&e.message.unwrap(), 0).unwrap();
-        bridge.burn(t_burned.message_id, 2).unwrap();
+        bridge.burn(t_burned.message_id, 2, [9u8; 20]).unwrap();
 
         bridge.sweep_expired_locks(far);
         for (what, id) in [

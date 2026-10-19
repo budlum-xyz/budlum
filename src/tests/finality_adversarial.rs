@@ -428,6 +428,7 @@ fn finality_honest_quorum_survives_byzantine_noise() {
                 &sks[i],
                 &checkpoint_signing_message(epoch, height, byz_hash),
             ),
+            auth_sig: Vec::new(),
         };
         assert!(
             agg.add_precommit(noise).is_err(),

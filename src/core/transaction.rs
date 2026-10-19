@@ -2247,6 +2247,7 @@ mod v29_signing_tests {
                 revoked_at: None,
             }],
             credential_root: None,
+            credential_roots: Default::default(),
             guardians: vec![],
             recovery_threshold: 0,
         };

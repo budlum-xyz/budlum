@@ -846,7 +846,7 @@ mod settlement_prod_tests {
         let missing_event = event_tree.events()[0].clone();
         let missing_proof = event_tree.proof(0).unwrap();
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 999, 0, None, missing_event, &missing_proof)
+            .verify_domain_event_proof(pow.id, 999, 0, [0u8; 32], missing_event, &missing_proof)
             .is_err());
     }
 
@@ -1567,7 +1567,7 @@ mod settlement_prod_tests {
         let err = bc
             .state
             .bridge_state
-            .burn(transfer.message_id, 9)
+            .burn(transfer.message_id, 9, [9u8; 20])
             .unwrap_err();
         assert!(err.to_string().contains("not minted"));
     }
@@ -1653,13 +1653,14 @@ mod settlement_prod_tests {
 
         let mut commitment = commitment_for(&pow, 10, 0, 60);
         commitment.event_root = tree.root();
+        let block_hash = commitment.domain_block_hash;
         bc.submit_domain_commitment(commitment).unwrap();
 
         let event = tree.events()[1].clone();
         let mut forged_proof = tree.proof(1).unwrap();
         forged_proof.siblings[0] = [0xFFu8; 32];
         let err = bc
-            .verify_domain_event_proof(1, 10, 0, None, event, &forged_proof)
+            .verify_domain_event_proof(1, 10, 0, block_hash, event, &forged_proof)
             .unwrap_err();
         assert_eq!(
             err,
@@ -1700,11 +1701,12 @@ mod settlement_prod_tests {
         tree.push(event.clone());
         let mut commitment = commitment_for(&pow, 10, 0, 70);
         commitment.event_root = tree.root();
+        let block_hash = commitment.domain_block_hash;
         bc.submit_domain_commitment(commitment).unwrap();
 
         let proof = tree.proof(0).unwrap();
         let err = bc
-            .verify_domain_event_proof(1, 10, 0, None, event, &proof)
+            .verify_domain_event_proof(1, 10, 0, block_hash, event, &proof)
             .unwrap_err();
         assert_eq!(
             err,

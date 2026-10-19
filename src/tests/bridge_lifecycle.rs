@@ -223,7 +223,7 @@ fn bridge_lock_mint_burn_unlock_conserves_supply() {
     let burn_message = burn_event.message.clone().expect("burn carries a message");
     bc.state
         .bridge_state
-        .unlock(&message_id, 2, 40)
+        .unlock(message_id, 2, 40)
         .expect("unlock the burned transfer");
     bc.state.get_or_create(&owner).balance += 400;
     assert_eq!(

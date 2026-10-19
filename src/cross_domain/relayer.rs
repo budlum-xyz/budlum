@@ -802,7 +802,11 @@ mod tests {
             .process_relay(
                 message.message_id,
                 Address::from([0xAA; 32]),
-                &[],
+                &MerkleProof {
+                    leaf: [0u8; 32],
+                    index: 0,
+                    siblings: Vec::new(),
+                },
                 1,
                 [0u8; 32],
                 110,

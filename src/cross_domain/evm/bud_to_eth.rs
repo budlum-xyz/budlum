@@ -185,7 +185,6 @@ mod tests {
             [0u8; 32],
             vec![0xFF; 100],
             vec![0xAA; 50],
-            [0xBB; 20],
             DEFAULT_BRIDGE_CAP,
         );
     }

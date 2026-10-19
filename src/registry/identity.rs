@@ -2099,12 +2099,12 @@ mod tests {
         registry
             .apply(&ConsensusKind::PoA, IdentityOp::Issue { credential: first.clone() }, 150)
             .unwrap();
-        let root_after_first = registry.record(&issuer_id).unwrap().root();
+        let root_after_first = registry.record(&issuer_id).unwrap().credential_root;
         registry
             .apply(&ConsensusKind::PoA, IdentityOp::Issue { credential: second.clone() }, 150)
             .unwrap();
         let record = registry.record(&issuer_id).unwrap();
-        let root_after_second = record.root();
+        let root_after_second = record.credential_root;
         assert_ne!(
             root_after_first, root_after_second,
             "the record root must answer to the second issuance too"

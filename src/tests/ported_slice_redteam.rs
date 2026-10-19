@@ -185,6 +185,7 @@ fn the_write_gate_answers_before_the_payload_is_read() {
         subject: addr(1),
         methods: vec![],
         credential_root: None,
+        credential_roots: Default::default(),
         guardians: vec![],
         recovery_threshold: 0,
     };
@@ -371,6 +372,7 @@ fn an_unregistered_subject_cannot_be_handed_a_credential() {
         &addr(9),
         IdentityTx::Issue {
             credential: credential(9, 100, Some(1_000)),
+            consent: None,
         },
         &POA,
         200,
