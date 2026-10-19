@@ -159,9 +159,8 @@ fn key_material_in(enum_body: &str) -> Vec<String> {
         let mut i = 0;
         while let Some(rel) = lower[i..].find(word) {
             let abs = i + rel;
-            let prev_ok = abs == 0
-                || !(lower.as_bytes()[abs - 1].is_ascii_alphanumeric()
-                    || lower.as_bytes()[abs - 1] == b'_');
+            // A word start, or the tail of a compound such as `master_key`.
+            let prev_ok = abs == 0 || !lower.as_bytes()[abs - 1].is_ascii_alphanumeric();
             let mut j = abs + word.len();
             while j < lower.len()
                 && (lower.as_bytes()[j].is_ascii_alphanumeric() || lower.as_bytes()[j] == b'_')
@@ -180,6 +179,10 @@ fn key_material_in(enum_body: &str) -> Vec<String> {
             }
             i = abs + word.len();
         }
+    }
+    // A tuple variant has no `name:`; raw bytes in its payload are key-shaped.
+    if lower.contains("[u8;") || lower.contains("vec<u8>") {
+        found.push(String::from("raw byte payload"));
     }
     found
 }
@@ -335,28 +338,56 @@ fn check_binding(code: &str) -> Checks {
 
 /// Every production caller must pass the manifest's own declaration, not a
 /// literal.
+///
+/// Calls are found with whitespace removed, so a call that rustfmt split over
+/// lines is still seen. At least one call has to exist: a check that matched
+/// nothing would pass for any code.
 fn check_call_sites(code: &str) -> Checks {
     let checked = 1;
     let mut problems = Vec::new();
-    let needle = "manifest_id_from_parts(&self.shards";
+    let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    let needle = "manifest_id_from_parts(";
+    let mut calls = 0usize;
     let mut i = 0;
-    while let Some(rel) = code[i..].find(needle) {
+    while let Some(rel) = compact[i..].find(needle) {
         let abs = i + rel;
-        let rest = &code[abs + needle.len()..];
-        let close = rest.find(')').map(|d| abs + needle.len() + d);
-        let call = match close {
-            Some(c) => &code[abs..=c],
-            None => &code[abs..],
-        };
+        i = abs + needle.len();
+        let before = &compact[..abs];
+        // The definition, and a longer name that merely ends the same way.
+        if before.ends_with("fn")
+            || before.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        calls += 1;
+        let mut depth = 0i32;
+        let mut end = compact.len();
+        for (k, c) in compact[abs + needle.len() - 1..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = abs + needle.len() - 1 + k;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let call = &compact[abs..end.min(compact.len())];
         if !call.contains("self.encryption") {
             problems.push(format!(
-                "a `manifest_id_from_parts` call inside `ContentManifest` does \
-                 not pass `self.encryption`: {}. The id would then commit to a \
-                 declaration the manifest does not carry.",
-                call.trim()
+                "a `manifest_id_from_parts` call does not pass `self.encryption`: {call}. \
+                 The id would then commit to a declaration the manifest does not carry."
             ));
         }
-        i = abs + needle.len();
+    }
+    if calls == 0 {
+        problems.push(String::from(
+            "no call of `manifest_id_from_parts` was found, so nothing shows the id \
+             commits to the declaration.",
+        ));
     }
     Checks::new(checked, problems)
 }
@@ -746,4 +777,25 @@ pub fn self_test() -> Result<String, String> {
         "content encryption declaration gate self-test OK: the corrected tree \
          passes and all 13 defect shapes are refused.",
     ))
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    #[test]
+    fn compound_names_and_byte_payloads_are_key_material() {
+        assert!(!key_material_in("master_key: Foo,").is_empty());
+        assert!(!key_material_in("ClientSide(ContentCipher, [u8; 32]),").is_empty());
+        assert!(key_material_in("ClientSide(ContentCipher),").is_empty());
+    }
+
+    #[test]
+    fn split_call_without_the_declaration_is_found_and_zero_calls_fail() {
+        let bad = "self.id = manifest_id_from_parts(\n    &self.shards,\n    &literal,\n);";
+        assert!(!check_call_sites(bad).problems.is_empty());
+        let good = "self.id = manifest_id_from_parts(\n    &self.shards,\n    &self.encryption,\n);\nfn manifest_id_from_parts(a: u8) {}";
+        assert!(check_call_sites(good).problems.is_empty());
+        assert!(!check_call_sites("fn other() {}").problems.is_empty());
+    }
 }
