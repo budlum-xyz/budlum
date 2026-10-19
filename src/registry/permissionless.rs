@@ -1599,6 +1599,8 @@ mod tests {
                 Address::from([u8::try_from(n % 251).unwrap_or(0); 32]),
                 crate::registry::evidence::SlashingProof::DoubleSign {
                     height: n,
+                    kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                    epoch: None,
                     block_hash_1: format!("{n:064x}"),
                     block_hash_2: format!("{:064x}", n + 1),
                     signature_1: vec![u8::try_from(n % 256).unwrap_or(0)],
