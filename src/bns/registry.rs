@@ -179,9 +179,10 @@ impl BnsRegistry {
     }
 
     /// Transfer ownership of a live (non-expired) name to a new owner. Only
-    /// The current owner may transfer. Resolver/content bindings and existing
-    /// Subdomain mappings are preserved; after the transfer the previous
-    /// Owner loses all control over the record.
+    /// The current owner may transfer. The pointers the previous owner set
+    /// (resolver, address, storage, content and subdomains) are cleared and the
+    /// address points at the new owner, so the name never resolves to the
+    /// previous owner after the transfer.
     pub fn transfer(
         &mut self,
         name: &str,
@@ -197,6 +198,14 @@ impl BnsRegistry {
             return Err(BnsError::Expired);
         }
         record.owner = new_owner;
+        record.resolver = None;
+        record.address = Some(new_owner);
+        record.consensus_domain_id = None;
+        record.storage_root = None;
+        record.storage_domain_id = None;
+        record.storage_root_height = None;
+        record.content_id = None;
+        record.subdomains.clear();
         Ok(())
     }
 
