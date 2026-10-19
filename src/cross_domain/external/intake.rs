@@ -263,6 +263,15 @@ pub struct IntakeState {
     pub quorum: QuorumRounds,
 }
 
+/// The clock `max_age` measures against at submission: the domain's most
+/// recent accepted height, never lower than the stored registration value
+/// (BLG-0153/P07-F08 - the same high-water-mark rule as the EVM relay's
+/// policy clock).
+#[must_use]
+pub(crate) fn live_policy_clock(stored_now: u64, last_accepted_height: Option<u64>) -> u64 {
+    last_accepted_height.map_or(stored_now, |tip| tip.max(stored_now))
+}
+
 /// What went wrong at the intake boundary, as distinct from inside the
 /// framework registry. The split matters for callers: an `IntakeError` means
 /// the request never reached the registry's rules.
@@ -452,7 +461,22 @@ impl IntakeState {
             return Err(IntakeError::MissingBlsVerifier);
         }
         let adapter = entry.spec.build(bls, None);
-        let policy = entry.policy.clone();
+        // BLG-0153 (P07-F08, decision B): `now` is the live clock, not the
+        // registration timestamp. A policy stored `now` forever, so
+        // `max_age` was measured against a frozen instant and newer evidence
+        // saturated the age subtraction to 0 - freshness was dead in
+        // practice. The deterministic clock Budlum has is the domain's own
+        // accepted tip: every node replays the same acceptances, so every
+        // node measures age against the same height. Until the domain has an
+        // accepted attestation the stored value stays (registration-time
+        // admission used it deliberately).
+        let mut policy = entry.policy.clone();
+        policy.now = live_policy_clock(
+            policy.now,
+            self.registry
+                .domain(&key)
+                .and_then(|reg| reg.record.last_accepted_height),
+        );
         if self.quorum.policy_of(&key).is_some() {
             return match self.submit_to_round(key, evidence, adapter.as_ref(), &policy)? {
                 Some(attestation) => Ok(attestation),
@@ -1167,6 +1191,19 @@ mod tests {
         state
             .set_quorum_policy(&key, QuorumPolicy::strict(2, 3))
             .expect("a strict majority with enough bonded provers installs");
+    }
+
+    /// BLG-0153 (P07-F08): the policy clock at submission is the domain's
+    /// accepted tip, not the frozen registration instant.
+    #[test]
+    fn the_policy_clock_advances_with_the_accepted_tip() {
+        assert_eq!(live_policy_clock(100, None), 100, "no tip: keep stored");
+        assert_eq!(live_policy_clock(100, Some(50)), 100, "never goes back");
+        assert_eq!(
+            live_policy_clock(100, Some(175)),
+            175,
+            "the accepted tip is the live clock - a frozen 100 made max_age dead"
+        );
     }
 
     #[test]
