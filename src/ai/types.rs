@@ -1291,10 +1291,18 @@ mod tests {
         let with_dims = s.calculate_leaf();
         assert_ne!(base, with_dims, "P31-F02: dims must change the leaf");
         s.execution_dims = Some(vec![2, 2]);
-        assert_ne!(with_dims, s.calculate_leaf(), "dims values must change the leaf");
+        assert_ne!(
+            with_dims,
+            s.calculate_leaf(),
+            "dims values must change the leaf"
+        );
         let mut m = valid_spec();
         m.modalities = crate::ai_inference::perception::ModalitySet::none();
-        assert_ne!(base, m.calculate_leaf(), "P31-F02: modalities must change the leaf");
+        assert_ne!(
+            base,
+            m.calculate_leaf(),
+            "P31-F02: modalities must change the leaf"
+        );
     }
 
     #[test]
