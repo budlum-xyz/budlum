@@ -856,3 +856,341 @@ fn hex(bytes: &[u8]) -> String {
 pub fn no_backing() -> SecurityBacking {
     SecurityBacking::None
 }
+
+
+#[cfg(test)]
+mod tests {
+    // BLG-0157 (P07-F12): the R3 registry had no direct tests at all - the
+    // defects of F03, F05 and F11 would have been found by any of these.
+    use super::*;
+    use crate::cross_domain::external::selftest::{admit, FaultProbe};
+    use crate::cross_domain::external::spec::{
+        FinalityKind, TimeUnit, TrustModel, VerificationPolicy,
+    };
+    use crate::cross_domain::external::versioning::VersionPolicy;
+    use crate::cross_domain::external::{
+        ChallengeReward, DomainEconomics, ProverFee,
+    };
+
+    struct Fix;
+
+    impl crate::cross_domain::external::spec::ExternalFinalityAdapter for Fix {
+        fn descriptor(&self) -> AdapterDescriptor {
+            AdapterDescriptor {
+                id: AdapterId::from_name("fix"),
+                name: "fix".to_string(),
+                adapter_version: 1,
+                accepted_evidence_versions: vec![1],
+                consensus_kind: "none".to_string(),
+                finality_kind: FinalityKind::Proven,
+                required_depth: 0,
+                time_unit: TimeUnit::Height,
+                trust_model: TrustModel::Trustless,
+            }
+        }
+
+        fn verify(
+            &self,
+            evidence: &RawConsensusEvidence,
+            _policy: &VerificationPolicy,
+        ) -> Result<FinalityAttestation, AdapterError> {
+            if evidence.payload == b"golden" {
+                Ok(FinalityAttestation {
+                    adapter: AdapterId::from_name("fix"),
+                    domain: DomainKey::from_parts(&AdapterId::from_name("fix"), &evidence.network),
+                    height: evidence.declared_height,
+                    state_root: evidence.declared_root,
+                    attested_block_hash: None,
+                    attested_event_root: None,
+                    attested_tx_root: None,
+                    finalized_at: evidence.declared_height,
+                    time_unit: TimeUnit::Height,
+                    security: crate::cross_domain::external::spec::SecurityBacking::None,
+                    evidence_digest: evidence.digest(),
+                    adapter_version: 1,
+                    evidence_version: 1,
+                })
+            } else {
+                Err(AdapterError::ConsensusRule {
+                    rule: "only the golden payload".to_string(),
+                })
+            }
+        }
+
+        fn fault_probes(&self) -> Vec<FaultProbe> {
+            vec![FaultProbe {
+                name: "a corrupted payload is refused".to_string(),
+                patch: crate::cross_domain::external::selftest::BytePatch::InPayload {
+                    offset: 0,
+                    bytes: vec![0xFF],
+                },
+                expect: crate::cross_domain::external::selftest::ExpectedRefusal::Any,
+            }]
+        }
+
+        fn golden_evidence(&self) -> Option<RawConsensusEvidence> {
+            Some(RawConsensusEvidence {
+                adapter: AdapterId::from_name("fix"),
+                evidence_version: 1,
+                network: "testnet".to_string(),
+                payload: b"golden".to_vec(),
+                declared_height: 1,
+                declared_root: [2; 32],
+                submitter: Address::from([7u8; 32]),
+            })
+        }
+    }
+
+    fn economics() -> DomainEconomics {
+        DomainEconomics {
+            routing_ceiling_atoms: 1_000,
+            fee: ProverFee {
+                base_atoms: 1,
+                value_bps: 10,
+            },
+            challenge: ChallengeReward {
+                bps_of_slash: 1_000,
+                floor_atoms: 5,
+            },
+            unbonding_heights: 100,
+        }
+    }
+
+    /// A registered domain with one bonded prover, plus the accepted
+    /// attestation that prover carried.
+    fn registered() -> (ExternalDomainRegistry, DomainKey, FinalityAttestation) {
+        let mut registry = ExternalDomainRegistry::new();
+        let admission = admit(&Fix, &VerificationPolicy::strict(10));
+        assert!(admission.admitted, "the fixture adapter must admit");
+        let econ = economics();
+        let bond = econ.required_bond_atoms();
+        let key = registry
+            .register(
+                "testnet",
+                Fix.descriptor(),
+                econ,
+                VersionPolicy::single(AdapterId::from_name("fix"), 1, 100),
+                &admission,
+                bond,
+                Address::from([7u8; 32]),
+            )
+            .expect("a fresh domain registers");
+        let att = Fix
+            .verify(
+                &Fix.golden_evidence().expect("the fixture has golden"),
+                &VerificationPolicy::strict(10),
+            )
+            .expect("the golden verifies");
+        registry
+            .commit_attestation(&att, Address::from([7u8; 32]))
+            .expect("the accepted attestation commits");
+        (registry, key, att)
+    }
+
+    #[test]
+    fn slash_charges_the_carrier_and_withdraws_the_attestation() {
+        let (mut registry, key, att) = registered();
+        let (taken, reward) = registry
+            .slash(
+                &key,
+                Address::from([7u8; 32]),
+                att.evidence_digest,
+                50,
+                Address::from([9u8; 32]),
+            )
+            .expect("the carrier of an accepted attestation is slashable");
+        assert!(taken > 0, "the slash must take something");
+        assert!(reward <= taken, "the reward can never exceed the slash");
+        // BLG-0156 (P07-F11): the contradicted attestation is withdrawn -
+        // `latest_attestation` must not keep serving it as valid.
+        let reg = registry.domain(&key).expect("domain");
+        assert!(
+            reg.latest_attestation().is_none(),
+            "a slashed attestation must not be served"
+        );
+    }
+
+    #[test]
+    fn slash_names_the_carrier_not_a_guess() {
+        let (mut registry, key, att) = registered();
+        let err = registry
+            .slash(
+                &key,
+                Address::from([8u8; 32]),
+                att.evidence_digest,
+                50,
+                Address::from([9u8; 32]),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RegistryError::AttestationProverMismatch { .. }),
+            "charging a bond that did not carry the attestation is confiscation, got: {err:?}"
+        );
+        let err = registry
+            .slash(
+                &key,
+                Address::from([7u8; 32]),
+                [0xEE; 32],
+                50,
+                Address::from([9u8; 32]),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RegistryError::Adapter(_)),
+            "slashing for something that never landed is refused, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn one_digest_is_slashed_once() {
+        let (mut registry, key, att) = registered();
+        registry
+            .slash(
+                &key,
+                Address::from([7u8; 32]),
+                att.evidence_digest,
+                10,
+                Address::from([9u8; 32]),
+            )
+            .expect("first slash");
+        let err = registry
+            .slash(
+                &key,
+                Address::from([7u8; 32]),
+                att.evidence_digest,
+                10,
+                Address::from([9u8; 32]),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RegistryError::AlreadySlashed { .. }),
+            "the same evidence must not empty a bond twice, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn readmit_reopens_a_faulted_domain_but_is_not_an_edit() {
+        let (mut registry, key, _att) = registered();
+        let admission = admit(&Fix, &VerificationPolicy::strict(10));
+        // A serving domain cannot be "re-admitted" with the identical report
+        // - that is not a readmission, it is nothing.
+        let err = registry
+            .readmit(&key, &admission, "no reason")
+            .unwrap_err();
+        assert!(
+            matches!(err, RegistryError::AdmissionDigestMismatch { .. })
+                || matches!(err, RegistryError::Adapter(_))
+                || matches!(err, RegistryError::InvalidVersionPolicy),
+            "an identical report on a serving domain is refused, got: {err:?}"
+        );
+        registry.mark_faulted(&key, "test").expect("faults");
+        // BLG-0135 no: P07-F05: the exit from Faulted WORKS even though
+        // admission is deterministic - the same digest is exactly what a
+        // Faulted domain re-presents.
+        registry
+            .readmit(&key, &admission, "probes fixed nothing; state restored")
+            .expect("a Faulted domain readmits under the same admission");
+        let reg = registry.domain(&key).expect("domain");
+        assert!(
+            reg.record.state.serves(),
+            "after readmit the domain serves again"
+        );
+    }
+
+    #[test]
+    fn a_faulted_domain_takes_no_new_attestation() {
+        let (mut registry, key, _att) = registered();
+        registry.mark_faulted(&key, "dispute").expect("faults");
+        registry.mark_faulted(&key, "again").expect("not an error");
+        let reg = registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.state, DomainState::Faulted);
+        let faults: Vec<_> = reg
+            .record
+            .history
+            .iter()
+            .filter(|e| e.to == DomainState::Faulted)
+            .collect();
+        assert_eq!(faults.len(), 1, "the fault is recorded once, not stacked");
+        let mut other = Fix
+            .verify(
+                &Fix.golden_evidence().expect("golden"),
+                &VerificationPolicy::strict(10),
+            )
+            .expect("golden verifies");
+        other.height = 2;
+        other.evidence_version = 1;
+        let err = registry
+            .commit_attestation(&other, Address::from([7u8; 32]))
+            .unwrap_err();
+        assert!(
+            matches!(err, RegistryError::NotServing { .. }),
+            "a Faulted domain must not commit, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_duplicate_slot_rule_holds() {
+        let (mut registry, key, att) = registered();
+        let err = registry
+            .commit_attestation(&att, Address::from([7u8; 32]))
+            .unwrap_err();
+        assert!(
+            matches!(err, RegistryError::DuplicateAttestation { .. }),
+            "one slot, one attestation, got: {err:?}"
+        );
+        let mut v2 = att.clone();
+        v2.evidence_version = 2;
+        // A different evidence version is a different slot and commits.
+        registry
+            .commit_attestation(&v2, Address::from([7u8; 32]))
+            .expect("version 2 has its own slot");
+    }
+
+    #[test]
+    fn a_policy_swap_stays_on_the_adapter() {
+        let (mut registry, key, _att) = registered();
+        let err = registry
+            .set_version_policy(
+                &key,
+                VersionPolicy::single(AdapterId::from_name("other"), 1, 100),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RegistryError::DescriptorMismatch { .. }),
+            "a policy for another adapter is a swap, not a fork, got: {err:?}"
+        );
+        let err = registry
+            .set_version_policy(
+                &key,
+                VersionPolicy {
+                    windows: Vec::new(),
+                    ..VersionPolicy::single(AdapterId::from_name("fix"), 1, 100)
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, RegistryError::InvalidVersionPolicy),
+            "an inconsistent policy is refused, got: {err:?}"
+        );
+        registry
+            .set_version_policy(
+                &key,
+                VersionPolicy::single(AdapterId::from_name("fix"), 1, 100),
+            )
+            .expect("the sanctioned mutation installs");
+        let reg = registry.domain(&key).expect("domain");
+        assert_eq!(reg.record.accepted_evidence_versions, vec![1]);
+    }
+
+    #[test]
+    fn intake_state_round_trips_through_bincode() {
+        let (registry, key, _att) = registered();
+        let mut state = crate::cross_domain::external::intake::IntakeState::default();
+        state.registry = registry;
+        let bytes = bincode::serialize(&state).expect("serialises");
+        let back: crate::cross_domain::external::intake::IntakeState =
+            bincode::deserialize(&bytes).expect("the current shape decodes");
+        assert_eq!(state, back, "the consensus state must round trip");
+        assert!(back.registry.domain(&key).is_some());
+    }
+}
