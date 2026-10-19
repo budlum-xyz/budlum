@@ -294,13 +294,17 @@ impl MerkleTrie {
 
     pub fn insert(&mut self, key: [u8; 32], value: Vec<u8>) {
         self.entries.insert(key, value);
-        // root = hash of all keys sorted
-        let mut hashes: Vec<_> = self.entries.keys().cloned().collect();
-        hashes.sort();
+        // root = hash of all (key, value) pairs, sorted by key. The value is
+        // length-prefixed, so two tries with different values cannot share
+        // a root.
+        let mut pairs: Vec<(&[u8; 32], &Vec<u8>)> = self.entries.iter().collect();
+        pairs.sort();
         let mut h = Sha3_256::new();
-        h.update(b"BDLM_BUD_TRIE_V1");
-        for hk in hashes {
-            h.update(hk);
+        h.update(b"BDLM_BUD_TRIE_V2");
+        for (k, v) in pairs {
+            h.update(k);
+            h.update((v.len() as u64).to_le_bytes());
+            h.update(v);
         }
         self.root = h.finalize().into();
     }
@@ -342,6 +346,19 @@ impl EconomicsGates {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn trie_root_commits_to_values() {
+        let mut a = MerkleTrie::new();
+        let mut b = MerkleTrie::new();
+        a.insert([1u8; 32], b"one".to_vec());
+        b.insert([1u8; 32], b"two".to_vec());
+        assert_ne!(a.root, b.root);
+        // An overwrite changes the root too.
+        let before = a.root;
+        a.insert([1u8; 32], b"three".to_vec());
+        assert_ne!(a.root, before);
+    }
+
     #[test]
     fn economics_holds() {
         // JSON 17.19x with plain 7+1 (e=1.143) holds 0.016: 0.23342*1.143/17.19 = 0.01552 <= 0.016
