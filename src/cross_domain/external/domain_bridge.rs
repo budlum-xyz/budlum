@@ -19,7 +19,7 @@
 //! commitment path are documented in `intake.rs`.
 
 use crate::cross_domain::external::spec::{
-    AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, VerificationPolicy,
+    AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, SecurityBacking, VerificationPolicy,
 };
 use crate::domain::finality_adapter::{
     DomainFinalityAdapter, FinalityError, FinalityProof, FinalityStatus,
@@ -182,11 +182,7 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 commitment.event_root,
                 attestation.attested_event_root,
             ),
-            (
-                "tx_root",
-                commitment.tx_root,
-                attestation.attested_tx_root,
-            ),
+            ("tx_root", commitment.tx_root, attestation.attested_tx_root),
         ] {
             match attested {
                 Some(value) if value == committed => {}
@@ -239,8 +235,7 @@ mod tests {
     use super::*;
     use crate::core::address::Address;
     use crate::cross_domain::external::spec::{
-        AdapterDescriptor, FinalityAttestation, FinalityKind, SecurityBacking,
-        TimeUnit, TrustModel,
+        AdapterDescriptor, FinalityAttestation, FinalityKind, SecurityBacking, TimeUnit, TrustModel,
     };
     use crate::domain::types::{ConsensusKind, DomainStatus, RootScheme};
 
@@ -401,21 +396,12 @@ mod tests {
     /// event root or transaction root - the fields are attested or empty.
     #[test]
     fn unattested_commitment_fields_are_refused() {
-        for (name, mutate) in [
-            (
-                "domain_block_hash",
-                Box::new(|c: &mut DomainCommitment| c.domain_block_hash = [9; 32])
-                    as Box<dyn Fn(&mut DomainCommitment)>,
-            ),
-            (
-                "event_root",
-                Box::new(|c: &mut DomainCommitment| c.event_root = [9; 32]),
-            ),
-            (
-                "tx_root",
-                Box::new(|c: &mut DomainCommitment| c.tx_root = [9; 32]),
-            ),
-        ] {
+        let rows: [(&str, fn(&mut DomainCommitment)); 3] = [
+            ("domain_block_hash", |c| c.domain_block_hash = [9; 32]),
+            ("event_root", |c| c.event_root = [9; 32]),
+            ("tx_root", |c| c.tx_root = [9; 32]),
+        ];
+        for (name, mutate) in rows {
             let (adapter, domain, mut commitment) = fixture();
             let proof = encode_external_evidence(&adapter.evidence).expect("encode");
             commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
@@ -424,7 +410,9 @@ mod tests {
                 Box::new(adapter),
                 VerificationPolicy::proven(100),
             );
-            let status = bridge.verify_finality(&domain, &commitment, &proof).unwrap();
+            let status = bridge
+                .verify_finality(&domain, &commitment, &proof)
+                .unwrap();
             assert!(
                 matches!(status, FinalityStatus::Rejected(_)),
                 "{name} was accepted unattested"
@@ -443,7 +431,9 @@ mod tests {
         let mut policy = VerificationPolicy::proven(100);
         policy.require_slashable = true;
         let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter), policy);
-        let status = bridge.verify_finality(&domain, &commitment, &proof).unwrap();
+        let status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
         assert!(
             matches!(status, FinalityStatus::Rejected(_)),
             "an unslashable set passed a slashable-only policy"
