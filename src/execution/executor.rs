@@ -11,6 +11,9 @@ use serde_json;
 /// hashes; the bound leaves room for framing while preventing a length prefix
 /// from allocating attacker-sized memory during block execution.
 const MAX_RELAYER_RESULT_PROOF_BYTES: u64 = 4 * 1024;
+/// How far before the including block a grant may be dated. A wider window would let a grant
+/// slip under an encryption policy that was deprecated since.
+const MAX_GRANT_BACKDATE_BLOCKS: u64 = 64;
 
 pub struct Executor;
 
@@ -1925,6 +1928,16 @@ impl Executor {
                     return Err(BudlumError::validation(
                         "pollen_grant_owner_mismatch",
                         "AccessGrant owner must equal tx.from",
+                    ));
+                }
+                let height = state.current_block_height;
+                if grant.issued_at_block > height
+                    || height.saturating_sub(grant.issued_at_block) > MAX_GRANT_BACKDATE_BLOCKS
+                    || grant.expires_at_block < height
+                {
+                    return Err(BudlumError::validation(
+                        "pollen_grant_window",
+                        "AccessGrant must be issued within the backdate window and not be expired",
                     ));
                 }
                 state
