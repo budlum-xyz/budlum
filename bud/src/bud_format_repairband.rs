@@ -38,8 +38,12 @@ pub fn repair_band(n: usize, k: usize, model: RepairModel) -> Option<f64> {
             Some((grup as f64).min(k as f64))
         }
         RepairModel::Msr => {
-            // MSR has the form alpha(n-1)/(n-k); simplified to about k/(n-k).
-            Some(k as f64 / (n - k) as f64)
+            // MSR with d = n-1 helpers: alpha * (n-1) / (n-k). With no parity
+            // (k == n) the formula divides by zero, so there is no value.
+            if n == k {
+                return None;
+            }
+            Some((n - 1) as f64 / (n - k) as f64)
         }
         RepairModel::Mbr => {
             // MBR: the minimum bandwidth is k (approximately the
@@ -89,6 +93,12 @@ mod tests {
             msr < plain,
             "the MSR bandwidth has to be lower: msr={msr} plain={plain}"
         );
+    }
+
+    #[test]
+    fn msr_follows_the_published_formula() {
+        assert_eq!(repair_band(6, 4, RepairModel::Msr), Some(2.5));
+        assert!(repair_band(4, 4, RepairModel::Msr).is_none());
     }
 
     #[test]
