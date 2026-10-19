@@ -20,8 +20,8 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The eight rejected characters, in the shell gate's report order.
-const DASHES: [(char, &str); 8] = [
+/// The thirteen rejected characters, in the shell gate's report order.
+const DASHES: [(char, &str); 13] = [
     ('\u{2010}', "U+2010 hyphen"),
     ('\u{2011}', "U+2011 non-breaking hyphen"),
     ('\u{2012}', "U+2012 figure dash"),
@@ -30,6 +30,11 @@ const DASHES: [(char, &str); 8] = [
     ('\u{2015}', "U+2015 horizontal bar"),
     ('\u{2212}', "U+2212 minus sign"),
     ('\u{00ad}', "U+00AD soft hyphen"),
+    ('\u{2e3a}', "U+2E3A two-em dash"),
+    ('\u{2e3b}', "U+2E3B three-em dash"),
+    ('\u{fe58}', "U+FE58 small em dash"),
+    ('\u{fe63}', "U+FE63 small hyphen-minus"),
+    ('\u{ff0d}', "U+FF0D fullwidth hyphen-minus"),
 ];
 
 /// Directories that carry no prose worth scanning.
@@ -185,7 +190,7 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// # Errors
 ///
 /// Returns the first canary that misbehaves. The canaries mirror the shell
-/// gate's one for one: a clean tree passes, each of the eight characters is
+/// gate's one for one: a clean tree passes, each of the thirteen characters is
 /// caught on its own, a workflow job name is caught, and the vacuity floor
 /// fires on a near-empty tree.
 pub fn self_test() -> Result<String, String> {
@@ -258,7 +263,7 @@ pub fn self_test() -> Result<String, String> {
 
     let _ = fs::remove_dir_all(&tmp);
     Ok(String::from(
-        "Self-test OK: clean tree passes, 8 dash characters detected, workflow name detected, vacuity floor fires.",
+        "Self-test OK: clean tree passes, 13 dash characters detected, workflow name detected, vacuity floor fires.",
     ))
 }
 
@@ -306,5 +311,17 @@ mod tests {
     fn truncate_keeps_100_chars() {
         assert_eq!(truncate100(&"x".repeat(120)).chars().count(), 100);
         assert_eq!(truncate100("  hello  "), "hello");
+    }
+}
+
+#[cfg(test)]
+mod dash_tests {
+    use super::*;
+
+    #[test]
+    fn long_and_small_dash_forms_are_rejected() {
+        for c in ['\u{2e3a}', '\u{2e3b}', '\u{fe58}', '\u{fe63}', '\u{ff0d}'] {
+            assert!(DASHES.iter().any(|(d, _)| *d == c), "{c:?}");
+        }
     }
 }
