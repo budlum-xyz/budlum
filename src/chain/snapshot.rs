@@ -513,7 +513,14 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// memberships are digestive state - a node that dropped them would hand the
 /// screen a folder list that is not the chain's - so the field enters the
 /// digest under a `>= 6` gate and pre-vault pinned digests stay byte-exact.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 6;
+///
+/// Schema 7 digests the PoA admission records and the compliance ledger
+/// (BLG-0090 / BLG-0091). Both decide writes: a node that dropped an
+/// admission set or a freeze would serve a chain that is not the chain's,
+/// and the field shipped outside the digest was exactly the forgery surface
+/// the note-registry lesson closed. Pre-schema-7 pinned digests stay
+/// byte-exact: at 6 and below the two fields cannot affect the digest.
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -626,6 +633,11 @@ pub struct StateSnapshotV2 {
     /// was derived from.
     #[serde(default)]
     pub poa_onboarding: Option<crate::registry::poa_onboarding::PoAOnboarding>,
+    /// BLG-0091 (P04-F09): the PoA compliance ledger (screening, freeze,
+    /// travel-rule) alongside the admission records, both digested from
+    /// schema 7.
+    #[serde(default)]
+    pub poa_compliance: Option<crate::registry::PoaComplianceRegistry>,
     #[serde(default)]
     pub message_registry: Option<crate::cross_domain::message_registry::CrossDomainMessageRegistry>,
     #[serde(default)]
@@ -827,6 +839,7 @@ impl StateSnapshotV2 {
             note_registry: Some(account_state.note_registry.clone()),
             bridge_state: Some(account_state.bridge_state.clone()),
             poa_onboarding: Some(account_state.poa_onboarding.clone()),
+            poa_compliance: Some(account_state.poa_compliance.clone()),
             message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
             proof_market: Some(account_state.proof_market.clone()),
@@ -1020,6 +1033,15 @@ impl StateSnapshotV2 {
         //     different hash rather than a quietly-valid snapshot. ---
         if self.schema_version >= 6 {
             hash_opt_serializable(&mut hasher, &self.vault);
+        }
+        // --- The PoA admission + compliance pair (schema-7 wave, BLG-0090 /
+        //     BLG-0091). Same gate logic as identity and vault: at 6 and
+        //     below these fields cannot affect the digest, at 7 and above a
+        //     node that dropped an admission set or a freeze produces a
+        //     different hash instead of a quietly-valid snapshot. ---
+        if self.schema_version >= 7 {
+            hash_opt_serializable(&mut hasher, &self.poa_onboarding);
+            hash_opt_serializable(&mut hasher, &self.poa_compliance);
         }
 
         hasher.finalize().into()
@@ -2125,6 +2147,37 @@ mod tests {
         );
     }
 
+    /// The PoA admission records and the compliance ledger cross the wire
+    /// INSIDE the digest (BLG-0090 / BLG-0091): a peer that empties an
+    /// admission set or drops a freeze invalidates the snapshot instead of
+    /// quietly unpermissioning a domain or clearing a gate.
+    #[test]
+    fn the_poa_gate_state_crosses_the_wire_inside_the_digest() {
+        use crate::core::account::AccountState;
+        let mut st = AccountState::new();
+        st.poa_onboarding.add_admin(0, crate::core::address::Address::from([1u8; 32]));
+        let mut snapshot = StateSnapshotV2::from_state(
+            &st,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "b".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        assert!(snapshot.verify(), "the fixture must verify as issued");
+
+        snapshot.poa_onboarding = Some(crate::registry::poa_onboarding::PoAOnboarding::new());
+        snapshot.reseal_after_manual_edit();
+        assert!(
+            !snapshot.verify(),
+            "the admission records crossed the wire outside the digest"
+        );
+    }
+
     /// The signature fields stay outside, and must.
     ///
     /// Guarding the fix from the obvious overcorrection. `manifest_signature`
@@ -2227,16 +2280,16 @@ mod tests {
     /// Only the keys of the schema-4 wave.
     const SCHEMA4_ONLY_KEYS: &[&str] = &["manifest_signer", "manifest_signature", "trust_policy"];
 
-    /// PoA admission records: a field added with `#[serde(default)]`, without a
-    /// version bump.
+    /// PoA admission records: a field added with `#[serde(default)]`.
     ///
-    /// **Why `CURRENT_..._SCHEMA_VERSION` was not bumped:** the version exists for cases where an old
-    /// binary could read a new snapshot *wrongly*.
-    /// There is no such case here - if the field is absent the default is an empty record, and an empty
-    /// record means "this domain is not permissioned", which is exactly the truth of old
-    /// snapshots. Bumping the version would push old releases outside the supported
-    /// window: a compatibility break that gains nothing.
-    /// kaybi.
+    /// It shipped WITHOUT a version bump, on the argument that absence
+    /// defaults to an empty record ("not permissioned"), which is the truth
+    /// of old snapshots. BLG-0090 (P04-F08) overrode that: the records are
+    /// consensus gate state, and a field crossing the wire outside the
+    /// digest is a field a peer can empty without invalidating the
+    /// snapshot - the same forgery surface the note-registry lesson closed.
+    /// The key still ships at schema 4 (old blobs carry it, the legacy-blob
+    /// fixtures assert that); the VALUE enters the digest at schema 7.
     ///
     /// The derived set (`poa_admitted`) is NOT HERE and must not be: it is recomputed from the records
     /// at every block close. Had it been written to the snapshot, a hand-edited
