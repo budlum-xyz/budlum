@@ -3575,6 +3575,10 @@ mod tests {
             registry.get_request(&req_id).is_none(),
             "Pruned cancelled request should be removed"
         );
+        assert!(
+            !registry.is_cancelled(&req_id),
+            "Pruned cancelled request must lose its cancellation marker"
+        );
     }
 
     // ===================== AI Settlement Layer Deepening Tests =====================
@@ -4386,10 +4390,9 @@ mod tests {
     fn test_qos_changes_state_root() {
         // QoS changes affect state root
         let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
-        let root_before = registry.state_root();
 
         let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
-        let _ = root_before; // just trigger QoS via result submission
+        let root_before = registry.state_root();
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
