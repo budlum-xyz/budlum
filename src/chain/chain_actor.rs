@@ -3941,8 +3941,11 @@ impl ChainActor {
                 }
                 ChainCommand::GetAiFeeReclaimStatus(id, res_tx) => {
                     let current_block = self.ai_query_height();
-                    let mut registry = self.blockchain.state.ai_registry.clone();
-                    let res = registry.reclaim_fee(&id, current_block);
+                    let res = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .check_reclaimable(&id, current_block);
                     let _ = res_tx.send(res);
                 }
                 ChainCommand::GetAiEquivocationStatus(request_id, verifier, res_tx) => {
