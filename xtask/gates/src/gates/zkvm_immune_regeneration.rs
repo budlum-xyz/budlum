@@ -32,6 +32,30 @@ fn read(root: &Path, rel: &str) -> Result<String, String> {
     std::fs::read_to_string(&f).map_err(|e| e.to_string())
 }
 
+/// Source with block and line comments removed. String contents stay, so a
+/// `//` inside a literal is not taken as a comment.
+fn without_comments(text: &str) -> String {
+    let blocks = crate::gates::rust_literals::strip_block_comments(text);
+    let mut out = String::with_capacity(blocks.len());
+    for line in blocks.lines() {
+        let mut in_str = false;
+        let mut prev = '\0';
+        let mut cut = line.len();
+        for (i, c) in line.char_indices() {
+            if c == '"' && prev != '\\' {
+                in_str = !in_str;
+            } else if !in_str && c == '/' && prev == '/' {
+                cut = i - 1;
+                break;
+            }
+            prev = c;
+        }
+        out.push_str(&line[..cut]);
+        out.push('\n');
+    }
+    out
+}
+
 /// Is `code` named inside a validation error rather than in prose?
 fn code_is_a_rejection(src: &str, code: &str) -> bool {
     let needle = "BudlumError::validation(";
@@ -70,8 +94,8 @@ fn rejections(exec: &str) -> (usize, Vec<String>) {
 ///
 /// Returns the list of violated claims.
 pub fn run(root: &Path) -> Result<String, String> {
-    let exec = read(root, "src/execution/executor.rs")?;
-    let verifier = read(root, "src/execution/proof_verifier.rs")?;
+    let exec = without_comments(&read(root, "src/execution/executor.rs")?);
+    let verifier = without_comments(&read(root, "src/execution/proof_verifier.rs")?);
     let zkvm = read(root, "src/execution/zkvm.rs")?;
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
@@ -94,7 +118,10 @@ pub fn run(root: &Path) -> Result<String, String> {
         .lines()
         .find(|l| l.contains("pub const MAX_PROOF_BYTES"))
     {
-        if line.contains("1 << 20") {
+        let value = line
+            .split_once('=')
+            .map(|(_, v)| v.trim().trim_end_matches(';').trim());
+        if value == Some("1 << 20") {
             checked += 1;
         } else {
             problems.push(format!(
@@ -226,6 +253,27 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from(
             "canary: a nested chain path reaching the un-gated executor passed",
         ));
+    }
+    std::fs::remove_dir_all(dir.join("src/chain")).map_err(|e| e.to_string())?;
+    // A rejection that survives only in a comment is not a rejection.
+    let commented = exec.replace(
+        "return Err(BudlumError::validation(\"ai_exec_stark\", e));",
+        "// return Err(BudlumError::validation(\"ai_exec_stark\", e));",
+    );
+    std::fs::write(dir.join("src/execution/executor.rs"), commented).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: a commented-out rejection passed"));
+    }
+    std::fs::write(dir.join("src/execution/executor.rs"), exec).map_err(|e| e.to_string())?;
+    std::fs::write(
+        dir.join("src/execution/proof_verifier.rs"),
+        "pub const MAX_PROOF_BYTES: usize = 11 << 20;\n",
+    )
+    .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: a lookalike size ceiling passed"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
