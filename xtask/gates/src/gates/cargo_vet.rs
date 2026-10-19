@@ -74,6 +74,14 @@ fn tool_is_absent(out: &str) -> bool {
         .any(|l| l.contains("no such command") && l.contains("vet"))
 }
 
+/// How far above the measured count the baseline may sit, in percent.
+const STALL_SLACK_PERCENT: u64 = 10;
+
+/// Is the baseline further above the measured count than the ratchet allows?
+fn baseline_too_slack(n: u64, base: u64) -> bool {
+    base > n + n * STALL_SLACK_PERCENT / 100
+}
+
 /// # Errors
 ///
 /// Returns a finding when the unvetted count exceeds the baseline.
@@ -104,6 +112,12 @@ pub fn run(root: &Path) -> Result<String, String> {
         return Err(format!(
             "{msg}\nFAIL: the unvetted dependency count went over the baseline (+{}).\n      If a new dependency was added: either a trusted import source must\n      cover it, or a justified audit entry must be recorded with\n      `cargo vet certify`. RAISING the baseline is not a fix.",
             n - base
+        ));
+    }
+    if baseline_too_slack(n, base) {
+        return Err(format!(
+            "{msg}\nFAIL: the baseline is {} above the measured count, more than the {STALL_SLACK_PERCENT}% a ratchet may be off by. Lower `.github/cargo-vet-baseline.txt` to {n}: an unlowered baseline is silent permission for that many new unvetted dependencies.",
+            base - n
         ));
     }
     if n < base {
@@ -157,4 +171,16 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "Canary OK: 123 was counted, a clean report was recognised, broken output was refused.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_baseline_far_above_the_count_is_slack() {
+        assert!(baseline_too_slack(100, 120));
+        assert!(!baseline_too_slack(100, 110));
+        assert!(!baseline_too_slack(433, 433));
+    }
 }
