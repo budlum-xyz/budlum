@@ -800,9 +800,9 @@ impl VerifierRegistry {
                     expected,
                 } => {
                     let mut b = window_start_epoch.to_le_bytes().to_vec();
-                    b.extend_from_slice(window_end_epoch.to_le_bytes());
-                    b.extend_from_slice(missed.to_le_bytes());
-                    b.extend_from_slice(expected.to_le_bytes());
+                    b.extend_from_slice(&window_end_epoch.to_le_bytes());
+                    b.extend_from_slice(&missed.to_le_bytes());
+                    b.extend_from_slice(&expected.to_le_bytes());
                     b
                 }
                 SlashingProof::Other { tag, data } => {
@@ -816,12 +816,12 @@ impl VerifierRegistry {
                     threshold,
                 } => {
                     let mut b = epoch.to_le_bytes().to_vec();
-                    b.extend_from_slice(count.to_le_bytes());
-                    b.extend_from_slice(threshold.to_le_bytes());
+                    b.extend_from_slice(&count.to_le_bytes());
+                    b.extend_from_slice(&threshold.to_le_bytes());
                     b
                 }
             };
-            hasher.update(&(record.report.proof.condition() as u8).to_le_bytes());
+            hasher.update((record.report.proof.condition() as u8).to_le_bytes());
             hasher.update((proof_bytes.len() as u64).to_le_bytes());
             hasher.update(&proof_bytes);
         }
@@ -1410,7 +1410,7 @@ mod tests {
             unbonding_epochs: 0,
             ..Default::default()
         };
-        assert!(VerifierRegistry::try_with_params(bad.clone()).is_err());
+        assert!(VerifierRegistry::try_with_params(bad).is_err());
         let mut reg = VerifierRegistry::new();
         assert!(reg.set_params(bad).is_err());
         assert_eq!(reg.params().unbonding_epochs, 7);
@@ -1454,6 +1454,7 @@ mod tests {
                     tag: "t".into(),
                     data: vec![1],
                 },
+                crate::evidence::ProofProvenance::Unverified,
                 None,
             ),
             penalty: 5,
