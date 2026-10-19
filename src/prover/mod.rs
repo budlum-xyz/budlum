@@ -362,7 +362,9 @@ impl ProofClaimRegistry {
     /// bound; the caller maps the refusal onto the submission path.
     pub fn record(&mut self, claim: AcceptedProofClaim) -> Result<(), ProofError> {
         if self.claims.len() >= MAX_PROOF_CLAIMS {
-            return Err(ProofError::RegistryFull { cap: MAX_PROOF_CLAIMS });
+            return Err(ProofError::RegistryFull {
+                cap: MAX_PROOF_CLAIMS,
+            });
         }
         self.claims.insert(claim.key, claim);
         Ok(())
@@ -424,7 +426,10 @@ mod tests {
         );
         // A duplicate of a recorded claim is classified, not recorded: the
         // cap must not turn idempotent resubmissions into refusals.
-        assert_eq!(reg.classify(key(5), [1u8; 32]).unwrap(), ClaimDecision::Duplicate);
+        assert_eq!(
+            reg.classify(key(5), [1u8; 32]).unwrap(),
+            ClaimDecision::Duplicate
+        );
     }
 
     #[test]

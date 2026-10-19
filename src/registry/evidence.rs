@@ -204,6 +204,9 @@ pub enum EvidenceError {
     /// a double-sign proof. The other conditions are not provable from the
     /// report alone; see the note on the RPC path.
     WrongProofForVerification,
+    /// A double-sign proof's `kind` and `epoch` disagree: voting messages
+    /// are bound to an epoch, block headers have none (BLG-0196).
+    KindEpochMismatch,
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -244,6 +247,9 @@ impl std::fmt::Display for EvidenceError {
             }
             EvidenceError::WrongProofForVerification => {
                 write!(f, "proof is not a double-sign proof")
+            }
+            EvidenceError::KindEpochMismatch => {
+                write!(f, "double-sign proof kind and epoch disagree")
             }
         }
     }
@@ -494,14 +500,17 @@ impl SlashingReport {
         }
         match &self.proof {
             SlashingProof::DoubleSign {
-                kind: DoubleSignKind::BlockHeader,
-                epoch: None,
+                kind,
+                epoch,
                 block_hash_1,
                 block_hash_2,
                 signature_1,
                 signature_2,
                 ..
             } => {
+                if (*kind == DoubleSignKind::BlockHeader) != epoch.is_none() {
+                    return Err(EvidenceError::KindEpochMismatch);
+                }
                 if block_hash_1.len() > MAX_BLOCK_HASH_LEN {
                     return Err(EvidenceError::FieldTooLarge {
                         field: "block_hash_1",

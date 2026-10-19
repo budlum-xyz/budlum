@@ -10667,7 +10667,8 @@ mod tests {
     /// reject (BLG-0232/P14-F02).
     #[test]
     fn air_rejects_a_forged_final_state_root_baked_in_before_proving() {
-        let (envelope, pi, program) = build_arith_proof_forged(|pi| pi.final_state_root = [0xAB; 32]);
+        let (envelope, pi, program) =
+            build_arith_proof_forged(|pi| pi.final_state_root = [0xAB; 32]);
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
             matches!(res, Err(crate::adapter::VerifyError::InvalidProof)),

@@ -1517,7 +1517,9 @@ impl Node {
         // double-sign window the marks exist to close.
         let tmp = parent.join(format!(
             ".{}.tmp",
-            path.file_name().map(|n| n.to_string()).unwrap_or_default()
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
         ));
         let write = (|| -> std::io::Result<()> {
             {
