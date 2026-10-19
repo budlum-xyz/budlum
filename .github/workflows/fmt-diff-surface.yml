@@ -68,6 +68,8 @@ jobs:
           set +e
           cargo test --lib > /tmp/tests-raw.txt 2>&1
           status=$?
+          cargo test --manifest-path crates/bpqs/Cargo.toml >> /tmp/tests-raw.txt 2>&1
+          status=$((status | $?))
           sed -e 's/\x1b\[[0-9;]*m//g' /tmp/tests-raw.txt > /tmp/tests.txt
           if [ "$status" -eq 0 ]; then
             echo "clean=true" >> "$GITHUB_OUTPUT"
