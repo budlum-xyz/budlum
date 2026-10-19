@@ -306,7 +306,8 @@ fn verify_prompt_text(text: &str) -> Result<(), String> {
     generation_phrases_are_all_refusals(text)?;
 
     for (medium, unit, limit) in DECLARED_LIMITS {
-        if !text.contains(&limit.to_string()) {
+        let line = format!("- {medium}: at most {limit} {unit}");
+        if !text.contains(&line) {
             return Err(format!(
                 "the prompt no longer states the {medium} limit of {limit} {unit}; \
                  the runtime would enforce a number the user was never told"
@@ -897,6 +898,15 @@ mod tests {
     /// without breaking anything that reads the constants: the numbers are
     /// prose here and code in the crate that enforces them, and the two can
     /// drift apart silently.
+    #[test]
+    fn a_limit_number_outside_its_line_does_not_satisfy_the_check() {
+        let line = "- video: at most 4096 frames";
+        assert!(AI_SYSTEM_PROMPT.contains(line));
+        let moved = AI_SYSTEM_PROMPT.replace(line, "- video: at most 9 frames (see 4096)");
+        let err = verify_prompt_text(&moved).expect_err("the video ceiling line is gone");
+        assert!(err.contains("video"), "{err}");
+    }
+
     #[test]
     fn a_prompt_missing_an_effort_figure_is_refused() {
         let stripped = AI_SYSTEM_PROMPT.replace("10.0x", "<missing>");
