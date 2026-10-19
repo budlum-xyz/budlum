@@ -23,7 +23,31 @@ use sha3::{Digest, Sha3_256};
 pub const DAS_MAGIC: [u8; 8] = *b"\xB5DASS\0\0\0";
 pub const DAS_VERSION: u8 = 1;
 
-/// The Merkle root over a chunk list, domain-tagged (K38).
+/// Wrap a Merkle tree root with the leaf count (P37-F22). The odd-node rule
+/// duplicates the last node, so `[a, b, c]` and `[a, b, c, c]` share one tree
+/// root; folding the count in keeps the two roots apart and lets a verifier
+/// that holds the root know the object length.
+fn bind_count(tree_root: [u8; 32], count: usize) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(b"BDLM_BUD_DAS_ROOT_V1");
+    h.update((count as u64).to_le_bytes());
+    h.update(tree_root);
+    h.finalize().into()
+}
+
+/// The number of sibling hashes a proof for a tree of `count` leaves carries.
+fn tree_depth(count: usize) -> usize {
+    let mut depth = 0usize;
+    let mut n = count;
+    while n > 1 {
+        n = n.div_ceil(2);
+        depth += 1;
+    }
+    depth
+}
+
+/// The Merkle root over a chunk list, domain-tagged (K38), bound to the leaf
+/// count.
 pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
     // No chunks, no tree: a domain-tagged empty root instead of `level[0]`
     // on an empty vector.
@@ -60,7 +84,7 @@ pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
         }
         level = next;
     }
-    level[0]
+    bind_count(level[0], chunks.len())
 }
 
 /// A single chunk proof: a leaf plus a path, verified against the root.
@@ -69,6 +93,9 @@ pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
 #[derive(Debug, Clone)]
 pub struct DasProof {
     pub leaf_index: usize,
+    /// The number of leaves of the tree the proof was made for. It is folded
+    /// into the root, so a proof only verifies against a root of that count.
+    pub leaf_count: usize,
     pub path: Vec<[u8; 32]>,
 }
 
@@ -125,11 +152,23 @@ impl DasProof {
             idx /= 2;
         }
         let _ = leaf;
-        Some(DasProof { leaf_index, path })
+        Some(DasProof {
+            leaf_index,
+            leaf_count: chunks.len(),
+            path,
+        })
     }
 
     /// Verify a proof: the leaf plus the path must reach the root. Panic-free.
     pub fn verify(&self, leaf: &[u8], root: &[u8; 32]) -> bool {
+        // The position must lie inside the tree and the path must have exactly
+        // the depth of that tree: high index bits are not ignored (P37-F23).
+        if self.leaf_count == 0
+            || self.leaf_index >= self.leaf_count
+            || self.path.len() != tree_depth(self.leaf_count)
+        {
+            return false;
+        }
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_DAS_LEAF_V1");
         h.update((leaf.len() as u64).to_le_bytes());
@@ -149,7 +188,7 @@ impl DasProof {
             cur = nh.finalize().into();
             idx /= 2;
         }
-        cur == *root
+        bind_count(cur, self.leaf_count) == *root
     }
 }
 
@@ -280,6 +319,26 @@ mod tests {
             let p = DasProof::prove(&chunks5, i).unwrap();
             assert!(p.verify(&chunks5[i], &root5));
         }
+    }
+
+    /// P37-F22: a duplicated last chunk is a different object and must have a
+    /// different root; P37-F23: a proof does not verify at another position.
+    #[test]
+    fn root_binds_the_leaf_count_and_proofs_bind_the_position() {
+        let abc = gen_chunks(3);
+        let mut abcc = abc.clone();
+        abcc.push(abc[2].clone());
+        assert_ne!(das_root(&abc), das_root(&abcc));
+
+        let root = das_root(&abc);
+        let proof = DasProof::prove(&abc, 1).unwrap();
+        assert!(proof.verify(&abc[1], &root));
+        let mut moved = proof.clone();
+        moved.leaf_index += 2; // same parity, outside the tree
+        assert!(!moved.verify(&abc[1], &root));
+        let mut recount = proof.clone();
+        recount.leaf_count = 4;
+        assert!(!recount.verify(&abc[1], &root));
     }
 
     #[test]
