@@ -13,6 +13,9 @@ const HOMES: &[&str] = &[
     "budzero/verifier-registry/src/params.rs",
 ];
 
+/// Source roots walked for inline copies. Every entry must exist.
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates", "bud"];
+
 /// Does this line look like the slash expression: stake/bond-ish u128
 /// multiply-divide by `FIXED_POINT_SCALE` with `as u64`?
 fn is_slash_expr(line: &str) -> bool {
@@ -353,10 +356,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     // Only the crate source roots are scanned, matching the shell gate's
     // os.walk over the repo minus skip-dirs: the gate's own source under
     // xtask/ must not be treated as an inline copy.
-    let mut stack: Vec<std::path::PathBuf> = ["src", "budzero", "wallet-core"]
-        .iter()
-        .map(|s| root.join(s))
-        .collect();
+    let mut stack: Vec<std::path::PathBuf> = SCAN_ROOTS.iter().map(|s| root.join(s)).collect();
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
