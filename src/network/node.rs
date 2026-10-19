@@ -2933,7 +2933,7 @@ impl Node {
                                                let voter_addr = match crate::core::address::Address::from_hex(&voter_id) {
                                                    Ok(addr) => addr,
                                                    Err(e) => {
-                                                       // BLG-0211 (P11-F10): an unparseable
+                                                       // BLG-0211 (P11-F10): an unparsable
                                                        // voter identity is a sender fault.
                                                        warn!("Invalid voter_id in Prevote: {e}");
                                                        self.peer_manager_lock().report_bad_behavior(&peer_id);
