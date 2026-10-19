@@ -280,7 +280,7 @@ fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
             .and_then(toml::Value::as_str)
         {
             assert!(
-                metrics.starts_with("127.") || metrics.starts_with("[::1]"),
+                is_loopback(metrics),
                 "{file} exposes the unauthenticated metrics endpoint on {metrics}"
             );
         }
