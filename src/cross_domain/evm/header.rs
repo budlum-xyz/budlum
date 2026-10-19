@@ -57,6 +57,9 @@ impl std::fmt::Display for HeaderError {
             HeaderError::Rlp(e) => write!(f, "header rlp error: {e}"),
             HeaderError::InvalidHeader => write!(f, "header: invalid structure"),
             HeaderError::ChainBroken => write!(f, "header: chain broken"),
+            HeaderError::CheckpointNotReached => {
+                write!(f, "header: chain does not reach the trusted checkpoint")
+            }
             HeaderError::InsufficientConfirmations => {
                 write!(f, "header: insufficient confirmations")
             }
