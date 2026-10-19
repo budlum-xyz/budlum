@@ -4364,20 +4364,31 @@ mod c3_validator_readiness_tests {
             .expect("the slash applies");
         assert_eq!(burned, 30, "the rest of the slash is burned, not returned");
         assert_eq!(state.get_balance(&challenger), 20, "the reward lands");
-        assert_eq!(state.get_balance(&poster), 20, "the balance was debited at lock");
         assert_eq!(
-            state.external_bond_escrow.get(&poster).copied().unwrap_or(0),
+            state.get_balance(&poster),
+            20,
+            "the balance was debited at lock"
+        );
+        assert_eq!(
+            state
+                .external_bond_escrow
+                .get(&poster)
+                .copied()
+                .unwrap_or(0),
             30,
             "the escrow holds the unslashed remainder"
         );
         assert!(
-            state.slash_external_bond(&poster, 50, 20, &challenger).is_err(),
+            state
+                .slash_external_bond(&poster, 50, 20, &challenger)
+                .is_err(),
             "a slash can never exceed what is escrowed"
         );
         assert!(
-            state.slash_external_bond(&poster, 10, 11, &challenger).is_err(),
+            state
+                .slash_external_bond(&poster, 10, 11, &challenger)
+                .is_err(),
             "the reward can never exceed the slash"
         );
     }
-
 }

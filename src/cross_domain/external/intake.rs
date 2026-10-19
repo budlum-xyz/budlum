@@ -44,7 +44,10 @@ use crate::cross_domain::external::quorum::{
 };
 use crate::cross_domain::external::registry::{ExternalDomainRegistry, RegistryError};
 use crate::cross_domain::external::selftest::{admit, AdmissionReport};
-use crate::cross_domain::external::spec::{AdapterDescriptor, AdapterError, DomainKey, ExternalFinalityAdapter, FinalityAttestation, RawConsensusEvidence, VerificationPolicy};;
+use crate::cross_domain::external::spec::{
+    AdapterDescriptor, AdapterError, DomainKey, ExternalFinalityAdapter, FinalityAttestation,
+    RawConsensusEvidence, VerificationPolicy,
+};
 use crate::cross_domain::external::versioning::VersionPolicy;
 use crate::cross_domain::external::zkvm_proof::ZkVmFinalityAdapter;
 use serde::{Deserialize, Serialize};
@@ -600,7 +603,6 @@ impl IntakeState {
             RoundState::AgreedRefusal { .. } | RoundState::Open => Ok(None),
         };
         outcome
-        }
     }
 
     /// Bonds an additional prover to a registered domain. Registration
