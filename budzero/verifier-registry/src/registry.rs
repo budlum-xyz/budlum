@@ -489,7 +489,10 @@ impl VerifierRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        if !matches!(reg.status, MemberStatus::Active) {
+        // BLG-0253, decision 5A: exclusion is not confiscation. The
+        // penalty already reduced stake; the remainder exits with the same
+        // delay as an active bond, matching the node registry.
+        if !matches!(reg.status, MemberStatus::Active | MemberStatus::Slashed) {
             return Err(RegistryError::NotActive { account, role });
         }
         let release_epoch = current_epoch.saturating_add(self.params.unbonding_epochs);
@@ -614,6 +617,10 @@ impl VerifierRegistry {
     ) -> Result<Option<SlashOutcome>, EvidenceError> {
         report.is_actionable()?;
         let condition = report.condition();
+        // A lifecycle transition must not make retained evidence charge twice.
+        if self.slashing_history.iter().any(|record| record.report == *report) {
+            return Ok(None);
+        }
         let ratio = self.params.slash_ratio(condition);
         match self.slash(report.offender, report.role, condition, ratio) {
             Ok(outcome) => {
@@ -1143,19 +1150,24 @@ mod tests {
         assert!(reg.get(&account, roles::VALIDATOR).is_none());
     }
 
-    /// The terminal classes stay terminal, with the exit refused.
+    /// Decision 5A: double-sign exclusion does not confiscate the remainder.
     #[test]
-    fn double_sign_slash_still_locks_the_remainder_out() {
+    fn double_sign_remainder_exits_only_after_the_delay() {
         let account = addr(52);
         let mut reg = VerifierRegistry::new();
         reg.register_validator(account, 10_000, 0).unwrap();
         reg.slash(account, roles::VALIDATOR, SlashingCondition::DoubleSign, FIXED_POINT_SCALE / 2)
             .unwrap();
-        let exit = reg.begin_unbonding(account, roles::VALIDATOR, 9);
-        assert!(
-            matches!(exit, Err(RegistryError::NotActive { .. })),
-            "a terminal slash must not open the exit, got {exit:?}"
-        );
+        assert!(!reg.is_active(&account, roles::VALIDATOR));
+        let release = reg.begin_unbonding(account, roles::VALIDATOR, 9)
+            .expect("a slashed bond retains a delayed exit");
+        assert!(!reg.is_active(&account, roles::VALIDATOR));
+        assert!(matches!(
+            reg.withdraw(account, roles::VALIDATOR, release - 1),
+            Err(RegistryError::StillUnbonding { .. })
+        ));
+        assert_eq!(reg.withdraw(account, roles::VALIDATOR, release).unwrap(), 5_000);
+        assert!(reg.get(&account, roles::VALIDATOR).is_none());
     }
 
     /// BLG-0253: the mirror may only shrink a slashed entry.
@@ -1253,6 +1265,9 @@ mod tests {
         );
         let hist = reg.slashing_history_for(&addr(11));
         assert_eq!(hist.len(), 1, "the slash itself is recorded");
+        assert!(reg.slash_from_report(&report).unwrap().is_none());
+        assert_eq!(reg.get(&addr(11), roles::MASTER_VERIFIER).unwrap().stake,
+            outcome.remaining_stake, "replaying retained evidence cannot cut twice");
     }
 
     /// The slashing history stops at the cap: the newest are kept, the oldest dropped.
