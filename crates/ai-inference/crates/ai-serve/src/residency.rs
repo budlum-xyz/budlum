@@ -168,9 +168,17 @@ pub struct RoutingHeat {
     pub counts: std::collections::BTreeMap<[u8; 32], u64>,
 }
 
+/// The most distinct shards a heat map tracks. A router cannot select more
+/// shards than a model has, so a larger map only comes from unknown ids.
+const MAX_HEAT_ENTRIES: usize = 65_536;
+
 impl RoutingHeat {
-    /// Record one router selection of a shard.
+    /// Record one router selection of a shard. A shard not yet tracked is
+    /// ignored once the map holds [`MAX_HEAT_ENTRIES`] shards.
     pub fn record(&mut self, content_id: [u8; 32]) {
+        if self.counts.len() >= MAX_HEAT_ENTRIES && !self.counts.contains_key(&content_id) {
+            return;
+        }
         let current = self.counts.get(&content_id).copied().unwrap_or(0);
         self.counts.insert(content_id, current.saturating_add(1));
     }
@@ -978,6 +986,19 @@ mod heat_tests {
 
         assert_eq!(tier_of(&rebalanced, 4), Tier::System);
         assert_eq!(tier_of(&rebalanced, 1), Tier::Disk);
+    }
+
+    #[test]
+    fn heat_tracks_a_bounded_number_of_shards() {
+        let mut heat = RoutingHeat::default();
+        for n in 0..=MAX_HEAT_ENTRIES {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            heat.record(key);
+        }
+        assert_eq!(heat.counts.len(), MAX_HEAT_ENTRIES);
+        heat.record([0u8; 32]);
+        assert_eq!(heat.count(&[0u8; 32]), 2);
     }
 
     #[test]
