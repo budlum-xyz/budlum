@@ -900,6 +900,55 @@ mod tests {
         assert_eq!(vm.events, vec![30]);
     }
 
+    /// P35-F17: a name bound inside an `if` or `while` body is not visible
+    /// after it, and a `let` there does not replace an outer variable.
+    #[test]
+    fn branch_bindings_stay_in_the_branch() {
+        for body in [
+            "if (c) { let t = 1; }",
+            "if (c) { emit E(0); } else { let t = 1; }",
+            "while (n < 1) { let t = 1; n = n + 1; }",
+        ] {
+            let source = format!(
+                r#"
+                contract Scope {{
+                    pub fn main() {{
+                        let c = 1;
+                        let n = 0;
+                        {body}
+                        emit E(t);
+                    }}
+                }}
+            "#
+            );
+            assert!(
+                matches!(
+                    compile(&source, IsaProfile::Production),
+                    Err(CompileError::SemanticError(_))
+                ),
+                "`t` leaked out of: {body}"
+            );
+        }
+
+        let source = r#"
+            contract Shadow {
+                pub fn main() {
+                    let x = 1;
+                    let c = 1;
+                    if (c) {
+                        let x = 2;
+                        emit E(x);
+                    }
+                    emit E(x);
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("shadow program compiles");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![2, 1]);
+    }
+
     /// P35-F01: a scrutinee that is not a plain identifier lives in a
     /// temporary register. The pattern Load must not overwrite it.
     #[test]
