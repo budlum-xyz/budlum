@@ -97,6 +97,10 @@ async fn main() {
         }
     }
     let ingest_duration = start_ingest.elapsed();
+    assert!(
+        ingested > 0,
+        "no transaction was ingested ({ingest_failed} refused); the numbers would mean nothing"
+    );
     let ingest_tps = ingested as f64 / ingest_duration.as_secs_f64();
 
     // 4. Measure EXECUTION/COMMIT TPS
@@ -121,6 +125,9 @@ async fn main() {
     }
     println!("\nExecution completed.");
     let exec_duration = start_exec.elapsed();
+    if processed < ingested {
+        eprintln!("WARNING: only {processed} of {ingested} ingested transactions were produced");
+    }
     let exec_tps = processed as f64 / exec_duration.as_secs_f64();
 
     // 5. Results
