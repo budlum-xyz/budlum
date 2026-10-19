@@ -128,16 +128,30 @@ pub struct ZkVmFinalityAdapter {
     /// verifying a proof under the wrong network is not a weaker guarantee, it
     /// is a statement about a different chain.
     network: String,
+    /// The pinned program (BLG-0134/P06-F05, decision A): a proof of ANY
+    /// canonical-set program is not a proof of THIS domain's program. Pinned
+    /// at admission; `None` is the closed state and every verification is
+    /// refused.
+    program_hash: Option<[u8; 32]>,
+    /// The pinned chain id (BLG-0134/P06-F05, decision A): a proof under
+    /// another chain's id attests another chain's state.
+    chain_id: Option<u64>,
     golden: Option<RawConsensusEvidence>,
 }
 
 impl ZkVmFinalityAdapter {
     /// Builds an adapter for one network.
     #[must_use]
-    pub fn new(network: &str) -> Self {
+    pub fn new(
+        network: &str,
+        program_hash: Option<[u8; 32]>,
+        chain_id: Option<u64>,
+    ) -> Self {
         let id = AdapterId::from_name(&format!("budzkvm-{network}"));
         Self {
             network: network.to_string(),
+            program_hash,
+            chain_id,
             descriptor: AdapterDescriptor {
                 id,
                 name: format!("budzkvm-{network}"),
@@ -249,6 +263,33 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
             &decoded.program,
         )
         .map_err(|e| AdapterError::Crypto { what: describe(&e) })?;
+
+        // BLG-0134 (P06-F05, decision A): the proof must be of THIS domain's
+        // pinned program and chain. Canonical-set membership alone let any
+        // canonical program attest anything its inputs named.
+        let Some(program_hash) = self.program_hash else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "no program hash pinned; ZkVm admission is closed".to_string(),
+            });
+        };
+        if decoded.inputs.program_hash != program_hash {
+            return Err(AdapterError::ConsensusRule {
+                rule: "the proved program is not the pinned program".to_string(),
+            });
+        }
+        let Some(chain_id) = self.chain_id else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "no chain id pinned; ZkVm admission is closed".to_string(),
+            });
+        };
+        if decoded.inputs.chain_id != chain_id {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "the proof's chain id {} is not the pinned chain id {chain_id}",
+                    decoded.inputs.chain_id
+                ),
+            });
+        }
 
         Ok(FinalityAttestation {
             adapter: self.descriptor.id,
@@ -366,7 +407,7 @@ mod tests {
         // no committee whose honesty is assumed. If this ever changes, the
         // profile a user sees changes with it, and this test is where that
         // shows up first.
-        let d = ZkVmFinalityAdapter::new("testnet").descriptor();
+        let d = ZkVmFinalityAdapter::new("testnet", None, None).descriptor();
         assert_eq!(d.trust_model, TrustModel::Trustless);
         assert_eq!(d.finality_kind, FinalityKind::Proven);
         assert_eq!(d.required_depth, 0, "a proof has no depth");
@@ -391,7 +432,7 @@ mod tests {
 
     #[test]
     fn the_version_gate_refuses_before_any_decoding() {
-        let adapter = ZkVmFinalityAdapter::new("testnet");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, None);
         let evidence = RawConsensusEvidence {
             adapter: adapter.descriptor().id,
             evidence_version: 2,
@@ -414,7 +455,7 @@ mod tests {
     fn the_wrong_network_is_refused_before_the_proof_is_read() {
         // The signing context is per network; verifying a proof under the
         // wrong one is not a smaller guarantee, it is a different statement.
-        let adapter = ZkVmFinalityAdapter::new("testnet");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, None);
         let evidence = RawConsensusEvidence {
             adapter: adapter.descriptor().id,
             evidence_version: EVIDENCE_VERSION,
@@ -434,7 +475,7 @@ mod tests {
     fn a_caller_asking_for_depth_is_told_a_proof_has_none() {
         // Silently ignoring min_depth would let a caller believe they had
         // confirmation depth that a proof does not provide.
-        let adapter = ZkVmFinalityAdapter::new("testnet");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, None);
         let mut policy = VerificationPolicy::proven(10);
         policy.min_depth = 6;
         // The proof cannot be reached because decoding fails first, so this
@@ -528,7 +569,7 @@ mod tests {
         )
         .expect("the proof is valid under full activation");
 
-        let adapter = ZkVmFinalityAdapter::new("testnet");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, None);
         let payload = ZkFinalityEvidence {
             envelope,
             inputs,
@@ -624,9 +665,12 @@ mod tests {
             }
             .encode()
         };
-        let adapter = ZkVmFinalityAdapter::new("testnet");
         let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
             .expect("canonical build");
+        // BLG-0134 (P06-F05): the success row needs the pin; the outside row
+        // is refused at the canonical-set gate before the pin is read.
+        let pinned_hash = bud_proof::canonical_set::program_hash_of(&canonical);
+        let adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1));
         let outside = vec![
             inst(Opcode::Load, 1, 0, 7),
             inst(Opcode::Log, 0, 1, 0),
@@ -671,7 +715,7 @@ mod tests {
 
     #[test]
     fn the_probe_set_is_offset_independent_and_covers_every_edge() {
-        let probes = ZkVmFinalityAdapter::new("testnet").fault_probes();
+        let probes = ZkVmFinalityAdapter::new("testnet", None, None).fault_probes();
         assert!(!probes.is_empty());
         // Every probe must be applicable to a payload of any size, which is why
         // none of them uses a fixed interior offset beyond the first 16 bytes.
@@ -707,6 +751,53 @@ mod tests {
                 .iter()
                 .any(|n| n.contains("corrupting the leading bytes")),
             "no probe attacks the envelope itself"
+        );
+    }
+
+    /// BLG-0134 (P06-F05, decision A): an unpinned adapter is closed - a
+    /// canonical-set proof attests nothing without the domain's pins.
+    #[test]
+    fn unpinned_zkvm_admission_is_closed() {
+        let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, Some(1));
+        let evidence = honest_evidence(&adapter, canonical);
+        let err = adapter
+            .verify(&evidence, &VerificationPolicy::proven(0))
+            .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// BLG-0134 (P06-F05, decision A): a proof of a DIFFERENT canonical
+    /// program than the pinned one is refused, and so is a proof under
+    /// another chain id.
+    #[test]
+    fn the_pinned_program_and_chain_decide() {
+        let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let pinned_hash = bud_proof::canonical_set::program_hash_of(&canonical);
+        let adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1));
+        // Wrong chain id.
+        let wrong_chain = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(2));
+        let evidence = honest_evidence(&adapter, canonical.clone());
+        let err = wrong_chain
+            .verify(&evidence, &VerificationPolicy::proven(0))
+            .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "got: {err:?}"
+        );
+        // Wrong program pin: another hash than the proved program's.
+        let wrong_program = ZkVmFinalityAdapter::new("testnet", Some([0xEE; 32]), Some(1));
+        let err = wrong_program
+            .verify(&evidence, &VerificationPolicy::proven(0))
+            .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "got: {err:?}"
         );
     }
 }

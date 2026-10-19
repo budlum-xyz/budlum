@@ -146,8 +146,16 @@ pub enum AdapterSpec {
         #[serde(default)]
         committee: Option<crate::cross_domain::external::ethereum::PinnedCommittee>,
     },
-    /// BudZKVM validity proofs for one network.
-    ZkVm { network: String },
+    /// BudZKVM validity proofs for one network, pinned to one program and
+    /// one chain (BLG-0134/P06-F05, decision A). A spec without the pins is
+    /// the closed admission state: `register_domain` refuses it.
+    ZkVm {
+        network: String,
+        #[serde(default)]
+        program_hash: Option<[u8; 32]>,
+        #[serde(default)]
+        chain_id: Option<u64>,
+    },
 }
 
 impl AdapterSpec {
@@ -156,7 +164,7 @@ impl AdapterSpec {
     #[must_use]
     pub fn network(&self) -> &str {
         match self {
-            Self::EthereumSync { network, .. } | Self::ZkVm { network } => network,
+            Self::EthereumSync { network, .. } | Self::ZkVm { network, .. } => network,
         }
     }
 
@@ -184,8 +192,12 @@ impl AdapterSpec {
                 };
                 Box::new(adapter)
             }
-            Self::ZkVm { network } => {
-                let adapter = ZkVmFinalityAdapter::new(network);
+            Self::ZkVm {
+                network,
+                program_hash,
+                chain_id,
+            } => {
+                let adapter = ZkVmFinalityAdapter::new(network, *program_hash, *chain_id);
                 let adapter = match golden {
                     Some(g) => adapter.with_golden(g),
                     None => adapter,
@@ -336,6 +348,19 @@ impl IntakeState {
         // submitter name their own aggregate key.
         if let AdapterSpec::EthereumSync { committee, .. } = &spec {
             if committee.is_none() {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
+        }
+        // BLG-0134 (P06-F05, decision A): ZkVm admission needs the pinned
+        // program and chain - canonical-set membership alone attested
+        // anything the prover's inputs named.
+        if let AdapterSpec::ZkVm {
+            program_hash,
+            chain_id,
+            ..
+        } = &spec
+        {
+            if program_hash.is_none() || chain_id.is_none() {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
@@ -992,6 +1017,8 @@ mod tests {
     fn a_zkvm_spec_builds_without_bls_and_keeps_its_network() {
         let spec = AdapterSpec::ZkVm {
             network: "mainnet".to_string(),
+            program_hash: None,
+            chain_id: None,
         };
         assert_eq!(spec.network(), "mainnet");
         let adapter = spec.build(None, None);
