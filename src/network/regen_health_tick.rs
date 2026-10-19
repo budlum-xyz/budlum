@@ -211,8 +211,12 @@ impl RegenHealthTick {
                     self.ledger
                         .revert(&target, stress, &self.policy.reversion, &canonical)
                 } else {
-                    self.ledger
-                        .revert_after_forgery(&target, stress, &canonical)
+                    self.ledger.revert_after_forgery(
+                        &target,
+                        stress,
+                        &self.policy.reversion,
+                        &canonical,
+                    )
                 };
                 match result {
                     Ok(reversion) => TickOutcome::Reverted(reversion),

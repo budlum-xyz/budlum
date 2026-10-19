@@ -145,7 +145,7 @@ fn chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks() {
             // refuses invalid ledgers, so damaged-trust state enters via the
             // door that trusts nothing inside the ledger.
             forged
-                .revert_after_forgery(&target, stress, &canonical)
+                .revert_after_forgery(&target, stress, &policy.reversion, &canonical)
                 .expect("forgery-door recovery to a canonical polyp is allowed");
         }
         other => panic!("forged trail must be answered with full reversion, got {other:?}"),
