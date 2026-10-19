@@ -275,7 +275,13 @@ fn is_result_fn(line: &str) -> bool {
     if !t.starts_with("fn ") {
         return false;
     }
-    t.contains("-> Result<")
+    // `Result<`, `io::Result<`, `anyhow::Result<`: the path before `<` ends
+    // in `Result`.
+    t.find("->").is_some_and(|at| {
+        let ret = t[at + 2..].trim_start();
+        ret.find('<')
+            .is_some_and(|lt| ret[..lt].trim_end().ends_with("Result"))
+    })
 }
 
 /// The shell regex is `self\s*\.\s*\w+\s*\.\s*remove\(`: a `self` receiver
@@ -283,7 +289,7 @@ fn is_result_fn(line: &str) -> bool {
 /// `map.remove(` (where `map` came from `self.inner.write()`) must NOT count,
 /// so the match is the full `self.<word>.remove(` chain, not just any
 /// `self.` in the window.
-fn receiver_is_self(lines: &[&str], idx: usize) -> bool {
+fn self_receiver(lines: &[&str], idx: usize) -> Option<String> {
     let lo = idx.saturating_sub(2);
     let window: String = lines[lo..=idx]
         .iter()
@@ -315,6 +321,7 @@ fn receiver_is_self(lines: &[&str], idx: usize) -> bool {
             while j < w.len() && (w[j].is_ascii_alphanumeric() || w[j] == b'_') {
                 j += 1;
             }
+            let id_end = j;
             if j == id_start {
                 i += 4;
                 continue;
@@ -332,14 +339,14 @@ fn receiver_is_self(lines: &[&str], idx: usize) -> bool {
             }
             // "remove("
             if w[j..].starts_with(b"remove(") {
-                return true;
+                return Some(String::from_utf8_lossy(&w[id_start..id_end]).into_owned());
             }
             i += 4;
         } else {
             i += 1;
         }
     }
-    false
+    None
 }
 
 /// # Errors
@@ -395,7 +402,7 @@ pub fn run(root: &Path) -> Result<String, String> {
                 .filter(|(i, l)| {
                     !l.trim_start().starts_with("//")
                         && l.contains(".remove(")
-                        && receiver_is_self(&lines, *i)
+                        && self_receiver(&lines, *i).is_some()
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -406,6 +413,8 @@ pub fn run(root: &Path) -> Result<String, String> {
             }
             checked_fns += 1;
             let first_remove = removes[0];
+            let receiver = self_receiver(&lines, first_remove).unwrap_or_default();
+            let restore = format!("{receiver}.insert(");
             let later_err: Vec<usize> = lines
                 .iter()
                 .enumerate()
@@ -418,7 +427,7 @@ pub fn run(root: &Path) -> Result<String, String> {
                 .collect();
             let guarded = |err_line: usize| -> bool {
                 (first_remove + 1..err_line).any(|i| {
-                    !lines[i].trim_start().starts_with("//") && lines[i].contains(".insert(")
+                    !lines[i].trim_start().starts_with("//") && lines[i].contains(&restore)
                 })
             };
             let unguarded: Vec<usize> =
@@ -548,6 +557,21 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from(
             "canary: a bodiless test module declaration hid the function after it",
         ));
+    }
+
+    // An insert into another collection is not a restore, and a path
+    // qualified `Result` return is still a refusal.
+    let other = "fn f(&mut self) -> Result<(), E> {\n    self.m.remove(&k);\n    self.log.insert(k, 1);\n    if !self.valid() { return Err(E::X); }\n    Ok(())\n}\n";
+    let qualified = "fn f(&mut self) -> io::Result<()> {\n    self.m.remove(&k);\n    if !self.valid() { return Err(E::X); }\n    Ok(())\n}\n";
+    for (label, body) in [
+        ("another collection", other),
+        ("qualified Result", qualified),
+    ] {
+        std::fs::write(dir.join("src/lib.rs"), body).map_err(|e| e.to_string())?;
+        if run(&dir).is_ok() {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("canary: {label} hid a partial write"));
+        }
     }
 
     let _ = std::fs::remove_dir_all(&dir);
