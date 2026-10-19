@@ -318,6 +318,13 @@ pub struct AccountState {
     pub poa_admitted: BTreeMap<crate::domain::types::DomainId, BTreeSet<Address>>,
     pub message_registry: CrossDomainMessageRegistry,
     pub external_roots: BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>,
+    /// BLG-0155 (P07-F10): the money behind external-domain bonds. Every
+    /// registration and prover bond DEBITS the poster's balance into this
+    /// escrow; a slash moves the penalty to the challenger's balance and
+    /// burns the rest; release credits the remainder back. Before this the
+    /// bond was "a declared number, not a signed stake transfer" and the
+    /// honesty-gate economics were bookkeeping with no money behind them.
+    pub external_bond_escrow: BTreeMap<Address, u64>,
     /// On-chain burn-reserve account the timed burn consumes. `None` when $BUD
     /// Tokenomics is not enabled for this chain (e.g. plain devnet genesis).
     pub burn_reserve_address: Option<Address>,
@@ -444,6 +451,7 @@ impl AccountState {
             message_registry: CrossDomainMessageRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
+            external_bond_escrow: BTreeMap::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -501,6 +509,7 @@ impl AccountState {
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
+            external_bond_escrow: BTreeMap::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -567,6 +576,7 @@ impl AccountState {
             marketplace: crate::pollen::MarketplaceRegistry::new(),
             budlumxyz: crate::budlumxyz::BudlumxyzRegistry::new(),
             external_roots: BTreeMap::new(),
+            external_bond_escrow: BTreeMap::new(),
             base_fee: MIN_TX_FEE,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -654,6 +664,7 @@ impl AccountState {
             budlumxyz: snapshot.budlumxyz.clone().unwrap_or_default(),
             governance: snapshot.governance.clone().unwrap_or_default(),
             external_roots: snapshot.external_roots.clone().unwrap_or_default(),
+            external_bond_escrow: snapshot.external_bond_escrow.clone().unwrap_or_default(),
             base_fee: snapshot.base_fee,
             fee_distributions: Vec::new(),
             dirty_accounts: HashSet::new(),
@@ -2328,6 +2339,99 @@ impl AccountState {
             .saturating_add(self.total_staked_supply())
             .saturating_add(self.total_unbonding_supply())
             .saturating_add(self.total_registry_role_bonded_supply())
+            .saturating_add(self.total_external_bonded_supply())
+    }
+
+    /// Total $BUD escrowed as external-domain prover bonds (BLG-0155). A
+    /// bond is not a burn: it must keep counting against the fixed cap or
+    /// every bond would open fake minting headroom.
+    pub fn total_external_bonded_supply(&self) -> u128 {
+        self.external_bond_escrow
+            .values()
+            .fold(0u128, |acc, v| acc + u128::from(*v))
+    }
+
+    /// Escrows an external-domain bond: the amount LEAVES the poster's
+    /// balance and enters [`Self::external_bond_escrow`] (BLG-0155/P07-F10).
+    ///
+    /// # Errors
+    ///
+    /// An amount that does not fit the balance type, or a poster whose
+    /// balance cannot cover it. A bond the poster cannot pay is not a bond.
+    pub fn lock_external_bond(&mut self, poster: &Address, amount: u64) -> Result<(), String> {
+        if amount == 0 {
+            return Err("a zero bond escrows nothing".to_string());
+        }
+        let balance = self.get_balance(poster);
+        if balance < amount {
+            return Err(format!(
+                "bond of {amount} exceeds the poster's balance of {balance}"
+            ));
+        }
+        let account = self.get_or_create(poster);
+        account.balance = balance - amount;
+        self.dirty_accounts.insert(*poster);
+        *self.external_bond_escrow.entry(*poster).or_insert(0) += amount;
+        Ok(())
+    }
+
+    /// Releases escrowed bond back to its owner - the unbond half of the
+    /// lifecycle (BLG-0155). The escrow is the source of truth: a release
+    /// can never credit more than what was locked.
+    ///
+    /// # Errors
+    ///
+    /// The escrow does not hold `amount` for this address.
+    pub fn release_external_bond(&mut self, owner: &Address, amount: u64) -> Result<(), String> {
+        let held = self.external_bond_escrow.get(owner).copied().unwrap_or(0);
+        if held < amount {
+            return Err(format!(
+                "release of {amount} exceeds the {held} escrowed for this bond"
+            ));
+        }
+        if held == amount {
+            self.external_bond_escrow.remove(owner);
+        } else if let Some(v) = self.external_bond_escrow.get_mut(owner) {
+            *v = held - amount;
+        }
+        self.try_add_balance(owner, amount)?;
+        Ok(())
+    }
+
+    /// Applies a slash to escrowed bond (BLG-0155): `taken` leaves the
+    /// escrow, `reward` lands in the challenger's balance, and the rest is
+    /// BURNED - a slash that returns the remainder to the slashed prover
+    /// would be theatre. Returns `(burned)`.
+    ///
+    /// # Errors
+    ///
+    /// The escrow does not hold `taken` for this prover, or the reward
+    /// would exceed what was taken.
+    pub fn slash_external_bond(
+        &mut self,
+        prover: &Address,
+        taken: u64,
+        reward: u64,
+        challenger: &Address,
+    ) -> Result<u64, String> {
+        if reward > taken {
+            return Err("the challenger reward cannot exceed the slash".to_string());
+        }
+        let held = self.external_bond_escrow.get(prover).copied().unwrap_or(0);
+        if held < taken {
+            return Err(format!(
+                "slash of {taken} exceeds the {held} escrowed for this prover"
+            ));
+        }
+        if held == taken {
+            self.external_bond_escrow.remove(prover);
+        } else if let Some(v) = self.external_bond_escrow.get_mut(prover) {
+            *v = held - taken;
+        }
+        if reward > 0 {
+            self.try_add_balance(challenger, reward)?;
+        }
+        Ok(taken - reward)
     }
 
     /// Remaining headroom under the fixed 100M cap.
@@ -2786,6 +2890,16 @@ impl AccountState {
             final_hasher.update(b"external_roots_v1");
             final_hasher.update(
                 bincode::serialize(&self.external_roots)
+                    .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
+            );
+        }
+        // BLG-0155 (P07-F10): escrowed external bonds are consensus state -
+        // without this fold two nodes could disagree on the state root while
+        // agreeing on every balance.
+        if !self.external_bond_escrow.is_empty() {
+            final_hasher.update(b"external_bond_escrow_v1");
+            final_hasher.update(
+                bincode::serialize(&self.external_bond_escrow)
                     .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
             );
         }
@@ -4192,4 +4306,70 @@ mod c3_validator_readiness_tests {
         assert!(v.has_consensus_keys());
         assert!(!v.verify_pop_is_valid(DEFAULT_CHAIN_ID));
     }
+
+    // ---- BLG-0155 (P07-F10): external bond escrow ----
+
+    #[test]
+    fn a_bond_the_poster_cannot_pay_is_refused() {
+        let mut state = AccountState::new();
+        let poster = Address::from([1u8; 32]);
+        state.add_balance(&poster, 50);
+        let err = state.lock_external_bond(&poster, 51).unwrap_err();
+        assert!(err.contains("exceeds"), "got: {err}");
+        assert!(state.lock_external_bond(&poster, 0).is_err());
+        // Nothing escrowed, nothing moved.
+        assert_eq!(state.get_balance(&poster), 50);
+        assert!(state.external_bond_escrow.is_empty());
+    }
+
+    #[test]
+    fn a_locked_bond_leaves_the_balance_and_returns_on_release() {
+        let mut state = AccountState::new();
+        let poster = Address::from([1u8; 32]);
+        state.add_balance(&poster, 100);
+        state.lock_external_bond(&poster, 60).expect("covers it");
+        assert_eq!(state.get_balance(&poster), 40, "the bond is debited");
+        assert_eq!(state.total_external_bonded_supply(), 60);
+        // The bond counts against the cap; it is not a burn.
+        assert!(
+            state.total_bud_committed() >= 100,
+            "escrow must keep counting against the fixed cap"
+        );
+        state.release_external_bond(&poster, 60).expect("releases");
+        assert_eq!(state.get_balance(&poster), 100, "released in full");
+        assert!(state.external_bond_escrow.is_empty());
+        assert!(
+            state.release_external_bond(&poster, 1).is_err(),
+            "a release can never exceed what was locked"
+        );
+    }
+
+    #[test]
+    fn a_slash_moves_the_reward_to_the_challenger_and_burns_the_rest() {
+        let mut state = AccountState::new();
+        let poster = Address::from([1u8; 32]);
+        let challenger = Address::from([2u8; 32]);
+        state.add_balance(&poster, 100);
+        state.lock_external_bond(&poster, 80).expect("covers it");
+        let burned = state
+            .slash_external_bond(&poster, 50, 20, &challenger)
+            .expect("the slash applies");
+        assert_eq!(burned, 30, "the rest of the slash is burned, not returned");
+        assert_eq!(state.get_balance(&challenger), 20, "the reward lands");
+        assert_eq!(state.get_balance(&poster), 20, "the balance was debited at lock");
+        assert_eq!(
+            state.external_bond_escrow.get(&poster).copied().unwrap_or(0),
+            30,
+            "the escrow holds the unslashed remainder"
+        );
+        assert!(
+            state.slash_external_bond(&poster, 50, 20, &challenger).is_err(),
+            "a slash can never exceed what is escrowed"
+        );
+        assert!(
+            state.slash_external_bond(&poster, 10, 11, &challenger).is_err(),
+            "the reward can never exceed the slash"
+        );
+    }
+
 }

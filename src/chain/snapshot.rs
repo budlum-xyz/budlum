@@ -643,6 +643,11 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub external_roots:
         Option<BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>>,
+    /// Escrowed external-domain prover bonds (BLG-0155/P07-F10). `None` on a
+    /// snapshot taken before the bond money existed, which is what such a
+    /// chain had: declared numbers, no escrow.
+    #[serde(default)]
+    pub external_bond_escrow: Option<BTreeMap<Address, u64>>,
     /// Proof tasks and unpaid receipts.
     ///
     /// `#[serde(default)]` like its neighbours: a snapshot taken before this
@@ -842,6 +847,7 @@ impl StateSnapshotV2 {
             poa_compliance: Some(account_state.poa_compliance.clone()),
             message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
+            external_bond_escrow: Some(account_state.external_bond_escrow.clone()),
             proof_market: Some(account_state.proof_market.clone()),
             identity: Some(account_state.identity.clone()),
             vault: Some(account_state.vault.clone()),
@@ -1005,6 +1011,9 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.bridge_state);
             hash_opt_serializable(&mut hasher, &self.message_registry);
             hash_opt_serializable(&mut hasher, &self.external_roots);
+            // BLG-0155: the escrow is consensus state and must cross the
+            // wire inside the digest, not outside it.
+            hash_opt_serializable(&mut hasher, &self.external_bond_escrow);
             // The proof market carries assigned tasks, each naming a prover
             // and an epoch, and unpaid receipts, each naming an amount. A
             // field that crosses the wire outside the digest is a field a
@@ -2272,6 +2281,7 @@ mod tests {
         "bridge_state",
         "message_registry",
         "external_roots",
+        "external_bond_escrow",
         "proof_market",
         "manifest_signer",
         "manifest_signature",
@@ -2445,6 +2455,7 @@ mod tests {
             "bridge_state",
             "message_registry",
             "external_roots",
+            "external_bond_escrow",
             "proof_market",
             // schema-4 dalgasi
             "manifest_signer",
@@ -2641,6 +2652,7 @@ mod tests {
             "bridge_state",
             "message_registry",
             "external_roots",
+            "external_bond_escrow",
             "proof_market",
         ]);
         assert_fields_preserved(&full, &restored, &preserved);

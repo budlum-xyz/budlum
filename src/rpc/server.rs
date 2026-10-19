@@ -1673,8 +1673,10 @@ impl BudlumApiServer for RpcServer {
         &self,
         registration: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: the bond figure in this build is a declared number,
-        // not a signed stake transfer, and only the operator may declare it.
+        // Operator-only: only the operator may declare the terms. BLG-0155
+        // (P07-F10): the bond itself is no longer a declared number - the
+        // registration debits the poster's balance into escrow before the
+        // registry sees it (Blockchain::register_external_domain).
         self.require_operator("bud_registerExternalDomain")?;
         #[derive(serde::Deserialize)]
         struct Params {
