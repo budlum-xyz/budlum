@@ -271,3 +271,13 @@ fn test_bns_default_registry_matches_new() {
     assert_eq!(reg.base_cost, BnsRegistry::new().base_cost);
     assert!(reg.is_empty());
 }
+
+#[test]
+fn test_bns_register_refuses_expiry_overflow() {
+    let mut reg = BnsRegistry::new();
+    let alice = addr(1);
+    assert!(reg
+        .register("overflow.bud".to_string(), alice, 1, u64::MAX)
+        .is_err());
+    assert!(reg.is_empty());
+}
