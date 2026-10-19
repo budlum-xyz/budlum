@@ -1085,5 +1085,31 @@ mod chaos_tests {
             chain_b.chain.last().unwrap().hash,
             "chain A's tip must match chain B's tip"
         );
+
+        // A transaction applied once on the adopted chain's state cannot be
+        // applied a second time: the nonce moved, so the replay is refused and
+        // the balances stay where the first application left them.
+        use crate::core::transaction::Transaction;
+        use crate::crypto::primitives::KeyPair;
+        use crate::execution::executor::Executor;
+
+        let alice_kp = KeyPair::generate().unwrap();
+        let bob_kp = KeyPair::generate().unwrap();
+        let alice = Address::from(alice_kp.public_key_bytes());
+        let bob = Address::from(bob_kp.public_key_bytes());
+        chain_a.state.add_balance(&alice, 1000);
+        let mut tx = Transaction::new_with_fee(alice, bob, 100, 1, 0, vec![]);
+        tx.sign(&alice_kp);
+
+        Executor::apply_transaction(&mut chain_a.state, &tx).unwrap();
+        let alice_after = chain_a.state.get_balance(&alice);
+        let bob_after = chain_a.state.get_balance(&bob);
+        assert_eq!(bob_after, 100);
+        assert!(
+            Executor::apply_transaction(&mut chain_a.state, &tx).is_err(),
+            "replaying an applied transaction must be refused"
+        );
+        assert_eq!(chain_a.state.get_balance(&alice), alice_after);
+        assert_eq!(chain_a.state.get_balance(&bob), bob_after);
     }
 }
