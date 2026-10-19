@@ -329,6 +329,8 @@ pub enum DerivedError {
     /// master is not held can never be read, so registering it is selling
     /// storage for an object that does not exist.
     UnknownMaster { master_id: ContentId },
+    /// Another reference cannot be represented without losing a live dependency.
+    DerivationCountOverflow { master_id: ContentId },
     /// The spec's transform and its fields disagree about which kind it is.
     ///
     /// A `Prefix` with no span has nothing to copy; a `Crop` carrying one is
@@ -353,6 +355,9 @@ impl std::fmt::Display for DerivedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyRegion => write!(f, "a derived region must have a non-zero area"),
+            Self::DerivationCountOverflow { master_id } => {
+                write!(f, "derivation count exhausted for master {master_id:?}")
+            }
             Self::OutOfBounds {
                 block_x,
                 block_y,
@@ -732,7 +737,15 @@ impl MasterRegistry {
                 master_id: *master_id,
             });
         };
-        entry.derivations = entry.derivations.saturating_add(1);
+        // BLG-0417: saturation would lose one reference, making a later
+        // release report zero while a live derivation still holds the master.
+        entry.derivations =
+            entry
+                .derivations
+                .checked_add(1)
+                .ok_or(DerivedError::DerivationCountOverflow {
+                    master_id: *master_id,
+                })?;
         // A master that is being derived from again is no longer on its way
         // out. Leaving the window open would let a release land between the
         // new derivation and the next epoch.
@@ -745,7 +758,12 @@ impl MasterRegistry {
         let Some(entry) = self.entries.get_mut(master_id) else {
             return;
         };
-        entry.derivations = entry.derivations.saturating_sub(1);
+        // Only the one-to-zero transition opens the grace window. A repeated
+        // release must not create a window or keep postponing an existing one.
+        if entry.derivations == 0 {
+            return;
+        }
+        entry.derivations -= 1;
         if entry.derivations == 0 {
             entry.releasable_at_epoch = Some(now_epoch.saturating_add(MASTER_GRACE_EPOCHS));
         }
@@ -851,6 +869,33 @@ mod tests {
                 master_bytes: 474_537,
             }),
         }
+    }
+
+    #[test]
+    fn reference_overflow_and_repeated_release_do_not_mutate_the_registry() {
+        let id = master();
+        let mut reg = MasterRegistry::empty_registry();
+        reg.hold_master(id);
+        reg.release_derivation(&id, 100);
+        assert_eq!(reg.pending_release_epoch(&id), None);
+        reg.acquire_master(&id).unwrap();
+        reg.release_derivation(&id, 100);
+        let released = reg.clone();
+        reg.release_derivation(&id, 200);
+        assert_eq!(
+            reg, released,
+            "a repeated release cannot extend the grace window"
+        );
+
+        let entry = reg.entries.get_mut(&id).unwrap();
+        entry.derivations = u32::MAX;
+        entry.releasable_at_epoch = None;
+        let full = reg.clone();
+        assert_eq!(
+            reg.acquire_master(&id),
+            Err(DerivedError::DerivationCountOverflow { master_id: id })
+        );
+        assert_eq!(reg, full, "refusing overflow must leave references intact");
     }
 
     #[test]
