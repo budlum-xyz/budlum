@@ -656,6 +656,38 @@ impl GenesisConfig {
                 entry.slashed = false;
             }
         }
+        // P01-F07 (BLG-0012): a PoA domain was permissioned only once it had an
+        // admin, and nothing in production ever gave it one - so any funded
+        // account could stake its way into the leader set. A genesis that
+        // lists authorities now declares the gate: the first one is the
+        // domain's admin (the trust root, as governance would appoint) and
+        // every listed authority is admitted for the longest KYC horizon, so
+        // the set the chain starts from is the set it keeps admitting.
+        if let Some((admin, rest)) = self.poa_authorities.split_first() {
+            const GENESIS_POA_DOMAIN: crate::domain::types::DomainId = 0;
+            const GENESIS_KYC_COMMITMENT: [u8; 32] = [0x01; 32];
+            state.poa_onboarding.add_admin(GENESIS_POA_DOMAIN, *admin);
+            for authority in std::iter::once(admin).chain(rest.iter()) {
+                // Both steps cannot refuse on a fresh registry (a distinct
+                // address, a non-zero commitment, a horizon at the ceiling);
+                // a refusal here would leave the authority un-admitted and
+                // the chain would fail closed at its first block.
+                let _ = state.poa_onboarding.submit_application(
+                    GENESIS_POA_DOMAIN,
+                    *authority,
+                    GENESIS_KYC_COMMITMENT,
+                    0,
+                );
+                let _ = state.poa_onboarding.approve(
+                    GENESIS_POA_DOMAIN,
+                    *admin,
+                    *authority,
+                    0,
+                    crate::registry::poa_onboarding::MAX_KYC_VALIDITY_HORIZON,
+                );
+            }
+            state.refresh_poa_admissions(0);
+        }
 
         // $BUD tokenomics: seed the distribution accounts and configure
         // The on-chain burn-reserve address + team vesting so the timed burn and
@@ -1143,6 +1175,26 @@ mod tests {
             block.hash, "87d93624975213bbdf7879ba8af973935e21f52d3436cc736b8df586774879ba",
             "the pin in xtask/tools/src/docker_smoke.rs must move with devnet_genesis()"
         );
+    }
+
+    /// P01-F07 (BLG-0012): a genesis that lists PoA authorities declares the
+    /// admission gate; an outsider with stake is not in the admitted set.
+    #[test]
+    fn genesis_poa_authorities_open_the_admission_gate() {
+        let a = Address::from_hex(&"a1".repeat(32)).unwrap();
+        let b = Address::from_hex(&"b2".repeat(32)).unwrap();
+        let outsider = Address::from_hex(&"c3".repeat(32)).unwrap();
+        let mut config = GenesisConfig::new(4242);
+        config.poa_authorities = vec![a, b];
+        let state = config.build_state();
+        assert!(state.poa_is_permissioned(0), "the gate must be declared");
+        let admitted = state.poa_admitted_addresses(0);
+        assert!(admitted.contains(&a) && admitted.contains(&b));
+        assert!(!admitted.contains(&outsider));
+        // No authorities listed: the chain stays ungated, as before.
+        assert!(!GenesisConfig::new(4242)
+            .build_state()
+            .poa_is_permissioned(0));
     }
 
     #[test]
