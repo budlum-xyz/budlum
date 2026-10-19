@@ -17,17 +17,25 @@ pub const LT_MAGIC: [u8; 8] = *b"\xB5LT01\0\0\0";
 /// produce symbols nobody can open.
 const LT_MAX_BLOCKS: usize = 16;
 
+/// The most symbols one call produces, and the most output bytes (symbols
+/// times block length) it may allocate.
+const LT_MAX_SYMBOLS: usize = 1 << 20;
+const LT_MAX_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
+
 /// Produce n symbols from k blocks (deterministic - seeded generator).
 ///
 /// Every block must have the same length: a symbol is the XOR of its chosen
 /// blocks, sized by the first block, so a shorter block would be zero-padded
 /// on encode and come back padded on decode, and a longer one would be cut.
 pub fn lt_encode(blocks: &[Vec<u8>], n: usize, seed: u64) -> Option<Vec<(Vec<u8>, Vec<usize>)>> {
-    if blocks.is_empty() || n == 0 || blocks.len() > LT_MAX_BLOCKS {
+    if blocks.is_empty() || n == 0 || blocks.len() > LT_MAX_BLOCKS || n > LT_MAX_SYMBOLS {
         return None;
     }
     let blen = blocks[0].len();
     if blen == 0 || blocks.iter().any(|b| b.len() != blen) {
+        return None;
+    }
+    if n.checked_mul(blen)? > LT_MAX_OUTPUT_BYTES {
         return None;
     }
     let k = blocks.len();
@@ -316,6 +324,9 @@ mod tests {
     #[test]
     fn invalid_input_is_refused() {
         assert!(lt_encode(&[], 4, 1).is_none());
+        // A symbol count no caller can honour is refused, not allocated.
+        assert!(lt_encode(&[vec![1u8]], usize::MAX / 8, 1).is_none());
+        assert!(lt_encode(&[vec![1u8; 1 << 20]], 1 << 19, 1).is_none());
         assert!(lt_encode(&[vec![1u8]], 0, 1).is_none());
         assert!(lt_decode(&[], 0).is_none());
         assert!(lt_decode(&[], 17).is_none());
