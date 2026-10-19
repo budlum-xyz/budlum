@@ -5498,13 +5498,15 @@ impl BudlumApiServer for RpcServer {
         //
         // Security check (HIGH): the check used to look at storage_root only,
         // so a record with content_id set and storage_root unset skipped the
-        // guard. The manifest identity is now resolved with content_id first.
+        // guard. The gateway serves storage_root, so the guard now checks
+        // every identity the record names (content_id and storage_root);
+        // a record with two different values cannot pick the unprotected one.
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
-        let manifest_id = resolved.as_ref().and_then(|r| {
-            r.content_id
-                .or(r.storage_root.map(crate::storage::ContentId))
-        });
-        if let Some(cid) = manifest_id {
+        for cid in resolved
+            .as_ref()
+            .map(crate::gateway::pollen_guard_ids)
+            .unwrap_or_default()
+        {
             if self.chain.pollen_asset_for_content(cid).await.is_some() {
                 return Err(ErrorObjectOwned::owned(
                     -32603,
@@ -5534,11 +5536,11 @@ impl BudlumApiServer for RpcServer {
         // the access rules: protected content stays protected in whatever
         // format it is requested.
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
-        let manifest_id = resolved.as_ref().and_then(|r| {
-            r.content_id
-                .or(r.storage_root.map(crate::storage::ContentId))
-        });
-        if let Some(cid) = manifest_id {
+        for cid in resolved
+            .as_ref()
+            .map(crate::gateway::pollen_guard_ids)
+            .unwrap_or_default()
+        {
             if self.chain.pollen_asset_for_content(cid).await.is_some() {
                 return Err(ErrorObjectOwned::owned(
                     -32603,
