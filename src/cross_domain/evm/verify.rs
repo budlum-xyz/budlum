@@ -1,7 +1,7 @@
 //! F10.2 security core: `verify_evm_receipt`, the deterministic orchestrator.
 //!
 //! Combines the steps of RFC section 4.1 (the ETH -> Budlum mint flow) into a
-//! single verification surface. It **runs on-chain, inside Budlum consensus**,
+//! single verification surface. It runs on-chain, inside Budlum consensus,
 //! so it is deterministic and touches no network. The relayer produces the
 //! proof; Budlum verifies it here.
 //!
