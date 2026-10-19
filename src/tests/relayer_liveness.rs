@@ -55,6 +55,18 @@ fn relayed_message(sender: Address, nonce: u64) -> CrossDomainMessage {
     })
 }
 
+/// BLG-0113 (P05-F06): the sender envelope is mandatory at the relayed
+/// door - a key whose address IS the sender signs the message id.
+fn signed_relayed_message(
+    keypair: &crate::crypto::primitives::KeyPair,
+    nonce: u64,
+) -> CrossDomainMessage {
+    let sender = Address::from(keypair.public_key_bytes());
+    let mut msg = relayed_message(sender, nonce);
+    msg.sign_sender_ed25519(keypair);
+    msg
+}
+
 // --- 1. Relayer gating ------------------------------------------------------
 
 #[test]
@@ -72,14 +84,48 @@ fn unregistered_account_cannot_submit_cross_domain_message() {
 #[test]
 fn active_relayer_can_submit_cross_domain_message() {
     let mut bc = fresh_chain();
-    let relayer = addr(0x02);
+    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let relayer = Address::from(keypair.public_key_bytes());
     bc.state.add_balance(&relayer, 5_000);
     bc.state.bond_relayer(&relayer, 2_000).unwrap();
     assert!(bc.state.registry.is_active_relayer(&relayer));
 
-    bc.submit_relayed_cross_domain_message(relayed_message(relayer, 1))
+    bc.submit_relayed_cross_domain_message(signed_relayed_message(&keypair, 1))
         .unwrap();
     assert_eq!(bc.state.message_registry.len(), 1);
+}
+
+/// BLG-0113 (P05-F06): an unsigned message - or one signed by somebody who
+/// is not the declared sender - is refused at the door even when the
+/// named sender IS an active relayer. That spoof is the finding.
+#[test]
+fn a_relayed_message_must_be_signed_by_its_declared_sender() {
+    let mut bc = fresh_chain();
+    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let relayer = Address::from(keypair.public_key_bytes());
+    bc.state.add_balance(&relayer, 5_000);
+    bc.state.bond_relayer(&relayer, 2_000).unwrap();
+    // Unsigned: refused.
+    let err = bc
+        .submit_relayed_cross_domain_message(relayed_message(relayer, 1))
+        .unwrap_err();
+    assert!(err.contains("sender signature"), "{err}");
+    // Signed by a DIFFERENT key while naming the relayer: refused.
+    let impostor = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let mut forged = relayed_message(relayer, 1);
+    forged.sign_sender_ed25519(&impostor);
+    let err = bc
+        .submit_relayed_cross_domain_message(forged)
+        .unwrap_err();
+    assert!(err.contains("signer is not the declared sender"), "{err}");
+    // A real signature over an id whose body was tampered afterwards: the
+    // envelope opens but the id no longer matches the preimage, so the
+    // pre-registration attack dies at the id check behind the envelope.
+    let mut tampered = signed_relayed_message(&keypair, 1);
+    tampered.recipient = addr(0xEF);
+    let err = bc.submit_relayed_cross_domain_message(tampered).unwrap_err();
+    assert!(err.contains("preimage"), "{err}");
+    assert_eq!(bc.state.message_registry.len(), 0, "nothing registered");
 }
 
 #[test]
@@ -100,9 +146,11 @@ fn slashed_relayer_cannot_submit_cross_domain_message() {
         .unwrap();
     assert!(!bc.state.registry.is_active_relayer(&relayer));
 
-    let err = bc
-        .submit_relayed_cross_domain_message(relayed_message(relayer, 1))
-        .unwrap_err();
+    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let mut msg = relayed_message(relayer, 1);
+    msg.sender_public_key = keypair.public_key_bytes().to_vec();
+    msg.sender_signature = keypair.sign(&msg.message_id).to_vec();
+    let err = bc.submit_relayed_cross_domain_message(msg).unwrap_err();
     assert!(err.contains("not an active relayer"));
 }
 
@@ -111,7 +159,8 @@ fn unbonding_relayer_can_still_submit() {
     // Decision: unbonding is an exit process, not a punishment; the stake is
     // Still locked and slashable, so the relayer may keep relaying.
     let mut bc = fresh_chain();
-    let relayer = addr(0x04);
+    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let relayer = Address::from(keypair.public_key_bytes());
     bc.state.add_balance(&relayer, 5_000);
     bc.state.bond_relayer(&relayer, 2_000).unwrap();
     bc.state
@@ -119,7 +168,7 @@ fn unbonding_relayer_can_still_submit() {
         .begin_unbonding(relayer, roles::RELAYER, 0)
         .unwrap();
     assert!(bc.state.registry.is_active_relayer(&relayer));
-    bc.submit_relayed_cross_domain_message(relayed_message(relayer, 1))
+    bc.submit_relayed_cross_domain_message(signed_relayed_message(&keypair, 1))
         .unwrap();
     assert_eq!(bc.state.message_registry.len(), 1);
 }

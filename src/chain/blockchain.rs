@@ -3170,6 +3170,13 @@ impl Blockchain {
             .registry
             .ensure_active_relayer(&message.sender)
             .map_err(|e| e.to_string())?;
+        // BLG-0113 (P05-F06): the sender must SIGN the message id. The
+        // self-declared field alone let anybody name an active relayer and
+        // register arbitrary messages - or pre-register a predictable lock
+        // id out from under the real one. Chain-built messages (lock/burn/
+        // mint/unlock) enter through `submit_cross_domain_message` and are
+        // already the chain's own word; this door is for everything else.
+        message.verify_sender_signature()?;
         self.submit_cross_domain_message(message)
     }
 
@@ -5161,6 +5168,13 @@ impl Blockchain {
         // ledger is written once per block, not once per event.
         self.quarantine_ledger
             .prune_expired(self.chain.len() as u64, ALARM_RETENTION_BLOCKS);
+        // BLG-0114 (P05-F07): the message registry prunes its dead rows at
+        // block close too - same retention class as the bridge's settled
+        // rows (ten finality depths).
+        self.state.message_registry.prune_expired(
+            self.chain.len() as u64,
+            crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH * 10,
+        );
         if self.quarantine_dirty {
             self.quarantine_dirty = false;
             if let Some(store) = &self.storage {
