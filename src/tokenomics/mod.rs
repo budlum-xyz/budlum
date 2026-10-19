@@ -273,9 +273,9 @@ impl TokenomicsParams {
         // formula, so a hand-built parameter set cannot mint u64::MAX money.
         let ratio = self
             .validator_annual_yield_ratio_fixed
-            .min(crate::core::chain_config::FIXED_POINT_SCALE);
+            .min(FIXED_POINT_SCALE);
         let annual_yield = (u128::from(validator_stake) * u128::from(ratio))
-            / u128::from(crate::core::chain_config::FIXED_POINT_SCALE);
+            / u128::from(FIXED_POINT_SCALE);
         let epochs_per_year = u128::from(self.epochs_per_year.max(1));
         let epoch_yield = annual_yield / epochs_per_year;
         // With the cap, epoch_yield <= validator_stake and fits u64. The
@@ -290,8 +290,8 @@ impl TokenomicsParams {
         // the quotient cannot exceed the reserve; the fallback says exactly
         // that rather than silently wrapping.
         let ratio = self.annual_burn_ratio_fixed.min(FIXED_POINT_SCALE);
-        let amount = (u128::from(self.burn_reserve) * u128::from(ratio))
-            / u128::from(FIXED_POINT_SCALE);
+        let amount =
+            (u128::from(self.burn_reserve) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);
         u64::try_from(amount).unwrap_or(self.burn_reserve)
     }
 
