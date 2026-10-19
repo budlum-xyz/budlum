@@ -102,6 +102,31 @@ impl Executor {
     /// Counted before anything executes, at the per-call limit each, so the
     /// refusal costs no proving work. See
     /// [`crate::execution::zkvm::MAX_BLOCK_CONTRACT_GAS`] for the number.
+    /// Splits an escrowed AI request fee among the agreeing verifiers.
+    /// The first `remainder` verifiers receive one extra unit.
+    fn pay_agreeing_verifiers(
+        state: &mut AccountState,
+        max_fee: u64,
+        verifiers: &[Address],
+    ) -> BudlumResult<()> {
+        let Some(count) = u64::try_from(verifiers.len()).ok().filter(|c| *c > 0) else {
+            return Ok(());
+        };
+        let reward_per_verifier = max_fee / count;
+        let remainder = max_fee % count;
+        for (i, verifier_addr) in verifiers.iter().enumerate() {
+            let extra = u64::from((i as u64) < remainder);
+            let reward = reward_per_verifier.checked_add(extra).ok_or_else(|| {
+                BudlumError::validation("balance_overflow", "AI verifier reward overflow")
+            })?;
+            let acc = state.get_or_create(verifier_addr);
+            acc.balance = acc.balance.checked_add(reward).ok_or_else(|| {
+                BudlumError::validation("balance_overflow", "AI verifier reward overflow")
+            })?;
+        }
+        Ok(())
+    }
+
     fn check_block_contract_gas(transactions: &[Transaction]) -> BudlumResult<()> {
         let calls = transactions
             .iter()
@@ -1641,29 +1666,12 @@ impl Executor {
                         // `requester` and the local `res` - it does not clash with the mutable
                         // `state` access of the reward loop.
                         let requester = req.requester;
-                        if !finalized.agreeing_verifiers.is_empty() {
-                            // Integer division remainder protection.
-                            // Max_fee / verifier_count loses the remainder.
-                            // Distribute remaining units to verifiers in order
-                            // (first verifier gets the extra unit).
-                            let verifier_count = finalized.agreeing_verifiers.len() as u64;
-                            let reward_per_verifier = req.max_fee / verifier_count;
-                            let remainder = req.max_fee % verifier_count;
-                            for (i, verifier_addr) in
-                                finalized.agreeing_verifiers.iter().enumerate()
-                            {
-                                let acc = state.get_or_create(verifier_addr);
-                                let extra = if (i as u64) < remainder { 1 } else { 0 };
-                                // Checked add for verifier reward
-                                let reward = reward_per_verifier + extra;
-                                acc.balance = acc.balance.checked_add(reward).ok_or_else(|| {
-                                    BudlumError::validation(
-                                        "balance_overflow",
-                                        "AI verifier reward overflow",
-                                    )
-                                })?;
-                            }
-                        }
+                        let max_fee = req.max_fee;
+                        Self::pay_agreeing_verifiers(
+                            state,
+                            max_fee,
+                            &finalized.agreeing_verifiers,
+                        )?;
                         // The SocialFi bridge (best effort): a finalized AI inference layer
                         // output is minted to the requester as a "ai-inference" NFT.
                         // A failure is NOT a block refusal - the inference result
@@ -2454,7 +2462,20 @@ impl Executor {
                 // Explicit finalize path. For single-verifier threshold, caller may
                 // Re-submit same result after attach; multi-verifier attaches race.
                 // Convenience: attempt threshold re-eval without new result.
-                let _ = state.ai_registry.try_finalize_with_proofs(request_id);
+                if let Some(finalized) = state.ai_registry.try_finalize_with_proofs(request_id) {
+                    if let Some(max_fee) = state
+                        .ai_registry
+                        .requests
+                        .get(&finalized.request_id)
+                        .map(|r| r.max_fee)
+                    {
+                        Self::pay_agreeing_verifiers(
+                            state,
+                            max_fee,
+                            &finalized.agreeing_verifiers,
+                        )?;
+                    }
+                }
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -2947,6 +2968,20 @@ mod tests {
         // Nothing moved: balance intact, no validator registered.
         assert_eq!(state.get_balance(&team), 5_000);
         assert!(state.get_validator(&team).is_none());
+    }
+
+    #[test]
+    fn verifier_fee_split_pays_remainder_to_first_verifiers() {
+        let mut state = crate::core::account::AccountState::new();
+        let vs = [
+            crate::core::address::Address::from([1u8; 32]),
+            crate::core::address::Address::from([2u8; 32]),
+            crate::core::address::Address::from([3u8; 32]),
+        ];
+        super::Executor::pay_agreeing_verifiers(&mut state, 10, &vs).unwrap();
+        assert_eq!(state.get_balance(&vs[0]), 4);
+        assert_eq!(state.get_balance(&vs[1]), 3);
+        assert_eq!(state.get_balance(&vs[2]), 3);
     }
 
     #[test]
