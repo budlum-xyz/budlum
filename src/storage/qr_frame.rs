@@ -48,6 +48,8 @@ pub const THREE_FRAME_HEADER_LEN: usize = 2 + 1 + 1 + 4 + 4 + 2 + 4;
 pub enum FrameError {
     /// Buffer shorter than the header or declared drop length.
     Truncated,
+    /// Bytes remain after the declared nested drop.
+    TrailingBytes,
     /// Magic is not [`THREE_FRAME_MAGIC`].
     BadMagic,
     /// Version is not [`THREE_FRAME_VERSION`].
@@ -68,6 +70,7 @@ impl std::fmt::Display for FrameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Truncated => write!(f, "three qr frame truncated"),
+            Self::TrailingBytes => write!(f, "three qr frame has trailing bytes"),
             Self::BadMagic => write!(f, "three qr frame bad magic"),
             Self::BadVersion(v) => write!(f, "three qr frame unsupported version {v}"),
             Self::UnsupportedFlags(flags) => {
@@ -161,6 +164,10 @@ pub fn unpack_frame(stream_commitment: &[u8; 32], frame: &[u8]) -> Result<Drop, 
     if frame.len() < drop_end {
         return Err(FrameError::Truncated);
     }
+    // BLG-0431: the length-delimited object must consume the entire frame.
+    if frame.len() > drop_end {
+        return Err(FrameError::TrailingBytes);
+    }
     let drop_wire = frame
         .get(THREE_FRAME_HEADER_LEN..drop_end)
         .ok_or(FrameError::Truncated)?;
@@ -242,6 +249,26 @@ mod tests {
         let enc = CarouselEncoder::new(payload, DEFAULT_BLOCK_LEN).unwrap();
         let stream = enc.params().stream_commitment(&packed_commit);
         (stream, enc)
+    }
+
+    #[test]
+    fn frame_refuses_bytes_after_the_declared_drop() {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"canonical frame").unwrap();
+        let (stream, enc) = stream_for(&packed);
+        let frame = pack_frame(&stream, &enc.drop_at(0)).unwrap();
+        assert!(unpack_frame(&stream, &frame).is_ok());
+        for trailer in [&[0u8][..], &frame[..]] {
+            let mut aliased = frame.clone();
+            aliased.extend_from_slice(trailer);
+            assert_eq!(
+                unpack_frame(&stream, &aliased),
+                Err(FrameError::TrailingBytes)
+            );
+        }
+        assert_eq!(
+            unpack_frame(&stream, &frame[..frame.len() - 1]),
+            Err(FrameError::Truncated)
+        );
     }
 
     #[test]
