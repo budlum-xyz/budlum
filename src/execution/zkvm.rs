@@ -206,6 +206,9 @@ pub fn prove_bytecode_mainnet(
 /// that it was this one. Callers must bind the image out of band, for AI
 /// execution that is `weights_digest` plus `input_commitment` on the
 /// transaction, see `docs/AI_VERIFICATION_STATUS.md`.
+///
+/// The staged-rollout opcode gate applies here as on the ContractCall path
+/// (P16-F03).
 pub fn prove_bytecode_with_memory<F>(
     bytecode: &[u8],
     gas_limit: u64,
@@ -214,7 +217,7 @@ pub fn prove_bytecode_with_memory<F>(
 where
     F: FnOnce(&mut [u8]) -> Result<(), String>,
 {
-    prove_bytecode_inner_with_memory(bytecode, gas_limit, false, Some(Box::new(setup)))
+    prove_bytecode_inner_with_memory(bytecode, gas_limit, true, Some(Box::new(setup)))
 }
 
 fn prove_bytecode_inner(
@@ -467,6 +470,40 @@ mod tests {
             assert!(
                 proving_err.contains("activation") || proving_err.contains("Activation"),
                 "{opcode:?} was refused by the prover for the wrong reason: {proving_err}"
+            );
+        }
+    }
+
+    /// P16-F03: the memory-image prover must apply the same staged-rollout
+    /// gate as the ContractCall path. It used to hard code `mainnet = false`,
+    /// so the closed opcodes decoded there.
+    #[test]
+    fn memory_image_prover_cannot_reach_a_gated_opcode() {
+        for opcode in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
+            let program = vec![
+                Instruction {
+                    opcode,
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                    imm: 0,
+                }
+                .encode(),
+                Instruction {
+                    opcode: Opcode::Halt,
+                    rd: 0,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: 0,
+                }
+                .encode(),
+            ];
+            let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
+            let err = prove_bytecode_with_memory(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT, |_| Ok(()))
+                .expect_err(&format!("{opcode:?} decoded on the memory-image prover"));
+            assert!(
+                err.contains("activation") || err.contains("Activation"),
+                "{opcode:?} was refused for the wrong reason: {err}"
             );
         }
     }
