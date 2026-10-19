@@ -111,6 +111,17 @@ fn strip_rust_noise(src: &str) -> String {
                 }
             }
         }
+        // A char literal such as `'"'` or `'\"'` must not open a string.
+        if bytes[pos] == b'\'' {
+            let len = char_literal_len(&bytes[pos..]);
+            if len > 0 {
+                for _ in 0..len {
+                    out.push(' ');
+                }
+                pos += len;
+                continue;
+            }
+        }
         if bytes[pos] == b'"' {
             out.push(' ');
             pos += 1;
@@ -132,6 +143,25 @@ fn strip_rust_noise(src: &str) -> String {
         pos += 1;
     }
     out
+}
+
+/// Byte length of a char literal at the start of `b` (which starts with `'`),
+/// or 0 when it is a lifetime or a label.
+fn char_literal_len(b: &[u8]) -> usize {
+    match b.get(1) {
+        Some(b'\\') => b[2..]
+            .iter()
+            .take(10)
+            .position(|c| *c == b'\'')
+            .map_or(0, |p| p + 3),
+        Some(c) if *c >= 0x80 => b[2..]
+            .iter()
+            .take(4)
+            .position(|x| *x == b'\'')
+            .map_or(0, |p| p + 3),
+        Some(_) if b.get(2) == Some(&b'\'') => 3,
+        _ => 0,
+    }
 }
 
 /// Extract the live `SlashValidator` arm body from the noise-stripped view:
@@ -190,7 +220,12 @@ fn judge(src: &str) -> Vec<String> {
         return problems;
     };
 
-    if !block.contains("record.report.role != crate::registry::role::roles::VALIDATOR") {
+    // The role test must be an `if` that refuses: `let _ = role != VALIDATOR;`
+    // only mentions the comparison.
+    let compact_block: String = block.chars().filter(|c| !c.is_whitespace()).collect();
+    if !compact_block
+        .contains("ifrecord.report.role!=crate::registry::role::roles::VALIDATOR{return")
+    {
         problems.push(String::from(
             "account.rs no longer requires the slashing evidence to be a VALIDATOR record inside the SlashValidator path. Any-role evidence reopens the governance-slash bypass (CWE-345).",
         ));
@@ -451,4 +486,18 @@ fn execute_proposal(&mut self, proposal: &Proposal) {
     Ok(String::from(
         "governance-slash gate self-test OK: the protected branch passes, bait outside the branch fails.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn char_quote_literal_does_not_flip_string_state() {
+        let src = "let q = '\"'; let after = 1; /* c */";
+        let out = strip_rust_noise(src);
+        assert!(out.contains("after"));
+        let lifetime = strip_rust_noise("fn f<'a>(x: &'a str) { marker(); }");
+        assert!(lifetime.contains("marker"));
+    }
 }
