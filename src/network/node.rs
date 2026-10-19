@@ -426,6 +426,14 @@ pub struct Node {
     /// The content id each outbound Bitswap request asked for. A response is
     /// checked against this, not against the cid the response claims.
     bitswap_requests: HashMap<request_response::OutboundRequestId, bud_node::store::ContentId>,
+    /// BLG-0212 (P11-F11): outstanding Bitswap answers per content id. A
+    /// waiters list used to be removed only when a response delivered data;
+    /// every `not_found`, every malformed response and every disconnected
+    /// peer left the entry - and the callers in it - in the map forever.
+    /// Each outbound request per peer is one attempt; when the last attempt
+    /// fails by any route, the waiters are answered with the failure and the
+    /// entry is dropped.
+    bitswap_pending_attempts: HashMap<[u8; 32], usize>,
     pub max_peers: usize,
     pub validator_address: Option<crate::core::address::Address>,
     pub last_precommit_height: u64,
@@ -1207,6 +1215,7 @@ impl Node {
             sync_started_at,
             active_sync_request: None,
             pending_bitswap_fetches: HashMap::new(),
+            bitswap_pending_attempts: HashMap::new(),
             bitswap_requests: HashMap::new(),
             // The server budget. A battery-powered node lowers this through
             // `with_mobile_profile`, which derives it from the power mode
@@ -1481,24 +1490,51 @@ impl Node {
 
     /// Record the vote high-water marks.
     ///
-    /// Written immediately after a vote is published, never batched: the
-    /// window between signing and persisting is exactly the window in which a
-    /// crash loses the record.
+    /// BLG-0210 (P11-F09): written BEFORE the vote is published, never
+    /// batched, and atomically. Persist-then-publish can at worst lose a
+    /// round (mark ahead of the wire); the old publish-then-persist order lost
+    /// the record of a vote everyone else saw.
     fn save_vote_history(&self) {
         let Some(ref path) = self.vote_history_db else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                warn!(error = %e, path = %path.display(), "Cannot create vote-history directory");
-                return;
-            }
+        let Some(parent) = path.parent() else {
+            warn!(path = %path.display(), "vote-history path has no parent directory");
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            warn!(error = %e, path = %path.display(), "Cannot create vote-history directory");
+            return;
         }
         let body = serde_json::json!({
             "last_prevote_height": self.last_prevote_height,
             "last_precommit_height": self.last_precommit_height,
         });
-        if let Err(e) = std::fs::write(path, body.to_string()) {
+        // BLG-0210 (P11-F09): tmp + fsync + rename. A plain `fs::write` left
+        // a truncated file behind when a crash landed mid-write; the loader
+        // parsed nothing, reset BOTH high-water marks to zero, and the vote
+        // that triggered the write was already on the wire - the exact
+        // double-sign window the marks exist to close.
+        let tmp = parent.join(format!(
+            ".{}.tmp",
+            path.file_name().map(|n| n.to_string()).unwrap_or_default()
+        ));
+        let write = (|| -> std::io::Result<()> {
+            {
+                use std::io::Write;
+                let mut f = std::fs::File::create(&tmp)?;
+                f.write_all(body.to_string().as_bytes())?;
+                f.sync_all()?;
+            }
+            std::fs::rename(&tmp, path)?;
+            // Durability of the rename itself; directory sync is best-effort.
+            if let Ok(d) = std::fs::File::open(parent) {
+                let _ = d.sync_all();
+            }
+            Ok(())
+        })();
+        if let Err(e) = write {
+            let _ = std::fs::remove_file(&tmp);
             warn!(error = %e, path = %path.display(),
                   "Failed to persist vote history; a restart could re-sign a checkpoint");
         }
@@ -1741,10 +1777,12 @@ impl Node {
                                            sig_bls: precommit.sig_bls,
                                            auth_sig: precommit.auth_sig,
                                        };
-                                       let topic = gossipsub::IdentTopic::new("blocks");
-                                       let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
+                                       // BLG-0210: the mark is durable before the
+                                       // bytes leave on the wire.
                                        self.last_precommit_height = agg_state.checkpoint_height;
                                        self.save_vote_history();
+                                       let topic = gossipsub::IdentTopic::new("blocks");
+                                       let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
                                    }
                                    Err(e) => {
                                        warn!("Failed to sign precommit: {e}");
@@ -1785,10 +1823,12 @@ impl Node {
                                                sig_bls: prevote.sig_bls,
                                                auth_sig: prevote.auth_sig,
                                            };
-                                           let topic = gossipsub::IdentTopic::new("blocks");
-                                           let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
+                                           // BLG-0210: persist-before-publish, as
+                                           // for the precommit above.
                                            self.last_prevote_height = checkpoint_height;
                                            self.save_vote_history();
+                                           let topic = gossipsub::IdentTopic::new("blocks");
+                                           let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
                                        }
                                        Err(e) => {
                                            warn!("Failed to sign prevote: {e}");
@@ -2031,6 +2071,14 @@ impl Node {
                                                    }
                                                    entry.push(response);
                                                    let want_cid = bud_node::store::ContentId(cid);
+                                                   // BLG-0212: one attempt per peer asked;
+                                                   // the counter is what lets a failing route
+                                                   // (not_found, bad response, disconnect)
+                                                   // retire the waiters instead of parking them.
+                                                   *self
+                                                       .bitswap_pending_attempts
+                                                       .entry(cid)
+                                                       .or_insert(0) += peers.len();
                                                    for peer in &peers {
                                                        let request_id = self.swarm.behaviour_mut().bitswap.send_request(
                                                            peer,
@@ -2188,6 +2236,34 @@ impl Node {
                                    }
                                }
                                SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                                   // BLG-0212 (P11-F11): every pending fetch asked
+                                   // every connected peer once. When a peer goes
+                                   // away its undelivered answers can never arrive,
+                                   // so retire one attempt per still-pending cid -
+                                   // otherwise a peer that vanishes mid-want parks
+                                   // the waiters and the counters forever.
+                                   let closed_cids: Vec<[u8; 32]> =
+                                       self.bitswap_pending_attempts.keys().copied().collect();
+                                   for cid in closed_cids {
+                                       let exhausted =
+                                                           if let Some(left) = self.bitswap_pending_attempts.get_mut(&cid) {
+                                                               *left = left.saturating_sub(1);
+                                                               *left == 0
+                                                           } else {
+                                                               false
+                                                           };
+                                       if exhausted {
+                                           self.bitswap_pending_attempts.remove(&cid);
+                                           if let Some(senders) = self.pending_bitswap_fetches.remove(&cid) {
+                                               for sender in senders {
+                                                   let _ = sender.send(Err(format!(
+                                                       "no peer served content {} (peers disconnected)",
+                                                       hex::encode(cid)
+                                                   )));
+                                               }
+                                           }
+                                       }
+                                   }
                                    // Same treatment: a poisoned lock used to
                                    // report every close as a real disconnect,
                                    // which drifts `peer_count` in the opposite
@@ -2855,7 +2931,10 @@ impl Node {
                                                let voter_addr = match crate::core::address::Address::from_hex(&voter_id) {
                                                    Ok(addr) => addr,
                                                    Err(e) => {
+                                                       // BLG-0211 (P11-F10): an unparseable
+                                                       // voter identity is a sender fault.
                                                        warn!("Invalid voter_id in Prevote: {e}");
+                                                       self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                        continue;
                                                    }
                                                };
@@ -2876,7 +2955,13 @@ impl Node {
                                                        }
                                                    }
                                                    Err(e) => {
+                                                       // BLG-0211 (P11-F10): a rejected vote
+                                                       // cost the sender nothing before - the
+                                                       // rate limit only capped volume; a slow
+                                                       // spammer kept full score and survived
+                                                       // the ban threshold.
                                                        warn!("Prevote from {peer_id} rejected: {e}");
+                                                       self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                    }
                                                }
                                            }
@@ -2893,7 +2978,9 @@ impl Node {
                                                let voter_addr = match crate::core::address::Address::from_hex(&voter_id) {
                                                    Ok(addr) => addr,
                                                    Err(e) => {
+                                                       // BLG-0211 (P11-F10): see the prevote arm.
                                                        warn!("Invalid voter_id in Precommit: {e}");
+                                                       self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                        continue;
                                                    }
                                                };
@@ -2937,7 +3024,9 @@ impl Node {
                                                        }
                                                    }
                                                    Err(e) => {
+                                                       // BLG-0211 (P11-F10): see the prevote arm.
                                                        warn!("Precommit from {peer_id} rejected: {e}");
+                                                       self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                    }
                                                }
                                            }
@@ -3491,6 +3580,7 @@ impl Node {
                                                        self.peer_manager_lock().report_bad_behavior(&peer);
                                                        continue;
                                                    };
+                                                   let mut attempt_failed = true;
                                                    if let Err(e) = bitswap.handle_response(requested_cid, response) {
                                                        self.peer_manager_lock().report_bad_behavior(&peer);
                                                        warn!("Bitswap response from {peer} failed: {e}");
@@ -3502,10 +3592,39 @@ impl Node {
                                                        if !is_not_found {
                                                            let cid_bytes = response_cid.0;
                                                            if let Ok(data) = bitswap.store().get(&response_cid) {
+                                                               // Delivered: retire the waiters and
+                                                               // every bookkeeping entry for the cid.
+                                                               attempt_failed = false;
+                                                               self.bitswap_pending_attempts.remove(&cid_bytes);
                                                                if let Some(senders) = self.pending_bitswap_fetches.remove(&cid_bytes) {
                                                                    for sender in senders {
                                                                        let _ = sender.send(Ok(data.clone()));
                                                                    }
+                                                               }
+                                                           }
+                                                       }
+                                                   }
+                                                   // BLG-0212: a failed answer is an attempt
+                                                   // spent. When the last peer's attempt is spent,
+                                                   // the waiters get the failure - they no longer
+                                                   // hang and the map no longer grows per fetch.
+                                                   if attempt_failed {
+                                                       let cid_bytes = response_cid.0;
+                                                       let exhausted =
+                                                           if let Some(left) = self.bitswap_pending_attempts.get_mut(&cid_bytes) {
+                                                               *left = left.saturating_sub(1);
+                                                               *left == 0
+                                                           } else {
+                                                               false
+                                                           };
+                                                       if exhausted {
+                                                           self.bitswap_pending_attempts.remove(&cid_bytes);
+                                                           if let Some(senders) = self.pending_bitswap_fetches.remove(&cid_bytes) {
+                                                               for sender in senders {
+                                                                   let _ = sender.send(Err(format!(
+                                                                       "no peer served content {} (all attempts failed)",
+                                                                       hex::encode(cid_bytes)
+                                                                   )));
                                                                }
                                                            }
                                                        }
