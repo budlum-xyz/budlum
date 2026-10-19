@@ -83,6 +83,12 @@ impl BudlumxyzRegistry {
         if &app.developer != caller {
             return Err(BudlumxyzError::NotDeveloper);
         }
+        if new_url.is_some() || new_manifest.is_some() {
+            // The badges refer to the content that was reviewed; changed
+            // content has to earn them again.
+            app.verified = false;
+            app.developer_attested = false;
+        }
         if let Some(url) = new_url {
             app.website_url = url;
         }
@@ -388,6 +394,20 @@ mod tests {
             .is_ok());
         assert_eq!(reg.apps[&id].website_url, "new");
         assert_eq!(reg.apps[&id].manifest_id, Some(ContentId([3u8; 32])));
+    }
+
+    #[test]
+    fn update_clears_the_badges() {
+        let mut reg = BudlumxyzRegistry::new();
+        let dev = Address::from([1u8; 32]);
+        let id = reg
+            .register_app("B".into(), dev, AppCategory::DeFi, "u".into(), None, 1)
+            .expect("a fresh registry has no id to collide with");
+        reg.attest_app_as_developer(id, &dev).unwrap();
+        reg.apps.get_mut(&id).unwrap().verified = true;
+        reg.update_app(id, &dev, Some("new".into()), None).unwrap();
+        assert!(!reg.apps[&id].verified);
+        assert!(!reg.apps[&id].developer_attested);
     }
 
     #[test]
