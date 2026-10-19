@@ -341,3 +341,26 @@ fn serde_json_failure_is_a_real_class_now_surfaced_not_swallowed() {
     );
     // New persistence path surfaces the same class as an Err instead.
 }
+
+#[test]
+fn truncated_and_garbage_snapshot_bytes_are_refused() {
+    let mut state = AccountState::new();
+    state
+        .registry
+        .register_validator(addr(1), 5_000, 0)
+        .unwrap();
+    let bytes = StateSnapshotV2::from_state(&state, snapshot_params()).to_bytes();
+
+    assert!(StateSnapshotV2::from_bytes(&bytes[..bytes.len() / 2]).is_err());
+    assert!(StateSnapshotV2::from_bytes(b"not a snapshot").is_err());
+    assert!(StateSnapshotV2::from_bytes(&[]).is_err());
+}
+
+#[test]
+fn a_snapshot_with_a_tampered_hash_does_not_verify() {
+    let state = AccountState::new();
+    let mut snapshot = StateSnapshotV2::from_state(&state, snapshot_params());
+    assert!(snapshot.verify());
+    snapshot.snapshot_hash = "00".repeat(32);
+    assert!(!snapshot.verify());
+}
