@@ -129,9 +129,17 @@ impl HeaderStore {
                 header.index
             ));
         }
+        if header.epoch != header.index / EPOCH_LENGTH {
+            return Err(format!(
+                "header {} claims epoch {} but its index puts it in epoch {}",
+                header.index,
+                header.epoch,
+                header.index / EPOCH_LENGTH
+            ));
+        }
         if let Some(last) = self.headers.last() {
             if header.index == last.index {
-                if header.hash != last.hash {
+                if header.hash != last.hash || header.state_root != last.state_root {
                     return Err(format!(
                         "two different hashes appeared for index {} ({} and {}); \
                          that is a sign of a fork and is not resolved silently",
@@ -318,6 +326,18 @@ mod tests {
             state_root: format!("root{index}"),
             hash: format!("hash{index}"),
         }
+    }
+
+    #[test]
+    fn a_wrong_epoch_or_a_changed_state_root_is_refused() {
+        let mut store = HeaderStore::new();
+        assert!(store.accept(header(10)).is_ok());
+        let mut forked = header(10);
+        forked.state_root = "other".to_string();
+        assert!(store.accept(forked).is_err());
+        let mut wrong_epoch = header(20);
+        wrong_epoch.epoch = 7;
+        assert!(store.accept(wrong_epoch).is_err());
     }
 
     #[test]
