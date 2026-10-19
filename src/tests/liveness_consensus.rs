@@ -458,4 +458,18 @@ fn a_liveness_slash_is_releasable() {
         v.jail_until > epoch,
         "the term must end in the future, or the punishment is decorative"
     );
+
+    // The release loop frees the validator once the term has run out.
+    let until = v.jail_until;
+    bc.state.epoch_index = until;
+    let chain_id = bc.chain_id;
+    bc.state.advance_epoch(0, chain_id);
+    let released = bc
+        .state
+        .get_validator(&offender)
+        .expect("the validator is still in the map");
+    assert!(
+        !released.jailed,
+        "advance_epoch must release a validator whose term has ended"
+    );
 }
