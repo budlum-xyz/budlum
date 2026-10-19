@@ -139,7 +139,7 @@ pub fn run(root: &Path, cfg: &Config) -> Result<String, String> {
         None => find_binary(root)?,
     };
 
-    reset_dir(&db)?;
+    reset_dir(&db, &protected_dirs(root))?;
     std::fs::create_dir_all(db.join("secrets"))
         .map_err(|e| format!("{} could not be created: {e}", db.display()))?;
     let log_path = db.join("node.log");
@@ -202,19 +202,84 @@ fn log_tail(path: &Path) -> String {
     std::fs::read_to_string(path).map_or_else(|_| String::new(), |t| tail_lines(&t, 80))
 }
 
-/// `rm -rf` then `mkdir -p`, with a guard the shell version lacked: an empty
-/// or root path is refused, because `rm -rf ""` style slips are exactly what
-/// this crate exists to prevent.
-fn reset_dir(path: &Path) -> Result<(), String> {
-    if path.as_os_str().is_empty() || path.parent().is_none() {
-        return Err(format!("refusing to wipe {:?}", path.display().to_string()));
+/// The file that marks a directory as one this tool prepared. A non-empty
+/// directory without it is somebody else's data and is never wiped.
+const SMOKE_MARKER: &str = ".budlum-smoke-db";
+
+/// Directories the wipe must never remove or contain: the repository root,
+/// the working directory and the home directory.
+fn protected_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut out = vec![root.to_path_buf()];
+    if let Ok(cwd) = std::env::current_dir() {
+        out.push(cwd);
     }
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        out.push(PathBuf::from(home));
+    }
+    out
+}
+
+/// Check that `path` may be wiped. The earlier guard refused only an empty
+/// path and `/`; `.`, a relative path, `$HOME` and the repository root passed
+/// and were removed recursively. A path is now wiped only if it is absolute,
+/// free of `..`, at least two levels below the root of the file system, is
+/// not (and does not contain) a protected directory, and is either absent,
+/// empty, or marked as a smoke directory by an earlier run.
+fn check_wipeable(path: &Path, protected: &[PathBuf]) -> Result<(), String> {
+    let shown = path.display().to_string();
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return Err(format!(
+            "refusing to wipe {shown:?}: the path must be absolute"
+        ));
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!("refusing to wipe {shown:?}: the path has a `..`"));
+    }
+    if path.components().count() < 3 {
+        return Err(format!(
+            "refusing to wipe {shown:?}: too close to the root of the file system"
+        ));
+    }
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    for dir in protected {
+        let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone());
+        if dir.starts_with(&real) {
+            return Err(format!(
+                "refusing to wipe {shown:?}: it is, or contains, the protected directory {}",
+                dir.display()
+            ));
+        }
+    }
+    if real.exists() {
+        let non_empty = std::fs::read_dir(&real)
+            .map_err(|e| format!("{shown} could not be read: {e}"))?
+            .next()
+            .is_some();
+        if non_empty && !real.join(SMOKE_MARKER).is_file() {
+            return Err(format!(
+                "refusing to wipe {shown:?}: it is not empty and does not carry the \
+                 {SMOKE_MARKER} marker of an earlier smoke run"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `rm -rf` then `mkdir -p`, behind [`check_wipeable`], then the marker is
+/// written so a later run may reuse the directory.
+fn reset_dir(path: &Path, protected: &[PathBuf]) -> Result<(), String> {
+    check_wipeable(path, protected)?;
     if path.exists() {
         std::fs::remove_dir_all(path)
             .map_err(|e| format!("{} could not be wiped: {e}", path.display()))?;
     }
     std::fs::create_dir_all(path)
-        .map_err(|e| format!("{} could not be created: {e}", path.display()))
+        .map_err(|e| format!("{} could not be created: {e}", path.display()))?;
+    std::fs::write(path.join(SMOKE_MARKER), b"budlum smoke test directory\n")
+        .map_err(|e| format!("{} could not be marked: {e}", path.display()))
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -322,16 +387,49 @@ mod tests {
     }
 
     #[test]
-    fn the_wipe_refuses_an_empty_or_root_path() {
-        assert!(reset_dir(Path::new("")).is_err());
-        assert!(reset_dir(Path::new("/")).is_err());
+    fn the_wipe_refuses_an_empty_relative_or_root_path() {
+        let none: Vec<PathBuf> = Vec::new();
+        assert!(reset_dir(Path::new(""), &none).is_err());
+        assert!(reset_dir(Path::new("/"), &none).is_err());
+        assert!(reset_dir(Path::new("."), &none).is_err());
+        assert!(reset_dir(Path::new("data"), &none).is_err());
+        assert!(reset_dir(Path::new("/tmp"), &none).is_err());
+        assert!(reset_dir(Path::new("/tmp/a/../b"), &none).is_err());
+    }
+
+    #[test]
+    fn the_wipe_refuses_a_protected_directory_and_its_ancestors() {
+        let dir = make_temp_dir("budlum-smoke-protected").expect("dir");
+        let inner = dir.join("work");
+        std::fs::create_dir_all(&inner).expect("inner");
+        // The protected directory sits inside the target: wiping the target
+        // would remove it.
+        assert!(check_wipeable(&dir, std::slice::from_ref(&inner)).is_err());
+        // The target itself is protected.
+        assert!(check_wipeable(&inner, std::slice::from_ref(&inner)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_wipe_refuses_foreign_data_and_accepts_a_marked_directory() {
+        let dir = make_temp_dir("budlum-smoke-foreign").expect("dir");
+        std::fs::write(dir.join("precious"), b"x").expect("file");
+        let none: Vec<PathBuf> = Vec::new();
+        assert!(reset_dir(&dir, &none).is_err());
+        assert!(dir.join("precious").exists());
+        std::fs::write(dir.join(SMOKE_MARKER), b"m").expect("marker");
+        reset_dir(&dir, &none).expect("a marked directory is wiped");
+        assert!(!dir.join("precious").exists());
+        assert!(dir.join(SMOKE_MARKER).is_file());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_wipe_recreates_a_directory() {
         let dir = make_temp_dir("budlum-smoke-test").expect("dir");
         std::fs::write(dir.join("old"), b"x").expect("file");
-        reset_dir(&dir).expect("reset");
+        std::fs::write(dir.join(SMOKE_MARKER), b"m").expect("marker");
+        reset_dir(&dir, &[]).expect("reset");
         assert!(dir.is_dir());
         assert!(!dir.join("old").exists());
         let _ = std::fs::remove_dir_all(&dir);
