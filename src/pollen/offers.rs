@@ -1431,6 +1431,61 @@ mod tests {
     }
 
     #[test]
+    fn binding_requires_the_asset_manifest_and_its_owner() {
+        let mut registry = MarketplaceRegistry::new();
+        let manifest = ContentId::of(b"asset");
+        let asset = DataAsset::new(addr(1), manifest, [1u8; 32], true);
+        let asset_id = registry.register_data_asset(asset).unwrap();
+        let other = ContentId::of(b"someone else's content");
+        assert!(registry
+            .bind_content_to_asset(other, asset_id, addr(1))
+            .is_err());
+        assert!(registry
+            .bind_content_to_asset(manifest, asset_id, addr(2))
+            .is_err());
+        assert!(registry
+            .bind_content_to_asset(manifest, asset_id, addr(1))
+            .is_ok());
+        assert!(registry.check_content_may_be_public(&manifest).is_err());
+        assert!(registry.check_content_may_be_public(&other).is_ok());
+    }
+
+    #[test]
+    fn bound_content_needs_a_live_grant_for_the_reader() {
+        let mut registry = MarketplaceRegistry::new();
+        let manifest = ContentId::of(b"asset");
+        let asset = DataAsset::new(addr(1), manifest, [1u8; 32], true);
+        let asset_id = registry.register_data_asset(asset.clone()).unwrap();
+        registry
+            .bind_content_to_asset(manifest, asset_id, addr(1))
+            .unwrap();
+        let grant_id = registry
+            .create_access_grant(signed_grant(&asset, addr(2), 1))
+            .unwrap();
+        let free = ContentId::of(b"free content");
+        assert!(registry
+            .authorize_content_read(&free, &addr(3), None, 15)
+            .is_ok());
+        assert!(registry
+            .authorize_content_read(&manifest, &addr(2), None, 15)
+            .is_err());
+        assert!(registry
+            .authorize_content_read(&manifest, &addr(2), Some(&grant_id), 15)
+            .is_ok());
+        assert!(registry
+            .authorize_content_read(&manifest, &addr(3), Some(&grant_id), 15)
+            .is_err());
+        assert!(registry
+            .authorize_content_read(&manifest, &addr(2), Some(&grant_id), 25)
+            .is_err());
+        registry.revoke_data_asset(&asset_id, &addr(1)).unwrap();
+        let err = registry
+            .authorize_content_read(&manifest, &addr(2), Some(&grant_id), 15)
+            .unwrap_err();
+        assert!(err.contains("revoked"), "{err}");
+    }
+
+    #[test]
     fn declared_foreign_asset_without_reference_is_denied() {
         let mut registry = MarketplaceRegistry::new();
         let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
