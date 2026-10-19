@@ -406,11 +406,17 @@ impl RegenerationLedger {
         }
         // 1. Ordering. Re-growth is not reversion and must not be smuggled in
         //    through this call.
-        let Some(wanted) = self.stage.reversions_to(target.stage) else {
-            return Err(ReversionError::TargetNotEarlier {
-                from: self.stage,
-                to: target.stage,
-            });
+        //    A same-stage target is not a reversion either: it would record
+        //    an event with `from == to`, which `validate` rejects, so one
+        //    accepted call would brick the ledger (P24-F01).
+        let wanted = match self.stage.reversions_to(target.stage) {
+            Some(steps) if steps > 0 => steps,
+            _ => {
+                return Err(ReversionError::TargetNotEarlier {
+                    from: self.stage,
+                    to: target.stage,
+                });
+            }
         };
         if target.height > self.height {
             return Err(ReversionError::TargetAhead {
@@ -621,7 +627,9 @@ impl RegenerationLedger {
         damaged_below: u64,
         stage_height: &dyn Fn(Stage) -> Option<u64>,
     ) -> Option<Stage> {
-        let mut candidate = Some(self.stage);
+        // A reversion goes strictly earlier: the current stage holds the
+        // damaged view, and `revert` refuses a same-stage target (P24-F01).
+        let mut candidate = self.stage.earlier();
         while let Some(stage) = candidate {
             if stage_height(stage).is_some_and(|height| height <= damaged_below) {
                 return Some(stage);
@@ -705,6 +713,35 @@ mod tests {
             commitment: canonical(Stage::Medusa, height).unwrap_or([0; 32]),
             carried: Transdifferentiated::default(),
         }
+    }
+
+    /// P24-F01: a same-stage target used to be accepted, recorded an event
+    /// with `from == to`, and the next `validate` rejected the whole ledger.
+    #[test]
+    fn a_same_stage_target_is_refused_and_leaves_the_ledger_valid() {
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let err = ledger
+            .revert(
+                &snapshot(Stage::Medusa, 80),
+                Stress::Divergence,
+                &ReversionPolicy::default(),
+                &canonical,
+            )
+            .unwrap_err();
+        assert!(matches!(err, ReversionError::TargetNotEarlier { .. }));
+        assert!(ledger.reversion_events.is_empty());
+        assert!(ledger.validate().is_ok());
+        // The ledger still reverts to a strictly earlier stage afterwards.
+        ledger
+            .revert(
+                &snapshot(Stage::Ephyra, 60),
+                Stress::Divergence,
+                &ReversionPolicy::default(),
+                &canonical,
+            )
+            .expect("an earlier stage is still accepted");
+        assert!(ledger.validate().is_ok());
     }
 
     #[test]
@@ -1167,8 +1204,8 @@ mod tests {
     #[test]
     fn the_cheapest_target_is_the_shallowest_one_that_clears_the_damage() {
         let ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
-        // Damage at or below the current height means the current stage already
-        // clears it - no reversion needed.
+        // The current stage is never a target: a reversion goes strictly
+        // earlier, and `revert` refuses a same-stage target (P24-F01).
         let stage_height = |stage| match stage {
             Stage::Medusa => Some(100),
             Stage::Ephyra => Some(60),
@@ -1176,11 +1213,11 @@ mod tests {
         };
         assert_eq!(
             ledger.cheapest_target(100, &stage_height),
-            Some(Stage::Medusa)
+            Some(Stage::Ephyra)
         );
         assert_eq!(
             ledger.cheapest_target(101, &stage_height),
-            Some(Stage::Medusa)
+            Some(Stage::Ephyra)
         );
         assert_eq!(
             ledger.cheapest_target(70, &stage_height),
