@@ -94,6 +94,6 @@ pub enum Token {
 
     #[regex(r"//[^\n]*", logos::skip, allow_greedy = true)]
     #[regex(r"/\*([^*]|\*+[^*/])*\*+/", logos::skip)]
-    #[regex(r"[ \t\n\f]+", logos::skip)]
+    #[regex(r"[ \t\r\n\f]+", logos::skip)]
     Error,
 }
