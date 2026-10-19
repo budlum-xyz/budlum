@@ -521,7 +521,7 @@ fn a_domain_with_an_empty_allowlist_accepts_no_proof() {
     let err = bc
         .submit_zk_proof(submission(sender, 2, 10, &proof, &pi, &program))
         .unwrap_err();
-    assert!(err.contains("not on the zk allowlist"), "gelen: {err}");
+    assert!(err.contains("not on the zk allowlist"), "got: {err}");
 }
 
 /// An unregistered domain: the proof is refused without being evaluated.
@@ -536,7 +536,7 @@ fn a_proof_for_an_unknown_domain_is_refused() {
     let err = bc
         .submit_zk_proof(submission(sender, 77, 10, &proof, &pi, &program))
         .unwrap_err();
-    assert!(err.contains("unknown domain 77"), "gelen: {err}");
+    assert!(err.contains("unknown domain 77"), "got: {err}");
 }
 
 /// 1d (freshness): if a public input claims a height that is too old the proof is refused
