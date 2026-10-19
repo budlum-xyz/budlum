@@ -3,7 +3,7 @@
 //! Architecture:
 //! - Any account with the RELAYER role (staked via PermissionlessRegistry) can
 //!   relay cross-domain messages. That check is the chain's
-//!   (`Blockchain::submit_relay` calls `ensure_active_relayer` before this
+//!   (`Blockchain::submit_relayed_cross_domain_message` calls `ensure_active_relayer` before this
 //!   module sees the submission); `process_relay` itself does not know the
 //!   registry and does not re-check the caller.
 //! - The relayer watches for bridge lock/burn events on the source domain and
@@ -25,8 +25,6 @@ use std::collections::BTreeMap;
 /// Errors specific to the Universal Relayer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayerError {
-    /// The relayer is not registered or not active in the permissionless registry.
-    NotActiveRelayer(Address),
     /// The message was already relayed (replay protection).
     AlreadyRelayed(MessageId),
     /// The proof failed verification.
@@ -37,8 +35,6 @@ pub enum RelayerError {
         expiry: u64,
         current_height: u64,
     },
-    /// The bridge transfer is in an unexpected state for this relay operation.
-    InvalidTransferState(MessageId),
     /// The source domain does not match the transfer's source.
     SourceDomainMismatch { expected: DomainId, got: DomainId },
     /// Generic relay error.
@@ -48,9 +44,6 @@ pub enum RelayerError {
 impl std::fmt::Display for RelayerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RelayerError::NotActiveRelayer(addr) => {
-                write!(f, "address {addr} is not an active relayer")
-            }
             RelayerError::AlreadyRelayed(id) => {
                 write!(f, "message {} already relayed", hex::encode(id))
             }
@@ -69,9 +62,6 @@ impl std::fmt::Display for RelayerError {
                     expiry,
                     current_height
                 )
-            }
-            RelayerError::InvalidTransferState(id) => {
-                write!(f, "transfer {} in invalid state for relay", hex::encode(id),)
             }
             RelayerError::SourceDomainMismatch { expected, got } => {
                 write!(f, "source domain mismatch: expected {expected}, got {got}")
@@ -225,7 +215,16 @@ impl UniversalRelayer {
         source_event: DomainEvent,
         message: &CrossDomainMessage,
         created_height: u64,
-    ) {
+    ) -> Result<(), RelayerError> {
+        // BLG-0129 (P05-F22): the event and the message must be the SAME
+        // relay. Storing one while keying the other let a pending row hold
+        // an event whose message was never the one being relayed.
+        if source_event.message.as_ref() != Some(message) {
+            return Err(RelayerError::Other(format!(
+                "source event does not carry the enqueued message {}",
+                hex::encode(message.message_id)
+            )));
+        }
         let relay = PendingRelay {
             message_id: message.message_id,
             source_domain: message.source_domain,
@@ -235,6 +234,7 @@ impl UniversalRelayer {
             expiry_height: message.expiry_height,
         };
         self.pending.insert(message.message_id, relay);
+        Ok(())
     }
 
     /// Process a relay submission from a relayer.
@@ -448,7 +448,7 @@ mod tests {
         let (event, message) = make_event_and_message(1, 2, 10);
 
         // Enqueue
-        relayer.enqueue_relay(event.clone(), &message, 10);
+        relayer.enqueue_relay(event.clone(), &message, 10).unwrap();
         assert_eq!(relayer.pending_count(), 1);
 
         // Build event tree and proof
@@ -479,7 +479,7 @@ mod tests {
         let mut relayer = UniversalRelayer::new(RelayerConfig::default());
         let (event, message) = make_event_and_message(1, 2, 10);
 
-        relayer.enqueue_relay(event.clone(), &message, 10);
+        relayer.enqueue_relay(event.clone(), &message, 10).unwrap();
 
         let mut tree = DomainEventTree::new();
         tree.push(event.clone());
@@ -518,7 +518,7 @@ mod tests {
         let mut relayer = UniversalRelayer::new(RelayerConfig::default());
         let (event, message) = make_event_and_message(1, 2, 10);
 
-        relayer.enqueue_relay(event.clone(), &message, 10);
+        relayer.enqueue_relay(event.clone(), &message, 10).unwrap();
 
         let mut tree = DomainEventTree::new();
         tree.push(event.clone());
@@ -545,7 +545,7 @@ mod tests {
         let mut relayer = UniversalRelayer::new(RelayerConfig::default());
         let (event, message) = make_event_and_message(1, 2, 10);
 
-        relayer.enqueue_relay(event.clone(), &message, 10);
+        relayer.enqueue_relay(event.clone(), &message, 10).unwrap();
 
         let relayer_addr = Address::from([0xAA; 32]);
         let bad_proof = MerkleProof {
@@ -573,7 +573,7 @@ mod tests {
         let mut relayer = UniversalRelayer::new(RelayerConfig::default());
         let (event, message) = make_event_and_message(1, 2, 10);
 
-        relayer.enqueue_relay(event, &message, 10);
+        relayer.enqueue_relay(event, &message, 10).unwrap();
 
         // Not expired at height 50
         assert_eq!(relayer.expired_relays(50).len(), 0);
@@ -680,7 +680,7 @@ mod tests {
         tree.push(event.clone());
         let root = tree.root();
         let proof = tree.proof(0).unwrap();
-        relayer.enqueue_relay(event, &message, 10);
+        relayer.enqueue_relay(event, &message, 10).unwrap();
 
         let err = relayer
             .process_relay(
@@ -760,7 +760,7 @@ mod tests {
         let mut relayer = UniversalRelayer::new(RelayerConfig::default());
         let (mut event, message) = make_event_and_message(1, 2, 10);
         event.message = None;
-        relayer.enqueue_relay(event.clone(), &message, 10);
+        relayer.enqueue_relay(event.clone(), &message, 10).unwrap();
         let mut tree = DomainEventTree::new();
         tree.push(event);
         let root = tree.root();
@@ -797,7 +797,7 @@ mod tests {
         let mut relayer = UniversalRelayer::new(RelayerConfig::default());
         // height 10 -> expiry 110.
         let (event, message) = make_event_and_message(1, 2, 10);
-        relayer.enqueue_relay(event, &message, 10);
+        relayer.enqueue_relay(event, &message, 10).unwrap();
         let err = relayer
             .process_relay(
                 message.message_id,
@@ -812,5 +812,45 @@ mod tests {
             matches!(err, RelayerError::Expired { current_height: 110, .. }),
             "got: {err}"
         );
+    }
+
+    /// BLG-0126 (P05-F19): a relay that fails mid-way leaves NO half-state -
+    /// nothing in the ledger, the pending row untouched.
+    #[test]
+    fn neg_half_relay_leaves_no_half_state() {
+        let mut relayer = UniversalRelayer::new(RelayerConfig::default());
+        let (event, message) = make_event_and_message(1, 2, 10);
+        relayer.enqueue_relay(event.clone(), &message, 10).unwrap();
+        let mut tree = DomainEventTree::new();
+        tree.push(event.clone());
+        let proof = tree.proof(0).unwrap();
+
+        // Wrong root: the proof does not verify against it.
+        let err = relayer
+            .process_relay(
+                message.message_id,
+                Address::from([0xAA; 32]),
+                &proof,
+                1,
+                [0xFF; 32],
+                15,
+            )
+            .unwrap_err();
+        assert!(!relayer.ledger.is_relayed(&message.message_id));
+        assert_eq!(relayer.pending_count(), 1, "got: {err}");
+
+        // And the honest attempt still works afterwards: the failure did
+        // not burn the replay slot.
+        let root = tree.root();
+        let ok = relayer.process_relay(
+            message.message_id,
+            Address::from([0xAA; 32]),
+            &proof,
+            1,
+            root,
+            15,
+        );
+        assert!(ok.is_ok());
+        assert!(relayer.ledger.is_relayed(&message.message_id));
     }
 }

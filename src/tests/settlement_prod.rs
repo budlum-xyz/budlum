@@ -1989,7 +1989,7 @@ mod settlement_prod_tests {
         let burn_proof = burn_tree.proof(0).unwrap();
 
         let mut wrong_kind = burn_event.clone();
-        wrong_kind.kind = DomainEventKind::BridgeUnlocked;
+        wrong_kind.kind = DomainEventKind::BridgeMinted;
         assert!(bc
             .unlock_bridge_transfer_from_verified_event(
                 pos.id,

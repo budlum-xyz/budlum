@@ -245,7 +245,7 @@ pub fn merkle_root_from_proof(
     siblings: &[[u8; 32]],
     combine: fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
     promote: fn(&[u8; 32]) -> [u8; 32],
-) -> [u8; 32] {
+) -> Option<[u8; 32]> {
     let mut cur = *leaf;
     let mut idx = index;
     for sibling in siblings {
@@ -261,7 +261,14 @@ pub fn merkle_root_from_proof(
         };
         idx /= 2;
     }
-    cur
+    // BLG-0129 (P05-F22): the index must fit its path. Bits above the walk
+    // used to be ignored, so ONE proof verified under many index values and
+    // the recorded proof_hash depended on which variant a node happened to
+    // get. A leftover index is refused instead of silently narrowed.
+    if idx != 0 {
+        return None;
+    }
+    Some(cur)
 }
 
 #[cfg(test)]
@@ -355,7 +362,8 @@ mod tests {
                 let proof = merkle_proof(&leaves, i, combine_sha3, promote_sha3)
                     .unwrap_or_else(|| panic!("leaf {i} of {len}"));
                 assert_eq!(
-                    merkle_root_from_proof(&leaves[i], i, &proof, combine_sha3, promote_sha3),
+                    merkle_root_from_proof(&leaves[i], i, &proof, combine_sha3, promote_sha3)
+                        .unwrap(),
                     root,
                     "leaf {i} of {len}"
                 );

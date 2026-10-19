@@ -496,13 +496,19 @@ impl QcFaultProof {
             siblings.push(digest);
         }
 
+        // BLG-0129 (P05-F22): an index with bits above its path is refused,
+        // not silently narrowed - one proof must verify under exactly one
+        // index.
         let computed = merkle_tree::merkle_root_from_proof(
             &leaf,
             (*leaf_index) as usize,
             &siblings,
             merkle_tree::combine_sha3,
             merkle_tree::promote_sha3,
-        );
+        )
+        .ok_or_else(|| {
+            "Merkle proof invalid: index has bits above the proof path".to_string()
+        })?;
         let computed_root = hex::encode(computed);
         if computed_root != merkle_root {
             return Err(format!(
