@@ -209,6 +209,20 @@ impl ConstitutionRegistry {
         self.parameters.get(&key)
     }
 
+    /// Minimum voting duration for a constitution amendment, in epochs.
+    /// Falls back to the default of 10 when the entry is missing or not a
+    /// `U64` (a tampered snapshot), which is never lower than the default.
+    pub fn min_proposal_epochs(&self) -> u64 {
+        match self
+            .parameters
+            .get(&ConstitutionParameterKey::MinConstitutionProposalEpochs)
+            .map(|p| &p.value)
+        {
+            Some(ConstitutionValue::U64(epochs)) => (*epochs).max(10),
+            _ => 10,
+        }
+    }
+
     pub fn assert_hard_guardrails(&self) -> Result<(), String> {
         for key in [
             ConstitutionParameterKey::AiReadRequiresPollenGrant,
@@ -222,6 +236,12 @@ impl ConstitutionRegistry {
                 .parameters
                 .get(&key)
                 .ok_or_else(|| format!("missing hard constitution guardrail {key:?}"))?;
+            if parameter.key != key {
+                return Err(format!(
+                    "constitution guardrail {key:?} holds a parameter for {:?}",
+                    parameter.key
+                ));
+            }
             parameter.validate_value()?;
         }
         Ok(())
@@ -275,6 +295,22 @@ mod tests {
                 .clone(),
             ConstitutionValue::Bool(true)
         );
+    }
+
+    /// P20-F08: a guardrail slot must hold the parameter of its own key.
+    #[test]
+    fn p20_f08_guardrail_slot_with_foreign_parameter_is_rejected() {
+        let mut registry = ConstitutionRegistry::new();
+        registry.parameters.insert(
+            ConstitutionParameterKey::PoaIslandIsolation,
+            ConstitutionParameter::new(
+                ConstitutionParameterKey::MaxEmergencyHaltEpochs,
+                ConstitutionValue::U64(5),
+                0,
+                [0u8; 32],
+            ),
+        );
+        assert!(registry.assert_hard_guardrails().is_err());
     }
 
     #[test]

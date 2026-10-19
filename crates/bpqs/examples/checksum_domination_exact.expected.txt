@@ -1,0 +1,29 @@
+== exact checksum digit marginals (rank: values with nonzero mass) ==
+  rank 0: {0: '0.062500', 1: '0.062500', 2: '0.062500', 3: '0.062500', 4: '0.062500', 5: '0.062500', 6: '0.062500', 7: '0.062500', 8: '0.062500', 9: '0.062500', 10: '0.062500', 11: '0.062500', 12: '0.062500', 13: '0.062500', 14: '0.062500', 15: '0.062500'}
+  rank 0: matches uniform exactly? True
+  rank 1: {0: '0.097824', 1: '0.056556', 2: '0.027107', 3: '0.010747', 4: '0.003541', 5: '0.001126', 6: '0.001066', 7: '0.003287', 8: '0.010079', 9: '0.025727', 10: '0.054314', 11: '0.095048', 12: '0.138143', 13: '0.166966', 14: '0.167927', 15: '0.140545'}
+  rank 1: matches uniform exactly? False
+  rank 2: {0: '0.000000', 1: '0.803075', 2: '0.196925', 3: '0.000000'}
+  rank 2: matches uniform exactly? False
+
+== E[min of q iid draws] per checksum rank (uniform compare) ==
+  q=1: ranks ['7.5000', '10.3805', '1.1969']  uniform 7.5000
+  q=2: ranks ['4.8438', '7.8481', '1.0388']  uniform 4.8438
+  q=4: ranks ['2.7208', '4.8837', '1.0015']  uniform 2.7208
+  q=8: ranks ['1.3193', '2.1188', '1.0000']  uniform 1.3193
+
+== checksum-side joint domination term ==
+  exact  P(C<=H over 3 ranks), q=1: 0.203832  log2 -3.0
+  uniform first-order (17/32)^3:   0.149933
+  q_honest=1: exact P(C <= min over honest q, joint ranks) = 0.203832  log2 = -2.295
+  q_honest=2: exact P(C <= min over honest q, joint ranks) = 0.072460  log2 = -3.787
+  q_honest=4: exact P(C <= min over honest q, joint ranks) = 0.017499  log2 = -5.837
+  q_honest=8: exact P(C <= min over honest q, joint ranks) = 0.002487  log2 = -8.651
+
+== refined q=1 first-order work factor ==
+  msg-position term (17/32)^64: log2 = -58.402
+  exact checksum term:          log2 = -2.295
+  refined total:                log2 = -60.697   (first-order-uniform was -61.140)
+
+== rank-2 support check ==
+  T values with rank2 digit >= 4 and positive mass: 0 (expect 0)

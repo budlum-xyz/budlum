@@ -26,7 +26,9 @@
 use crate::core::hash::{calculate_hash_bytes, hash_fields_bytes};
 use crate::storage::qr_carousel::{oneshot_drop_count, CarouselEncoder, CarouselError};
 use crate::storage::qr_frame::{fold_frame_digests, frame_digest, pack_frame, FrameError};
-use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadError, PayloadKind};
+use crate::storage::qr_payload::{
+    pack_payload_opts, payload_commitment, PayloadError, PayloadKind,
+};
 use crate::storage::qr_png::frame_to_qr_png;
 use crate::storage::qr_recipe::ThreeRecipePublic;
 use crate::storage::qr_video::{QrVideo, QrVideoError, MAX_VIDEO_FRAMES, VIDEO_MAGIC};
@@ -400,7 +402,14 @@ impl RecipeCore {
                 )));
             }
         };
-        let packed = pack_payload(kind, &transformed.bytes)?;
+        // Same A1 policy as `three_pipe::encode_payload`, so a recipe written
+        // over the production encode reproduces its packed bytes: ciphertext
+        // and the classes that refused zlib at A0 skip the attempt.
+        let allow_zlib = match kind {
+            PayloadKind::EncryptedContent => false,
+            _ => transformed.class.may_try_zlib(),
+        };
+        let packed = pack_payload_opts(kind, &transformed.bytes, allow_zlib)?;
         let commit = payload_commitment(&packed);
 
         // A2: systematic pass plus the pinned repair margin, never 2k carousel.
@@ -608,6 +617,27 @@ mod tests {
         let encoded = encode_qr_video_internal(content, t, 1, 200, 50, DEFAULT_FPS).unwrap();
         let recipe = VideoRecipe::from_encoded(content, t, 1, 200, 50, DEFAULT_FPS, &encoded);
         (recipe, encoded)
+    }
+
+    /// A body that A0 classes as entropy but zlib would shrink: the recipe
+    /// written over the production encode must still re-emit bit-equal.
+    #[test]
+    fn recipe_over_entropy_class_compressible_body_reemits() {
+        use crate::storage::three_pipe::{encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
+        let mut content = vec![0xff, 0xd8, 0xff, 0xe0];
+        content.extend_from_slice(&[0xabu8; 4096]);
+        let produced = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None).unwrap();
+        let recipe = VideoRecipe::from_encoded(
+            &content,
+            RecipeTransform::pin_from(TransformOpts::default(), &content),
+            1,
+            PIPE_DEFAULT_BLOCK_LEN,
+            crate::storage::qr_carousel::ONESHOT_REPAIR_PERMILLAGE,
+            DEFAULT_FPS,
+            &produced,
+        );
+        let again = recipe.reemit(&content).unwrap();
+        assert_eq!(again.video_blob, produced.video_blob);
     }
 
     /// The whole claim: the stored recipe plus the stored body rebuild the

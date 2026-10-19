@@ -231,13 +231,13 @@ pub fn apply_cross_shard_transfer(
     }
 
     let total_cost = tx.total_cost();
-    let sender = state.get_or_create(&tx.from);
-    if sender.balance < total_cost {
+    // Read-only checks: `get_or_create` would insert empty accounts into
+    // the state on a rejected transfer.
+    if state.get_balance(&tx.from) < total_cost {
         return Err("insufficient balance for cross-shard transfer".into());
     }
-    let receiver = state.get_or_create(&tx.to);
-    receiver
-        .balance
+    state
+        .get_balance(&tx.to)
         .checked_add(tx.amount)
         .ok_or_else(|| "receiver balance overflow on cross-shard transfer".to_string())?;
 
@@ -363,6 +363,16 @@ mod tests {
         assert_eq!(state.get_or_create(&addr(0)).balance, 100 - 45);
         assert_eq!(state.get_or_create(&addr(1)).balance, 40);
         assert_eq!(state.get_or_create(&addr(0)).nonce, 1);
+    }
+
+    /// P20-F04: a rejected transfer must not create accounts.
+    #[test]
+    fn p20_f04_rejected_transfer_creates_no_accounts() {
+        let mut state = AccountState::new();
+        let tx = transfer(addr(0), addr(1), 40, 5);
+        assert!(apply_cross_shard_transfer(&mut state, &tx, 2).is_err());
+        assert!(!state.accounts.contains_key(&addr(0)));
+        assert!(!state.accounts.contains_key(&addr(1)));
     }
 
     #[test]

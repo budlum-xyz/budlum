@@ -57,4 +57,21 @@ mod tests {
         tampered.rank = 64;
         assert!(verify_lock(&lock, &tampered).is_err());
     }
+
+    /// Swapping the adapter hash or dtype after locking is caught.
+    #[test]
+    fn swapped_adapter_or_dtype_breaks_lock() {
+        let mut m = LoRaManifest::new(ModelId([4; 32]), 16, 32);
+        m.adapter_sha256 = Some("ab".repeat(32));
+        let lock = lock_output(&m);
+        assert!(verify_lock(&lock, &m).is_ok());
+
+        let mut swapped = m.clone();
+        swapped.adapter_sha256 = Some("cd".repeat(32));
+        assert!(verify_lock(&lock, &swapped).is_err());
+
+        let mut other_dtype = m.clone();
+        other_dtype.dtype = ai_core::manifest::AdapterDtype::Fp16;
+        assert!(verify_lock(&lock, &other_dtype).is_err());
+    }
 }

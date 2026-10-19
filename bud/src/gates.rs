@@ -149,11 +149,19 @@ impl GateSuite {
         }
     }
 
+    /// A price that could not be computed is an infinite cost: the KF gate
+    /// refuses it. Reading it as 0.0 made the gate pass.
+    fn cost_or_refuse(cost: Result<f64, crate::price::PriceError>) -> f64 {
+        cost.unwrap_or(f64::INFINITY)
+    }
+
     pub fn all_gates_demo() -> Vec<GateResult> {
         let price = PriceModel::default();
-        // K38: the demo does not panic either - an invalid ratio is marked with 0.0.
-        let cost_json = price.cost_sold(1.143, 17.191).unwrap_or(0.0);
-        let cost_jpeg = price.cost_sold(1.1667, 4.885).unwrap_or(0.0);
+        // K38: the demo does not panic either - an invalid ratio is marked
+        // with an infinite cost, which fails the gate. A cost of 0.0 would
+        // pass it.
+        let cost_json = Self::cost_or_refuse(price.cost_sold(1.143, 17.191));
+        let cost_jpeg = Self::cost_or_refuse(price.cost_sold(1.1667, 4.885));
         let core = FidelityCore::new(vec![1, 2, 3], 1920, 1080);
         vec![
             Self::kp1(8, 1.143, 1),
@@ -176,6 +184,17 @@ impl GateSuite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BLG-0671: a price error must fail the KF gate, not pass it as 0.0.
+    #[test]
+    fn a_price_error_fails_the_kf_gate() {
+        let price = PriceModel::default();
+        let cost = GateSuite::cost_or_refuse(price.cost_sold(1.143, 0.0));
+        assert!(!GateSuite::kf(cost, 0.016).passed);
+        let ok = GateSuite::cost_or_refuse(price.cost_sold(1.143, 17.191));
+        assert!(GateSuite::kf(ok, 0.016).passed);
+    }
+
     #[test]
     fn gate_kp1_refuses_invalid_domain_without_panic() {
         // f > N used to underflow into a huge "survivor" count (false pass);

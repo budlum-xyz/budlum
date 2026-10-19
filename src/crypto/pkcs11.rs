@@ -38,8 +38,15 @@ impl Pkcs11Signer {
         module_path: String,
         slot_id: u64,
         token_pin_env: String,
+        key_label: Option<String>,
     ) -> Result<Self, CryptoError> {
-        Self::new_with_software_fallback_policy(module_path, slot_id, token_pin_env, true)
+        Self::new_with_software_fallback_policy(
+            module_path,
+            slot_id,
+            token_pin_env,
+            key_label,
+            true,
+        )
     }
 
     /// Construct a PKCS#11 signer without loading extractable BLS/PQ secret
@@ -51,14 +58,22 @@ impl Pkcs11Signer {
         module_path: String,
         slot_id: u64,
         token_pin_env: String,
+        key_label: Option<String>,
     ) -> Result<Self, CryptoError> {
-        Self::new_with_software_fallback_policy(module_path, slot_id, token_pin_env, false)
+        Self::new_with_software_fallback_policy(
+            module_path,
+            slot_id,
+            token_pin_env,
+            key_label,
+            false,
+        )
     }
 
     fn new_with_software_fallback_policy(
         module_path: String,
         slot_id: u64,
         token_pin_env: String,
+        key_label: Option<String>,
         _load_software_fallback: bool,
     ) -> Result<Self, CryptoError> {
         let pin = std::env::var(&token_pin_env).map_err(|e| {
@@ -104,7 +119,6 @@ impl Pkcs11Signer {
         session
             .login(cryptoki::session::UserType::User, Some(&pin_secret))
             .map_err(|e| CryptoError::KeyGeneration(format!("PKCS#11 login failed: {e}")))?;
-        let key_label: Option<String> = None;
         let public_key_bytes = Self::extract_ed25519_public_key(&session, key_label.as_deref())
             .map_err(|e| {
                 CryptoError::KeyGeneration(format!("Failed to extract Ed25519 key from HSM: {e}"))
@@ -149,13 +163,6 @@ impl Pkcs11Signer {
         if let Some(id) = self.pq_mechanism {
             tracing::info!("PKCS#11: vendor PQ mechanism 0x{:08X}", id);
         }
-        self
-    }
-
-    /// When the slot holds more than one Ed25519 pair, the label selects the consensus key.
-    #[must_use]
-    pub fn with_key_label(mut self, label: Option<String>) -> Self {
-        self.key_label = label;
         self
     }
 
@@ -212,6 +219,7 @@ impl Pkcs11Signer {
         mech_id: u64,
         label: &str,
         msg: &[u8],
+        check_signature: fn(&[u8]) -> Result<(), String>,
     ) -> Result<Vec<u8>, CryptoError> {
         let mechanism = Self::vendor_mechanism(mech_id)?;
         let template = &[
@@ -221,14 +229,51 @@ impl Pkcs11Signer {
         let objects = session
             .find_objects(template)
             .map_err(|e| CryptoError::Signing(format!("Failed to find key '{label}': {e}")))?;
-        if objects.is_empty() {
-            return Err(CryptoError::Signing(format!(
-                "Key '{label}' not found for vendor sign"
-            )));
-        }
-        session
+        Self::require_single_vendor_object(label, objects.len()).map_err(CryptoError::Signing)?;
+        let sig = session
             .sign(&mechanism, objects[0], msg)
-            .map_err(|e| CryptoError::Signing(format!("Vendor sign '{label}': {e}")))
+            .map_err(|e| CryptoError::Signing(format!("Vendor sign '{label}': {e}")))?;
+        check_signature(&sig)
+            .map_err(|e| CryptoError::Signing(format!("Vendor sign '{label}': {e}")))?;
+        Ok(sig)
+    }
+
+    /// A vendor label must name exactly one private key. Taking the first of several
+    /// objects could sign with a key other than the one the node announced.
+    fn require_single_vendor_object(label: &str, count: usize) -> Result<(), String> {
+        match count {
+            0 => Err(format!("Key '{label}' not found for vendor sign")),
+            1 => Ok(()),
+            n => Err(format!(
+                "{n} private keys carry the label '{label}'; refusing to guess"
+            )),
+        }
+    }
+
+    /// A vendor BLS signature is a compressed G1 point (48 bytes), as the software path
+    /// produces. Any other length is a scheme mismatch and must not be voted.
+    fn check_bls_signature_len(sig: &[u8]) -> Result<(), String> {
+        const BLS_SIGNATURE_LEN: usize = 48;
+        if sig.len() == BLS_SIGNATURE_LEN {
+            Ok(())
+        } else {
+            Err(format!(
+                "BLS signature length {} is not {BLS_SIGNATURE_LEN}",
+                sig.len()
+            ))
+        }
+    }
+
+    /// A vendor PQ signature must have the length of a known validator PQ scheme.
+    fn check_pq_signature_len(sig: &[u8]) -> Result<(), String> {
+        use crate::crypto::primitives::{classify_pq_signature_len, PqSignatureClass};
+        match classify_pq_signature_len(sig.len()) {
+            PqSignatureClass::Dilithium5 | PqSignatureClass::MlDsa65 => Ok(()),
+            _ => Err(format!(
+                "PQ signature length {} matches no validator PQ scheme",
+                sig.len()
+            )),
+        }
     }
 
     pub fn store_bls_key(&self, _keypair: &BlsKeypair) -> Result<(), CryptoError> {
@@ -481,7 +526,8 @@ impl ConsensusSigner for Pkcs11Signer {
                 .lock()
                 .map_err(|_| CryptoError::Signing("HSM mutex".into()))?;
             if let Some(inner) = guard.as_ref() {
-                match self.try_vendor_sign(&inner.session, mech_id, BLS_DATA_LABEL, msg) {
+                let check = Self::check_bls_signature_len;
+                match self.try_vendor_sign(&inner.session, mech_id, BLS_DATA_LABEL, msg, check) {
                     Ok(sig) => return Ok(sig),
                     Err(e) => {
                         if self.strict_vendor_native {
@@ -524,7 +570,8 @@ impl ConsensusSigner for Pkcs11Signer {
                 .lock()
                 .map_err(|_| CryptoError::Signing("HSM mutex".into()))?;
             if let Some(inner) = guard.as_ref() {
-                match self.try_vendor_sign(&inner.session, mech_id, PQ_DATA_LABEL, msg) {
+                let check = Self::check_pq_signature_len;
+                match self.try_vendor_sign(&inner.session, mech_id, PQ_DATA_LABEL, msg, check) {
                     Ok(sig) => return Ok(sig),
                     Err(e) => {
                         if self.strict_vendor_native {
@@ -929,6 +976,26 @@ mod vendor_tests {
             check_mechanism_admissible_for_mainnet(id, &caps)
                 .expect("the vendor's own documented signing mechanisms must pass");
         }
+    }
+
+    #[test]
+    fn vendor_sign_refuses_zero_or_several_objects() {
+        assert!(Pkcs11Signer::require_single_vendor_object("L", 1).is_ok());
+        let none = Pkcs11Signer::require_single_vendor_object("L", 0).unwrap_err();
+        assert!(none.contains("not found"), "{none}");
+        let many = Pkcs11Signer::require_single_vendor_object("L", 2).unwrap_err();
+        assert!(many.contains("refusing to guess"), "{many}");
+    }
+
+    #[test]
+    fn vendor_signature_length_is_checked() {
+        assert!(Pkcs11Signer::check_bls_signature_len(&[0u8; 48]).is_ok());
+        assert!(Pkcs11Signer::check_bls_signature_len(&[0u8; 47]).is_err());
+        assert!(Pkcs11Signer::check_bls_signature_len(&[0u8; 96]).is_err());
+        assert!(Pkcs11Signer::check_pq_signature_len(&[]).is_err());
+        assert!(Pkcs11Signer::check_pq_signature_len(&[0u8; 64]).is_err());
+        let ok = vec![0u8; crate::crypto::primitives::PQ_ML_DSA_65_SIGNATURE_LEN];
+        assert!(Pkcs11Signer::check_pq_signature_len(&ok).is_ok());
     }
 
     #[test]

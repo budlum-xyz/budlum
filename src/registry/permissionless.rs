@@ -488,7 +488,10 @@ impl PermissionlessRegistry {
         match self.registrations.get_mut(&key) {
             Some(reg) => {
                 if matches!(reg.status, MemberStatus::Slashed) {
-                    reg.stake = total_stake;
+                    // A slashed entry may only shrink. Writing the caller's
+                    // uncut total back would undo the slash on the next
+                    // Stake or Unstake of the mirrored validator bond.
+                    reg.stake = reg.stake.min(total_stake);
                     return;
                 }
                 if total_stake == 0 {
@@ -1027,6 +1030,28 @@ mod tests {
                 FIXED_POINT_SCALE,
             )
             .is_err());
+    }
+
+    /// BLG-0084: a later stake sync with the uncut total must not undo a slash.
+    #[test]
+    fn upsert_stake_cannot_raise_a_slashed_entry() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(11), 10_000, 0).unwrap();
+        let outcome = reg
+            .slash(
+                addr(11),
+                roles::VALIDATOR,
+                SlashingCondition::DoubleSign,
+                FIXED_POINT_SCALE / 2,
+            )
+            .unwrap();
+        assert!(outcome.penalty > 0);
+        reg.upsert_stake(addr(11), roles::VALIDATOR, 10_000, 1);
+        let after = reg.get(&addr(11), roles::VALIDATOR).unwrap();
+        assert_eq!(after.stake, outcome.remaining_stake);
+        // A smaller total still applies, including a full exit.
+        reg.upsert_stake(addr(11), roles::VALIDATOR, 0, 2);
+        assert_eq!(reg.get(&addr(11), roles::VALIDATOR).unwrap().stake, 0);
     }
 
     #[test]

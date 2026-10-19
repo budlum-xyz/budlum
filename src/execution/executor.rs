@@ -41,6 +41,25 @@ fn ai_execution_backend_allowed(_chain_id: u64, backend: &str) -> bool {
     backend == AI_EXECUTION_BACKEND_PLONKY3
 }
 
+/// Checks registered `dims` against the MLP shape limits.
+/// It reads only the `dims` slice and allocates nothing.
+fn check_ai_exec_dims(dims: &[u16]) -> Result<(), String> {
+    use crate::ai::execution::{MAX_MLP_LAYERS, MAX_MLP_WIDTH};
+    if dims.len() < 2 || dims.len() > MAX_MLP_LAYERS + 1 {
+        return Err(format!(
+            "dims length must be 2..={} (got {})",
+            MAX_MLP_LAYERS + 1,
+            dims.len()
+        ));
+    }
+    for &d in dims {
+        if d == 0 || d as usize > MAX_MLP_WIDTH {
+            return Err(format!("layer dim {d} out of 1..={MAX_MLP_WIDTH}"));
+        }
+    }
+    Ok(())
+}
+
 fn privacy_transfers_enabled(chain_id: u64) -> bool {
     // Allowlist, not a denylist.
     //
@@ -195,6 +214,22 @@ impl Executor {
                 })?;
             }
             TransactionType::Stake => {
+                // A slashed validator's bond was cut by the report that
+                // slashed it, and the permissionless registry refuses to
+                // grow a `Slashed` entry back (`upsert_stake` only lets it
+                // shrink). Letting the ledger half top the stake up would
+                // split the two views again and hand the offender its
+                // penalty back, so the top-up is refused outright - before
+                // any balance movement (P04-F02).
+                if state
+                    .get_validator(&tx.from)
+                    .is_some_and(|validator| validator.slashed)
+                {
+                    return Err(BudlumError::validation(
+                        "validator_slashed",
+                        "Slashed validators cannot add stake",
+                    ));
+                }
                 // Vesting gate (audit 2026-09-09, E-1): staking moves value
                 // out of the account exactly like a transfer; the locked
                 // team-vesting portion is not spendable. Read before the
@@ -380,10 +415,19 @@ impl Executor {
                 );
             }
             TransactionType::Unstake => {
-                let current_stake = state
+                let (current_stake, penalised) = state
                     .get_validator(&tx.from)
-                    .map(|v| v.stake)
+                    .map(|v| (v.stake, v.slashed || v.jailed))
                     .ok_or_else(|| BudlumError::validation("not_validator", "Not a validator"))?;
+                // A slashed or jailed validator must stay in the registry
+                // until its penalty is settled. A full exit would remove the
+                // entry, and a later report would find nothing to cut.
+                if penalised {
+                    return Err(BudlumError::validation(
+                        "validator_penalised",
+                        "Slashed or jailed validators cannot unstake",
+                    ));
+                }
                 if current_stake < tx.amount {
                     return Err(BudlumError::validation(
                         "insufficient_stake",
@@ -2168,6 +2212,17 @@ impl Executor {
                             "public inputs bind the proof to a different chain",
                         ));
                     }
+                    // The envelope's public inputs and the proof struct are two
+                    // prover-supplied claims about the same run. The AIR binds
+                    // `gas_used` to the trace, so a disagreement means the
+                    // envelope describes a different execution than the one the
+                    // struct's commitments were checked against.
+                    if claimed_inputs.gas_used != proof.gas_used {
+                        return Err(BudlumError::validation(
+                            "ai_exec_gas_mismatch",
+                            "public inputs and proof disagree on gas_used",
+                        ));
+                    }
                     let expected_inputs = claimed_inputs.to_execution_inputs();
                     let program = crate::ai::execution::guest_program_for_model(spec)
                         .map_err(|e| BudlumError::validation("ai_exec_program_rebuild", e))?;
@@ -2270,6 +2325,8 @@ impl Executor {
                     // hidden behind a default, so nobody reads this as a
                     // budget that was checked.
                     if let Some(ref dims) = model_spec.execution_dims {
+                        check_ai_exec_dims(dims)
+                            .map_err(|e| BudlumError::validation("ai_exec_dims", e))?;
                         let sizing = crate::ai::execution::FixedPointMlpSpec {
                             dims: dims.clone(),
                             weights: vec![
@@ -2338,9 +2395,15 @@ impl Executor {
                         "proof_bytes is not a valid bud_proof::ProofEnvelope (postcard)",
                     ));
                 }
+                // Only the full STARK path (registered guest program plus the
+                // claimed public inputs re-derived from the request) marks the
+                // proof verified. A structural-only attach stores evidence but
+                // stays out of `fully_verified_proofs`, so it can never release
+                // a `require_proof` escrow.
+                let fully_verified = stark_girisi.is_some() && report.stark_ok == Some(true);
                 state
                     .ai_registry
-                    .attach_execution_proof(request_id, &tx.from, proof.clone())
+                    .attach_execution_proof(request_id, &tx.from, proof.clone(), fully_verified)
                     .map_err(|e| BudlumError::validation("ai_exec_attach", e))?;
                 // If this attach unlocks finalization for require_execution_proof models,
                 // Try re-check by re-submitting is not automatic, next result or
@@ -2452,6 +2515,41 @@ impl Executor {
                     vault_tx.clone(),
                 )
                 .map_err(|e| BudlumError::validation("vault_tx_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::Storage(storage_tx) => {
+                // One arm delegating to the tested body
+                // (`domain::execute_storage_tx`), which runs every check
+                // before it writes. A storage write records commitments; it
+                // moves no value, so a carried amount is refused rather than
+                // silently burned.
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "storage_amount_must_be_zero",
+                        "a storage transaction records commitments; it cannot carry value",
+                    ));
+                }
+                if state.get_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance_for_fee",
+                        "insufficient balance for the storage transaction fee",
+                    ));
+                }
+                // The nonce is read before the epilogue below advances it:
+                // an operator's consent to a deal-open is bound to it, so
+                // the consent is spent by this transaction.
+                let ctx = crate::domain::StorageTxContext {
+                    sender: tx.from,
+                    nonce: state.get_nonce(&tx.from),
+                    chain_id: tx.chain_id,
+                    fee: tx.fee,
+                };
+                crate::domain::execute_storage_tx(state, &ctx, storage_tx)
+                    .map_err(|e| BudlumError::validation("storage_tx_failed", e.to_string()))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -2584,7 +2682,54 @@ impl Executor {
 
 #[cfg(test)]
 mod tests {
-    use super::{ai_execution_backend_allowed, privacy_transfers_enabled};
+    use super::{ai_execution_backend_allowed, check_ai_exec_dims, privacy_transfers_enabled};
+
+    #[test]
+    fn ai_exec_dims_rejects_wide_layer() {
+        assert!(check_ai_exec_dims(&[65, 1]).is_err());
+    }
+
+    #[test]
+    fn ai_exec_dims_rejects_too_many_layers() {
+        assert!(check_ai_exec_dims(&[u16::MAX; 32]).is_err());
+    }
+
+    #[test]
+    fn ai_exec_dims_accepts_small_model() {
+        assert!(check_ai_exec_dims(&[2, 1]).is_ok());
+    }
+
+    /// BLG-0085: a jailed validator must not exit, or a later report finds
+    /// no registry entry to cut.
+    #[test]
+    fn unstake_refuses_a_jailed_validator() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let who = Address::from([5u8; 32]);
+        let mut state = AccountState::new();
+        state.add_balance(&who, 10);
+        state.add_validator(who, 1_000);
+        if let Some(validator) = state.get_validator_mut(&who) {
+            validator.jailed = true;
+        }
+        let mut tx = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            1_000,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::Unstake,
+        );
+        tx.hash = tx.calculate_hash();
+        assert!(Executor::apply_transaction(&mut state, &tx).is_err());
+        assert_eq!(state.get_validator(&who).map(|v| v.stake), Some(1_000));
+        assert!(state.unbonding_queue.is_empty());
+    }
 
     /// Audit 2026-09-09 E-1: the vesting spend gate must hold on every arm
     /// that moves value out of the account, not just Transfer/escrow. The

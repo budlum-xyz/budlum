@@ -26,7 +26,8 @@ use sha3::{Digest, Keccak256};
 
 /// Hard bound on trie descent.
 ///
-/// A path is `keccak256(key)` expanded to nibbles, so an honest proof
+/// A path is the key expanded to nibbles (`rlp(tx_index)` is a few bytes
+/// for the receipts trie, at most 64 nibbles for a 32-byte key), so an honest proof
 /// descends at most 64 levels and each step consumes at least one nibble.
 /// Extension nodes are the exception: a hex-prefix path can decode to an
 /// *empty* nibble list (`hp_decode(&[0x00])`), and `nibbles.starts_with(&[])`
@@ -113,10 +114,11 @@ pub const EMPTY_TRIE_ROOT: [u8; 32] = [
     0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0, 0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
 ];
 
-/// Expands a 32-byte hash into 64 nibbles (the MPT path is the nibbles of keccak256(key)).
-pub fn to_nibbles(hash: &[u8; 32]) -> Vec<u8> {
-    let mut nibbles = Vec::with_capacity(64);
-    for &b in hash {
+/// Expands bytes into nibbles, high nibble first. The MPT path of a key is the nibbles of the
+/// key itself (plain trie, as the Ethereum receipts trie); a secure trie would pass a hash.
+pub fn to_nibbles(bytes: &[u8]) -> Vec<u8> {
+    let mut nibbles = Vec::with_capacity(bytes.len().saturating_mul(2));
+    for &b in bytes {
         nibbles.push(b >> 4);
         nibbles.push(b & 0x0f);
     }
@@ -174,7 +176,9 @@ pub fn hp_decode(bytes: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
 ///
 /// - `proof_nodes`: RLP-encoded node bytes (a hash -> bytes map is built).
 /// - `root`: the expected root hash (`keccak256(rlp(root_node))`).
-/// - `key`: the raw key bytes (the path is the nibbles of `keccak256(key)`).
+/// - `key`: the raw key bytes. The path is the nibbles of the key itself: the Ethereum
+///   receipts trie is a plain trie keyed by `rlp(tx_index)`. It is not a secure trie, so
+///   the key is NOT hashed first.
 ///
 /// On success -> the value bytes (leaf value or branch value slot, raw).
 /// On failure -> the proof is invalid (MissingNode/PathMismatch/KeyNotFound and so on).
@@ -188,7 +192,7 @@ pub fn verify(proof_nodes: &[Vec<u8>], root: &[u8; 32], key: &[u8]) -> Result<Ve
     // Resolve the root node.
     let root_bytes = node_map.get(root).ok_or(MptError::MissingNode)?;
     let root_item = rlp::decode(root_bytes)?;
-    let path = to_nibbles(&keccak256(key));
+    let path = to_nibbles(key);
 
     walk(&root_item, &path, &node_map, 0)
 }
@@ -360,7 +364,7 @@ mod tests {
         // A single-entry trie: key -> value (one leaf node is the root).
         let key = b"hello";
         let value = b"world";
-        let nibbles = to_nibbles(&keccak256(key));
+        let nibbles = to_nibbles(key);
         let node_bytes = leaf_node_bytes(&nibbles, value);
         let root = keccak256(&node_bytes);
 
@@ -372,7 +376,7 @@ mod tests {
     fn verify_single_leaf_wrong_key_misses() {
         let key = b"hello";
         let value = b"world";
-        let nibbles = to_nibbles(&keccak256(key));
+        let nibbles = to_nibbles(key);
         let node_bytes = leaf_node_bytes(&nibbles, value);
         let root = keccak256(&node_bytes);
 
@@ -386,14 +390,13 @@ mod tests {
     #[test]
     fn verify_two_keys_share_branch() {
         // The first nibbles of the two keys differ -> a branch root with a leaf per child.
-        // keccak256("a") and keccak256("b") should differ in their first nibble (very likely).
-        let key_a = b"a";
+        let key_a = &[0x1au8];
         let val_a = b"alpha";
-        let key_b = b"b";
+        let key_b = &[0x2bu8];
         let val_b = b"beta";
 
-        let nib_a = to_nibbles(&keccak256(key_a));
-        let nib_b = to_nibbles(&keccak256(key_b));
+        let nib_a = to_nibbles(key_a);
+        let nib_b = to_nibbles(key_b);
         assert_ne!(
             nib_a[0], nib_b[0],
             "test precondition: distinct first nibble"
@@ -410,8 +413,8 @@ mod tests {
 
         // The absent-key check happens BEFORE the children are moved (branch_node_bytes
         // takes ownership). Is the first-nibble slot of the c key occupied?
-        let absent = b"c";
-        let nib_c = to_nibbles(&keccak256(absent));
+        let absent = &[0x3cu8];
+        let nib_c = to_nibbles(absent);
         let absent_slot_empty = children[nib_c[0] as usize].is_none();
 
         let branch_bytes = branch_node_bytes(children, None);
@@ -459,9 +462,8 @@ mod tests {
             .chain(std::iter::once(9))
             .chain(leaf_nibbles.iter().cloned())
             .collect();
-        // Key bytes (each nibble pair of the path is a byte); exactly 64 nibbles is not
-        // required because verify uses keccak256(key); here we call walk instead of verify
-        // in order to test the walk directly.
+        // Key bytes (each nibble pair of the path is a byte); here we call walk instead of
+        // verify in order to test the walk directly.
         let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
         node_map.insert(keccak256(&ext_bytes), ext_bytes.clone());
         node_map.insert(keccak256(&branch_bytes), branch_bytes.clone());
@@ -482,6 +484,35 @@ mod tests {
         assert_eq!(keccak256(&ext_bytes), root);
     }
 
+    /// P05-F03: the receipts trie is a plain trie keyed by `rlp(tx_index)`.
+    /// Index 0 has key 0x80 (nibbles 8, 0) and index 1 has key 0x01 (nibbles 0, 1).
+    /// The shape below is what Ethereum builds for a block with two receipts: a
+    /// branch root, one leaf per first nibble. The key is NOT hashed.
+    #[test]
+    fn verify_walks_a_plain_receipts_trie_keyed_by_rlp_index() {
+        let leaf_0 = leaf_node_bytes(&[0], b"receipt-0"); // key 0x80, after nibble 8
+        let leaf_1 = leaf_node_bytes(&[1], b"receipt-1"); // key 0x01, after nibble 0
+        let mut children: [Option<Vec<u8>>; 16] = Default::default();
+        children[8] = Some(keccak256(&leaf_0).to_vec());
+        children[0] = Some(keccak256(&leaf_1).to_vec());
+        let branch = branch_node_bytes(children, None);
+        let root = keccak256(&branch);
+        let proof = vec![branch, leaf_0, leaf_1];
+
+        assert_eq!(verify(&proof, &root, &[0x80]).unwrap(), b"receipt-0");
+        assert_eq!(verify(&proof, &root, &[0x01]).unwrap(), b"receipt-1");
+        // Key 0x30 leads to an empty branch slot: the key is absent.
+        assert_eq!(
+            verify(&proof, &root, &[0x30]).unwrap_err(),
+            MptError::KeyNotFound
+        );
+        // Key 0x02 reaches leaf_1 but its path differs: a path mismatch.
+        assert_eq!(
+            verify(&proof, &root, &[0x02]).unwrap_err(),
+            MptError::PathMismatch
+        );
+    }
+
     // ---- negatif: missing node ----
 
     #[test]
@@ -489,7 +520,7 @@ mod tests {
         // Skip a node of the proof → MissingNode.
         let key = b"hello";
         let value = b"world";
-        let nibbles = to_nibbles(&keccak256(key));
+        let nibbles = to_nibbles(key);
         let node_bytes = leaf_node_bytes(&nibbles, value);
         let root = keccak256(&node_bytes);
 
@@ -502,7 +533,7 @@ mod tests {
     fn verify_wrong_root_rejected() {
         let key = b"hello";
         let value = b"world";
-        let nibbles = to_nibbles(&keccak256(key));
+        let nibbles = to_nibbles(key);
         let node_bytes = leaf_node_bytes(&nibbles, value);
         let real_root = keccak256(&node_bytes);
         let wrong_root = [0xffu8; 32];
@@ -537,8 +568,7 @@ mod tests {
         let branch_bytes = branch_node_bytes(children, None);
         let root = keccak256(&branch_bytes);
 
-        // verify turns keccak256(key) into the path - we test through walk directly
-        // because the path from a key is keccak256(key) and would not match the synthetic path.
+        // We test through walk directly with a synthetic short path.
         let mut node_map: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
         node_map.insert(keccak256(&branch_bytes), branch_bytes.clone());
 
@@ -626,14 +656,14 @@ mod depth_bound_locks {
     ///
     /// Comparing two constants would be folded away at compile time (clippy
     /// calls it a constant assertion, correctly), so this builds an actual
-    /// branch chain 64 levels deep, the maximum a keccak256 path allows,
+    /// branch chain 64 levels deep, the maximum a 32-byte key allows,
     /// and checks it resolves. Lowering `MAX_WALK_DEPTH` below the honest
     /// maximum would make this fail with `NestingTooDeep`.
     #[test]
     fn a_maximum_depth_honest_descent_still_resolves() {
-        let key = b"deep";
-        let path = to_nibbles(&keccak256(key));
-        assert_eq!(path.len(), 64, "keccak256 expands to 64 nibbles");
+        let key = &[0x5au8; 32];
+        let path = to_nibbles(key);
+        assert_eq!(path.len(), 64, "a 32-byte key expands to 64 nibbles");
         let value = b"found";
 
         // Build bottom-up: a leaf consuming nothing, then 64 branch nodes each
@@ -671,7 +701,7 @@ mod depth_bound_locks {
     fn a_normal_leaf_lookup_still_resolves() {
         let key = b"balance";
         let value = b"42";
-        let path = to_nibbles(&keccak256(key));
+        let path = to_nibbles(key);
 
         let leaf = Item::List(vec![
             Item::String(hp_encode(&path, true)),

@@ -111,6 +111,40 @@ fn strip_strings(text: &str) -> String {
     crate::gates::rust_literals::scrub(text)
 }
 
+/// Does the attribute block that ends `before` (the text ahead of `fn`)
+/// hold `#[test]` and no `#[ignore]`? Visibility and `async` words between
+/// the attributes and `fn` are skipped.
+fn is_active_test(before: &str) -> bool {
+    let mut rest = before.trim_end();
+    loop {
+        let mut stripped = false;
+        for word in ["pub", "async", "unsafe"] {
+            if let Some(r) = rest.strip_suffix(word) {
+                rest = r.trim_end();
+                stripped = true;
+            }
+        }
+        if !stripped {
+            break;
+        }
+    }
+    let mut found = false;
+    while rest.ends_with(']') {
+        let Some(start) = rest.rfind("#[") else {
+            return false;
+        };
+        let attr = &rest[start..];
+        if attr.starts_with("#[ignore") {
+            return false;
+        }
+        if attr == "#[test]" {
+            found = true;
+        }
+        rest = rest[..start].trim_end();
+    }
+    found
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -128,10 +162,11 @@ pub fn run(root: &Path) -> Result<String, String> {
     for name in REQUIRED {
         // `#[test] fn <name>(`
         let is_test = blob.contains("#[test]") && blob.contains(&format!("fn {name}("));
-        // check attribute precedes the fn
+        // The attribute block directly above the fn must hold `#[test]`.
+        // A `#[test]` anywhere earlier in the blob proves nothing.
         let test_before_fn = blob
             .find(&format!("fn {name}("))
-            .is_some_and(|fn_pos| blob[..fn_pos].rfind("#[test]").is_some());
+            .is_some_and(|fn_pos| is_active_test(&blob[..fn_pos]));
         if is_test && test_before_fn {
             continue;
         }
@@ -300,4 +335,23 @@ pub fn self_test() -> Result<String, String> {
          asserting success after tampering FAILs, refusal tokens in a block comment or a \
          raw string FAIL, and a brace inside a string does not cut a body.",
     ))
+}
+
+#[cfg(test)]
+mod attribute_tests {
+    use super::is_active_test;
+
+    #[test]
+    fn only_the_attribute_block_above_the_fn_counts() {
+        assert!(is_active_test("#[test]\n"));
+        assert!(is_active_test(
+            "fn other() {}\n#[test]\n#[should_panic]\npub "
+        ));
+        // A test attribute on an earlier function is not this function's.
+        assert!(!is_active_test("#[test]\nfn other() {}\n"));
+        assert!(!is_active_test("fn other() {}\n"));
+        // An ignored test does not run.
+        assert!(!is_active_test("#[test]\n#[ignore]\n"));
+        assert!(!is_active_test("#[ignore]\n#[test]\n"));
+    }
 }

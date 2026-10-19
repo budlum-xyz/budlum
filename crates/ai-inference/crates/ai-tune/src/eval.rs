@@ -32,6 +32,9 @@ pub enum Check {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalCase {
     pub name: String,
+    /// The system turn of the training record, when there is one. It is part
+    /// of the case identity (the digest), though the grader does not use it.
+    pub system: Option<String>,
     pub prompt: String,
     pub check: Check,
 }
@@ -46,6 +49,7 @@ impl EvalCase {
     ) -> Self {
         Self {
             name: name.into(),
+            system: None,
             prompt: prompt.into(),
             check: Check::Exact(golden.into()),
         }
@@ -64,6 +68,7 @@ impl EvalCase {
     ) -> Self {
         Self {
             name: name.into(),
+            system: None,
             prompt: prompt.into(),
             check: Check::ContainsAll(contains_all.into_iter().map(Into::into).collect()),
         }
@@ -207,29 +212,52 @@ where
 // An educational/evaluation data set: the "learning content" side of the AI inference layer.
 // ---------------------------------------------------------------------------
 
+/// One length-prefixed field: `<byte length>:<text>`. No text can run into the
+/// next field, whatever characters it holds.
+fn canonical_field(s: &str) -> String {
+    format!("{}:{}", s.len(), s)
+}
+
+/// A list: `<count>[` then each length-prefixed item then `]`.
+fn canonical_list(xs: &[String]) -> String {
+    let mut out = format!("{}[", xs.len());
+    for x in xs {
+        out.push_str(&canonical_field(x));
+    }
+    out.push(']');
+    out
+}
+
 impl Check {
-    /// A deterministic, human-readable representation used for hashing the
-    /// data set. Two [`EvalCase`]s that grade identically hash identically.
+    /// A deterministic, self-delimiting representation used for hashing the
+    /// data set. Two [`EvalCase`]s that grade identically hash identically,
+    /// and no two different checks give the same text.
     #[must_use]
     pub fn canonical(&self) -> String {
         match self {
-            Check::Exact(s) => format!("exact:{}", s),
-            Check::ExactTrimmed(s) => format!("exact_trimmed:{}", s),
-            Check::ContainsAll(xs) => format!("contains_all:{}", xs.join("|")),
-            Check::Excludes(xs) => format!("excludes:{}", xs.join("|")),
-            Check::And(a, b) => format!("and:{}|{}", a.canonical(), b.canonical()),
+            Check::Exact(s) => format!("exact:{}", canonical_field(s)),
+            Check::ExactTrimmed(s) => format!("exact_trimmed:{}", canonical_field(s)),
+            Check::ContainsAll(xs) => format!("contains_all:{}", canonical_list(xs)),
+            Check::Excludes(xs) => format!("excludes:{}", canonical_list(xs)),
+            Check::And(a, b) => format!("and:{}{}", a.canonical(), b.canonical()),
         }
     }
 }
 
 impl EvalCase {
-    /// The deterministic record for this case (name / prompt / rule).
+    /// The deterministic record for this case (name / system / prompt / rule).
+    /// Every text field is length-prefixed, so records cannot run together.
     #[must_use]
     pub fn canonical(&self) -> String {
+        let system = match &self.system {
+            Some(s) => format!("s1:{}", canonical_field(s)),
+            None => "s0".to_string(),
+        };
         format!(
-            "{}\n{}\n{}\n",
-            self.name,
-            self.prompt,
+            "{}{}{}{}\n",
+            canonical_field(&self.name),
+            system,
+            canonical_field(&self.prompt),
             self.check.canonical()
         )
     }
@@ -262,6 +290,7 @@ impl EvalDataSet {
             .iter()
             .map(|r| EvalCase {
                 name: String::new(),
+                system: r.system.clone(),
                 prompt: r.user.clone(),
                 check: Check::ExactTrimmed(r.assistant.clone()),
             })
@@ -371,6 +400,7 @@ mod tests {
     fn contains_all_requires_every_needle() {
         let c = EvalCase {
             name: "parts".into(),
+            system: None,
             prompt: "Which layers is AI inference layer built from?".into(),
             check: Check::ContainsAll(vec!["core".into(), "knowledge".into(), "serve".into()]),
         };
@@ -385,6 +415,7 @@ mod tests {
     fn excludes_rejects_forbidden_substrings() {
         let c = EvalCase {
             name: "no_halluc".into(),
+            system: None,
             prompt: "x".into(),
             check: Check::Excludes(vec!["i do not know".into(), "i am not sure".into()]),
         };
@@ -404,6 +435,7 @@ mod tests {
         ));
         let trimmed = EvalCase {
             name: "t".into(),
+            system: None,
             prompt: "question".into(),
             check: Check::ExactTrimmed("the answer here".into()),
         };
@@ -420,6 +452,7 @@ mod tests {
             EvalCase::exact("b", "1+1?", "3"),
             EvalCase {
                 name: "c".into(),
+                system: None,
                 prompt: "? ".into(),
                 check: Check::ContainsAll(vec!["ok".into()]),
             },
@@ -616,5 +649,45 @@ mod tests {
         assert!(!strict.passes(&half));
         assert!(strict.verdict(&half).contains("REFUSED"));
         assert!(perfect.verdict(&ok).contains("PASS"));
+    }
+
+    /// Two sets that differ only in where a record boundary falls must not collide.
+    #[test]
+    fn digest_is_not_fooled_by_embedded_newlines() {
+        let two = EvalDataSet {
+            name: "a".into(),
+            cases: vec![EvalCase::exact("", "p", "a"), EvalCase::exact("", "q", "b")],
+        };
+        let one = EvalDataSet {
+            name: "a".into(),
+            cases: vec![EvalCase::exact("", "p", "a\n\nq\nexact_trimmed:b")],
+        };
+        assert_ne!(two.digest(), one.digest());
+    }
+
+    /// The `|` join of a list is unambiguous.
+    #[test]
+    fn list_checks_with_separator_text_differ() {
+        let a = Check::ContainsAll(vec!["a|b".into()]);
+        let b = Check::ContainsAll(vec!["a".into(), "b".into()]);
+        assert_ne!(a.canonical(), b.canonical());
+        let c = Check::Excludes(vec!["x|y".into()]);
+        let d = Check::Excludes(vec!["x".into(), "y".into()]);
+        assert_ne!(c.canonical(), d.canonical());
+    }
+
+    /// Records that differ only in the system turn have different digests.
+    #[test]
+    fn from_golden_digest_binds_the_system_turn() {
+        let rec = |system: Option<&str>| ai_data::jsonl::InstructionRecord {
+            system: system.map(String::from),
+            user: "u".into(),
+            assistant: "a".into(),
+        };
+        let none = EvalDataSet::from_golden("s", &[rec(None)]).digest();
+        let one = EvalDataSet::from_golden("s", &[rec(Some("be brief"))]).digest();
+        let two = EvalDataSet::from_golden("s", &[rec(Some("be long"))]).digest();
+        assert_ne!(none, one);
+        assert_ne!(one, two);
     }
 }

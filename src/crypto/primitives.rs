@@ -16,6 +16,45 @@ use rand::Rng;
 use sha3::{Digest, Sha3_256};
 use std::io::{Read, Write};
 use std::path::Path;
+/// Write secret key bytes so that a crash never leaves a short or empty key file.
+///
+/// The bytes go to a new sibling file made with `create_new` and mode `0o600`, are
+/// flushed to disk, and then replace the target with an atomic rename. The mode of a
+/// file that already existed is therefore never kept: the new file always has `0o600`.
+fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), CryptoError> {
+    let io_err = |e: std::io::Error| CryptoError::Io(e.to_string());
+    let mut tmp_name = path
+        .file_name()
+        .ok_or_else(|| CryptoError::Io("key path has no file name".into()))?
+        .to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = path.with_file_name(tmp_name);
+    match std::fs::remove_file(&tmp_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(e)),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = options
+        .open(&tmp_path)
+        .map_err(io_err)
+        .and_then(|mut file| {
+            file.write_all(bytes).map_err(io_err)?;
+            file.sync_all().map_err(io_err)?;
+            std::fs::rename(&tmp_path, path).map_err(io_err)
+        });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyBackend {
     LocalFile,
@@ -497,29 +536,7 @@ impl ValidatorKeys {
         if let Some(bls_key) = &self.bls_key {
             bytes.extend_from_slice(&bls_key.to_bytes());
         }
-        // (security audit §6) create with strict 0o600 from the
-        // Start. The previous `let _ = set_permissions` swallowed
-        // Permission-set errors on the most sensitive key on the node;
-        // Any failure is now propagated via `?` and surfaces to the
-        // Operator at save time.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path.as_ref())
-                .map_err(|e| CryptoError::Io(e.to_string()))?;
-            use std::io::Write;
-            file.write_all(&bytes)
-                .map_err(|e| CryptoError::Io(e.to_string()))?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(path.as_ref(), bytes).map_err(|e| CryptoError::Io(e.to_string()))?;
-        }
+        write_key_file(path.as_ref(), &bytes)?;
         Ok(())
     }
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
@@ -670,30 +687,7 @@ impl KeyPair {
         Self::from_bytes(&bytes)
     }
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
-        // (security audit §6) create the file with strict 0o600
-        // Permissions from the start (no create-then-chmod window).
-        // On non-unix, the second branch falls back to a plain create
-        // (no umask to manipulate on those platforms).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path.as_ref())
-                .map_err(|e| CryptoError::Io(e.to_string()))?;
-            file.write_all(self.signing_key.as_bytes())
-                .map_err(|e| CryptoError::Io(e.to_string()))?;
-        }
-        #[cfg(not(unix))]
-        {
-            let mut file =
-                std::fs::File::create(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
-            file.write_all(self.signing_key.as_bytes())
-                .map_err(|e| CryptoError::Io(e.to_string()))?;
-        }
+        write_key_file(path.as_ref(), self.signing_key.as_bytes())?;
         // (security audit §7) the file path of a
         // Freshly-saved keypair is a sensitive secret, an
         // Attacker reading process stdout learns exactly where
@@ -978,6 +972,39 @@ pub fn verify_ml_dsa_87_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn save_over_a_wide_mode_file_resets_mode_and_leaves_no_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp.bin");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let kp = KeyPair::generate().unwrap();
+        kp.save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            KeyPair::load(&path).unwrap().private_key_bytes(),
+            kp.private_key_bytes()
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(names.len(), 1, "no temp file may remain");
+    }
+
+    #[test]
+    fn a_stale_temp_file_does_not_block_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp.bin");
+        std::fs::write(dir.path().join("kp.bin.tmp"), b"stale").unwrap();
+        let kp = KeyPair::generate().unwrap();
+        kp.save(&path).unwrap();
+        assert_eq!(
+            KeyPair::load(&path).unwrap().private_key_bytes(),
+            kp.private_key_bytes()
+        );
+    }
     #[test]
     fn test_keypair_generation() {
         let kp = KeyPair::generate().unwrap();

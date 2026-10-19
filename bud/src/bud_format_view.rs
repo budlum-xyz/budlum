@@ -24,6 +24,8 @@ use sha3::{Digest, Sha3_256};
 
 pub const VIEW_MAGIC: [u8; 8] = *b"\xB5VIEW\0\0\0";
 pub const VIEW_VERSION: u8 = 1;
+/// The most keys a view may carry; the writer and the reader share this limit.
+const MAX_VIEW_KEYS: usize = 512;
 
 /// The inferred schema of one key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,12 +59,19 @@ impl CompiledView {
         // The key set, taken from the first record, preserving its order.
         let first = arr[0].as_object()?;
         let mut keys: Vec<String> = first.keys().cloned().collect();
+        if keys.len() > MAX_VIEW_KEYS {
+            return None;
+        }
         // All keys, including the optional ones.
         for rec in arr {
             if let Some(o) = rec.as_object() {
                 for k in o.keys() {
                     if !keys.contains(k) {
                         keys.push(k.clone());
+                        // The view is optional (KF2); a view the reader refuses is not built.
+                        if keys.len() > MAX_VIEW_KEYS {
+                            return None;
+                        }
                     }
                 }
             }
@@ -161,7 +170,7 @@ impl CompiledView {
         let bytes = &bytes[..payload_len];
         let record_count = u64::from_le_bytes(bytes[9..17].try_into().ok()?);
         let key_count = u16::from_le_bytes([bytes[17], bytes[18]]) as usize;
-        if key_count > 512 {
+        if key_count > MAX_VIEW_KEYS {
             return None;
         }
         let mut pos = HDR;
@@ -241,6 +250,18 @@ fn value_type(v: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_view_with_too_many_keys_is_not_compiled_and_the_limit_roundtrips() {
+        let wide = |n: usize| {
+            let obj: serde_json::Map<String, Value> =
+                (0..n).map(|i| (format!("k{i}"), Value::from(i))).collect();
+            serde_json::to_vec(&vec![Value::Object(obj)]).unwrap()
+        };
+        assert!(CompiledView::compile(&wide(600)).is_none());
+        let v = CompiledView::compile(&wide(MAX_VIEW_KEYS)).unwrap();
+        assert!(CompiledView::from_blob(&v.to_blob()).is_some());
+    }
 
     fn sample_json() -> Vec<u8> {
         br#"[{"u":"u1","ts":"2026-08-01","a":"r","v":42,"s":200},{"u":"u2","ts":"2026-08-02","a":"w","v":7,"s":200},{"u":"u1","ts":"2026-08-03","a":"l","v":999,"s":404}]"#.to_vec()

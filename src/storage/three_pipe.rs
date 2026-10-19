@@ -415,6 +415,15 @@ mod tests {
         assert_eq!(enc.video_blob, again.video_blob);
     }
 
+    #[test]
+    fn empty_content_qr_video_round_trip() {
+        let enc = encode_qr_video(b"", 64, None).unwrap();
+        assert!(enc.video_blob.starts_with(b"BDLV"));
+        let (kind, raw, _v) = decode_qr_video(&enc.video_blob).unwrap();
+        assert_eq!(kind, PayloadKind::ContentBytes);
+        assert!(raw.is_empty());
+    }
+
     /// The sealed body's nonce: 4 B magic + 1 B version + 24 B nonce.
     fn sealed_nonce_of(enc: &EncodedPipe) -> [u8; SEALED_NONCE_LEN] {
         let (_, body) = unpack_payload(&enc.packed).unwrap();
@@ -458,6 +467,21 @@ mod tests {
         let (kind, body) = decode_frames(&enc.stream_commitment, &enc.frames).unwrap();
         assert_eq!(kind, PayloadKind::EncryptedContent);
         assert_eq!(open_payload(&key, &body).unwrap(), content);
+    }
+
+    #[test]
+    fn sealed_empty_qr_video_round_trip() {
+        let key = PayloadKey::derive(b"facade-key");
+        let a = encode_qr_video(b"", 64, Some(&key)).unwrap();
+        let b = encode_qr_video(b"", 64, Some(&key)).unwrap();
+        let (kind, body, _v) = decode_qr_video(&a.video_blob).unwrap();
+        assert_eq!(kind, PayloadKind::EncryptedContent);
+        assert!(open_payload(&key, &body).unwrap().is_empty());
+        assert_ne!(
+            sealed_nonce_of(&a.pipe),
+            sealed_nonce_of(&b.pipe),
+            "two empty seals under one key reused a nonce"
+        );
     }
 
     /// The A0 class drives the A1 compression attempt: entropy-coded content

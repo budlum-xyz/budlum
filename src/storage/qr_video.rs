@@ -254,7 +254,10 @@ pub fn demux_optical_frames(video: &QrVideo) -> Result<Vec<Vec<u8>>, QrVideoErro
     Ok(out)
 }
 
-/// Minimal greyscale decode for **our** stored-filter RGB PNGs only.
+/// Greyscale decode for 8 bit PNGs of color type 0, 2, 4 or 6, all five
+/// filter types, no interlace. Every chunk CRC is checked. Grey is channel 0
+/// of each pixel (the red channel for RGB and RGBA). 16 bit, palette and
+/// interlaced images are refused with an explicit error.
 fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
     if png.len() < 8 {
         return Err("png magic".into());
@@ -266,40 +269,75 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
     let mut off = 8usize;
     let mut width = 0u32;
     let mut height = 0u32;
+    let mut channels = 0usize;
     let mut idat = Vec::new();
     while off + 8 <= png.len() {
         let len_bytes = png.get(off..off + 4).ok_or_else(|| "png len".to_string())?;
         let mut lb = [0u8; 4];
         lb.copy_from_slice(len_bytes);
         let len = u32::from_be_bytes(lb) as usize;
-        let ty = png
+        let chunk_kind = png
             .get(off + 4..off + 8)
             .ok_or_else(|| "png ty".to_string())?;
-        let data = png
+        let chunk_body = png
             .get(off + 8..off + 8 + len)
             .ok_or_else(|| "png chunk".to_string())?;
-        off = off + 12 + len;
-        if ty == b"IHDR" {
-            if data.len() < 8 {
+        let crc_end = off
+            .checked_add(12)
+            .and_then(|v| v.checked_add(len))
+            .ok_or_else(|| "png chunk".to_string())?;
+        let crc_bytes = png
+            .get(crc_end - 4..crc_end)
+            .ok_or_else(|| "png chunk".to_string())?;
+        // PNG CRC-32 (spec, ISO 3309) runs over type then data with no length
+        // between them. This is a fixed external format, not a Budlum digest.
+        let mut crc = flate2::Crc::new();
+        crc.update(chunk_kind);
+        crc.update(chunk_body);
+        if crc.sum().to_be_bytes() != crc_bytes {
+            return Err("png crc".into());
+        }
+        off = crc_end;
+        if chunk_kind == b"IHDR" {
+            if chunk_body.len() < 13 {
                 return Err("ihdr".into());
+            }
+            let depth = chunk_body.get(8).copied().unwrap_or(0);
+            let color = chunk_body.get(9).copied().unwrap_or(0);
+            if depth != 8 {
+                return Err("png bit depth".into());
+            }
+            channels = match color {
+                0 => 1,
+                2 => 3,
+                4 => 2,
+                6 => 4,
+                3 => return Err("png palette".into()),
+                _ => return Err("png color type".into()),
+            };
+            if chunk_body.get(10).copied() != Some(0) || chunk_body.get(11).copied() != Some(0) {
+                return Err("png method".into());
+            }
+            if chunk_body.get(12).copied() != Some(0) {
+                return Err("png interlace".into());
             }
             let mut wb = [0u8; 4];
             let mut hb = [0u8; 4];
-            wb.copy_from_slice(data.get(0..4).ok_or_else(|| "w".to_string())?);
-            hb.copy_from_slice(data.get(4..8).ok_or_else(|| "h".to_string())?);
+            wb.copy_from_slice(chunk_body.get(0..4).ok_or_else(|| "w".to_string())?);
+            hb.copy_from_slice(chunk_body.get(4..8).ok_or_else(|| "h".to_string())?);
             width = u32::from_be_bytes(wb);
             height = u32::from_be_bytes(hb);
-        } else if ty == b"IDAT" {
-            idat.extend_from_slice(data);
-        } else if ty == b"IEND" {
+        } else if chunk_kind == b"IDAT" {
+            idat.extend_from_slice(chunk_body);
+        } else if chunk_kind == b"IEND" {
             break;
         }
     }
-    if width == 0 || height == 0 {
+    if width == 0 || height == 0 || channels == 0 {
         return Err("no ihdr".into());
     }
     // A hostile IHDR can declare any u32 geometry; the IDAT must then inflate
-    // to `h * (1 + w*3)` bytes, which is the unbounded allocation this ceiling
+    // to `h * (1 + w*channels)` bytes, which is the unbounded allocation this ceiling
     // closes. Our encoder never emits a side over `MAX_PNG_SIDE_PX`, so
     // anything larger is refused before a single inflated byte is produced.
     if width > MAX_PNG_SIDE_PX || height > MAX_PNG_SIDE_PX {
@@ -307,27 +345,70 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
     }
     let w = width as usize;
     let h = height as usize;
-    let row = 1 + w * 3;
+    let row = 1 + w * channels;
     let expected = h.checked_mul(row).ok_or("png dims overflow")?;
-    let raw = inflate_zlib_stored(&idat, expected)?;
+    let mut raw = inflate_zlib_stored(&idat, expected)?;
     if raw.len() != expected {
         return Err(format!("raw len {} != {}", raw.len(), expected));
     }
+    unfilter(&mut raw, h, row, channels)?;
     let mut grey = vec![0u8; w * h];
     for y in 0..h {
-        let base = y * row;
-        let filter = raw.get(base).copied().unwrap_or(1);
-        if filter != 0 {
-            return Err("filter".into());
-        }
         for x in 0..w {
-            let r = raw.get(base + 1 + x * 3).copied().unwrap_or(0);
+            let v = raw.get(y * row + 1 + x * channels).copied().unwrap_or(0);
             if let Some(slot) = grey.get_mut(y * w + x) {
-                *slot = r;
+                *slot = v;
             }
         }
     }
     Ok((w, h, grey))
+}
+
+/// Undo PNG scanline filters in place. `bpp` is bytes per pixel (8 bit depth).
+fn unfilter(raw: &mut [u8], h: usize, row: usize, bpp: usize) -> Result<(), String> {
+    for y in 0..h {
+        let base = y * row;
+        let filter = raw.get(base).copied().ok_or("filter")?;
+        if filter > 4 {
+            return Err("filter".into());
+        }
+        for i in 1..row {
+            let at = |dy: usize, back: usize| -> u8 {
+                if (dy == 1 && y == 0) || i <= back {
+                    return 0;
+                }
+                raw.get(base + i - back - dy * row).copied().unwrap_or(0)
+            };
+            let a = at(0, bpp);
+            let b = at(1, 0);
+            let c = at(1, bpp);
+            let pred = match filter {
+                0 => 0,
+                1 => a,
+                2 => b,
+                3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+                _ => paeth(a, b, c),
+            };
+            if let Some(slot) = raw.get_mut(base + i) {
+                *slot = slot.wrapping_add(pred);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn paeth(a: u8, b: u8, c: u8) -> u8 {
+    let p = i32::from(a) + i32::from(b) - i32::from(c);
+    let pa = (p - i32::from(a)).abs();
+    let pb = (p - i32::from(b)).abs();
+    let pc = (p - i32::from(c)).abs();
+    if pa <= pb && pa <= pc {
+        a
+    } else if pb <= pc {
+        b
+    } else {
+        c
+    }
 }
 
 fn inflate_zlib_stored(z: &[u8], limit: usize) -> Result<Vec<u8>, String> {
@@ -602,14 +683,16 @@ mod tests {
         (out, dropped, refused)
     }
 
-    /// Minimal PNG chunk writer. The decode side does not check CRC, but it
-    /// does advance past the 4-byte CRC field, so each chunk must carry it.
+    /// Minimal PNG chunk writer with a real CRC-32 over type and data.
     fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut crc = flate2::Crc::new();
+        crc.update(ty);
+        crc.update(data);
         let mut c = Vec::new();
         c.extend_from_slice(&(data.len() as u32).to_be_bytes());
         c.extend_from_slice(ty);
         c.extend_from_slice(data);
-        c.extend_from_slice(&[0u8; 4]); // CRC-32 slot (unchecked by decoder)
+        c.extend_from_slice(&crc.sum().to_be_bytes());
         c
     }
 
@@ -655,5 +738,200 @@ mod tests {
         let idat = enc.finish().unwrap();
         let bomb = png_with_ihdr_and_idat(100, 100, &idat);
         assert_eq!(decode_png_grey(&bomb), Err("inflate too large".into()));
+    }
+
+    /// Test-only PNG writer: 8 or 16 bit, any color type, chosen filter type.
+    fn enc_png(
+        w: u32,
+        h: u32,
+        color: u8,
+        depth: u8,
+        interlace: u8,
+        filter: u8,
+        samples: &[u8],
+    ) -> Vec<u8> {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let ch = match color {
+            0 | 3 => 1usize,
+            2 => 3,
+            4 => 2,
+            _ => 4,
+        };
+        let bpp = ch * usize::from(depth / 8).max(1);
+        let row = w as usize * bpp;
+        let mut raw = Vec::new();
+        for y in 0..h as usize {
+            raw.push(filter);
+            for i in 0..row {
+                let cur = samples[y * row + i];
+                let a = if i >= bpp {
+                    samples[y * row + i - bpp]
+                } else {
+                    0
+                };
+                let b = if y > 0 { samples[(y - 1) * row + i] } else { 0 };
+                let c = if y > 0 && i >= bpp {
+                    samples[(y - 1) * row + i - bpp]
+                } else {
+                    0
+                };
+                let pred = match filter {
+                    0 => 0,
+                    1 => a,
+                    2 => b,
+                    3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+                    _ => {
+                        let p = i32::from(a) + i32::from(b) - i32::from(c);
+                        let (pa, pb, pc) = (
+                            (p - i32::from(a)).abs(),
+                            (p - i32::from(b)).abs(),
+                            (p - i32::from(c)).abs(),
+                        );
+                        if pa <= pb && pa <= pc {
+                            a
+                        } else if pb <= pc {
+                            b
+                        } else {
+                            c
+                        }
+                    }
+                };
+                raw.push(cur.wrapping_sub(pred));
+            }
+        }
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
+        z.write_all(&raw).unwrap();
+        let idat = z.finish().unwrap();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[depth, color, 0, 0, interlace]);
+        let mut p = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        p.extend_from_slice(&chunk(b"IHDR", &ihdr));
+        p.extend_from_slice(&chunk(b"IDAT", &idat));
+        p.extend_from_slice(&chunk(b"IEND", &[]));
+        p
+    }
+
+    fn grey_pattern(w: usize, h: usize) -> Vec<u8> {
+        (0..w * h)
+            .map(|i| ((i * 37 + (i / w) * 11) % 256) as u8)
+            .collect()
+    }
+
+    /// Expand grey samples to the given color type; channel 0 carries the grey value.
+    fn expand(grey: &[u8], color: u8) -> Vec<u8> {
+        let mut v = Vec::new();
+        for &g in grey {
+            match color {
+                0 => v.push(g),
+                2 => v.extend_from_slice(&[g, g ^ 0x5a, g.wrapping_add(7)]),
+                4 => v.extend_from_slice(&[g, 0x80]),
+                _ => v.extend_from_slice(&[g, g ^ 0x5a, g.wrapping_add(7), 0xff]),
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn every_filter_and_color_type_decodes_to_the_same_grey() {
+        let (w, h) = (13usize, 9usize);
+        let grey = grey_pattern(w, h);
+        for color in [0u8, 2, 4, 6] {
+            for filter in 0u8..=4 {
+                let png = enc_png(
+                    w as u32,
+                    h as u32,
+                    color,
+                    8,
+                    0,
+                    filter,
+                    &expand(&grey, color),
+                );
+                let got = decode_png_grey(&png)
+                    .unwrap_or_else(|e| panic!("color {color} filter {filter}: {e}"));
+                assert_eq!(got, (w, h, grey.clone()), "color {color} filter {filter}");
+            }
+        }
+    }
+
+    #[test]
+    fn paeth_grey_png_yields_the_original_optical_frame() {
+        let frame = b"paeth-reencoded-frame-001".to_vec();
+        let png = crate::storage::qr_png::frame_to_qr_png(&frame).unwrap();
+        let (w, h, grey) = decode_png_grey(&png).unwrap();
+        let re = enc_png(w as u32, h as u32, 0, 8, 0, 4, &grey);
+        assert_eq!(png_to_optical_frame(&re).unwrap(), frame);
+    }
+
+    #[test]
+    fn own_png_roundtrip_is_unchanged() {
+        let frame = b"own-png-roundtrip-002".to_vec();
+        let png = crate::storage::qr_png::frame_to_qr_png(&frame).unwrap();
+        assert_eq!(png_to_optical_frame(&png).unwrap(), frame);
+    }
+
+    #[test]
+    fn png_crc_is_the_standard_unprefixed_crc32() {
+        // The IEND chunk CRC is the well known constant AE 42 60 82. A length
+        // prefix in the CRC input would change it and break every PNG reader.
+        let iend = chunk(b"IEND", &[]);
+        assert_eq!(iend.get(8..12), Some(&[0xAE, 0x42, 0x60, 0x82][..]));
+    }
+
+    #[test]
+    fn bad_chunk_crc_is_refused() {
+        let grey = grey_pattern(4, 4);
+        let mut png = enc_png(4, 4, 0, 8, 0, 0, &grey);
+        // IHDR CRC sits at 8 + 8 + 13 .. +4.
+        png[8 + 8 + 13] ^= 0xff;
+        assert!(decode_png_grey(&png).unwrap_err().contains("crc"));
+        // Corrupt IDAT data instead (CRC no longer matches).
+        let mut png2 = enc_png(4, 4, 0, 8, 0, 0, &grey);
+        png2[8 + 25 + 8] ^= 0x01;
+        assert!(decode_png_grey(&png2).unwrap_err().contains("crc"));
+    }
+
+    #[test]
+    fn unsupported_formats_are_refused_explicitly() {
+        let g8 = grey_pattern(4, 4);
+        let g16: Vec<u8> = g8.iter().flat_map(|&b| [b, b]).collect();
+        let e16 = decode_png_grey(&enc_png(4, 4, 0, 16, 0, 0, &g16)).unwrap_err();
+        assert_eq!(e16, "png bit depth");
+        let ep = decode_png_grey(&enc_png(4, 4, 3, 8, 0, 0, &g8)).unwrap_err();
+        assert_eq!(ep, "png palette");
+        let ei = decode_png_grey(&enc_png(4, 4, 0, 8, 1, 0, &g8)).unwrap_err();
+        assert_eq!(ei, "png interlace");
+    }
+
+    #[test]
+    fn unknown_filter_type_is_refused() {
+        // Build a PNG whose filter byte is 5 by hand.
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut raw = Vec::new();
+        for _ in 0..4 {
+            raw.push(5u8);
+            raw.extend_from_slice(&[0u8; 4]);
+        }
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
+        z.write_all(&raw).unwrap();
+        let png = png_with_ihdr_gray(4, 4, &z.finish().unwrap());
+        assert_eq!(decode_png_grey(&png).unwrap_err(), "filter");
+    }
+
+    fn png_with_ihdr_gray(w: u32, h: u32, idat: &[u8]) -> Vec<u8> {
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+        let mut p = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        p.extend_from_slice(&chunk(b"IHDR", &ihdr));
+        p.extend_from_slice(&chunk(b"IDAT", idat));
+        p.extend_from_slice(&chunk(b"IEND", &[]));
+        p
     }
 }

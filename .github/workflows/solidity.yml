@@ -1,0 +1,49 @@
+name: Solidity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+
+concurrency:
+  group: solidity-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    name: Compile external-domain contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Pinned solc with a pinned checksum: the contracts carry the finality
+      # bridge's verification logic, so what CI compiles must be reproducible
+      # and must not drift with a floating compiler download.
+      - name: Install solc 0.8.26
+        run: |
+          curl -sSL -o /tmp/solc \
+            https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-static-linux
+          echo "d5f23436f443edb85d8e76906d12f0a86ce0490e7663a9e608efeb7a93f149ef  /tmp/solc" \
+            | sha256sum -c -
+          chmod +x /tmp/solc
+          sudo mv /tmp/solc /usr/local/bin/solc
+          solc --version
+
+      - name: Compile every contract
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          files=(contracts/**/*.sol)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no .sol files found" >&2
+            exit 1
+          fi
+          solc --bin --abi --optimize --overwrite -o /tmp/solc-out "${files[@]}"
+          echo "compiled ${#files[@]} file(s)"

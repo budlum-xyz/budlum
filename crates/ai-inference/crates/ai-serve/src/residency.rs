@@ -250,7 +250,8 @@ impl ResidencyPlan {
     /// The rule, in order:
     ///
     /// 1. Every [`Demand::EveryToken`] shard is placed in fast memory,
-    ///    accelerator first. If they do not all fit, the whole plan fails;
+    ///    accelerator first, largest shard first with ties broken by content
+    ///    id (so the plan does not depend on input order). If they do not all fit, the whole plan fails;
     ///    there is no partial answer here, because a dense part half on disk
     ///    pays the disk cost on every token anyway.
     /// 2. [`Demand::WhenRouted`] shards fill whatever fast memory is left,
@@ -355,8 +356,19 @@ impl ResidencyPlan {
         let mut free_system = budget.system_bytes;
         let mut placements = Vec::with_capacity(shards.len());
 
-        // Rule 1: the dense part, fastest tier first.
-        for shard in shards.iter().filter(|s| s.demand == Demand::EveryToken) {
+        // Rule 1: the dense part, fastest tier first. Largest shard first
+        // (first-fit decreasing), ties by content id, so the verdict and the
+        // placement order do not depend on the order the shards were listed.
+        let mut dense: Vec<&WeightShard> = shards
+            .iter()
+            .filter(|s| s.demand == Demand::EveryToken)
+            .collect();
+        dense.sort_by(|a, b| {
+            b.bytes
+                .cmp(&a.bytes)
+                .then_with(|| a.content_id.cmp(&b.content_id))
+        });
+        for shard in dense {
             let tier = if shard.bytes <= free_accelerator {
                 free_accelerator -= shard.bytes;
                 Tier::Accelerator
@@ -789,6 +801,30 @@ mod tests {
                 "shard {n} landed in a different tier when the input order changed"
             );
         }
+    }
+
+    /// Two dense shards that only fit in one order of a naive first-fit.
+    #[test]
+    fn the_dense_plan_does_not_depend_on_shard_order() {
+        let budget = DeviceBudget {
+            accelerator_bytes: 700,
+            system_bytes: 400,
+        };
+        let a = WeightShard {
+            content_id: id(1),
+            bytes: 300,
+            demand: Demand::EveryToken,
+        };
+        let b = WeightShard {
+            content_id: id(2),
+            bytes: 700,
+            demand: Demand::EveryToken,
+        };
+        let forward = ResidencyPlan::plan(&[a.clone(), b.clone()], budget, profile())
+            .expect("1000 B of dense weights fit in 1100 B");
+        let backward = ResidencyPlan::plan(&[b, a], budget, profile())
+            .expect("the same device must give the same verdict");
+        assert_eq!(forward, backward, "placements must not follow input order");
     }
 
     /// Every shard appears exactly once.

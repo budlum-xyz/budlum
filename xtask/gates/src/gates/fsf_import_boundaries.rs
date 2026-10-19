@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 const FIT_DOC: &str = "docs/FSF_PROJECT_FIT.md";
 const PLAN_DOC: &str = "docs/FSF_ADAPTATION_PLAN.md";
-const CURATION_TOOL: &str = "tools/fsf_project_fit.py";
+const CURATION_TOOL: &str = "xtask/tools/src/fsf_fit.rs";
 const SELF_PATH: &str = "xtask/gates/src/gates/fsf_import_boundaries.rs";
 const BOUNDARY_NOTE: &str = "BUDLUM_IMPORT_BOUNDARY.md";
 const VACUITY_FLOOR: usize = 100;
