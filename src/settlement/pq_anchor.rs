@@ -717,9 +717,19 @@ pub fn rotate_anchor_key_with_committee(
     state: &mut ColdWalletState,
     at_height: u64,
     reason: &str,
-    identities: &[SignerIdentity],
     certificates: &[DeviceSignature],
 ) -> Result<u32, AnchorError> {
+    // S2: the committee comes from the wallet's pinned state, never from
+    // the caller.
+    if state.trusted_devices.len() != state.policy.device_count as usize {
+        return Err(AnchorError::CommitteeQuorum(
+            QuorumError::IdentitySetSizeMismatch {
+                device_count: state.policy.device_count,
+                presented: state.trusted_devices.len(),
+            },
+        ));
+    }
+    let identities = state.trusted_devices.clone();
     let mut payload = Vec::with_capacity(26 + 8 + 8 + 8 + 32);
     payload.extend_from_slice(b"BDLM_PQ_ANCHOR_ROTATION_V2");
     // BLG-0069 (P03-F12): the chain id is part of the signed payload. With
@@ -734,7 +744,7 @@ pub fn rotate_anchor_key_with_committee(
     ]));
     let proven = verify_quorum(
         &state.policy,
-        identities,
+        &identities,
         &payload,
         state.key_epoch,
         certificates,
@@ -1025,6 +1035,8 @@ mod tests {
                 device_count: 6,
                 refusal_history_capacity: 8,
             })
+            // S2: the committee is pinned in state at installation.
+            .with_trusted_devices(identities())
         }
 
         fn identities() -> Vec<SignerIdentity> {
@@ -1057,7 +1069,6 @@ mod tests {
                 &mut cold,
                 1200,
                 "anchor key believed compromised",
-                &identities(),
                 &certification,
             )
             .expect("committee rotation succeeds");
@@ -1075,7 +1086,6 @@ mod tests {
                 &mut cold,
                 1200,
                 "attacker wants the key changed",
-                &identities(),
                 &[],
             )
             .unwrap_err();
@@ -1092,7 +1102,6 @@ mod tests {
                 &mut cold,
                 1200,
                 "epoch one compromised",
-                &identities(),
                 &certs_old,
             )
             .expect("first rotation succeeds");
@@ -1101,7 +1110,6 @@ mod tests {
                 &mut cold,
                 1300,
                 "replay of the same certificate",
-                &identities(),
                 &certs_old,
             )
             .unwrap_err();
