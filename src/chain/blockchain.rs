@@ -2572,6 +2572,26 @@ impl Blockchain {
         event_index: u32,
         expiry_height: u64,
     ) -> Result<DomainEvent, String> {
+        // BLG-0108 (P05-F01): burn is the debit half of mint. The minted
+        // units sit with the transfer's recipient, so the burn takes them
+        // back before the row flips - without this, one lock/mint/burn/
+        // unlock cycle grows total balances by one transfer amount and the
+        // 100M supply invariant dies. Balance checked first: a refused burn
+        // must leave the transfer untouched.
+        let transfer = self
+            .state
+            .bridge_state
+            .get_transfer(&message_id)
+            .cloned()
+            .ok_or_else(|| "Unknown bridge transfer".to_string())?;
+        let amount = transfer.amount.get();
+        let burner = transfer.recipient;
+        let burner_balance = self.state.get_balance(&burner);
+        if burner_balance < amount {
+            return Err(format!(
+                "Insufficient balance for bridge burn: burner has {burner_balance}, needed {amount}"
+            ));
+        }
         let event = self
             .state
             .bridge_state
@@ -2583,6 +2603,8 @@ impl Blockchain {
                 expiry_height,
             )
             .map_err(|e| e.to_string())?;
+        let burner_account = self.state.get_or_create(&burner);
+        burner_account.balance = burner_account.balance.saturating_sub(amount);
         if let Some(store) = &self.storage {
             store
                 .save_bridge_state(&self.state.bridge_state)
@@ -3751,14 +3773,6 @@ impl Blockchain {
     }
 
     /// Get expired relays for slashing.
-    pub fn expired_relays(&self) -> Vec<crate::cross_domain::relayer::PendingRelay> {
-        let current_height = self.chain.len() as u64;
-        self.universal_relayer
-            .expired_relays(current_height)
-            .into_iter()
-            .cloned()
-            .collect()
-    }
 
     /// Merkle root of the relay ledger (for on-chain commitment).
     pub fn relay_ledger_root(&self) -> crate::domain::types::Hash32 {
