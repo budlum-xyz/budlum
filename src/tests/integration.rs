@@ -493,13 +493,11 @@ mod integration_tests {
             .validate_and_add_block(conflicting_block)
             .map(|_| ());
         assert!(result.is_err());
-        // Finality conflict is checked before tip continuity; accept either
-        // Message if ordering changes again.
+        // The finality conflict is checked before tip continuity.
         let err = result.unwrap_err();
         assert!(
-            err.contains("conflicts with finalized checkpoint")
-                || err.contains("height discontinuity")
-                || err.contains("Block height discontinuity")
+            err.contains("conflicts with finalized checkpoint"),
+            "the finalized checkpoint rule must refuse the block: {err}"
         );
     }
 
