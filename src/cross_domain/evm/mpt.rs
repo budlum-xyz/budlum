@@ -1,16 +1,16 @@
-//! In-tree Merkle-Patricia Trie (MPT) **verifier** - Ethereum Yellow Paper
+//! In-tree Merkle-Patricia Trie (MPT) verifier - Ethereum Yellow Paper
 //! Appendix D.
 //!
-//! **Verify only** (RFC Q1 = relayer_produces): proof generation lives in the relayer binary;
+//! Verify only (RFC Q1 = relayer_produces): proof generation lives in the relayer binary;
 //! Budlum only verifies `(proof_nodes, root, key) -> value`.
 //! Deterministic and network free - critical for consensus safety.
 //!
 //! # MPT node types (after RLP decoding)
 //!
-//! - **Null**: the empty string `""` -> empty trie / missing child.
-//! - **Leaf**: `[hp_encoded_path, value]` - path terminator flag=1.
-//! - **Extension**: `[hp_encoded_path, child_ref]` - terminator flag=0.
-//! - **Branch**: `[c0, c1, ..., c15, value]` - 17 elements (16 children + optional value).
+//! - Null: the empty string `""` -> empty trie / missing child.
+//! - Leaf: `[hp_encoded_path, value]` - path terminator flag=1.
+//! - Extension: `[hp_encoded_path, child_ref]` - terminator flag=0.
+//! - Branch: `[c0, c1, ..., c15, value]` - 17 elements (16 children + optional value).
 //!
 //! `child_ref` is either a 32-byte keccak256 hash (looked up in node_map) or an inline
 //! RLP-encoded node (32 bytes or fewer, the small-node optimization).
@@ -33,18 +33,22 @@ use sha3::{Digest, Keccak256};
 /// *empty* nibble list (`hp_decode(&[0x00])`), and `nibbles.starts_with(&[])`
 /// is always true, so `remaining` comes back the same length it went in.
 ///
-/// Two such nodes pointing at each other never terminate. Measured against
-/// the unbounded version:
+/// Two such nodes pointing at each other would never terminate. BLG-0124
+/// (P05-F17) corrects the reachability claim: through `verify` a hash cycle
+/// is NOT constructible - `node_map` is keyed by keccak of the node bytes,
+/// so a node cannot reference itself without a keccak preimage fixpoint. The
+/// depth bound is still load-bearing as defence-in-depth: a caller that
+/// builds `node_map` by hand could wire a cycle, and the bound is what stops
+/// the descent instead of overflowing the stack. Measured against the
+/// unbounded version with a hand-built cycle:
 ///
 /// ```text
 /// A -> B, B -> A, both empty-path extensions
 /// fatal runtime error: stack overflow, aborting
 /// ```
 ///
-/// The proof bytes come from a bridge relayer, so that is a remote abort of
-/// the node process, not a local misuse. The depth is generous, twice the
-/// longest honest descent - because the goal is to stop non-termination, not
-/// to second-guess a legitimate trie.
+/// The depth is generous, twice the longest honest descent - because the
+/// goal is to stop non-termination, not to second-guess a legitimate trie.
 pub const MAX_WALK_DEPTH: usize = 128;
 use std::collections::HashMap;
 
@@ -160,6 +164,11 @@ pub fn hp_decode(bytes: &[u8]) -> Result<(bool, Vec<u8>), MptError> {
     }
     let is_leaf = (flag_byte & 0b10) != 0;
     let odd = (flag_byte & 0b01) != 0;
+    // BLG-0124 (P05-F17): on an EVEN path the low nibble of the prefix byte
+    // is the zero pad - a nonzero value is a non-canonical HP encoding.
+    if !odd && (first & 0x0f) != 0 {
+        return Err(MptError::InvalidHpEncoding);
+    }
 
     let mut nibbles = Vec::new();
     if odd {
@@ -260,10 +269,14 @@ fn resolve_ref(item: &Item, node_map: &HashMap<[u8; 32], Vec<u8>>) -> Result<Ite
             let node_bytes = node_map.get(&hash).ok_or(MptError::MissingNode)?;
             rlp::decode(node_bytes).map_err(MptError::from)
         }
-        Item::String(b) => {
-            // An inline node (RLP of 32 bytes or fewer) - decode and handle in place.
+        Item::String(b) if b.len() < 32 => {
+            // An inline node (RLP strictly under 32 bytes) - decode and handle
+            // in place. BLG-0124 (P05-F17): anything 32 bytes or above is a
+            // hash reference, never an inline node - a longer string used to
+            // be decoded as one regardless of size.
             rlp::decode(b).map_err(MptError::from)
         }
+        Item::String(_) => Err(MptError::InvalidNodeRef),
         Item::List(_) => {
             // A nested decoded inline node (the branch child is a list directly).
             Ok(item.clone())
@@ -594,11 +607,12 @@ mod tests {
         ];
         let root = [0x42u8; 32];
         for proof in &garbage_sets {
-            // The result must be Err (MissingNode / InvalidNode / Rlp), not a panic.
-            let _ = verify(proof, &root, b"key");
+            // BLG-0126 (P05-F19): every garbage case must be an Err (the
+            // exact kind varies: MissingNode / InvalidNode / Rlp), not a
+            // panic and never a silent success.
+            let result = verify(proof, &root, b"key");
+            assert!(result.is_err(), "garbage proof accepted: {proof:?}");
         }
-        // MissingNode is expected because the root hashes are not in the proof; what matters
-        // is that there is no panic (DoS safety).
     }
 }
 

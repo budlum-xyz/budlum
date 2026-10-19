@@ -118,8 +118,14 @@ impl<'a> BridgeRelayerPipeline<'a> {
         message: &CrossDomainMessage,
         source_height: u64,
     ) {
-        self.relayer
-            .enqueue_relay(source_event.clone(), message, source_height);
+        // BLG-0129 (P05-F22): the stage refuses an event that does not
+        // carry the enqueued message.
+        if let Err(e) = self
+            .relayer
+            .enqueue_relay(source_event.clone(), message, source_height)
+        {
+            tracing::error!(error = %e, "bridge relay enqueue refused");
+        }
     }
 
     /// Register an asset on a domain.
@@ -143,7 +149,10 @@ impl<'a> BridgeRelayerPipeline<'a> {
     /// Enqueues the relay request.
     ///
     /// Returns the event (for the caller's audit log).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "BLG-0128 (P05-F21): the pipeline's lock mirrors BridgeState::lock's parameter set one-for-one"
+    )]
     pub fn lock(
         &mut self,
         source_domain: DomainId,
@@ -192,7 +201,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
 
         // Enqueue relay
         self.relayer
-            .enqueue_relay(event.clone(), &message, source_height);
+            .enqueue_relay(event.clone(), &message, source_height)?;
 
         // Add to event tree
         self.get_or_create_tree(source_domain).push(event.clone());
@@ -289,7 +298,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
 
             // Enqueue relay back to source
             self.relayer
-                .enqueue_relay(event.clone(), message, domain_height);
+                .enqueue_relay(event.clone(), message, domain_height)?;
         }
 
         // Add to event tree

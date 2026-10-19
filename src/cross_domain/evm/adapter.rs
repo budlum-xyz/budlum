@@ -4,17 +4,17 @@
 //!
 //! Two sides:
 //!
-//! - **On-chain (verify_receipt_proof):** deterministic in Budlum consensus.
+//! - On-chain (verify_receipt_proof): deterministic in Budlum consensus.
 //!   It uses F10.1 (MPT) + F10.2 (receipt/header/verify). The sync committee
 //!   (F10.3) runs only if `EvmDepositProof.sync_attestation` is populated;
 //!   this line said "uses" for a long time while no path called it.
 //!   Network-free - the relayer produces the proof, Budlum verifies it.
 //!
-//! - **Off-chain (generate/submit/wait):** in the relayer binary (`src/bin/
+//! - Off-chain (generate/submit/wait): in the relayer binary (`src/bin/
 //!   budlum-relayer.rs`). It connects to Ethereum RPC. This module provides the
 //!   structure + a minimal impl; the production RPC client is separate (reqwest/alloy - after mainnet).
 //!
-//! **Security invariant:** `verify_receipt_proof` NEVER connects to the network.
+//! Security invariant: `verify_receipt_proof` NEVER connects to the network.
 //!
 //! ## The cryptographic binding between receipt and tx_hash
 //!
@@ -25,7 +25,7 @@
 //! same binding also prevents cross-bridge proof reuse (the leaf is bound to
 //! bridge_address).
 //!
-//! **Security boundary:** the wire format changed - the off-chain relayer tool
+//! Security boundary: the wire format changed - the off-chain relayer tool
 //! must produce the leaf with the same formula. `verify_deposit` (the real safe
 //! path) is unaffected: it already does MPT + header chain + status + log match
 //! over the full `EvmDepositProof`.
@@ -203,14 +203,14 @@ impl ChainAdapter for EvmChainAdapter {
     /// path: this method only checks the Merkle proof + leaf binding, while the
     /// full package (`EvmDepositProof`) goes to `verify_deposit`.
     ///
-    /// **Wire format:** `proof.leaf` =
+    /// Wire format: `proof.leaf` =
     /// `hash(BDLM_EVM_RECEIPT_LEAF_V1 || tx_hash || bridge_address)`;
     /// `external_state_root` = header.receiptsRoot; `expected_tx_hash` = tx_hash.
     /// Header chain + sync-committee verification is NOT in this method, it is
     /// inside `verify_evm_receipt`, and only `verify_deposit` goes there.
     ///
     ///
-    /// **Two-part verification:**
+    /// Two-part verification:
     /// 1) `proof.verify(external_state_root)` - Merkle self-consistency.
     /// 2) `proof.leaf == derive_receipt_leaf(tx_hash, bridge_address)` -
     ///    The cryptographic leaf binding. An attacker cannot present the same
@@ -387,7 +387,7 @@ impl EvmChainAdapter {
     ///
     /// This is the enriched form of `ChainAdapter::verify_receipt_proof`: the
     /// relayer supplies the full proof package (header chain + MPT nodes +
-    /// receipt), and what comes back is a **proven deposit**.
+    /// receipt), and what comes back is a proven deposit.
     ///
     /// This function used to throw away the result of `verify_evm_receipt` as
     /// `_verified`, resolve the header chain and the MPT a second time and hand
@@ -462,7 +462,7 @@ mod tests {
 
     /// It refuses to produce a proof for a chain it does not read.
     ///
-    /// It used to return a single-leaf tree and its test **pinned** the equality
+    /// It used to return a single-leaf tree and its test pinned the equality
     /// `proof.leaf == root`. That equality was precisely the defect:
     /// `MerkleProof::verify` takes no hash step with an empty sibling list, falls
     /// through to the `leaf == root` comparison and passes. So the proof produced
