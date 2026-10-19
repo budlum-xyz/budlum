@@ -89,11 +89,17 @@ pub fn run(root: &Path) -> Result<String, String> {
     let base = baseline(root)?;
     let output = run_vet(root)?;
     if tool_is_absent(&output) {
+        // A pass without the scanner proves nothing. Only a job that says the
+        // tool is optional, because another job decides the ratchet, may skip.
+        if std::env::var_os("BUDLUM_VET_OPTIONAL").is_none() {
+            return Err(String::from(
+                "cargo-vet is not installed, so no scan ran. Install it, or set \
+                 BUDLUM_VET_OPTIONAL where the dedicated Cargo Vet job decides the ratchet.",
+            ));
+        }
         return Ok(String::from(
-            "SKIPPED: cargo-vet is not installed on this job; the ratchet decision\n\
-             is made by the separate `Cargo Vet` job (cargo-vet.yml). The absence\n\
-             of the tool is not a finding - the tool running and producing an\n\
-             unreadable report is still a hard error.",
+            "SKIPPED: cargo-vet is not installed on this job and BUDLUM_VET_OPTIONAL is set;\n\
+             the ratchet decision is made by the separate `Cargo Vet` job (cargo-vet.yml).",
         ));
     }
     let n = match count_from_output(&output) {
