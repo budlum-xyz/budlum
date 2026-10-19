@@ -435,6 +435,8 @@ pub struct RecoveryProposal {
     pub new_address: BudlumAddress,
     pub created_block: u64,
     pub executable_after: u64,
+    pub chain_id: u64,
+    pub account_nonce: u64,
 }
 
 impl RecoveryProposal {
@@ -443,6 +445,8 @@ impl RecoveryProposal {
         new_owner: PublicKeyBytes,
         policy: &SocialRecoveryPolicy,
         created_block: u64,
+        chain_id: u64,
+        account_nonce: u64,
     ) -> Result<Self, WalletError> {
         if current_owner == new_owner {
             return Err(WalletError::InvalidRecoveryProposal(
@@ -459,6 +463,8 @@ impl RecoveryProposal {
             new_owner,
             created_block,
             executable_after,
+            chain_id,
+            account_nonce,
         })
     }
 
@@ -466,7 +472,9 @@ impl RecoveryProposal {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V1");
+        hasher.update(b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V3");
+        hasher.update(self.chain_id.to_be_bytes());
+        hasher.update(self.account_nonce.to_be_bytes());
         hasher.update(&self.current_owner);
         hasher.update(&self.current_address);
         hasher.update(&self.new_owner);
@@ -496,8 +504,13 @@ impl RecoveryProposal {
         policy: &SocialRecoveryPolicy,
         approvals: &[GuardianApproval],
         current_block: u64,
+        expected_chain_id: u64,
+        current_account_nonce: u64,
     ) -> bool {
-        self.is_timelock_satisfied(current_block)
+        // Expected values must come from trusted current state, not the proposal.
+        self.chain_id == expected_chain_id
+            && self.account_nonce == current_account_nonce
+            && self.is_timelock_satisfied(current_block)
             && self.verify_guardian_approvals(policy, approvals)
     }
 }
@@ -2086,7 +2099,7 @@ mod tests {
         assert!(rotated.guardians.contains(&replacement.public_key()));
 
         let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &rotated, 1_000)
+            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &rotated, 1_000, 45_262, 0)
                 .unwrap();
         let digest = proposal.digest();
         let compromised_quorum = [
@@ -2142,7 +2155,7 @@ mod tests {
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000)
+            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000, 45_262, 0)
                 .unwrap();
 
         assert_eq!(proposal.current_address, owner.address());
@@ -2161,14 +2174,13 @@ mod tests {
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000)
+            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000, 45_262, 0)
                 .unwrap();
         let changed_target = RecoveryProposal::new(
             owner.public_key(),
             other_new_owner.public_key(),
             &policy,
-            1_000,
-        )
+            1_000, 45_262, 0)
         .unwrap();
         let mut changed_timelock = proposal.clone();
         changed_timelock.executable_after += 1;
@@ -2191,7 +2203,7 @@ mod tests {
         )
         .unwrap();
         let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000)
+            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000, 45_262, 0)
                 .unwrap();
         let digest = proposal.digest();
         let one = [GuardianApproval {
@@ -2222,8 +2234,18 @@ mod tests {
         assert!(!proposal.verify_guardian_approvals(&policy, &one));
         assert!(!proposal.verify_guardian_approvals(&policy, &wrong_digest));
         assert!(proposal.verify_guardian_approvals(&policy, &quorum));
-        assert!(!proposal.is_executable(&policy, &quorum, 1_099));
-        assert!(proposal.is_executable(&policy, &quorum, 1_100));
+        assert!(!proposal.is_executable(&policy, &quorum, 1_099, 45_262, 0));
+        assert!(proposal.is_executable(&policy, &quorum, 1_100, 45_262, 0));
+        assert!(!proposal.is_executable(&policy, &quorum, 1_100, 45_263, 0));
+        assert!(!proposal.is_executable(&policy, &quorum, 1_100, 45_262, 1));
+        let mut replay = proposal.clone();
+        replay.account_nonce = 1;
+        assert_ne!(proposal.digest(), replay.digest());
+        assert!(!replay.verify_guardian_approvals(&policy, &quorum));
+        replay = proposal.clone();
+        replay.chain_id = 45_263;
+        assert_ne!(proposal.digest(), replay.digest());
+        assert!(!replay.verify_guardian_approvals(&policy, &quorum));
     }
 
     #[test]
@@ -2233,14 +2255,13 @@ mod tests {
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
         assert!(
-            RecoveryProposal::new(owner.public_key(), owner.public_key(), &policy, 1_000).is_err()
+            RecoveryProposal::new(owner.public_key(), owner.public_key(), &policy, 1_000, 45_262, 0).is_err()
         );
         assert!(RecoveryProposal::new(
             owner.public_key(),
             new_owner.public_key(),
             &policy,
-            u64::MAX,
-        )
+            u64::MAX, 45_262, 0)
         .is_err());
     }
 
