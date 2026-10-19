@@ -665,6 +665,16 @@ impl Executor {
                         .marketplace
                         .validate_ai_read_ref(req.input_ref.as_slice(), &tx.from, current_block)
                         .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
+                    if let Some(perception) = req.perception.as_ref() {
+                        state
+                            .marketplace
+                            .validate_ai_declared_asset(
+                                req.input_ref.as_slice(),
+                                &perception.asset_id,
+                                &tx.from,
+                            )
+                            .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
+                    }
                     // Sender must have sufficient balance
                     // For max_fee escrow BEFORE submitting. Without this, an
                     // Account with 0 balance can submit requests (the
@@ -1588,6 +1598,16 @@ impl Executor {
                     .marketplace
                     .validate_ai_read_ref(req.input_ref.as_slice(), &tx.from, current_block)
                     .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
+                if let Some(perception) = req.perception.as_ref() {
+                    state
+                        .marketplace
+                        .validate_ai_declared_asset(
+                            req.input_ref.as_slice(),
+                            &perception.asset_id,
+                            &tx.from,
+                        )
+                        .map_err(|e| BudlumError::validation("ai_data_access_denied", e))?;
+                }
                 state
                     .ai_registry
                     .submit_request(req.clone(), current_block)
