@@ -30,9 +30,29 @@ const HASHING_FNS: &[&str] = &[
     "compute_hash",
     "state_root",
     "digest",
+    "merkle_root",
+    "commitment",
 ];
 
-const UNORDERED: &[&str] = &["HashMap", "HashSet"];
+const UNORDERED: &[&str] = &[
+    "HashMap",
+    "HashSet",
+    "FxHashMap",
+    "FxHashSet",
+    "AHashMap",
+    "AHashSet",
+];
+
+/// Iteration adaptors that walk a collection in its stored order.
+const ITER_METHODS: &[&str] = &[
+    "values_mut()",
+    "values()",
+    "keys()",
+    "iter_mut()",
+    "iter()",
+    "into_iter()",
+    "drain()",
+];
 
 struct Finding {
     path: String,
@@ -199,16 +219,16 @@ fn iter_field(candidate: &str) -> Option<String> {
     // optional `.values()` / `.keys()` / `.iter()`
     let after_method = if let Some(r) = after_field.strip_prefix('.') {
         let r = r.trim_start();
-        let matched = ["values()", "keys()", "iter()"]
-            .iter()
-            .find(|m| r.starts_with(**m))?;
+        let matched = ITER_METHODS.iter().find(|m| r.starts_with(**m))?;
         &r[matched.len()..]
     } else {
         after_field
     };
-    // the iteration must be followed by `{` or `&`
+    // The iteration must be followed by `{` or `&`, or by a further adaptor
+    // (`.filter(..)`, `.map(..)`) after an iteration method.
     let tail = after_method.trim_start();
-    if tail.starts_with('{') || tail.starts_with('&') {
+    let chained = after_field.starts_with('.') && tail.starts_with('.');
+    if tail.starts_with('{') || tail.starts_with('&') || chained {
         Some(field.to_string())
     } else {
         None
@@ -328,6 +348,9 @@ fn word_assign_word_op(text: &str) -> bool {
 fn has_fold(body: &str) -> bool {
     word_then(body, ".", "update(")
         || word_then(body, ".", "push(")
+        || word_then(body, ".", "extend(")
+        || word_then(body, ".", "write(")
+        || word_then(body, ".", "absorb(")
         || word_op_assign(body)
         || word_assign_word_op(body)
 }
@@ -737,5 +760,35 @@ mod tests {
         assert!(!has_fold("    let x = 1;"));
         assert!(has_own_slot_write("    self.leaves[pos] = h.finalize();"));
         assert!(!has_own_slot_write("    let x = y;"));
+    }
+}
+
+#[cfg(test)]
+mod iteration_tests {
+    use super::*;
+
+    #[test]
+    fn chained_adaptors_and_into_iter_are_iteration() {
+        assert_eq!(
+            iter_field("for x in self.entries.iter().filter(|e| e.ok()) {").as_deref(),
+            Some("entries")
+        );
+        assert_eq!(
+            iter_field("for x in self.entries.into_iter() {").as_deref(),
+            Some("entries")
+        );
+        assert_eq!(
+            iter_field("for x in self.entries.values_mut() {").as_deref(),
+            Some("entries")
+        );
+    }
+
+    #[test]
+    fn more_hashing_names_and_folds_are_seen() {
+        assert!(is_hashing_fn("pub fn merkle_root(&self) -> H {").is_some());
+        assert!(is_hashing_fn("pub fn commitment(&self) -> H {").is_some());
+        assert!(has_fold("h.absorb(x);"));
+        assert!(has_fold("h.extend(x);"));
+        assert!(has_fold("w.write(x);"));
     }
 }
