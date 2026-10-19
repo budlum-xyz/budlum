@@ -28,8 +28,6 @@
 //! - Rate-limited invalid-signature slashing:
 //!   `repeated_invalid_signatures_trigger_slash` covers that.
 
-#![allow(clippy::needless_range_loop)]
-
 use crate::chain::finality::{
     pop_signing_message, sign_bls, sign_bls_pop, FinalityAggregator, Prevote, ValidatorEntry,
     ValidatorSetSnapshot,
@@ -102,8 +100,8 @@ fn live_path_epoch_change_isolates_votes() {
     let (snap1, sks1) = make_snapshot(4, 1, 1000);
     let mut agg1 = FinalityAggregator::new(1, 10, "H".into(), snap1.clone());
     // 3 of 4 prevote, so the epoch 1 window takes 3 votes.
-    for i in 0..3 {
-        let pv = sign_prevote(&sks1[i], 1, 10, "H", snap1.validators[i].address);
+    for (sk, v) in sks1.iter().zip(snap1.validators.iter()).take(3) {
+        let pv = sign_prevote(sk, 1, 10, "H", v.address);
         agg1.add_prevote(pv).expect("epoch 1 prevote");
     }
     assert_eq!(
@@ -148,18 +146,14 @@ fn live_path_prevote_with_wrong_height_rejected() {
     agg.add_prevote(pv_ok)
         .expect("the right height is accepted");
 
-    // The wrong height=11. Because the signature was made over a different
-    // message, it DOES NOT MATCH what the aggregator expects, so it is refused.
+    // The wrong height=11 is refused by the height check.
     let pv_bad = sign_prevote(&sks[0], 1, 11, "H", snap.validators[0].address);
     let err = agg
         .add_prevote(pv_bad)
         .expect_err("a signature at the wrong height has to be invalid");
-    let err_lower = err.to_lowercase();
     assert!(
-        err_lower.contains("invalid")
-            || err_lower.contains("signature")
-            || err_lower.contains("mismatch")
-            || err_lower.contains("height")
+        err.contains("height mismatch"),
+        "the wrong height must be refused by the height check: {err}"
     );
     // Only the first vote reached the aggregator.
     assert_eq!(agg.prevotes.len(), 1);
