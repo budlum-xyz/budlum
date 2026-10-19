@@ -167,6 +167,9 @@ fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<D
     unreachable!("retry loop returns on success, on final attempt, or on non-lock errors")
 }
 
+/// Version tag stored next to the storage registry row. Bump it when the row shape changes.
+const STORAGE_REGISTRY_ROW_VERSION: u32 = 1;
+
 impl Storage {
     /// # Errors
     ///
@@ -1216,6 +1219,10 @@ impl Storage {
         registry: &crate::domain::storage_deal::StorageRegistry,
     ) -> std::io::Result<()> {
         let val = encode(registry)?;
+        self.db.insert(
+            b"STORAGE_REGISTRY_VERSION",
+            STORAGE_REGISTRY_ROW_VERSION.to_le_bytes().to_vec(),
+        )?;
         self.db.insert(b"STORAGE_REGISTRY", val)?;
         self.db.flush()?;
         Ok(())
@@ -1229,6 +1236,14 @@ impl Storage {
         &self,
     ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
         if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
+            let version = self.db.get(b"STORAGE_REGISTRY_VERSION")?;
+            if version.as_deref() != Some(&STORAGE_REGISTRY_ROW_VERSION.to_le_bytes()[..]) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "STORAGE_REGISTRY row has no matching version tag; a row from another build \
+                     is refused",
+                ));
+            }
             // One shape only. A row written before the settled-ticket queue
             // used to be padded with an empty queue and accepted; the queue
             // is part of the registry root and decides when a ticket row is
@@ -2156,6 +2171,18 @@ mod tests {
     use crate::core::address::Address;
     use crate::core::block::Block;
     use tempfile::tempdir;
+
+    #[test]
+    fn storage_registry_row_needs_its_version_tag() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let registry = crate::domain::storage_deal::StorageRegistry::default();
+        storage.save_storage_registry(&registry).unwrap();
+        assert!(storage.load_storage_registry().unwrap().is_some());
+        storage.db().remove(b"STORAGE_REGISTRY_VERSION").unwrap();
+        let err = storage.load_storage_registry().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn get_content_refuses_a_row_that_no_longer_hashes_to_its_key() {
