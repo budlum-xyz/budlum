@@ -4856,7 +4856,14 @@ mod tests {
 
         let top2 = registry.top_agents(2);
         assert_eq!(top2.len(), 2);
-        // And a3 should be top (both 100% reliability)
-        assert!(top2.iter().all(|(a, _)| *a == a1 || *a == a3));
+        // a1 and a3 tie at full reliability and keep address order.
+        assert_eq!(top2[0].0, a1);
+        assert_eq!(top2[1].0, a3);
+        assert_eq!(top2[0].1.to_bits(), top2[1].1.to_bits());
+
+        let all = registry.top_agents(3);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2].0, a2);
+        assert!(all[2].1 < all[1].1);
     }
 }
