@@ -154,8 +154,16 @@ impl ZkProofSubmission {
         // Infeasible to fail from untrusted input (no fallible custom Serialize,
         // Writing to a Vec), so a failure is a deterministic programming error we
         // Fail-fast on rather than hide.
-        let proof_bytes = bincode::serialize(proof)
-            .unwrap_or_else(|_| b"budlum/serialize-failed/proof-envelope".to_vec());
+        // P18-F10: if the envelope cannot be serialized (a programming error),
+        // the fallback still carries the raw proof bytes and the envelope
+        // identity, so two different proofs never share one binding hash.
+        let proof_bytes = bincode::serialize(proof).unwrap_or_else(|_| {
+            let mut fallback = b"budlum/serialize-failed/proof-envelope".to_vec();
+            fallback.extend_from_slice(&proof.public_inputs_hash);
+            fallback.extend_from_slice(&proof.degree_bits.to_le_bytes());
+            fallback.extend_from_slice(&proof.proof_bytes);
+            fallback
+        });
         let pi_bytes = public_inputs.to_canonical_bytes();
         let mut program_bytes = Vec::with_capacity(program.len() * 8);
         for word in program {
