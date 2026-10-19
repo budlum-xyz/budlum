@@ -96,6 +96,9 @@ pub struct DomainRegistration {
     /// beside the attestation makes slashing addressable to the actual
     /// carrier; accepting a proof and later charging an unrelated bond would
     /// turn permissionless registration into arbitrary confiscation.
+    /// BLG-0154 (P07-F09): `serde(default)` is not a migration for bincode
+    /// (not self-describing) - a registration written before this trailing
+    /// field existed fails to decode, loudly, at load. See `IntakeState`.
     #[serde(default, with = "crate::core::map_keys")]
     pub attestation_provers: BTreeMap<[u8; 32], Address>,
     pub provers: BTreeMap<Address, ProverBond>,
@@ -825,6 +828,12 @@ impl ExternalDomainRegistry {
         let penalty = reg.economics.penalty_for(value_atoms, bond.live_atoms());
         let reward = reg.economics.challenge.for_slash(penalty);
         let taken = bond.slash(height, evidence_digest, penalty, challenger, reward);
+        // BLG-0156 (P07-F11): a contradicted attestation is withdrawn from
+        // the served book. `latest_attestation` answered with a slashed
+        // attestation as if nothing had happened. The carrier map stays:
+        // it is the receipt that made the slash addressable.
+        reg.attestations
+            .retain(|_, a| a.evidence_digest != evidence_digest);
         Ok((taken, reward))
     }
 }
