@@ -49,6 +49,26 @@ fn generator_variants(code: &str) -> Vec<String> {
 /// that assumption true.
 const FROZEN_TEST_FN: &str = "fn generated_bytes_match_their_frozen_vectors";
 
+/// Quoted hex literals of eight or more digits.
+fn hex_literals(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    let bytes = s.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            let end = s[i + 1..].find('"').map_or(s.len(), |p| i + 1 + p);
+            let lit = &s[i + 1..end];
+            if lit.chars().all(|c| c.is_ascii_hexdigit()) && lit.len() >= 8 {
+                out.push(lit.to_string());
+            }
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// # Errors
 ///
 /// Returns a finding when a generator is under-pinned or the digests are not
@@ -81,26 +101,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let table_end = rest.find("\n    }").unwrap_or(rest.len());
     let table = &rest[..table_end];
 
-    let hex_re = |s: &str| -> Vec<String> {
-        let mut out = Vec::new();
-        let mut i = 0;
-        let bytes = s.as_bytes();
-        while i < bytes.len() {
-            if bytes[i] == b'"' {
-                let end = s[i + 1..].find('"').map_or(s.len(), |p| i + 1 + p);
-                let lit = &s[i + 1..end];
-                if lit.chars().all(|c| c.is_ascii_hexdigit()) && lit.len() >= 8 {
-                    out.push(lit.to_string());
-                }
-                i = end + 1;
-            } else {
-                i += 1;
-            }
-        }
-        out
-    };
-
-    let digests = hex_re(table);
+    let digests = hex_literals(table);
     let short: Vec<&String> = digests.iter().filter(|d| d.len() != 64).collect();
     if !short.is_empty() {
         let mut msg = String::from("these frozen digests are not 64 hex characters:\n");

@@ -364,6 +364,52 @@ pub fn run(root: &Path) -> Result<String, String> {
     ))
 }
 
+fn self_test_tail(dir: &std::path::Path, good: &str) -> Result<(), String> {
+    let second = good.replace(
+        "        self.access_events.entry(id).or_default();",
+        "        self.access_events.entry(id).or_default();\n        self.access_events.insert(7, 8);",
+    );
+    let spread = second.replace(
+        "    fn record_proven_read(&mut self, id: u64) {",
+        "    fn other_writer(&mut self) {\n        self.access_events.insert(3, 4);\n    }\n    fn record_proven_read(&mut self, id: u64) {",
+    );
+    std::fs::write(dir.join("src/domain/storage_deal.rs"), spread).map_err(|e| e.to_string())?;
+    if run(dir).is_ok() {
+        let _ = std::fs::remove_dir_all(dir);
+        return Err(String::from(
+            "canary: an exception held while a second writer existed",
+        ));
+    }
+    // A multi-byte character ahead of the body must not move the span. With
+    // char indices added to a byte offset, the slice fell short of the fold's
+    // end, so the last folded map read as dropped; and a genuinely dropped fold
+    // behind such a character has to stay visible.
+    let accented = good.replace(
+        "    pub fn root(&self) -> Hash32 {",
+        "    /// The root folds every table, na\u{ef}ve order, r\u{e9}sum\u{e9} of the state.\n    pub fn root(&self) -> Hash32 {",
+    );
+    std::fs::write(dir.join("src/domain/storage_deal.rs"), &accented).map_err(|e| e.to_string())?;
+    if let Err(e) = run(dir) {
+        let _ = std::fs::remove_dir_all(dir);
+        return Err(format!(
+            "canary: a non-ASCII comment before the fold shifted the span: {e}"
+        ));
+    }
+    let accented_dropped = accented.replace(
+        "        for x in &self.confidential_owners { h.update(x.0.to_le_bytes()); }\n",
+        "",
+    );
+    std::fs::write(dir.join("src/domain/storage_deal.rs"), accented_dropped)
+        .map_err(|e| e.to_string())?;
+    if run(dir).is_ok() {
+        let _ = std::fs::remove_dir_all(dir);
+        return Err(String::from(
+            "canary: a dropped fold behind a non-ASCII comment passed",
+        ));
+    }
+    Ok(())
+}
+
 /// # Errors
 ///
 /// Returns a finding when a defect fixture passes.
@@ -458,48 +504,7 @@ pub fn self_test() -> Result<String, String> {
             "canary: a field named only in a comment passed as folded",
         ));
     }
-    let second = good.replace(
-        "        self.access_events.entry(id).or_default();",
-        "        self.access_events.entry(id).or_default();\n        self.access_events.insert(7, 8);",
-    );
-    let spread = second.replace(
-        "    fn record_proven_read(&mut self, id: u64) {",
-        "    fn other_writer(&mut self) {\n        self.access_events.insert(3, 4);\n    }\n    fn record_proven_read(&mut self, id: u64) {",
-    );
-    std::fs::write(dir.join("src/domain/storage_deal.rs"), spread).map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: an exception held while a second writer existed",
-        ));
-    }
-    // A multi-byte character ahead of the body must not move the span. With
-    // char indices added to a byte offset, the slice fell short of the fold's
-    // end, so the last folded map read as dropped; and a genuinely dropped fold
-    // behind such a character has to stay visible.
-    let accented = good.replace(
-        "    pub fn root(&self) -> Hash32 {",
-        "    /// The root folds every table, na\u{ef}ve order, r\u{e9}sum\u{e9} of the state.\n    pub fn root(&self) -> Hash32 {",
-    );
-    std::fs::write(dir.join("src/domain/storage_deal.rs"), &accented).map_err(|e| e.to_string())?;
-    if let Err(e) = run(&dir) {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(format!(
-            "canary: a non-ASCII comment before the fold shifted the span: {e}"
-        ));
-    }
-    let accented_dropped = accented.replace(
-        "        for x in &self.confidential_owners { h.update(x.0.to_le_bytes()); }\n",
-        "",
-    );
-    std::fs::write(dir.join("src/domain/storage_deal.rs"), accented_dropped)
-        .map_err(|e| e.to_string())?;
-    if run(&dir).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(String::from(
-            "canary: a dropped fold behind a non-ASCII comment passed",
-        ));
-    }
+    self_test_tail(&dir, &good)?;
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
         "state-root determinism canary OK (full fold and single-writer exception PASS, also \

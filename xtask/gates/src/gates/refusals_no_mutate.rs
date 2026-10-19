@@ -358,6 +358,23 @@ fn self_receiver(lines: &[&str], idx: usize) -> Option<String> {
 /// slices at this string, so the name is exactly this far in.
 const FN_KEYWORD: &str = "fn ";
 
+fn verdict(checked_fns: usize, problems: &[String]) -> Result<(), String> {
+    if checked_fns == 0 {
+        return Err(String::from(
+            "gate found no Result-returning fn that removes from a collection - \
+             wrong root, or the pattern changed shape.",
+        ));
+    }
+    if !problems.is_empty() {
+        let mut msg = String::new();
+        for p in problems {
+            writeln!(msg, "FAIL: {p}").expect("writing to a String cannot fail");
+        }
+        return Err(msg);
+    }
+    Ok(())
+}
+
 pub fn run(root: &Path) -> Result<String, String> {
     let files = collect_files(root)?;
 
@@ -455,19 +472,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
     }
 
-    if checked_fns == 0 {
-        return Err(String::from(
-            "gate found no Result-returning fn that removes from a collection - \
-             wrong root, or the pattern changed shape.",
-        ));
-    }
-    if !problems.is_empty() {
-        let mut msg = String::new();
-        for p in problems {
-            writeln!(msg, "FAIL: {p}").expect("writing to a String cannot fail");
-        }
-        return Err(msg);
-    }
+    verdict(checked_fns, &problems)?;
     Ok(format!(
         "partial-write gate OK: {checked_fns} Result-returning fns remove from a \
          collection, each deciding its refusals first, restoring on failure, or \
