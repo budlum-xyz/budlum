@@ -434,9 +434,26 @@ impl Blockchain {
                     #[cfg(test)]
                     panic!("Genesis ceremony validation failed: {e}");
                 }
+            } else if matches!(network, crate::core::chain_config::Network::Mainnet) {
+                // BLG-0174 (P08-F08): mainnet must never skip the ceremony.
+                // The warning-only path existed for the pre-launch skeletons
+                // (the ceremony addresses arrive at launch); a MAINNET
+                // genesis that declares no ceremony addresses is a mainnet
+                // whose ceremony was never checked, which is exactly the
+                // gate's whole purpose. Refuse, loudly.
+                error!(
+                    "CRITICAL ERROR: a mainnet genesis must declare its ceremony \
+                     tokenomics addresses; refusing to build a chain whose consensus \
+                     ceremony was never validated"
+                );
+                #[cfg(not(test))]
+                std::process::exit(1);
+                #[cfg(test)]
+                panic!("mainnet genesis without ceremony tokenomics addresses");
             } else {
                 warn!(
-                    "known network {network:?} genesis declares no ceremony tokenomics                      addresses; the consensus ceremony is NOT validated for this chain"
+                    "known network {network:?} genesis declares no ceremony tokenomics \
+                     addresses; the consensus ceremony is NOT validated for this chain"
                 );
             }
         }
@@ -581,18 +598,25 @@ impl Blockchain {
                             #[cfg(test)]
                             panic!("Mainnet startup refuses unsigned V1 snapshot fallback");
                         }
-                        for (addr, balance) in &snapshot.balances {
-                            let acc = state.get_or_create(addr);
-                            acc.balance = *balance;
-                        }
-                        for (addr, nonce) in &snapshot.nonces {
-                            let acc = state.get_or_create(addr);
-                            acc.nonce = *nonce;
-                        }
-                        snapshot_height = snapshot.height;
-                        restored_finalized_height = snapshot.finalized_height;
-                        restored_finalized_hash = snapshot.finalized_hash.clone();
-                        info!("Restored state from V1 snapshot at height {snapshot_height} (finalized={restored_finalized_height})");
+                        // BLG-0175 (P08-F09): the V1 fallback restored only
+                        // balances and nonces - validators, registry, epoch
+                        // and roots stayed at genesis - and then logged
+                        // "Restored state", which is a half-truth at best.
+                        // A half-restored state is worse than none: the
+                        // chain looks healthy on the wrong validator set.
+                        // The fallback refuses; testnet and devnet resync
+                        // from the V2 path or the chain itself.
+                        error!(
+                            "CRITICAL ERROR: V1 snapshot at height {} carries only balances \
+                             and nonces; validators, registry, epoch and roots cannot be \
+                             restored from it. Refusing the half-restore - use a V2 snapshot \
+                             or resync.",
+                            snapshot.height
+                        );
+                        #[cfg(not(test))]
+                        std::process::exit(1);
+                        #[cfg(test)]
+                        panic!("V1 snapshot half-restore refused (BLG-0175)");
                     } else {
                         warn!(
                             "V1 snapshot chain_id mismatch (expected {}, got {}). Ignoring.",
@@ -1015,45 +1039,6 @@ impl Blockchain {
         bc
     }
 
-    #[allow(dead_code)]
-    fn load_chain_from_db(&mut self, last_hash: String) -> std::io::Result<()> {
-        let mut current_hash = last_hash;
-        let mut blocks = Vec::new();
-        if let Some(ref store) = self.storage {
-            while let Ok(Some(block)) = store.get_block(&current_hash) {
-                blocks.push(block.clone());
-                if block.previous_hash == "0".repeat(64) {
-                    break;
-                }
-                current_hash = block.previous_hash;
-            }
-        }
-        if blocks.is_empty() {
-            return Err(std::io::Error::other("Chain broken or empty"));
-        }
-        blocks.reverse();
-        self.chain = blocks;
-        info!("Loaded {} blocks from disk", self.chain.len());
-        if let Some(store) = &self.storage {
-            if let Err(e) = self.consensus.load_state(store) {
-                tracing::error!(error = %e, "Failed to load consensus state from store");
-            }
-        }
-        Ok(())
-    }
-    #[allow(dead_code)]
-    fn create_genesis_block(&mut self) {
-        let genesis_block = Block::genesis();
-        self.chain.push(genesis_block.clone());
-        if let Some(ref store) = self.storage {
-            if let Err(e) = store.insert_block(&genesis_block) {
-                tracing::error!(error = %e, "Failed to persist genesis block (dead_code path)");
-            }
-            if let Err(e) = store.save_last_hash(&genesis_block.hash) {
-                tracing::error!(error = %e, "Failed to persist genesis last_hash (dead_code path)");
-            }
-        }
-    }
     /// Wall-clock seconds according to the chain, taken from the newest
     /// block's timestamp.
     ///
@@ -1470,6 +1455,14 @@ impl Blockchain {
         )
     }
 
+    /// Test-only entry that skips the finality proof and the anchor step.
+    ///
+    /// BLG-0176 (P08-F10): this shim is why tests could not catch BLG-0169 -
+    /// production runs `submit_verified_domain_commitment` (proof + anchor),
+    /// the shim runs acceptance only. Acceptance-level tests keep using it;
+    /// the anchor rule is pinned on the production accept-and-anchor
+    /// sequence by `resubmitted_old_commitment_does_not_rewind_the_anchor`
+    /// (BLG-0169), which exercises `accept_verified_domain_commitment`.
     #[cfg(test)]
     pub fn submit_domain_commitment(&mut self, commitment: DomainCommitment) -> Result<(), String> {
         self.accept_domain_commitment(commitment)
@@ -4299,9 +4292,23 @@ impl Blockchain {
             let mut height = (tip / checkpoint_interval) * checkpoint_interval;
             while height >= checkpoint_interval {
                 if let Ok(Some(cert)) = store.get_finality_cert(height) {
-                    new_finalized_height = cert.checkpoint_height;
-                    new_finalized_hash = cert.checkpoint_hash;
-                    break;
+                    // BLG-0186 (P09-F07): a stored cert is adopted only when
+                    // its checkpoint hash matches the block actually at that
+                    // height on THIS chain. Adopting whatever the disk holds
+                    // let a cert for another fork set the finalized marker.
+                    let matches_chain = self
+                        .chain
+                        .get(height as usize)
+                        .is_some_and(|block| block.hash == cert.checkpoint_hash);
+                    if matches_chain {
+                        new_finalized_height = cert.checkpoint_height;
+                        new_finalized_hash = cert.checkpoint_hash;
+                        break;
+                    }
+                    tracing::warn!(
+                        height,
+                        "stored finality cert does not match the chain at that height; not adopted"
+                    );
                 }
                 height = height.saturating_sub(checkpoint_interval);
                 if height == 0 {
@@ -4334,30 +4341,20 @@ impl Blockchain {
         verdict: QcProofVerdict,
     ) -> Result<(), String> {
         if verdict.slash_validator || verdict.action == QcProofAction::SlashValidator {
-            let validator_address = Address::from_hex(&proof.validator_address)
-                .map_err(|e| format!("Invalid QC fault-proof validator address: {e}"))?;
-
-            // (security audit §8) the QC-fault slash
-            // Ratio is a critical security parameter and must
-            // Come from `RegistryParams` rather than a hardcoded
-            // Literal - a 50% literal scattered through the code
-            // Is impossible to retune for a security incident
-            // Without finding every occurrence. We use the
-            // `MaliciousBehaviour` ratio (currently 100%, the
-            // Default for provable consensus-attested forgery)
-            // Because a valid QC fault proof is the strongest
-            // Possible proof of malicious consensus participation.
-            let slash_ratio_fixed = self.state.registry.params().slash_ratio(
-                crate::registry::permissionless::SlashingCondition::MaliciousBehaviour,
+            // BLG-0187 (P09-F08): a stake slash applied directly to
+            // `self.state` from the gossip/RPC import path mutates state that
+            // lives in the state root OUTSIDE block execution - every node
+            // that saw the proof would compute a different root from every
+            // node that did not. The old path also dropped the result
+            // (`let _ =`), so even the caller could not tell what moved.
+            // The slash is refused here; it applies only when a block carries
+            // it as an effect. Until that carrier exists (with the P01-F22
+            // proof path), the verdict records nothing and moves nothing.
+            return Err(
+                "QC fault verdict slash refused: stake moves only inside block \
+                 execution (BLG-0187) - slashing outside a block splits the state root"
+                    .to_string(),
             );
-            let _ = self.state.slash_validator(
-                &validator_address,
-                slash_ratio_fixed,
-                "slashable QC fault",
-            );
-            if let Some(ref m) = self.metrics {
-                m.slashing_events_total.inc();
-            }
         }
 
         if let Some(height) = verdict.invalidate_from_height {
@@ -4440,7 +4437,31 @@ impl Blockchain {
             }
         }
 
-        self.process_pending_finality_certs(blob.checkpoint_height)?;
+        // BLG-0189 (P09-F10): the blob is imported - stored in memory and on
+        // disk - before this point. A pending cert at this height failing is
+        // a separate bookkeeping problem, not a reason to report the peer
+        // that delivered a good blob as bad. The import reports success; the
+        // pending-cert outcome is logged.
+        if let Err(e) = self.process_pending_finality_certs(blob.checkpoint_height) {
+            tracing::warn!(
+                height = blob.checkpoint_height,
+                "QC blob imported, but the pending finality cert at this height did not apply: {e}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A stored QC blob must sign the same checkpoint block as the certificate.
+    /// After a reorg `get_qc_blob` can still return the blob of the old fork
+    /// from disk, and a certificate of the new fork must not be finalized with
+    /// it (BLG-0181).
+    fn ensure_blob_matches_checkpoint(blob: &QcBlob, checkpoint_hash: &str) -> Result<(), String> {
+        if blob.checkpoint_hash != checkpoint_hash {
+            return Err(format!(
+                "QC blob checkpoint hash {} does not match certificate hash {} at height {}",
+                blob.checkpoint_hash, checkpoint_hash, blob.checkpoint_height
+            ));
+        }
         Ok(())
     }
 
@@ -5004,10 +5025,17 @@ impl Blockchain {
                 accounts_to_save.push((*pubkey, account.clone()));
             }
 
+            // BLG-0186 (P09-F07): the durable batch stores the cert ONLY
+            // when it certifies THIS block. A pending cert is just a queued
+            // object - storing it beside a block it does not hash-match
+            // writes a finality cert for a block that was never finalised
+            // that way, and `invalidate_finality_from_height` would later
+            // adopt it wholesale.
             let finality_cert = self
                 .pending_finality_certs
                 .get(&block.index)
-                .and_then(|certs| certs.first().cloned());
+                .and_then(|certs| certs.first().cloned())
+                .filter(|cert| cert.checkpoint_hash == block.hash);
 
             let batch = crate::storage::traits::DurableCommitBatch {
                 block: block.clone(),
@@ -5892,6 +5920,16 @@ impl Blockchain {
         self.chain = new_chain;
         self.state = new_state;
 
+        // BLG-0186 (P09-F07): the DISK still holds FINALITY_CERT and
+        // QC_BLOB at the reorged heights. Left behind, a later
+        // `invalidate_finality_from_height` rescan adopts the orphaned
+        // fork's cert wholesale (before its adoption fix) or the next reorg
+        // reads fork data as canonical. The invalidation deletes the certs
+        // and blobs at the orphaned heights and rescans finality against the
+        // NEW chain (its adoption now hash-checks the cert against the
+        // block).
+        self.invalidate_finality_from_height(fork_point as u64);
+
         // After a reorg, reload the domain/bridge/settlement structures from
         // storage. The old code left these fields as they were - split brain (the
         // old chain's domain/bridge state was inconsistent with the new chain's
@@ -6302,6 +6340,18 @@ impl Blockchain {
                 snapshot.height
             ));
         };
+        // BLG-0188 (P09-F09): the snapshot must be AT THE TIP. The old rule
+        // accepted any height whose block merely exists, so a snapshot at a
+        // lower height replaced a state that had already moved past it -
+        // state rollback dressed up as sync.
+        let tip = self.chain.len().saturating_sub(1) as u64;
+        if snapshot.height != tip {
+            return Err(format!(
+                "Snapshot height {} is not the chain tip ({tip}); applying it would \
+                 roll state back",
+                snapshot.height
+            ));
+        }
         if block.hash != snapshot.block_hash {
             return Err(format!(
                 "Snapshot block hash mismatch at height {}",
