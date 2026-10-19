@@ -1125,14 +1125,16 @@ mod tests {
         reg.register_validator(addr(8), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
         let report = SlashingReport::consensus_liveness(
-            addr(8),
-            roles::VALIDATOR,
-            1,
-            2,
-            9,
-            10,
-            None,
-        );
+                addr(8),
+                roles::VALIDATOR,
+                crate::registry::evidence::SlashingProof::Liveness {
+                    window_start_epoch: 1,
+                    window_end_epoch: 2,
+                    missed: 9,
+                    expected: 10,
+                },
+                None,
+            );
         let outcome = reg.slash_from_report(&report).unwrap();
         assert!(outcome.is_some());
         let entry = reg.registrations.get(&(roles::VALIDATOR, addr(8))).unwrap();
@@ -1297,14 +1299,16 @@ mod tests {
             .expect("registration");
 
         let report = crate::registry::evidence::SlashingReport::consensus_liveness(
-            a,
-            roles::RELAYER,
-            0,
-            10,
-            5,
-            10,
-            None,
-        );
+                a,
+                roles::RELAYER,
+                crate::registry::evidence::SlashingProof::Liveness {
+                    window_start_epoch: 0,
+                    window_end_epoch: 10,
+                    missed: 5,
+                    expected: 10,
+                },
+                None,
+            );
         let outcome = reg
             .slash_from_report(&report)
             .expect("the report is actionable")
@@ -1592,11 +1596,13 @@ mod tests {
         SlashingRecord {
             report: SlashingReport::consensus_double_sign(
                 Address::from([u8::try_from(n % 251).unwrap_or(0); 32]),
-                n,
-                format!("{n:064x}"),
-                format!("{:064x}", n + 1),
-                vec![u8::try_from(n % 256).unwrap_or(0)],
-                vec![u8::try_from((n + 1) % 256).unwrap_or(0)],
+                crate::registry::evidence::SlashingProof::DoubleSign {
+                    height: n,
+                    block_hash_1: format!("{n:064x}"),
+                    block_hash_2: format!("{:064x}", n + 1),
+                    signature_1: vec![u8::try_from(n % 256).unwrap_or(0)],
+                    signature_2: vec![u8::try_from((n + 1) % 256).unwrap_or(0)],
+                },
                 None,
             ),
             penalty: n,

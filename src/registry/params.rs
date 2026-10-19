@@ -243,6 +243,21 @@ impl RegistryParams {
         if self.min_stake < 100 {
             return Err("min_stake must be at least 100".into());
         }
+        // BLG-0101 (P04-F19): ceilings on the amount fields a proposal can
+        // set. 10^18 is orders of magnitude past any honest value in base
+        // units and still refuses u64::MAX - a governance proposal must not
+        // be able to price every account out of existence or mint a fee
+        // nobody can pay.
+        const MAX_PARAM_AMOUNT: u64 = 1_000_000_000_000_000_000;
+        if self.min_stake > MAX_PARAM_AMOUNT {
+            return Err("min_stake exceeds the maximum parameter amount".into());
+        }
+        if self.bridge_relayer_min_fee > MAX_PARAM_AMOUNT {
+            return Err("bridge_relayer_min_fee exceeds the maximum parameter amount".into());
+        }
+        if self.ai_model_register_fee > MAX_PARAM_AMOUNT {
+            return Err("ai_model_register_fee exceeds the maximum parameter amount".into());
+        }
         if self.unbonding_epochs == 0 || self.unbonding_epochs > 100_000 {
             return Err("unbonding_epochs must be between 1 and 100,000".into());
         }
@@ -368,7 +383,8 @@ mod tests {
     fn registry_params_serialized_shape_is_pinned() {
         let encoded =
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
-        // 15 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        // 16 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        // (BLG-0102/P04-F20: the comment said 15; the pin has counted 16.)
         //
         // The count moved from 12 when the three proportional rates were
         // added: a state-format change the `# Adding a field` note describes,
@@ -735,5 +751,23 @@ mod tests {
     #[test]
     fn liveness_slashing_defaults_to_observe_only() {
         assert!(!RegistryParams::default().liveness_slashing_enabled);
+    }
+
+    /// BLG-0101 (P04-F19): the amount fields a proposal can set are
+    /// bounded above - governance must not be able to price every account
+    /// out of existence.
+    #[test]
+    fn amount_parameters_have_upper_bounds() {
+        let mut p = RegistryParams::default();
+        p.min_stake = u64::MAX;
+        assert!(p.validate().is_err(), "min_stake at u64::MAX must refuse");
+        p = RegistryParams::default();
+        p.bridge_relayer_min_fee = u64::MAX;
+        assert!(p.validate().is_err());
+        p = RegistryParams::default();
+        p.ai_model_register_fee = u64::MAX;
+        assert!(p.validate().is_err());
+        // The documented defaults still validate.
+        assert!(RegistryParams::default().validate().is_ok());
     }
 }

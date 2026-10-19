@@ -624,7 +624,8 @@ mod tests {
         const _: () = assert!(DEFAULT_KYC_HORIZON > 0);
     }
 
-    #[allow(clippy::too_many_lines)] // lifecycle test is intentionally thorough
+    // BLG-0107 (P04-F25): the stale `too_many_lines` allow is gone with the
+    // refactor that shrank this test; no allow without a reason and a date.
     #[test]
     fn whitelist_member_round_trip() {
         let admin = addr(0xAD);

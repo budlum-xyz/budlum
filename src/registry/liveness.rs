@@ -1,6 +1,6 @@
 //! Consensus liveness (downtime) fault detection.
 //!
-//! `SlashingProof::Liveness` was defined in the previous turn but nothing
+//! `crate::registry::evidence::SlashingProof::Liveness` was defined in the previous turn but nothing
 //! Produced it. This module closes that gap: it tracks, per validator, the
 //! Number of *consecutive* epochs in which the validator failed to show the
 //! Expected consensus participation. When that count crosses
@@ -102,14 +102,16 @@ impl LivenessTracker {
                     .copied()
                     .unwrap_or(epoch);
                 reports.push(SlashingReport::consensus_liveness(
-                    *validator,
-                    roles::VALIDATOR,
-                    start,
-                    epoch,
-                    current,
-                    current,
-                    None,
-                ));
+                *validator,
+                roles::VALIDATOR,
+                crate::registry::evidence::SlashingProof::Liveness {
+                    window_start_epoch: start,
+                    window_end_epoch: epoch,
+                    missed: current,
+                    expected: current,
+                },
+                None,
+            ));
                 self.reported.insert(*validator, ());
             }
         }
@@ -224,7 +226,7 @@ mod tests {
         let reports = t.record_epoch(3, &[v], |_| false, &p);
         assert_eq!(reports.len(), 1);
         match &reports[0].proof {
-            SlashingProof::Liveness {
+            crate::registry::evidence::SlashingProof::Liveness {
                 missed,
                 window_start_epoch,
                 window_end_epoch,
