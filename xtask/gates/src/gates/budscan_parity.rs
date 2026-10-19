@@ -135,12 +135,19 @@ fn check_name_rule(root: &Path, problems: &mut Vec<String>) -> Result<(), String
     Ok(())
 }
 
+/// The core copy hashes the tag and the chunk through the length-prefixed field hash.
+const CORE_CONTENT_CALL: &str = "hash_fields_bytes(&[b\"BDLM_CONTENT_V1\", chunk])";
+
 /// Do the two `ContentId` definitions produce the same identity?
 fn check_content_id(root: &Path, problems: &mut Vec<String>) -> Result<(), String> {
     // -- 2. The content identity -----------------------------------------
     let browser_cid = read(root, "crates/budscan/src/content_id.rs")?;
     let core_cid = read(root, "src/storage/content_id.rs")?;
+    content_id_problems(&browser_cid, &core_cid, problems);
+    Ok(())
+}
 
+fn content_id_problems(browser_cid: &str, core_cid: &str, problems: &mut Vec<String>) {
     if !browser_cid.contains(CONTENT_DOMAIN_TAG) {
         problems.push(format!(
             "crates/budscan/src/content_id.rs does not use the {CONTENT_DOMAIN_TAG} tag; \
@@ -163,8 +170,19 @@ fn check_content_id(root: &Path, problems: &mut Vec<String>) -> Result<(), Strin
              Without the prefix two different contents can share one identity",
         ));
     }
+    if !core_cid.contains(CORE_CONTENT_CALL) {
+        problems.push(String::from(
+            "src/storage/content_id.rs no longer hashes the tag and the chunk through \
+             hash_fields_bytes, the length-prefixed field hash. The scanner copy prefixes \
+             every field; the chain copy has to do the same",
+        ));
+    }
+}
 
-    Ok(())
+/// Is the first constant item with this name written with this exact text?
+fn const_line<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("const {name}:");
+    text.lines().map(str::trim).find(|l| l.contains(&needle))
 }
 
 /// Are the constants repeated in three places identical?
@@ -172,9 +190,22 @@ fn check_shared_constants(root: &Path, problems: &mut Vec<String>) -> Result<(),
     // -- 3. Size bound: identical in three places ------------------------
     let browser_fetch = read(root, "crates/budscan/src/fetch.rs")?;
     let core_gateway = read(root, "src/gateway/service.rs")?;
-    let browser_limit = browser_fetch.contains("10 * 1024 * 1024");
-    let core_limit = core_gateway.contains("10 * 1024 * 1024");
-    if browser_limit != core_limit {
+    let browser_lc = read(root, "crates/budscan/src/light_client.rs")?;
+    let chain = read(root, "src/chain/blockchain.rs")?;
+    shared_constant_problems(&browser_fetch, &core_gateway, &browser_lc, &chain, problems);
+    Ok(())
+}
+
+fn shared_constant_problems(
+    browser_fetch: &str,
+    core_gateway: &str,
+    browser_lc: &str,
+    chain: &str,
+    problems: &mut Vec<String>,
+) {
+    let browser_limit = const_line(browser_fetch, "MAX_CONTENT_BYTES").map(value_of);
+    let core_limit = const_line(core_gateway, "MAX_GATEWAY_CONTENT_BYTES").map(value_of);
+    if browser_limit.is_none() || browser_limit != core_limit {
         problems.push(String::from(
             "the content size bound has diverged between crates/budscan/src/fetch.rs and \
              src/gateway/service.rs. Two different bounds open a gap where one accepts \
@@ -183,11 +214,9 @@ fn check_shared_constants(root: &Path, problems: &mut Vec<String>) -> Result<(),
     }
 
     // -- 4. Epoch length ---------------------------------------------------
-    let browser_lc = read(root, "crates/budscan/src/light_client.rs")?;
-    let chain = read(root, "src/chain/blockchain.rs")?;
-    if chain.contains("pub const EPOCH_LENGTH: u64 = 10;")
-        != browser_lc.contains("pub const EPOCH_LENGTH: u64 = 10;")
-    {
+    let browser_epoch = const_line(browser_lc, "EPOCH_LENGTH").map(value_of);
+    let chain_epoch = const_line(chain, "EPOCH_LENGTH").map(value_of);
+    if browser_epoch.is_none() || browser_epoch != chain_epoch {
         problems.push(String::from(
             "EPOCH_LENGTH has diverged between src/chain/blockchain.rs and \
              crates/budscan/src/light_client.rs. The scanner would take the wrong headers \
@@ -195,8 +224,11 @@ fn check_shared_constants(root: &Path, problems: &mut Vec<String>) -> Result<(),
              itself",
         ));
     }
+}
 
-    Ok(())
+/// The text right of the `=` of a constant line.
+fn value_of(line: &str) -> &str {
+    line.split_once('=').map_or("", |(_, v)| v.trim())
 }
 
 /// # Errors
@@ -239,4 +271,52 @@ pub fn self_test() -> Result<String, String> {
         "budscan parity self-test OK: the gate does not pass on a tree it cannot read and none of \
          the patterns it searches for are empty",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn epoch_values_must_be_equal_not_just_present() {
+        let mut p = Vec::new();
+        let fetch = "pub const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024;";
+        let gw = "pub const MAX_GATEWAY_CONTENT_BYTES: usize = 10 * 1024 * 1024;";
+        shared_constant_problems(
+            fetch,
+            gw,
+            "pub const EPOCH_LENGTH: u64 = 30;",
+            "pub const EPOCH_LENGTH: u64 = 20;",
+            &mut p,
+        );
+        assert_eq!(p.len(), 1);
+        p.clear();
+        shared_constant_problems(
+            fetch,
+            gw,
+            "pub const EPOCH_LENGTH: u64 = 10;",
+            "pub const EPOCH_LENGTH: u64 = 10;",
+            &mut p,
+        );
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn size_bound_dropped_on_both_sides_fails() {
+        let mut p = Vec::new();
+        let epoch = "pub const EPOCH_LENGTH: u64 = 10;";
+        shared_constant_problems("", "", epoch, epoch, &mut p);
+        assert_eq!(p.len(), 1);
+    }
+
+    #[test]
+    fn core_content_id_must_keep_its_length_prefixed_hash() {
+        let browser = "BDLM_CONTENT_V1 (field.len() as u64).to_le_bytes()";
+        let mut p = Vec::new();
+        content_id_problems(browser, "BDLM_CONTENT_V1 sha(chunk)", &mut p);
+        assert_eq!(p.len(), 1);
+        p.clear();
+        content_id_problems(browser, &format!("x {CORE_CONTENT_CALL}"), &mut p);
+        assert!(p.is_empty());
+    }
 }
