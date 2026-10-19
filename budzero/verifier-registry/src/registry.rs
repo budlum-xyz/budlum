@@ -52,7 +52,7 @@
 
 use crate::address::Address;
 use crate::evidence::{EvidenceError, SlashingProof, SlashingReport};
-use crate::params::{slash_penalty, RegistryParams};
+use crate::params::{RegistryParams, slash_penalty};
 use crate::role::RoleId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -618,7 +618,11 @@ impl VerifierRegistry {
         report.is_actionable()?;
         let condition = report.condition();
         // A lifecycle transition must not make retained evidence charge twice.
-        if self.slashing_history.iter().any(|record| record.report == *report) {
+        if self
+            .slashing_history
+            .iter()
+            .any(|record| record.report == *report)
+        {
             return Ok(None);
         }
         let ratio = self.params.slash_ratio(condition);
@@ -1045,9 +1049,10 @@ mod tests {
         let mut reg = VerifierRegistry::new();
         reg.register_attester(addr(3), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
-        assert!(reg
-            .register_attester(addr(3), MIN_REGISTRATION_STAKE, 0)
-            .is_err());
+        assert!(
+            reg.register_attester(addr(3), MIN_REGISTRATION_STAKE, 0)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1069,9 +1074,10 @@ mod tests {
         reg.register_validator(addr(4), 5_000, 10).unwrap();
         let release = reg.begin_unbonding(addr(4), roles::VALIDATOR, 10).unwrap();
         assert_eq!(release, 10 + UNBONDING_EPOCHS);
-        assert!(reg
-            .withdraw(addr(4), roles::VALIDATOR, release - 1)
-            .is_err());
+        assert!(
+            reg.withdraw(addr(4), roles::VALIDATOR, release - 1)
+                .is_err()
+        );
         let released = reg.withdraw(addr(4), roles::VALIDATOR, release).unwrap();
         assert_eq!(released, 5_000);
         assert!(reg.get(&addr(4), roles::VALIDATOR).is_none());
@@ -1133,7 +1139,12 @@ mod tests {
         reg.register_validator(account, 10_000, 0).unwrap();
         let one_percent = FIXED_POINT_SCALE / 100;
         let outcome = reg
-            .slash(account, roles::VALIDATOR, SlashingCondition::LivenessFault, one_percent)
+            .slash(
+                account,
+                roles::VALIDATOR,
+                SlashingCondition::LivenessFault,
+                one_percent,
+            )
             .expect("a live registration can be slashed for liveness");
         assert_eq!(outcome.penalty, 100, "1% of 10_000");
         assert!(
@@ -1156,17 +1167,26 @@ mod tests {
         let account = addr(52);
         let mut reg = VerifierRegistry::new();
         reg.register_validator(account, 10_000, 0).unwrap();
-        reg.slash(account, roles::VALIDATOR, SlashingCondition::DoubleSign, FIXED_POINT_SCALE / 2)
-            .unwrap();
+        reg.slash(
+            account,
+            roles::VALIDATOR,
+            SlashingCondition::DoubleSign,
+            FIXED_POINT_SCALE / 2,
+        )
+        .unwrap();
         assert!(!reg.is_active(&account, roles::VALIDATOR));
-        let release = reg.begin_unbonding(account, roles::VALIDATOR, 9)
+        let release = reg
+            .begin_unbonding(account, roles::VALIDATOR, 9)
             .expect("a slashed bond retains a delayed exit");
         assert!(!reg.is_active(&account, roles::VALIDATOR));
         assert!(matches!(
             reg.withdraw(account, roles::VALIDATOR, release - 1),
             Err(RegistryError::StillUnbonding { .. })
         ));
-        assert_eq!(reg.withdraw(account, roles::VALIDATOR, release).unwrap(), 5_000);
+        assert_eq!(
+            reg.withdraw(account, roles::VALIDATOR, release).unwrap(),
+            5_000
+        );
         assert!(reg.get(&account, roles::VALIDATOR).is_none());
     }
 
@@ -1176,13 +1196,22 @@ mod tests {
         let account = addr(53);
         let mut reg = VerifierRegistry::new();
         reg.register_validator(account, 10_000, 0).unwrap();
-        reg.slash(account, roles::VALIDATOR, SlashingCondition::DoubleSign, FIXED_POINT_SCALE / 2)
-            .unwrap();
+        reg.slash(
+            account,
+            roles::VALIDATOR,
+            SlashingCondition::DoubleSign,
+            FIXED_POINT_SCALE / 2,
+        )
+        .unwrap();
         reg.upsert_stake(account, roles::VALIDATOR, 10_000, 3);
         let after = reg.get(&account, roles::VALIDATOR).unwrap();
         assert_eq!(after.stake, 5_000, "the slash survives the mirror");
         reg.upsert_stake(account, roles::VALIDATOR, 4_000, 4);
-        assert_eq!(reg.get(&account, roles::VALIDATOR).unwrap().stake, 4_000, "shrinks may follow");
+        assert_eq!(
+            reg.get(&account, roles::VALIDATOR).unwrap().stake,
+            4_000,
+            "shrinks may follow"
+        );
     }
 
     #[test]
@@ -1266,8 +1295,11 @@ mod tests {
         let hist = reg.slashing_history_for(&addr(11));
         assert_eq!(hist.len(), 1, "the slash itself is recorded");
         assert!(reg.slash_from_report(&report).unwrap().is_none());
-        assert_eq!(reg.get(&addr(11), roles::MASTER_VERIFIER).unwrap().stake,
-            outcome.remaining_stake, "replaying retained evidence cannot cut twice");
+        assert_eq!(
+            reg.get(&addr(11), roles::MASTER_VERIFIER).unwrap().stake,
+            outcome.remaining_stake,
+            "replaying retained evidence cannot cut twice"
+        );
     }
 
     /// The slashing history stops at the cap: the newest are kept, the oldest dropped.
@@ -1341,14 +1373,15 @@ mod tests {
                 release_epoch: 5 + reg.params().unbonding_epochs
             }
         );
-        assert!(reg
-            .slash(
+        assert!(
+            reg.slash(
                 addr(30),
                 roles::MASTER_VERIFIER,
                 SlashingCondition::MaliciousBehaviour,
                 FIXED_POINT_SCALE,
             )
-            .is_ok());
+            .is_ok()
+        );
     }
 
     /// P16-F13: stake only grows on an Active bond and never clips.
