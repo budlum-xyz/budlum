@@ -443,7 +443,7 @@ fn render_frame(_spec: &GeneratedSpec, pixels: &[u8], frame: u16) -> Result<Vec<
 const QR_FRAME_HEADER_LEN: usize = 16;
 
 /// Domain tag for a recipe-addressed stream id.
-const QR_STREAM_ID_TAG: &[u8] = b"BDLM_QR_STREAM_ID_V1";
+const QR_STREAM_ID_TAG: &[u8] = b"BDLM_QR_STREAM_ID_V2";
 
 /// The path that produces a transport frame.
 ///
@@ -577,29 +577,15 @@ pub fn qr_stream_content_id(
     if frame_count == 0 {
         return Err(RenderError::MissingParam("qr stream frame_count"));
     }
-    // The scheme is deliberately narrow. The frame digest already binds the recipe, the
-    // position and the slice bytes; binding them **again** in the fold says nothing new.
-    //
-    // The first version carried three more fields - recipe digest, frame count,
-    // slice length - and all three turned out redundant. Measured by mutation: removing
-    // each one from the scheme broke no test, because what all three distinguished was
-    // already inside the frame digests. A different slice
-    // length produces different frames; a different frame count produces a fold of a
-    // different length; a different recipe gives a different frame digest.
-    //
-    // What defends a field in a scheme is that removing it breaks something.
-    // If it breaks nothing it is not there, it is merely sitting there - and a field
-    // that merely sits tells a reader "this is bound too", producing a false assurance.
-    let mut acc = hash_fields_bytes(&[QR_STREAM_ID_TAG]);
+    // BLG-0421: V1 folded only the four-byte transport checksum. That
+    // checksum detects optical corruption; it is not a content commitment.
+    // V2 binds the full recipe digest and every frame byte at hash strength.
+    // No V1 fallback: this helper has no production callers or stored ids.
+    let recipe = generated_spec_digest(spec);
+    let mut acc = hash_fields_bytes(&[QR_STREAM_ID_TAG, &recipe]);
     for seq in 0..frame_count {
         let frame = render_qr_stream_frame(spec, payload, seq, payload_len)?;
-        // A frame's own digest sits at header range 12..16. Instead of hashing the
-        // frame afresh that value is used: the id builds on what the receiver already
-        // verifies per frame, not on a separate digest scheme.
-        let frame_digest = frame
-            .get(12..QR_FRAME_HEADER_LEN)
-            .ok_or(RenderError::MissingParam("qr frame digest"))?;
-        acc = hash_fields_bytes(&[QR_STREAM_ID_TAG, &acc, frame_digest]);
+        acc = hash_fields_bytes(&[QR_STREAM_ID_TAG, &acc, &frame]);
     }
     Ok(acc)
 }
@@ -649,6 +635,33 @@ pub fn render_and_verify(
 mod tests {
     use super::*;
     use crate::storage::generated::GeneratorId;
+
+    #[test]
+    fn stream_v2_commits_full_frame_bytes_not_the_transport_checksum() {
+        let spec = avatar_spec();
+        let payload = [0xabu8; 64];
+        let recipe = generated_spec_digest(&spec);
+        let initial = hash_fields_bytes(&[super::QR_STREAM_ID_TAG, &recipe]);
+        let frame = super::render_qr_stream_frame(&spec, &payload, 0, 64).unwrap();
+        let expected = hash_fields_bytes(&[super::QR_STREAM_ID_TAG, &initial, &frame]);
+        assert_eq!(super::QR_STREAM_ID_TAG, b"BDLM_QR_STREAM_ID_V2");
+        assert_eq!(
+            super::qr_stream_content_id(&spec, &payload, 64, 1).unwrap(),
+            expected
+        );
+        let mut substituted = frame.clone();
+        substituted[super::QR_FRAME_HEADER_LEN] ^= 1;
+        assert_eq!(&frame[12..16], &substituted[12..16], "same short checksum");
+        assert_ne!(
+            expected,
+            hash_fields_bytes(&[super::QR_STREAM_ID_TAG, &initial, &substituted]),
+            "even a short-checksum collision cannot substitute a frame"
+        );
+        let old_tag = b"BDLM_QR_STREAM_ID_V1";
+        let old_initial = hash_fields_bytes(&[old_tag]);
+        let old_id = hash_fields_bytes(&[old_tag, &old_initial, &frame[12..16]]);
+        assert_ne!(expected, old_id, "V1 and V2 are explicitly separated");
+    }
 
     #[test]
     fn png_size_limit_is_exact_integer_arithmetic() {
