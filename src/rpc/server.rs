@@ -7132,6 +7132,10 @@ mod tests {
     #[tokio::test]
     async fn operator_rejects_foreign_host() {
         let op = RpcMode::Operator;
+        assert_ne!(
+            status_through_layer(op.clone(), Some("evil.example"), None).await,
+            StatusCode::OK
+        );
         assert_eq!(
             status_through_layer(op.clone(), Some("evil.example"), None).await,
             StatusCode::FORBIDDEN
@@ -7170,6 +7174,15 @@ mod tests {
 
     #[tokio::test]
     async fn operator_rejects_origin_header() {
+        assert_ne!(
+            status_through_layer(
+                RpcMode::Operator,
+                Some("127.0.0.1:8546"),
+                Some("http://x.example")
+            )
+            .await,
+            StatusCode::OK
+        );
         assert_eq!(
             status_through_layer(
                 RpcMode::Operator,
