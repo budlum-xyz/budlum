@@ -154,3 +154,5 @@ paeth = "paeth"
 # flate : typos splits the crate name `flate2` (zlib backend of the QR PNG code)
 #         and offers "flat". The crate name cannot change.
 flate = "flate"
+# loca  : the TrueType glyph location table tag in the font parser test data.
+loca = "loca"
