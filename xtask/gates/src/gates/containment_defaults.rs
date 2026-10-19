@@ -13,11 +13,28 @@ fn code_of(path: &Path) -> Result<String, String> {
         return Err(format!("expected source file missing: {}", path.display()));
     }
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    Ok(text
-        .lines()
-        .map(|l| l.split("//").next().unwrap_or("").to_string())
-        .collect::<Vec<_>>()
-        .join("\n"))
+    // Literals and comments (line and block) are blanked: a `/* .. */` that
+    // names the call, or a `//` inside a string, must not change what is read.
+    Ok(super::rust_literals::scrub(&text))
+}
+
+/// The text of the first brace-balanced block that starts at or after `from`.
+fn balanced_block(text: &str, from: usize) -> Option<&str> {
+    let open = text[from..].find('{')? + from;
+    let mut depth = 0usize;
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(&text[open..=open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Does `execute_bytecode` hand `true` as the mainnet flag to the inner runner?
@@ -40,11 +57,9 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     // 1. Default impl exists and closes both flags.
     let default_start = isa_code.find("impl Default for MainnetActivation");
-    let default_block = default_start.map(|s| {
-        let rest = &isa_code[s..];
-        let end = rest.find('}').unwrap_or(rest.len());
-        &rest[..=end]
-    });
+    // The whole impl, balanced: lines after the first `}` are read too, and an
+    // impl with no closing brace is a finding, not a panic.
+    let default_block = default_start.and_then(|s| balanced_block(&isa_code, s));
     let Some(default_block) = default_block else {
         return Err(String::from(
             "MainnetActivation no longer has a Default impl - the staged-rollout defaults are the containment boundary",
@@ -61,6 +76,14 @@ pub fn run(root: &Path) -> Result<String, String> {
                  VerifyInference because there is no verification circuit behind it and it\n  \
                  returns a hard-coded zero. Opening either is a consensus-visible decision\n  \
                  that belongs in the commit that makes it, with the verification to match."
+            ));
+        }
+        if default_block
+            .lines()
+            .any(|l| l.contains(flag) && l.contains("true"))
+        {
+            return Err(format!(
+                "MainnetActivation::default() sets {flag} to true somewhere in the impl."
             ));
         }
     }
@@ -145,5 +168,19 @@ mod tests {
         assert!(!has_gated_entry(
             "execute_bytecode_inner(bytecode, gas_limit, false, ctx)"
         ));
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    #[test]
+    fn balanced_block_reads_the_whole_impl_and_never_panics() {
+        let t = "impl X { fn d() -> S { S { a: false } } fn e() { s.a = true; } } tail";
+        let b = balanced_block(t, 0).unwrap();
+        assert!(b.ends_with("} }") && b.contains("s.a = true"));
+        assert!(balanced_block("impl X { fn d() {", 0).is_none());
+        assert!(balanced_block("no brace", 0).is_none());
     }
 }
