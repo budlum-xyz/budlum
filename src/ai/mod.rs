@@ -4083,6 +4083,17 @@ mod tests {
     }
 
     #[test]
+    fn callback_queue_root_commits_to_event_count() {
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let addr =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000CB")
+                .unwrap();
+        let absent = registry.state_root();
+        registry.callback_queue.insert(addr, Vec::new());
+        assert_ne!(absent, registry.state_root());
+    }
+
+    #[test]
     fn test_multiple_callbacks_same_address() {
         // Multiple outcomes can queue events for the same callback
         let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
