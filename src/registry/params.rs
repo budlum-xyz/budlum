@@ -300,7 +300,7 @@ impl Default for RegistryParams {
             // Targeting a multi-day window on mainnet should raise this via
             // Governance rather than editing code.
             unbonding_epochs: crate::core::account::UNBONDING_EPOCHS,
-            // 50% - matches `PoSConfig::double_sign_penalty`.
+            // 50% - double-sign burns half the bond.
             double_sign_slash_ratio_fixed: FIXED_POINT_SCALE / 2,
             // 1% - downtime is a light offence.
             liveness_slash_ratio_fixed: FIXED_POINT_SCALE / 100,

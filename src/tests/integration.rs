@@ -344,7 +344,6 @@ mod integration_tests {
         let config = PoAConfig {
             quorum_numerator: 2,
             quorum_denominator: 3,
-            block_period: 5,
             ..PoAConfig::default()
         };
 
