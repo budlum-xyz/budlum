@@ -9,6 +9,9 @@ use tiny_keccak::{Hasher, Keccak};
 
 pub type Hash = [u8; 32];
 
+/// Largest state file `State::load` reads.
+pub const MAX_STATE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
 // The privacy layer note/UTXO model - separate from the account model
 // Izole, paralel subtree.
 pub mod note;
@@ -157,6 +160,16 @@ pub fn verify_account_proof(root: Hash, id: u64, account_hash: Hash, proof: &[Ha
 impl State {
     pub fn load(path: &str) -> Result<Self, String> {
         let accounts = if std::path::Path::new(path).exists() {
+            // P16-F17: bound the read. The file is JSON text of accounts, so a
+            // file past the cap is a wrong file, not a state.
+            let len = fs::metadata(path)
+                .map_err(|e| format!("Failed to stat state file: {e}"))?
+                .len();
+            if len > MAX_STATE_FILE_BYTES {
+                return Err(format!(
+                    "State file of {len} bytes exceeds the {MAX_STATE_FILE_BYTES} byte cap"
+                ));
+            }
             let data =
                 fs::read_to_string(path).map_err(|e| format!("Failed to read state file: {e}"))?;
             serde_json::from_str(&data).map_err(|e| format!("Failed to parse state JSON: {e}"))?
@@ -189,6 +202,19 @@ impl State {
         drop(file);
         fs::rename(&temp_path, path)
             .map_err(|e| format!("Failed to rename temp state file to final: {e}"))?;
+        // P16-F17: sync the parent directory so the rename survives a crash.
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let dir = if parent.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                parent
+            };
+            if let Ok(handle) = fs::File::open(dir) {
+                handle
+                    .sync_all()
+                    .map_err(|e| format!("Failed to sync state directory: {e}"))?;
+            }
+        }
         Ok(())
     }
 
@@ -245,12 +271,15 @@ impl StateBackend for State {
         // would leave values on disk that an outer rollback then discards in
         // memory, and the next `load` would hand back a state nobody
         // committed.
-        self.backup_stack.pop();
-        if self.backup_stack.is_empty() {
-            self.save_atomic()
-        } else {
-            Ok(())
+        //
+        // P16-F16: the outermost frame is dropped only after the save
+        // succeeded. Popping first left memory ahead of disk on a failed
+        // save, with nothing for `rollback` to restore.
+        if self.backup_stack.len() == 1 {
+            self.save_atomic()?;
         }
+        self.backup_stack.pop();
+        Ok(())
     }
 
     fn rollback(&mut self) {
@@ -264,6 +293,33 @@ impl StateBackend for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P16-F16: a failed outermost commit keeps the backup, so the caller can
+    /// still roll the memory back to what is on disk.
+    #[test]
+    fn failed_commit_keeps_the_backup_for_rollback() {
+        let path = std::env::temp_dir()
+            .join("bud_state_no_such_dir_p16_f16")
+            .join("state.json");
+        let path = path.to_string_lossy().to_string();
+        let mut state = State::load(&path).unwrap();
+        state.begin_transaction();
+        state.set_account(
+            1,
+            Account {
+                nonce: 1,
+                balance: 5,
+                code_hash: [0u8; 32],
+                storage_root: [0u8; 32],
+            },
+        );
+        assert!(state.commit().is_err(), "the parent directory is missing");
+        state.rollback();
+        assert!(
+            state.get_account(1).is_none(),
+            "rollback must restore the pre-transaction state after a failed commit"
+        );
+    }
 
     #[test]
     fn test_account_crud() {
