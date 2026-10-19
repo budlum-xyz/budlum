@@ -414,3 +414,30 @@ fn ai_request_after_the_asset_is_revoked_is_refused_by_the_executor() {
         Executor::apply_transaction_checked(&mut state, &ai_request_tx(requester, req, 0));
     assert!(outcome.is_err(), "a revoked asset cannot be read");
 }
+
+#[test]
+fn tx_backed_pollen_rejects_a_backdated_or_expired_grant() {
+    let owner = addr(1);
+    let requester = addr(2);
+    let mut state = AccountState::new();
+    state.add_balance(&owner, 100);
+    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x66; 32], true);
+    Executor::apply_transaction_checked(
+        &mut state,
+        &pollen_tx(
+            owner,
+            TransactionType::PollenRegisterDataAsset(asset.clone()),
+            0,
+        ),
+    )
+    .unwrap();
+    state.current_block_height = 1_000;
+
+    let grant = signed_grant(&asset, requester, 1);
+    let err = Executor::apply_transaction_checked(
+        &mut state,
+        &pollen_tx(owner, TransactionType::PollenGrantAccess(grant), 1),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "pollen_grant_window");
+}
