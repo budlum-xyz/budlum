@@ -42,7 +42,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Roots holding shipped library code.
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates"];
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
@@ -730,5 +730,18 @@ mod comment_binding_tests {
         let code = scrub(text);
         assert!(!bound_in(&code, "amount"));
         assert!(bound_in(&code, "owner"));
+    }
+}
+
+#[cfg(test)]
+mod scan_root_tests {
+    use super::*;
+
+    #[test]
+    fn every_scan_root_exists() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for r in SCAN_ROOTS {
+            assert!(repo.join(r).is_dir(), "missing scan root {r}");
+        }
     }
 }
