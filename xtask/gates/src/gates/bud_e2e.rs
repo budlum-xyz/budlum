@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-const TESTS: &[&str] = &[
+pub(crate) const TESTS: &[&str] = &[
     "tests::bud_e2e::invariant_1_no_whitelist_for_deal_or_challenge",
     "tests::bud_e2e::invariant_2_no_admin_pause_freeze_hook",
     "tests::bud_e2e::invariant_3_any_account_can_challenge_any_deal",
