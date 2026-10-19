@@ -222,6 +222,16 @@ impl GrantAuthorization {
     }
 }
 
+/// The grant fields a signed issuance covers besides the chain, the nonce,
+/// the content and the issuer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantIssueTerms {
+    pub grantee: Option<Address>,
+    pub key_id: [u8; 32],
+    pub policy: ViewPolicy,
+    pub opened_epoch: u64,
+}
+
 /// Digest a grant issuance is signed over.
 ///
 /// `chain_id` keeps a signature from working on another network, and `nonce`
@@ -237,12 +247,9 @@ pub fn grant_issue_digest(
     nonce: u64,
     content_id: &ContentId,
     issuer: &Address,
-    grantee: Option<&Address>,
-    key_id: &[u8; 32],
-    policy: ViewPolicy,
-    opened_epoch: u64,
+    terms: &GrantIssueTerms,
 ) -> [u8; 32] {
-    let policy_byte = [match policy {
+    let policy_byte = [match terms.policy {
         ViewPolicy::OwnerOnly => 1u8,
         ViewPolicy::NamedGrantee => 2u8,
         ViewPolicy::PublicKeyId => 3u8,
@@ -254,10 +261,13 @@ pub fn grant_issue_digest(
         &nonce.to_le_bytes(),
         content_id.as_bytes(),
         issuer.as_bytes(),
-        grantee.map_or(absent_grantee.as_slice(), |g| g.as_bytes()),
-        key_id,
+        terms
+            .grantee
+            .as_ref()
+            .map_or(absent_grantee.as_slice(), |g| g.as_bytes()),
+        &terms.key_id,
         &policy_byte,
-        &opened_epoch.to_le_bytes(),
+        &terms.opened_epoch.to_le_bytes(),
     ])
 }
 
@@ -769,10 +779,12 @@ mod tests {
                 0,
                 &cid(1),
                 &addr(2),
-                None,
-                &[3u8; 32],
-                ViewPolicy::PublicKeyId,
-                6
+                &GrantIssueTerms {
+                    grantee: None,
+                    key_id: [3u8; 32],
+                    policy: ViewPolicy::PublicKeyId,
+                    opened_epoch: 6
+                }
             ),
             "a view claim must not collide with a grant issue over the same fields"
         );
@@ -787,10 +799,12 @@ mod tests {
                 n,
                 &cid(1),
                 &addr(2),
-                None,
-                &[3u8; 32],
-                ViewPolicy::OwnerOnly,
-                6,
+                &GrantIssueTerms {
+                    grantee: None,
+                    key_id: [3u8; 32],
+                    policy: ViewPolicy::OwnerOnly,
+                    opened_epoch: 6,
+                },
             )
         };
         assert_ne!(issue(1, 0), issue(2, 0));

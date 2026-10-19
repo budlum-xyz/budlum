@@ -1181,8 +1181,10 @@ mod tests {
     #[test]
     fn intake_state_round_trips_through_bincode() {
         let (registry, key, _att) = registered();
-        let mut state = crate::cross_domain::external::intake::IntakeState::default();
-        state.registry = registry;
+        let state = crate::cross_domain::external::intake::IntakeState {
+            registry,
+            ..Default::default()
+        };
         let bytes = bincode::serialize(&state).expect("serialises");
         let back: crate::cross_domain::external::intake::IntakeState =
             bincode::deserialize(&bytes).expect("the current shape decodes");

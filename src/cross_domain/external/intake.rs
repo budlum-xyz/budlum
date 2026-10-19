@@ -1370,9 +1370,9 @@ mod tests {
 
     /// BLG-0158 (P07-F13): the dispute-to-fault wiring through `IntakeState`
     /// - the branch that calls `mark_faulted` when a round freezes in a
-    /// dispute - had no test through the intake at all. A three-way split
-    /// under a 3-of-3 policy reaches `Disputed` (no group can ever reach the
-    /// threshold), and the domain must come out Faulted.
+    ///   dispute - had no test through the intake at all. A three-way split
+    ///   under a 3-of-3 policy reaches `Disputed` (no group can ever reach the
+    ///   threshold), and the domain must come out Faulted.
     #[test]
     fn a_disputed_round_faults_the_domain_through_the_intake() {
         let mut state = IntakeState::new();

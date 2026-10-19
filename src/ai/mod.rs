@@ -4270,10 +4270,12 @@ mod tests {
     /// tests of the missing bindings.
     #[test]
     fn full_stark_verification_flag_is_locked_off_until_inputs_are_bound() {
-        assert!(
-            !FULL_AI_STARK_VERIFICATION_LIVE,
-            "P32-F02: STARK public inputs are not bound to the request yet"
-        );
+        const {
+            assert!(
+                !FULL_AI_STARK_VERIFICATION_LIVE,
+                "P32-F02: STARK public inputs are not bound to the request yet"
+            );
+        }
     }
 
     #[test]
