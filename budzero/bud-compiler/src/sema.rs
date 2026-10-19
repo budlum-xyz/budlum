@@ -424,6 +424,30 @@ impl SemanticAnalyzer {
         }
     }
 
+    /// The declared type of the plain (non mapping) storage field `name`, or
+    /// `Unknown` with an error recorded when the field is missing or is a
+    /// mapping. `storage::name` always runs one `SRead` or `SWrite`, so a
+    /// mapping needs an index.
+    fn scalar_storage_type(&self, name: &str, errors: &mut Vec<CompileError>) -> Type {
+        match self.storage.get(name) {
+            Some(Type::Map(..)) => {
+                errors.push(CompileError::SemanticError(format!(
+                    "storage field '{}' is a mapping, use an index",
+                    name
+                )));
+                Type::Unknown
+            }
+            Some(ty) => ty.clone(),
+            None => {
+                errors.push(CompileError::SemanticError(format!(
+                    "Undefined storage variable '{}'",
+                    name
+                )));
+                Type::Unknown
+            }
+        }
+    }
+
     /// Type-check one `name[key]` access and return the value type. The key
     /// is compared with the declared key type: `Map<K,V>` records both, and
     /// for a while only `V` was checked, so a `Map<u64,u64>` indexed with a
@@ -535,8 +559,29 @@ impl SemanticAnalyzer {
                     self.analyze_expr(expr, env, errors);
                 }
             }
-            Stmt::StorageWrite(_, expr) => {
-                self.analyze_expr(expr, env, errors);
+            Stmt::StorageWrite(name, expr) => {
+                let ty = self.analyze_expr(expr, env, errors);
+                let declared = self.scalar_storage_type(name, errors);
+                if matches!(ty, Type::Struct(_) | Type::Void)
+                    || matches!(declared, Type::Struct(_) | Type::Void)
+                {
+                    errors.push(CompileError::SemanticError(format!(
+                        "storage field '{}' holds a scalar, not {}",
+                        name,
+                        if matches!(ty, Type::Struct(_) | Type::Void) {
+                            ty.name()
+                        } else {
+                            declared.name()
+                        }
+                    )));
+                } else if ty != declared && ty != Type::Unknown && declared != Type::Unknown {
+                    errors.push(CompileError::SemanticError(format!(
+                        "storage field '{}' is {}, got {}",
+                        name,
+                        declared.name(),
+                        ty.name()
+                    )));
+                }
             }
             Stmt::MappingWrite(name, key, val) => {
                 let val_ty = self.analyze_expr(val, env, errors);
@@ -687,7 +732,7 @@ impl SemanticAnalyzer {
                     Type::Unknown
                 }
             }
-            Expr::StorageRead(_) => Type::U64,
+            Expr::StorageRead(name) => self.scalar_storage_type(name, errors),
             Expr::MappingRead(name, key) => self.mapping_access_type(name, key, env, errors),
             Expr::FieldAccess(base, field) => {
                 let base_ty = self.analyze_expr(base, env, errors);

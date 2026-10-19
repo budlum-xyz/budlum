@@ -900,6 +900,49 @@ mod tests {
         assert_eq!(vm.events, vec![30]);
     }
 
+    /// P35-F23: storage reads and writes are checked against the declared
+    /// field type, and a mapping needs an index.
+    #[test]
+    fn storage_access_is_checked_against_the_field() {
+        let cases = [
+            (
+                "storage { m: Map<u64,u64>, } pub fn main() { storage::m = 1; }",
+                "storage field 'm'",
+            ),
+            (
+                "storage { m: Map<u64,u64>, } pub fn main() { let x = storage::m; }",
+                "storage field 'm'",
+            ),
+            (
+                "storage { flag: bool, } pub fn main() { storage::flag = 7; }",
+                "storage field 'flag'",
+            ),
+            (
+                "storage { n: u64, } pub fn main() { storage::missing = 1; }",
+                "Undefined storage variable",
+            ),
+            (
+                "storage { n: u64, } pub fn main() { let x = storage::missing; }",
+                "Undefined storage variable",
+            ),
+        ];
+        for (body, expected) in cases {
+            let source = format!("contract C {{ {body} }}");
+            match compile(&source, IsaProfile::Production) {
+                Err(CompileError::SemanticError(msg)) => {
+                    assert!(msg.contains(expected), "`{body}` gave: {msg}")
+                }
+                other => panic!("`{body}` must be a semantic error, got {other:?}"),
+            }
+        }
+
+        compile(
+            "contract C { storage { n: u64, flag: bool, } pub fn main() { storage::n = storage::n + 1; storage::flag = 1 == 1; } }",
+            IsaProfile::Production,
+        )
+        .expect("matching storage access compiles");
+    }
+
     /// P35-F16: a function with a result must return on every path, and
     /// `main` cannot take parameters.
     #[test]
