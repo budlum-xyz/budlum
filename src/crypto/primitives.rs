@@ -76,16 +76,6 @@ pub struct ValidatorKeyPolicy {
 }
 
 impl ValidatorKeyPolicy {
-    pub fn mainnet_default() -> Self {
-        Self {
-            backend: KeyBackend::Hsm {
-                slot: "BUDLUM_MAINNET_VALIDATOR".to_string(),
-            },
-            rotation_interval_epochs: 90,
-            allow_export: false,
-        }
-    }
-
     pub fn devnet_default() -> Self {
         Self {
             backend: KeyBackend::LocalFile,
@@ -353,9 +343,6 @@ impl PqKeyPair {
         &self.public_key
     }
 
-    pub fn secret_key_bytes(&self) -> &[u8] {
-        &self.secret_key
-    }
 
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let secret_key = dilithium5::SecretKey::from_bytes(&self.secret_key)
@@ -431,9 +418,6 @@ impl PqKeyPair {
         &self.public_key
     }
 
-    pub fn secret_key_bytes(&self) -> &[u8] {
-        &self.secret_key
-    }
 
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let seed = ml_dsa::Seed::try_from(self.secret_key.as_slice())
@@ -504,9 +488,6 @@ impl PqKeyPair {
         &self.public_key
     }
 
-    pub fn secret_key_bytes(&self) -> &[u8] {
-        &self.secret_key
-    }
 
     pub fn sign(&self, _message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         Err(CryptoError::Signing(
@@ -646,6 +627,10 @@ impl ValidatorKeys {
     ///
     /// [`CryptoError::PlaintextDiskKeysForbiddenOnMainnet`] when mainnet keys
     /// carry BLS or post-quantum secrets in the clear.
+    /// F18: the engine enforces mainnet policy through
+    /// [`crate::crypto::mainnet_policy::check_mainnet_validator_key_policy`];
+    /// this hook exists for the test suite that proves the rule.
+    #[cfg(test)]
     pub fn validate_mainnet_disk_policy(&self, is_mainnet: bool) -> Result<(), CryptoError> {
         if is_mainnet && (self.pq_key.is_some() || self.bls_key.is_some()) {
             return Err(CryptoError::PlaintextDiskKeysForbiddenOnMainnet);
@@ -653,33 +638,6 @@ impl ValidatorKeys {
         Ok(())
     }
 
-    /// Load keys from disk and apply the mainnet policy to what came back.
-    ///
-    /// [`ValidatorKeys::validate_mainnet_disk_policy`] existed, was tested,
-    /// and no production path ever called it. A rule nothing reaches is not a
-    /// weaker rule than one that fires, it is a comment: the callers in
-    /// `main.rs` each re-derived their own version of it, one of them left the
-    /// network out entirely, and the disagreement was invisible because there
-    /// was no single place the answer came from.
-    ///
-    /// This is that place. Callers say which network they are on and get keys
-    /// that are legal for it, or an error. Anyone who needs the raw bytes can
-    /// still call [`ValidatorKeys::load`], but they are now choosing to, in a
-    /// line that says so.
-    ///
-    /// # Errors
-    ///
-    /// Whatever [`ValidatorKeys::load`] returns, or
-    /// [`CryptoError::PlaintextDiskKeysForbiddenOnMainnet`] when the file is
-    /// legal to read and illegal to use on this network.
-    pub fn load_for_network<P: AsRef<Path>>(
-        path: P,
-        is_mainnet: bool,
-    ) -> Result<Self, CryptoError> {
-        let keys = Self::load(path)?;
-        keys.validate_mainnet_disk_policy(is_mainnet)?;
-        Ok(keys)
-    }
 }
 impl KeyPair {
     pub fn generate() -> Result<Self, CryptoError> {
@@ -737,6 +695,9 @@ impl KeyPair {
         tracing::debug!("Keypair saved to {:?}", path.as_ref());
         Ok(())
     }
+    /// Test-only: production code must not read the raw ed25519 seed
+    /// (F18 keeps the surface minimal; tests use it for round-trips).
+    #[cfg(test)]
     pub fn private_key_bytes(&self) -> [u8; SECRET_KEY_LENGTH] {
         *self.signing_key.as_bytes()
     }
@@ -845,6 +806,7 @@ pub fn classify_pq_signature_len(len: usize) -> PqSignatureClass {
 /// `pq_signature_acceptability_agrees_with_classification` proves this never
 /// disagrees with [`classify_pq_signature_len`].
 #[must_use]
+#[cfg(test)]
 pub fn pq_signature_len_acceptable(len: usize, expected: PqSignatureClass) -> bool {
     match expected {
         PqSignatureClass::Dilithium5 => len == PQ_DILITHIUM5_SIGNATURE_LEN,
@@ -1140,43 +1102,91 @@ mod tests {
     }
     #[test]
     fn test_save_and_load() {
+        // BLG-0053 (F17): a fixed /tmp path is shared between parallel test
+        // processes; every run gets its own tempdir now.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_budlum_key");
         let kp = KeyPair::generate().unwrap();
-        let path = "/tmp/test_budlum_key";
-        kp.save(path).unwrap();
-        let loaded = KeyPair::load(path).unwrap();
+        kp.save(&path).unwrap();
+        let loaded = KeyPair::load(&path).unwrap();
         assert_eq!(kp.public_key_bytes(), loaded.public_key_bytes());
         let msg = b"test";
         assert_eq!(kp.sign(msg), loaded.sign(msg));
-        std::fs::remove_file(path).ok();
     }
 }
 
-/// (security audit §7) the public-key hex must NOT
-/// Be printed to stdout by `KeyPair::generate`. We can't
-/// Directly observe `println!` from a unit test (it goes to
-/// The captured test stdout which cargo doesn't surface),
-/// But we can pin the contract that the function returns
-/// Silently and the public key is recoverable only through
-/// The public_key accessor - proving the API never needed
-/// The println. This is the regression guard for the
-/// Security-relevant side-channel removal.
+/// Does the captured stdout contain a run of 64 hex characters?
+fn stdout_has_64_hex_run(stdout: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stdout);
+    let bytes = text.as_bytes();
+    let is_hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b.to_ascii_lowercase());
+    let mut run = 0usize;
+    for &b in bytes {
+        if is_hex(b) {
+            run += 1;
+            if run >= 64 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+/// (security audit §7) the public-key hex must NOT be printed to stdout by
+/// `KeyPair::generate`.
+///
+/// BLG-0053 (F17): the old test claimed to capture stdout but never did. The
+/// check now runs `generate` inside a child process whose raw stdout is
+/// fully captured, so any printed 64-hex public key is observable. A canary
+/// test proves the detector itself works (red-green).
 #[test]
 fn keypair_generate_does_not_leak_public_key_via_println() {
-    // Capture stdout for the duration of `generate`. If
-    // Anything is printed that contains the public key hex
-    // (128 hex chars), the security boundary is broken.
-    let kp = KeyPair::generate().expect("KeyPair::generate must succeed");
-    // The public key is accessible via the typed accessor;
-    // The only way an attacker can recover it is by reading
-    // Process stdout. With `println!` removed (replaced by
-    // `tracing::debug!`), nothing is written to stdout by
-    // Default, so the public key stays in-process.
-    let pk_bytes = kp.public_key_bytes();
-    assert_eq!(pk_bytes.len(), 32, "ed25519 public key is 32 bytes");
-    // Round-trip: serialize and re-import - proves the API
-    // Is complete without the println.
-    let hex_pk = hex::encode(pk_bytes);
-    assert_eq!(hex_pk.len(), 64, "hex-encoded pubkey is 64 chars");
+    match std::env::var("BUDLUM_STDOUT_PROBE").as_deref() {
+        Ok("child") => {
+            let _kp = KeyPair::generate().expect("KeyPair::generate must succeed");
+        }
+        Ok("canary") => {
+            let canary = std::env::var("BUDLUM_STDOUT_CANARY").expect("canary hex");
+            println!("{canary}");
+        }
+        _ => {
+            let exe = std::env::current_exe().expect("test binary path");
+            let run_probe = |mode: &str| {
+                std::process::Command::new(&exe)
+                    .args([
+                        "keypair_generate_does_not_leak_public_key_via_println",
+                        "--exact",
+                        "--nocapture",
+                    ])
+                    .env("BUDLUM_STDOUT_PROBE", mode)
+                    .output()
+                    .expect("spawn probe")
+            };
+            let out = run_probe("child");
+            assert!(
+                !stdout_has_64_hex_run(&out.stdout),
+                "KeyPair::generate printed a public key to stdout"
+            );
+            // Canary: the same detector must see hex that IS printed.
+            let canary = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+            let out = std::process::Command::new(&exe)
+                .args([
+                    "keypair_generate_does_not_leak_public_key_via_println",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env("BUDLUM_STDOUT_PROBE", "canary")
+                .env("BUDLUM_STDOUT_CANARY", canary)
+                .output()
+                .expect("spawn canary");
+            assert!(
+                stdout_has_64_hex_run(&out.stdout),
+                "the stdout detector must see a printed public key (canary)"
+            );
+        }
+    }
 }
 
 #[test]

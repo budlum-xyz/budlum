@@ -48,12 +48,15 @@ fn l3_code_path_roundtrips() {
 
 #[test]
 fn signature_wire_size_matches_the_cost_model() {
-    // L5: 4 (epoch) + 67*32 (chains) + 16*32 (path) = 2660 ≈ 2.7 KB.
-    let bytes = 4 + ParamsL5::LEN * 32 + ParamsL5::T_LOG2 * 32;
-    assert_eq!(bytes, 2660, "L5 wire sketch drifted");
+    // BLG-0053 (F17): the sketch must count every serialized field —
+    // epoch 4 + randomizer 16 + LEN*32 chains + T_LOG2*32 path. The old
+    // formula omitted the randomizer (2660) and disagreed with
+    // SECURITY-ARGUMENT.md's 2676.
+    let bytes = 4 + 16 + ParamsL5::LEN * 32 + ParamsL5::T_LOG2 * 32;
+    assert_eq!(bytes, 2676, "L5 wire sketch drifted");
     assert!(bytes < 3200, "research-doc claim: sig stays ≈2.7-3.2 KB");
-    let bytes_l3 = 4 + ParamsL3::LEN * 32 + ParamsL3::T_LOG2 * 32;
-    assert_eq!(bytes_l3, 2148);
+    let bytes_l3 = 4 + 16 + ParamsL3::LEN * 32 + ParamsL3::T_LOG2 * 32;
+    assert_eq!(bytes_l3, 2164);
 }
 
 #[test]

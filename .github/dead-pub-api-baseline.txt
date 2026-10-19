@@ -117,8 +117,6 @@ src/crypto/pkcs11.rs:pq_signing_available
 src/crypto/pkcs11.rs:store_bls_key
 src/crypto/pkcs11.rs:store_pq_key
 src/crypto/primitives.rs:devnet_default
-src/crypto/primitives.rs:load_for_network
-src/crypto/primitives.rs:mainnet_default
 src/crypto/primitives.rs:private_key_bytes
 src/crypto/signer.rs:with_bls
 src/crypto/signer.rs:with_pq
