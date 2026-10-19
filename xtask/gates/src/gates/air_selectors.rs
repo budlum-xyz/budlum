@@ -214,6 +214,43 @@ fn isa_name_for(selector: &str, opcodes: &[(String, u32)]) -> Option<String> {
         .map(|(n, _)| n.clone())
 }
 
+fn check_selectors(
+    selectors: &[String],
+    opcodes: &[(String, u32)],
+    bound: &std::collections::HashMap<String, u32>,
+    problems: &mut Vec<String>,
+) {
+    let mut selectors_sorted = selectors.to_vec();
+    selectors_sorted.sort();
+    for sel in &selectors_sorted {
+        let Some(isa_name) = isa_name_for(sel, opcodes) else {
+            problems.push(format!(
+                "selector COL_IS_{sel} matches no opcode in the ISA - either the \
+                 opcode was removed and the column is dead, or it is misspelled"
+            ));
+            continue;
+        };
+        let opcode_val = opcodes
+            .iter()
+            .find(|(n, _)| n == &isa_name)
+            .map_or(0, |(_, v)| *v);
+        if !bound.contains_key(sel) {
+            problems.push(format!(
+                "selector COL_IS_{sel} (opcode {isa_name} = 0x{opcode_val:02X}) is not in \
+                 the binding sum - a row carrying any other opcode could set it"
+            ));
+            continue;
+        }
+        if bound[sel] != opcode_val {
+            problems.push(format!(
+                "selector COL_IS_{sel} is bound to 0x{:02X} but \
+                 {isa_name} encodes to 0x{opcode_val:02X}",
+                bound[sel]
+            ));
+        }
+    }
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -267,35 +304,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             "selector COL_IS_{sel} appears in the binding sum with two different opcodes"
         ));
     }
-    let mut selectors_sorted = selectors.clone();
-    selectors_sorted.sort();
-    for sel in &selectors_sorted {
-        let Some(isa_name) = isa_name_for(sel, &opcodes) else {
-            problems.push(format!(
-                "selector COL_IS_{sel} matches no opcode in the ISA - either the \
-                 opcode was removed and the column is dead, or it is misspelled"
-            ));
-            continue;
-        };
-        let opcode_val = opcodes
-            .iter()
-            .find(|(n, _)| n == &isa_name)
-            .map_or(0, |(_, v)| *v);
-        if !bound.contains_key(sel) {
-            problems.push(format!(
-                "selector COL_IS_{sel} (opcode {isa_name} = 0x{opcode_val:02X}) is not in \
-                 the binding sum - a row carrying any other opcode could set it"
-            ));
-            continue;
-        }
-        if bound[sel] != opcode_val {
-            problems.push(format!(
-                "selector COL_IS_{sel} is bound to 0x{:02X} but \
-                 {isa_name} encodes to 0x{opcode_val:02X}",
-                bound[sel]
-            ));
-        }
-    }
+    check_selectors(&selectors, &opcodes, bound, &mut problems);
 
     // Direction 2: every opcode must have a selector.
     let selector_isa_names: Vec<String> = selectors

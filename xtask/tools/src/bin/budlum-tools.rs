@@ -55,6 +55,29 @@ fn usage() -> String {
         .to_string()
 }
 
+/// Run every tool's canary and exit non-zero when one falls.
+fn run_self_tests() {
+    let mut failed = 0usize;
+    for (name, result) in [
+        ("seed-corpus", seed_corpus::self_test()),
+        ("devnet", devnet::self_test()),
+        ("backup-drill", backup_drill::self_test()),
+        ("pre-push", prepush::self_test()),
+    ] {
+        match result {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("FAIL [{name}]: {e}");
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        eprintln!("\n{failed} canaries fell.");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -113,25 +136,7 @@ fn main() {
         // between "returned 0" and "never ran"; the `--self-test` pattern of the
         // gates crate holds here too.
         Some(&"--self-test") => {
-            let mut failed = 0usize;
-            for (name, result) in [
-                ("seed-corpus", seed_corpus::self_test()),
-                ("devnet", devnet::self_test()),
-                ("backup-drill", backup_drill::self_test()),
-                ("pre-push", prepush::self_test()),
-            ] {
-                match result {
-                    Ok(msg) => println!("{msg}"),
-                    Err(e) => {
-                        eprintln!("FAIL [{name}]: {e}");
-                        failed += 1;
-                    }
-                }
-            }
-            if failed > 0 {
-                eprintln!("\n{failed} canaries fell.");
-                std::process::exit(1);
-            }
+            run_self_tests();
             return;
         }
         Some(&"pre-push") => prepush::ensure_components(&root).and_then(|()| prepush::run(&root)),

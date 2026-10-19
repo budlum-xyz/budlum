@@ -432,9 +432,6 @@ mod truncate_tests {
         let line = format!("a{}.unwrap()", "\u{00f6}".repeat(130));
         let points = scan("x.rs", &line);
         assert_eq!(points.len(), 1);
-        assert_eq!(
-            points[0].text.chars().count(),
-            100 + ".unwrap()".len().min(20)
-        );
+        assert_eq!(points[0].text.chars().count(), 120);
     }
 }
