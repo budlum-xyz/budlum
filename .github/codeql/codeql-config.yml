@@ -58,7 +58,6 @@ paths-ignore:
   - "**/*.test.rs"
   - benches/**
   - fuzz/**
-  - budzero/**
   - examples/**
   - scripts/**
   - proto/**
