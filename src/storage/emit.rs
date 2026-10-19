@@ -93,7 +93,7 @@ pub const MAX_PREVIEW_CONTENT_BYTES: usize = 1 << 20;
 /// `ONESHOT_REPAIR_PERMILLAGE`, and a policy field that a stage ignores is a
 /// lie a caller would pay for. The margin the encode used is reported back in
 /// [`FeedPreview`] instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EmitPolicy {
     /// A2 source block length.
     pub block_len: u16,
@@ -107,6 +107,20 @@ pub struct EmitPolicy {
     pub seal_seed: Option<[u8; 32]>,
     /// Frames one burst may return. A burst is a screenful, not a download.
     pub max_burst_frames: u32,
+}
+
+/// The seal seed is the payload key, so Debug names whether one is set and
+/// never prints it.
+impl core::fmt::Debug for EmitPolicy {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EmitPolicy")
+            .field("block_len", &self.block_len)
+            .field("fps", &self.fps)
+            .field("meter_budget", &self.meter_budget)
+            .field("seal_seed", &self.seal_seed.map(|_| "[redacted]"))
+            .field("max_burst_frames", &self.max_burst_frames)
+            .finish()
+    }
 }
 
 impl Default for EmitPolicy {
@@ -1491,6 +1505,17 @@ pub fn qr_feed_frames_burst(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn debug_of_the_emit_policy_never_prints_the_seal_seed() {
+        let policy = EmitPolicy {
+            seal_seed: Some([0xAB; 32]),
+            ..EmitPolicy::default()
+        };
+        let text = format!("{policy:?}");
+        assert!(text.contains("[redacted]"), "{text}");
+        assert!(!text.to_lowercase().contains("ab, ab"), "{text}");
+    }
+
     use super::*;
     use crate::storage::qr_payload::pack_payload;
 
