@@ -389,6 +389,35 @@ impl SealedGeneratedSpec {
         }
     }
 
+    /// The same public ceilings a public recipe meets in `generate_content`,
+    /// applied to the fields a sealed recipe exposes. The seed is off chain so
+    /// nothing can run, but an absurd `output_len` or `step_budget` can still
+    /// be refused from the public fields alone.
+    ///
+    /// # Errors
+    ///
+    /// A reason string when a public field is over its ceiling.
+    pub fn check_public_bounds(&self) -> Result<(), String> {
+        if self.output_len == 0 {
+            return Err("sealed recipe output_len must be non-zero".into());
+        }
+        if self.output_len > MAX_GENERATED_BYTES {
+            return Err(format!(
+                "sealed recipe output_len {} is over the {MAX_GENERATED_BYTES} byte ceiling",
+                self.output_len
+            ));
+        }
+        let ceiling = STEP_BUDGET_BASE
+            .saturating_add(self.output_len.saturating_mul(MAX_STEPS_PER_OUTPUT_BYTE));
+        if self.step_budget > ceiling {
+            return Err(format!(
+                "sealed recipe step_budget {} is over the ceiling {ceiling}",
+                self.step_budget
+            ));
+        }
+        Ok(())
+    }
+
     /// # Errors
     ///
     /// Mismatch when the candidate seed/spec does not open this commitment,
@@ -953,6 +982,26 @@ fn draw_rings(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>, G
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P28-F08: public fields of a sealed recipe are bounded like a public one.
+    #[test]
+    fn sealed_public_fields_are_bounded() {
+        let mut ok = SealedGeneratedSpec {
+            generator: GeneratorId::Gradient,
+            output_len: 3072,
+            step_budget: 4096,
+            recipe_commitment: [1u8; 32],
+        };
+        assert!(ok.check_public_bounds().is_ok());
+        ok.output_len = u32::MAX;
+        assert!(ok.check_public_bounds().is_err());
+        ok.output_len = 3072;
+        ok.step_budget = u32::MAX;
+        assert!(ok.check_public_bounds().is_err());
+        ok.step_budget = 0;
+        ok.output_len = 0;
+        assert!(ok.check_public_bounds().is_err());
+    }
 
     fn spec(gen: GeneratorId, seed: u8, len: u32, budget: u32) -> GeneratedSpec {
         GeneratedSpec {
