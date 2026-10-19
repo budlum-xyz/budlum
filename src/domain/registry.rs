@@ -297,7 +297,32 @@ impl ConsensusDomainRegistry {
     }
 }
 
+/// A domain with a zk program allowlist or a committed plugin code hash gets a V4 leaf that
+/// mixes both in. Other domains keep their earlier leaf byte for byte.
 pub fn domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
+    let base = base_domain_leaf_hash(domain);
+    if domain.zk_program_allowlist.is_empty() && domain.plugin_code_hash.is_none() {
+        return base;
+    }
+    let mut allowlist = domain.zk_program_allowlist.clone();
+    allowlist.sort();
+    allowlist.dedup();
+    let mut allowlist_bytes = Vec::new();
+    for program in &allowlist {
+        allowlist_bytes.extend_from_slice(program);
+    }
+    let plugin = domain.plugin_code_hash.unwrap_or_default();
+    hash_fields_bytes(&[
+        b"BDLM_DOMAIN_REGISTRY_LEAF_V4",
+        &base,
+        &(allowlist.len() as u64).to_le_bytes(),
+        &allowlist_bytes,
+        &[u8::from(domain.plugin_code_hash.is_some())],
+        &plugin,
+    ])
+}
+
+fn base_domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
     let kind = domain.kind.as_bytes();
     let status = match domain.status {
         DomainStatus::Active => b"active".as_slice(),
@@ -388,6 +413,20 @@ mod tests {
     use super::*;
     use crate::domain::plugin::default_domain;
     use crate::domain::types::ConsensusKind;
+
+    #[test]
+    fn the_leaf_commits_to_the_zk_allowlist_and_plugin_hash() {
+        let plain = default_domain(2, ConsensusKind::PoS, 1338, "pos", 0);
+        let mut listed = plain.clone();
+        listed.zk_program_allowlist = vec![[7u8; 32]];
+        let mut pinned = plain.clone();
+        pinned.plugin_code_hash = Some([9u8; 32]);
+        let plain_leaf = domain_leaf_hash(&plain);
+        assert_eq!(plain_leaf, base_domain_leaf_hash(&plain));
+        assert_ne!(domain_leaf_hash(&listed), plain_leaf);
+        assert_ne!(domain_leaf_hash(&pinned), plain_leaf);
+        assert_ne!(domain_leaf_hash(&listed), domain_leaf_hash(&pinned));
+    }
 
     #[test]
     fn a_domain_cannot_register_as_frozen_or_retired() {
