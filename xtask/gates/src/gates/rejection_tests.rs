@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates/wallet-core"];
 
 /// Substrings that make a function name promise a refusal (the shell
 /// PROMISE regex, precomputed).
@@ -479,5 +479,18 @@ mod tests {
         assert!(has_negative("assert_eq!(score, 0);"));
         assert!(!has_negative("assert_eq!(chain.len(), 3);"));
         assert!(!has_negative("let x = 1;"));
+    }
+}
+
+#[cfg(test)]
+mod scan_root_tests {
+    use super::*;
+
+    #[test]
+    fn every_scan_root_exists() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for r in SCAN_ROOTS {
+            assert!(repo.join(r).is_dir(), "missing scan root {r}");
+        }
     }
 }
