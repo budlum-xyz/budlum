@@ -30,6 +30,40 @@ fn mentions_byte_unit(text: &str) -> bool {
         || lower.contains("billed in bytes")
 }
 
+/// True when `needle` appears in `text` as a whole number, not inside a longer
+/// one such as `1447` or `447.5`.
+fn has_number(text: &str, needle: &str) -> bool {
+    let b = text.as_bytes();
+    let numeric = |c: u8| c.is_ascii_digit() || c == b'.' || c == b',';
+    text.match_indices(needle).any(|(at, _)| {
+        let before = at.checked_sub(1).and_then(|i| b.get(i)).copied();
+        let after = b.get(at + needle.len()).copied();
+        let after_ok = match after {
+            None => true,
+            Some(c) => {
+                !numeric(c)
+                    || (c == b'.' || c == b',')
+                        && !b.get(at + needle.len() + 1).is_some_and(u8::is_ascii_digit)
+            }
+        };
+        !before.is_some_and(numeric) && after_ok
+    })
+}
+
+/// The first paragraph that states a share in one unit with an explicit
+/// phrase and never names the other unit.
+fn one_unit_paragraph(text: &str) -> Option<String> {
+    text.split("\n\n").find_map(|para| {
+        let lower = para.to_lowercase();
+        let obj = lower.contains("% of files") || lower.contains("% of objects");
+        let byt = lower.contains("% of bytes") || lower.contains("% of volume");
+        let has_obj = obj || lower.contains("share of files") || lower.contains("share of objects");
+        let has_byt = byt || lower.contains("share of bytes") || lower.contains("share of volume");
+        ((obj && !has_byt) || (byt && !has_obj))
+            .then(|| para.lines().next().unwrap_or("").to_string())
+    })
+}
+
 /// Parse the JSON row of the corpus table: `| JSON ... | <files_pct> | <bytes_pct> | ...`.
 fn json_row_ratio(text: &str) -> Option<(f64, f64)> {
     let line = text
@@ -85,6 +119,13 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
 
+    if let Some(first) = one_unit_paragraph(&text) {
+        return Err(format!(
+            "{DOC} has a paragraph that states a share in one unit only, starting: {first}\n  \
+             Every claim names both files and bytes."
+        ));
+    }
+
     if !text.contains("10.1145/3656015") {
         return Err(String::from(
             "the corpus composition measurement has no citation in the roadmap.\n  \
@@ -93,7 +134,7 @@ pub fn run(root: &Path) -> Result<String, String> {
              the numbers has nothing to check them against.",
         ));
     }
-    if !text.contains("447") {
+    if !has_number(&text, "447") {
         return Err(String::from(
             "the roadmap no longer records the size of the discrepancy.\n  \
              447 is the factor between the two units for one class, and it is the whole\n  \
@@ -143,6 +184,17 @@ pub fn self_test() -> Result<String, String> {
     if run(&dir).is_ok() {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a single object-unit claim passed"));
+    }
+    // A single-unit claim in its own paragraph, and a number that only contains 447.
+    let para = format!("{good}\n40.2% of files are small.\n");
+    std::fs::write(dir.join(DOC), para).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: a single-unit paragraph passed"));
+    }
+    if has_number("factor 1447 here", "447") || !has_number("factor 447.", "447") {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: number matching is not exact"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
