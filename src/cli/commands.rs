@@ -991,9 +991,12 @@ impl NodeConfig {
             self.role = role;
         }
         if let Ok(chain_id) = std::env::var("BUDLUM_CHAIN_ID") {
-            if let Ok(id) = chain_id.parse::<u64>() {
-                self.chain_id = Some(id);
-            }
+            // A bad value must stop the node: ignoring it would skip the chain id check.
+            let id = parse_env_chain_id(&chain_id).unwrap_or_else(|error| {
+                eprintln!("CRITICAL: invalid BUDLUM_CHAIN_ID: {error}");
+                std::process::exit(1);
+            });
+            self.chain_id = Some(id);
         }
         if let Ok(db) = std::env::var("BUDLUM_DB_PATH") {
             self.db_path = db;
@@ -1295,6 +1298,13 @@ fn parse_env_bool(value: &str) -> Result<bool, String> {
     }
 }
 
+fn parse_env_chain_id(value: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("expected an unsigned integer, got '{value}': {error}"))
+}
+
 fn canonical_signer_backend(value: &str) -> Result<String, String> {
     match value {
         "local" => Ok("local".to_string()),
@@ -1543,6 +1553,13 @@ mod tests {
         assert_eq!(parse_env_bool("true"), Ok(true));
         assert_eq!(parse_env_bool("OFF"), Ok(false));
         assert!(parse_env_bool("typo").is_err());
+    }
+
+    #[test]
+    fn chain_id_environment_parser_refuses_a_bad_value() {
+        assert_eq!(parse_env_chain_id(" 7 "), Ok(7));
+        assert!(parse_env_chain_id("main").is_err());
+        assert!(parse_env_chain_id("").is_err());
     }
 
     #[test]
