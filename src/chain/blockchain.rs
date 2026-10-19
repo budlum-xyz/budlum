@@ -1336,6 +1336,19 @@ impl Blockchain {
         crate::consensus::pos::slashing_evidence_is_valid(evidence)
     }
 
+    /// Evidence a block carries is applied by every engine, so every engine
+    /// must refuse a block whose evidence does not verify.
+    fn check_block_slashing_evidence(block: &Block) -> Result<(), String> {
+        if let Some(evidences) = &block.slashing_evidence {
+            for (i, evidence) in evidences.iter().enumerate() {
+                if !Self::verify_slashing_evidence(evidence) {
+                    return Err(format!("Invalid slashing evidence #{i}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_consensus_domain_registration(domain: &ConsensusDomain) -> Result<(), String> {
         if domain.id == 0 {
             return Err("Consensus domain id 0 is reserved".into());
@@ -5600,6 +5613,7 @@ impl Blockchain {
         {
             return Err(format!("Consensus validation failed: {e}"));
         }
+        Self::check_block_slashing_evidence(&block)?;
 
         // Validate transactions against current state before applying
         let mut temp_state = self.state.clone();
@@ -5822,6 +5836,8 @@ impl Blockchain {
                         block.index, error
                     )
                 })?;
+            Self::check_block_slashing_evidence(block)
+                .map_err(|e| format!("Candidate block {} refused: {e}", block.index))?;
 
             let mut projected = state.clone();
             projected.current_block_height = block.index;
@@ -7875,6 +7891,21 @@ mod tests {
             sig1,
             sig2,
         )
+    }
+
+    #[test]
+    fn a_block_with_unverifiable_evidence_is_refused_by_every_engine() {
+        let keys = crate::crypto::primitives::ValidatorKeys::generate().unwrap();
+        let mut evidence = double_sign_evidence(&keys, 10);
+        let mut block = Block::new(11, "prev".into(), vec![]);
+        block.slashing_evidence = Some(vec![evidence.clone()]);
+        assert!(Blockchain::check_block_slashing_evidence(&block).is_ok());
+
+        evidence.signature1[0] ^= 0xFF;
+        block.slashing_evidence = Some(vec![evidence]);
+        let err = Blockchain::check_block_slashing_evidence(&block)
+            .expect_err("a forged signature must be refused");
+        assert!(err.contains("Invalid slashing evidence"), "{err}");
     }
 
     /// BLG-0018: double-sign evidence signed for another chain id must not
