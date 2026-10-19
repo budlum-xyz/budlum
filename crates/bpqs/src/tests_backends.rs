@@ -45,7 +45,7 @@ const MSG: &[u8] = b"bpqs-backend-differential-payload";
 fn roundtrip<H: BpqsHash, P: BpqsParams>() {
     let mut signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen {}: {e}", P::NAME));
-    let Nonesig = signer
+    let sig = signer
         .sign_at_height(1, MSG)
         .unwrap_or_else(|e| panic!("sign {}: {e}", P::NAME));
     verify_at_height::<H, P>(signer.public(), 1, MSG, &sig)
@@ -55,7 +55,7 @@ fn roundtrip<H: BpqsHash, P: BpqsParams>() {
 fn tamper_refuses<H: BpqsHash, P: BpqsParams>() {
     let mut signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
-    let Nonesig = signer
+    let sig = signer
         .sign_at_height(2, MSG)
         .unwrap_or_else(|e| panic!("sign: {e}"));
     let mut chain_tamper = sig.clone();
@@ -135,7 +135,7 @@ fn epoch_replay_refuses<H: BpqsHash, P: BpqsParams>() {
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     // Epoch window is 3, so heights 0..2 are epoch 0 and height 3 is epoch
     // 1: verifying the epoch-0 signature at height 3 must refuse.
-    let Nonesig = signer
+    let sig = signer
         .sign_at_height(0, MSG)
         .unwrap_or_else(|e| panic!("sign: {e}"));
     assert!(
@@ -289,7 +289,7 @@ fn kat_compute<H: BpqsHash>() -> ([u8; 32], [u8; 32]) {
         .unwrap_or_else(|e| panic!("kat keygen_root: {e}"));
     let mut signer = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("kat keygen: {e}"));
-    let Nonesig = signer
+    let sig = signer
         .sign_at_height(3, MSG)
         .unwrap_or_else(|e| panic!("kat sign: {e}"));
     (public.root, Sha3_256::digest(wire_bytes(&sig)).into())
