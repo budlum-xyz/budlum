@@ -297,6 +297,18 @@ const BUDGETS: &[Budget] = &[
         reason: "actor-boundary mirrors of the bridge lock/mint entry points; each argument crosses the channel as part of one message and none groups into a meaningful struct, so bundling them would hide which fields a caller must supply",
     },
     Budget {
+        file: "src/cross_domain/bridge.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "the lock arguments are the transfer's parameter set (route, indices, parties, amount, expiry); a struct would mirror them one for one",
+    },
+    Budget {
+        file: "src/cross_domain/bridge_relayer.rs",
+        lint: "clippy::too_many_arguments",
+        count: 1,
+        reason: "the pipeline lock mirrors the bridge lock parameter set one for one",
+    },
+    Budget {
         file: "src/cross_domain/external/registry.rs",
         lint: "clippy::too_many_arguments",
         count: 2,
@@ -538,12 +550,22 @@ fn allows_in(src: &str) -> Vec<String> {
             continue;
         }
         j += 1;
-        let kw: String = chars[j..(j + 6).min(chars.len())].iter().collect();
-        if kw != "allow(" {
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+        let word_start = j;
+        while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '_') {
+            j += 1;
+        }
+        let kw: String = chars[word_start..j].iter().collect();
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+        if (kw != "allow" && kw != "expect") || j >= chars.len() || chars[j] != '(' {
             i += 1;
             continue;
         }
-        j += 6;
+        j += 1;
         // Read to the matching close paren.
         let start = j;
         let mut depth = 1i32;
@@ -559,7 +581,10 @@ fn allows_in(src: &str) -> Vec<String> {
             j += 1;
         }
         let inner: String = chars[start..j.min(chars.len())].iter().collect();
-        for lint in inner.split(',') {
+        let lints = inner
+            .find("reason")
+            .map_or(inner.as_str(), |at| &inner[..at]);
+        for lint in lints.split(',') {
             let l = lint.trim();
             if !l.is_empty() {
                 out.push(l.to_string());
@@ -714,6 +739,13 @@ pub fn self_test() -> Result<String, String> {
     let got = allows_in(src);
     if got != vec!["dead_code", "clippy::all", "unused"] {
         problems.push(format!("BROKEN: allows_in read {got:?}"));
+    }
+    let spelled = "#[ expect (clippy::a,\n    reason = \"x, y\")]\nfn c() {}\n";
+    if allows_in(spelled) != vec!["clippy::a"] {
+        problems.push(format!(
+            "BROKEN: expect or spaced form read {:?}",
+            allows_in(spelled)
+        ));
     }
     if !allows_in("// #[allow(x)] in a comment\n").is_empty() {
         // A comment mentioning one is still text the parser sees; recorded
