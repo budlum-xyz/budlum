@@ -22,6 +22,26 @@ impl CrossDomainMessageRegistry {
         }
     }
 
+    /// Drops messages whose useful life is over (BLG-0114/P05-F07): the
+    /// registry hashes EVERY message into the state root, so a registry
+    /// that never forgets is unbounded per-block cost and unbounded state.
+    /// A message past `expiry_height + retention` can never again be
+    /// consumed (mint/unlock refuse expired messages), so keeping it buys
+    /// nothing - re-registering a dead id is equally dead. Zero-expiry
+    /// messages age from `source_height` instead. Returns the drop count.
+    pub fn prune_expired(&mut self, current_height: u64, retention_blocks: u64) -> usize {
+        let before = self.messages.len();
+        self.messages.retain(|_, m| {
+            let horizon = if m.expiry_height != 0 {
+                m.expiry_height
+            } else {
+                m.source_height
+            };
+            horizon.saturating_add(retention_blocks) > current_height
+        });
+        before - self.messages.len()
+    }
+
     pub fn insert(&mut self, message: CrossDomainMessage) -> Result<(), String> {
         if !message.verify_id() {
             return Err("Invalid message id".into());
@@ -170,5 +190,22 @@ mod tests {
         assert!(registry.insert(make(MAX_CUSTOM_KIND_BYTES + 1)).is_err());
         assert!(registry.is_empty());
         registry.insert(make(MAX_CUSTOM_KIND_BYTES)).unwrap();
+    }
+
+    /// BLG-0114 (P05-F07): expired messages are pruned; live ones stay.
+    #[test]
+    fn expired_messages_are_pruned_and_live_ones_stay() {
+        let mut registry = CrossDomainMessageRegistry::new();
+        let mut old = make(1);
+        old.expiry_height = 10;
+        old.message_id = old.calculate_message_id();
+        let mut fresh = make(2);
+        fresh.expiry_height = 90_000;
+        fresh.message_id = fresh.calculate_message_id();
+        registry.insert(old).unwrap();
+        registry.insert(fresh).unwrap();
+        let dropped = registry.prune_expired(100_000, 1_000);
+        assert_eq!(dropped, 1);
+        assert_eq!(registry.len(), 1);
     }
 }

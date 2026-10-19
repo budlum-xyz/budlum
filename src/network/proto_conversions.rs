@@ -833,6 +833,8 @@ fn convert_proto_to_relayer_result(
                 .map_err(|e| format!("Invalid message recipient: {e}"))?,
             payload_hash,
             kind,
+            sender_public_key: Vec::new(),
+            sender_signature: Vec::new(),
             expiry_height: p_msg.expiry_height,
         })
     } else {
