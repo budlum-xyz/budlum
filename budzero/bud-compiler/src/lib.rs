@@ -943,6 +943,29 @@ mod tests {
         .expect("matching storage access compiles");
     }
 
+    /// P35-F24: with two fields missing, the error names the same one on
+    /// every run (the first in name order).
+    #[test]
+    fn missing_field_error_is_deterministic() {
+        let source = r#"
+            contract M {
+                struct S { delta: u64, alpha: u64, gamma: u64, beta: u64 }
+                pub fn main() {
+                    let s = S { gamma: 1 };
+                    emit E(s.gamma);
+                }
+            }
+        "#;
+        for _ in 0..8 {
+            match compile(source, IsaProfile::Production) {
+                Err(CompileError::SemanticError(msg)) => {
+                    assert!(msg.ends_with("missing field alpha"), "got: {msg}")
+                }
+                other => panic!("a partial literal must be refused, got {other:?}"),
+            }
+        }
+    }
+
     /// P35-F16: a function with a result must return on every path, and
     /// `main` cannot take parameters.
     #[test]

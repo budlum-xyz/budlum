@@ -781,7 +781,10 @@ impl SemanticAnalyzer {
                     // Every field (mirrors Rust's exhaustive struct
                     // Literals; a future `..default` could relax this
                     // Explicitly).
-                    for fname in sfields.keys() {
+                    // Sorted, so the first error is the same on every run.
+                    let mut declared: Vec<&String> = sfields.keys().collect();
+                    declared.sort();
+                    for fname in declared {
                         if !fields.iter().any(|(provided, _)| provided == fname) {
                             errors.push(CompileError::SemanticError(format!(
                                 "Struct {} literal is missing field {}",
