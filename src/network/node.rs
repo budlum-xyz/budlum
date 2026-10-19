@@ -2446,6 +2446,12 @@ impl Node {
                                                    let mut pm = self.peer_manager_lock();
                                                    pm.report_invalid_tx(&peer_id);
                                                }
+                                               // Dropped for the sender's state, not for the
+                                               // content: an honest copy must stay new.
+                                               self.gossip_dedup
+                                                   .lock()
+                                                   .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                                   .forget(&message.data);
                                                self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
                                                continue;
                                            }
