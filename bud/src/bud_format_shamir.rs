@@ -122,8 +122,12 @@ impl ShamirShare {
         let gf = Gf8::new();
         let chosen = &shares[..k];
         // Every share has to be 32 bytes.
-        for (_, v) in chosen {
+        for (x, v) in chosen {
             if v.len() != 32 {
+                return None;
+            }
+            // x = 0 is the secret's own point; split never hands it out.
+            if *x == 0 {
                 return None;
             }
         }
@@ -170,6 +174,16 @@ impl ShamirShare {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combine_refuses_a_share_at_x_zero_or_a_repeated_x() {
+        let secret = [0x11u8; 32];
+        let shares = ShamirShare::split(&secret, 2, 3).unwrap();
+        let zero = [(0u8, shares[0].1.clone()), shares[1].clone()];
+        assert!(ShamirShare::combine(&zero, 2).is_none());
+        let twice = [shares[0].clone(), shares[0].clone()];
+        assert!(ShamirShare::combine(&twice, 2).is_none());
+    }
 
     #[test]
     fn split_combine_roundtrip() {
