@@ -527,17 +527,18 @@ mod rpc_tests {
             .get_transaction_receipt(hex_tx_hash.clone())
             .await
             .unwrap();
-        error_to_json_result(server.get_transaction_receipt(hex_tx_hash.clone()).await);
+        // A second read of the same pending receipt answers the same way.
+        let again = server
+            .get_transaction_receipt(hex_tx_hash.clone())
+            .await
+            .expect("a pending receipt query must not error");
+        assert_eq!(again, receipt);
         println!(
             "bud_getTransactionReceipt (pending): {}",
             serde_json::to_string_pretty(&receipt).unwrap()
         );
 
         assert!(receipt.is_null());
-    }
-
-    fn error_to_json_result<T>(res: Result<T, jsonrpsee::types::error::ErrorObjectOwned>) {
-        let _ = res;
     }
 
     #[tokio::test]
@@ -551,6 +552,10 @@ mod rpc_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), -32602);
+        assert!(
+            !err.message().is_empty(),
+            "an invalid-params refusal must carry a reason"
+        );
         println!("Error Case (Invalid Params): {err}");
     }
 
