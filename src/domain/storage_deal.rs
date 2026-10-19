@@ -4199,6 +4199,26 @@ impl StorageRegistry {
             .map(|d| (d.deal_id, d.operator, d.economics.operator_bond))
             .collect();
 
+        // BLG-0365 (P24-F06): an open retrieval challenge is a live question
+        // about these exact bytes. Pruning under it would expire the deal,
+        // `finalize_missed_challenge` would then refuse with DealNotActive,
+        // and the challenge would never close - the opener's bond stuck, the
+        // slash that the challenge was raised for never applied. The prune is
+        // refused whole (not partial: a half-pruned manifest leaves live deals
+        // referencing a dictionary that no longer exists); the next epoch's
+        // maintenance pass prunes once finalize has run.
+        for (deal_id, _, _) in &deals {
+            let retrieval_open = self.challenges.iter().any(|(id, challenge)| {
+                challenge.deal_id == *deal_id && !self.results.contains_key(id)
+            });
+            let coding_open = self.coding_audits.values().any(|audit| {
+                audit.deal_id == *deal_id && audit.outcome == CodingAuditOutcome::Open
+            });
+            if retrieval_open || coding_open {
+                return (0, Vec::new());
+            }
+        }
+
         let pruned = deals.len() as u64;
         let mut bond_returns: Vec<(Address, u64)> = Vec::new();
         for (deal_id, operator, bond) in deals {
@@ -6683,6 +6703,59 @@ mod tests {
         let blob = bincode::serialize(&envelope).expect("test envelope serialize");
         let err = StorageRegistry::validate_merkle_proof_format(&blob, &[0u8; 32]).unwrap_err();
         assert!(matches!(err, StorageError::InvalidMerkleProof(_)));
+    }
+
+    /// BLG-0365 (P24-F06): prune defers while a retrieval challenge is open
+    /// on one of the deals, and proceeds once the challenge has been
+    /// finalized (the deal leaves Active with it).
+    #[test]
+    fn prune_defers_while_a_retrieval_challenge_is_open() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let manifest_id = m.manifest_id;
+        let shard_id = m.shards[0].shard_id;
+        let deal_id = reg
+            .open_deal(
+                42,
+                &m,
+                shard_id,
+                operator(),
+                0,
+                100,
+                200,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        let challenger = Address::from([0xC0u8; 32]);
+        let challenge_id = reg
+            .open_challenge(
+                deal_id, 0, 8, 140, 160, challenger,
+                StorageRegistry::required_opener_bond(8),
+            )
+            .expect("a funded challenge opens");
+
+        let (pruned, bonds) = reg.prune_content(&manifest_id, 150);
+        assert_eq!(pruned, 0, "no pruning under an open challenge");
+        assert!(bonds.is_empty());
+        assert!(reg.get_manifest(&manifest_id).is_some(), "manifest stays live");
+        assert_eq!(
+            reg.get_deal(deal_id).map(|d| d.status),
+            Some(DealStatus::Active),
+            "the challenged deal must keep serving the answer window"
+        );
+
+        let closed = reg.finalize_missed_challenge(challenge_id, 161);
+        assert!(closed.is_ok(), "the open challenge finalizes: {closed:?}");
+        let (pruned_after, bonds_after) = reg.prune_content(&manifest_id, 162);
+        assert_eq!(pruned_after, 0, "the slashed deal is no longer active");
+        assert!(bonds_after.is_empty(), "a slashed operator is not refunded");
+        assert!(
+            reg.get_manifest(&manifest_id).is_none(),
+            "with the challenge closed, the manifest prunes"
+        );
     }
 
     #[test]
