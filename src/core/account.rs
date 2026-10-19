@@ -274,6 +274,9 @@ pub struct AccountState {
     pub tokenomics: crate::tokenomics::TokenomicsParams,
     /// State of the timed (annual) reserve burn.
     pub timed_burn: crate::tokenomics::TimedBurnState,
+    /// Lifetime total removed from supply by `burn_from`. Burned BUD must not
+    /// reopen mint headroom, so issuance is committed supply plus this total.
+    pub burned_total: u64,
     pub bns_registry: crate::bns::BnsRegistry,
     pub nft_registry: crate::socialfi::NftRegistry,
     /// Identity registry (`did:bud`): DID records, credential commitments and
@@ -469,6 +472,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
             proof_market: crate::settlement::ProofMarketState::new(),
@@ -527,6 +531,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
             proof_market: crate::settlement::ProofMarketState::new(),
@@ -594,6 +599,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: crate::registry::PoaComplianceRegistry::new(),
+            burned_total: 0,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
             proof_market: crate::settlement::ProofMarketState::new(),
@@ -685,6 +691,7 @@ impl AccountState {
             pending_bud_boost_share: 0,
             pending_domain_unfreezes: Vec::new(),
             poa_compliance: snapshot.poa_compliance.clone().unwrap_or_default(),
+            burned_total: snapshot.burned_total,
             pending_poa_freezes: Vec::new(),
             pending_poa_unfreezes: Vec::new(),
             // An assigned task names the prover that took it and the epoch it
@@ -2453,7 +2460,10 @@ impl AccountState {
     /// Remaining headroom under the fixed 100M cap.
     pub fn supply_capacity_remaining(&self) -> u64 {
         let cap = u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY);
+        // Burned BUD was issued once; counting it keeps lifetime issuance
+        // under the cap instead of letting a burn reopen the same room.
         cap.saturating_sub(self.total_bud_committed())
+            .saturating_sub(u128::from(self.burned_total))
             .min(u128::from(u64::MAX)) as u64
     }
 
@@ -2480,6 +2490,7 @@ impl AccountState {
             );
         }
         account.balance -= burned;
+        self.burned_total = self.burned_total.saturating_add(burned);
         self.dirty_accounts.insert(*address);
         burned
     }
@@ -2819,6 +2830,10 @@ impl AccountState {
             bincode::serialize(&self.timed_burn)
                 .unwrap_or_else(|_| STATE_SERIALIZE_FAILED.to_vec()),
         );
+        if self.burned_total != 0 {
+            final_hasher.update(b"burned_total_v1");
+            final_hasher.update(self.burned_total.to_le_bytes());
+        }
         final_hasher.update(b"burn_reserve_v1");
         final_hasher.update(
             bincode::serialize(&self.burn_reserve_address)
@@ -3497,6 +3512,17 @@ mod tests {
         assert_eq!(state.total_staked_supply(), 2_000);
         assert_eq!(state.total_unbonding_supply(), 3_000);
         assert_eq!(state.total_bud_committed(), 6_000);
+    }
+
+    #[test]
+    fn burned_supply_does_not_reopen_mint_headroom() {
+        let a = test_addr_from_byte(21u8);
+        let mut state = AccountState::new();
+        state.add_balance(&a, 1_000);
+        let before = state.supply_capacity_remaining();
+        assert_eq!(state.burn_from(&a, 400), 400);
+        assert_eq!(state.supply_capacity_remaining(), before);
+        assert_eq!(state.burned_total, 400);
     }
 
     #[test]
