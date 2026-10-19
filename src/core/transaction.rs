@@ -2037,6 +2037,10 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             for n in &sub.nullifiers {
                 put_fixed(out, n);
             }
+            put_u64(out, sub.nullifier_proofs.len() as u64);
+            for pr in &sub.nullifier_proofs {
+                put_fixed(out, pr);
+            }
             put_u64(out, sub.output_commitments.len() as u64);
             for c in &sub.output_commitments {
                 put_fixed(out, c);
