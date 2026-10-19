@@ -3,10 +3,15 @@
 //! Ported from `scripts/check-udeps.sh`. Parses the tree-shaped output of
 //! `cargo +nightly udeps --all-targets` into `<package>:<dep>` lines and
 //! compares against `.github/udeps-baseline.txt`; a finding not on the
-//! baseline fails (ratchet). Without a baseline file the gate skips
-//! (measurement mode, matching the shell gate).
+//! baseline fails (ratchet). A missing baseline file is an empty baseline,
+//! not a reason to skip: the ratchet has never had a file, so the old SKIP
+//! meant every unused dependency passed forever. To accept today's
+//! findings, commit `.github/udeps-baseline.txt` from a green measurement.
 
 use std::path::Path;
+
+/// The line cargo-udeps prints when it finished and found nothing.
+const CLEAN_SENTINEL: &str = "All deps seem to have been used.";
 
 fn parse_udeps(text: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -68,17 +73,23 @@ pub fn run(root: &Path, out: &Path) -> Result<String, String> {
                  incomplete and is not accepted as clean:\n{text}"
             ));
         }
+        // A clean verdict needs the tool's own sentinel: an empty or
+        // truncated file parses to zero findings too.
+        if !text.contains(CLEAN_SENTINEL) {
+            return Err(format!(
+                "the cargo-udeps output has no findings and no `{CLEAN_SENTINEL}` line; \
+                 the tool did not finish, so the scan is not accepted as clean:\n{text}"
+            ));
+        }
         return Ok(String::from("OK: no unused dependencies (parsed)."));
     }
     let baseline_path = root.join(".github/udeps-baseline.txt");
-    if !baseline_path.is_file() {
-        return Ok(format!(
-            "SKIP: {} is absent - first measurement (step 1); findings:\n{}",
-            baseline_path.display(),
-            found.join("\n")
-        ));
-    }
-    let bl = std::fs::read_to_string(&baseline_path).map_err(|e| e.to_string())?;
+    // A missing file is an empty baseline: every finding fails.
+    let bl = if baseline_path.is_file() {
+        std::fs::read_to_string(&baseline_path).map_err(|e| e.to_string())?
+    } else {
+        String::new()
+    };
     let baseline_set: std::collections::BTreeSet<&str> = bl.lines().collect();
     let mut fails: Vec<String> = Vec::new();
     for f in &found {
@@ -135,7 +146,39 @@ pub fn self_test() -> Result<String, String> {
     )
     .map_err(|e| e.to_string())?;
     let clean_passed = run(&dir, &clean).is_ok();
+    // An empty report is not a clean verdict.
+    let empty = dir.join("empty.txt");
+    std::fs::write(&empty, "").map_err(|e| e.to_string())?;
+    let empty_failed = run(&dir, &empty).is_err();
+    // A finding with no baseline file fails: the ratchet has no SKIP.
+    let found = dir.join("found.txt");
+    std::fs::write(
+        &found,
+        "unused dependencies:\n`a v0.1.0 (/x)`\n└─── dependencies\n     └─── \"left\"\n",
+    )
+    .map_err(|e| e.to_string())?;
+    let found_failed = run(&dir, &found).is_err();
+    // The same finding in a baseline passes.
+    std::fs::create_dir_all(dir.join(".github")).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(".github/udeps-baseline.txt"), "a:left\n")
+        .map_err(|e| e.to_string())?;
+    let baselined_passed = run(&dir, &found).is_ok();
     let _ = std::fs::remove_dir_all(&dir);
+    if !empty_failed {
+        return Err(String::from(
+            "canary: an empty udeps report was counted as clean",
+        ));
+    }
+    if !found_failed {
+        return Err(String::from(
+            "canary: a finding with no baseline file passed (the ratchet skipped)",
+        ));
+    }
+    if !baselined_passed {
+        return Err(String::from(
+            "canary: a finding that is in the baseline was refused",
+        ));
+    }
     if !broken_failed {
         return Err(String::from(
             "canary: broken udeps output was counted as clean (fail-open)",
@@ -145,7 +188,7 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("canary: genuinely clean output was refused"));
     }
     Ok(String::from(
-        "udeps canary OK: the tree was parsed, broken output FAILs, clean PASSes.",
+        "udeps canary OK: the tree was parsed; broken, empty and unbaselined output FAIL; clean and baselined output PASS.",
     ))
 }
 
