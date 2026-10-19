@@ -524,6 +524,12 @@ impl CarouselDecoder {
         }
     }
 
+    /// The stream parameters locked by the first accepted drop, if any.
+    #[must_use]
+    pub const fn params(&self) -> Option<CarouselParams> {
+        self.params
+    }
+
     /// Number of source blocks still unknown.
     #[must_use]
     pub fn missing(&self) -> usize {
