@@ -901,6 +901,9 @@ impl BudGates {
     /// integer path gives the same answer everywhere.
     pub fn k_bud_ratio(f: &BudFile, original_len: usize) -> Result<(), &'static str> {
         let payload: usize = f.chunks.iter().map(|c| c.data.len()).sum();
+        if payload == 0 && original_len > 0 {
+            return Err("K-BUD-RATIO: empty payload for a non-empty original (zip bomb)");
+        }
         let measured = crate::bud_fixed_point::fixed_ratio(original_len as u64, payload as u64);
         if measured > MAX_RATIO_FIXED {
             return Err("K-BUD-RATIO: >100:1 (zip bomb)");
@@ -1148,6 +1151,21 @@ mod tests {
             vec![0u8; 1000],
         );
         assert!(BudGates::k_bud_ratio(&f2, original.len()).is_ok());
+    }
+    #[test]
+    fn ratio_gate_rejects_empty_payload_with_claimed_original() {
+        let f = BudFile::encode(
+            &[],
+            BudFormatClass::Json,
+            "application/json",
+            0,
+            0,
+            3,
+            BudFlags::new(true, true, false, false, false, false),
+            Vec::new(),
+        );
+        assert!(BudGates::k_bud_ratio(&f, 4 << 30).is_err());
+        assert!(BudGates::k_bud_ratio(&f, 0).is_ok());
     }
     #[test]
     fn multi_ratio_best_all_files() {
