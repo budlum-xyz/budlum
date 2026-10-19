@@ -62,6 +62,8 @@ pub enum CodecError {
     MuxNotLinked,
     /// Empty frame list.
     EmptyFrames,
+    /// Bytes remain after the declared frame list.
+    TrailingBytes,
     /// Declared frame count is larger than the blob can physically hold.
     BadFrameCount {
         /// Declared count.
@@ -75,6 +77,7 @@ impl std::fmt::Display for CodecError {
             Self::Forbidden(k) => write!(f, "three codec {k:?} forbidden by K-QR-KODEK gate"),
             Self::MuxNotLinked => write!(f, "three codec mux adapter not linked in this build"),
             Self::EmptyFrames => write!(f, "three codec refuses empty frame list"),
+            Self::TrailingBytes => write!(f, "three codec container has trailing bytes"),
             Self::BadFrameCount { count } => {
                 write!(f, "three codec refuses declared frame count {count}")
             }
@@ -160,6 +163,9 @@ impl FrameMux for RawFrameConcat {
         // The declared count cannot exceed what the blob can physically hold:
         // every frame costs at least its 4-byte length header. Bound it before
         // `Vec::with_capacity(n)` turns a forged count into a huge reservation.
+        if n == 0 {
+            return Err(CodecError::EmptyFrames);
+        }
         let max_frames = (blob.len().saturating_sub(8)) / 4;
         if n > max_frames {
             return Err(CodecError::BadFrameCount { count: n as u64 });
@@ -172,12 +178,14 @@ impl FrameMux for RawFrameConcat {
             a.copy_from_slice(s);
             let len = u32::from_le_bytes(a) as usize;
             off += 4;
-            let fr = blob
-                .get(off..off + len)
-                .ok_or(CodecError::EmptyFrames)?
-                .to_vec();
-            off += len;
+            let end = off.checked_add(len).ok_or(CodecError::EmptyFrames)?;
+            let fr = blob.get(off..end).ok_or(CodecError::EmptyFrames)?.to_vec();
+            off = end;
             out.push(fr);
+        }
+        // BLG-0431: reject appended data instead of decoding an alias.
+        if off != blob.len() {
+            return Err(CodecError::TrailingBytes);
         }
         Ok(out)
     }
@@ -202,6 +210,33 @@ mod tests {
         assert_eq!(
             mux.mux(CodecKind::H264, &[vec![1, 2, 3]]).unwrap_err(),
             CodecError::MuxNotLinked
+        );
+    }
+
+    #[test]
+    fn raw_concat_refuses_trailers_zero_count_and_truncated_lengths() {
+        let blob = RawFrameConcat
+            .mux(CodecKind::RawFrames, &[vec![1, 2, 3]])
+            .unwrap();
+        for trailer in [&[0u8][..], &blob[..]] {
+            let mut aliased = blob.clone();
+            aliased.extend_from_slice(trailer);
+            assert_eq!(
+                RawFrameConcat.split(CodecKind::RawFrames, &aliased),
+                Err(CodecError::TrailingBytes)
+            );
+        }
+        let mut empty = RAW_CONCAT_MAGIC.to_vec();
+        empty.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            RawFrameConcat.split(CodecKind::RawFrames, &empty),
+            Err(CodecError::EmptyFrames)
+        );
+        let mut huge = blob;
+        huge[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            RawFrameConcat.split(CodecKind::RawFrames, &huge),
+            Err(CodecError::EmptyFrames)
         );
     }
 
