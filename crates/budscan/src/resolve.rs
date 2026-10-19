@@ -13,6 +13,8 @@ use crate::bns_proof::{self, BnsInclusionProof, ResolvedName};
 use crate::content_id::ContentId;
 use crate::ens::{self, ContentHash};
 use crate::evidence::{Claim, Evidence, Strength};
+#[cfg(test)]
+use crate::fetch::BudManifest;
 use crate::fetch::{self, Fetched, Target, Transport};
 use crate::name_rule;
 use crate::query::{self, Query};
@@ -330,7 +332,10 @@ mod tests {
         }
     }
 
-    struct Table(HashMap<String, Vec<u8>>);
+    struct Table {
+        bytes: HashMap<String, Vec<u8>>,
+        manifests: HashMap<String, BudManifest>,
+    }
 
     impl Transport for Table {
         fn fetch(&self, target: &Target) -> Result<Vec<u8>, String> {
@@ -339,24 +344,47 @@ mod tests {
                 Target::Ipfs(s) | Target::Https(s) => s.clone(),
                 Target::Arweave(r) => hex::encode(r),
             };
-            self.0
+            self.bytes
                 .get(&key)
                 .cloned()
                 .ok_or_else(|| format!("{key} not found"))
         }
+
+        fn fetch_bud_manifest(&self, id: &ContentId) -> Result<BudManifest, String> {
+            self.manifests
+                .get(&id.to_string())
+                .cloned()
+                .ok_or_else(|| format!("manifest {id} not found"))
+        }
     }
 
     fn table(pairs: &[(&str, &[u8])]) -> Table {
-        Table(
-            pairs
+        Table {
+            bytes: pairs
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_vec()))
                 .collect(),
-        )
+            manifests: HashMap::new(),
+        }
+    }
+
+    /// The manifest id of an unsharded upload of `bytes`.
+    fn bud_id(bytes: &[u8]) -> ContentId {
+        BudManifest::single_shard(bytes).manifest_id()
+    }
+
+    /// A transport holding the manifest of `honest` and serving `served` under
+    /// its id.
+    fn bud_table(honest: &[u8], served: &[u8]) -> Table {
+        let manifest = BudManifest::single_shard(honest);
+        let key = manifest.manifest_id().to_string();
+        let mut t = table(&[(&key, served)]);
+        t.manifests.insert(key, manifest);
+        t
     }
 
     fn bud_resolver(bytes: &[u8], proven: bool) -> Resolver {
-        let id = ContentId::of(bytes);
+        let id = bud_id(bytes);
         let resolved = ResolvedName {
             name: String::from("ayaz.bud"),
             owner: [1u8; 32],
@@ -399,7 +427,7 @@ mod tests {
     fn a_proven_name_with_matching_bytes_renders_as_verified() {
         let bytes = b"<html>ayaz</html>";
         let r = bud_resolver(bytes, true);
-        let t = table(&[(&ContentId::of(bytes).to_string(), bytes)]);
+        let t = bud_table(bytes, bytes);
         let page = open(&r, &t, "ayaz.bud").unwrap();
         assert!(page.is_renderable());
         assert_eq!(page.evidence.weakest(), Strength::Verified);
@@ -413,7 +441,7 @@ mod tests {
         // for.
         let bytes = b"<html>ayaz</html>";
         let r = bud_resolver(bytes, false);
-        let t = table(&[(&ContentId::of(bytes).to_string(), bytes)]);
+        let t = bud_table(bytes, bytes);
         let page = open(&r, &t, "ayaz.bud").unwrap();
         assert!(page.is_renderable());
         assert_eq!(page.evidence.weakest(), Strength::RpcClaimOnly);
@@ -423,7 +451,7 @@ mod tests {
     #[test]
     fn bytes_that_do_not_hash_are_not_rendered_at_all() {
         let r = bud_resolver(b"expected", true);
-        let t = table(&[(&ContentId::of(b"expected").to_string(), b"other")]);
+        let t = bud_table(b"expected", b"other");
         let page = open(&r, &t, "ayaz.bud").unwrap();
         assert!(!page.is_renderable());
         assert!(
