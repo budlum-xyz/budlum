@@ -179,7 +179,7 @@ fn checked_in_state_file_matches_the_account_schema() {
 /// own tests sized theirs at 8192, so every struct contract failed only through
 /// the CLI. This test runs the real host memory size.
 #[test]
-fn a_struct_using_contract_runs_and_proves() {
+fn a_struct_using_contract_runs() {
     let source = "contract S {\n\
                   \x20   struct P {\n\
                   \x20       a: u64,\n\
@@ -208,7 +208,6 @@ fn a_struct_using_contract_runs_and_proves() {
     // (bud-proof has no Store test at all). Whether such a program proves is
     // tracked separately; this test's job is to prove that the *host memory
     // floor* is right, which is what the execution assertions above establish.
-    let _ = public_inputs_for(&vm, &bytecode, &receipt.events);
 }
 
 /// The host memory floor must stay above the heap base, otherwise struct
@@ -269,7 +268,7 @@ fn a_declared_storage_field_can_be_read_and_written() {
 
     let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
     let receipt = vm.run_receipt(&bytecode);
-    assert!(receipt.success, "kosum basarisiz: {:?}", receipt.error);
+    assert!(receipt.success, "run failed: {:?}", receipt.error);
     assert_ne!(
         receipt.state_writes_digest, [0u8; 32],
         "a run that writes storage has to produce a non-empty write digest"
@@ -296,7 +295,7 @@ fn a_storage_writing_program_proves_and_verifies() {
 
     let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
     let receipt = vm.run_receipt(&bytecode);
-    assert!(receipt.success, "kosum basarisiz: {:?}", receipt.error);
+    assert!(receipt.success, "run failed: {:?}", receipt.error);
 
     let pi =
         public_inputs_with_writes(&vm, &bytecode, &receipt.events, receipt.state_writes_digest);
