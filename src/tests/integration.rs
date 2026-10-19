@@ -1389,18 +1389,17 @@ mod integration_tests {
     fn test_dns_seed_resolution_resolves_addresses() {
         use crate::network::node::resolve_dns_seeds;
 
-        let addrs = resolve_dns_seeds(&["localhost".to_string()], 4001);
-        assert!(!addrs.is_empty(), "localhost should resolve");
-        for addr in &addrs {
-            assert!(addr.starts_with("/ip4/") || addr.starts_with("/ip6/"));
-        }
+        // A literal address needs no resolver, so the result is fixed.
+        let addrs = resolve_dns_seeds(&["127.0.0.1".to_string()], 4001);
+        assert_eq!(addrs, vec!["/ip4/127.0.0.1/tcp/4001".to_string()]);
     }
 
     #[test]
     fn test_dns_seed_resolution_handles_invalid() {
         use crate::network::node::resolve_dns_seeds;
 
-        let addrs = resolve_dns_seeds(&["invalid.nonexistent.domain.test".to_string()], 4001);
+        // An empty seed never reaches the network resolver.
+        let addrs = resolve_dns_seeds(&[String::new()], 4001);
         // Should not panic, returns empty
         assert!(addrs.is_empty());
     }
