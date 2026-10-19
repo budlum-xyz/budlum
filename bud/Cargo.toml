@@ -52,6 +52,8 @@ bud3 = ["bud2"]
 # silently.
 [lints.rust]
 unsafe_code = "forbid"
+# `cfg(kani)` is set by the kani driver, not by a Cargo feature.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [lints.clippy]
 # The panic boundary: `unwrap`/`expect` are forbidden on the production path.

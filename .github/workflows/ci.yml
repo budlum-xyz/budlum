@@ -1601,6 +1601,11 @@ jobs:
             cargo +nightly-2026-10-09 fuzz run "$t" -- -max_total_time=60 -timeout=25 -print_final_stats=1
           done
           echo "All fuzz targets clean."
+      - name: B.U.D. format fuzz (60s)
+        # bud/ is its own crate with its own fuzz/ directory, so cargo-fuzz
+        # has to run from bud/.
+        working-directory: bud
+        run: cargo +nightly-2026-10-09 fuzz run fuzz_bud_format -- -max_total_time=60 -timeout=25 -print_final_stats=1
       - name: Crash artifact (varsa)
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
