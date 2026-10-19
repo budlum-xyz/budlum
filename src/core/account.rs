@@ -1831,6 +1831,26 @@ impl AccountState {
                     );
                 }
             }
+            ProposalType::PoaAddAdmin { domain_id, admin } => {
+                // BLG-0089 (P04-F07): governance is the trust root of a
+                // permissioned domain - the first admin arrives here, and
+                // later ones can too.
+                self.poa_onboarding.add_admin(*domain_id, *admin);
+                tracing::info!(
+                    "Executing Governance: PoA domain {domain_id} admin {admin} added"
+                );
+            }
+            ProposalType::PoaRemoveAdmin { domain_id, admin } => {
+                // BLG-0094 (P04-F12): governance may take the last admin -
+                // unpermissioning a domain is a recorded decision, not an
+                // admin door action.
+                self.poa_onboarding
+                    .registry_mut()
+                    .force_remove_admin(*domain_id, *admin);
+                tracing::info!(
+                    "Executing Governance: PoA domain {domain_id} admin {admin} removed"
+                );
+            }
             ProposalType::ParameterUpdate(key, value) => {
                 // Wire ParameterUpdate into RegistryParams with bounds.
                 match self.apply_registry_parameter_update(key, value) {
