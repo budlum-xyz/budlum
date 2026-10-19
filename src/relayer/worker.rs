@@ -56,6 +56,8 @@ pub struct RelayerWorker {
     /// so that a block held back by one retried request does not have its
     /// other requests relayed again on the next pass.
     settled: std::collections::HashSet<String>,
+    /// Failed relay attempts per request hash within the current block pass.
+    attempts: std::collections::HashMap<String, u32>,
     /// The nonce the next result transaction is signed with, when this pass
     /// has already submitted one. The chain's account nonce does not move
     /// until a result is included in a block, so two results signed in one
@@ -129,6 +131,22 @@ const PENDING_FILE_NAME: &str = "relayer-pending.json";
 /// `UniversalRelay` has no chain-side deadline to lean on.
 const MAX_REQUESTER_LOOKUP_FAILURES: u32 = 1440;
 
+/// Records one failed attempt for a request. Returns true, and forgets the
+/// request, once it reached [`MAX_RELAY_ATTEMPTS`].
+fn note_failed_attempt(attempts: &mut std::collections::HashMap<String, u32>, hash: &str) -> bool {
+    let tries = attempts.entry(hash.to_string()).or_insert(0);
+    *tries = tries.saturating_add(1);
+    if *tries >= MAX_RELAY_ATTEMPTS {
+        attempts.remove(hash);
+        return true;
+    }
+    false
+}
+
+/// How many passes one relay request may fail with a retryable error before
+/// it is skipped. Passes are five seconds apart.
+const MAX_RELAY_ATTEMPTS: u32 = 120;
+
 impl RelayerWorker {
     pub fn new(chain: ChainHandle, relayer_address: Address) -> Self {
         Self {
@@ -138,6 +156,7 @@ impl RelayerWorker {
             adapters: Arc::new(AdapterRegistry::new()),
             cursor_path: None,
             settled: std::collections::HashSet::new(),
+            attempts: std::collections::HashMap::new(),
             next_nonce: None,
             observed: std::collections::HashMap::new(),
         }
@@ -699,6 +718,18 @@ impl RelayerWorker {
                             RelayOutcome::Retry => {
                                 // The block stays under the cursor; the
                                 // next pass comes back to this request.
+                                // A request that keeps failing is dropped
+                                // after a bounded number of passes, so one
+                                // request cannot hold every later block.
+                                if note_failed_attempt(&mut self.attempts, &tx.hash) {
+                                    warn!(
+                                        height = h,
+                                        request = %tx.hash,
+                                        "Relayer: request failed repeatedly; skipping it so later blocks are not held"
+                                    );
+                                    self.settled.insert(tx.hash.clone());
+                                    continue;
+                                }
                                 warn!(
                                     height = h,
                                     request = %tx.hash,
@@ -728,6 +759,7 @@ impl RelayerWorker {
                 // Everything in this block is behind the cursor now. The
                 // pending results are not: they stay until finality.
                 self.settled.clear();
+                self.attempts.clear();
             }
         }
     }
@@ -1031,6 +1063,22 @@ const fn relay_outcome_for(error: &AdapterError) -> RelayOutcome {
 /// verifier was calibrated for. A one-block confirmation is not a
 /// confirmation on any chain this bridge targets.
 const CONFIRMATION_DEPTH: u32 = crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
+
+#[cfg(test)]
+mod attempt_budget {
+    use super::*;
+
+    #[test]
+    fn a_request_is_skipped_after_the_attempt_budget() {
+        let mut attempts = std::collections::HashMap::new();
+        for _ in 1..MAX_RELAY_ATTEMPTS {
+            assert!(!note_failed_attempt(&mut attempts, "0xaa"));
+        }
+        assert!(note_failed_attempt(&mut attempts, "0xaa"));
+        assert!(attempts.is_empty());
+        assert!(!note_failed_attempt(&mut attempts, "0xaa"));
+    }
+}
 
 #[cfg(test)]
 mod cursor_persistence {
