@@ -173,6 +173,48 @@ fn continue_on_error_is_soft(bare: &str) -> bool {
     !value.eq_ignore_ascii_case("false")
 }
 
+/// Job ids under the top-level `jobs:` key.
+fn job_ids(src: &str) -> Vec<String> {
+    let lines: Vec<&str> = src.lines().collect();
+    let Some(jobs_at) = lines.iter().position(|l| l.trim_end() == "jobs:") else {
+        return Vec::new();
+    };
+    let job_indent = lines[jobs_at + 1..]
+        .iter()
+        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map_or(2, |l| indent_of(l));
+    let mut out = Vec::new();
+    for raw in lines.iter().skip(jobs_at + 1) {
+        let line = raw.trim_end();
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let ind = indent_of(line);
+        if ind == 0 {
+            break;
+        }
+        if ind == job_indent && t.ends_with(':') {
+            out.push(t.trim_end_matches(':').to_string());
+        }
+    }
+    out
+}
+
+/// Every must-block job has to still exist, or the block says nothing.
+fn missing_must_block(jobs: &[(String, String)]) -> Vec<String> {
+    MUST_BLOCK
+        .iter()
+        .filter(|(file, job, _)| !jobs.iter().any(|(f, j)| f == file && j == job))
+        .map(|(file, job, _)| {
+            format!(
+                "{file}: job `{job}` is on the must-block list and no longer exists. \
+                 Deleting or renaming it removes the check without a finding."
+            )
+        })
+        .collect()
+}
+
 /// Find every `continue-on-error` and `|| true` under each job.
 fn softeners_in(path: &Path, src: &str) -> Vec<Soft> {
     let file = path
@@ -305,12 +347,20 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
     let mut found = Vec::new();
+    let mut jobs: Vec<(String, String)> = Vec::new();
     for f in &files {
-        let src = std::fs::read_to_string(f).unwrap_or_default();
+        let src = std::fs::read_to_string(f)
+            .map_err(|e| format!("cannot read workflow {}: {e}", f.display()))?;
+        let name = f
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        jobs.extend(job_ids(&src).into_iter().map(|j| (name.clone(), j)));
         found.extend(softeners_in(f, &src));
     }
 
-    let problems = judge(&found);
+    let mut problems = judge(&found);
+    problems.extend(missing_must_block(&jobs));
     if problems.is_empty() {
         return Ok(format!(
             "Security scan gate OK: {} softened checks across {} workflows, each listed \
@@ -408,6 +458,16 @@ jobs:
         problems.push(format!(
             "BROKEN: softener shapes read as {shape_jobs:?}, expected {expected:?}"
         ));
+    }
+
+    // A must-block job that disappeared must be reported.
+    if missing_must_block(&[]).len() != MUST_BLOCK.len() {
+        problems.push(String::from(
+            "VACUOUS: a removed must-block job was not reported",
+        ));
+    }
+    if job_ids(wf) != ["reporter", "masked", "strict"] {
+        problems.push(String::from("BROKEN: job ids were not read"));
     }
 
     // An unlisted softener must be refused.
