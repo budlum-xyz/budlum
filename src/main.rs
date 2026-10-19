@@ -24,11 +24,24 @@ use std::sync::Arc;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
+fn try_load_signing_key(path: &str) -> Result<KeyPair, String> {
+    match ValidatorKeys::load(path) {
+        Ok(keys) => Ok(keys.sig_key),
+        Err(keys_error) => KeyPair::load(path).map_err(|pair_error| {
+            format!("cannot load key file {path}: as validator keys: {keys_error}; as key pair: {pair_error}")
+        }),
+    }
+}
+
+/// Loads the signing key and tells the operator why a load failed.
 fn load_signing_key(path: &str) -> Option<KeyPair> {
-    ValidatorKeys::load(path)
-        .map(|keys| keys.sig_key)
-        .or_else(|_| KeyPair::load(path))
-        .ok()
+    match try_load_signing_key(path) {
+        Ok(key) => Some(key),
+        Err(reason) => {
+            eprintln!("Warning: {reason}");
+            None
+        }
+    }
 }
 
 /// Claims `path` for a new secret key file. It fails when the path already exists, so key
@@ -1777,7 +1790,9 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{claim_new_key_file, console_producer, daemon_producer_loop_runs};
+    use super::{
+        claim_new_key_file, console_producer, daemon_producer_loop_runs, try_load_signing_key,
+    };
     use budlum_core::cli::ConsensusType;
 
     #[test]
@@ -1811,5 +1826,17 @@ mod tests {
         assert!(console_producer(None).is_err());
         let configured = budlum_core::core::address::Address::from([0x07u8; 32]);
         assert_eq!(console_producer(Some(configured)), Ok(configured));
+    }
+
+    #[test]
+    fn a_failed_key_load_names_the_file_and_both_errors() {
+        let path = std::env::temp_dir().join(format!("budlum-no-key-{}", std::process::id()));
+        let path_str = path.to_str().expect("utf8 path");
+        let Err(reason) = try_load_signing_key(path_str) else {
+            unreachable!("a missing file is an error");
+        };
+        assert!(reason.contains(path_str));
+        assert!(reason.contains("as validator keys"));
+        assert!(reason.contains("as key pair"));
     }
 }
