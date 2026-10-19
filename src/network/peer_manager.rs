@@ -20,6 +20,9 @@ pub const BAN_DURATION: Duration = Duration::from_secs(3600);
 /// mints for one burst of malformed handshakes cannot fill the tracked
 /// table forever and refuse every peer the node has never seen.
 const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
+/// After a prune that reclaimed nothing, the table is not scanned again for
+/// this long (P36-F09).
+const EMPTY_PRUNE_BACKOFF: Duration = Duration::from_secs(1);
 pub const MAX_SCORE: i32 = 100;
 pub const MIN_SCORE: i32 = BAN_THRESHOLD;
 pub const MAX_MSG_BURST: f64 = 20.0;
@@ -136,6 +139,10 @@ pub struct PeerManager {
     outbound_subnet_counts: HashMap<[u8; 3], usize>,
     /// Outbound peer → subnet mapping.
     outbound_peer_subnets: HashMap<PeerId, [u8; 3]>,
+    /// When the last full-table prune found nothing to reclaim. While the
+    /// table stays full of unprunable records, scanning it again on every
+    /// message from an unknown peer is a CPU amplifier (P36-F09).
+    last_empty_prune: Option<Instant>,
 }
 impl Default for PeerManager {
     fn default() -> Self {
@@ -157,6 +164,7 @@ impl PeerManager {
             max_outbound_per_subnet: 0,
             outbound_subnet_counts: HashMap::new(),
             outbound_peer_subnets: HashMap::new(),
+            last_empty_prune: None,
         }
     }
 
@@ -317,7 +325,16 @@ impl PeerManager {
     /// accumulated penalty.
     fn get_or_create(&mut self, peer_id: &PeerId) -> Option<&mut PeerScore> {
         if !self.peers.contains_key(peer_id) && self.peers.len() >= self.max_tracked_peers {
-            self.prune_spent_records();
+            let recently_empty = self
+                .last_empty_prune
+                .is_some_and(|t| t.elapsed() < EMPTY_PRUNE_BACKOFF);
+            if !recently_empty {
+                if self.prune_spent_records() == 0 {
+                    self.last_empty_prune = Some(Instant::now());
+                } else {
+                    self.last_empty_prune = None;
+                }
+            }
             if self.peers.len() >= self.max_tracked_peers
                 && !(self.connected_peers.contains(peer_id) && self.evict_stalest_penalty())
             {
@@ -875,6 +892,29 @@ mod tests {
             "the ceiling is never exceeded"
         );
         assert!(spent.peers.contains_key(&overflow));
+    }
+
+    /// P36-F09: a full table of unprunable records is scanned once, not on
+    /// every message from an unknown peer; the back-off lifts when a scan can
+    /// succeed again.
+    #[test]
+    fn a_full_unprunable_table_is_not_rescanned_on_every_message() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 4;
+        for _ in 0..4 {
+            let peer = libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id();
+            manager.report_invalid_tx(&peer);
+        }
+        let stranger = test_peer_id();
+        assert!(!manager.check_rate_limit(&stranger));
+        assert!(
+            manager.last_empty_prune.is_some(),
+            "the empty scan is remembered"
+        );
+        assert!(!manager.check_rate_limit(&stranger));
+        assert_eq!(manager.tracked_peer_count(), 4);
     }
 
     /// Burst exhaustion then rejection (token bucket).
