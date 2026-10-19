@@ -866,6 +866,8 @@ pub enum StorageError {
     },
     /// Opener bond is 0 (would let anyone spam challenges for free).
     ZeroOpenerBond,
+    /// A registry id counter reached `u64::MAX`; no further id can be issued.
+    IdSpaceExhausted,
     /// Opener bond does not cover the I/O the operator must spend to answer.
     ///
     /// The bond is refunded when the operator answers correctly, so an
@@ -1060,6 +1062,7 @@ impl std::fmt::Display for StorageError {
                  is not what a primary copy means"
             ),
             Self::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
+            Self::IdSpaceExhausted => write!(f, "registry id counter is exhausted"),
             Self::OpenerBondBelowRangeCost {
                 range_len,
                 required,
@@ -2090,10 +2093,14 @@ impl StorageRegistry {
                     "held_bytes refused the source (hybrid prefix longer than listed size)",
                 ),
             })?;
-        self.register_manifest(manifest);
-
+        // Take the next id before any write, so a full counter leaves no
+        // partial state behind.
         let deal_id = self.next_deal_id;
-        self.next_deal_id += 1;
+        let next_deal_id = deal_id
+            .checked_add(1)
+            .ok_or(StorageError::IdSpaceExhausted)?;
+        self.register_manifest(manifest);
+        self.next_deal_id = next_deal_id;
 
         let deal = StorageDeal {
             deal_id,
@@ -2928,7 +2935,9 @@ impl StorageRegistry {
         }
 
         let challenge_id = self.next_challenge_id;
-        self.next_challenge_id += 1;
+        self.next_challenge_id = challenge_id
+            .checked_add(1)
+            .ok_or(StorageError::IdSpaceExhausted)?;
         let challenge = RetrievalChallenge {
             challenge_id,
             deal_id,
@@ -5840,6 +5849,36 @@ mod tests {
             10
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_full_id_counter_refuses_instead_of_overflowing() {
+        // P23-F15: the counters used a bare `+= 1`. With overflow checks on
+        // that is a panic, so a full counter must be a clean refusal.
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, shard_id) = open_one(&mut reg, &m);
+        reg.next_challenge_id = u64::MAX;
+        assert!(matches!(
+            reg.open_challenge(deal_id, 0, 4, 110, 120, opener(), 50),
+            Err(StorageError::IdSpaceExhausted)
+        ));
+        reg.next_deal_id = u64::MAX;
+        let refused = reg.open_deal(
+            42,
+            &m,
+            shard_id,
+            operator(),
+            1,
+            100,
+            200,
+            good_econ(),
+            &params(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        );
+        assert!(matches!(refused, Err(StorageError::IdSpaceExhausted)));
+        assert_eq!(reg.next_deal_id, u64::MAX);
     }
 
     #[test]
