@@ -286,22 +286,30 @@ impl Pkcs11Signer {
     pub fn verify_consensus_key_bindings(&self) -> Result<(), CryptoError> {
         const BINDING_MSG: &[u8] = b"BUDLUM_HSM_CONSENSUS_KEY_BINDING_V1";
         if self.bls_mechanism.is_some() {
-            if let Some(pk) = self.announced_bls_public_key() {
-                let sig = self.bls_sign(BINDING_MSG)?;
-                crate::chain::finality::verify_bls_sig(&pk, BINDING_MSG, &sig).map_err(|e| {
-                    CryptoError::KeyGeneration(format!("HSM BLS key binding test failed: {e}"))
-                })?;
-            }
+            let pk = Self::binding_key("BLS", self.announced_bls_public_key())
+                .map_err(CryptoError::KeyGeneration)?;
+            let sig = self.bls_sign(BINDING_MSG)?;
+            crate::chain::finality::verify_bls_sig(&pk, BINDING_MSG, &sig).map_err(|e| {
+                CryptoError::KeyGeneration(format!("HSM BLS key binding test failed: {e}"))
+            })?;
         }
         if self.pq_mechanism.is_some() {
-            if let Some(pk) = self.announced_pq_public_key() {
-                let sig = self.pq_sign(BINDING_MSG)?;
-                crate::crypto::primitives::PqKeyPair::verify(&pk, BINDING_MSG, &sig).map_err(
-                    |e| CryptoError::KeyGeneration(format!("HSM PQ key binding test failed: {e}")),
-                )?;
-            }
+            let pk = Self::binding_key("PQ", self.announced_pq_public_key())
+                .map_err(CryptoError::KeyGeneration)?;
+            let sig = self.pq_sign(BINDING_MSG)?;
+            crate::crypto::primitives::PqKeyPair::verify(&pk, BINDING_MSG, &sig).map_err(|e| {
+                CryptoError::KeyGeneration(format!("HSM PQ key binding test failed: {e}"))
+            })?;
         }
         Ok(())
+    }
+
+    /// A configured vendor mechanism needs a public key to bind against.
+    /// Without one the binding test would pass by doing nothing.
+    fn binding_key(which: &str, announced: Option<Vec<u8>>) -> Result<Vec<u8>, String> {
+        announced.ok_or_else(|| {
+            format!("{which} vendor mechanism is configured but no {which} public key is known to bind it against")
+        })
     }
 
     /// Require vendor-native BLS/PQ signing and fail closed on any fallback.
@@ -1130,6 +1138,16 @@ mod vendor_tests {
             check_mechanism_admissible_for_mainnet(id, &caps)
                 .expect("the vendor's own documented signing mechanisms must pass");
         }
+    }
+
+    #[test]
+    fn binding_test_refuses_a_mechanism_without_a_public_key() {
+        let missing = Pkcs11Signer::binding_key("BLS", None).unwrap_err();
+        assert!(missing.contains("no BLS public key"), "{missing}");
+        assert_eq!(
+            Pkcs11Signer::binding_key("PQ", Some(vec![1, 2])).unwrap(),
+            vec![1, 2]
+        );
     }
 
     #[test]
