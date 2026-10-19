@@ -459,6 +459,9 @@ impl Blockchain {
         }
 
         let mut state = resolved_genesis_config.build_state();
+        // The replay below runs identity writes under the engine's domain
+        // gate, as the live path did when it applied them.
+        state.execution_domain = consensus.domain_kind();
 
         if !loaded_chain {
             let genesis = resolved_genesis_config.build_genesis_block();
@@ -638,6 +641,7 @@ impl Blockchain {
                 // state, or every block would be applied on top of a state
                 // that already holds its effects (BLG-0168).
                 state = resolved_genesis_config.build_state();
+                state.execution_domain = consensus.domain_kind();
                 restored_finalized_height = 0;
                 restored_finalized_hash = chain_vec[0].hash.clone();
             }
@@ -5807,6 +5811,7 @@ impl Blockchain {
         }
 
         let mut state = self.genesis_config.build_state();
+        state.execution_domain = self.consensus.domain_kind();
         for (index, block) in chain.iter().enumerate().skip(1) {
             let expected_height = index as u64;
             let parent = &chain[index - 1];
@@ -6159,7 +6164,11 @@ impl Blockchain {
         F: FnMut(&Block, &AccountState) -> Result<(), String>,
     {
         let mut current_state = if fork_point > 0 {
-            Blockchain::rebuild_state(&chain[..fork_point], &self.genesis_config)?
+            Blockchain::rebuild_state(
+                &chain[..fork_point],
+                &self.genesis_config,
+                self.consensus.domain_kind(),
+            )?
         } else {
             AccountState::new()
         };
@@ -6217,6 +6226,7 @@ impl Blockchain {
     fn rebuild_state(
         chain: &[Block],
         genesis_config: &GenesisConfig,
+        domain: crate::domain::ConsensusKind,
     ) -> Result<AccountState, String> {
         let genesis = chain
             .first()
@@ -6226,6 +6236,7 @@ impl Blockchain {
             return Err("Candidate chain genesis does not match configured genesis".into());
         }
         let mut state = genesis_config.build_state();
+        state.execution_domain = domain;
 
         for (index, block) in chain.iter().enumerate().skip(1) {
             let mut next_state = Self::apply_block_effects(&state, block, &chain[..index])
@@ -6257,8 +6268,12 @@ impl Blockchain {
             return None;
         }
         let block = &self.chain[height as usize];
-        let mut state =
-            Self::rebuild_state(&self.chain[..=height as usize], &self.genesis_config).ok()?;
+        let mut state = Self::rebuild_state(
+            &self.chain[..=height as usize],
+            &self.genesis_config,
+            self.consensus.domain_kind(),
+        )
+        .ok()?;
         // Same rule as the reorg path: a rebuild must replay identity writes
         // under the same gate the chain applied them under, or the served
         // snapshot disagrees with the canonical state root at that height.
@@ -7891,6 +7906,16 @@ mod tests {
             sig1,
             sig2,
         )
+    }
+
+    #[test]
+    fn a_rebuilt_state_carries_the_engine_domain() {
+        let genesis_config = GenesisConfig::new(1337);
+        let chain = vec![genesis_config.build_genesis_block()];
+        let state =
+            Blockchain::rebuild_state(&chain, &genesis_config, crate::domain::ConsensusKind::PoA)
+                .expect("a genesis only chain rebuilds");
+        assert_eq!(state.execution_domain, crate::domain::ConsensusKind::PoA);
     }
 
     #[test]
