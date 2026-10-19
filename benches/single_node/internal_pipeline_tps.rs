@@ -29,7 +29,8 @@ async fn main() {
     let validator_keys = ValidatorKeys::generate().unwrap();
     let consensus = Arc::new(PoSEngine::new(pos_config, Some(validator_keys.clone())));
 
-    let blockchain = Blockchain::new(consensus, None, 1337, None);
+    let chain_id = 1337;
+    let blockchain = Blockchain::new(consensus, None, chain_id, None);
     let (chain_actor, chain) = ChainActor::new(blockchain);
 
     tokio::spawn(async move {
@@ -62,6 +63,7 @@ async fn main() {
                 (i / sender_count) as u64,
                 vec![],
             );
+            tx.chain_id = chain_id;
             tx.sign(&keypairs[sender_idx]);
             tx
         })
