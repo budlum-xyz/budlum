@@ -262,8 +262,8 @@ fn has_manifest_call(region: &str, method: &str) -> bool {
     false
 }
 
-/// The `ChainCommand::RegisterStorageManifest { ... } =>` match arm, plus the
-/// 2000 characters after its start.
+/// The `ChainCommand::RegisterStorageManifest { ... } =>` match arm body when
+/// it is a block, else the 2000 characters after its start.
 fn register_handler_region(actor_code: &str) -> Option<String> {
     let needle = "ChainCommand::RegisterStorageManifest";
     let mut from = 0usize;
@@ -279,7 +279,24 @@ fn register_handler_region(actor_code: &str) -> Option<String> {
             from = abs + 1;
             continue;
         };
-        if skip_py_ws(&rest[close + 1..]).starts_with("=>") {
+        let after_arrow = skip_py_ws(&rest[close + 1..]);
+        if let Some(body) = after_arrow.strip_prefix("=>") {
+            let body = skip_py_ws(body);
+            if body.starts_with('{') {
+                let mut depth = 0usize;
+                for (i, c) in body.char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some(body[..=i].to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             let region: String = actor_code[abs..].chars().take(2000).collect();
             return Some(region);
         }
@@ -613,4 +630,17 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "untrusted manifest gate self-test OK: 8 canaries",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_handler_region_stops_at_the_end_of_its_arm() {
+        let code = "match c {\n    ChainCommand::RegisterStorageManifest { manifest, response } => {\n        store(manifest);\n    }\n    ChainCommand::Other { m } => {\n        m.validate_untrusted();\n    }\n}\n";
+        let region = register_handler_region(code).expect("arm found");
+        assert!(!region.contains("validate_untrusted"));
+        assert!(region.contains("store(manifest)"));
+    }
 }
