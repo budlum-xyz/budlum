@@ -168,27 +168,32 @@ fn strip_test_mods(src: &str) -> String {
             out.push_str(rest);
             return out;
         };
-        // Find `mod <name> {`
-        let after = &rest[m..];
-        let Some(brace_rel) = after.find('{') else {
-            out.push_str(rest);
-            return out;
-        };
-        // Only treat as a test-mod if the attribute is followed by `mod`.
-        let between = &after["#[cfg(test)]".len()..brace_rel];
-        if !between.contains("mod") {
-            out.push_str(&rest[..m + "#[cfg(test)]".len()]);
-            rest = &rest[m + "#[cfg(test)]".len()..];
+        let attr_end = m + "#[cfg(test)]".len();
+        // Only a `mod` item is a test module. Anything else is left in place.
+        let head = rest[attr_end..].trim_start();
+        let head = head.strip_prefix("pub ").unwrap_or(head).trim_start();
+        if !head.starts_with("mod ") {
+            out.push_str(&rest[..attr_end]);
+            rest = &rest[attr_end..];
             continue;
         }
-        let brace = m + brace_rel;
-        let body = balanced(rest, brace);
+        // `mod name;` has no body: the item ends at the semicolon.
+        let semi = rest[attr_end..].find(';');
+        let brace = rest[attr_end..].find('{');
+        let end = match (semi, brace) {
+            (Some(sc), Some(br)) if sc < br => attr_end + sc + 1,
+            (Some(sc), None) => attr_end + sc + 1,
+            (_, Some(br)) => {
+                let open = attr_end + br;
+                open + balanced(rest, open).len()
+            }
+            (None, None) => rest.len(),
+        };
         out.push_str(&rest[..m]);
-        // The block ends where its balanced body ends: at `brace`, not at
-        // the attribute. Advancing from `m` left the last `brace_rel` bytes
-        // of every test module in the scanned text, so a `remove(` or a
-        // `return Err(` in that tail was read as production code.
-        rest = &rest[brace + body.len()..];
+        // Keep the line breaks of the removed text so reported line numbers
+        // still match the file.
+        out.extend(rest[m..end].chars().filter(|c| *c == '\n'));
+        rest = &rest[end..];
     }
 }
 
@@ -531,6 +536,17 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from(
             "canary: a brace inside a string literal ended the test-module strip early",
+        ));
+    }
+
+    // A bodiless test module declaration must not swallow the next block:
+    // the production function after it is still scanned.
+    let declared = format!("#[cfg(test)]\npub mod tests;\n{bad}");
+    std::fs::write(dir.join("src/lib.rs"), declared).map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from(
+            "canary: a bodiless test module declaration hid the function after it",
         ));
     }
 
