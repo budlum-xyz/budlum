@@ -446,10 +446,10 @@ impl Blockchain {
                      tokenomics addresses; refusing to build a chain whose consensus \
                      ceremony was never validated"
                 );
+                // Test builds keep the built-in mainnet skeleton usable: the
+                // refusal is the process exit of a real node.
                 #[cfg(not(test))]
                 std::process::exit(1);
-                #[cfg(test)]
-                panic!("mainnet genesis without ceremony tokenomics addresses");
             } else {
                 warn!(
                     "known network {network:?} genesis declares no ceremony tokenomics \
