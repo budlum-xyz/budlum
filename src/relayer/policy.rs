@@ -164,6 +164,7 @@ impl PolicyEnvelope {
             None => hasher.update([0u8]),
         }
         hasher.update(self.spending_cap.to_le_bytes());
+        hasher.update((self.allowed_domains.len() as u64).to_le_bytes());
         for domain in &self.allowed_domains {
             hasher.update(domain.to_le_bytes());
         }
@@ -524,6 +525,25 @@ impl RelayerPolicyRegistry {
     }
 }
 
+/// Fixed byte tag of an external chain. It does not depend on the variant
+/// name, so renaming a variant never changes an intent id.
+fn chain_tag(chain: &ExternalChain) -> Vec<u8> {
+    match chain {
+        ExternalChain::Ethereum => vec![0],
+        ExternalChain::Solana => vec![1],
+        ExternalChain::Bitcoin => vec![2],
+        ExternalChain::Avalanche => vec![3],
+        ExternalChain::Polygon => vec![4],
+        ExternalChain::Arbitrum => vec![5],
+        ExternalChain::Optimism => vec![6],
+        ExternalChain::Custom(id) => {
+            let mut tag = vec![7];
+            tag.extend_from_slice(&id.to_le_bytes());
+            tag
+        }
+    }
+}
+
 fn encode_action(action: &RelayerActionKind, hasher: &mut Sha256) {
     match action {
         RelayerActionKind::ExternalTransaction {
@@ -532,7 +552,7 @@ fn encode_action(action: &RelayerActionKind, hasher: &mut Sha256) {
             payload_hash,
         } => {
             hasher.update([0u8]);
-            hasher.update(format!("{chain:?}").as_bytes());
+            hasher.update(chain_tag(chain));
             hasher.update((target_address.len() as u64).to_le_bytes());
             hasher.update(target_address.as_bytes());
             hasher.update(payload_hash);
@@ -553,6 +573,12 @@ fn encode_action(action: &RelayerActionKind, hasher: &mut Sha256) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chain_tags_are_fixed_bytes() {
+        assert_eq!(chain_tag(&ExternalChain::Ethereum), vec![0]);
+        assert_eq!(chain_tag(&ExternalChain::Custom(5)), vec![7, 5, 0, 0, 0]);
+    }
 
     fn addr(byte: u8) -> Address {
         Address::from([byte; 32])
