@@ -125,7 +125,11 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
     /// draw the same Winternitz key twice - the property the caller-held
     /// counter could not guarantee. `&mut self` is the point: minting is a
     /// state change on the key.
-    pub fn sign_at_height(&mut self, height: u64, msg: &[u8]) -> Result<BpqsSignature<P>, BpqsError> {
+    pub fn sign_at_height(
+        &mut self,
+        height: u64,
+        msg: &[u8],
+    ) -> Result<BpqsSignature<P>, BpqsError> {
         let epoch = epoch_of(height, self.public.window)?;
         let used = self.per_epoch_counts.get(&epoch).copied().unwrap_or(0);
         if used >= P::Q_MAX {
@@ -263,7 +267,8 @@ mod sign_tests {
         // One mint per epoch: Q_MAX is 1 (BLG-0041), and the device now
         // enforces the quota itself.
         for height in [0u64, 8, 16, 24, 32, 40] {
-            let sig = signer.sign_at_height(height, b"anchor-digest")
+            let sig = signer
+                .sign_at_height(height, b"anchor-digest")
                 .unwrap_or_else(|e| panic!("sign h={height}: {e}"));
             verify_at_height::<H, P>(signer.public(), height, b"anchor-digest", &sig)
                 .unwrap_or_else(|e| panic!("verify h={height}: {e}"));
@@ -273,7 +278,9 @@ mod sign_tests {
     #[test]
     fn signature_moved_to_another_epoch_refuses() {
         let mut signer = committee();
-        let sig = signer.sign_at_height(0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        let sig = signer
+            .sign_at_height(0, b"m")
+            .unwrap_or_else(|e| panic!("{e}"));
         let out = verify_at_height::<H, P>(signer.public(), 8, b"m", &sig);
         assert_eq!(
             out,
@@ -287,7 +294,8 @@ mod sign_tests {
     #[test]
     fn second_signature_in_one_epoch_refuses() {
         let mut signer = committee();
-        signer.sign_at_height(3, b"m")
+        signer
+            .sign_at_height(3, b"m")
             .unwrap_or_else(|e| panic!("first mint of the epoch must sign: {e}"));
         assert_eq!(
             signer.sign_at_height(3, b"m"),
@@ -301,14 +309,18 @@ mod sign_tests {
     #[test]
     fn wrong_message_refuses() {
         let mut signer = committee();
-        let sig = signer.sign_at_height(0, b"good").unwrap_or_else(|e| panic!("{e}"));
+        let Nonesig = signer
+            .sign_at_height(0, b"good")
+            .unwrap_or_else(|e| panic!("{e}"));
         assert!(verify_at_height::<H, P>(signer.public(), 0, b"evil", &sig).is_err());
     }
 
     #[test]
     fn tampered_path_refuses() {
         let mut signer = committee();
-        let mut sig = signer.sign_at_height(0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        let mut sig = signer
+            .sign_at_height(0, b"m")
+            .unwrap_or_else(|e| panic!("{e}"));
         sig.path[0][0] ^= 0x01;
         assert_eq!(
             verify_at_height::<H, P>(signer.public(), 0, b"m", &sig),
@@ -319,7 +331,9 @@ mod sign_tests {
     #[test]
     fn tampered_chain_refuses() {
         let mut signer = committee();
-        let mut sig = signer.sign_at_height(0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        let mut sig = signer
+            .sign_at_height(0, b"m")
+            .unwrap_or_else(|e| panic!("{e}"));
         sig.chains[9][1] ^= 0x01;
         assert!(verify_at_height::<H, P>(signer.public(), 0, b"m", &sig).is_err());
     }
@@ -327,7 +341,9 @@ mod sign_tests {
     #[test]
     fn non_zero_unused_chain_refuses() {
         let mut signer = committee();
-        let mut sig = signer.sign_at_height(0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        let mut sig = signer
+            .sign_at_height(0, b"m")
+            .unwrap_or_else(|e| panic!("{e}"));
         sig.chains[P::LEN][0] = 1;
         assert!(matches!(
             verify_at_height::<H, P>(signer.public(), 0, b"m", &sig),
@@ -338,7 +354,9 @@ mod sign_tests {
     #[test]
     fn non_zero_unused_path_entry_refuses() {
         let mut signer = committee();
-        let mut sig = signer.sign_at_height(0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        let mut sig = signer
+            .sign_at_height(0, b"m")
+            .unwrap_or_else(|e| panic!("{e}"));
         sig.path[P::T_LOG2][5] = 1;
         assert!(matches!(
             verify_at_height::<H, P>(signer.public(), 0, b"m", &sig),
