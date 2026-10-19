@@ -342,7 +342,7 @@ fn verify_prompt_text(text: &str) -> Result<(), String> {
 
     for (medium, unit, limit) in DECLARED_LIMITS {
         let line = format!("- {medium}: at most {limit} {unit}");
-        if !text.contains(&line) {
+        if !text.lines().any(|l| l.trim_end() == line) {
             return Err(format!(
                 "the prompt no longer states the {medium} limit of {limit} {unit}; \
                  the runtime would enforce a number the user was never told"
@@ -927,6 +927,15 @@ mod tests {
                 "the {medium} limit of {limit} {unit} is missing from the prompt"
             );
         }
+    }
+
+    /// A limit line with extra text after the number no longer states that limit.
+    #[test]
+    fn a_limit_line_with_a_suffix_is_refused() {
+        let (medium, unit, limit) = DECLARED_LIMITS[0];
+        let line = format!("- {medium}: at most {limit} {unit}");
+        let doctored = AI_SYSTEM_PROMPT.replace(&line, &format!("{line} per request, roughly"));
+        assert!(verify_prompt_text(&doctored).is_err());
     }
 
     /// A prompt that lost a closed-loop channel is refused.
