@@ -60,6 +60,29 @@ const CHAOS_TESTS: &[&str] = &[
     "chaos_no_canonical_source_alarms_and_never_reverts_blind",
 ];
 
+/// The text of one function, from the start of `from` to the brace that
+/// closes its body. Later items and test modules are not part of it. When the
+/// braces never balance, the rest of the text is returned.
+fn function_body(from: &str) -> &str {
+    let Some(open) = from.find('{') else {
+        return from;
+    };
+    let mut depth = 0usize;
+    for (i, c) in from.char_indices().skip_while(|(i, _)| *i < open) {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return &from[..=i];
+                }
+            }
+            _ => {}
+        }
+    }
+    from
+}
+
 /// The whole check, factored out so `self_test` can feed it tampered copies.
 fn probe(mod_rs: &str, stage: &str, health: &str, chaos: &str, problems: &mut Vec<String>) {
     if !mod_rs.contains("pub mod regen_health;") {
@@ -95,7 +118,7 @@ fn probe(mod_rs: &str, stage: &str, health: &str, chaos: &str, problems: &mut Ve
         problems.push(format!("{HEALTH_RS}: assess not found"));
         return;
     };
-    let body = &health[start..];
+    let body = function_body(&health[start..]);
     let positions: Vec<(usize, &str)> = ASSESS_ORDER
         .iter()
         .filter_map(|token| {
@@ -225,6 +248,23 @@ pub fn self_test() -> Result<String, String> {
         probe(good_mod, good_stage, &scrambled, good_chaos, &mut p);
         if p.is_empty() {
             problems.push("canary failed: scrambled decision order not caught".into());
+        }
+    }
+    // Canary 4b: the last verdict token sits in a later item, not in `assess`.
+    {
+        let mut p: Vec<String> = Vec::new();
+        let tampered = concat!(
+            "pub enum HealthVerdict pub enum AlarmReason pub struct HealthPolicy ",
+            "pub fn assess( { let _ = ledger.validate(); ",
+            "HealthVerdict::RevertTo { target, stress } ",
+            "let _ = canonical(ledger.stage, ledger.height); ",
+            "let _ = cheapest_target(damaged_below); ",
+            "let _ = reversion_beats_repair(a, b, c, d); } ",
+            "fn later() { HealthVerdict::RevertTo { target, stress } }"
+        );
+        probe(good_mod, good_stage, tampered, good_chaos, &mut p);
+        if p.is_empty() {
+            problems.push("canary failed: a verdict outside assess hid a scrambled ladder".into());
         }
     }
     // Canary 5: a chaos test is renamed/dissolved.
