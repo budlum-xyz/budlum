@@ -485,18 +485,30 @@ fn closure_tail_is_digest_cmp(body: &Expr) -> bool {
         },
         other => Some(other),
     };
-    last.is_some_and(|e| {
-        let c = compact(e);
-        c.contains("evidence_hash") && c.contains("==")
-    })
+    last.is_some_and(is_digest_eq)
+}
+
+/// Is the expression exactly `<x> == <y>` with `evidence_hash` on one side?
+///
+/// `a == evidence_hash || true` is an `||` expression and does not count,
+/// and neither does `!=`.
+fn is_digest_eq(e: &Expr) -> bool {
+    match e {
+        Expr::Paren(p) => is_digest_eq(&p.expr),
+        Expr::Binary(b) => {
+            matches!(b.op, syn::BinOp::Eq(_))
+                && (compact(&b.left).contains("evidence_hash")
+                    || compact(&b.right).contains("evidence_hash"))
+        }
+        _ => false,
+    }
 }
 
 /// Does the closure body contain any digest comparison? (Enough for
 /// `has_digest_condition` even when not in tail position; `digest_guards_return`
 /// only accepts the tail form.)
 fn closure_has_digest_cmp(body: &Expr) -> bool {
-    let c = compact(body);
-    c.contains("evidence_hash") && c.contains("sha2")
+    compact(body).contains("evidence_hash")
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -505,6 +517,9 @@ struct GovSlashVisitor {
     in_slash_validator: bool,
     has_digest_condition: bool,
     digest_guards_return: bool,
+    /// A digest condition was seen that does not drive the success. It is
+    /// sticky: a later good `if` cannot clear it.
+    digest_weak: bool,
 }
 
 impl GovSlashVisitor {
@@ -514,6 +529,7 @@ impl GovSlashVisitor {
             in_slash_validator: false,
             has_digest_condition: false,
             digest_guards_return: false,
+            digest_weak: false,
         }
     }
 }
@@ -563,8 +579,10 @@ impl<'ast> Visit<'ast> for GovSlashVisitor {
                 self.has_digest_condition = true;
                 let mut v = TopLevelTrue::default();
                 v.visit_block(&node.then_branch);
-                if v.found {
+                if v.found && is_digest_eq(&node.cond) {
                     self.digest_guards_return = true;
+                } else {
+                    self.digest_weak = true;
                 }
                 return;
             }
@@ -580,6 +598,8 @@ impl<'ast> Visit<'ast> for GovSlashVisitor {
                         self.has_digest_condition = true;
                         if closure_tail_is_digest_cmp(&c.body) {
                             self.digest_guards_return = true;
+                        } else {
+                            self.digest_weak = true;
                         }
                     }
                 }
@@ -670,7 +690,7 @@ fn judge_file(src: &str, checks: Checks) -> Vec<String> {
             problems.push(String::from(
                 "AST: no digest condition in the SlashValidator branch (neither if digest == evidence_hash nor an .any closure tail).",
             ));
-        } else if !gs.digest_guards_return {
+        } else if !gs.digest_guards_return || gs.digest_weak {
             problems.push(String::from(
                 "AST: the digest condition in the SlashValidator branch does not drive the success: there is no direct return true in the if block, or the .any closure tail is not the digest comparison.",
             ));
@@ -1021,5 +1041,35 @@ mod tests {
     fn return_ok_of_error_type_is_not_a_refusal() {
         let m = "if !a.verify_measurement(t) { return Ok(Error::X); }";
         assert!(!judge_file(&tee_src(m, B, R, ""), TEE_ONLY).is_empty());
+    }
+
+    const GOV_ONLY: Checks = Checks {
+        zero_address: false,
+        tee: false,
+        gov_slash: true,
+    };
+
+    fn gov_src(body: &str) -> String {
+        format!(
+            "fn execute_proposal() {{ match p.p_type {{ ProposalType::SlashValidator {{ evidence_hash }} => {{ {body} }} }} }}"
+        )
+    }
+
+    #[test]
+    fn gov_digest_forms() {
+        let good = "let ok = h.iter().any(|r| { let d = f(r); d == evidence_hash });";
+        assert!(judge_file(&gov_src(good), GOV_ONLY).is_empty());
+        let or_true = "let ok = h.iter().any(|r| { let d = f(r); d == evidence_hash || true });";
+        assert!(!judge_file(&gov_src(or_true), GOV_ONLY).is_empty());
+        let inverted = "if d != evidence_hash { return true; }";
+        assert!(!judge_file(&gov_src(inverted), GOV_ONLY).is_empty());
+        let good_if = "if d == evidence_hash { return true; }";
+        assert!(judge_file(&gov_src(good_if), GOV_ONLY).is_empty());
+    }
+
+    #[test]
+    fn gov_weak_condition_is_sticky() {
+        let both = "if d == evidence_hash { return true; } if d != evidence_hash { return true; }";
+        assert!(!judge_file(&gov_src(both), GOV_ONLY).is_empty());
     }
 }
