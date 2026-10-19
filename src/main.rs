@@ -615,6 +615,13 @@ async fn main() {
     let port = config.port.unwrap_or(network.default_port());
     let chain_id = config.chain_id.unwrap_or(network.chain_id().value());
     let network_params = network.consensus_params();
+    if let Err(e) = budlum_core::core::chain_config::check_epoch_len_matches_chain_id(
+        chain_id,
+        network_params.epoch_len,
+    ) {
+        eprintln!("ERROR: {e}");
+        std::process::exit(1);
+    }
     // P01-F23: min-stake is a consensus rule. A node started with a
     // divergent `--min-stake` would validate leaders and validators against a
     // parameter the rest of the network does not share and split off - while
