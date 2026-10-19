@@ -122,10 +122,17 @@ impl HybridFinalityVote {
 }
 
 /// Dual Wallet - dual_required_new, no address, SHA3(ed||pq) bud1...
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DualWallet {
     pub ed_seed: [u8; 32],
     pub pq_seed: [u8; 32],
+}
+
+/// The seeds are secrets: the debug form never prints them.
+impl std::fmt::Debug for DualWallet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DualWallet { seeds: <redacted> }")
+    }
 }
 impl DualWallet {
     pub fn from_bip39_seed(seed: &[u8; 64]) -> Self {
@@ -257,6 +264,16 @@ impl QuantumChainGates {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_debug_form_of_a_wallet_does_not_print_the_seeds() {
+        let w = DualWallet {
+            ed_seed: [0xAB; 32],
+            pq_seed: [0xCD; 32],
+        };
+        let shown = format!("{w:?}");
+        assert!(!shown.contains("171") && !shown.contains("205"), "{shown}");
+    }
     use ed25519_dalek::Signer as Ed25519Signer;
     #[test]
     fn sha3_hasher() {
