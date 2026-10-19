@@ -520,55 +520,68 @@ impl Block {
         }
         self.verify_signature()
     }
-    pub fn mine(&mut self, difficulty: usize) {
-        // Use binary bit-level check for consistency with PoWEngine
-        let leading_zero_bits = difficulty * 4;
-        let full_bytes = leading_zero_bits / 8;
-        let remaining_bits = leading_zero_bits % 8;
-
+    /// Searches nonces until the hash has `difficulty` leading zero hex digits.
+    ///
+    /// Returns `false` when the nonce space is exhausted without a hit, so the
+    /// search ends instead of wrapping or panicking on overflow (P20-F12). A
+    /// difficulty above 64 hex digits cannot be met by a 32-byte hash and
+    /// returns `false` at once.
+    pub fn mine(&mut self, difficulty: usize) -> bool {
+        let leading_zero_bits = difficulty.saturating_mul(4);
+        if leading_zero_bits > 256 {
+            return false;
+        }
         loop {
-            let hash_bytes = match hex::decode(&self.hash) {
-                Ok(b) => b,
-                Err(_) => {
-                    self.nonce += 1;
-                    self.hash = self.calculate_hash();
-                    continue;
-                }
+            if Self::hash_meets_leading_zero_bits(&self.hash, leading_zero_bits) {
+                return true;
+            }
+            let Some(next) = self.nonce.checked_add(1) else {
+                return false;
             };
-
-            if hash_bytes.len() < full_bytes + if remaining_bits > 0 { 1 } else { 0 } {
-                self.nonce += 1;
-                self.hash = self.calculate_hash();
-                continue;
-            }
-
-            let mut valid = true;
-            for byte in &hash_bytes[..full_bytes] {
-                if *byte != 0 {
-                    valid = false;
-                    break;
-                }
-            }
-
-            if valid && remaining_bits > 0 {
-                let mask = 0xFFu8 << (8 - remaining_bits);
-                if hash_bytes[full_bytes] & mask != 0 {
-                    valid = false;
-                }
-            }
-
-            if valid {
-                break;
-            }
-
-            self.nonce += 1;
+            self.nonce = next;
             self.hash = self.calculate_hash();
         }
+    }
+
+    fn hash_meets_leading_zero_bits(hash_hex: &str, leading_zero_bits: usize) -> bool {
+        let Ok(hash_bytes) = hex::decode(hash_hex) else {
+            return false;
+        };
+        let full_bytes = leading_zero_bits / 8;
+        let remaining_bits = leading_zero_bits % 8;
+        let needed = full_bytes + usize::from(remaining_bits > 0);
+        if hash_bytes.len() < needed {
+            return false;
+        }
+        if hash_bytes[..full_bytes].iter().any(|byte| *byte != 0) {
+            return false;
+        }
+        if remaining_bits > 0 {
+            let mask = 0xFFu8 << (8 - remaining_bits);
+            if hash_bytes[full_bytes] & mask != 0 {
+                return false;
+            }
+        }
+        true
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mine_stops_at_nonce_exhaustion_and_impossible_difficulty() {
+        let mut block = Block::new(1, "0".repeat(64), vec![]);
+        assert!(!block.mine(65), "no 32-byte hash has 65 zero hex digits");
+        block.nonce = u64::MAX;
+        block.hash = block.calculate_hash();
+        // Difficulty 63 will not be met by this single nonce.
+        assert!(!block.mine(63));
+        assert_eq!(block.nonce, u64::MAX);
+        let mut easy = Block::new(1, "0".repeat(64), vec![]);
+        assert!(easy.mine(1));
+        assert!(easy.hash.starts_with('0'));
+    }
 
     /// Regression: a malformed `tx.hash` must not be silently reinterpreted as
     /// Raw bytes inside the Merkle leaf preimage.
