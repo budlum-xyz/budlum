@@ -68,8 +68,9 @@ pub trait Transport {
     /// # Errors
     ///
     /// A network error, content that is not found, or the size limit being
-    /// exceeded.
-    fn fetch(&self, target: &Target) -> Result<Vec<u8>, String>;
+    /// exceeded. `max_bytes` is the most the caller will accept: a transport
+    /// stops reading past it instead of buffering the whole body.
+    fn fetch(&self, target: &Target, max_bytes: usize) -> Result<Vec<u8>, String>;
 
     /// Fetch the manifest a `bud://` manifest id names.
     ///
@@ -240,7 +241,7 @@ pub const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024;
 /// A transport error, a size overrun, or a target identifier that cannot be
 /// parsed.
 pub fn fetch_and_verify<T: Transport>(transport: &T, target: &Target) -> Result<Fetched, String> {
-    let bytes = transport.fetch(target)?;
+    let bytes = transport.fetch(target, MAX_CONTENT_BYTES)?;
     if bytes.len() > MAX_CONTENT_BYTES {
         return Err(format!(
             "{} content is {} bytes; the limit is {MAX_CONTENT_BYTES}",
@@ -358,7 +359,7 @@ mod tests {
     }
 
     impl Transport for Table {
-        fn fetch(&self, target: &Target) -> Result<Vec<u8>, String> {
+        fn fetch(&self, target: &Target, _max_bytes: usize) -> Result<Vec<u8>, String> {
             let key = match target {
                 Target::Bud(id) => id.to_string(),
                 Target::Ipfs(s) | Target::Https(s) => s.clone(),
@@ -387,6 +388,20 @@ mod tests {
         let got = fetch_and_verify(&t, &Target::Bud(id)).unwrap();
         assert_eq!(got.evidence.weakest(), Strength::Verified);
         assert!(got.is_displayable());
+    }
+
+    #[test]
+    fn the_transport_is_told_the_size_limit() {
+        struct Probe(std::cell::Cell<usize>);
+        impl Transport for Probe {
+            fn fetch(&self, _target: &Target, max_bytes: usize) -> Result<Vec<u8>, String> {
+                self.0.set(max_bytes);
+                Ok(Vec::new())
+            }
+        }
+        let probe = Probe(std::cell::Cell::new(0));
+        let _ = fetch_and_verify(&probe, &Target::Https(String::from("https://x/y")));
+        assert_eq!(probe.0.get(), MAX_CONTENT_BYTES);
     }
 
     #[test]
