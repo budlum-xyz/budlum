@@ -165,6 +165,23 @@ impl Default for SemanticAnalyzer {
     }
 }
 
+/// True when control cannot reach the end of `stmts` without a `return`.
+/// A loop may run zero times, so it never counts. An `if` counts when both
+/// branches return. A `match` always ends in a wildcard, so it counts when
+/// every arm returns.
+fn stmts_always_return(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::Return(_) => true,
+        Stmt::If(_, then_branch, Some(else_branch)) => {
+            stmts_always_return(then_branch) && stmts_always_return(else_branch)
+        }
+        Stmt::Match { arms, .. } => {
+            !arms.is_empty() && arms.iter().all(|arm| stmts_always_return(&arm.body))
+        }
+        _ => false,
+    })
+}
+
 impl SemanticAnalyzer {
     pub fn new() -> Self {
         Self {
@@ -465,6 +482,24 @@ impl SemanticAnalyzer {
 
         for stmt in &func.body {
             self.analyze_stmt(stmt, &mut env, errors);
+        }
+
+        // The epilogue of codegen pushes 0 when control reaches the end of the
+        // body. For a function that declares a result, that is a made-up
+        // value (a null pointer for a struct), so the end must be unreachable.
+        if !matches!(self.current_func_ret, Type::Void | Type::Unknown)
+            && !stmts_always_return(&func.body)
+        {
+            errors.push(CompileError::SemanticError(format!(
+                "function '{}' must return a value on every path",
+                func.name
+            )));
+        }
+        // The entry call pushes no argument, so `main` cannot take any.
+        if func.name == "main" && !func.params.is_empty() {
+            errors.push(CompileError::SemanticError(
+                "function 'main' cannot take parameters".to_string(),
+            ));
         }
     }
 

@@ -900,6 +900,63 @@ mod tests {
         assert_eq!(vm.events, vec![30]);
     }
 
+    /// P35-F16: a function with a result must return on every path, and
+    /// `main` cannot take parameters.
+    #[test]
+    fn missing_return_and_main_parameters_are_refused() {
+        for body in [
+            "let x = 1;",
+            "if (c) { return 1; }",
+            "while (c) { return 1; }",
+            "if (c) { return 1; } else { let y = 2; }",
+        ] {
+            let source = format!(
+                r#"
+                contract R {{
+                    fn f(c: u64) -> u64 {{
+                        {body}
+                    }}
+
+                    pub fn main() {{
+                        emit E(1);
+                    }}
+                }}
+            "#
+            );
+            match compile(&source, IsaProfile::Production) {
+                Err(CompileError::SemanticError(msg)) => {
+                    assert!(msg.contains("every path"), "unexpected message: {msg}")
+                }
+                other => panic!("`{body}` must be refused, got {other:?}"),
+            }
+        }
+
+        let ok = r#"
+            contract R {
+                fn f(c: u64) -> u64 {
+                    if (c) { return 1; } else { return 2; }
+                }
+
+                pub fn main() {
+                    emit E(f(1));
+                }
+            }
+        "#;
+        compile(ok, IsaProfile::Production).expect("both branches return");
+
+        let with_param = r#"
+            contract R {
+                pub fn main(x: u64) {
+                    emit E(x);
+                }
+            }
+        "#;
+        match compile(with_param, IsaProfile::Production) {
+            Err(CompileError::SemanticError(msg)) => assert!(msg.contains("main")),
+            other => panic!("main with a parameter must be refused, got {other:?}"),
+        }
+    }
+
     /// P35-F17: a name bound inside an `if` or `while` body is not visible
     /// after it, and a `let` there does not replace an outer variable.
     #[test]
