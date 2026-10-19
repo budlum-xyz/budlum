@@ -87,6 +87,9 @@ pub enum VaultError {
     /// The folder already holds the most members one folder may hold.
     #[error("folder {0} is full")]
     FolderFull(u64),
+    /// The registry already holds the most folders it may hold.
+    #[error("the vault registry is full")]
+    TooManyFolders,
 }
 
 /// The folder-to-membership map. Pure state, no clock, no ownership: those
@@ -101,6 +104,10 @@ impl VaultRegistry {
     /// Most members one folder can hold. It bounds the membership scans.
     pub const MAX_MEMBERS_PER_FOLDER: usize = 1_000;
 
+    /// Most folders the registry can hold. With the member cap it bounds the
+    /// scan in `referenced_by`.
+    pub const MAX_FOLDERS: usize = 100_000;
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -108,6 +115,9 @@ impl VaultRegistry {
 
     /// A folder that exists and holds nothing is still a folder.
     pub fn register_folder(&mut self, folder: u64) -> Result<(), VaultError> {
+        if self.folders.len() >= Self::MAX_FOLDERS && !self.folders.contains(&folder) {
+            return Err(VaultError::TooManyFolders);
+        }
         if !self.folders.insert(folder) {
             return Err(VaultError::AlreadyFolder(folder));
         }
@@ -437,6 +447,15 @@ mod tests {
             v.add_member(1, 10_000 + id).unwrap();
         }
         assert_eq!(v.add_member(1, 99_999), Err(VaultError::FolderFull(1)));
+    }
+
+    #[test]
+    fn the_registry_refuses_folders_past_the_total_cap() {
+        let mut v = VaultRegistry::new();
+        for id in 0..VaultRegistry::MAX_FOLDERS as u64 {
+            v.register_folder(id).unwrap();
+        }
+        assert_eq!(v.register_folder(u64::MAX), Err(VaultError::TooManyFolders));
     }
 
     fn two_folders() -> (VaultRegistry, u64, u64) {
