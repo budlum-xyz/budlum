@@ -1929,6 +1929,20 @@ jobs:
         run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets -- -D warnings
       - name: Rust gates rustfmt
         run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
+      # xtask/tools is its own workspace and runs five CI tools (audit-guard,
+      # step-reachability, audit-deps, generate-sbom, the smoke tools). Its
+      # lints are pedantic-deny and its unit tests (the committed FSF document
+      # equals the generated one, the real workflows have no dangling step
+      # references) were never executed, so a regression in a tool was found
+      # only when the tool itself broke.
+      - name: Tools clippy (pedantic, no allow)
+        run: cargo clippy --release --manifest-path xtask/tools/Cargo.toml --all-targets -- -D warnings
+      - name: Tools rustfmt
+        run: cargo fmt --manifest-path xtask/tools/Cargo.toml --check
+      - name: Tools unit tests
+        run: cargo test --release --manifest-path xtask/tools/Cargo.toml
+      - name: Tools canary (seed-corpus, devnet, backup-drill, pre-push)
+        run: cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- --self-test
       # A typographic dash in a workflow `name:` silently unlists the job from
       # branch protection: it runs, it passes, and it stops counting. Three
       # required checks were carrying one. A hand count already missed them
