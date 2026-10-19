@@ -928,6 +928,9 @@ jobs:
       - name: Test
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --workspace
+      - name: Test compiler with the experimental ISA
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test -p bud-compiler --features experimental
       - name: Format
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --all -- --check
