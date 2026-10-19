@@ -354,9 +354,9 @@ fn render() -> String {
     let bl_diff = p1.num.shr(strip).bit_len() as i64 - p1.den.shr(strip).bit_len() as i64;
     let _ = writeln!(
         o,
-        "  exact  P(C<=H over 3 ranks), q=1: {}  log2 {:.1}",
+        "  exact  P(C<=H over 3 ranks), q=1: {}  bit-length difference {}",
         fmt(&p1, 6),
-        bl_diff as f64
+        bl_diff
     );
     let _ = writeln!(o, "  uniform first-order (17/32)^3:   {}", fmt(&p1u, 6));
     for q in [1u32, 2, 4, 8] {

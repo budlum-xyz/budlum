@@ -13,7 +13,7 @@
   q=8: ranks ['1.3193', '2.1188', '1.0000']  uniform 1.3193
 
 == checksum-side joint domination term ==
-  exact  P(C<=H over 3 ranks), q=1: 0.203832  log2 -3.0
+  exact  P(C<=H over 3 ranks), q=1: 0.203832  bit-length difference -3
   uniform first-order (17/32)^3:   0.149933
   q_honest=1: exact P(C <= min over honest q, joint ranks) = 0.203832  log2 = -2.295
   q_honest=2: exact P(C <= min over honest q, joint ranks) = 0.072460  log2 = -3.787
