@@ -213,6 +213,9 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --manifest-path crates/bpqs/Cargo.toml --verbose 2>&1 | tee /tmp/bpqstests.log
+      - name: Ceremony-scale keygen (release, ignored test)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --release --manifest-path crates/bpqs/Cargo.toml -- --ignored full_size_ceremony_l5
   budlum-quality:
     name: Budlum Core quality
     runs-on: ubuntu-latest
