@@ -2522,6 +2522,30 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::PoaOnboarding(poa_tx) => {
+                // BLG-0089 (P04-F07): one arm delegating to the one body
+                // (`poa_onboarding::execute_poa_onboarding_tx`) that holds
+                // every authority rule. Admission writes commit state; they
+                // never move value:
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "poa_onboarding_amount_must_be_zero",
+                        "a PoA admission transaction commits state; an unspent amount would be silently burned",
+                    ));
+                }
+                crate::registry::poa_onboarding::execute_poa_onboarding_tx(
+                    &mut state.poa_onboarding,
+                    &tx.from,
+                    poa_tx.clone(),
+                    state.epoch_index,
+                )
+                .map_err(|e| BudlumError::validation("poa_onboarding_tx_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
             TransactionType::Storage(storage_tx) => {
                 // One arm delegating to the tested body
                 // (`domain::execute_storage_tx`), which runs every check
