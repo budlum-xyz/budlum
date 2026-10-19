@@ -121,14 +121,10 @@ impl StateSnapshot {
         }
         serde_json::from_slice(data).map_err(|e| format!("Failed to parse snapshot: {e}"))
     }
-    pub fn size(&self) -> usize {
-        self.to_bytes().len()
-    }
-
-    pub fn chunk(&self, chunk_size: usize) -> Vec<Vec<u8>> {
-        let data = self.to_bytes();
-        data.chunks(chunk_size).map(<[u8]>::to_vec).collect()
-    }
+    // BLG-0213 (P11-F12): `size` and `chunk` were deleted. No caller in the
+    // tree and no entry in any baseline; a paged-transfer API that exists only
+    // as a public name is an unowned attack surface (the chunking a snapshot
+    // actually ships is the wire protocol's, not this method's).
 }
 #[derive(Clone)]
 pub struct PruningManager {
