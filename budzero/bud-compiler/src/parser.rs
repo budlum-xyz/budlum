@@ -162,6 +162,23 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// After one list element: a comma, or the closing token. Anything else
+    /// is a missing comma.
+    fn comma_or_close(&mut self, close: &Token) -> Result<(), CompileError> {
+        if self.peek() == &Token::Comma {
+            self.consume();
+            Ok(())
+        } else if self.peek() == close {
+            Ok(())
+        } else {
+            Err(CompileError::ParserError(format!(
+                "Expected ',' or {:?}, found {:?}",
+                close,
+                self.peek()
+            )))
+        }
+    }
+
     pub fn parse_contract(&mut self) -> Result<Contract, CompileError> {
         self.expect(Token::Contract)?;
         let name = if let Token::Ident(name) = self.consume() {
@@ -306,9 +323,7 @@ impl<'a> Parser<'a> {
                 return Err(CompileError::ParserError("Expected param type".to_string()));
             };
             params.push(Param { name, ty });
-            if self.peek() == &Token::Comma {
-                self.consume();
-            }
+            self.comma_or_close(&Token::ParenClose)?;
         }
         self.expect(Token::ParenClose)?;
 
@@ -513,9 +528,7 @@ impl<'a> Parser<'a> {
                 let mut args = Vec::new();
                 while self.peek() != &Token::ParenClose {
                     args.push(self.parse_expr()?);
-                    if self.peek() == &Token::Comma {
-                        self.consume();
-                    }
+                    self.comma_or_close(&Token::ParenClose)?;
                 }
                 self.expect(Token::ParenClose)?;
                 self.expect(Token::Semicolon)?;
@@ -701,9 +714,7 @@ impl<'a> Parser<'a> {
                     let mut args = Vec::new();
                     while self.peek() != &Token::ParenClose {
                         args.push(self.parse_child(child_max)?);
-                        if self.peek() == &Token::Comma {
-                            self.consume();
-                        }
+                        self.comma_or_close(&Token::ParenClose)?;
                     }
                     self.expect(Token::ParenClose)?;
                     Ok(Expr::Call("poseidon".to_string(), args))
@@ -746,9 +757,7 @@ impl<'a> Parser<'a> {
                     let mut args = Vec::new();
                     while self.peek() != &Token::ParenClose {
                         args.push(self.parse_child(child_max)?);
-                        if self.peek() == &Token::Comma {
-                            self.consume();
-                        }
+                        self.comma_or_close(&Token::ParenClose)?;
                     }
                     self.expect(Token::ParenClose)?;
                     Ok(Expr::Call(name, args))
@@ -771,9 +780,7 @@ impl<'a> Parser<'a> {
                         self.expect(Token::Colon)?;
                         let val = self.parse_child(child_max)?;
                         fields.push((fname, val));
-                        if self.peek() == &Token::Comma {
-                            self.consume();
-                        }
+                        self.comma_or_close(&Token::BraceClose)?;
                     }
                     self.expect(Token::BraceClose)?;
                     Ok(Expr::StructLiteral(name, fields))
@@ -836,6 +843,26 @@ mod tests {
         );
         let mut parser = Parser::new(&source).expect("the input lexes");
         assert!(parser.parse_contract().is_err());
+    }
+
+    #[test]
+    fn missing_commas_in_lists_are_refused() {
+        let cases = [
+            "contract T { pub fn f(a: u64 b: u64) { } }",
+            "contract T { pub fn main() { emit E(1 2); } }",
+            "contract T { pub fn main() { let x = poseidon(1 2); } }",
+            "contract T { pub fn main() { let x = f(1 2); } }",
+            "contract T { pub fn main() { let x = S { a: 1 b: 2 }; } }",
+        ];
+        for source in cases {
+            let mut parser = Parser::new(source).expect("the input lexes");
+            assert!(
+                parser.parse_contract().is_err(),
+                "must be refused: {source}"
+            );
+        }
+        let mut parser = Parser::new("contract T { pub fn f(a: u64, b: u64) { } }").unwrap();
+        assert!(parser.parse_contract().is_ok());
     }
 
     #[test]
