@@ -1507,6 +1507,16 @@ impl Executor {
                 if spec.owner != tx.from {
                     spec.owner = tx.from;
                 }
+                // The id is derived, never chosen: a sender-picked id would
+                // let a front-runner take another owner's id.
+                if spec.model_id
+                    != crate::ai::types::AiModelId::of(&tx.from, &spec.model_hash, spec.version)
+                {
+                    return Err(BudlumError::validation(
+                        "model_id_not_canonical",
+                        "model_id must equal the id derived from owner, model_hash and version",
+                    ));
+                }
                 // The anti-sybil registration fee (governance adjustable,
                 // RegistryParams::ai_model_register_fee). Exact cost: less is
                 // refused; the whole amount is added on top of the fee. A tier 2 decision
@@ -2912,6 +2922,53 @@ mod tests {
         assert!(Executor::apply_transaction(&mut state, &tx).is_err());
         assert_eq!(state.get_validator(&who).map(|v| v.stake), Some(1_000));
         assert!(state.unbonding_queue.is_empty());
+    }
+
+    #[test]
+    fn model_registration_refuses_a_chosen_model_id() {
+        use crate::core::account::AccountState;
+        use crate::core::address::Address;
+        use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+        use crate::execution::executor::Executor;
+
+        let who = Address::from([6u8; 32]);
+        let mut state = AccountState::new();
+        let fee = state.base_fee.max(1);
+        let reg_fee = state.registry.params().ai_model_register_fee;
+        state.add_balance(&who, reg_fee + fee);
+        let model_hash = [0xA1; 32];
+        let spec = crate::ai::types::AiModelSpec {
+            model_id: crate::ai::types::AiModelId([9u8; 32]),
+            model_hash,
+            owner: who,
+            min_verifier_count: 3,
+            agreement_threshold: 2,
+            max_input_ref_bytes: 1_024,
+            max_output_ref_bytes: 1_024,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 100,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_dims: None,
+            execution_weights_digest: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        };
+        let mut tx = Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            reg_fee,
+            fee,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::AiModelRegister(spec),
+        );
+        tx.hash = tx.calculate_hash();
+        assert!(Executor::apply_transaction(&mut state, &tx).is_err());
+        assert!(state.ai_registry.models.is_empty());
     }
 
     /// Audit 2026-09-09 E-1: the vesting spend gate must hold on every arm
