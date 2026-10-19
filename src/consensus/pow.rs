@@ -692,12 +692,13 @@ mod tests {
         let mut chain: Vec<Block> = Vec::new();
         let mut genesis = Block::new(0, "0".repeat(64), vec![]);
         genesis.timestamp = 1_000_000;
+        let genesis_ts = genesis.timestamp;
         genesis.hash = genesis.calculate_hash();
         chain.push(genesis);
         for i in 1..=4u64 {
             let prev_hash = chain[(i - 1) as usize].hash.clone();
             let mut b = Block::new(i, prev_hash, vec![]);
-            b.timestamp = genesis.timestamp + u128::from(i) * 1_000;
+            b.timestamp = genesis_ts + u128::from(i) * 1_000;
             let state = AccountState::new();
             engine.prepare_block(&mut b, &state).unwrap();
             chain.push(b);

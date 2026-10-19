@@ -87,6 +87,11 @@ pub struct BpqsSigner<P: BpqsParams, H: BpqsHash> {
     levels: merkle::Levels,
     root_seed: [u8; 32],
     public: BpqsPublicKey<P>,
+    /// Signatures minted per epoch (BLG-0041). The WOTS one-time property
+    /// per (epoch, count) is only safe if a count is never reused, and a
+    /// caller-held count nothing persists could not promise that. The device
+    /// keeps its own counters now, and `sign_at_height` takes `&mut self`.
+    per_epoch_counts: alloc::collections::BTreeMap<u32, u32>,
     _hash: core::marker::PhantomData<H>,
 }
 
@@ -107,8 +112,61 @@ impl<P: BpqsParams, H: BpqsHash> BpqsSigner<P, H> {
             levels,
             root_seed,
             public,
+            per_epoch_counts: alloc::collections::BTreeMap::new(),
             _hash: core::marker::PhantomData,
         })
+    }
+
+    /// Sign `msg` for the epoch of `height`, consuming one slot of the
+    /// epoch's quota (BLG-0041).
+    ///
+    /// The device counts its own signatures per epoch and refuses the next
+    /// mint once `Q_MAX` is reached, so two messages in one epoch can never
+    /// draw the same Winternitz key twice - the property the caller-held
+    /// counter could not guarantee. `&mut self` is the point: minting is a
+    /// state change on the key.
+    pub fn sign_at_height(&mut self, height: u64, msg: &[u8]) -> Result<BpqsSignature<P>, BpqsError> {
+        let epoch = epoch_of(height, self.public.window)?;
+        let used = self.per_epoch_counts.get(&epoch).copied().unwrap_or(0);
+        if used >= P::Q_MAX {
+            return Err(BpqsError::QuotaExceeded {
+                epoch,
+                // Saturating (BLG-0052): `used + 1` overflowed at u32::MAX and
+                // aborted a build that promised never to panic.
+                attempted: used.saturating_add(1),
+            });
+        }
+        if epoch >= (1u32 << P::T_LOG2) {
+            return Err(BpqsError::Malformed(
+                "epoch beyond the tree's headroom; committee renewal ceremony required",
+            ));
+        }
+        let epoch_seed = prf_epoch_seed::<H>(&self.root_seed, epoch);
+        let chains = wots::epoch_secret_chains::<H, P>(&epoch_seed);
+        let r_wide = H::digest32(
+            domains::RANDOMIZER,
+            &[
+                &self.root_seed,
+                &epoch.to_le_bytes(),
+                &used.to_le_bytes(),
+                msg,
+            ],
+        );
+        let mut randomizer = [0u8; 16];
+        randomizer.copy_from_slice(&r_wide[..16]);
+        let bound = H::digest32(domains::MESSAGE_BIND_V1, &[&randomizer, msg]);
+        let mut signature = BpqsSignature {
+            epoch,
+            randomizer,
+            chains: wots::sign_chains::<H, P>(&chains, &bound),
+            path: merkle::auth_path::<P>(&self.levels, epoch as usize)?,
+            _private: core::marker::PhantomData,
+        };
+        for lane in signature.chains.iter_mut().skip(P::LEN) {
+            *lane = [0u8; 32];
+        }
+        self.per_epoch_counts.insert(epoch, used.saturating_add(1));
+        Ok(signature)
     }
 
     /// Borrow the public half for the keybook entry.
@@ -126,56 +184,6 @@ pub fn keygen_root<H: BpqsHash, P: BpqsParams>(
 ) -> Result<BpqsPublicKey<P>, BpqsError> {
     let signer = BpqsSigner::<P, H>::ceremonial_keygen(root_seed, window)?;
     Ok(signer.public().clone())
-}
-
-/// Sign `msg` for the epoch of `height`. `per_epoch_count` is the caller's
-/// own count of signatures already minted in this epoch - the device keeps
-/// no mutable chain state, so the count lives in the ceremony log, and
-/// breaching `q_max` is refused loudly instead of silently degrading toward
-/// one-time-key reuse.
-pub fn sign_at_height<H: BpqsHash, P: BpqsParams>(
-    signer: &BpqsSigner<P, H>,
-    height: u64,
-    per_epoch_count: u32,
-    msg: &[u8],
-) -> Result<BpqsSignature<P>, BpqsError> {
-    let epoch = epoch_of(height, signer.public.window)?;
-    if per_epoch_count >= P::Q_MAX {
-        return Err(BpqsError::QuotaExceeded {
-            epoch,
-            attempted: per_epoch_count + 1,
-        });
-    }
-    if epoch >= (1u32 << P::T_LOG2) {
-        return Err(BpqsError::Malformed(
-            "epoch beyond the tree's headroom; committee renewal ceremony required",
-        ));
-    }
-    let epoch_seed = prf_epoch_seed::<H>(&signer.root_seed, epoch);
-    let chains = wots::epoch_secret_chains::<H, P>(&epoch_seed);
-    let r_wide = H::digest32(
-        domains::RANDOMIZER,
-        &[
-            &signer.root_seed,
-            &epoch.to_le_bytes(),
-            &per_epoch_count.to_le_bytes(),
-            msg,
-        ],
-    );
-    let mut randomizer = [0u8; 16];
-    randomizer.copy_from_slice(&r_wide[..16]);
-    let bound = H::digest32(domains::MESSAGE_BIND_V1, &[&randomizer, msg]);
-    let mut signature = BpqsSignature {
-        epoch,
-        randomizer,
-        chains: wots::sign_chains::<H, P>(&chains, &bound),
-        path: merkle::auth_path::<P>(&signer.levels, epoch as usize)?,
-        _private: core::marker::PhantomData,
-    };
-    for lane in signature.chains.iter_mut().skip(P::LEN) {
-        *lane = [0u8; 32];
-    }
-    Ok(signature)
 }
 
 /// Refuse a signature whose unused bytes are not zero. The verifier reads only
@@ -251,9 +259,11 @@ mod sign_tests {
 
     #[test]
     fn roundtrip_across_epochs() {
-        let signer = committee();
-        for height in [0u64, 7, 8, 15, 16, 40] {
-            let sig = sign_at_height::<H, P>(&signer, height, 0, b"anchor-digest")
+        let mut signer = committee();
+        // One mint per epoch: Q_MAX is 1 (BLG-0041), and the device now
+        // enforces the quota itself.
+        for height in [0u64, 8, 16, 24, 32, 40] {
+            let sig = signer.sign_at_height(height, b"anchor-digest")
                 .unwrap_or_else(|e| panic!("sign h={height}: {e}"));
             verify_at_height::<H, P>(signer.public(), height, b"anchor-digest", &sig)
                 .unwrap_or_else(|e| panic!("verify h={height}: {e}"));
@@ -262,8 +272,8 @@ mod sign_tests {
 
     #[test]
     fn signature_moved_to_another_epoch_refuses() {
-        let signer = committee();
-        let sig = sign_at_height::<H, P>(&signer, 0, 0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        let mut signer = committee();
+        let sig = signer.sign_at_height(0, b"m").unwrap_or_else(|e| panic!("{e}"));
         let out = verify_at_height::<H, P>(signer.public(), 8, b"m", &sig);
         assert_eq!(
             out,
@@ -276,11 +286,11 @@ mod sign_tests {
 
     #[test]
     fn second_signature_in_one_epoch_refuses() {
-        let signer = committee();
-        sign_at_height::<H, P>(&signer, 3, 0, b"m")
+        let mut signer = committee();
+        signer.sign_at_height(3, b"m")
             .unwrap_or_else(|e| panic!("first mint of the epoch must sign: {e}"));
         assert_eq!(
-            sign_at_height::<H, P>(&signer, 3, 1, b"m"),
+            signer.sign_at_height(3, b"m"),
             Err(BpqsError::QuotaExceeded {
                 epoch: 0,
                 attempted: 2
@@ -290,15 +300,15 @@ mod sign_tests {
 
     #[test]
     fn wrong_message_refuses() {
-        let signer = committee();
-        let sig = sign_at_height::<H, P>(&signer, 0, 0, b"good").unwrap_or_else(|e| panic!("{e}"));
+        let mut signer = committee();
+        let sig = signer.sign_at_height(0, b"good").unwrap_or_else(|e| panic!("{e}"));
         assert!(verify_at_height::<H, P>(signer.public(), 0, b"evil", &sig).is_err());
     }
 
     #[test]
     fn tampered_path_refuses() {
-        let signer = committee();
-        let mut sig = sign_at_height::<H, P>(&signer, 0, 0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        let mut signer = committee();
+        let mut sig = signer.sign_at_height(0, b"m").unwrap_or_else(|e| panic!("{e}"));
         sig.path[0][0] ^= 0x01;
         assert_eq!(
             verify_at_height::<H, P>(signer.public(), 0, b"m", &sig),
@@ -308,16 +318,16 @@ mod sign_tests {
 
     #[test]
     fn tampered_chain_refuses() {
-        let signer = committee();
-        let mut sig = sign_at_height::<H, P>(&signer, 0, 0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        let mut signer = committee();
+        let mut sig = signer.sign_at_height(0, b"m").unwrap_or_else(|e| panic!("{e}"));
         sig.chains[9][1] ^= 0x01;
         assert!(verify_at_height::<H, P>(signer.public(), 0, b"m", &sig).is_err());
     }
 
     #[test]
     fn non_zero_unused_chain_refuses() {
-        let signer = committee();
-        let mut sig = sign_at_height::<H, P>(&signer, 0, 0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        let mut signer = committee();
+        let mut sig = signer.sign_at_height(0, b"m").unwrap_or_else(|e| panic!("{e}"));
         sig.chains[P::LEN][0] = 1;
         assert!(matches!(
             verify_at_height::<H, P>(signer.public(), 0, b"m", &sig),
@@ -327,8 +337,8 @@ mod sign_tests {
 
     #[test]
     fn non_zero_unused_path_entry_refuses() {
-        let signer = committee();
-        let mut sig = sign_at_height::<H, P>(&signer, 0, 0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        let mut signer = committee();
+        let mut sig = signer.sign_at_height(0, b"m").unwrap_or_else(|e| panic!("{e}"));
         sig.path[P::T_LOG2][5] = 1;
         assert!(matches!(
             verify_at_height::<H, P>(signer.public(), 0, b"m", &sig),

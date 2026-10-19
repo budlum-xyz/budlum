@@ -7,12 +7,12 @@
 //!
 //! ## Backends
 //!
-//! - **Canonical**: [`super::poseidon2::Poseidon2GoldilocksHash`] -
+//! - Canonical: [`super::poseidon2::Poseidon2GoldilocksHash`] -
 //!   Poseidon2-Goldilocks-16 with the BPQS-POSEIDON2-SPONGE-v0 byte binding
 //!   (see the poseidon2 module header for the full binding proof sketch).
-//! - **Cross-check 1**: [`Sha3_256Hash`] - NIST FIPS 202 fixed-output member,
+//! - Cross-check 1: [`Sha3_256Hash`] - NIST FIPS 202 fixed-output member,
 //!   present and vetted in-tree since M1.
-//! - **Cross-check 2**: [`super::shake256::Shake256Hash`] - the FIPS 202
+//! - Cross-check 2: [`super::shake256::Shake256Hash`] - the FIPS 202
 //!   XOF member (domain suffix 0x1F, 32-byte read), implemented in-crate on
 //!   the `keccak` permutation because sha3 0.12 ships no SHAKE surface.
 //!
