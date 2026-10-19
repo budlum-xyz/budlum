@@ -2172,6 +2172,30 @@ mod tests {
     }
 
     #[test]
+    fn outcome_keeps_earliest_agreeing_output_ref() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let mk = |v: u8, out: &[u8], nonce: u64| AiInferenceResult {
+            request_id: req_id,
+            verifier: Address::from([v; 32]),
+            output_commitment: [9u8; 32],
+            output_ref: BoundedBytes::try_new(out.to_vec()).unwrap(),
+            result_nonce: nonce,
+            signature: vec![1],
+            submitted_at_block: 11,
+        };
+        assert!(registry
+            .submit_result(mk(0x11, b"first", 1), 11)
+            .unwrap()
+            .is_none());
+        let outcome = registry
+            .submit_result(mk(0x22, b"second", 1), 11)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.output_ref.as_slice(), b"first");
+    }
+
+    #[test]
     fn test_request_deadline_one_past_rejected() {
         // P5 -T1(a): Request at current_block == deadline_block + 1 → REJECTED.
         let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
