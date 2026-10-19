@@ -731,11 +731,39 @@ async fn main() {
                 config.pkcs11_key_label.clone(),
             )
         };
+        // P02-F01 decision B: operator-configured consensus public keys are
+        // cross-checked against the HSM-held objects at startup and then
+        // pinned as the announced identity.
+        let decode_expected = |raw: Option<&str>, what: &str| -> Option<Vec<u8>> {
+            let raw = raw?.trim().trim_start_matches("0x").to_string();
+            match hex::decode(&raw) {
+                Ok(bytes) => Some(bytes),
+                Err(_) => {
+                    eprintln!("CRITICAL: --{what} is not valid hex; refusing to start");
+                    std::process::exit(1);
+                }
+            }
+        };
+        let expected_bls_key =
+            decode_expected(config.pkcs11_bls_public_key.as_deref(), "pkcs11-bls-public-key");
+        let expected_pq_key =
+            decode_expected(config.pkcs11_pq_public_key.as_deref(), "pkcs11-pq-public-key");
         match signer_result.map(|s| {
+            let s = match s.with_expected_consensus_public_keys(expected_bls_key, expected_pq_key) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("CRITICAL: consensus public key cross-check failed: {e}");
+                    std::process::exit(1);
+                }
+            };
             let signer = s.with_vendor_mechanisms(
                 config.pkcs11_bls_mechanism.clone(),
                 config.pkcs11_pq_mechanism.clone(),
             );
+            if let Err(e) = signer.verify_consensus_key_bindings() {
+                eprintln!("CRITICAL: HSM consensus key binding test failed: {e}");
+                std::process::exit(1);
+            }
             if strict_vendor_native {
                 signer.require_vendor_native_signing()
             } else {
