@@ -713,6 +713,9 @@ pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject
     })
 }
 
+/// Largest body [`verify_object_encoding`] re-encodes.
+const MAX_VERIFY_ENCODING_BYTES: usize = 64 * 1024 * 1024;
+
 /// Re-encode `data` under the scheme the claimed manifest declares and refuse
 /// if the result is a different object.
 ///
@@ -730,6 +733,23 @@ pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject
 /// Scheme/empty-object failures from [`encode_object`], or a mismatch when the
 /// claimed id / shard list is not the one re-encoding produces.
 pub fn verify_object_encoding(data: &[u8], claimed: &ContentManifest) -> Result<(), ErasureError> {
+    // The re-encode allocates stripe times n bytes, so the work follows the
+    // body size. The cap sits here, and not only in the callers, so a future
+    // caller cannot skip it. The length check is free and refuses a body that
+    // is not the object the claim describes before the coder runs.
+    if data.len() > MAX_VERIFY_ENCODING_BYTES {
+        return Err(ErasureError::ShardMismatch(format!(
+            "body of {} bytes is over the verify cap {MAX_VERIFY_ENCODING_BYTES}",
+            data.len()
+        )));
+    }
+    if u64::try_from(data.len()).ok() != Some(claimed.content_size()) {
+        return Err(ErasureError::ShardMismatch(format!(
+            "body has {} bytes but the claim says {}",
+            data.len(),
+            claimed.content_size()
+        )));
+    }
     // Structural lies are cheaper to catch first; the coder is the expensive
     // half and should not run on a manifest that already fails the free checks.
     claimed
@@ -1458,6 +1478,18 @@ mod tests {
             .map(|s| s.shard_id)
             .collect();
         assert_eq!(ids.len(), 6, "every shard has its own id");
+    }
+
+    #[test]
+    fn verify_object_encoding_refuses_a_body_of_the_wrong_size_before_encoding() {
+        let data: Vec<u8> = (0u8..=200).cycle().take(900).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let manifest = encode_object(&data, scheme).unwrap().to_manifest().unwrap();
+        let err = verify_object_encoding(&data[..899], &manifest).expect_err("short body");
+        assert!(matches!(err, ErasureError::ShardMismatch(m) if m.contains("claim says")));
+        let huge = vec![0u8; MAX_VERIFY_ENCODING_BYTES + 1];
+        let err = verify_object_encoding(&huge, &manifest).expect_err("over cap");
+        assert!(matches!(err, ErasureError::ShardMismatch(m) if m.contains("verify cap")));
     }
 
     #[test]
