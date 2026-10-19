@@ -402,6 +402,9 @@ impl QcBlob {
     }
 }
 
+/// A Merkle path for a `u32` leaf index has at most 32 siblings.
+const MAX_MERKLE_PROOF_ELEMENTS: usize = 32;
+
 impl QcFaultProof {
     /// Version 2 (P01-F27): proofs are produced and checked against the
     /// domain-tagged Merkle tree. A version-1 proof walked the untagged
@@ -476,6 +479,12 @@ impl QcFaultProof {
         else {
             return Err("Merkle inclusion is not available for this QC proof kind".to_string());
         };
+        if merkle_proof.len() > MAX_MERKLE_PROOF_ELEMENTS {
+            return Err(format!(
+                "Merkle proof has {} elements, at most {MAX_MERKLE_PROOF_ELEMENTS} are allowed",
+                merkle_proof.len()
+            ));
+        }
 
         let leaf = QcBlob::leaf_hash(&PqSignatureEntry {
             validator_index: self.validator_index,
@@ -540,6 +549,9 @@ impl QcFaultProof {
                 }
                 if merkle_proof.is_empty() && *leaf_index != 0 {
                     return Err("Empty merkle proof".into());
+                }
+                if merkle_proof.len() > MAX_MERKLE_PROOF_ELEMENTS {
+                    return Err("Merkle proof is longer than any tree path".into());
                 }
             }
             QcProofKind::ZkInvalidAttestationV1 {
@@ -1120,6 +1132,30 @@ mod tests {
             err.contains("not evidence"),
             "the refusal must name the frame-up reason, got: {err}"
         );
+    }
+
+    #[test]
+    fn an_overlong_merkle_proof_is_refused_before_hashing() {
+        let proof = QcFaultProof::new_invalid_dilithium(
+            1,
+            100,
+            "cp".into(),
+            0,
+            "addr".into(),
+            InvalidDilithiumEvidence {
+                dilithium_signature: vec![1],
+                merkle_proof: vec![vec![0u8; 32]; MAX_MERKLE_PROOF_ELEMENTS + 1],
+                leaf_index: 0,
+            },
+        );
+        let err = proof
+            .validate()
+            .expect_err("an overlong path must be refused");
+        assert!(err.contains("longer than any tree path"), "{err}");
+        let err = proof
+            .verify_inclusion("root")
+            .expect_err("an overlong path must not be hashed");
+        assert!(err.contains("at most 32"), "{err}");
     }
 
     /// A blob may not carry more signature entries than the validator set has
