@@ -614,27 +614,27 @@ fn quarantine_reason_of(
 }
 
 /// Record the relay's alarm into the node ledger and quarantine the offending
-/// program, then assert the chained log still verifies.
+/// program, then check the chained log still verifies.
 fn record_relay_outcome(
     ledger: &mut NodeLedger,
     report: &bud_proof::relayer::CanonicalRelayReport,
     program_hash: [u8; 32],
-) {
+) -> Result<(), String> {
     if report.status != bud_proof::relayer::RelayStatus::Alarm {
-        return;
+        return Ok(());
     }
     let Some(bud_proof::relayer::AlarmDetail { code, detail }) = &report.alarm else {
-        return;
+        return Ok(());
     };
     let kind = alarm_kind_of(*code);
     ledger.alarms.record(report.report_sig, kind, detail);
     if let Some(reason) = quarantine_reason_of(kind) {
         ledger.quarantine.ban(program_hash, reason);
     }
-    debug_assert!(
-        ledger.alarms.verify_integrity(),
-        "the chained alarm log must verify after a record"
-    );
+    if !ledger.alarms.verify_integrity() {
+        return Err("the chained alarm log does not verify after a record".to_string());
+    }
+    Ok(())
 }
 
 /// The system clock, or the caller-pinned timestamp. Naming the clock error
@@ -695,7 +695,7 @@ fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn s
         alarms: bud_proof::alarm_log::AlarmLog::new(),
         quarantine: bud_proof::quarantine::QuarantineLedger::new(),
     };
-    record_relay_outcome(&mut ledger, &report, expected_inputs.program_hash);
+    record_relay_outcome(&mut ledger, &report, expected_inputs.program_hash)?;
     if !ledger.alarms.is_empty() {
         let entries: Vec<&bud_proof::alarm_log::AlarmEntry> = ledger.alarms.iter().collect();
         info!(
@@ -1107,6 +1107,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_alarm_is_recorded_and_the_program_is_banned() {
+        use bud_proof::relayer::{
+            AlarmCode, AlarmDetail, CanonicalRelayReport, ProofFingerprint, RelayStatus,
+        };
+        let report = CanonicalRelayReport {
+            schema_version: 1,
+            status: RelayStatus::Alarm,
+            verified_at_unix: 0,
+            program_hash: [7u8; 32],
+            is_canonical: false,
+            canonical_set_digest: [0u8; 32],
+            proof: ProofFingerprint {
+                proof_format_version: 1,
+                backend: String::new(),
+                p3_version: String::new(),
+                fri_params_id: String::new(),
+                degree_bits: 0,
+                public_inputs_hash: [0u8; 32],
+                proof_bytes_len: 0,
+            },
+            alarm: Some(AlarmDetail {
+                code: AlarmCode::InvalidProof,
+                detail: "bad".to_string(),
+            }),
+            report_sig: [1u8; 32],
+        };
+        let mut ledger = NodeLedger {
+            alarms: bud_proof::alarm_log::AlarmLog::new(),
+            quarantine: bud_proof::quarantine::QuarantineLedger::new(),
+        };
+        assert!(record_relay_outcome(&mut ledger, &report, [7u8; 32]).is_ok());
+        assert!(!ledger.alarms.is_empty());
+    }
 
     #[test]
     fn chain_id_zero_is_refused() {
