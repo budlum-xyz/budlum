@@ -194,6 +194,13 @@ impl PollenPurchaseReceipt {
     }
 }
 
+/// Most offers the registry holds. Closed offers are pruned first when full.
+pub const MAX_OFFERS: usize = 100_000;
+/// Most data assets the registry holds.
+pub const MAX_DATA_ASSETS: usize = 100_000;
+/// Most access grants the registry holds.
+pub const MAX_ACCESS_GRANTS: usize = 100_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MarketplaceRegistry {
     #[serde(default)]
@@ -282,6 +289,12 @@ impl MarketplaceRegistry {
         if price == 0 {
             return Err("Price must be greater than zero".into());
         }
+        if self.offers.len() >= MAX_OFFERS {
+            self.offers.retain(|_, o| o.active);
+            if self.offers.len() >= MAX_OFFERS {
+                return Err("offer registry is full".into());
+            }
+        }
         let id = self.next_offer_id;
         // Third instance of the same shape, after `NftRegistry::mint` and
         // `BudlumxyzRegistry::register_app`: `insert` overwrites, and the
@@ -329,6 +342,9 @@ impl MarketplaceRegistry {
         if self.data_assets.contains_key(&asset.asset_id) {
             return Err("DataAsset already registered".into());
         }
+        if self.data_assets.len() >= MAX_DATA_ASSETS {
+            return Err("data asset registry is full".into());
+        }
         let id = asset.asset_id;
         self.data_assets.insert(id, asset);
         Ok(id)
@@ -374,6 +390,9 @@ impl MarketplaceRegistry {
         .map_err(|e| format!("AccessGrant owner signature invalid: {e}"))?;
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
+        }
+        if self.access_grants.len() >= MAX_ACCESS_GRANTS {
+            return Err("access grant registry is full".into());
         }
         // DAO policy is applied here. Until now `encryption_policies` was a
         // record that was only written and read: `set_encryption_policy`
@@ -609,6 +628,9 @@ impl MarketplaceRegistry {
         grant.validate_shape()?;
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
+        }
+        if self.access_grants.len() >= MAX_ACCESS_GRANTS {
+            return Err("access grant registry is full".into());
         }
         // The seller's authorization window is not a SECURITY ceiling: the
         // seller sets it. The DAO's ceiling is applied identically on both
@@ -1064,6 +1086,32 @@ mod tests {
         assert!(registry
             .validate_ai_read_ref(&reference.encode(), &addr(2), 10)
             .is_err());
+    }
+
+    #[test]
+    fn offer_registry_is_capped_and_prunes_closed_offers() {
+        let mut registry = MarketplaceRegistry::new();
+        for i in 0..MAX_OFFERS as u64 {
+            registry.offers.insert(
+                i,
+                DataOffer {
+                    id: i,
+                    seller: addr(1),
+                    cid: ContentId::of(b"x"),
+                    price: 1,
+                    active: true,
+                },
+            );
+        }
+        registry.next_offer_id = MAX_OFFERS as u64;
+        assert!(registry
+            .create_offer(addr(2), ContentId::of(b"y"), 5)
+            .is_err());
+        registry.close_offer(0, &addr(1)).unwrap();
+        registry
+            .create_offer(addr(2), ContentId::of(b"y"), 5)
+            .unwrap();
+        assert_eq!(registry.offers.len(), MAX_OFFERS);
     }
 
     #[test]
