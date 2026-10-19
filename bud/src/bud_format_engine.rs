@@ -143,6 +143,10 @@ impl EngineResult {
     }
 }
 
+/// The bytes after the container in an engine blob: steps_hash(32),
+/// measured_ratio(8), pact(32), production(32).
+const ENGINE_TAIL: usize = 32 + 8 + 32 + 32;
+
 /// Domain tag of a shard digest inside the pack.
 const SHARD_DIGEST_DOMAIN: &[u8] = b"BDLM_BUD_SHARD_V1";
 
@@ -286,7 +290,13 @@ pub fn engine_restore(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> {
     let _chunk_mode = result_blob[9]; // 0=structural 1=fastcdc (not needed for restore: the container carries the chunks)
     let container_len = u32::from_le_bytes(result_blob[10..14].try_into().ok()?) as usize;
     let container_start = HDR;
-    if result_blob.len() < container_start + container_len {
+    // The blob ends with exactly the tail `to_blob` writes. A cut or
+    // extended tail is refused.
+    if container_start
+        .checked_add(container_len)?
+        .checked_add(ENGINE_TAIL)?
+        != result_blob.len()
+    {
         return None;
     }
     let container = &result_blob[container_start..container_start + container_len];
@@ -527,7 +537,13 @@ pub fn engine_restore_raw(result_blob: &[u8], erasure: bool) -> Option<Vec<u8>> 
     }
     let container_len = u32::from_le_bytes(result_blob[10..14].try_into().ok()?) as usize;
     let container_start = HDR;
-    if result_blob.len() < container_start + container_len {
+    // The blob ends with exactly the tail `to_blob` writes. A cut or
+    // extended tail is refused.
+    if container_start
+        .checked_add(container_len)?
+        .checked_add(ENGINE_TAIL)?
+        != result_blob.len()
+    {
         return None;
     }
     let container = &result_blob[container_start..container_start + container_len];
@@ -811,6 +827,21 @@ mod tests {
         if r.transform_kind == TransformKind::Columnar {
             assert!(r.steps.contains(&PipeStep::Transform));
         }
+    }
+
+    #[test]
+    fn a_blob_with_a_cut_or_extended_tail_is_refused() {
+        let data = b"line one of the log\nline two of the log\nline three of the log\n".repeat(20);
+        let r = engine_store(&data, false, 1).expect("store");
+        let blob = r.to_blob();
+        assert_eq!(engine_restore_raw(&blob, false).as_deref(), Some(&data[..]));
+        let mut longer = blob.clone();
+        longer.push(0);
+        assert!(engine_restore(&longer, false).is_none());
+        assert!(engine_restore_raw(&longer, false).is_none());
+        let shorter = &blob[..blob.len() - 1];
+        assert!(engine_restore(shorter, false).is_none());
+        assert!(engine_restore_raw(shorter, false).is_none());
     }
 
     #[test]
