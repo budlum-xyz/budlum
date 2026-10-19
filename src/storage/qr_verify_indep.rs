@@ -353,6 +353,9 @@ fn parse_drop(wire: &[u8], frame_seq: u32) -> Result<RawDrop, &'static str> {
     if wire.get(4).copied() != Some(DROP_VERSION) {
         return Err("drop version");
     }
+    if wire.get(5) != Some(&0) || wire.get(19) != Some(&0) {
+        return Err("drop reserved fields");
+    }
     let seq = le_u32(wire, 6).ok_or("drop seq")?;
     let k = le_u16(wire, 10).ok_or("drop k")?;
     let block_len = le_u16(wire, 12).ok_or("drop block length")?;
@@ -836,6 +839,20 @@ mod tests {
                 independent: 1
             })
         );
+    }
+
+    #[test]
+    fn both_drop_parsers_refuse_nonzero_reserved_bytes() {
+        let enc = car::CarouselEncoder::new(b"canonical carousel", 8).unwrap();
+        for offset in [5, 19] {
+            let mut wire = enc.drop_at(0).to_bytes();
+            wire[offset] = 1;
+            assert_eq!(
+                car::Drop::from_bytes(&wire),
+                Err(car::CarouselError::NonCanonicalHeader)
+            );
+            assert!(matches!(parse_drop(&wire, 0), Err("drop reserved fields")));
+        }
     }
 
     #[test]
