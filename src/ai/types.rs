@@ -11,6 +11,9 @@ use sha2::{Digest, Sha256};
 /// Prevents state/mempool/snapshot DoS vectors via oversize inference references.
 pub const MAX_INFERENCE_REF_BYTES: usize = 65_536;
 
+/// Highest whitelisted execution class id (1 = FixedPointMlpV1, 0 = none).
+const MAX_EXECUTION_CLASS: u8 = 1;
+
 /// Domain-separated AI Model Identifier (`[u8; 32]`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
@@ -84,8 +87,20 @@ impl AiResultId {
 }
 
 /// Bounded byte wrapper verifying length bounds (`<= MAX_INFERENCE_REF_BYTES`).
+///
+/// Deserialization goes through `try_new`, so a serde path (snapshot JSON,
+/// RPC JSON, bincode) cannot build a value above the bound.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "Vec<u8>")]
 pub struct BoundedBytes(pub Vec<u8>);
+
+impl TryFrom<Vec<u8>> for BoundedBytes {
+    type Error = String;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_new(bytes)
+    }
+}
 
 impl BoundedBytes {
     pub fn try_new(bytes: Vec<u8>) -> Result<Self, String> {
@@ -205,6 +220,15 @@ impl AiModelSpec {
         }
         if self.agreement_threshold == 0 || self.agreement_threshold > self.min_verifier_count {
             return Err("agreement_threshold must be between 1 and min_verifier_count".into());
+        }
+        if self.max_input_ref_bytes == 0 || self.max_output_ref_bytes == 0 {
+            return Err("max_input_ref_bytes and max_output_ref_bytes must be >= 1".into());
+        }
+        if self.execution_class > MAX_EXECUTION_CLASS {
+            return Err(format!(
+                "execution_class {} is not a whitelisted class (max {MAX_EXECUTION_CLASS})",
+                self.execution_class
+            ));
         }
         if self.max_input_ref_bytes > MAX_INFERENCE_REF_BYTES as u64 {
             return Err(format!(
@@ -719,9 +743,13 @@ impl AiVerifierQos {
         self.avg_response_blocks = if total == 0 {
             response_blocks
         } else {
-            (self.avg_response_blocks * total + response_blocks) / (total + 1)
+            // Widen to u128: the product can pass u64 range. The quotient is at
+            // most max(old_avg, new_value), so it always fits back into u64.
+            let sum = u128::from(self.avg_response_blocks) * u128::from(total)
+                + u128::from(response_blocks);
+            u64::try_from(sum / (u128::from(total) + 1)).unwrap_or(u64::MAX)
         };
-        self.total_results_submitted = total + 1;
+        self.total_results_submitted = total.saturating_add(1);
         self.last_active_block = current_block;
     }
 
@@ -736,6 +764,9 @@ impl AiVerifierQos {
     }
 
     /// Calculate a reliability score (0.0 - 1.0).
+    ///
+    /// Display only (Z8): uses f64. It must never feed consensus, verifier
+    /// selection or fees. The state root hashes the integer counters only.
     /// Higher is better. Factors in:
     /// - Finalization rate (successful / total)
     /// - Equivocation penalty
@@ -951,14 +982,19 @@ impl AiAgentReputation {
     }
 
     /// Calculate the agent's trust score (0.0 - 1.0).
+    ///
+    /// Display only (Z8): uses f64. It must never feed consensus, verifier
+    /// selection or fees. The state root hashes the integer counters only.
     /// Factors in payment reliability, inference quality, and equivocation rate.
     pub fn trust_score(&self) -> f64 {
-        if self.payments_completed + self.payments_defaulted == 0 && self.results_submitted == 0 {
+        let total_payments = self
+            .payments_completed
+            .saturating_add(self.payments_defaulted);
+        if total_payments == 0 && self.results_submitted == 0 {
             return 0.0;
         }
 
         // Payment reliability (0.0 - 1.0)
-        let total_payments = self.payments_completed + self.payments_defaulted;
         let payment_reliability = if total_payments > 0 {
             self.payments_completed as f64 / total_payments as f64
         } else {
@@ -1193,6 +1229,70 @@ fn request_commitment(payment_id: [u8; 32], request_id: AiRequestId) -> [u8; 32]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_spec() -> AiModelSpec {
+        AiModelSpec {
+            model_id: AiModelId([9u8; 32]),
+            model_hash: [8u8; 32],
+            owner: addr(1),
+            min_verifier_count: 2,
+            agreement_threshold: 2,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_weights_digest: None,
+            execution_dims: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        }
+    }
+
+    #[test]
+    fn spec_validate_rejects_zero_ref_bytes_and_unknown_class() {
+        assert!(valid_spec().validate().is_ok());
+        let mut s = valid_spec();
+        s.max_input_ref_bytes = 0;
+        assert!(s.validate().is_err());
+        let mut s = valid_spec();
+        s.max_output_ref_bytes = 0;
+        assert!(s.validate().is_err());
+        let mut s = valid_spec();
+        s.execution_class = 2;
+        assert!(s.validate().is_err());
+        let mut s = valid_spec();
+        s.execution_class = 1;
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn bounded_bytes_deserialize_enforces_the_bound() {
+        let ok = serde_json::to_string(&vec![1u8; 10]).unwrap();
+        assert!(serde_json::from_str::<BoundedBytes>(&ok).is_ok());
+        let big = serde_json::to_string(&vec![1u8; MAX_INFERENCE_REF_BYTES + 1]).unwrap();
+        assert!(serde_json::from_str::<BoundedBytes>(&big).is_err());
+    }
+
+    #[test]
+    fn qos_average_and_trust_score_do_not_overflow() {
+        let mut q = AiVerifierQos::new(addr(1));
+        q.avg_response_blocks = u64::MAX;
+        q.total_results_submitted = 2;
+        q.record_result(0, 5);
+        let expected = u64::try_from(u128::from(u64::MAX) * 2 / 3).unwrap();
+        assert_eq!(q.avg_response_blocks, expected);
+        assert_eq!(q.total_results_submitted, 3);
+
+        let mut r = AiAgentReputation::new(addr(2));
+        r.payments_completed = u64::MAX;
+        r.payments_defaulted = 1;
+        let score = r.trust_score();
+        assert!((0.0..=1.0).contains(&score));
+    }
 
     fn addr(b: u8) -> Address {
         Address([b; 32])

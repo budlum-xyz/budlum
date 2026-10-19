@@ -764,6 +764,11 @@ pub const WORD_BYTES: usize = 8;
 /// `crate::execution::zkvm::prove_bytecode`.
 pub const GUEST_MEMORY_BYTES: usize = 8192;
 
+const _: () = assert!(
+    GUEST_MEMORY_BYTES as u64 <= bud_vm::MAX_MEMORY_BYTES,
+    "GUEST_MEMORY_BYTES must not exceed bud_vm::MAX_MEMORY_BYTES, the proof address space"
+);
+
 /// Goldilocks modulus used by the VM's field arithmetic.
 pub const GOLDILOCKS_P: u64 = 18_446_744_069_414_584_321;
 

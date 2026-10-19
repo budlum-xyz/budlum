@@ -3,7 +3,7 @@
 //! Why: the repo's spell check lived ONLY in CI (`.github/workflows/
 //! typos.yml`, calibrated via `.quality/typos.toml`). That let tree-wide
 //! findings surface for the first time in CI - the 2026-09-22 case being a
-//! two-character parameter name in `tools/bpqs_checksum_domination_exact.py`
+//! two-character parameter name in `tools/bpqs_checksum_domination_exact.py` (since ported to Rust)
 //! that read as a typo of `and`, passed every local gate, and tripped only
 //! the CI workflow. This gate runs the same whole-tree calibrated scan
 //! locally so the finding class is caught where every other gate runs.

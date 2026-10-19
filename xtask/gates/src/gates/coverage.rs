@@ -23,23 +23,19 @@ fn baseline(root: &Path) -> Result<f64, String> {
         .map_err(|e| format!("the baseline is not a number: {e}"))
 }
 
-/// Pull the line-coverage percentage out of llvm-cov JSON without a JSON
-/// dependency. The shell gate's python read `data[0]["totals"]["lines"]
-/// ["percent"]`; llvm-cov's summary block is `"totals":{"lines":{...},
-/// "functions":{...},...}`, so find the `"lines":{` fragment and read the
-/// first `"percent":` value inside it (a trailing `"functions"` block also
-/// carries a `"percent"` that must not be picked).
+/// Pull the line-coverage percentage out of the llvm-cov JSON export:
+/// `data[0].totals.lines.percent`. The export lists every file with its own
+/// `summary.lines` before the `totals` object, so a text search for the first
+/// `"lines":{` reads the first file, not the total.
 fn percent_from_json(text: &str) -> Option<f64> {
-    let lines_block = text.find("\"lines\":{")?;
-    let block = &text[lines_block..];
-    let pct_pos = block.find("\"percent\":")?;
-    let after = &block[pct_pos + "\"percent\":".len()..];
-    let num: String = after
-        .chars()
-        .skip_while(|c| c.is_whitespace())
-        .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
-        .collect();
-    num.parse().ok()
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    value
+        .get("data")?
+        .get(0)?
+        .get("totals")?
+        .get("lines")?
+        .get("percent")?
+        .as_f64()
 }
 
 /// # Errors
@@ -113,5 +109,18 @@ mod tests {
     fn picks_line_not_function() {
         let j = r#"{"data":[{"totals":{"lines":{"percent":12.5},"functions":{"percent":99.0}}}]}"#;
         assert_eq!(percent_from_json(j), Some(12.5));
+    }
+}
+
+#[cfg(test)]
+mod percent_tests {
+    use super::percent_from_json;
+
+    #[test]
+    fn the_total_is_read_not_the_first_file() {
+        let text = r#"{"data":[{"files":[{"filename":"a.rs","summary":{"lines":{"count":10,"covered":1,"percent":10.0}}}],"functions":[],"totals":{"lines":{"count":100,"covered":70,"percent":70.0},"functions":{"percent":5.0}}}],"type":"llvm.coverage.json.export"}"#;
+        assert_eq!(percent_from_json(text), Some(70.0));
+        assert_eq!(percent_from_json("not json"), None);
+        assert_eq!(percent_from_json(r#"{"data":[]}"#), None);
     }
 }

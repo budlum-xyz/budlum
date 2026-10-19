@@ -6,14 +6,6 @@
 # (the rule: unmaintained only warns, a vulnerability fails).
 
 [advisories]
-ignore = [
-    # RUSTSEC-2026-0118 - NSEC3 DoS; only on the DnssecDnsHandle path that
-    # validates DNSSEC. Budlum does not use it. `p2p-mdns` has additionally been
-    # removed from the production/default feature graph.
-    "RUSTSEC-2026-0118",
-    # RUSTSEC-2026-0119 - hickory name-compression CPU DoS. Mainnet/testnet
-    # no longer compile or construct the mDNS dependency/behaviour; only a devnet
-    # build installed explicitly with `--features p2p-mdns` is affected.
-    # This temporary exception must be removed once upstream hickory >=0.26 compatibility lands.
-    "RUSTSEC-2026-0119",
-]
+# Empty on purpose. The hickory-proto 0.26.1 and yamux 0.14.0 locks closed
+# RUSTSEC-2026-0118 and RUSTSEC-2026-0119; a new entry needs evidence, reason and expiry.
+ignore = []

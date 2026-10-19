@@ -633,19 +633,37 @@ impl ProofMarketState {
     /// Adds a new task.
     pub fn add_task(&mut self, task: ProofTask) -> Result<(), String> {
         task.validate_shape()?;
-        if task.is_active() {
-            if self.active_tasks.len() >= MAX_PROOF_MARKET_ACTIVE_TASKS {
-                return Err("ProofMarketState active task limit exceeded".into());
-            }
-            if self
-                .active_tasks
-                .iter()
-                .any(|existing| existing.task_id == task.task_id)
-            {
-                return Err("ProofMarketState duplicate task".into());
-            }
-            self.active_tasks.push(task);
+        // Only a pending task may enter. An assigned one would skip the
+        // `min_prover_stake` check that `assign` makes, and a completed or
+        // expired one has no place in the active list: refuse it loudly
+        // instead of returning `Ok` and storing nothing.
+        if task.status != ProofTaskStatus::Pending {
+            return Err(format!(
+                "ProofMarketState only accepts pending tasks (status: {:?})",
+                task.status
+            ));
         }
+        if self.active_tasks.len() >= MAX_PROOF_MARKET_ACTIVE_TASKS {
+            return Err("ProofMarketState active task limit exceeded".into());
+        }
+        if self
+            .active_tasks
+            .iter()
+            .any(|existing| existing.task_id == task.task_id)
+        {
+            return Err("ProofMarketState duplicate task".into());
+        }
+        // A completed task leaves `active_tasks`, so the check above no
+        // longer sees it. While its receipt is still held, the same task
+        // fields must not open a second job and earn a second receipt.
+        if self
+            .pending_receipts
+            .iter()
+            .any(|receipt| receipt.task_id == task.task_id)
+        {
+            return Err("ProofMarketState task already completed".into());
+        }
+        self.active_tasks.push(task);
         Ok(())
     }
 
@@ -706,11 +724,14 @@ impl ProofMarketState {
             .ok_or("Receipt index out of bounds")?;
 
         let reward = receipt.reward_claimed;
-        receipt.mark_paid()?;
-        self.total_rewards_paid = self
+        // The total is computed before the receipt changes state, so an
+        // overflow refusal leaves the receipt payable.
+        let total_rewards_paid = self
             .total_rewards_paid
             .checked_add(reward)
             .ok_or_else(|| "ProofMarketState total_rewards_paid overflow".to_string())?;
+        receipt.mark_paid()?;
+        self.total_rewards_paid = total_rewards_paid;
         Ok(reward)
     }
 
@@ -851,6 +872,13 @@ mod tests {
         )
     }
 
+    /// Seat an already assigned task, as a market restored from a snapshot
+    /// would hold it. `add_task` takes pending tasks only.
+    fn push_assigned(market: &mut ProofMarketState, task: ProofTask) {
+        assert!(matches!(task.status, ProofTaskStatus::Assigned { .. }));
+        market.active_tasks.push(task);
+    }
+
     fn task_kind() -> ProofTaskKind {
         ProofTaskKind::DomainCommitment {
             domain_id: 1,
@@ -980,7 +1008,7 @@ mod tests {
         );
         let task_id = task.task_id;
         task.assign(test_address(2), 0, 15).unwrap();
-        market.add_task(task).unwrap();
+        push_assigned(&mut market, task);
         assert_eq!(market.active_tasks.len(), 1);
 
         let receipt = ProofReceipt::new(task_id, test_address(2), 20, [5u8; 32], 3_000);
@@ -1005,12 +1033,62 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_payment_leaves_the_receipt_pending() {
+        let mut market = ProofMarketState::new();
+        market.total_rewards_paid = u64::MAX;
+        market.pending_receipts.push(ProofReceipt::new(
+            [1u8; 32],
+            test_address(2),
+            20,
+            [3u8; 32],
+            5_000,
+        ));
+        assert!(market.pay_receipt(0).unwrap_err().contains("overflow"));
+        assert!(market.pending_receipts[0].is_payable());
+        assert_eq!(market.total_rewards_paid, u64::MAX);
+    }
+
+    #[test]
+    fn add_task_takes_pending_tasks_only() {
+        let mut market = ProofMarketState::new();
+        let assigned = assigned_task();
+        assert!(market.add_task(assigned).unwrap_err().contains("pending"));
+        let mut done = assigned_task();
+        done.complete().unwrap();
+        assert!(market.add_task(done).is_err());
+        let mut expired = task_with(task_kind(), test_address(1), 10, 100, 5_000);
+        expired.expire().unwrap();
+        assert!(market.add_task(expired).is_err());
+        assert!(market.is_empty());
+        let pending = task_with(task_kind(), test_address(1), 10, 100, 5_000);
+        market.add_task(pending).unwrap();
+        assert_eq!(market.active_tasks.len(), 1);
+    }
+
+    #[test]
+    fn a_completed_task_cannot_be_added_again_while_its_receipt_is_held() {
+        let mut market = ProofMarketState::new();
+        let mut task = task_with(task_kind(), test_address(1), 1, 100, 1_000);
+        let again = task.clone();
+        let task_id = task.task_id;
+        task.assign(test_address(2), 0, 10).unwrap();
+        push_assigned(&mut market, task);
+        let receipt = ProofReceipt::new(task_id, test_address(2), 20, [5u8; 32], 1_000);
+        market.complete_task(task_id, receipt, |_| Ok(())).unwrap();
+        assert!(market
+            .add_task(again)
+            .unwrap_err()
+            .contains("already completed"));
+        assert!(market.active_tasks.is_empty());
+    }
+
+    #[test]
     fn complete_task_does_not_drop_task_on_invalid_receipt() {
         let mut market = ProofMarketState::new();
         let mut task = task_with(task_kind(), test_address(1), 1, 100, 1_000);
         let task_id = task.task_id;
         task.assign(test_address(2), 0, 10).unwrap();
-        market.add_task(task).unwrap();
+        push_assigned(&mut market, task);
         let bad_receipt = ProofReceipt::new(task_id, test_address(9), 20, [5u8; 32], 1_000);
         assert!(market
             .complete_task(task_id, bad_receipt, |_| Ok(()))
@@ -1036,8 +1114,8 @@ mod tests {
         );
         t1.assign(test_address(2), 0, 2).unwrap();
         t2.assign(test_address(3), 0, 2).unwrap();
-        market.add_task(t1).unwrap();
-        market.add_task(t2).unwrap();
+        push_assigned(&mut market, t1);
+        push_assigned(&mut market, t2);
 
         let pruned = market.prune_expired(6);
         assert_eq!(pruned, 1);
@@ -1187,8 +1265,8 @@ mod tests {
         );
         dear.assign(test_address(2), 50_000, 10).unwrap();
 
-        lenient.add_task(cheap).unwrap();
-        strict.add_task(dear).unwrap();
+        push_assigned(&mut lenient, cheap);
+        push_assigned(&mut strict, dear);
 
         assert_ne!(
             lenient.root(),
@@ -1223,8 +1301,8 @@ mod tests {
             100,
         );
         live.assign(test_address(3), 0, 2).unwrap();
-        market.add_task(stale).unwrap();
-        market.add_task(live).unwrap();
+        push_assigned(&mut market, stale);
+        push_assigned(&mut market, live);
 
         // One receipt, paid, so the prune has something real to remove.
         let live_id = market.active_tasks[1].task_id;
@@ -1264,7 +1342,7 @@ mod tests {
         let mut market = ProofMarketState::new();
         let mut running = task_with(task_kind(), test_address(1), 1, 900, 100);
         running.assign(test_address(2), 0, 2).unwrap();
-        market.add_task(running).unwrap();
+        push_assigned(&mut market, running);
 
         let (expired, _) = market.close_epoch(500);
 
@@ -1288,7 +1366,7 @@ mod tests {
 
         let mut task = task_with(task_kind(), test_address(1), 1, 100, 1_000);
         task.assign(test_address(2), 0, 2).unwrap();
-        market.add_task(task).unwrap();
+        push_assigned(&mut market, task);
         assert!(
             !market.is_empty(),
             "a market holding an assigned task must reach the state root"

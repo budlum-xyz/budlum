@@ -544,6 +544,39 @@ impl SemanticAnalyzer {
                         scrutinee_ty
                     )));
                 }
+                // The codegen chain has no fall-through when no arm hits, so
+                // the last arm must be the wildcard. A wildcard anywhere else
+                // makes the arms after it dead, and a repeated integer
+                // pattern can never run (the first one wins).
+                let last = arms.len().saturating_sub(1);
+                if !matches!(
+                    arms.last().map(|a| &a.pattern),
+                    Some(MatchPattern::Wildcard)
+                ) {
+                    errors.push(CompileError::SemanticError(
+                        "match must end with a wildcard `_` arm".to_string(),
+                    ));
+                }
+                let mut seen: Vec<u64> = Vec::new();
+                for (i, arm) in arms.iter().enumerate() {
+                    match &arm.pattern {
+                        MatchPattern::Wildcard if i != last => {
+                            errors.push(CompileError::SemanticError(
+                                "wildcard `_` arm must be the last arm of a match".to_string(),
+                            ));
+                        }
+                        MatchPattern::IntLit(v) => {
+                            if seen.contains(v) {
+                                errors.push(CompileError::SemanticError(format!(
+                                    "duplicate match pattern {}",
+                                    v
+                                )));
+                            }
+                            seen.push(*v);
+                        }
+                        MatchPattern::Wildcard => {}
+                    }
+                }
                 for arm in arms {
                     let mut arm_env = env.clone();
                     for s in &arm.body {

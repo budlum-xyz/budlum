@@ -534,6 +534,13 @@ impl BridgeState {
         event_index: u32,
         expiry_height: u64,
     ) -> Result<DomainEvent, BridgeError> {
+        // A burn message that is already expired when it is made could never
+        // be relayed, and the row would wait for a sweep that was due at once.
+        if expiry_height != 0 && expiry_height <= domain_height {
+            return Err(BridgeError(
+                "Burn expiry must be above the burn domain height".into(),
+            ));
+        }
         let transfer = self
             .transfers
             .get(&message_id)
@@ -579,8 +586,18 @@ impl BridgeState {
             .get_mut(&message_id)
             .ok_or_else(|| BridgeError("Unknown bridge transfer".into()))?;
         transfer.status = BridgeStatus::Burned { domain };
+        // The lock expiry no longer matters once the transfer is minted. The
+        // field now holds the burn message expiry, so the sweep knows when an
+        // unrelayed burn must return to Minted.
+        transfer.expiry_height = expiry_height;
         self.asset_locations
             .insert(transfer.asset_id, BridgeStatus::Burned { domain });
+        if expiry_height > 0 {
+            self.expiry_queue
+                .entry(expiry_height)
+                .or_default()
+                .push(message_id);
+        }
         Ok(event)
     }
 
@@ -732,13 +749,26 @@ impl BridgeState {
             if let Some(mids) = self.expiry_queue.remove(&h) {
                 for mid in mids {
                     if let Some(t) = self.transfers.get_mut(&mid) {
-                        // Only release if it's still Locked (might have been minted/burned already)
-                        if let BridgeStatus::Locked { domain } = t.status.clone() {
-                            t.status = BridgeStatus::Active { domain };
-                            self.asset_locations
-                                .insert(t.asset_id, BridgeStatus::Active { domain });
-                            released.push((t.owner, t.amount));
-                            self.mark_settled(mid, current_height);
+                        match t.status.clone() {
+                            // Only release if it's still Locked (might have been minted/burned already)
+                            BridgeStatus::Locked { domain } => {
+                                t.status = BridgeStatus::Active { domain };
+                                self.asset_locations
+                                    .insert(t.asset_id, BridgeStatus::Active { domain });
+                                released.push((t.owner, t.amount));
+                                self.mark_settled(mid, current_height);
+                            }
+                            // A burn whose message expired unrelayed goes back to
+                            // Minted, so the holder can burn again. The entry may be
+                            // the older lock expiry: act only when the burn expiry
+                            // (stored in `expiry_height`) is due. No balance moves.
+                            BridgeStatus::Burned { domain } if t.expiry_height <= h => {
+                                t.status = BridgeStatus::Minted { domain };
+                                t.expiry_height = 0;
+                                self.asset_locations
+                                    .insert(t.asset_id, BridgeStatus::Minted { domain });
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1142,7 +1172,10 @@ mod tests {
 
 #[cfg(test)]
 mod bridge_fee_split {
-    use super::{check_burn_matches_lock_domain, split_bridge_fee, split_bridge_fee_u128, Bud};
+    use super::{
+        check_burn_matches_lock_domain, hash_fields_bytes, split_bridge_fee, split_bridge_fee_u128,
+        Address, AssetId, BridgeState, BridgeStatus, Bud,
+    };
 
     const PPM_1_PCT: u64 = 10_000;
 
@@ -1278,5 +1311,36 @@ mod bridge_fee_split {
             !chain.contains("Relayed burn target domain does not match lock source"),
             "the inline check came back; one rule, one home"
         );
+    }
+
+    /// P05-F02: a burn whose message expires unrelayed must not strand the row.
+    #[test]
+    fn an_unrelayed_burn_returns_to_minted_after_its_expiry() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"burn-expiry"]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 50)
+            .unwrap();
+        let id = transfer.message_id;
+        bridge.mint(&event.message.unwrap(), 0).unwrap();
+        assert!(bridge.burn_with_event(id, 2, 20, 0, 20).is_err());
+        bridge.burn_with_event(id, 2, 20, 0, 200).unwrap();
+
+        // The lock expiry (50) passes while the burn is still live.
+        assert!(bridge.sweep_expired_locks(60).is_empty());
+        assert_eq!(
+            bridge.transfer(&id).unwrap().status,
+            BridgeStatus::Burned { domain: 2 }
+        );
+        // The burn expiry passes: back to Minted, no refund, burn possible again.
+        assert!(bridge.sweep_expired_locks(200).is_empty());
+        assert_eq!(
+            bridge.transfer(&id).unwrap().status,
+            BridgeStatus::Minted { domain: 2 }
+        );
+        bridge.burn_with_event(id, 2, 201, 0, 400).unwrap();
     }
 }

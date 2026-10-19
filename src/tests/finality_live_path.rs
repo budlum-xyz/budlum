@@ -121,6 +121,15 @@ fn live_path_epoch_change_isolates_votes() {
     assert_eq!(agg2.prevotes.len(), 1);
     // The epoch 1 aggregator is still in its own window, unaffected.
     assert_eq!(agg1.prevotes.len(), 3, "epoch 1 penceresi kirletilmemeli");
+
+    // A stale vote: a validly signed epoch 1 vote sent to the epoch 2
+    // aggregator is refused and does not enter its window.
+    let stale = sign_prevote(&sks1[3], 1, 10, "H", snap1.validators[3].address);
+    let error = agg2
+        .add_prevote(stale)
+        .expect_err("an old-epoch vote must not enter the new window");
+    assert!(error.contains("epoch mismatch"), "{error}");
+    assert_eq!(agg2.prevotes.len(), 1, "the new window is unchanged");
 }
 
 // 2.2 - A late prevote (a height mismatch)
@@ -221,4 +230,75 @@ fn live_path_snapshot_hash_distinguishes_sets() {
     // The SAME set deterministically produces the same hash.
     let hash_a2 = ValidatorSetSnapshot::compute_hash(&snap_a.validators);
     assert_eq!(hash_a, hash_a2, "compute_hash has to be deterministic");
+}
+
+// 2.5 - The node's prevote epoch must be the aggregator's epoch (P10-F01)
+
+/// Regression for the finality-dead bug: node.rs derived the periodic
+/// prevote epoch as `checkpoint_height / checkpoint_interval` while the
+/// receiving aggregator (`Blockchain::start_prevote_task`) derives it as
+/// `checkpoint_height / epoch_len`. On mainnet (interval 10, epoch_len 100)
+/// every honest prevote was refused with "Prevote epoch mismatch", so the
+/// prevote quorum was never reached and native BLS finality never advanced
+/// on any network where the two divisors differ.
+#[test]
+fn node_prevote_epoch_reaches_the_aggregator() {
+    use crate::core::chain_config::{
+        epoch_len_for_chain_id, finality_checkpoint_interval_for_chain_id, Network,
+    };
+
+    for network in [Network::Mainnet, Network::Testnet, Network::Devnet] {
+        let chain_id = network.chain_id().value();
+        let interval = finality_checkpoint_interval_for_chain_id(chain_id);
+        let epoch_len = epoch_len_for_chain_id(chain_id);
+        assert!(interval > 0 && epoch_len > 0, "{network:?} divisors");
+
+        // A checkpoint height where the old interval divisor and the
+        // epoch-len divisor disagree, so the mismatch path is exercised.
+        let height = interval * epoch_len;
+        let checkpoint_height = (height / interval) * interval;
+        assert!(checkpoint_height > 0);
+        assert_ne!(
+            checkpoint_height / interval,
+            checkpoint_height / epoch_len,
+            "{network:?}: this height must distinguish the two divisors"
+        );
+
+        // The node's computation after the fix (node.rs periodic prevote).
+        let node_epoch = checkpoint_height / epoch_len;
+
+        // Drive a real prevote through a real aggregator built the way
+        // start_prevote_task builds it.
+        let (snap, sks) = make_snapshot(1, node_epoch, 1000);
+        let mut agg = FinalityAggregator::new(
+            node_epoch,
+            checkpoint_height,
+            "cp_hash".into(),
+            snap.clone(),
+        );
+        let pv = sign_prevote(
+            &sks[0],
+            node_epoch,
+            checkpoint_height,
+            "cp_hash",
+            snap.validators[0].address,
+        );
+        agg.add_prevote(pv).unwrap_or_else(|e| {
+            panic!("{network:?}: a prevote carrying the node's own epoch must reach the aggregator: {e}")
+        });
+
+        // The old buggy epoch must still be refused: proof that this height
+        // really exercises the mismatch path.
+        let stale = sign_prevote(
+            &sks[0],
+            checkpoint_height / interval,
+            checkpoint_height,
+            "cp_hash",
+            snap.validators[0].address,
+        );
+        let err = agg
+            .add_prevote(stale)
+            .expect_err("the old interval-based epoch must be refused");
+        assert!(err.contains("epoch mismatch"), "{err}");
+    }
 }

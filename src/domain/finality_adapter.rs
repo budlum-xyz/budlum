@@ -225,6 +225,9 @@ impl DomainFinalityAdapter for PoWHeaderChainFinalityAdapter {
                 "Expected PoWHeaderChain finality proof".into(),
             ));
         };
+        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+            return Ok(rejected);
+        }
         let params = domain
             .pow_parameters
             .as_ref()
@@ -355,6 +358,10 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
         else {
             return Err(FinalityError("Expected PoS finality proof".into()));
         };
+
+        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+            return Ok(rejected);
+        }
 
         // Before the certificate is read: a bridge-enabled domain with no
         // registered set has nothing a certificate could be checked against.
@@ -488,6 +495,24 @@ pub fn poa_authority_set_hash(
     ))
 }
 
+/// A commitment must name the domain whose adapter is judging it.
+///
+/// PoS and BFT certificates bind only a height and a block hash, so without this
+/// check a proof made for one domain would finalize the same height and hash on
+/// another domain that shares a validator set.
+fn reject_commitment_domain_mismatch(
+    domain: &ConsensusDomain,
+    commitment: &DomainCommitment,
+) -> Option<FinalityStatus> {
+    if domain.id != commitment.domain_id {
+        return Some(FinalityStatus::Rejected(format!(
+            "Commitment names domain {} but domain {} is being verified",
+            commitment.domain_id, domain.id
+        )));
+    }
+    None
+}
+
 /// A bridge-enabled domain must have a registered validator set before any
 /// set-bound proof can finalize on it.
 ///
@@ -574,6 +599,10 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
         else {
             return Err(FinalityError("Expected PoA finality proof".into()));
         };
+
+        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+            return Ok(rejected);
+        }
 
         if authorities.is_empty() {
             return Ok(FinalityStatus::Rejected(
@@ -680,6 +709,10 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
         else {
             return Err(FinalityError("Expected BFT finality proof".into()));
         };
+
+        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+            return Ok(rejected);
+        }
 
         // Before the certificate is read: a bridge-enabled domain with no
         // registered set has nothing a certificate could be checked against.
@@ -1267,6 +1300,69 @@ mod tests {
     }
 
     #[test]
+    fn pos_bft_poa_and_pow_adapters_refuse_a_commitment_for_another_domain() {
+        let commitment = commitment(ConsensusKind::PoS);
+        assert_eq!(commitment.domain_id, 1);
+        let other = default_domain(7, ConsensusKind::PoS, 45262, "pos-qc-finality", 0);
+        let snapshot = ValidatorSetSnapshot::new(0, vec![]);
+        let cert = FinalityCert {
+            epoch: 0,
+            checkpoint_height: commitment.domain_height,
+            checkpoint_hash: hex::encode(commitment.domain_block_hash),
+            agg_sig_bls: vec![],
+            bitmap: vec![],
+            set_hash: snapshot.set_hash.clone(),
+        };
+        let pos = PoSFinalityAdapter
+            .verify_finality(
+                &other,
+                &commitment,
+                &FinalityProof::PoS {
+                    cert: cert.clone(),
+                    validator_snapshot: snapshot.clone(),
+                },
+            )
+            .unwrap();
+        let bft = BftFinalityAdapter::default()
+            .verify_finality(
+                &other,
+                &commitment,
+                &FinalityProof::Bft {
+                    round: 0,
+                    commit_hash: commitment.domain_block_hash,
+                    cert,
+                    validator_snapshot: snapshot,
+                },
+            )
+            .unwrap();
+        let poa = PoAFinalityAdapter::default()
+            .verify_finality(
+                &other,
+                &commitment,
+                &FinalityProof::PoA {
+                    authorities: vec![],
+                    signatures: vec![],
+                },
+            )
+            .unwrap();
+        let pow = PoWHeaderChainFinalityAdapter
+            .verify_finality(
+                &other,
+                &commitment,
+                &FinalityProof::PoWHeaderChain { headers: vec![] },
+            )
+            .unwrap();
+        for status in [pos, bft, poa, pow] {
+            match status {
+                FinalityStatus::Rejected(reason) => {
+                    assert!(reason.contains("Commitment names domain 1"), "{reason}")
+                }
+                other => panic!("expected a domain mismatch refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn leading_zero_bits_counts_prefix() {
         assert_eq!(leading_zero_bits(&[0u8; 32]), 256);
         let mut h = [0u8; 32];
@@ -1382,7 +1478,8 @@ mod tests {
     fn poa_finality_enforces_quorum_and_empty_validator_set_rejection() {
         use crate::crypto::primitives::KeyPair;
         let mut domain = default_domain(2, ConsensusKind::PoA, 45262, "poa-authority-quorum", 0);
-        let commitment = commitment(ConsensusKind::PoA);
+        let mut commitment = commitment(ConsensusKind::PoA);
+        commitment.domain_id = domain.id;
         let adapter = PoAFinalityAdapter::default();
 
         // Build 4 real ed25519 authorities and sign the commit message.
@@ -1471,7 +1568,8 @@ mod tests {
         // hold on its own, on a domain that gate does not cover.
         let mut domain = default_domain(3, ConsensusKind::PoS, 45262, "pos-qc-finality", 0);
         domain.bridge_enabled = false;
-        let commitment = commitment(ConsensusKind::PoS);
+        let mut commitment = commitment(ConsensusKind::PoS);
+        commitment.domain_id = domain.id;
         let adapter = PoSFinalityAdapter;
 
         for unparsable in ["", "zz", "abcd", &"ab".repeat(31)] {
@@ -1514,7 +1612,8 @@ mod tests {
         // Bridge off, for the same reason as the PoS twin above.
         let mut domain = default_domain(3, ConsensusKind::Bft, 45262, "bft-finality", 0);
         domain.bridge_enabled = false;
-        let commitment = commitment(ConsensusKind::Bft);
+        let mut commitment = commitment(ConsensusKind::Bft);
+        commitment.domain_id = domain.id;
         let adapter = BftFinalityAdapter::default();
 
         for unparsable in ["", "zz", "abcd", &"ab".repeat(31)] {
@@ -1559,7 +1658,8 @@ mod tests {
     #[test]
     fn pos_finality_rejects_mismatched_height_or_hash_before_signature_work() {
         let domain = default_domain(3, ConsensusKind::PoS, 45262, "pos-qc-finality", 0);
-        let commitment = commitment(ConsensusKind::PoS);
+        let mut commitment = commitment(ConsensusKind::PoS);
+        commitment.domain_id = domain.id;
         let adapter = PoSFinalityAdapter;
         let snapshot = ValidatorSetSnapshot::new(0, vec![]);
 

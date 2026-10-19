@@ -9,16 +9,21 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-/// Does this log line show `name` followed by `ok` somewhere?
+/// Is this log line the libtest result `test <path> ... ok` of the test
+/// `name`? The path must be `name` or end in `::name`.
 ///
-/// The shell gate matches `grep -Eq "test .*NAME .*ok|NAME.*ok"`. Both
-/// alternatives reduce to "NAME appears and `ok` appears after it", which is
-/// what this checks.
+/// The first version matched "name appears, then `ok` appears later" anywhere
+/// in the line. A failure line such as `thread 'tests::x::name' panicked at
+/// src/tokenomics/...` has the name followed by the letters `ok`, and a longer
+/// name such as `name_v2 ... ok` contains `name`. Both counted as a pass.
 fn line_matches(line: &str, name: &str) -> bool {
-    match line.find(name) {
-        Some(pos) => line[pos + name.len()..].contains("ok"),
-        None => false,
-    }
+    let Some(rest) = line.trim_end().strip_prefix("test ") else {
+        return false;
+    };
+    let Some(path) = rest.strip_suffix(" ... ok") else {
+        return false;
+    };
+    path == name || path.ends_with(&format!("::{name}"))
 }
 
 /// # Errors
@@ -80,4 +85,41 @@ pub fn self_test(tests: &[&str], subject: &str) -> Result<String, String> {
 
     let _ = fs::remove_dir_all(&dir);
     Ok(format!("{subject} gate self-test OK"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::line_matches;
+
+    #[test]
+    fn only_the_exact_ok_line_of_the_named_test_matches() {
+        assert!(line_matches(
+            "test economy::tests::burn_is_capped ... ok",
+            "burn_is_capped"
+        ));
+        assert!(line_matches("test burn_is_capped ... ok", "burn_is_capped"));
+        // A failure line whose path holds "ok" after the name.
+        assert!(!line_matches(
+            "thread 'tests::burn_is_capped' panicked at src/tokenomics/mod.rs:9:1:",
+            "burn_is_capped"
+        ));
+        // A longer name must not satisfy a shorter one.
+        assert!(!line_matches(
+            "test tests::burn_is_capped_v2 ... ok",
+            "burn_is_capped"
+        ));
+        assert!(!line_matches(
+            "test tests::xburn_is_capped ... ok",
+            "burn_is_capped"
+        ));
+        // A failed or ignored result is not a pass.
+        assert!(!line_matches(
+            "test tests::burn_is_capped ... FAILED",
+            "burn_is_capped"
+        ));
+        assert!(!line_matches(
+            "test tests::burn_is_capped ... ignored",
+            "burn_is_capped"
+        ));
+    }
 }

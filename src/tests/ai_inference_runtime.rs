@@ -860,3 +860,68 @@ fn a_request_whose_own_clock_lies_is_refused_at_submission() {
         .expect_err("a lying submitted_at_block must be refused");
     assert!(err.contains("outside the"), "{err}");
 }
+
+#[test]
+fn prune_refunds_escrow_of_never_reclaimed_request() {
+    // BLG-0467 / P32-F01: an unfinalized request whose requester never sent
+    // AiFeeReclaim used to be deleted by prune_expired with its escrowed
+    // max_fee: the fee was neither returned, burned, nor paid. Prune now
+    // hands the refund to the caller (the chain actor credits it).
+    let mut state = AccountState::new();
+    let requester = Address::from([0x57; 32]);
+    let (spec, request) = model_and_request(requester);
+    state.ai_registry.register_model(spec).expect("model");
+    state
+        .ai_registry
+        .submit_request(request.clone(), 0)
+        .expect("request");
+
+    let retention = crate::ai::registry::DISPUTE_WINDOW_BLOCKS;
+    let past_retention = request.deadline_block + retention + 1;
+
+    // Still inside the retention window: nothing is pruned.
+    let (pruned, refunds) = state
+        .ai_registry
+        .prune_expired(past_retention - 1, retention);
+    assert_eq!(pruned, 0);
+    assert!(refunds.is_empty());
+    assert!(state.ai_registry.requests.contains_key(&request.request_id));
+
+    let (pruned, refunds) = state.ai_registry.prune_expired(past_retention, retention);
+    assert!(pruned > 0, "expired request must be pruned");
+    assert_eq!(
+        refunds,
+        vec![(requester, request.max_fee)],
+        "prune must refund the escrowed max_fee of a never-reclaimed request"
+    );
+    assert!(!state.ai_registry.requests.contains_key(&request.request_id));
+}
+
+#[test]
+fn prune_does_not_refund_cancelled_or_reclaimed_requests() {
+    // A cancelled request already had its max_fee refunded by cancel_request
+    // and a reclaimed one by reclaim_fee; prune must not pay the same escrow
+    // a second time.
+    let mut state = AccountState::new();
+    let requester = Address::from([0x58; 32]);
+    let (spec, request) = model_and_request(requester);
+    state.ai_registry.register_model(spec).expect("model");
+    state
+        .ai_registry
+        .submit_request(request.clone(), 0)
+        .expect("request");
+
+    let (refunded_to, refunded_fee) = state
+        .ai_registry
+        .cancel_request(&request.request_id, &requester, 0)
+        .expect("requester cancels before finalization");
+    assert_eq!((refunded_to, refunded_fee), (requester, request.max_fee));
+
+    let retention = crate::ai::registry::DISPUTE_WINDOW_BLOCKS;
+    let past_retention = request.deadline_block + retention + 1;
+    let (_pruned, refunds) = state.ai_registry.prune_expired(past_retention, retention);
+    assert!(
+        refunds.is_empty(),
+        "cancelled escrow was already refunded at cancellation; prune must not pay twice"
+    );
+}

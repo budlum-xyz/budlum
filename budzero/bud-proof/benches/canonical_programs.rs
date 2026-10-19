@@ -198,8 +198,15 @@ fn run_one(name: &str, program: &[u64], samples: u32) {
         proof_bytes = proof.proof_bytes.len();
 
         let started = Instant::now();
-        Plonky3Adapter::verify(&proof, &inputs, program)
-            .expect("canonical proof verification failed");
+        // The storage challenge uses `VerifyMerkle`, which the default verifier
+        // refuses; the benchmark measures it under full activation.
+        Plonky3Adapter::verify_with_activation(
+            &proof,
+            &inputs,
+            program,
+            bud_isa::MainnetActivation::full(),
+        )
+        .expect("canonical proof verification failed");
         verify_total += started.elapsed();
     }
 

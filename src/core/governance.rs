@@ -486,6 +486,26 @@ impl GovernanceState {
                 // retargeted later (HIGH, CWE-345).
                 let _ = (app_id, developer, manifest_id, website_url_hash);
             }
+            // Same bounds as `AccountState::execute_proposal`: a proposal that
+            // execution would only warn about and drop must not take a slot.
+            ProposalType::ChangeBaseFee(new_fee) => {
+                use crate::core::account::{MAX_BASE_FEE, MIN_TX_FEE};
+                if !(MIN_TX_FEE..=MAX_BASE_FEE).contains(new_fee) {
+                    return Err(format!(
+                        "ChangeBaseFee must be between {MIN_TX_FEE} and {MAX_BASE_FEE}"
+                    ));
+                }
+            }
+            ProposalType::ChangeBlockReward(new_reward) => {
+                if *new_reward != 0 {
+                    return Err("ChangeBlockReward must be 0: validator income is fee-only".into());
+                }
+            }
+            ProposalType::SlashValidator { evidence_hash, .. } => {
+                if evidence_hash == &[0u8; 32] {
+                    return Err("SlashValidator evidence_hash must be non-zero".into());
+                }
+            }
             ProposalType::SetEncryptionPolicy(policy) => policy.validate()?,
             ProposalType::SetConstitutionParameter(parameter) => parameter.validate_update()?,
             ProposalType::UnfreezeConsensusDomain {
@@ -512,16 +532,25 @@ impl GovernanceState {
         }
 
         // Validate proposal duration
-        const MIN_PROPOSAL_DURATION: u64 = 10; // Minimum 10 epochs
         const MAX_PROPOSAL_DURATION: u64 = 100_000; // Maximum 100,000 epochs
-        if !(MIN_PROPOSAL_DURATION..=MAX_PROPOSAL_DURATION).contains(&duration) {
+                                                    // Minimum 10 epochs. A constitution amendment must also respect the
+                                                    // constitution's own MinConstitutionProposalEpochs (P20-F05).
+        let min_proposal_duration = match &p_type {
+            ProposalType::SetConstitutionParameter(_) => self.constitution.min_proposal_epochs(),
+            _ => 10,
+        };
+        if !(min_proposal_duration..=MAX_PROPOSAL_DURATION).contains(&duration) {
             return Err(format!(
-                "Proposal duration must be between {MIN_PROPOSAL_DURATION} and {MAX_PROPOSAL_DURATION} epochs"
+                "Proposal duration must be between {min_proposal_duration} and {MAX_PROPOSAL_DURATION} epochs"
             ));
         }
 
         // Limit active proposals to prevent state bloat
         const MAX_ACTIVE_PROPOSALS: usize = 100;
+        const MAX_ACTIVE_PROPOSALS_PER_PROPOSER: usize = 8;
+        // Epochs a Failed or Executed proposal stays in state after its
+        // activation epoch.
+        const CLOSED_PROPOSAL_RETENTION_EPOCHS: u64 = 1_000;
         let active_count = self
             .proposals
             .iter()
@@ -530,12 +559,33 @@ impl GovernanceState {
         if active_count >= MAX_ACTIVE_PROPOSALS {
             return Err("Too many active proposals".into());
         }
+        // The fee multiplier is keyed per epoch, so spreading proposals over
+        // many epochs keeps every one at 1x. Bound the open slots one
+        // proposer can hold at once (P20-F01).
+        let proposer_active = self
+            .proposals
+            .iter()
+            .filter(|p| p.status == ProposalStatus::Active && p.proposer == proposer)
+            .count();
+        if proposer_active >= MAX_ACTIVE_PROPOSALS_PER_PROPOSER {
+            return Err("Too many active proposals for this proposer".into());
+        }
 
         // Proposal bandwidth is fee-gated, not hard-capped per proposer. Keep
         // Only the current/future epoch counters so the fee schedule itself does
         // Not become an unbounded consensus map.
         self.proposer_epoch_count
             .retain(|(_, epoch), _| *epoch >= current_epoch);
+
+        // Closed proposals are history, not live state. Drop them after a
+        // retention window so the state and its root stay bounded (P20-F02).
+        // Active and Passed proposals are kept: they can still change state.
+        self.proposals.retain(|p| {
+            !matches!(p.status, ProposalStatus::Failed | ProposalStatus::Executed)
+                || p.activation_epoch()
+                    .checked_add(CLOSED_PROPOSAL_RETENTION_EPOCHS)
+                    .is_none_or(|keep_until| keep_until >= current_epoch)
+        });
 
         let end_epoch = current_epoch
             .checked_add(duration)
@@ -1011,6 +1061,60 @@ mod tests {
         );
     }
 
+    /// P20-F05: the constitution's MinConstitutionProposalEpochs binds
+    /// constitution amendments instead of the hard coded 10.
+    #[test]
+    fn p20_f05_amendment_respects_min_constitution_proposal_epochs() {
+        let mut gov = GovernanceState::default();
+        let proposer = Address::from([0x01; 32]);
+        gov.constitution
+            .set_parameter(ConstitutionParameter::new(
+                ConstitutionParameterKey::MinConstitutionProposalEpochs,
+                ConstitutionValue::U64(50),
+                0,
+                [3u8; 32],
+            ))
+            .unwrap();
+        let amendment = || {
+            ProposalType::SetConstitutionParameter(ConstitutionParameter::new(
+                ConstitutionParameterKey::MaxEmergencyHaltEpochs,
+                ConstitutionValue::U64(720),
+                11,
+                [2u8; 32],
+            ))
+        };
+        assert!(gov.create_proposal(proposer, amendment(), 0, 10).is_err());
+        assert!(gov.create_proposal(proposer, amendment(), 0, 50).is_ok());
+        // Other proposal types keep the default minimum.
+        assert!(gov
+            .create_proposal(proposer, ProposalType::ChangeBaseFee(100), 0, 10)
+            .is_ok());
+    }
+
+    /// P20-F07: proposals that execution would drop are refused up front.
+    #[test]
+    fn p20_f07_unexecutable_proposals_are_refused_at_creation() {
+        use crate::core::account::MAX_BASE_FEE;
+        let mut gov = GovernanceState::default();
+        let proposer = Address::from([0x01; 32]);
+        let bad = [
+            ProposalType::ChangeBaseFee(0),
+            ProposalType::ChangeBaseFee(MAX_BASE_FEE + 1),
+            ProposalType::ChangeBlockReward(1),
+            ProposalType::SlashValidator {
+                address: Address::from([0x02; 32]),
+                evidence_hash: [0u8; 32],
+            },
+        ];
+        for p_type in bad {
+            assert!(gov.create_proposal(proposer, p_type, 0, 10).is_err());
+        }
+        assert!(gov.proposals.is_empty());
+        assert!(gov
+            .create_proposal(proposer, ProposalType::ChangeBaseFee(42), 0, 10)
+            .is_ok());
+    }
+
     #[test]
     fn governance_rejects_non_whitelisted_parameter_proposal() {
         let mut gov = GovernanceState::default();
@@ -1208,6 +1312,52 @@ mod l4_tests {
         assert_eq!(gov.proposal_fee_multiplier(&proposer, 0), 64);
     }
 
+    /// P20-F01: one proposer cannot fill the Active slots by using one
+    /// proposal per epoch, which keeps the per-epoch fee multiplier at 1x.
+    #[test]
+    fn p20_f01_one_proposer_cannot_exhaust_active_slots() {
+        let mut gov = GovernanceState::default();
+        let attacker = Address::from([0xA1; 32]);
+        let mut accepted = 0u64;
+        for epoch in 0..100u64 {
+            if gov
+                .create_proposal(attacker, ProposalType::ChangeBaseFee(100), epoch, 100_000)
+                .is_ok()
+            {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, 8);
+        let other = Address::from([0xA2; 32]);
+        assert!(gov
+            .create_proposal(other, ProposalType::ChangeBaseFee(100), 100, 10)
+            .is_ok());
+    }
+
+    /// P20-F02: closed proposals leave state after the retention window.
+    #[test]
+    fn p20_f02_closed_proposals_are_pruned() {
+        let mut gov = GovernanceState::default();
+        let proposer = Address::from([0xB1; 32]);
+        let closed = gov
+            .create_proposal(proposer, ProposalType::ChangeBaseFee(100), 0, 10)
+            .unwrap();
+        let passed = gov
+            .create_proposal(proposer, ProposalType::ChangeBaseFee(200), 0, 10)
+            .unwrap();
+        gov.find_proposal_mut(closed).unwrap().status = ProposalStatus::Failed;
+        gov.find_proposal_mut(passed).unwrap().status = ProposalStatus::Passed;
+        // Inside the window both stay.
+        gov.create_proposal(proposer, ProposalType::ChangeBaseFee(300), 500, 10)
+            .unwrap();
+        assert_eq!(gov.proposals.len(), 3);
+        // Past the window the closed one goes, the Passed one stays.
+        gov.create_proposal(proposer, ProposalType::ChangeBaseFee(400), 5_000, 10)
+            .unwrap();
+        assert!(gov.proposals.iter().all(|p| p.id != closed));
+        assert!(gov.proposals.iter().any(|p| p.id == passed));
+    }
+
     #[test]
     fn l4_new_epoch_prunes_old_fee_counters() {
         let mut gov = GovernanceState::default();
@@ -1255,10 +1405,10 @@ mod l4_tests {
         let proposer = Address::from([0x01; 32]);
         let every_type = [
             ProposalType::ChangeBaseFee(1),
-            ProposalType::ChangeBlockReward(1),
+            ProposalType::ChangeBlockReward(0),
             ProposalType::SlashValidator {
                 address: Address::from([0x02; 32]),
-                evidence_hash: [0u8; 32],
+                evidence_hash: [1u8; 32],
             },
             ProposalType::ParameterUpdate("min_stake".into(), "5000".into()),
             ProposalType::WhitelistVerifier {

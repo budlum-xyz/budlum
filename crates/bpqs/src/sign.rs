@@ -178,6 +178,31 @@ pub fn sign_at_height<H: BpqsHash, P: BpqsParams>(
     Ok(signature)
 }
 
+/// Refuse a signature whose unused bytes are not zero. The verifier reads only
+/// the first `P::N` bytes of each used lane, the first `P::LEN` chains and the
+/// first `P::T_LOG2` path entries. Without this check, the other bytes could be
+/// changed with no effect on verification (malleability), and a non-zero lane
+/// tail would trip the debug assertion in `wots` instead of returning an error.
+fn check_canonical<P: BpqsParams>(sig: &BpqsSignature<P>) -> Result<(), BpqsError> {
+    let used_chains = sig.chains.iter().take(P::LEN);
+    let used_path = sig.path.iter().take(P::T_LOG2);
+    for lane in used_chains.chain(used_path) {
+        if lane.iter().skip(P::N).any(|b| *b != 0) {
+            return Err(BpqsError::Malformed("non-zero padding in a signature lane"));
+        }
+    }
+    let unused_chains = sig.chains.iter().skip(P::LEN);
+    let unused_path = sig.path.iter().skip(P::T_LOG2);
+    for lane in unused_chains.chain(unused_path) {
+        if lane.iter().any(|b| *b != 0) {
+            return Err(BpqsError::Malformed(
+                "non-zero bytes in an unused signature lane",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Verify `sig` over `msg` at chain `height` against `public`. The verifier
 /// re-derives the epoch (self-timestamping), continues every Winternitz
 /// segment to its head, and walks the auth path back to the member's root.
@@ -204,6 +229,7 @@ pub fn verify_at_height<H: BpqsHash, P: BpqsParams>(
     if sig.epoch >= (1u32 << P::T_LOG2) {
         return Err(BpqsError::Malformed("epoch beyond tree headroom"));
     }
+    check_canonical::<P>(sig)?;
     let bound = H::digest32(domains::MESSAGE_BIND_V1, &[&sig.randomizer, msg]);
     let rebuilt = wots::verify_chains::<H, P>(&sig.chains, &bound);
     merkle::verify_path::<H, P>(&rebuilt, sig.epoch as usize, &sig.path, &public.root)
@@ -286,5 +312,45 @@ mod sign_tests {
         let mut sig = sign_at_height::<H, P>(&signer, 0, 0, b"m").unwrap_or_else(|e| panic!("{e}"));
         sig.chains[9][1] ^= 0x01;
         assert!(verify_at_height::<H, P>(signer.public(), 0, b"m", &sig).is_err());
+    }
+
+    #[test]
+    fn non_zero_unused_chain_refuses() {
+        let signer = committee();
+        let mut sig = sign_at_height::<H, P>(&signer, 0, 0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        sig.chains[P::LEN][0] = 1;
+        assert!(matches!(
+            verify_at_height::<H, P>(signer.public(), 0, b"m", &sig),
+            Err(BpqsError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn non_zero_unused_path_entry_refuses() {
+        let signer = committee();
+        let mut sig = sign_at_height::<H, P>(&signer, 0, 0, b"m").unwrap_or_else(|e| panic!("{e}"));
+        sig.path[P::T_LOG2][5] = 1;
+        assert!(matches!(
+            verify_at_height::<H, P>(signer.public(), 0, b"m", &sig),
+            Err(BpqsError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn non_zero_lane_tail_refuses_without_panic() {
+        use crate::params::ParamsL3;
+        let mut sig = BpqsSignature::<ParamsL3> {
+            epoch: 0,
+            randomizer: [0u8; 16],
+            chains: [[0u8; 32]; 256],
+            path: [[0u8; 32]; 16],
+            _private: core::marker::PhantomData,
+        };
+        assert_eq!(check_canonical::<ParamsL3>(&sig), Ok(()));
+        sig.chains[0][ParamsL3::N] = 1;
+        assert!(check_canonical::<ParamsL3>(&sig).is_err());
+        sig.chains[0][ParamsL3::N] = 0;
+        sig.path[0][31] = 1;
+        assert!(check_canonical::<ParamsL3>(&sig).is_err());
     }
 }

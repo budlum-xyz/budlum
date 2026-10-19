@@ -123,25 +123,54 @@ mod tests {
 
     #[test]
     fn bft_leader_deterministic_selection() {
-        // BFT leader selection uses hash-mix (not pure round-robin).
-        // Test: same inputs → same leader.
-        let bc = setup_chain();
-        let _producer = addr(0x30);
+        // Leader selection hashes the height, the previous block hash and the
+        // ordered validator set. The same inputs give the same leader, and
+        // the entropy is part of the input.
+        use crate::consensus::poa::PoAEngine;
+        use crate::core::account::{AccountState, Validator};
 
-        // Chain must have a deterministic tip
-        let tip = bc.chain.last().unwrap();
-        assert_eq!(tip.index, 0, "genesis tip at index 0");
+        let mut state = AccountState::new();
+        for i in 1..=5u8 {
+            let address = addr(i);
+            let mut validator = Validator::new(address, 1000);
+            validator.active = true;
+            state.validators.insert(address, validator);
+        }
+        let active = state.get_active_validators();
+        let entropy_a = [1u8; 32];
+        let entropy_b = [2u8; 32];
+        for height in 1..40u64 {
+            let first = PoAEngine::leader_slot_with_entropy(height, &active, &entropy_a, 0);
+            let again = PoAEngine::leader_slot_with_entropy(height, &active, &entropy_a, 0);
+            assert_eq!(first, again, "same inputs must give the same leader");
+            assert!(first.is_some_and(|slot| slot < active.len()));
+        }
+        let differs = (1..40u64).any(|height| {
+            PoAEngine::leader_slot_with_entropy(height, &active, &entropy_a, 0)
+                != PoAEngine::leader_slot_with_entropy(height, &active, &entropy_b, 0)
+        });
+        assert!(differs, "the previous block hash must change the leader");
     }
 
     #[test]
     fn bft_block_validation_rejects_wrong_chain_id() {
-        let bc1 = setup_chain(); // chain_id 45262
-        let consensus2 = Arc::new(PoWEngine::new(0));
-        let bc2 = Blockchain::new(consensus2, None, 9999, None); // chain_id 9999
-
-        // Block from chain 9999 must not be valid in the devnet chain
-        let block_from_other = bc2.chain[0].clone();
-        assert_ne!(bc1.chain[0].chain_id, block_from_other.chain_id);
+        let mut bc1 = setup_chain(); // chain_id 45262
+        let mut block = crate::core::block::Block::new_with_chain_id(
+            1,
+            bc1.chain[0].hash.clone(),
+            vec![],
+            9999,
+        );
+        block.hash = block.calculate_hash();
+        let error = bc1
+            .validate_and_add_block(block)
+            .map(|_| ())
+            .expect_err("a block of another chain must be refused");
+        assert!(
+            error.to_lowercase().contains("chain"),
+            "the refusal must name the chain id: {error}"
+        );
+        assert_eq!(bc1.chain.len(), 1, "nothing was added");
     }
 
     // ─── Domain Isolation Edge Cases ───

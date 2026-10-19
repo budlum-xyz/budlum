@@ -1,4 +1,6 @@
-use super::{ConsensusEngine, ConsensusError};
+use super::{
+    ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+};
 use crate::core::account::{AccountState, Validator};
 use crate::core::address::Address;
 use crate::core::block::Block;
@@ -20,7 +22,7 @@ use tracing::{info, warn};
 /// Derivation stays deterministic and identical across the network. Callers on
 /// Both the propose and the verify path must use this helper so the two sides
 /// Can never disagree about the entropy.
-fn leader_entropy(hash: &str) -> Vec<u8> {
+pub(crate) fn leader_entropy(hash: &str) -> Vec<u8> {
     match hex::decode(hash) {
         Ok(bytes) if bytes.len() == 32 => bytes,
         // Domain-separated sentinel: distinct from any well-formed 32-byte hash.
@@ -187,17 +189,23 @@ impl PoAEngine {
         block_index: u64,
         active_validators: &'a [&Validator],
     ) -> Option<&'a Validator> {
-        self.expected_proposer_with_entropy(block_index, active_validators, &[0u8; 32])
+        self.expected_proposer_with_entropy(block_index, active_validators, &[0u8; 32], 0)
     }
 
     /// Expected proposer with external entropy for unpredictability.
+    ///
+    /// `round` is the leader-failure retry term (P01-F02): a slot whose
+    /// round-0 leader is offline advances to round 1 on timeout, and each
+    /// round hashes to a different leader. Validation recovers the round
+    /// from `block.nonce`.
     pub fn expected_proposer_with_entropy<'a>(
         &self,
         block_index: u64,
         active_validators: &'a [&Validator],
         entropy: &[u8],
+        round: u64,
     ) -> Option<&'a Validator> {
-        let slot = Self::leader_slot_with_entropy(block_index, active_validators, entropy)?;
+        let slot = Self::leader_slot_with_entropy(block_index, active_validators, entropy, round)?;
         active_validators.get(slot).copied()
     }
 
@@ -208,14 +216,24 @@ impl PoAEngine {
     /// Attacks. Now the leader is unpredictable until the previous block
     /// Is produced, since its hash is unknown beforehand.
     pub fn leader_slot(block_index: u64, active_validators: &[&Validator]) -> Option<usize> {
-        Self::leader_slot_with_entropy(block_index, active_validators, &[0u8; 32])
+        Self::leader_slot_with_entropy(block_index, active_validators, &[0u8; 32], 0)
     }
 
     /// Leader selection with external entropy (e.g., previous block hash).
+    ///
+    /// The round term (P01-F02) re-rolls the pick for a stalled slot. The
+    /// nonce is the round and is capped and time-priced in validation
+    /// (P01-F10), so the leader of one slot cannot farm favourable next
+    /// leaders by varying the nonce: only `0..MAX_LEADER_ROUNDS` exist and
+    /// claiming a later one costs wall time. Production timestamps come from
+    /// the slot schedule (`planned_block_timestamp`), so the header fields
+    /// that remain free are the transaction choice and order, which is the
+    /// proposer's job and is priced by the block-size and gas limits.
     pub fn leader_slot_with_entropy(
         block_index: u64,
         active_validators: &[&Validator],
         entropy: &[u8],
+        round: u64,
     ) -> Option<usize> {
         use sha2::{Digest, Sha256};
         let n = active_validators.len();
@@ -225,13 +243,18 @@ impl PoAEngine {
         if n == 0 {
             return None;
         }
+        if round > MAX_LEADER_ROUNDS {
+            return None;
+        }
         let mut hasher = Sha256::new();
-        hasher.update(b"BUDLUM_POA_LEADER_V2");
+        hasher.update(b"BUDLUM_POA_LEADER_V3");
         hasher.update(block_index.to_le_bytes());
         // V5-SECURITY-12: Mix in external entropy (previous block hash).
         // This makes the leader unpredictable until the previous block
         // Is durably committed - preventing pre-computation attacks.
         hasher.update(entropy);
+        // P01-F02: the retry round re-rolls the leader for a stalled slot.
+        hasher.update(round.to_le_bytes());
         // Fingerprint the ordered set (callers pass address-sorted active set).
         hasher.update((n as u64).to_le_bytes());
         for v in active_validators {
@@ -253,14 +276,76 @@ impl PoAEngine {
         &self,
         block: &mut Block,
         state: &AccountState,
+        parent_timestamp: Option<u128>,
     ) -> Result<Option<Address>, ConsensusError> {
         let active_refs = self.active_authorities(state);
         // V5-SECURITY-12: Use previous block hash as entropy for leader selection.
         // This makes the leader unpredictable until the previous block is committed.
         let prev_hash_bytes = leader_entropy(&block.previous_hash);
-        let expected_signer_addr = if let Some(expected) =
-            self.expected_proposer_with_entropy(block.index, &active_refs, &prev_hash_bytes)
-        {
+
+        let mut our_addrs: Vec<Address> = Vec::new();
+        if let Some(signer) = &self.signer {
+            our_addrs.push(signer.address());
+        }
+        if let Some(kp) = &self.keypair {
+            our_addrs.push(Address::from(kp.public_key_bytes()));
+        }
+
+        // Leader rounds (P01-F02). The affordable rounds are priced by wall
+        // time since the parent landed: round `r` needs
+        // `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS` to have elapsed, the
+        // same floor validation applies. A slot whose round-0 leader is
+        // offline therefore advances one round per timeout instead of
+        // stalling forever.
+        let round_cap = parent_timestamp.map_or(MAX_LEADER_ROUNDS, |prev_ts| {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            let spaced = now_ms
+                .saturating_sub(prev_ts)
+                .saturating_sub(MIN_BLOCK_INTERVAL_MS);
+            (spaced / ROUND_TIMEOUT_MS).min(MAX_LEADER_ROUNDS)
+        });
+
+        for round in 0..=round_cap {
+            let Some(expected) = self.expected_proposer_with_entropy(
+                block.index,
+                &active_refs,
+                &prev_hash_bytes,
+                round,
+            ) else {
+                break;
+            };
+            if expected.address == Address::zero() {
+                return Ok(None);
+            }
+            if our_addrs.contains(&expected.address) {
+                block.producer = Some(expected.address);
+                // The block nonce carries the round; validation reads it back
+                // and re-prices it (P01-F10: the nonce is no longer a free
+                // grinding field).
+                block.nonce = round;
+                if let Some(prev_ts) = parent_timestamp {
+                    let floor = prev_ts
+                        .saturating_add(MIN_BLOCK_INTERVAL_MS)
+                        .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+                    if block.timestamp < floor {
+                        block.timestamp = floor;
+                    }
+                }
+                return Ok(Some(expected.address));
+            }
+        }
+
+        // No affordable round names us. Name the round-0 leader so callers
+        // that only display or route the slot still see who owns it.
+        let expected_signer_addr = if let Some(expected) = self.expected_proposer_with_entropy(
+            block.index,
+            &active_refs,
+            &prev_hash_bytes,
+            0,
+        ) {
             expected.address
         } else if block.index == 0 {
             Address::zero()
@@ -272,46 +357,19 @@ impl PoAEngine {
             return Ok(None);
         }
 
-        if let Some(signer) = &self.signer {
-            let our_addr = signer.address();
-            if our_addr == expected_signer_addr {
-                block.producer = Some(our_addr);
-                return Ok(Some(our_addr));
-            }
-        }
-
-        if let Some(kp) = &self.keypair {
-            let our_addr = Address::from(kp.public_key_bytes());
-            if our_addr == expected_signer_addr {
-                block.producer = Some(our_addr);
-                return Ok(Some(our_addr));
-            }
-        }
-
         if block.producer.is_none() || block.producer == Some(Address::zero()) {
             block.producer = Some(expected_signer_addr);
         }
 
         Ok(block.producer)
     }
-}
 
-impl ConsensusEngine for PoAEngine {
-    /// The identity master registry opens writes on the PoA authority's
-    /// chain and nowhere else (KIMLIK-MIMARI §2). This is that declaration:
-    /// the gate reads it from the engine the node itself started with.
-    fn domain_kind(&self) -> crate::domain::ConsensusKind {
-        crate::domain::ConsensusKind::PoA
-    }
-
-    fn preview_block(&self, block: &mut Block, state: &AccountState) -> Result<(), ConsensusError> {
-        let _ = self.prepare_common(block, state)?;
-        Ok(())
-    }
-
-    fn prepare_block(&self, block: &mut Block, state: &AccountState) -> Result<(), ConsensusError> {
-        let expected_signer_addr = self.prepare_common(block, state)?;
-
+    /// Sign a prepared block when the expected signer is this node.
+    fn sign_prepared(
+        &self,
+        block: &mut Block,
+        expected_signer_addr: Option<Address>,
+    ) -> Result<(), ConsensusError> {
         if let Some(expected_signer_addr) = expected_signer_addr {
             info!(
                 "PoA: Block {} should be proposed by: {}",
@@ -349,6 +407,68 @@ impl ConsensusEngine for PoAEngine {
         info!("PoA: Block {} prepared", block.index);
         Ok(())
     }
+}
+
+impl ConsensusEngine for PoAEngine {
+    /// The identity master registry opens writes on the PoA authority's
+    /// chain and nowhere else (KIMLIK-MIMARI §2). This is that declaration:
+    /// the gate reads it from the engine the node itself started with.
+    fn domain_kind(&self) -> crate::domain::ConsensusKind {
+        crate::domain::ConsensusKind::PoA
+    }
+
+    fn preview_block(&self, block: &mut Block, state: &AccountState) -> Result<(), ConsensusError> {
+        let _ = self.prepare_common(block, state, None)?;
+        Ok(())
+    }
+
+    /// Chain-aware preview: the parent timestamp prices the leader rounds
+    /// (P01-F02), so production must go through this variant.
+    fn preview_block_with_chain(
+        &self,
+        block: &mut Block,
+        state: &AccountState,
+        chain: &[crate::core::block::Block],
+    ) -> Result<(), ConsensusError> {
+        let expected = self.prepare_common(block, state, chain.last().map(|p| p.timestamp))?;
+        // P01-F24: refuse a slot we do not lead before the caller applies any
+        // state. `prepare_common` names the round-0 leader for display when no
+        // affordable round names us; previewing through to the end made every
+        // non-leader PoA node compute the full state transition and then fail
+        // local validation with an error on every producer tick.
+        if let Some(expected) = expected {
+            let is_us = self.signer.as_ref().map(|s| s.address()) == Some(expected)
+                || self
+                    .keypair
+                    .as_ref()
+                    .map(|kp| Address::from(kp.public_key_bytes()))
+                    == Some(expected);
+            if !is_us {
+                return Err(ConsensusError(
+                    "Not selected as leader for any affordable round".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Chain-aware preparation: same round pricing as
+    /// [`Self::preview_block_with_chain`], then the signing step.
+    fn prepare_block_with_chain(
+        &self,
+        block: &mut Block,
+        state: &AccountState,
+        chain: &[crate::core::block::Block],
+    ) -> Result<(), ConsensusError> {
+        let expected_signer_addr =
+            self.prepare_common(block, state, chain.last().map(|p| p.timestamp))?;
+        self.sign_prepared(block, expected_signer_addr)
+    }
+
+    fn prepare_block(&self, block: &mut Block, state: &AccountState) -> Result<(), ConsensusError> {
+        let expected_signer_addr = self.prepare_common(block, state, None)?;
+        self.sign_prepared(block, expected_signer_addr)
+    }
 
     fn validate_block(
         &self,
@@ -373,6 +493,30 @@ impl ConsensusEngine for PoAEngine {
 
         let active_refs = self.active_authorities(state);
         if !active_refs.is_empty() {
+            // The block nonce carries the leader round (P01-F02, P01-F10).
+            // The round is capped, and claiming a later one is time-priced,
+            // so the nonce is a bounded retry term and not a free grinding
+            // field for steering the next slot's leader.
+            let round = block.nonce;
+            if round > MAX_LEADER_ROUNDS {
+                return Err(ConsensusError(format!(
+                    "PoA leader round {round} exceeds the cap {MAX_LEADER_ROUNDS}"
+                )));
+            }
+            if round > 0 {
+                if let Some(prev) = chain.last() {
+                    let floor = prev
+                        .timestamp
+                        .saturating_add(MIN_BLOCK_INTERVAL_MS)
+                        .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+                    if block.timestamp < floor {
+                        return Err(ConsensusError(format!(
+                            "PoA leader round {round} claimed too early: block timestamp {} < floor {}",
+                            block.timestamp, floor
+                        )));
+                    }
+                }
+            }
             // V5-SECURITY-12: Use previous block hash as entropy for leader verification.
             // Must match the entropy used in prepare_block/prepare_common.
             let prev_hash_bytes = if let Some(prev) = chain.last() {
@@ -381,7 +525,7 @@ impl ConsensusEngine for PoAEngine {
                 leader_entropy(&block.previous_hash)
             };
             let expected = self
-                .expected_proposer_with_entropy(block.index, &active_refs, &prev_hash_bytes)
+                .expected_proposer_with_entropy(block.index, &active_refs, &prev_hash_bytes, round)
                 .ok_or_else(|| ConsensusError("No proposer for this slot".into()))?;
 
             let producer = block
@@ -540,7 +684,7 @@ mod tests {
         // An empty set has no leader slot, on both entry points, in every
         // build profile.
         assert_eq!(PoAEngine::leader_slot(0, &[]), None);
-        assert_eq!(PoAEngine::leader_slot_with_entropy(0, &[], b"x"), None);
+        assert_eq!(PoAEngine::leader_slot_with_entropy(0, &[], b"x", 0), None);
     }
 
     #[test]

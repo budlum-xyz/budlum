@@ -66,7 +66,7 @@ impl RatioConsensus {
 
     /// The candidate pool: only the experts of the GIVEN format (multiple
     /// pipeline candidates). The ratios carry EVIDENCE
-    /// (RealBench/measure_ratios.py seed=7 - K19). The content class BONUS
+    /// (RealBench/measure_ratios seed=7 - K19). The content class BONUS
     /// decides between the pipelines of that format (K84).
     pub fn candidate_pool(format: FormatCodec, class: ContentClass) -> Vec<RatioCandidateAgent> {
         let mut pool = match format {

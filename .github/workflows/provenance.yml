@@ -57,7 +57,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
       - name: SBOM uret (CycloneDX)
-        run: bash ./ops/scripts/generate-sbom.sh
+        run: cargo run --release --manifest-path xtask/tools/Cargo.toml -- generate-sbom
 
       # Canary: is the file to be signed really an SBOM. Signing an empty or broken
 # file makes the signature itself meaningless; a signature says not that the
