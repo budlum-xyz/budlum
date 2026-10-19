@@ -136,12 +136,15 @@ impl BlsVerifier for PairingBls {
 /// silently stops serving, and that must be a loud error instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdapterSpec {
-    /// Ethereum sync-committee finality, bound to one network and one signing
-    /// root. The BLS verifier is installed by the node at construction; the
-    /// spec carries only the data.
+    /// Ethereum sync-committee finality, bound to one network and one PINNED
+    /// sync committee (BLG-0130/P06-F01). The BLS verifier is installed by
+    /// the node at construction; the spec carries only the data. A spec
+    /// without a committee is the closed admission state (decision C,
+    /// interim): `register_domain` refuses it.
     EthereumSync {
         network: String,
-        signing_root: [u8; 32],
+        #[serde(default)]
+        committee: Option<crate::cross_domain::external::ethereum::PinnedCommittee>,
     },
     /// BudZKVM validity proofs for one network.
     ZkVm { network: String },
@@ -172,9 +175,9 @@ impl AdapterSpec {
         match self {
             Self::EthereumSync {
                 network,
-                signing_root,
+                committee,
             } => {
-                let adapter = EthereumSyncAdapter::new(network, *signing_root, bls);
+                let adapter = EthereumSyncAdapter::new(network, committee.clone(), bls);
                 let adapter = match golden {
                     Some(g) => adapter.with_golden(g),
                     None => adapter,
@@ -255,6 +258,8 @@ pub enum IntakeError {
     UnknownDomain,
     #[error("the ethereum adapter needs a BLS verifier and none is installed")]
     MissingBlsVerifier,
+    #[error("ethereum sync admission is closed: no sync committee is pinned")]
+    CommitteeNotPinned,
     #[error("admission failed: golden={golden_verified}, {passed}/{total} probes passed")]
     AdmissionRefused {
         golden_verified: bool,
@@ -325,6 +330,14 @@ impl IntakeState {
         } = request;
         if matches!(spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
             return Err(IntakeError::MissingBlsVerifier);
+        }
+        // BLG-0130 (P06-F01, decision C interim): EthereumSync admission is
+        // closed until a sync committee is pinned - the old shape let the
+        // submitter name their own aggregate key.
+        if let AdapterSpec::EthereumSync { committee, .. } = &spec {
+            if committee.is_none() {
+                return Err(IntakeError::CommitteeNotPinned);
+            }
         }
         // Economics under which lying pays are refused at the door. The
         // framework checks the bond amount; whether the fee/penalty shape
@@ -702,7 +715,13 @@ mod tests {
     fn eth_spec() -> AdapterSpec {
         AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
-            signing_root: [0; 32],
+            // BLG-0130 (P06-F01): the happy-path tests pin the committee the
+            // golden sample carries ([0x11; 96], period 0).
+            committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
+                period: 0,
+                aggregate_pubkey: vec![0x11; 96],
+                next_committee_root: [0xbb; 32],
+            }),
         }
     }
 
@@ -722,7 +741,7 @@ mod tests {
         let adapter = spec.build(Some(Box::new(StrictTestBls)), None);
         RawConsensusEvidence {
             adapter: adapter.descriptor().id,
-            evidence_version: 1,
+            evidence_version: 2,
             network: "testnet".to_string(),
             payload,
             declared_height: 64,
@@ -733,7 +752,7 @@ mod tests {
 
     fn versions_for(spec: &AdapterSpec) -> VersionPolicy {
         let adapter = spec.build(Some(Box::new(StrictTestBls)), None);
-        VersionPolicy::single(adapter.descriptor().id, 1, 0)
+        VersionPolicy::single(adapter.descriptor().id, 2, 0)
     }
 
     fn register(state: &mut IntakeState) -> DomainKey {
@@ -1323,6 +1342,39 @@ mod tests {
                 .round_of(&key, evidence.declared_height)
                 .is_none(),
             "no policy, no round"
+        );
+    }
+
+    /// BLG-0130 (P06-F01, decision C interim): EthereumSync admission is
+    /// closed until a sync committee is pinned - the old shape let the
+    /// submitter name their own aggregate key.
+    #[test]
+    fn committee_less_ethereum_sync_is_refused_at_admission() {
+        let mut state = IntakeState::new();
+        let spec = AdapterSpec::EthereumSync {
+            network: "testnet".to_string(),
+            committee: None,
+        };
+        let golden = golden_for(&eth_spec());
+        let versions = versions_for(&eth_spec());
+        let economics = IntakeState::conservative_economics(1_000_000);
+        let err = state
+            .register_domain(
+                RegistrationRequest {
+                    spec,
+                    policy: VerificationPolicy::strict(1_000),
+                    economics,
+                    versions,
+                    bond_atoms: economics_bond(),
+                    poster: addr(9),
+                    golden: Some(golden),
+                },
+                Some(Box::new(StrictTestBls)),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, IntakeError::CommitteeNotPinned),
+            "got: {err}"
         );
     }
 }
