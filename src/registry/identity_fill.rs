@@ -165,6 +165,9 @@ impl std::error::Error for FillError {}
 
 /// One piece of a template: literal text to copy, or a named slot to fill.
 enum Piece<'a> {
+    /// Only the test-only `fill_template` renders literal runs; the
+    /// production walk (`template_slots`) reads the slots alone.
+    #[cfg(test)]
     Text(&'a str),
     Slot(&'a str),
 }
@@ -230,10 +233,11 @@ fn pieces(template: &str) -> Result<Vec<Piece<'_>>, FillError> {
             // the split is on a boundary - but the indexing gate refuses raw
             // slicing at runtime, and `split_at_checked` keeps the refusal
             // fail-closed if the arithmetic above ever changes.
-            let (text, tail) = rest
+            let (_text, tail) = rest
                 .split_at_checked(take)
                 .ok_or_else(|| FillError::MalformedTemplate(take_preview(rest)))?;
-            out.push(Piece::Text(text));
+            #[cfg(test)]
+            out.push(Piece::Text(_text));
             rest = tail;
         }
     }
@@ -258,12 +262,16 @@ fn take_preview(rest: &str) -> String {
 pub fn template_slots(template: &str) -> Result<Vec<String>, FillError> {
     let mut slots = Vec::new();
     for piece in pieces(template)? {
-        if let Piece::Slot(name) = piece {
-            let slot = name.to_string();
-            if slots.contains(&slot) {
-                return Err(FillError::DuplicateSlot { slot });
+        match piece {
+            Piece::Slot(name) => {
+                let slot = name.to_string();
+                if slots.contains(&slot) {
+                    return Err(FillError::DuplicateSlot { slot });
+                }
+                slots.push(slot);
             }
-            slots.push(slot);
+            #[cfg(test)]
+            Piece::Text(_) => {}
         }
     }
     Ok(slots)
