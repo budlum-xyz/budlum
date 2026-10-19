@@ -37,9 +37,12 @@
 //! missing, and spreading the obligation past what the bond covers would put
 //! shards behind collateral that cannot pay for their loss.
 //!
-//! The weighting is the standard HRW form, `-stake / ln(u)` with `u` drawn
-//! from the hash. That distribution is exactly proportional to weight, which
-//! a simple `hash * stake` is not.
+//! The weighting follows the standard HRW form, `-stake / ln(u)` with `u`
+//! drawn from the hash, which is exactly proportional to weight. The code
+//! cannot take a logarithm in consensus arithmetic, so it uses the integer
+//! stand-in `u / (1 - u)` (see `rendezvous_score`): monotone and
+//! deterministic, and proportional to stake only approximately. It is still
+//! closer to proportional than a simple `hash * stake`.
 //!
 //! # What this does not do
 //!
