@@ -26,7 +26,7 @@ use sha3::{Digest, Sha3_256};
 pub const MAX_MULTISIG_OWNERS: usize = 16;
 pub const ADDRESS_DOMAIN_V2: &[u8] = b"BUDLUM_ADDRESS_V2";
 pub const SEED_DOMAIN_V1: &[u8] = b"BUDLUM_MLDSA87_SEED_V1";
-pub const RECOVERY_DOMAIN_V2: &[u8] = b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V2";
+pub const RECOVERY_DOMAIN_V3: &[u8] = b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V3";
 pub const STORAGE_PACT_DOMAIN: &[u8] = b"BUDLUM_STORAGE_PACT_V1";
 
 /// The minimum input bytes needed to derive a signing seed.
@@ -276,6 +276,8 @@ pub struct RecoveryProposal {
     /// on a testnet (or any fork that reused the keys) carried over verbatim
     /// to mainnet - same keys, same proposal, same digest, valid forever.
     pub chain_id: u64,
+    /// Current account nonce, read from trusted state when proposing recovery.
+    pub account_nonce: u64,
 }
 
 impl RecoveryProposal {
@@ -288,6 +290,7 @@ impl RecoveryProposal {
         timelock: u64,
         created: u64,
         chain_id: u64,
+        account_nonce: u64,
     ) -> Result<Self, &'static str> {
         if current_owner == new_owner {
             return Err("KQ-WALLET-RECOVERY-16: new==current");
@@ -305,16 +308,18 @@ impl RecoveryProposal {
             created_block: created,
             executable_after,
             chain_id,
+            account_nonce,
         })
     }
 
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
-        // V2 (BLG-0276): the chain id joins the preimage, first, so no
-        // encoding of any older field can shadow it.
-        h.update(RECOVERY_DOMAIN_V2);
+        // V3 (BLG-0276): domain, chain and current account nonce precede
+        // the owner fields. V1/V2 approvals cannot authorize this format.
+        h.update(RECOVERY_DOMAIN_V3);
         h.update(self.chain_id.to_be_bytes());
+        h.update(self.account_nonce.to_be_bytes());
         h.update(self.current_owner);
         h.update(self.current_address);
         h.update(self.new_owner);
@@ -524,8 +529,8 @@ mod tests {
         cur[0] = 7;
         let mut nxt = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
         nxt[0] = 8;
-        let on_main = RecoveryProposal::new(cur, nxt, 100, 10, 45_262).expect("distinct owners");
-        let on_test = RecoveryProposal::new(cur, nxt, 100, 10, 45_263).expect("distinct owners");
+        let on_main = RecoveryProposal::new(cur, nxt, 100, 10, 45_262, 0).expect("distinct owners");
+        let on_test = RecoveryProposal::new(cur, nxt, 100, 10, 45_263, 0).expect("distinct owners");
         assert_ne!(
             on_main.digest(),
             on_test.digest(),
@@ -533,6 +538,14 @@ mod tests {
         );
         assert_eq!(on_main.digest(), on_main.digest(), "digest is a pure function");
         assert_eq!(on_main.chain_id, 45_262, "the proposal carries its chain binding");
+        let mut later_nonce = on_main.clone();
+        later_nonce.account_nonce = 1;
+        assert_ne!(on_main.digest(), later_nonce.digest(), "account nonce is signed");
+        assert_ne!(
+            GuardianVote::signed_message(&on_main.digest()),
+            GuardianVote::signed_message(&later_nonce.digest()),
+            "votes cannot transfer between account nonces"
+        );
     }
 
     /// `validate_all` must report all three gates passing; if one drops
@@ -574,12 +587,12 @@ mod tests {
     fn a_recovery_proposal_respects_its_timelock() {
         let current = [1u8; ML_DSA_87_PUBLIC_KEY_LEN];
         let next = [2u8; ML_DSA_87_PUBLIC_KEY_LEN];
-        let p = RecoveryProposal::new(current, next, 100, 10, 45_262).expect("distinct owners");
+        let p = RecoveryProposal::new(current, next, 100, 10, 45_262, 0).expect("distinct owners");
         assert_eq!(p.executable_after, 110);
         assert!(!p.is_timelock_satisfied(109));
         assert!(p.is_timelock_satisfied(110));
-        assert!(RecoveryProposal::new(current, current, 100, 10, 45_262).is_err());
-        assert!(RecoveryProposal::new(current, next, u64::MAX, 10, 45_262).is_err());
+        assert!(RecoveryProposal::new(current, current, 100, 10, 45_262, 0).is_err());
+        assert!(RecoveryProposal::new(current, next, u64::MAX, 10, 45_262, 0).is_err());
     }
 
     #[test]
