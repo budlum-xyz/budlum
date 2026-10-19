@@ -6,7 +6,7 @@
 //! - guest bytecode computes the forward pass in-VM over a host-published
 //!   memory image; its result is checked against the host evaluator
 //! - structural verify + optional STARK verify (postcard ProofEnvelope)
-//! - prove_mlp_inference packages AiExecutionProof for L1 attach
+//! - prove_mlp_inference packages AiExecutionProof for the chain attach
 
 mod guest;
 mod model_class;

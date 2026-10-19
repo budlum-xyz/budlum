@@ -3272,7 +3272,7 @@ impl StorageRegistry {
 
         // Bind every replay-relevant registry field. Roots alone are not enough:
         // The same shard proof must not answer another deal, replica, range,
-        // Challenge, deadline, responder, epoch, domain, or L1 network.
+        // Challenge, deadline, responder, epoch, domain, or chain network.
         let context_digest = context.digest(storage_root, range_hash);
 
         let mut sender_bytes = [0u8; 8];
