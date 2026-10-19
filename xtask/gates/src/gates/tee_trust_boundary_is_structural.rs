@@ -303,9 +303,10 @@ fn check_live_verifier_call(src: &str, problems: &mut Vec<String>) {
 
 fn judge(src: &str) -> Vec<String> {
     let mut problems = Vec::new();
+    let live = strip_rust_noise(src);
 
     // 1. The runtime side must be a quote source, not an attestation source.
-    if !src.contains("trait TeeQuoter: TeeRuntime") {
+    if !live.contains("trait TeeQuoter: TeeRuntime") {
         problems.push(String::from(
             "wallet-core no longer has a `TeeQuoter` trait. The runtime must produce only \\
              a raw quote; letting it produce parsed attestation fields reopens the \\
@@ -388,13 +389,13 @@ fn judge(src: &str) -> Vec<String> {
     }
 
     // 2. The verifier side must be wallet-owned and fail closed.
-    if !src.contains("trait TeeQuoteVerifier") {
+    if !live.contains("trait TeeQuoteVerifier") {
         problems.push(String::from(
             "wallet-core no longer has a `TeeQuoteVerifier` trait. Without a wallet-owned \\
              verifier, the runtime is the only source of attestation and can self-attest.",
         ));
     }
-    if !src.contains("UnavailableTeeQuoteVerifier") {
+    if !live.contains("UnavailableTeeQuoteVerifier") {
         problems.push(String::from(
             "wallet-core no longer fails closed when no hardware root is linked. \\
              `UnavailableTeeQuoteVerifier` must reject every quote.",
@@ -532,4 +533,17 @@ pub fn sign_with_privacy(&self, message: &[u8], runtime: &dyn TeeAttester) -> Re
         "TEE trust-boundary gate self-test OK: the split passes, the runtime-attestation \\
          regression fails.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_trait_named_only_in_a_comment_is_missing() {
+        let src = "// trait TeeQuoter: TeeRuntime\n// trait TeeQuoteVerifier\n// UnavailableTeeQuoteVerifier\n";
+        let problems = judge(src);
+        assert!(problems.iter().any(|p| p.contains("TeeQuoter")));
+        assert!(problems.iter().any(|p| p.contains("TeeQuoteVerifier")));
+    }
 }
