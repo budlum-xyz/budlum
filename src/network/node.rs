@@ -2481,6 +2481,18 @@ impl Node {
                                            // only now may gossipsub forward it to the mesh.
                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Accept);
 
+                                           // A decoded message from a handshaked peer earns
+                                           // score back, so honest forwarders that now and
+                                           // then relay a duplicate do not drift to a ban.
+                                           if let Ok(now) = std::time::SystemTime::now()
+                                               .duration_since(std::time::UNIX_EPOCH)
+                                           {
+                                               self.gossip_dedup
+                                                   .lock()
+                                                   .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                                   .record_valid(&peer_id, now.as_millis() as u64);
+                                           }
+
                                            match msg {
                                                NetworkMessage::Block(block) => {
                                                if let Some(metrics) = &self.metrics {
