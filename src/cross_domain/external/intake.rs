@@ -45,7 +45,7 @@ use crate::cross_domain::external::quorum::{
 use crate::cross_domain::external::registry::{ExternalDomainRegistry, RegistryError};
 use crate::cross_domain::external::selftest::{admit, AdmissionReport};
 use crate::cross_domain::external::spec::{
-    AdapterDescriptor, AdapterError, DomainKey, ExternalFinalityAdapter, FinalityAttestation,
+    AdapterDescriptor, DomainKey, ExternalFinalityAdapter, FinalityAttestation,
     RawConsensusEvidence, VerificationPolicy,
 };
 use crate::cross_domain::external::versioning::VersionPolicy;
