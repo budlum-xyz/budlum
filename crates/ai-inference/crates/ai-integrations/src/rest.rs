@@ -83,13 +83,19 @@ impl RetryPolicy {
     /// Does this status call for a retry?
     #[must_use]
     pub fn should_retry(&self, status: u16, attempt: u32) -> bool {
-        attempt + 1 < self.max_attempts && self.retry_on_status.contains(&status)
+        attempt.saturating_add(1) < self.max_attempts && self.retry_on_status.contains(&status)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_retry_does_not_wrap_at_the_largest_attempt() {
+        let policy = RetryPolicy::default();
+        assert!(!policy.should_retry(503, u32::MAX));
+    }
 
     #[test]
     fn retry_policy_exponential() {
