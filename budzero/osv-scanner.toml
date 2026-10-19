@@ -40,29 +40,6 @@ is void - the exception must then be removed and the finding becomes real.
 """
 
 [[IgnoredVulns]]
-id = "RUSTSEC-2026-0118"   # hickory-proto NSEC3 DoS
-reason = """
-The same record as the root .quality/osv-scanner.toml; the full reason lives there.
-
-The NSEC3 validation loop exists only when hickory is compiled with the `dnssec`
-feature. Measurement (2026-07-27): the active hickory-proto features are
-std/tokio/futures-io; NO dnssec, NO mdns.
-
-CORRECTION: the old reason said "resolved only with the optional p2p-mdns"; that has
-been wrong since the libp2p `dns` feature was turned on - hickory is in the default
-build through libp2p-dns. Unreachability still holds; the reason is that DNSSEC is not compiled.
-
-The premise is locked by src/tests/advisory_reachability.rs.
-"""
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0119"   # hickory-proto name-compression parser
-reason = """
-The same measurement as RUSTSEC-2026-0118: the vulnerable parser does not compile
-without `dnssec`. The same correction note applies.
-"""
-
-[[IgnoredVulns]]
 id = "GHSA-q2qq-hmj6-3wpp"   # hickory-proto O(n^2) DNS message encoding
 reason = """
 Quadratic CPU consumption while producing a DNS message - triggering it requires
