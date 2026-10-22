@@ -139,6 +139,19 @@ pub struct Prevote {
     pub epoch: u64,
     pub checkpoint_height: u64,
     pub checkpoint_hash: String,
+    /// The chain this vote is signed for, folded into the signing preimage.
+    ///
+    /// A BLS key reused across two Budlum chains produces a legitimate vote on
+    /// each of them for the same `(epoch, checkpoint_height)`. Without the
+    /// chain id those two genuine signatures look exactly like an equivocation,
+    /// so a block producer could put them in a `Prevote` double-sign report and
+    /// have the honest validator slashed on the chain it is being framed on.
+    /// Every verifier rebuilds the preimage with *its own* chain id (never the
+    /// one carried here), so a signature minted for another chain simply fails
+    /// verification. `#[serde(default)]` keeps older wire shapes decodable;
+    /// they fail the signature gate instead of being trusted.
+    #[serde(default)]
+    pub chain_id: u64,
     pub voter_id: Address,
     pub sig_bls: Vec<u8>,
     /// BLG-0083 (P04-F01): an authentication signature over
@@ -156,6 +169,9 @@ pub struct Precommit {
     pub epoch: u64,
     pub checkpoint_height: u64,
     pub checkpoint_hash: String,
+    /// Chain binding; see [`Prevote::chain_id`].
+    #[serde(default)]
+    pub chain_id: u64,
     pub voter_id: Address,
     pub sig_bls: Vec<u8>,
     /// BLG-0083 (P04-F01): the vote-authentication signature; see
@@ -169,31 +185,78 @@ pub struct FinalityCert {
     pub epoch: u64,
     pub checkpoint_height: u64,
     pub checkpoint_hash: String,
+    /// Chain binding of the aggregated precommit signatures; see
+    /// [`Prevote::chain_id`]. The certificate is the aggregate of votes, so it
+    /// must commit to the same chain id they signed.
+    #[serde(default)]
+    pub chain_id: u64,
     pub agg_sig_bls: Vec<u8>,
     pub bitmap: Vec<u8>,
     pub set_hash: String,
 }
 
+/// Build the domain-separated, length-framed preimage signed by a validator's
+/// vote-authentication key (`BUDLUM_VOTE_AUTH_V3`).
+///
+/// Both `vote_msg` and `sig_bls` are variable-length on the wire, so each
+/// carries an explicit little-endian `u64` byte length. Without those length
+/// prefixes, shifting trailing characters of `checkpoint_hash` into the front
+/// of `sig_bls` preserved the concatenated preimage and allowed one captured
+/// honest vote to mint invalid-vote ticks against the signer (CWE-347).
+pub fn vote_auth_signing_message(vote_msg: &[u8], sig_bls: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(19 + 8 + vote_msg.len() + 8 + sig_bls.len());
+    msg.extend_from_slice(b"BUDLUM_VOTE_AUTH_V3");
+    msg.extend_from_slice(&(vote_msg.len() as u64).to_le_bytes());
+    msg.extend_from_slice(vote_msg);
+    msg.extend_from_slice(&(sig_bls.len() as u64).to_le_bytes());
+    msg.extend_from_slice(sig_bls);
+    msg
+}
+
+/// Extract the canonical epoch committed inside a domain-separated `Prevote` or
+/// `Precommit` signing preimage, returning `None` for any non-vote byte string.
+pub fn vote_message_epoch(vote_msg: &[u8]) -> Option<u64> {
+    let after_chain = vote_preimage_after_chain_id(vote_msg)?;
+    let epoch_bytes: [u8; 8] = after_chain.get(..8)?.try_into().ok()?;
+    Some(u64::from_le_bytes(epoch_bytes))
+}
+
+fn vote_preimage_after_chain_id(vote_msg: &[u8]) -> Option<&[u8]> {
+    let scheme = BLS_SCHEME_RFC9380_V1.as_bytes();
+    let rest = vote_msg
+        .strip_prefix(PREVOTE_DOMAIN)
+        .or_else(|| vote_msg.strip_prefix(PRECOMMIT_DOMAIN))?;
+    let after_scheme = rest.strip_prefix(scheme)?;
+    after_scheme.get(8..)
+}
+
 impl Prevote {
     /// Bytes a validator signs to endorse a checkpoint.
     ///
-    /// # Why there is no explicit `chain_id` here
+    /// # Why the chain id is stated, not derived
     ///
-    /// The obvious cross-chain replay question, could a prevote signed on
-    /// Testnet be replayed on mainnet? - is closed, but indirectly:
-    /// `checkpoint_hash` is a block hash, and `Block::calculate_hash_bytes`
-    /// Folds `chain_id` into the `BDLM_BLOCK_V4` preimage. Two networks cannot
-    /// Produce the same checkpoint hash at the same height, so the signature
-    /// Does not verify against any other chain's checkpoint.
+    /// The cross-chain replay question (could a prevote signed on Testnet be
+    /// replayed on mainnet?) used to be answered indirectly: `checkpoint_hash`
+    /// is a block hash and `Block::calculate_hash_bytes` folds `chain_id` into
+    /// its `BDLM_BLOCK_V4` preimage, so the signature did not verify against
+    /// another chain's checkpoint.
     ///
-    /// That is a derived guarantee, not a stated one: it holds because of what
-    /// `calculate_hash_bytes` happens to include, and would break silently if
-    /// `chain_id` ever left the block preimage. `prevote_and_precommit_bind_the_chain`
-    /// Asserts the dependency so the two cannot drift apart.
+    /// That argument only rules out *replaying* one signature. It does not
+    /// rule out *presenting two genuine signatures*: a validator running the
+    /// same BLS key on two chains signs one legitimate vote per chain for the
+    /// same `(epoch, checkpoint_height)`, and the two hashes differ. Nothing in
+    /// that pair looks like equivocation to a verifier that cannot see which
+    /// chain each vote belongs to, so the pair could be filed as a `Prevote`
+    /// double-sign report and slash the honest validator.
+    ///
+    /// The chain id is therefore part of the preimage (`BUDLUM_PREVOTE_V2`),
+    /// and every verifier rebuilds it with its own chain id. A vote signed for
+    /// another chain is refused by the signature check itself.
     pub fn signing_message(&self) -> Vec<u8> {
         let mut msg = Vec::new();
-        msg.extend_from_slice(b"BUDLUM_PREVOTE");
+        msg.extend_from_slice(PREVOTE_DOMAIN);
         msg.extend_from_slice(BLS_SCHEME_RFC9380_V1.as_bytes());
+        msg.extend_from_slice(&self.chain_id.to_le_bytes());
         msg.extend_from_slice(&self.epoch.to_le_bytes());
         msg.extend_from_slice(&self.checkpoint_height.to_le_bytes());
         msg.extend_from_slice(self.checkpoint_hash.as_bytes());
@@ -204,35 +267,27 @@ impl Prevote {
     /// registered key. Domain-separated from the vote message so one
     /// signature cannot serve as the other.
     ///
-    /// BLG-0300 (P10-F12): V2 also covers `sig_bls`. V1 bound only
-    /// (epoch, height, hash), so a captured auth from an honest vote could be
-    /// paired with ANY garbage vote-signature on the same tuple - and every
-    /// pairing is a fresh "invalid signature" attributed to the key holder.
-    /// That is griefing, not self-incrimination. Binding the vote-signature
-    /// means an auth can only ever vouch for the exact signature its signer
-    /// produced.
+    /// V3 frames both variable-length inputs (`signing_message` and `sig_bls`)
+    /// with explicit 8-byte lengths via [`vote_auth_signing_message`].
     pub fn auth_signing_message(&self) -> Vec<u8> {
-        let mut msg = Vec::new();
-        msg.extend_from_slice(b"BUDLUM_VOTE_AUTH_V2");
-        msg.extend_from_slice(&self.signing_message());
-        msg.extend_from_slice(&self.sig_bls);
-        msg
+        vote_auth_signing_message(&self.signing_message(), &self.sig_bls)
     }
 }
 
 impl Precommit {
     pub fn signing_message(&self) -> Vec<u8> {
-        checkpoint_signing_message(self.epoch, self.checkpoint_height, &self.checkpoint_hash)
+        checkpoint_signing_message(
+            self.chain_id,
+            self.epoch,
+            self.checkpoint_height,
+            &self.checkpoint_hash,
+        )
     }
 
-    /// BLG-0083 (P04-F01): the vote-authentication message; see
-    /// [`Prevote::auth_signing_message`] (V2 binds `sig_bls`, BLG-0300).
+    /// BLG-0083 (P04-F01): the vote-authentication message; shares the exact
+    /// length-framed V3 encoding with [`Prevote::auth_signing_message`].
     pub fn auth_signing_message(&self) -> Vec<u8> {
-        let mut msg = Vec::new();
-        msg.extend_from_slice(b"BUDLUM_VOTE_AUTH_V2");
-        msg.extend_from_slice(&self.signing_message());
-        msg.extend_from_slice(&self.sig_bls);
-        msg
+        vote_auth_signing_message(&self.signing_message(), &self.sig_bls)
     }
 }
 
@@ -295,10 +350,18 @@ pub fn settlement_finality_window_from<'a>(
     window
 }
 
-pub fn checkpoint_signing_message(epoch: u64, height: u64, hash: &str) -> Vec<u8> {
+/// Precommit (and finality-certificate) preimage: the precommit vote and the
+/// certificate that aggregates those votes must sign the same bytes.
+///
+/// The chain id is the first field, exactly as for [`Prevote::signing_message`],
+/// so a vote or certificate produced on one chain can never be verified on
+/// another. See [`Prevote::signing_message`] for why this is stated rather
+/// than derived from the block hash.
+pub fn checkpoint_signing_message(chain_id: u64, epoch: u64, height: u64, hash: &str) -> Vec<u8> {
     let mut msg = Vec::new();
-    msg.extend_from_slice(b"BUDLUM_PRECOMMIT");
+    msg.extend_from_slice(PRECOMMIT_DOMAIN);
     msg.extend_from_slice(BLS_SCHEME_RFC9380_V1.as_bytes());
+    msg.extend_from_slice(&chain_id.to_le_bytes());
     msg.extend_from_slice(&epoch.to_le_bytes());
     msg.extend_from_slice(&height.to_le_bytes());
     msg.extend_from_slice(hash.as_bytes());
@@ -328,6 +391,11 @@ pub fn pop_signing_message(chain_id: u64, address: &Address, bls_pk: &[u8]) -> V
 /// Wire-visible identifier for the RFC 9380 random-oracle suite used by all
 /// Live Budlum BLS signatures. Public keys are in G2 and signatures are in G1.
 pub const BLS_SCHEME_RFC9380_V1: &str = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_";
+
+/// Domain tag of the chain-bound prevote preimage.
+const PREVOTE_DOMAIN: &[u8] = b"BUDLUM_PREVOTE_V2";
+/// Domain tag of the chain-bound precommit (and finality certificate) preimage.
+const PRECOMMIT_DOMAIN: &[u8] = b"BUDLUM_PRECOMMIT_V2";
 /// The pre-migration construction exposed H(m)'s discrete logarithm. Its ID is
 /// Retained only for handshake rejection and historical tooling; it must never
 /// Be used to validate a live vote or certificate.
@@ -400,9 +468,16 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     // network. The `is_none` check above made that unreachable, but the
     // guarantee sat one statement away; `into_option` fuses the check and the
     // read so a malformed key can only ever become an `Err`.
-    let pk_affine = G2Affine::from_compressed(&pk_bytes)
+    // bls12_381 0.9's `from_compressed` already guarantees subgroup
+    // membership; decode unchecked anyway and gate explicitly below, so the
+    // refusal that names the subgroup does not depend on the decoder's
+    // contract (which is exactly what changed under the 0.8 -> 0.9 bump).
+    let pk_affine = G2Affine::from_compressed_unchecked(&pk_bytes)
         .into_option()
         .ok_or_else(|| "Invalid BLS public key encoding".to_string())?;
+    if !bool::from(pk_affine.is_on_curve()) {
+        return Err("Invalid BLS public key encoding".to_string());
+    }
 
     // (security audit §5) enforce that the public key is
     // Actually in the correct prime-order subgroup. Without this
@@ -419,9 +494,12 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
     let sig_bytes: [u8; 48] = sig
         .try_into()
         .map_err(|_| "Invalid BLS signature length".to_string())?;
-    let sig_affine = G1Affine::from_compressed(&sig_bytes)
+    let sig_affine = G1Affine::from_compressed_unchecked(&sig_bytes)
         .into_option()
         .ok_or_else(|| "Invalid BLS signature encoding".to_string())?;
+    if !bool::from(sig_affine.is_on_curve()) {
+        return Err("Invalid BLS signature encoding".to_string());
+    }
 
     // Same subgroup check on the signature: a small-subgroup
     // Signature would also make the pairing produce values in a
@@ -456,13 +534,13 @@ pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
         Ok(b) => b,
         Err(_) => return false,
     };
-    let Some(pk_affine) = G2Affine::from_compressed(&pk_bytes).into_option() else {
+    let Some(pk_affine) = G2Affine::from_compressed_unchecked(&pk_bytes).into_option() else {
         return false;
     };
     // (security audit §5) subgroup check on the PoP
     // Public key (see `verify_bls_sig` for the full rationale).
     let is_on_curve: bool = pk_affine.is_torsion_free().into();
-    if !is_on_curve || bool::from(pk_affine.is_identity()) {
+    if !is_on_curve || !bool::from(pk_affine.is_on_curve()) || bool::from(pk_affine.is_identity()) {
         return false;
     }
 
@@ -471,13 +549,14 @@ pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
         Ok(b) => b,
         Err(_) => return false,
     };
-    let Some(sig_affine) = G1Affine::from_compressed(&sig_bytes).into_option() else {
+    let Some(sig_affine) = G1Affine::from_compressed_unchecked(&sig_bytes).into_option() else {
         return false;
     };
     // (security audit §5) subgroup check on the PoP
     // Signature (see `verify_bls_sig` for the full rationale).
     let is_on_curve: bool = sig_affine.is_torsion_free().into();
-    if !is_on_curve || bool::from(sig_affine.is_identity()) {
+    if !is_on_curve || !bool::from(sig_affine.is_on_curve()) || bool::from(sig_affine.is_identity())
+    {
         return false;
     }
 
@@ -816,7 +895,17 @@ impl FinalityAggregator {
             }
         }
 
+        // The certificate commits to the chain its precommits were signed
+        // for, so it is taken from those votes rather than assumed: every
+        // precommit that reached this aggregator passed the chain check, and
+        // a hardcoded id here would silently diverge on any other network.
+        let chain_id = self
+            .precommits
+            .values()
+            .next()
+            .map_or(0, |precommit| precommit.chain_id);
         Some(FinalityCert {
+            chain_id,
             epoch: self.epoch,
             checkpoint_height: self.checkpoint_height,
             checkpoint_hash: self.checkpoint_hash.clone(),
@@ -990,7 +1079,12 @@ impl FinalityCert {
     }
 
     pub fn signing_message(&self) -> Vec<u8> {
-        checkpoint_signing_message(self.epoch, self.checkpoint_height, &self.checkpoint_hash)
+        checkpoint_signing_message(
+            self.chain_id,
+            self.epoch,
+            self.checkpoint_height,
+            &self.checkpoint_hash,
+        )
     }
 
     pub fn signer_count(&self, validator_count: usize) -> usize {
@@ -1108,6 +1202,7 @@ mod tests {
         hash: &str,
     ) -> Prevote {
         let mut v = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
             checkpoint_height: height,
             checkpoint_hash: hash.to_string(),
@@ -1192,6 +1287,7 @@ mod tests {
     #[test]
     fn test_prevote_signing_message() {
         let vote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "abc".into(),
@@ -1200,7 +1296,7 @@ mod tests {
             auth_sig: Vec::new(),
         };
         let msg = vote.signing_message();
-        assert!(msg.starts_with(b"BUDLUM_PREVOTE"));
+        assert!(msg.starts_with(b"BUDLUM_PREVOTE_V2"));
     }
 
     #[test]
@@ -1243,6 +1339,7 @@ mod tests {
         let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snap.clone());
 
         let vote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
@@ -1264,11 +1361,20 @@ mod tests {
 
         // No prevote quorum yet: rejected before signature check.
         let pc = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
             voter_id: snap.validators[0].address,
-            sig_bls: sign_msg(sks[0], &checkpoint_signing_message(1, 10, "cp_hash")),
+            sig_bls: sign_msg(
+                sks[0],
+                &checkpoint_signing_message(
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    1,
+                    10,
+                    "cp_hash",
+                ),
+            ),
             auth_sig: Vec::new(),
         };
         assert!(agg.add_precommit(pc).is_err());
@@ -1288,6 +1394,7 @@ mod tests {
         let mut agg_sig = G1Projective::identity();
         for (i, sk) in sks.iter().enumerate().take(3) {
             let pc = Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
@@ -1383,6 +1490,7 @@ mod tests {
     fn test_cert_verify_rejects_insufficient_quorum() {
         let (snap, sks) = make_snapshot_with_keys(4, 1000);
         let pc = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
@@ -1393,6 +1501,7 @@ mod tests {
         let sig_bytes = sign_msg(sks[0], &pc.signing_message());
 
         let cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
@@ -1440,6 +1549,7 @@ mod tests {
 
         for bits in 1u8..16 {
             let cert = FinalityCert {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
@@ -1497,6 +1607,7 @@ mod tests {
         assert_eq!(snap.quorum_count(), 3);
 
         let pc = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
@@ -1506,6 +1617,7 @@ mod tests {
         };
         let sig_bytes = sign_msg(sks[0], &pc.signing_message());
         let cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
@@ -1527,6 +1639,7 @@ mod tests {
     fn test_cert_verify_rejects_wrong_set_hash() {
         let (snap, _) = make_snapshot_with_keys(4, 1000);
         let cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
@@ -1552,8 +1665,17 @@ mod tests {
             for delta in 1u8..=12u8 {
                 let mut cand = base;
                 cand[i] = cand[i].wrapping_add(delta);
-                if let Some(p) = G2Affine::from_compressed(&cand).into_option() {
-                    if !bool::from(p.is_identity()) && !bool::from(p.is_torsion_free()) {
+                // bls12_381 0.9's `from_compressed` guarantees subgroup
+                // membership, so the attack object can only be materialized
+                // through the unchecked decoder (which still checks the
+                // curve equation). The point of the test stands: these BYTES
+                // decode to an on-curve point outside the prime-order
+                // subgroup, and whatever production decodes them must refuse.
+                if let Some(p) = G2Affine::from_compressed_unchecked(&cand).into_option() {
+                    if bool::from(p.is_on_curve())
+                        && !bool::from(p.is_identity())
+                        && !bool::from(p.is_torsion_free())
+                    {
                         return cand;
                     }
                 }
@@ -1664,11 +1786,12 @@ mod tests {
             pop_signature: G1Affine::generator().to_compressed().to_vec(),
             pq_public_key: Vec::new(),
         };
+        let attack_point = G2Affine::from_compressed_unchecked(&attack_pk)
+            .into_option()
+            .expect("the attack key must survive decoding, or the test proves nothing");
         assert!(
-            G2Affine::from_compressed(&attack_pk)
-                .into_option()
-                .is_some(),
-            "the attack key must survive decoding, or the test proves nothing"
+            bool::from(attack_point.is_on_curve()) && !bool::from(attack_point.is_torsion_free()),
+            "the attack key must be an on-curve point outside the prime-order subgroup"
         );
         assert!(
             !verify_pop(&attack_entry, crate::core::transaction::DEFAULT_CHAIN_ID),
@@ -1678,22 +1801,11 @@ mod tests {
 
     /// A checkpoint signature must not verify on another network.
     ///
-    /// `Prevote::signing_message` and `checkpoint_signing_message` commit to a
-    /// domain tag, the BLS scheme id, the epoch, the height and the checkpoint
-    /// hash - but not to `chain_id`. That is safe only because the checkpoint
-    /// hash *is* a block hash and `Block::calculate_hash_bytes` folds
-    /// `chain_id` into its preimage, so mainnet and testnet cannot agree on a
-    /// checkpoint hash at the same height.
-    ///
-    /// The whole cross-chain replay defence therefore rests on one line in
-    /// another module. Drop `chain_id` from the block preimage and every
-    /// checkpoint signature becomes portable between networks, with nothing
-    /// in `finality.rs` to notice, because the signing message never mentioned
-    /// it.
-    ///
-    /// This asserts the dependency directly: two blocks identical except for
-    /// `chain_id` must hash differently, and the resulting signing messages
-    /// must differ.
+    /// The preimage commits to the chain id as its own fixed-width field, so
+    /// two votes over the same epoch, height and checkpoint hash still differ
+    /// when they were signed for two different chains. The block hash keeps
+    /// folding `chain_id` in as well; that is now the second line of defence,
+    /// not the only one.
     #[test]
     fn prevote_and_precommit_bind_the_chain() {
         use crate::core::block::Block;
@@ -1706,17 +1818,139 @@ mod tests {
 
         assert_ne!(
             mainnet.hash, testnet.hash,
-            "chain_id must be part of the block preimage; without it a \
-             checkpoint signature replays onto every other network, because \
-             the signing message does not carry chain_id itself"
+            "chain_id must stay in the block preimage"
         );
 
-        let prevote_a = checkpoint_signing_message(3, 10, &mainnet.hash);
-        let prevote_b = checkpoint_signing_message(3, 10, &testnet.hash);
+        // Same epoch, height and hash; only the chain id differs.
+        let a = checkpoint_signing_message(45260, 3, 10, &mainnet.hash);
+        let b = checkpoint_signing_message(45261, 3, 10, &mainnet.hash);
         assert_ne!(
-            prevote_a, prevote_b,
-            "identical epoch and height on two networks must still produce \
-             different signing messages"
+            a, b,
+            "identical epoch, height and hash on two networks must still \
+             produce different signing messages"
         );
+
+        // The same property for the two vote types that sign this preimage
+        // themselves, so neither can drift from the certificate construction.
+        let voter = crate::core::address::Address::default();
+        let prevote = |chain_id: u64| Prevote {
+            chain_id,
+            epoch: 3,
+            checkpoint_height: 10,
+            checkpoint_hash: mainnet.hash.clone(),
+            voter_id: voter,
+            sig_bls: Vec::new(),
+            auth_sig: Vec::new(),
+        };
+        assert_ne!(
+            prevote(45260).signing_message(),
+            prevote(45261).signing_message(),
+            "a prevote preimage must name the chain it was minted for"
+        );
+
+        let precommit = |chain_id: u64| Precommit {
+            chain_id,
+            epoch: 3,
+            checkpoint_height: 10,
+            checkpoint_hash: mainnet.hash.clone(),
+            voter_id: voter,
+            sig_bls: Vec::new(),
+            auth_sig: Vec::new(),
+        };
+        assert_ne!(
+            precommit(45260).signing_message(),
+            precommit(45261).signing_message(),
+            "a precommit preimage must name the chain it was minted for"
+        );
+    }
+
+    #[test]
+    fn vote_auth_v3_rejects_hash_to_signature_boundary_shift() {
+        let (snap, sks) = make_snapshot_with_keys(1, 1000);
+        let sk = sks[0];
+        let pk = snap.validators[0].bls_public_key.clone();
+        let voter_id = snap.validators[0].address;
+        let hash = "a1b2c3d4".repeat(8);
+        let prevote_msg = {
+            let pv = Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                epoch: 5,
+                checkpoint_height: 100,
+                checkpoint_hash: hash.clone(),
+                voter_id,
+                sig_bls: Vec::new(),
+                auth_sig: Vec::new(),
+            };
+            pv.signing_message()
+        };
+        let sig_bls = sign_bls(&sk, &prevote_msg);
+        let honest_prevote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 5,
+            checkpoint_height: 100,
+            checkpoint_hash: hash.clone(),
+            voter_id,
+            sig_bls: sig_bls.clone(),
+            auth_sig: sign_bls(&sk, &vote_auth_signing_message(&prevote_msg, &sig_bls)),
+        };
+        assert!(verify_bls_sig(
+            &pk,
+            &honest_prevote.auth_signing_message(),
+            &honest_prevote.auth_sig
+        )
+        .is_ok());
+        for split in 1..hash.len() {
+            let mut shifted_sig = hash.as_bytes()[split..].to_vec();
+            shifted_sig.extend_from_slice(&sig_bls);
+            let forged_prevote = Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                checkpoint_hash: hash[..split].to_string(),
+                sig_bls: shifted_sig,
+                ..honest_prevote.clone()
+            };
+            assert_ne!(
+                forged_prevote.auth_signing_message(),
+                honest_prevote.auth_signing_message()
+            );
+            assert!(verify_bls_sig(
+                &pk,
+                &forged_prevote.auth_signing_message(),
+                &forged_prevote.auth_sig
+            )
+            .is_err());
+        }
+
+        let pc_msg =
+            checkpoint_signing_message(crate::core::transaction::DEFAULT_CHAIN_ID, 5, 100, &hash);
+        let pc_sig = sign_bls(&sk, &pc_msg);
+        let honest_precommit = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 5,
+            checkpoint_height: 100,
+            checkpoint_hash: hash.clone(),
+            voter_id,
+            sig_bls: pc_sig.clone(),
+            auth_sig: sign_bls(&sk, &vote_auth_signing_message(&pc_msg, &pc_sig)),
+        };
+        for split in 1..hash.len() {
+            let mut shifted_sig = hash.as_bytes()[split..].to_vec();
+            shifted_sig.extend_from_slice(&pc_sig);
+            let forged_precommit = Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+                checkpoint_hash: hash[..split].to_string(),
+                sig_bls: shifted_sig,
+                ..honest_precommit.clone()
+            };
+            assert_ne!(
+                forged_precommit.auth_signing_message(),
+                honest_precommit.auth_signing_message()
+            );
+            assert!(verify_bls_sig(
+                &pk,
+                &forged_precommit.auth_signing_message(),
+                &forged_precommit.auth_sig
+            )
+            .is_err());
+        }
     }
 }

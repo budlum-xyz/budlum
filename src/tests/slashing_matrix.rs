@@ -124,6 +124,7 @@ mod tests {
                 epoch: 42,
                 count: 25,
                 threshold: 20,
+                samples: Vec::new(),
             },
             Some(addr(0x01)),
         );

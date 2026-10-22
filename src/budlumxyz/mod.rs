@@ -29,8 +29,14 @@ pub struct BudlumxyzRegistry {
 }
 
 /// Longest app name in bytes.
+///
+/// Convenience: pub so an app registration caller can refuse past
+/// the same bound the registry validates in this module.
 pub const MAX_APP_NAME_BYTES: usize = 64;
 /// Longest app URL in bytes.
+///
+/// Convenience: pub so an app registration caller can refuse past
+/// the same bound the registry validates in this module.
 pub const MAX_APP_URL_BYTES: usize = 256;
 
 impl BudlumxyzRegistry {

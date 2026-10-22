@@ -94,9 +94,12 @@ async fn test_p2p_topology_latency_drift_simulation() {
 
     // Usually accepted if within drift window (e.g. 15s in Bitcoin/Ethereum)
     let future_ts = future_block.timestamp;
-    shadow
-        .validate_and_add_block(future_block.clone())
-        .expect("shadow follows the accepted block");
+    // `shadow` already committed its own copy of this block inside
+    // `produce_block`, so feeding the timestamp-shifted twin back to it is a
+    // same-height rival, not a follow: height continuity refuses it before
+    // anything else runs. The shadow's job is only to mint canonically
+    // shaped blocks; `bc` is the chain under test.
+    let future_hash = future_block.hash.clone();
     let future_res = bc.validate_and_add_block(future_block);
     assert!(
         future_res.is_ok(),
@@ -114,6 +117,11 @@ async fn test_p2p_topology_latency_drift_simulation() {
         panic!("shadow block production failed");
     };
     past_block.timestamp = future_ts - 1000;
+    // The shadow built this block on ITS block 1, whose hash differs from
+    // the timestamp-shifted twin `bc` accepted. Parent it on `bc`'s actual
+    // tip, or the previous-hash link refuses it before the timestamp guard
+    // this test exists to reach ever runs.
+    past_block.previous_hash = future_hash;
     past_block.hash = past_block.calculate_hash();
 
     // MUST be rejected

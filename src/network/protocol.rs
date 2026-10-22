@@ -278,8 +278,10 @@ mod tests {
         let bytes = msg.to_bytes();
         assert!(NetworkMessage::from_bytes_validated(&bytes).is_ok());
         let mut padded = bytes.clone();
-        // field 15, varint 1: unknown to the schema, skipped by prost
-        padded.extend_from_slice(&[0x78, 0x01]);
+        // field 99, varint 1: unknown to the schema, skipped by prost.
+        // (Field 15, the old choice, became `prevote` - a known
+        // length-delimited field - so it no longer decodes leniently.)
+        padded.extend_from_slice(&[0x98, 0x06, 0x01]);
         assert!(NetworkMessage::from_bytes(&padded).is_ok());
         assert!(NetworkMessage::from_bytes_validated(&padded).is_err());
     }

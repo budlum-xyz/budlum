@@ -286,8 +286,14 @@ fn check_funds(
     let fee = terms.economics.total_fee(held, epochs);
     let bond = terms.economics.operator_bond;
 
+    // `spendable_balance`, not `get_balance`: the vesting lock is a spend gate
+    // and an escrow is a spend. The debit below subtracts from
+    // `account.balance`, so a raw-balance check here would let vesting-locked
+    // allocation pay deal fees and operator bonds out of the account, which is
+    // exactly the class `Transfer`, `AiOperatorBond`, hub registration and AI
+    // inference escrow already close.
     let payer_needs = fee.checked_add(payer_reserve);
-    if payer_needs.is_none_or(|need| state.get_balance(payer) < need) {
+    if payer_needs.is_none_or(|need| state.spendable_balance(payer) < need) {
         return Err(format!("Insufficient payer balance for deal fee {fee}"));
     }
     if bond > 0 {
@@ -296,7 +302,7 @@ fn check_funds(
         } else {
             Some(bond)
         };
-        if operator_needs.is_none_or(|need| state.get_balance(&terms.operator) < need) {
+        if operator_needs.is_none_or(|need| state.spendable_balance(&terms.operator) < need) {
             return Err(format!("Insufficient operator balance for bond {bond}"));
         }
     }

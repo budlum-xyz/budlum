@@ -56,7 +56,7 @@ use crate::params::{slash_penalty, RegistryParams};
 use crate::role::RoleId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Default minimum stake required to register for a role.
 pub const MIN_REGISTRATION_STAKE: u64 = 1_000;
@@ -240,6 +240,32 @@ pub struct VerifierRegistry {
     params: RegistryParams,
     #[serde(default)]
     slashing_history: Vec<SlashingRecord>,
+    /// Per-member set of already-charged offence windows `(kind, start, end)`,
+    /// keyed by `"<role_hex>:<account_hex>"` so `serde_json` serializes keys as
+    /// strings while keeping per-member isolation against history eviction.
+    #[serde(default)]
+    charged_offences: BTreeMap<String, BTreeSet<(u8, u64, u64)>>,
+}
+
+fn offence_member_key(role: RoleId, account: Address) -> String {
+    format!(
+        "{}:{}",
+        hex::encode(role.as_bytes()),
+        hex::encode(account.as_bytes())
+    )
+}
+
+fn offence_identity_window(proof: &SlashingProof) -> Option<(u8, u64, u64)> {
+    match proof {
+        SlashingProof::Liveness {
+            window_start_epoch,
+            window_end_epoch,
+            ..
+        } => Some((1, *window_start_epoch, *window_end_epoch)),
+        SlashingProof::DoubleSign { height, .. } => Some((2, *height, *height)),
+        SlashingProof::InvalidSignatureSpam { epoch, .. } => Some((3, *epoch, *epoch)),
+        SlashingProof::Other { .. } => None,
+    }
 }
 
 mod registrations_as_seq {
@@ -282,6 +308,7 @@ impl VerifierRegistry {
             registrations: BTreeMap::new(),
             params,
             slashing_history: Vec::new(),
+            charged_offences: BTreeMap::new(),
         }
     }
 
@@ -617,17 +644,45 @@ impl VerifierRegistry {
     ) -> Result<Option<SlashOutcome>, EvidenceError> {
         report.is_actionable()?;
         let condition = report.condition();
-        // A lifecycle transition must not make retained evidence charge twice.
-        if self
-            .slashing_history
-            .iter()
-            .any(|record| record.report == *report)
-        {
+        // Deduplicate on offence identity (`(role, offender, kind, start, end)`)
+        // across both the non-evictable per-member set and `slashing_history`
+        // so neither a re-counted/re-signed liveness report for the same window
+        // nor history trimming at `MAX_SLASHING_HISTORY` charges twice (CWE-799).
+        let window_key = offence_identity_window(&report.proof);
+        let member_key = offence_member_key(report.role, report.offender);
+        if let Some(wk) = window_key {
+            if self
+                .charged_offences
+                .get(&member_key)
+                .is_some_and(|set| set.contains(&wk))
+            {
+                return Ok(None);
+            }
+        }
+        let in_history = self.slashing_history.iter().any(|record| {
+            if record.report.offender != report.offender || record.report.role != report.role {
+                return false;
+            }
+            match (window_key, offence_identity_window(&record.report.proof)) {
+                (Some(a), Some(b)) => a == b,
+                _ => record.report == *report,
+            }
+        });
+        if in_history {
             return Ok(None);
         }
         let ratio = self.params.slash_ratio(condition);
         match self.slash(report.offender, report.role, condition, ratio) {
             Ok(outcome) => {
+                if let Some(wk) = window_key {
+                    let set = self.charged_offences.entry(member_key).or_default();
+                    set.insert(wk);
+                    if set.len() > MAX_SLASHING_HISTORY {
+                        if let Some(&oldest) = set.iter().next() {
+                            set.remove(&oldest);
+                        }
+                    }
+                }
                 self.record_slash(SlashingRecord {
                     report: report.clone(),
                     penalty: outcome.penalty,
@@ -738,22 +793,18 @@ impl VerifierRegistry {
     // ─── State Root ────────────────────────────────────────────────────
 
     pub fn state_root(&self) -> [u8; 32] {
-        // P16-F14 (BLG-0257): the root used to commit to the registration
-        // table ONLY. Parameters and slashing history were excluded, so a
-        // snapshot carrying this root could not tell apart a registry whose
-        // unbonding window, min stake or slash ratios had been rewritten -
-        // or one whose history had been truncated. V2 folds everything the
-        // struct holds; there is no longer an empty-table zero shortcut,
-        // because an empty registry with different params is not the same
-        // registry.
+        // V3 folds params, registrations, per-member charged offence windows
+        // and slashing history with explicit variant tags and 8-byte length
+        // framing on every variable-length proof field (CWE-345).
         let mut hasher = Sha256::default();
-        hasher.update(b"BDLM_VERIFIER_REGISTRY_V2");
+        hasher.update(b"BDLM_VERIFIER_REGISTRY_V3");
         let p = &self.params;
         hasher.update(p.min_stake.to_le_bytes());
         hasher.update(p.unbonding_epochs.to_le_bytes());
         hasher.update(p.double_sign_slash_ratio_fixed.to_le_bytes());
         hasher.update(p.liveness_slash_ratio_fixed.to_le_bytes());
         hasher.update(p.malicious_slash_ratio_fixed.to_le_bytes());
+        hasher.update((self.registrations.len() as u64).to_le_bytes());
         for (key, reg) in &self.registrations {
             hasher.update(key.0.as_bytes());
             hasher.update(key.1.as_bytes());
@@ -768,16 +819,24 @@ impl VerifierRegistry {
                 MemberStatus::Slashed => hasher.update(b"slashed"),
             }
         }
+        hasher.update((self.charged_offences.len() as u64).to_le_bytes());
+        for (member_key, windows) in &self.charged_offences {
+            hasher.update((member_key.len() as u64).to_le_bytes());
+            hasher.update(member_key.as_bytes());
+            hasher.update((windows.len() as u64).to_le_bytes());
+            for &(kind_tag, start_ep, end_ep) in windows {
+                hasher.update([kind_tag]);
+                hasher.update(start_ep.to_le_bytes());
+                hasher.update(end_ep.to_le_bytes());
+            }
+        }
         hasher.update((self.slashing_history.len() as u64).to_le_bytes());
         for record in &self.slashing_history {
             hasher.update(record.penalty.to_le_bytes());
             hasher.update(record.remaining_stake.to_le_bytes());
             hasher.update(record.report.offender.as_bytes());
             hasher.update(record.report.role.as_bytes());
-            // No serde_json dependency in this crate: the proof is folded
-            // variant-by-variant. Every field is a number, string or byte
-            // vector, so the walk is deterministic by construction.
-            let proof_bytes = match &record.report.proof {
+            let (variant_tag, proof_bytes): (u8, Vec<u8>) = match &record.report.proof {
                 SlashingProof::DoubleSign {
                     height,
                     block_hash_1,
@@ -787,11 +846,16 @@ impl VerifierRegistry {
                     ..
                 } => {
                     let mut b = height.to_le_bytes().to_vec();
-                    b.extend_from_slice(block_hash_1.as_bytes());
-                    b.extend_from_slice(block_hash_2.as_bytes());
-                    b.extend_from_slice(signature_1);
-                    b.extend_from_slice(signature_2);
-                    b
+                    for field in [
+                        block_hash_1.as_bytes(),
+                        block_hash_2.as_bytes(),
+                        signature_1.as_slice(),
+                        signature_2.as_slice(),
+                    ] {
+                        b.extend_from_slice(&(field.len() as u64).to_le_bytes());
+                        b.extend_from_slice(field);
+                    }
+                    (0u8, b)
                 }
                 SlashingProof::Liveness {
                     window_start_epoch,
@@ -803,12 +867,15 @@ impl VerifierRegistry {
                     b.extend_from_slice(&window_end_epoch.to_le_bytes());
                     b.extend_from_slice(&missed.to_le_bytes());
                     b.extend_from_slice(&expected.to_le_bytes());
-                    b
+                    (1u8, b)
                 }
                 SlashingProof::Other { tag, data } => {
-                    let mut b = tag.as_bytes().to_vec();
+                    let mut b = Vec::new();
+                    b.extend_from_slice(&(tag.len() as u64).to_le_bytes());
+                    b.extend_from_slice(tag.as_bytes());
+                    b.extend_from_slice(&(data.len() as u64).to_le_bytes());
                     b.extend_from_slice(data);
-                    b
+                    (2u8, b)
                 }
                 SlashingProof::InvalidSignatureSpam {
                     epoch,
@@ -818,9 +885,10 @@ impl VerifierRegistry {
                     let mut b = epoch.to_le_bytes().to_vec();
                     b.extend_from_slice(&count.to_le_bytes());
                     b.extend_from_slice(&threshold.to_le_bytes());
-                    b
+                    (3u8, b)
                 }
             };
+            hasher.update([variant_tag]);
             hasher.update((record.report.proof.condition() as u8).to_le_bytes());
             hasher.update((proof_bytes.len() as u64).to_le_bytes());
             hasher.update(&proof_bytes);
@@ -1480,5 +1548,112 @@ mod tests {
         // Determinism: equal content, equal root - the fold must not read a
         // map or any order-unstable structure.
         assert_eq!(empty.state_root(), VerifierRegistry::default().state_root());
+    }
+
+    #[test]
+    fn liveness_offence_window_is_charged_at_most_once_even_after_history_eviction() {
+        use crate::evidence::ProofProvenance;
+        let mut reg = VerifierRegistry::new();
+        let victim = addr(0xAA);
+        reg.register_master_verifier(victim, 10_000, 0).unwrap();
+
+        let first = SlashingReport::new(
+            victim,
+            roles::MASTER_VERIFIER,
+            SlashingProof::Liveness {
+                window_start_epoch: 0,
+                window_end_epoch: 10,
+                missed: 5,
+                expected: 10,
+            },
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        let outcome = reg.slash_from_report(&first).unwrap().expect("initial cut");
+        let modified_same_window = SlashingReport::new(
+            victim,
+            roles::MASTER_VERIFIER,
+            SlashingProof::Liveness {
+                window_start_epoch: 0,
+                window_end_epoch: 10,
+                missed: 8,
+                expected: 10,
+            },
+            ProofProvenance::ConsensusVerified,
+            Some(addr(0xBB)),
+        );
+        assert!(reg
+            .slash_from_report(&modified_same_window)
+            .unwrap()
+            .is_none());
+
+        for i in 0..(MAX_SLASHING_HISTORY + 4) {
+            let mut raw = [0u8; 32];
+            raw[0] = ((i / 256) as u8).wrapping_add(2);
+            raw[1] = (i % 256) as u8;
+            let other = Address::from(raw);
+            reg.register_master_verifier(other, 10_000, 0).unwrap();
+            let r = SlashingReport::new(
+                other,
+                roles::MASTER_VERIFIER,
+                SlashingProof::Liveness {
+                    window_start_epoch: 1,
+                    window_end_epoch: 11,
+                    missed: 6,
+                    expected: 10,
+                },
+                ProofProvenance::ConsensusVerified,
+                None,
+            );
+            let _ = reg.slash_from_report(&r).unwrap();
+        }
+        assert!(reg.slash_from_report(&first).unwrap().is_none());
+        assert_eq!(
+            reg.get(&victim, roles::MASTER_VERIFIER).unwrap().stake,
+            outcome.remaining_stake
+        );
+    }
+
+    #[test]
+    fn state_root_distinguishes_shifted_proof_field_boundaries() {
+        use crate::evidence::ProofProvenance;
+        let mut reg_a = VerifierRegistry::new();
+        let mut reg_b = VerifierRegistry::new();
+        reg_a
+            .register_master_verifier(addr(0xCC), 10_000, 0)
+            .unwrap();
+        reg_b
+            .register_master_verifier(addr(0xCC), 10_000, 0)
+            .unwrap();
+
+        let report_a = SlashingReport::new(
+            addr(0xCC),
+            roles::MASTER_VERIFIER,
+            SlashingProof::DoubleSign {
+                height: 7,
+                block_hash_1: "ab".into(),
+                block_hash_2: "cd".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        let report_b = SlashingReport::new(
+            addr(0xCC),
+            roles::MASTER_VERIFIER,
+            SlashingProof::DoubleSign {
+                height: 7,
+                block_hash_1: "a".into(),
+                block_hash_2: "bcd".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            ProofProvenance::ConsensusVerified,
+            None,
+        );
+        reg_a.slash_from_report(&report_a).unwrap();
+        reg_b.slash_from_report(&report_b).unwrap();
+        assert_ne!(reg_a.state_root(), reg_b.state_root());
     }
 }

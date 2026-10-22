@@ -158,6 +158,9 @@ impl EthReceipt {
     /// Returns the first log matching the given `(emitter_address, topic0)`.
     /// Bridge: `topic0` is an event signature such as
     /// keccak256("Deposit(address,uint256,bytes32,uint256)"); `emitter_address` is the bridge contract address.
+    ///
+    /// Convenience: the receipt lookup the EVM adapter's deposit scan
+    /// is built on, pub with the rest of this receipt reader.
     pub fn find_log<'a>(&'a self, emitter: &[u8], topic0: &[u8; 32]) -> Option<&'a EthLog> {
         self.logs
             .iter()

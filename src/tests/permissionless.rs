@@ -732,10 +732,48 @@ fn a_role_with_no_independent_bond_is_rejected() {
     let account = addr(0x68);
     let mut state = funded_state(account, 10_000);
     let err = state
-        .withdraw_role_bond(&account, roles::ATTESTER)
-        .expect_err("ATTESTER has no independently debited bond");
+        .withdraw_role_bond(&account, RoleId(42))
+        .expect_err("RoleId(42) has no independently debited bond");
     assert!(err.contains("no independently debited bond"), "got: {err}");
     assert_eq!(state.get_balance(&account), 10_000);
+}
+
+#[test]
+fn verifier_family_role_bonds_unbond_and_withdraw_cleanly() {
+    for (idx, role) in [
+        roles::VERIFIER,
+        roles::AI_VERIFIER,
+        roles::ATTESTER,
+        roles::CONTENT_VALIDATOR,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let who = addr(0x70 + idx as u8);
+        let mut state = funded_state(who, 1_000_000);
+        let bond = 10_000;
+        let tx = crate::core::transaction::Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            bond,
+            0,
+            0,
+            Vec::new(),
+            45262,
+            crate::core::transaction::TransactionType::RoleBond { role: role.0 },
+        );
+        Executor::apply_transaction(&mut state, &tx).expect("RoleBond succeeds");
+        assert_eq!(state.get_balance(&who), 1_000_000 - bond);
+        let release = state
+            .begin_role_bond_unbonding(&who, role)
+            .expect("begin_role_bond_unbonding succeeds for verifier-family role");
+        state.epoch_index = release;
+        let returned = state
+            .withdraw_role_bond(&who, role)
+            .expect("withdraw_role_bond refunds principal");
+        assert_eq!(returned, bond);
+        assert_eq!(state.get_balance(&who), 1_000_000);
+    }
 }
 
 /// Supply conservation across the full bond lifecycle.

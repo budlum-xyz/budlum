@@ -110,7 +110,11 @@ fuzz_target!(|data: &[u8]| {
             2 => {
                 // Burn
                 if let (Some(mid), Some((_, burn_dom))) = (last_message_id, last_lock_domains) {
-                    let _ = bridge.burn(mid, burn_dom);
+                    let mut recipient_eth = [0u8; 20];
+                    for slot in &mut recipient_eth {
+                        *slot = take(data, &mut i);
+                    }
+                    let _ = bridge.burn(mid, burn_dom, recipient_eth);
                 }
             }
             3 => {

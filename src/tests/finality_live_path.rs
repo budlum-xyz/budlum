@@ -77,6 +77,7 @@ fn make_snapshot(n: usize, epoch: u64, stake_each: u64) -> (ValidatorSetSnapshot
 
 fn sign_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Address) -> Prevote {
     let mut v = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: height,
         checkpoint_hash: hash.to_string(),

@@ -32,14 +32,13 @@ const SECRET_KEYWORDS: &[&str] = &[
 
 /// Whole key names that contain a secret keyword only by accident. They are
 /// matched exactly, so `author_token` or `authorization` still count as secret.
-const BENIGN_KEYS: &[&str] = &[
-    "author",
-    "authors",
-    "authority",
-    "max_tokens",
-    "tokenizer",
-    "secretary",
-];
+///
+/// `authority` is deliberately NOT here. In this codebase an authority field
+/// holds key material (validator/operator authority, wallet and keypair
+/// configs), so exempting the name disables the keyword rule for exactly the
+/// keys that must be masked. The exemption is only for names that cannot hold
+/// a credential.
+const BENIGN_KEYS: &[&str] = &["author", "authors", "max_tokens", "tokenizer", "secretary"];
 
 /// Does a key name carry one of the secret keywords?
 fn is_secret_key(key: &str) -> bool {
@@ -343,8 +342,19 @@ fn block_scalar_indent(line: &str) -> Option<usize> {
         return None;
     }
     let value = line[pos + 1..].trim();
-    let is_block = matches!(value, "|" | ">" | "|-" | ">-" | "|+" | ">+");
-    is_block.then(|| indent_of(line))
+    // YAML block scalar headers begin with `|` or `>`, followed by optional
+    // chomping (`+`/`-`) and indentation (`1..=9`) indicators, plus an
+    // optional trailing `#` comment (`|2`, `>+2`, `|  # keep verbatim`).
+    let indicator = value.split('#').next().unwrap_or_default().trim_end();
+    let mut chars = indicator.chars();
+    match chars.next() {
+        Some('|') | Some('>') => {}
+        _ => return None,
+    }
+    if !chars.all(|c| c == '+' || c == '-' || c.is_ascii_digit()) {
+        return None;
+    }
+    Some(indent_of(line))
 }
 
 /// Mask the known secret shapes inside a line (word boundaries are preserved).
@@ -530,6 +540,25 @@ mod tests {
         assert_eq!(r.text(), "author: Bob\nmax_tokens = 100");
         let r = redact_text("authorization: abc123");
         assert!(r.text().contains(REDACTION_TOKEN));
+    }
+
+    /// An `authority` field carries key material in this codebase, so the
+    /// exact-name exemption must not cover it: the regression was that every
+    /// redaction layer (text, structured, YAML block scalars) stopped masking
+    /// it once the name was on the benign list.
+    #[test]
+    fn an_authority_key_is_masked_again() {
+        let opaque = format!("{}{}", "Zm9vYmFy", "cXV1eA");
+        let input = format!("authority: {opaque}");
+        let r = redact_text(&input);
+        assert!(
+            r.text().contains(REDACTION_TOKEN),
+            "an authority value must be masked: {}",
+            r.text()
+        );
+        assert!(!r.text().contains(&opaque));
+        assert!(is_secret_key("authority"));
+        assert!(is_secret_key("Authority"));
     }
 
     #[test]
@@ -729,6 +758,21 @@ mod tests {
         assert!(!r.text().contains(body2));
         assert_eq!(r.text().lines().count(), input.lines().count());
         assert!(r.text().ends_with("next: ok"));
+
+        let secret = format!("hunter{}", 2);
+        for header in ["password: |  # keep", "password: |2", "private_key: >-2"] {
+            let doc = format!("{header}\n  {secret}\nafter: safe");
+            let masked = redact_text(&doc);
+            assert!(
+                !masked.text().contains(&secret),
+                "unmasked body for {header}"
+            );
+            assert!(masked.text().ends_with("after: safe"));
+        }
+        let nested = format!("credentials:\n  username: bob\n  password: {secret}");
+        let masked_nested = redact_text(&nested);
+        assert!(masked_nested.text().contains("username: bob"));
+        assert!(!masked_nested.text().contains(&secret));
     }
 
     /// A PEM private key body has no key name on its lines.

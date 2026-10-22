@@ -415,7 +415,13 @@ fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std:
         chain_id: config.chain_id,
         program_hash: prog_hash,
         initial_state_root,
-        final_state_root: post_root,
+        // The AIR ties the final root to the storage-writes fold (2a), so
+        // the proof's final root is the write digest - the commit refusal
+        // above already keeps storage writes out of committed runs, and
+        // `post_root` (the bud-state tree root) still rides in the run
+        // output for display. Passing `post_root` here claimed a
+        // post-state commitment the proof never made.
+        final_state_root: receipt.state_writes_digest,
         sender: vm.context.sender,
         nonce: vm.context.nonce,
         block_height: vm.context.block_height,

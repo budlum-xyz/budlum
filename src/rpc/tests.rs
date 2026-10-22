@@ -949,12 +949,15 @@ mod rpc_tests {
         bc.credit_development_account(&watcher, 100_000)
             .await
             .expect("devnet credit");
+        // The challenge window is validated against the chain's current
+        // epoch (a far-future challenge_epoch would push the rate-limit
+        // minimum out for good); this fresh chain sits at epoch 0.
         let open_msg = crate::core::hash::hash_fields_bytes(&[
             b"BUD_OPEN_CHALLENGE_V1",
             &deal_id.to_le_bytes(),
             &0u64.to_le_bytes(),
             &15u64.to_le_bytes(),
-            &15u64.to_le_bytes(),
+            &0u64.to_le_bytes(),
             &25u64.to_le_bytes(),
             &50u64.to_le_bytes(),
             watcher.as_bytes(),
@@ -966,7 +969,7 @@ mod rpc_tests {
                 deal_id,
                 byte_start: 0,
                 byte_end: 15,
-                challenge_epoch: 15,
+                challenge_epoch: 0,
                 deadline_epoch: 25,
                 opener_bond: 50,
                 opener: Some(watcher),
@@ -1410,6 +1413,17 @@ mod rpc_tests {
             .await
             .expect_err("public listener must refuse storage_answer_challenge");
         assert_eq!(refused.code(), -32004);
+        let refused_commit = public_server
+            .storage_register_confidential_commit(
+                "aa".repeat(32),
+                "xchacha20poly1305".to_string(),
+                "bb".repeat(32),
+                "hash_only".to_string(),
+                None,
+            )
+            .await
+            .expect_err("public listener must refuse confidential commit mutation");
+        assert_eq!(refused_commit.code(), -32004);
     }
 
     /// The re-encode check refuses a body over the shared 1 MiB cap before
@@ -1424,7 +1438,7 @@ mod rpc_tests {
             .storage_verify_encoding(big, manifest)
             .await
             .expect_err("oversized body must be refused");
-        assert_eq!(refused.code(), -32602);
         assert!(refused.message().contains("verify cap"));
+        assert_eq!(refused.code(), -32602);
     }
 }

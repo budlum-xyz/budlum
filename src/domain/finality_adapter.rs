@@ -1293,6 +1293,7 @@ mod tests {
         let other = default_domain(7, ConsensusKind::PoS, 45262, "pos-qc-finality", 0);
         let snapshot = ValidatorSetSnapshot::new(0, vec![]);
         let cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 0,
             checkpoint_height: commitment.domain_height,
             checkpoint_hash: hex::encode(commitment.domain_block_hash),
@@ -1563,6 +1564,7 @@ mod tests {
             let mut snapshot = ValidatorSetSnapshot::new(0, vec![]);
             snapshot.set_hash = unparsable.to_string();
             let cert = FinalityCert {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 0,
                 checkpoint_height: commitment.domain_height,
                 checkpoint_hash: hex::encode(commitment.domain_block_hash),
@@ -1614,6 +1616,7 @@ mod tests {
             }];
             snapshot.set_hash = unparsable.to_string();
             let cert = FinalityCert {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 0,
                 checkpoint_height: commitment.domain_height,
                 checkpoint_hash: hex::encode(commitment.domain_block_hash),
@@ -1651,6 +1654,7 @@ mod tests {
         let snapshot = ValidatorSetSnapshot::new(0, vec![]);
 
         let wrong_height = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 0,
             checkpoint_height: 9,
             checkpoint_hash: hex::encode(commitment.domain_block_hash),
@@ -1673,6 +1677,7 @@ mod tests {
         ));
 
         let wrong_hash = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 0,
             checkpoint_height: commitment.domain_height,
             checkpoint_hash: "ff".repeat(32),
@@ -1736,6 +1741,7 @@ mod tests {
         // That depends on it.
         snapshot.set_hash = "zz".to_string();
         let cert_for = |checkpoint_hash: String| FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 0,
             checkpoint_height: commitment.domain_height,
             checkpoint_hash,

@@ -364,17 +364,28 @@ mod integration_tests {
 
         let mut block = Block::new(0, "0".repeat(64), vec![]);
 
-        let mut my_slot = 0;
-        if expected.address != pubkey1 {
-            my_slot = 1;
-        }
+        // The leader is an entropy draw (V5-SECURITY-12), not a rotation:
+        // slots 0 and 1 can name the same validator, so "the other slot goes
+        // to the other validator" is a coin flip as a premise. What must
+        // hold is that both validators win the draw somewhere and the local
+        // key signs exactly on its own slots. 64 draws make a one-sided run
+        // a 2^-63 event, not a flake source.
+        let my_slot = (0..64)
+            .find(|&slot| engine.expected_proposer(slot, &validators).unwrap().address == pubkey1)
+            .expect("the draw reaches the first validator within 64 slots");
+        assert!(
+            (0..64).any(|slot| {
+                engine.expected_proposer(slot, &validators).unwrap().address == pubkey2
+            }),
+            "the draw reaches the second validator within 64 slots"
+        );
         block.index = my_slot;
 
         let expected_my_slot = engine.expected_proposer(my_slot, &validators).unwrap();
 
         assert_eq!(
             expected_my_slot.address, pubkey1,
-            "round robin hands the other slot to the second validator"
+            "the slot drawn for the local key names the local key"
         );
         let result = engine.prepare_block(&mut block, &state);
         assert!(result.is_ok());
@@ -433,6 +444,7 @@ mod integration_tests {
         let checkpoint_block = blockchain.chain[10].clone();
 
         let mut cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: checkpoint_block.hash.clone(),
@@ -682,6 +694,7 @@ mod integration_tests {
 
         let checkpoint_block = blockchain.chain[10].clone();
         let mut cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: checkpoint_block.hash.clone(),
@@ -822,6 +835,7 @@ mod integration_tests {
         let hash = block.hash.clone();
 
         let mut vote1 = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
             checkpoint_height: cp_height,
             checkpoint_hash: hash.clone(),
@@ -834,6 +848,7 @@ mod integration_tests {
         assert!(bc.handle_prevote(vote1).is_ok());
 
         let mut vote2 = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
             checkpoint_height: cp_height,
             checkpoint_hash: hash.clone(),
@@ -887,6 +902,7 @@ mod integration_tests {
         // Validly signed over the WRONG hash: passes ingest signature check, then
         // Is rejected for hash mismatch (: sig verified before hash check).
         let mut wrong_vote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
             checkpoint_height: cp_height,
             checkpoint_hash: "wrong_hash".to_string(),
@@ -943,6 +959,7 @@ mod integration_tests {
         let voter = test_addr_from_byte(1u8);
 
         let vote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "test_cp_hash".to_string(),
@@ -968,7 +985,12 @@ mod integration_tests {
     fn test_bls_sign_precommit_and_verify() {
         let bls_key = BlsKeypair::generate().unwrap();
 
-        let msg = checkpoint_signing_message(1, 10, "test_cp_hash");
+        let msg = checkpoint_signing_message(
+            crate::core::transaction::DEFAULT_CHAIN_ID,
+            1,
+            10,
+            "test_cp_hash",
+        );
         let sig = sign_bls(&bls_key.secret_key, &msg);
         assert_eq!(sig.len(), 48);
 
@@ -1057,6 +1079,7 @@ mod integration_tests {
         // 3 out of 4 validators send BLS-signed prevotes (meets 2/3 quorum)
         for i in 0..3 {
             let vote = Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
@@ -1068,6 +1091,7 @@ mod integration_tests {
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
 
             let signed_vote = Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 sig_bls: sig,
                 auth_sig: Vec::new(),
                 ..vote
@@ -1080,6 +1104,7 @@ mod integration_tests {
         // 3 validators send BLS-signed precommits
         for i in 0..3 {
             let pc = Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
@@ -1139,6 +1164,7 @@ mod integration_tests {
 
         // Add prevote
         let vote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
@@ -1149,6 +1175,7 @@ mod integration_tests {
         let msg = vote.signing_message();
         let sig = sign_bls(&bls_key.secret_key, &msg);
         agg.add_prevote(Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             sig_bls: sig,
             auth_sig: Vec::new(),
             ..vote
@@ -1172,6 +1199,7 @@ mod integration_tests {
         let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
 
         let vote1 = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
@@ -1183,6 +1211,7 @@ mod integration_tests {
         let sig = sign_bls(&bls_key.secret_key, &msg);
 
         agg.add_prevote(Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             sig_bls: sig.clone(),
             auth_sig: Vec::new(),
             ..vote1.clone()
@@ -1191,6 +1220,7 @@ mod integration_tests {
 
         // Duplicate prevote from same validator should be rejected
         let result = agg.add_prevote(Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             sig_bls: sig,
             auth_sig: Vec::new(),
             ..vote1
@@ -1211,6 +1241,7 @@ mod integration_tests {
         let mut agg = FinalityAggregator::new(1, 10, "cp_hash".into(), snapshot);
 
         let pc = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 10,
             checkpoint_hash: "cp_hash".into(),
@@ -1246,6 +1277,7 @@ mod integration_tests {
 
         for i in 0..3 {
             let vote = Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),
@@ -1256,6 +1288,7 @@ mod integration_tests {
             let msg = vote.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
             agg.add_prevote(Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 sig_bls: sig,
                 auth_sig: Vec::new(),
                 ..vote
@@ -1265,6 +1298,7 @@ mod integration_tests {
 
         for i in 0..3 {
             let pc = Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: 10,
                 checkpoint_hash: "cp_hash".into(),

@@ -276,11 +276,16 @@ fn hunk_count_errors(name: &str, diff: &str) -> Vec<String> {
         let mut j = i + 1;
         while j < lines.len() {
             let l = lines[j];
-            let counts_met = old >= declared_old && new >= declared_new;
-            if parse_hunk_header(l).is_some()
-                || (counts_met
-                    && (l.starts_with("--- ") || l.starts_with("+++ ") || l.starts_with("diff ")))
-            {
+            // A line that looks like a file header is one only once its
+            // own side of the hunk is full: a deleted line that begins
+            // `-- ` is body text while old lines are still owed, but
+            // with the old count already met it can only be the next
+            // file's header - even when the new count is still short,
+            // which is exactly the corrupt shape this check reports.
+            let header_line = (l.starts_with("--- ") && old >= declared_old)
+                || (l.starts_with("+++ ") && new >= declared_new)
+                || l.starts_with("diff ");
+            if parse_hunk_header(l).is_some() || header_line {
                 break;
             }
             if l.is_empty() && j + 1 == lines.len() {

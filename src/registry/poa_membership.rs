@@ -147,6 +147,10 @@ impl PoaMembershipRegistry {
     /// unpermissioned with pending applications in flight - governance can
     /// still take the last seat away through its own action, where the
     /// decision is recorded as such.
+    ///
+    /// WIRING: the admin-seat half of PoA membership governance; the
+    /// membership door that calls it lands with the admin-action
+    /// transaction path, and the refusal rules are pinned by tests.
     pub fn remove_admin(
         &mut self,
         domain: DomainId,
@@ -224,7 +228,8 @@ impl PoaMembershipRegistry {
 
     /// BLG-0090 (P04-F08): fold the registry (admins + members) together
     /// with the onboarding layer's KYC expiry map - one digest over the
-    /// whole admission state, computed by [`PoaOnboarding::root`].
+    /// whole admission state, computed by
+    /// [`crate::registry::poa_onboarding::PoAOnboarding::root`].
     pub fn root_with_expiry(&self, kyc_expiry: &BTreeMap<(DomainId, Address), u64>) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();

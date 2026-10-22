@@ -1832,6 +1832,13 @@ fn encode_identity_record(record: &crate::registry::IdentityRecord, out: &mut Ve
         }
     }
     put_option_fixed32(out, record.credential_root);
+    // Every asserted root feeds `is_credential_valid`, so each one is inside
+    // the signed preimage: a relay must not be able to add or drop a root on a
+    // record whose signature still verifies. `BTreeSet` fixes the order.
+    put_u64(out, record.credential_roots.len() as u64);
+    for root in &record.credential_roots {
+        put_fixed(out, root);
+    }
     put_u64(out, record.guardians.len() as u64);
     for guardian in &record.guardians {
         put_fixed(out, guardian.as_bytes());
@@ -2310,6 +2317,17 @@ mod v29_signing_tests {
         let mut r = base_record.clone();
         r.credential_root = Some([6u8; 32]);
         assert_ne!(base_register, hash_of(register(r)), "credential_root");
+        // The live root set decides `is_credential_valid`, so a relay that
+        // added or dropped one would be changing an authorization outcome
+        // behind a signature that still verifies. Both the presence of a root
+        // and the identity of each root must move the preimage.
+        let mut r = base_record.clone();
+        r.credential_roots.insert([6u8; 32]);
+        let with_one = hash_of(register(r.clone()));
+        assert_ne!(base_register, with_one, "credential_roots");
+        let mut r2 = r;
+        r2.credential_roots.insert([7u8; 32]);
+        assert_ne!(with_one, hash_of(register(r2)), "each credential root");
         let mut r = base_record.clone();
         r.guardians = vec![test_addr_from_byte(4u8)];
         assert_ne!(base_register, hash_of(register(r)), "guardians");

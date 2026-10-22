@@ -83,10 +83,14 @@ jobs:
           fi
 
       - name: Write the surfaces to the job summary
+        env:
+          FMT_CLEAN: ${{ steps.fmt.outputs.clean }}
+          CLIPPY_CLEAN: ${{ steps.clippy.outputs.clean }}
+          TESTS_CLEAN: ${{ steps.tests.outputs.clean }}
         run: |
           {
             echo "## Diagnostic surfaces (fmt / clippy / tests)"
-            if [ "${{ steps.fmt.outputs.clean }}" = "true" ]; then
+            if [ "$FMT_CLEAN" = "true" ]; then
               echo "- rustfmt: clean"
             else
               echo
@@ -95,7 +99,7 @@ jobs:
               cat /tmp/fmt-trimmed.txt
               echo '```'
             fi
-            if [ "${{ steps.clippy.outputs.clean }}" = "true" ]; then
+            if [ "$CLIPPY_CLEAN" = "true" ]; then
               echo "- clippy: clean"
             else
               echo
@@ -104,7 +108,7 @@ jobs:
               cat /tmp/clippy-trimmed.txt
               echo '```'
             fi
-            if [ "${{ steps.tests.outputs.clean }}" = "true" ]; then
+            if [ "$TESTS_CLEAN" = "true" ]; then
               echo "- tests: clean"
             else
               echo

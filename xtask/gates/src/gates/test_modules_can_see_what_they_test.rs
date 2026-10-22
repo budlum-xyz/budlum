@@ -45,15 +45,15 @@ fn parent_functions(src: &str) -> BTreeSet<String> {
         }
         let mut rest = t;
         while let Some(next) = [
-                "pub(crate) ",
-                "pub(super) ",
-                "pub ",
-                "const ",
-                "async ",
-                "unsafe ",
-            ]
-            .iter()
-            .find_map(|p| rest.strip_prefix(p))
+            "pub(crate) ",
+            "pub(super) ",
+            "pub ",
+            "const ",
+            "async ",
+            "unsafe ",
+        ]
+        .iter()
+        .find_map(|p| rest.strip_prefix(p))
         {
             rest = next;
         }

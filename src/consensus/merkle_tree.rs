@@ -70,6 +70,10 @@ pub fn promote_sha3(node: &[u8; 32]) -> [u8; 32] {
 /// ever yields it as a real sibling; a forged sentinel in a paired position
 /// only produces a root that does not match the committed one.
 #[must_use]
+///
+/// Convenience: pub so a verifier walking the same sibling lists
+/// outside this module recognises the promoted-step marker without
+/// restating its derivation.
 pub fn odd_promotion_sentinel() -> [u8; 32] {
     static SENTINEL: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
     *SENTINEL.get_or_init(|| hash_fields_bytes(&[b"BDLM_MERKLE_ODD_SENTINEL_V1"]))

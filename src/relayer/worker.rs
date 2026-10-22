@@ -198,6 +198,10 @@ impl RelayerWorker {
     /// cases are refused at startup rather than discovered as a mint against
     /// a transaction that never happened.
     #[must_use]
+    ///
+    /// WIRING: the startup seam that hands the worker its adapter
+    /// registry; the relayer binary still starts without adapters, so
+    /// this waits for the operator configuration that builds one.
     pub fn with_adapters(mut self, adapters: Arc<AdapterRegistry>) -> Self {
         self.adapters = adapters;
         self

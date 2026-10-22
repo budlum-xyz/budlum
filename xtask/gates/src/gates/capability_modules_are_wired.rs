@@ -394,6 +394,21 @@ fn strip_noise(src: &str) -> String {
                 continue;
             }
         }
+        // Char literal. This has to be recognised before the string
+        // branch below: a quote character written as a char literal would
+        // otherwise open a string that runs until the next quote in the
+        // file, and everything between vanishes from the scan. That is
+        // measured, not hypothetical: a `c == '"'` comparison in the
+        // redaction code swallowed six hundred lines this way, and a
+        // function defined in the swallowed region read as deleted.
+        // `char_literal_end` already tells a literal from a lifetime.
+        if chars[i] == '\'' {
+            if let Some(end) = char_literal_end(&chars, i) {
+                out.push(' ');
+                i = end;
+                continue;
+            }
+        }
         // Ordinary string.
         if chars[i] == '"' {
             i += 1;
@@ -1086,6 +1101,15 @@ fn self_test_mentions_canaries(problems: &mut Vec<String>) {
         &BTreeSet::new(),
     ) {
         problems.push(String::from("VACUOUS: a doc link counted as a call"));
+    }
+
+    // A quote written as a char literal does not open a string: the code
+    // after it has to survive stripping, or a definition below a
+    // `c == '"'` comparison reads as deleted.
+    if !code_only("fn k(c: char) -> bool { c == '\"' }\nfn alpha() {}\n").contains("fn alpha") {
+        problems.push(String::from(
+            "VACUOUS: a quote char literal opened a string and swallowed the code after it",
+        ));
     }
 
     // A mention in a string is not a call.
