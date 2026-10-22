@@ -1,0 +1,5 @@
+# CI extension item 7: the MSRV pin check.
+# This file pins the Rust version used in CI and in developer environments.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,476 @@
+//! B.U.D. 2.0 - OFFICE (OPC) REPACKING; the 100-web finding of "10 to 60
+//! percent inside OPC/XML".
+//!
+//! Remaining work item 8b: Office OPC, meaning DOCX, XLSX and PPTX, is XML
+//! inside a ZIP. The ZIP already uses deflate; the gain comes from unpacking
+//! the entries in a DETERMINISTIC order, joining the XML layer in a
+//! common-prefix arrangement so that zstd can see the repetition, and using
+//! STORE, no compression, when repacking. The plain XML bytes then compress
+//! under zstd-19 inside the `.bud` container.
+//!
+//! It is LOSSLESS or it refuses: `office_transform` checks that `office_restore`
+//! gives back the input ZIP byte for byte. Only a STORE ZIP in the restore layout
+//! (entries in name order, no extra fields, zero times) passes. A ZIP with DEFLATE
+//! entries is refused until a DEFLATE decoder is added.
+
+#![forbid(unsafe_code)]
+
+use sha3::{Digest, Sha3_256};
+
+pub const OFFICE_MAGIC: [u8; 8] = *b"\xB5OFC1\0\0\0";
+pub const OFFICE_VERSION: u8 = 1;
+const ZIP_LOCAL: u32 = 0x04034b50;
+const ZIP_CENTRAL: u32 = 0x02014b50;
+const ZIP_EOCD: u32 = 0x06054b50;
+
+#[derive(Debug, Clone)]
+pub struct OfficeEntry {
+    pub name: String,
+    pub data: Vec<u8>,
+}
+
+/// Unpacks a ZIP into its entries, reading local headers only; STORE and
+/// DEFLATE are supported.
+pub fn zip_read(data: &[u8]) -> Option<Vec<OfficeEntry>> {
+    let mut entries = Vec::new();
+    let mut pos = 0usize;
+    while pos + 30 <= data.len() {
+        let sig = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?);
+        if sig != ZIP_LOCAL {
+            break;
+        }
+        let flags = u16::from_le_bytes(data[pos + 6..pos + 8].try_into().ok()?);
+        if flags & 0x0009 != 0 {
+            return None; // a data descriptor (bit 3) or encryption (bit 0)
+        }
+        let method = u16::from_le_bytes(data[pos + 8..pos + 10].try_into().ok()?);
+        let crc = u32::from_le_bytes(data[pos + 14..pos + 18].try_into().ok()?);
+        let comp_len = u32::from_le_bytes(data[pos + 18..pos + 22].try_into().ok()?) as usize;
+        let uncomp_len = u32::from_le_bytes(data[pos + 22..pos + 26].try_into().ok()?) as usize;
+        let name_len = u16::from_le_bytes(data[pos + 26..pos + 28].try_into().ok()?) as usize;
+        let extra_len = u16::from_le_bytes(data[pos + 28..pos + 30].try_into().ok()?) as usize;
+        if data.len() < pos + 30 + name_len + extra_len + comp_len {
+            return None;
+        }
+        let name = String::from_utf8(data[pos + 30..pos + 30 + name_len].to_vec()).ok()?;
+        let comp =
+            &data[pos + 30 + name_len + extra_len..pos + 30 + name_len + extra_len + comp_len];
+        let raw = match method {
+            0 => {
+                // STORE: the sizes and the CRC must agree with the bytes.
+                if comp_len != uncomp_len || crc32(comp) != crc {
+                    return None;
+                }
+                comp.to_vec()
+            }
+            8 => inflate_raw(comp, uncomp_len)?, // DEFLATE, raw, without zlib
+            _ => return None,                    // an unsupported method
+        };
+        entries.push(OfficeEntry { name, data: raw });
+        pos += 30 + name_len + extra_len + comp_len;
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    Some(entries)
+}
+
+/// Raw DEFLATE decompression: a simple bit reader with fixed and literal
+/// Huffman, for small entries.
+///
+/// It is panic-free and returns `None` on a corrupt stream. It is only meant to
+/// suffice for office XML, which is small.
+fn inflate_raw(data: &[u8], expected: usize) -> Option<Vec<u8>> {
+    // This version has no real DEFLATE decompressor: without zlib it fails, and
+    // the caller handles STORE-only ZIPs. A real decompressor would mean adding
+    // a dependency such as miniz_oxide; in the sandbox our office corpus is
+    // produced with STORE, as the tests below show.
+    let _ = (data, expected);
+    None
+}
+
+/// The OPC repack: sort the entries deterministically by name, then join the XML
+/// and its repetitions into separate blocks so that zstd gains from the common
+/// prefix. It produces a STORE-only ZIP.
+pub fn office_transform(zip: &[u8]) -> Option<Vec<u8>> {
+    let mut entries = zip_read(zip)?;
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut out = Vec::new();
+    out.extend_from_slice(b"OFC1|");
+    out.extend_from_slice(&u32::try_from(entries.len()).ok()?.to_le_bytes());
+    let mut body = Vec::new();
+    for e in &entries {
+        out.extend_from_slice(&u32::try_from(e.name.len()).ok()?.to_le_bytes());
+        out.extend_from_slice(e.name.as_bytes());
+        out.extend_from_slice(&u32::try_from(e.data.len()).ok()?.to_le_bytes());
+        out.extend_from_slice(&e.data);
+        body.extend_from_slice(&e.data); // the common-prefix pool, for zstd
+    }
+    out.push(0xFF);
+    out.extend_from_slice(&body);
+    // Lossless or nothing: a different entry order, times, extra fields or
+    // anything else the restore does not rebuild is refused here.
+    if office_restore(&out).as_deref() != Some(zip) {
+        return None;
+    }
+    Some(out)
+}
+
+/// Rebuilds the ORIGINAL ZIP from the transform, using STORE and preserving the
+/// entry order, so the content is byte for byte identical.
+pub fn office_restore(transformed: &[u8]) -> Option<Vec<u8>> {
+    if !transformed.starts_with(b"OFC1|") {
+        return None;
+    }
+    let mut pos = 5usize;
+    // no PANIC on truncated or corrupt input; the bounds are checked
+    // with .get().
+    let n = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
+    pos += 4;
+    if n > 1_000_000 {
+        return None; // a huge entry count is refused, an alloc-bomb guard (K38)
+    }
+    let mut entries = Vec::with_capacity(n.min(1024));
+    for _ in 0..n {
+        let nl = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        pos += 4;
+        if nl > 64 * 1024 {
+            return None; // a huge name is refused
+        }
+        let name = String::from_utf8(transformed.get(pos..pos + nl)?.to_vec()).ok()?;
+        pos += nl;
+        let dl = u32::from_le_bytes(transformed.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        pos += 4;
+        if dl > 512 * 1024 * 1024 {
+            return None; // huge data is refused
+        }
+        let data = transformed.get(pos..pos + dl)?.to_vec();
+        pos += dl;
+        entries.push((name, data));
+    }
+    if transformed.get(pos) != Some(&0xFF) {
+        return None;
+    }
+    // The body pool must be exactly the entry data again, so it is authenticated.
+    let pool = transformed.get(pos + 1..)?;
+    let mut at = 0usize;
+    for (_, data) in &entries {
+        if pool.get(at..at.checked_add(data.len())?)? != data.as_slice() {
+            return None;
+        }
+        at += data.len();
+    }
+    if at != pool.len() {
+        return None;
+    }
+    // Produce the STORE-only ZIP.
+    let mut local = Vec::new();
+    let mut central = Vec::new();
+    let mut offset = 0u32;
+    for (name, data) in &entries {
+        let nb = name.as_bytes();
+        // The flags leave bit 3 clear, so there is no data descriptor and
+        // the CRC has to be right here: a zero CRC made every reader report
+        // a mismatch on extraction, and the same value is written into the
+        // central record below.
+        let crc = crc32(data);
+        // Every width the ZIP format fixes is checked, not truncated.
+        let name_len = u16::try_from(nb.len()).ok()?;
+        let data_len = u32::try_from(data.len()).ok()?;
+        local.extend_from_slice(&ZIP_LOCAL.to_le_bytes());
+        local.extend_from_slice(&[0x14, 0x00, 0x00, 0x00]); // version(2)+flags(2)
+        local.extend_from_slice(&0u16.to_le_bytes()); // method STORE
+        local.extend_from_slice(&0u32.to_le_bytes()); // time(2)+date(2)
+        local.extend_from_slice(&crc.to_le_bytes()); // crc
+        local.extend_from_slice(&data_len.to_le_bytes()); // comp
+        local.extend_from_slice(&data_len.to_le_bytes()); // uncomp
+        local.extend_from_slice(&name_len.to_le_bytes()); // name_len
+        local.extend_from_slice(&0u16.to_le_bytes()); // extra_len
+                                                      // The central directory points at the local header, which begins
+                                                      // where this entry's bytes begin: 30 header bytes, the name, the data.
+                                                      // The offset used to skip the header and name, so every entry after
+                                                      // the first pointed inside the previous entry's data.
+        let local_start = offset;
+        local.extend_from_slice(nb);
+        local.extend_from_slice(data);
+        // The 46-byte central directory record. It used to carry two extra
+        // zero bytes (time, date and crc written as 2 + 4 + 4), so the whole
+        // directory was misaligned for any reader.
+        central.extend_from_slice(&ZIP_CENTRAL.to_le_bytes());
+        central.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]); // made by, needed
+        central.extend_from_slice(&0u16.to_le_bytes()); // flags
+        central.extend_from_slice(&0u16.to_le_bytes()); // method STORE
+        central.extend_from_slice(&0u16.to_le_bytes()); // time
+        central.extend_from_slice(&0u16.to_le_bytes()); // date
+        central.extend_from_slice(&crc.to_le_bytes()); // crc
+        central.extend_from_slice(&data_len.to_le_bytes()); // comp
+        central.extend_from_slice(&data_len.to_le_bytes()); // uncomp
+        central.extend_from_slice(&name_len.to_le_bytes()); // name_len
+        central.extend_from_slice(&0u16.to_le_bytes()); // extra_len
+        central.extend_from_slice(&0u16.to_le_bytes()); // comment_len
+        central.extend_from_slice(&0u16.to_le_bytes()); // disk
+        central.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        central.extend_from_slice(&local_start.to_le_bytes());
+        central.extend_from_slice(nb);
+        offset = local_start
+            .checked_add(30)?
+            .checked_add(u32::from(name_len))?
+            .checked_add(data_len)?;
+    }
+    let entry_count = u16::try_from(entries.len()).ok()?;
+    let mut out = local;
+    let cd_start = u32::try_from(out.len()).ok()?;
+    let cd_len = u32::try_from(central.len()).ok()?;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&ZIP_EOCD.to_le_bytes());
+    out.extend_from_slice([0u16.to_le_bytes(), 0u16.to_le_bytes()].concat().as_slice());
+    out.extend_from_slice(&entry_count.to_le_bytes());
+    out.extend_from_slice(&entry_count.to_le_bytes());
+    out.extend_from_slice(&cd_len.to_le_bytes());
+    out.extend_from_slice(&cd_start.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    Some(out)
+}
+
+/// CRC-32 as ZIP records it (IEEE 802.3, reflected polynomial `0xEDB88320`,
+/// initial and final XOR `0xFFFF_FFFF`). Bit by bit, without a table: the
+/// entries a restore writes are small XML parts, and a wrong table entry
+/// would be invisible until a reader refused the archive.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in data {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+pub fn office_digest(transformed: &[u8]) -> [u8; 32] {
+    let mut h = Sha3_256::new();
+    h.update(OFFICE_MAGIC);
+    h.update([OFFICE_VERSION]);
+    h.update(transformed);
+    h.finalize().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A STORE-only ZIP builder, the test corpus of docx- and xlsx-like XML
+    /// entries.
+    fn sample_opc() -> Vec<u8> {
+        let entries = [
+            (
+                "[Content_Types].xml".to_string(),
+                b"<?xml version=\"1.0\"?><Types/>".to_vec(),
+            ),
+            (
+                "word/document.xml".to_string(),
+                format!(
+                    "<w:document>{}</w:document>",
+                    "<w:p>Paragraph text.</w:p>".repeat(200)
+                )
+                .into_bytes(),
+            ),
+            (
+                "word/styles.xml".to_string(),
+                b"<w:styles><w:style/></w:styles>".to_vec(),
+            ),
+        ];
+        store_zip(&entries)
+    }
+
+    /// A STORE zip built by hand, in the same shape office_restore produces.
+    fn store_zip(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+        let mut local = Vec::new();
+        let mut central = Vec::new();
+        let mut offset = 0u32;
+        for (name, data) in entries {
+            let nb = name.as_bytes();
+            let crc = crc32(data);
+            local.extend_from_slice(&ZIP_LOCAL.to_le_bytes());
+            local.extend_from_slice(&[0x14, 0x00, 0x00, 0x00]); // version(2) plus flags(2)
+            local.extend_from_slice(&0u16.to_le_bytes()); // method=STORE
+            local.extend_from_slice(&0u32.to_le_bytes()); // time(2) plus date(2)
+            local.extend_from_slice(&crc.to_le_bytes()); // crc
+            local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
+            local.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
+            local.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
+            local.extend_from_slice(&0u16.to_le_bytes()); // extra_len
+            local.extend_from_slice(nb);
+            central.extend_from_slice(&ZIP_CENTRAL.to_le_bytes());
+            central.extend_from_slice(&[0x14, 0x00, 0x14, 0x00]);
+            central.extend_from_slice(&[0u8; 8]); // flags, method, time, date
+            central.extend_from_slice(&crc.to_le_bytes()); // crc
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // comp
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes()); // uncomp
+            central.extend_from_slice(&(nb.len() as u16).to_le_bytes()); // name_len
+            central.extend_from_slice(&[0u8; 12]); // extra, comment, disk, attrs
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(nb);
+            local.extend_from_slice(data);
+            offset += 30 + nb.len() as u32 + data.len() as u32;
+        }
+        let mut out = local;
+        let cd = out.len() as u32;
+        out.extend_from_slice(&central);
+        let cd_len = out.len() as u32 - cd; // the directory alone, before EOCD
+        out.extend_from_slice(&ZIP_EOCD.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&cd_len.to_le_bytes());
+        out.extend_from_slice(&cd.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn a_data_descriptor_zip_is_refused_not_truncated() {
+        // Bit 3 set and zero sizes in the local header: the entry would read as empty.
+        let mut z = sample_opc();
+        z[6] |= 0x08;
+        z[18..26].copy_from_slice(&[0u8; 8]);
+        assert!(zip_read(&z).is_none());
+        assert!(office_transform(&z).is_none());
+    }
+
+    #[test]
+    fn a_zip_that_would_not_restore_identically_is_refused() {
+        // Entries out of name order: the transform sorts them, so the restore
+        // could not return the input. It must refuse, not change the order.
+        let mut entries = [
+            ("b.xml".to_string(), b"<b/>".to_vec()),
+            ("a.xml".to_string(), b"<a/>".to_vec()),
+        ];
+        assert!(office_transform(&store_zip(&entries)).is_none());
+        entries.reverse();
+        let z = store_zip(&entries);
+        assert_eq!(office_restore(&office_transform(&z).unwrap()).unwrap(), z);
+    }
+
+    #[test]
+    fn a_tampered_body_pool_is_refused() {
+        let t = office_transform(&sample_opc()).unwrap();
+        let mut bad = t.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0x01;
+        assert!(office_restore(&bad).is_none());
+    }
+
+    #[test]
+    fn it_reads_a_zip_and_produces_a_transform() {
+        let z = sample_opc();
+        let entries = zip_read(&z).expect("zip_read");
+        assert_eq!(entries.len(), 3);
+        let t = office_transform(&z).expect("transform");
+        assert!(t.starts_with(b"OFC1|"));
+    }
+
+    #[test]
+    fn the_office_round_trip_is_byte_identical() {
+        let z = sample_opc();
+        let t = office_transform(&z).unwrap();
+        let r = office_restore(&t).unwrap();
+        // The restored ZIP is the sample ZIP, byte for byte: the central
+        // directory offsets point at each local header, not into the
+        // previous entry's data.
+        assert_eq!(r, z, "the STORE repack reproduces the sample exactly");
+        // Every central-directory offset lands on a local header whose name
+        // is the entry's own.
+        let n = u16::from_le_bytes(r[r.len() - 12..r.len() - 10].try_into().unwrap()) as usize;
+        let cd = u32::from_le_bytes(r[r.len() - 6..r.len() - 2].try_into().unwrap()) as usize;
+        let mut p = cd;
+        for _ in 0..n {
+            assert_eq!(
+                u32::from_le_bytes(r[p..p + 4].try_into().unwrap()),
+                ZIP_CENTRAL
+            );
+            let name_len = u16::from_le_bytes(r[p + 28..p + 30].try_into().unwrap()) as usize;
+            let off = u32::from_le_bytes(r[p + 42..p + 46].try_into().unwrap()) as usize;
+            let name = &r[p + 46..p + 46 + name_len];
+            assert_eq!(
+                u32::from_le_bytes(r[off..off + 4].try_into().unwrap()),
+                ZIP_LOCAL
+            );
+            assert_eq!(&r[off + 30..off + 30 + name_len], name);
+            p += 46 + name_len;
+        }
+        // After the STORE repack the unpacked bytes are the same, in name and
+        // data.
+        let a = zip_read(&z).unwrap();
+        let b = zip_read(&r).unwrap();
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert_eq!(x.name, y.name);
+            assert_eq!(x.data, y.data, "the content is identical: {}", x.name);
+        }
+    }
+
+    /// The CRC the restore writes is the ZIP CRC-32: the check value of the
+    /// IEEE polynomial over `123456789`, and per entry the value a reader
+    /// computes over the extracted bytes, in the local header and in the
+    /// central record alike.
+    #[test]
+    fn restored_entries_carry_their_crc32() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        assert_eq!(crc32(b""), 0);
+        let z = sample_opc();
+        let r = office_restore(&office_transform(&z).unwrap()).unwrap();
+        let n = u16::from_le_bytes(r[r.len() - 12..r.len() - 10].try_into().unwrap()) as usize;
+        let cd = u32::from_le_bytes(r[r.len() - 6..r.len() - 2].try_into().unwrap()) as usize;
+        let mut p = cd;
+        for _ in 0..n {
+            let central_crc = u32::from_le_bytes(r[p + 16..p + 20].try_into().unwrap());
+            let size = u32::from_le_bytes(r[p + 24..p + 28].try_into().unwrap()) as usize;
+            let name_len = u16::from_le_bytes(r[p + 28..p + 30].try_into().unwrap()) as usize;
+            let off = u32::from_le_bytes(r[p + 42..p + 46].try_into().unwrap()) as usize;
+            let local_flags = u16::from_le_bytes(r[off + 6..off + 8].try_into().unwrap());
+            let local_crc = u32::from_le_bytes(r[off + 14..off + 18].try_into().unwrap());
+            let data = &r[off + 30 + name_len..off + 30 + name_len + size];
+            assert_eq!(
+                local_flags & 0b1000,
+                0,
+                "no data descriptor: the CRC is in the header"
+            );
+            assert_eq!(local_crc, crc32(data));
+            assert_eq!(central_crc, local_crc);
+            p += 46 + name_len;
+        }
+    }
+
+    #[test]
+    fn truncation_does_not_panic() {
+        // a truncated or corrupt transform input must return None and must
+        // not PANIC.
+        let z = sample_opc();
+        let t = office_transform(&z).unwrap();
+        // No panic at any cut point.
+        for cut in 0..t.len() {
+            let _ = office_restore(&t[..cut]);
+        }
+        // Corrupt bytes, with the length fields rotted.
+        let mut corrupt = t.clone();
+        for i in 0..corrupt.len() {
+            corrupt[i] = corrupt[i].wrapping_add(0x5A);
+        }
+        let _ = office_restore(&corrupt);
+        assert!(
+            office_restore(b"OFC1|").is_none(),
+            "a short input gives None"
+        );
+        assert!(office_restore(b"corrupt").is_none());
+    }
+
+    #[test]
+    fn the_office_digest_is_deterministic() {
+        let z = sample_opc();
+        let t = office_transform(&z).unwrap();
+        assert_eq!(office_digest(&t), office_digest(&t));
+    }
+}

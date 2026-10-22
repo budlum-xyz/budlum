@@ -1,0 +1,496 @@
+The bud:// protocol handler.
+
+Before opening a channel the scheme asks the `budscan` core, and **only
+verified bytes** are written into the channel. An answer that does not verify
+is turned into an error page; under no circumstance do the bytes reach the
+parser. Bytes whose route was not proven (`claim only`, `transport only`) are
+shown with that badge, under an opaque principal rather than the name's own
+origin: an unproven resolution must not borrow what the name's verified pages
+stored or sent.
+
+The C ABI the C++ calls is declared in `budscan_ffi.h`, added by this patch
+next to the two classes; the Rust library behind it is `budscan_ffi`.
+
+Why this is not a redirect: if `bud://ayaz.bud` were redirected to an HTTPS
+gateway, the origin of the page would be the origin of the gateway, and two
+different names under `bud://` would share one origin. Opening the channel
+ourselves keeps the origin at `bud://<name>`.
+
+--- a/netwerk/build/components.conf
++++ b/netwerk/build/components.conf
+@@ -120,6 +120,20 @@ Classes = [
+         'constructor': 'nsViewSourceHandler::Create',
+         'headers': ['/netwerk/protocol/viewsource/nsViewSourceHandler.h'],
+     },
++    {
++        'cid': '{6ce4b4ad-6b03-4f2c-9d55-1b3d8d6a1f77}',
++        'contract_ids': ['@mozilla.org/network/protocol;1?name=bud'],
++        'type': 'mozilla::net::BudProtocolHandler',
++        'headers': ['/netwerk/protocol/bud/BudProtocolHandler.h'],
++        'processes': ProcessSelector.ALLOW_IN_SOCKET_PROCESS,
++        'protocol_config': {
++            'scheme': 'bud',
++            'flags': [
++                'URI_STD',
++                'URI_LOADABLE_BY_ANYONE',
++            ],
++        },
++    },
+     {
+         'cid': '{9c7ec5d1-23f9-11d5-aea8-8fcc0793e97f}',
+         'contract_ids': ['@mozilla.org/network/protocol;1?name=data'],
+--- a/netwerk/protocol/moz.build
++++ b/netwerk/protocol/moz.build
+@@ -10,6 +10,7 @@ DIRS += [
+     "about",
+     "data",
+     "file",
++    "bud",
+     "http",
+     "res",
+     "viewsource",
+--- /dev/null
++++ b/netwerk/protocol/bud/moz.build
+@@ -0,0 +1,32 @@
++# This Source Code Form is subject to the terms of the Mozilla Public
++# License, v. 2.0. If a copy of the MPL was not distributed with this
++# file, You can obtain one at http://mozilla.org/MPL/2.0/.
++
++XPIDL_SOURCES += [
++    "nsIBudChannel.idl",
++]
++
++XPIDL_MODULE = "necko_bud"
++
++EXPORTS.mozilla.net += [
++    "BudChannel.h",
++    "BudProtocolHandler.h",
++    "budscan_ffi.h",
++]
++
++UNIFIED_SOURCES += [
++    "BudChannel.cpp",
++    "BudProtocolHandler.cpp",
++]
++
++# The verification core is Rust. Nothing in this directory decides whether
++# bytes are trustworthy; it asks budscan and refuses when the answer is no.
++# budscan_ffi.h is the C ABI this directory compiles against; the library
++# named here is the Rust side of that ABI.
++USE_LIBS += [
++    "budscan_ffi",
++]
++
++include("/ipc/chromium/chromium-config.mozbuild")
++
++FINAL_LIBRARY = "xul"
+--- /dev/null
++++ b/netwerk/protocol/bud/nsIBudChannel.idl
+@@ -0,0 +1,23 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "nsISupports.idl"
++
++/**
++ * How strongly the bytes behind a bud:// channel were verified.
++ *
++ * The address-bar badge reads this through QueryInterface. Without an
++ * interface that script can call, the badge cannot read the strength and
++ * every page would show the refused state.
++ */
++[scriptable, builtinclass, uuid(2f6a9c1e-4b7d-4e53-9a08-5c1d7e3b6a42)]
++interface nsIBudChannel : nsISupports
++{
++  /** budscan::evidence::Strength: 0 Refused, 1 claim only, 2 transport only,
++   *  3 Verified. */
++  readonly attribute octet strength;
++
++  /** The weakest-link badge text, from the core, untranslated. */
++  readonly attribute ACString badgeText;
++};
+--- /dev/null
++++ b/netwerk/protocol/bud/budscan_ffi.h
+@@ -0,0 +1,73 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef budscan_ffi_h
++#define budscan_ffi_h
++
++/*
++ * The C ABI between the Gecko patch layer and the budscan core.
++ *
++ * Every function here is implemented in Rust and called from C++; nothing
++ * in this header decides anything. The declarations are the contract the
++ * Rust side has to satisfy, written down so that BudChannel.cpp and
++ * BudProtocolHandler.cpp compile against a type-checked interface rather
++ * than against names the linker resolves and the compiler never saw.
++ *
++ * Ownership: a BudPage is created by the core and given back to it with
++ * budscan_page_free. The strings a page hands out live as long as the page.
++ * The reason string of a verdict is static.
++ */
++
++#include <stddef.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* The verdict of the name rule (budscan::name_rule::check_name). */
++typedef struct BudNameVerdict {
++  /* Non-zero when the name passes the rule. */
++  uint8_t ok;
++  /* When it does not: the property that failed, NUL-terminated UTF-8,
++   * static. Empty when `ok` is set. */
++  const char* reason;
++} BudNameVerdict;
++
++/* A resolved page: bytes, the strength of every claim on the way to them
++ * and the badge text. Opaque to C++. */
++typedef struct BudPage BudPage;
++
++/* Run the name rule over a bare name (the URI host, no scheme or path). */
++BudNameVerdict budscan_check_name(const char* spec);
++uint8_t budscan_verdict_ok(BudNameVerdict verdict);
++const char* budscan_verdict_reason(BudNameVerdict verdict);
++
++/* Resolve, fetch and verify "bud://<name>" (no path). Never null: a failure at any
++ * step comes back as a page whose strength is Refused. */
++BudPage* budscan_open(const char* spec);
++
++/* An explanation page for a refusal, built from the reason the badge
++ * carries. Never null; freed with budscan_page_free like any page. */
++BudPage* budscan_refusal_page(const char* reason);
++
++/* budscan::evidence::Strength as its discriminant: 0 Refused,
++ * 1 RpcClaimOnly, 2 TransportOnly, 3 Verified. */
++uint8_t budscan_page_strength(const BudPage* page);
++
++/* The one-line badge for the address bar, NUL-terminated UTF-8. */
++const char* budscan_page_badge(const BudPage* page);
++
++/* The page bytes and their length. Empty for a Refused page. */
++const char* budscan_page_bytes(const BudPage* page);
++size_t budscan_page_len(const BudPage* page);
++
++/* Give a page back to the core. */
++void budscan_page_free(BudPage* page);
++
++#ifdef __cplusplus
++}  /* extern "C" */
++#endif
++
++#endif  /* budscan_ffi_h */
+--- /dev/null
++++ b/netwerk/protocol/bud/BudProtocolHandler.h
+@@ -0,0 +1,61 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_net_BudProtocolHandler_h
++#define mozilla_net_BudProtocolHandler_h
++
++#include "nsIProtocolHandler.h"
++#include "nsWeakReference.h"
++
++namespace mozilla {
++namespace net {
++
++/**
++ * The bud:// scheme.
++ *
++ * A bud:// URI names content on Budlum. Resolution and byte verification are
++ * done by the budscan core (Rust); this class is the Gecko-side surface and
++ * deliberately holds no verification logic of its own. Two places deciding
++ * what counts as verified is worse than one place deciding badly.
++ *
++ * Flags, declared in the components.conf entry's `protocol_config`. Gecko
++ * reads a scheme's flags from that static table, and every scheme has to
++ * carry exactly one loadability flag: with none declared,
++ * nsContentSecurityManager refuses the channel before this handler is
++ * asked, so an entry without `protocol_config` is a scheme that never
++ * loads. The list below is the whole of what the scheme carries:
++ *   URI_STD               - bud://<name>/<path> parses as a standard URL, so
++ *                           each name gets its own origin. Without this two
++ *                           different names would share one origin.
++ *   URI_LOADABLE_BY_ANYONE- an ordinary page may link to bud://.
++ *
++ * Not set, on purpose:
++ *   URI_IS_POTENTIALLY_TRUSTWORTHY - the bytes are hash-verified, but the
++ *                           name is not: .bud resolution carries no state
++ *                           proof today (`claim only`), so a lying node can
++ *                           put any bytes under any name. A potentially
++ *                           trustworthy origin unlocks service workers,
++ *                           `crypto.subtle` and secure cookies for those
++ *                           bytes. Until the resolution is `verified` the
++ *                           scheme stays an ordinary, non-secure context.
++ *   URI_DANGEROUS_TO_LOAD - would make the scheme unusable from the address
++ *                           bar, which is the only place it is used.
++ *   URI_IS_LOCAL_RESOURCE - bud:// is not local; it is content-addressed.
++ */
++class BudProtocolHandler final : public nsIProtocolHandler,
++                                 public nsSupportsWeakReference {
++ public:
++  NS_DECL_ISUPPORTS
++  NS_DECL_NSIPROTOCOLHANDLER
++
++  BudProtocolHandler() = default;
++
++ private:
++  ~BudProtocolHandler() = default;
++};
++
++}  // namespace net
++}  // namespace mozilla
++
++#endif  // mozilla_net_BudProtocolHandler_h
+--- /dev/null
++++ b/netwerk/protocol/bud/BudProtocolHandler.cpp
+@@ -0,0 +1,59 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "BudProtocolHandler.h"
++#include "BudChannel.h"
++#include "budscan_ffi.h"
++#include "nsNetUtil.h"
++#include "nsStandardURL.h"
++
++namespace mozilla {
++namespace net {
++
++NS_IMPL_ISUPPORTS(BudProtocolHandler, nsIProtocolHandler,
++                  nsISupportsWeakReference)
++
++NS_IMETHODIMP
++BudProtocolHandler::GetScheme(nsACString& aResult) {
++  aResult.AssignLiteral("bud");
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++BudProtocolHandler::AllowPort(int32_t aPort, const char* aScheme,
++                              bool* aResult) {
++  // A name is not a host with a port. Allowing one would create two spellings
++  // of the same name and therefore two origins for one piece of content.
++  *aResult = false;
++  return NS_OK;
++}
++
++NS_IMETHODIMP
++BudProtocolHandler::NewChannel(nsIURI* aURI, nsILoadInfo* aLoadInfo,
++                               nsIChannel** aResult) {
++  NS_ENSURE_ARG_POINTER(aURI);
++  NS_ENSURE_ARG_POINTER(aLoadInfo);
++
++  // Only the host is the name. GetSpec would add the scheme separator and the
++  // trailing slash nsStandardURL appends, and the name rule refuses both.
++  nsAutoCString name;
++  nsresult rv = aURI->GetAsciiHost(name);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  // The name rule runs here, before anything is resolved or fetched. It is
++  // the same rule budscan applies (budscan::name_rule::check_name); the
++  // budscan-name-rule-parity gate fails the build if the two disagree.
++  //
++  // A refusal is not an error return: the caller gets a channel that produces
++  // an explanation page. "It did not open" without a reason is not an answer
++  // a user can act on.
++  BudNameVerdict verdict = budscan_check_name(name.get());
++
++  RefPtr<BudChannel> channel = new BudChannel(aURI, aLoadInfo, verdict);
++  channel.forget(aResult);
++  return NS_OK;
++}
++
++}  // namespace net
++}  // namespace mozilla
+--- /dev/null
++++ b/netwerk/protocol/bud/BudChannel.h
+@@ -0,0 +1,67 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef mozilla_net_BudChannel_h
++#define mozilla_net_BudChannel_h
++
++#include "budscan_ffi.h"
++#include "nsBaseChannel.h"
++#include "nsIBudChannel.h"
++
++namespace mozilla {
++namespace net {
++
++/**
++ * How strongly the bytes behind this channel were verified.
++ *
++ * Mirrors budscan::evidence::Strength. The order is weak-to-strong and the
++ * address bar shows the *weakest* claim in the chain: bytes that hash
++ * correctly under a resolution nobody proved are not verified content, they
++ * are verified bytes reached by an unproven route.
++ */
++enum class BudStrength : uint8_t {
++  Refused = 0,
++  RpcClaimOnly = 1,
++  TransportOnly = 2,
++  Verified = 3,
++};
++
++/**
++ * A channel over content that has already been verified.
++ *
++ * OpenContentStream never yields bytes whose strength is Refused. That is the
++ * whole point of this class: an unverified byte must not reach the HTML
++ * parser, because after that point nothing distinguishes it from a verified
++ * one.
++ *
++ * Bytes below Verified are shown, with the badge saying so, but not as the
++ * name: the channel gives them an opaque principal, so they are not
++ * same-origin with anything the name's verified pages stored or sent.
++ */
++class BudChannel final : public nsBaseChannel, public nsIBudChannel {
++ public:
++  NS_DECL_ISUPPORTS_INHERITED
++  NS_DECL_NSIBUDCHANNEL
++
++  BudChannel(nsIURI* aURI, nsILoadInfo* aLoadInfo, BudNameVerdict aVerdict);
++
++  BudStrength Strength() const { return mStrength; }
++  const nsCString& BadgeText() const { return mBadge; }
++
++ protected:
++  nsresult OpenContentStream(bool aAsync, nsIInputStream** aStream,
++                             nsIChannel** aChannel) override;
++
++ private:
++  ~BudChannel() = default;
++
++  BudNameVerdict mVerdict;
++  BudStrength mStrength = BudStrength::Refused;
++  nsCString mBadge;
++};
++
++}  // namespace net
++}  // namespace mozilla
++
++#endif  // mozilla_net_BudChannel_h
+--- /dev/null
++++ b/netwerk/protocol/bud/BudChannel.cpp
+@@ -0,0 +1,96 @@
++/* This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#include "BudChannel.h"
++#include "budscan_ffi.h"
++#include "mozilla/NullPrincipal.h"
++#include "mozilla/OriginAttributes.h"
++#include "nsILoadInfo.h"
++#include "nsStringStream.h"
++
++namespace mozilla {
++namespace net {
++
++BudChannel::BudChannel(nsIURI* aURI, nsILoadInfo* aLoadInfo,
++                       BudNameVerdict aVerdict)
++    : nsBaseChannel(), mVerdict(aVerdict) {
++  SetURI(aURI);
++  SetLoadInfo(aLoadInfo);
++  SetContentType("text/html"_ns);
++}
++
++// Hand a core-owned page to the parser and give the page back to the core.
++static nsresult StreamPage(BudPage* aPage, nsIInputStream** aStream) {
++  nsCString bytes(budscan_page_bytes(aPage), budscan_page_len(aPage));
++  budscan_page_free(aPage);
++  return NS_NewCStringInputStream(aStream, bytes);
++}
++
++NS_IMPL_ISUPPORTS_INHERITED(BudChannel, nsBaseChannel, nsIBudChannel)
++
++NS_IMETHODIMP BudChannel::GetStrength(uint8_t* aStrength) {
++  *aStrength = static_cast<uint8_t>(mStrength);
++  return NS_OK;
++}
++
++NS_IMETHODIMP BudChannel::GetBadgeText(nsACString& aBadgeText) {
++  aBadgeText = mBadge;
++  return NS_OK;
++}
++
++nsresult BudChannel::OpenContentStream(bool aAsync, nsIInputStream** aStream,
++                                       nsIChannel** aChannel) {
++  nsAutoCString host;
++  nsresult rv = URI()->GetAsciiHost(host);
++  NS_ENSURE_SUCCESS(rv, rv);
++
++  // budscan classifies "bud://<name>". The trailing slash of GetSpec is not
++  // part of that spelling, and a path has no route in this version.
++  nsAutoCString spec("bud://");
++  spec.Append(host);
++
++  // A name that failed the rule never reaches resolution. The page it gets is
++  // an explanation, not a blank refusal.
++  if (!budscan_verdict_ok(mVerdict)) {
++    mStrength = BudStrength::Refused;
++    mBadge = budscan_verdict_reason(mVerdict);
++    return StreamPage(budscan_refusal_page(mBadge.get()), aStream);
++  }
++
++  // Resolve, fetch and verify. Every one of those three steps happens in the
++  // Rust core and each contributes a claim; what comes back is already the
++  // weakest link.
++  BudPage* page = budscan_open(spec.get());
++  mStrength = static_cast<BudStrength>(budscan_page_strength(page));
++  mBadge = budscan_page_badge(page);
++
++  if (mStrength == BudStrength::Refused) {
++    // Bytes may exist and still be refused: the hash did not match, the proof
++    // did not verify, or decryption failed. They are not handed to the parser
++    // under any of those conditions.
++    budscan_page_free(page);
++    return StreamPage(budscan_refusal_page(mBadge.get()), aStream);
++  }
++
++  if (mStrength < BudStrength::Verified) {
++    // The bytes hash correctly but the route to them was not proven: an RPC
++    // answered without a proof, or TLS said who sent them and nothing said
++    // what they were. They are shown, and the badge says so, but not as
++    // bud://<name>. Under that origin they would read and write what the
++    // name's verified pages stored and speak to other pages as the name; a
++    // node that answers a resolution with bytes of its own choosing would
++    // borrow the name's origin for them. An opaque principal gives these
++    // bytes an origin of their own, shared with nothing, while the address
++    // bar still says which name was asked for and how far it was verified.
++    nsCOMPtr<nsILoadInfo> loadInfo = LoadInfo();
++    OriginAttributes attrs = loadInfo->GetOriginAttributes();
++    nsCOMPtr<nsIPrincipal> opaque = NullPrincipal::Create(attrs);
++    SetOwner(opaque);
++  }
++
++  return StreamPage(page, aStream);
++}
++
++}  // namespace net
++}  // namespace mozilla
+--- a/netwerk/base/nsNetUtil.cpp
++++ b/netwerk/base/nsNetUtil.cpp
+@@ -2712,6 +2712,10 @@ bool NS_IsSafeMethodNav(nsIChannel* aChannel) {
+ 
+ bool NS_IsInternalSameURIRedirect(nsIChannel* aOldChannel,
+                                   nsIChannel* aNewChannel, uint32_t aFlags) {
++  // bud:// never redirects: a name resolves to content, and if that content
++  // cannot be verified the load is refused rather than pointed somewhere
++  // else. A redirect here would let an unverifiable target borrow a verified
++  // name's origin.
+   if (!(aFlags & nsIChannelEventSink::REDIRECT_INTERNAL)) {
+     return false;
+   }

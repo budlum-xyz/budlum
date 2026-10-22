@@ -1,0 +1,123 @@
+# Diagnostic surfaces for readers that cannot reach the log host.
+#
+# The gated jobs already report verdicts; this workflow reports reasons. It
+# turns `cargo fmt --all -- --check`, `cargo clippy --all-targets`, and
+# `cargo test --lib` failures into PR comments with the actual hunks, lint
+# names and failing tests, so the fix can be applied exactly from a sandbox
+# whose egress cannot read Actions logs. It reports only: it is not a gate,
+# and it changes no verdict.
+
+name: Diff surface
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  surface:
+    name: Report fmt, clippy and test failures as PR comments
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Collect the rustfmt diff
+        id: fmt
+        run: |
+          set +e
+          cargo fmt --all -- --check > /tmp/fmt-raw.txt 2>&1
+          status=$?
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/fmt-raw.txt | grep -v '^info: ' > /tmp/fmt.txt
+          if [ "$status" -eq 0 ]; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            head -c 60000 /tmp/fmt.txt > /tmp/fmt-trimmed.txt
+          fi
+
+      - name: Collect clippy lints
+        id: clippy
+        run: |
+          set +e
+          cargo clippy --all-targets --message-format=short -- -D warnings > /tmp/clippy-raw.txt 2>&1
+          status=$?
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/clippy-raw.txt > /tmp/clippy.txt
+          if [ "$status" -eq 0 ]; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            grep -E '^[^ ]+\.(rs|toml):[0-9]+' /tmp/clippy.txt | head -200 > /tmp/clippy-trimmed.txt
+            if [ ! -s /tmp/clippy-trimmed.txt ]; then
+              tail -100 /tmp/clippy.txt > /tmp/clippy-trimmed.txt
+            fi
+          fi
+
+      - name: Collect failing tests
+        id: tests
+        run: |
+          set +e
+          cargo test --lib > /tmp/tests-raw.txt 2>&1
+          status=$?
+          cargo test --manifest-path crates/bpqs/Cargo.toml >> /tmp/tests-raw.txt 2>&1
+          status=$((status | $?))
+          sed -e 's/\x1b\[[0-9;]*m//g' /tmp/tests-raw.txt > /tmp/tests.txt
+          if [ "$status" -eq 0 ]; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            grep -E "^(test .* FAILED|failures:|---- .* stdout ----|thread .* panicked|assertion|Error:|left:|right:| *called |.*panicked at)" /tmp/tests.txt | head -200 > /tmp/tests-trimmed.txt
+            if [ ! -s /tmp/tests-trimmed.txt ]; then
+              tail -120 /tmp/tests.txt > /tmp/tests-trimmed.txt
+            fi
+          fi
+
+      - name: Write the surfaces to the job summary
+        env:
+          FMT_CLEAN: ${{ steps.fmt.outputs.clean }}
+          CLIPPY_CLEAN: ${{ steps.clippy.outputs.clean }}
+          TESTS_CLEAN: ${{ steps.tests.outputs.clean }}
+        run: |
+          {
+            echo "## Diagnostic surfaces (fmt / clippy / tests)"
+            if [ "$FMT_CLEAN" = "true" ]; then
+              echo "- rustfmt: clean"
+            else
+              echo
+              echo "### rustfmt hunks"
+              echo '```diff'
+              cat /tmp/fmt-trimmed.txt
+              echo '```'
+            fi
+            if [ "$CLIPPY_CLEAN" = "true" ]; then
+              echo "- clippy: clean"
+            else
+              echo
+              echo "### clippy lints (-D warnings)"
+              echo '```'
+              cat /tmp/clippy-trimmed.txt
+              echo '```'
+            fi
+            if [ "$TESTS_CLEAN" = "true" ]; then
+              echo "- tests: clean"
+            else
+              echo
+              echo "### failing tests"
+              echo '```'
+              cat /tmp/tests-trimmed.txt
+              echo '```'
+            fi
+            echo
+            echo "_Posted by the diff-surface workflow; it reports reasons only._"
+          } > /tmp/comment.md
+          cat /tmp/comment.md >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,7643 @@
+use super::api::BudlumApiServer;
+use crate::chain::chain_actor::ChainHandle;
+use crate::core::address::Address;
+use crate::core::block::Block;
+use crate::core::transaction::Transaction;
+use crate::domain::storage_deal::{
+    RetrievalChallenge, RetrievalChallengeRequest, RetrievalResponse, StorageDeal,
+};
+use crate::network::node::NodeClient;
+use crate::storage::content_id::ContentId;
+use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
+use bincode;
+use futures::future::BoxFuture;
+use hex;
+use hyper::header::{HeaderValue, AUTHORIZATION};
+use hyper::StatusCode;
+use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
+use jsonrpsee::types::error::ErrorObjectOwned;
+use libp2p::PeerId;
+use serde_json;
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use tower::{Layer, Service, ServiceBuilder};
+use tracing::info;
+
+/// Hard ceiling for the per-IP sliding-window map. Without a bound, an attacker
+/// Rotating source addresses can turn rate limiting itself into a memory DoS.
+const MAX_TRACKED_RPC_CLIENTS: usize = 10_000;
+
+/// Retrieval challenges establish only that an operator responded for the
+/// Requested range. Keep this wire-level discriminator explicit so clients
+/// Cannot mistake a successful retrieval outcome for a full storage proof.
+const RETRIEVAL_OUTCOME_PROOF_KIND: &str = "interim_availability_only";
+
+/// Upper bound accepted for `max_request_body_size`. A limit large enough to
+/// Exhaust node memory is not a limit; anything above this is treated as a
+/// Misconfiguration rather than silently honoured.
+const RPC_BODY_LIMIT_CEILING: u32 = 64 * 1024 * 1024;
+
+/// Upper bound accepted for `max_connections`, for the same reason.
+const RPC_CONNECTION_LIMIT_CEILING: u32 = 100_000;
+
+/// Transport limits applied when a caller builds a config from process
+/// Configuration without stating its own. These match
+/// [`RpcSecurityConfig::default`] so that every constructor in this file
+/// Produces a bounded listener.
+const RPC_DEFAULT_BODY_LIMIT: u32 = 16 * 1024 * 1024;
+const RPC_DEFAULT_RATE_LIMIT_PER_MINUTE: u64 = 120;
+const RPC_DEFAULT_CONNECTION_LIMIT: u32 = 500;
+
+// (security audit §5) `auth_required` defaults to `true` (secure
+// By default). Operators that explicitly want an unauthenticated RPC
+// Must call [`RpcSecurityConfig::operator_default`], which logs a
+// Prominent warning at server startup.
+#[derive(Clone, Debug)]
+pub struct RpcSecurityConfig {
+    pub auth_required: bool,
+    pub api_key: Option<String>,
+    pub allowed_ips: Vec<String>,
+    pub cors_origins: Vec<String>,
+    pub rate_limit_per_minute: Option<u64>,
+    pub trusted_proxies: Vec<String>,
+    pub max_request_body_size: Option<u32>,
+    pub max_connections: Option<u32>,
+}
+
+impl Default for RpcSecurityConfig {
+    fn default() -> Self {
+        // (security audit §5) secure default - auth ON, no API key
+        // (caller must configure `api_key` before serving). This is what
+        // [`Self::operator_default`] used to be (auth OFF); the prior
+        // Behaviour is preserved under that explicit name for trusted
+        // Local deployments.
+        Self {
+            auth_required: true,
+            api_key: None,
+            allowed_ips: vec!["127.0.0.1".into(), "::1".into()],
+            cors_origins: Vec::new(),
+            // Secure default (P21-F01): a limiter that is off by default
+            // leaves API-key guessing unthrottled on the public listener.
+            rate_limit_per_minute: Some(120),
+            trusted_proxies: Vec::new(),
+            max_request_body_size: Some(16 * 1024 * 1024),
+            max_connections: Some(10),
+        }
+    }
+}
+
+impl RpcSecurityConfig {
+    pub fn operator_default() -> Self {
+        // SECURITY WARNING: this constructor explicitly disables
+        // Authentication. It is intended for trusted local / private
+        // Network deployments only. A loud, multi-line `warn!` is logged
+        // At every server start so an operator cannot accidentally ship
+        // An unauthenticated RPC to the public internet.
+        tracing::warn!(
+            "[SECURITY] Operator RPC auth_required=false - for localhost or a private network only."
+        );
+        tracing::warn!(
+            "[SECURITY] Management methods are rejected on the public listener; the operator listener is still sensitive."
+        );
+        tracing::warn!(
+            "[SECURITY] Run only on a trusted or private network (auth_required=true is recommended)."
+        );
+        Self {
+            auth_required: false,
+            api_key: None,
+            allowed_ips: vec!["127.0.0.1".into(), "::1".into()],
+            cors_origins: Vec::new(),
+            rate_limit_per_minute: Some(120),
+            trusted_proxies: Vec::new(),
+            max_request_body_size: Some(16 * 1024 * 1024),
+            max_connections: Some(10),
+        }
+    }
+
+    pub fn from_env(
+        auth_required: bool,
+        api_key_env: Option<&str>,
+        allowed_ips: Vec<String>,
+        cors_origins: Vec<String>,
+        rate_limit_per_minute: Option<u64>,
+    ) -> Result<Self, String> {
+        let api_key = match api_key_env {
+            Some(env_name) if auth_required => Some(std::env::var(env_name).map_err(|_| {
+                format!("RPC auth is required but environment variable {env_name} is not set")
+            })?),
+            Some(env_name) => std::env::var(env_name).ok(),
+            None => None,
+        };
+
+        if auth_required && api_key.as_deref().unwrap_or_default().is_empty() {
+            return Err("RPC auth is required but no API key was configured".into());
+        }
+
+        Ok(Self {
+            auth_required,
+            api_key,
+            allowed_ips,
+            cors_origins,
+            // An unset limit falls back to the default, never to unlimited.
+            rate_limit_per_minute: rate_limit_per_minute
+                .or(Some(RPC_DEFAULT_RATE_LIMIT_PER_MINUTE)),
+            trusted_proxies: Vec::new(),
+            // Leaving these `None` handed the listener over to whatever the
+            // Transport crate happened to default to, and the value differed
+            // From every other constructor here. A config built from process
+            // Configuration is bounded like the rest; a caller that wants
+            // Other values overwrites these fields after construction.
+            max_request_body_size: Some(RPC_DEFAULT_BODY_LIMIT),
+            max_connections: Some(RPC_DEFAULT_CONNECTION_LIMIT),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RpcMode {
+    Public,
+    Operator,
+}
+
+#[derive(Clone)]
+struct RpcSecurityLayer {
+    config: Arc<RpcSecurityConfig>,
+    per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    mode: RpcMode,
+}
+
+impl RpcSecurityLayer {
+    fn new(
+        config: RpcSecurityConfig,
+        metrics: Option<Arc<crate::core::metrics::Metrics>>,
+        mode: RpcMode,
+    ) -> Self {
+        Self {
+            config: Arc::new(config),
+            per_ip_rates: Arc::new(Mutex::new(HashMap::new())),
+            metrics,
+            mode,
+        }
+    }
+}
+
+impl<S> Layer<S> for RpcSecurityLayer {
+    type Service = RpcSecurityService<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        RpcSecurityService {
+            inner,
+            config: self.config.clone(),
+            per_ip_rates: self.per_ip_rates.clone(),
+            metrics: self.metrics.clone(),
+            mode: self.mode.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RpcSecurityService<S> {
+    inner: S,
+    config: Arc<RpcSecurityConfig>,
+    per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    mode: RpcMode,
+}
+
+impl<S, B> Service<HttpRequest<B>> for RpcSecurityService<S>
+where
+    S: Service<HttpRequest<B>, Response = HttpResponse> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    S::Error: Send + 'static,
+    B: Send + 'static,
+{
+    type Response = HttpResponse;
+    type Error = S::Error;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: HttpRequest<B>) -> Self::Future {
+        if !is_ip_allowed(&self.config, &req) {
+            return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
+        }
+
+        if self.mode == RpcMode::Operator && !is_operator_request_allowed(&req) {
+            return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
+        }
+
+        let cors = cors_outcome(&self.config, &req);
+        if cors == CorsOutcome::Deny {
+            return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
+        }
+
+        // Preflight is answered before authentication: a browser cannot put
+        // `x-api-key` on this request, so a 401 here means the real request is
+        // never sent. It changes no state, and the IP and origin checks have
+        // already run.
+        if let CorsOutcome::Allow(ref origin) = cors {
+            if is_cors_preflight(&req) {
+                let origin = origin.clone();
+                return Box::pin(async move { Ok(preflight_response(&origin)) });
+            }
+        }
+
+        // The limiter runs before the key check so that failed key guesses
+        // count against the client's budget.
+        let client_ip = extract_client_ip(&self.config, &req);
+        if !is_per_ip_rate_limited(&self.config, &self.per_ip_rates, client_ip) {
+            if let Some(ref m) = self.metrics {
+                m.rpc_rate_limited_total.inc();
+            }
+            return Box::pin(async move {
+                let mut response =
+                    text_response(StatusCode::TOO_MANY_REQUESTS, "Too many requests");
+                if let CorsOutcome::Allow(ref origin) = cors {
+                    apply_cors_headers(&mut response, origin);
+                }
+                Ok(response)
+            });
+        }
+
+        if !is_authorized(&self.config, &req) {
+            return Box::pin(async move {
+                let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
+                if let CorsOutcome::Allow(ref origin) = cors {
+                    apply_cors_headers(&mut response, origin);
+                }
+                Ok(response)
+            });
+        }
+
+        if let Some(ref m) = self.metrics {
+            m.rpc_requests_total.inc();
+        }
+
+        let start = std::time::Instant::now();
+        let metrics = self.metrics.clone();
+        let mut inner = self.inner.clone();
+        Box::pin(async move {
+            let mut result = inner.call(req).await;
+            // Without the headers a browser withholds even a successful body
+            // from JavaScript; the allow decision only counts if it is visible
+            // on the response.
+            if let (Ok(ref mut response), CorsOutcome::Allow(ref origin)) = (&mut result, &cors) {
+                apply_cors_headers(response, origin);
+            }
+            if let Some(ref m) = metrics {
+                m.rpc_request_duration_seconds
+                    .observe(start.elapsed().as_secs_f64());
+            }
+            result
+        })
+    }
+}
+
+pub struct RpcServer {
+    chain: ChainHandle,
+    node: NodeClient,
+    security: RpcSecurityConfig,
+    mode: RpcMode,
+    /// Bounded, expiring reveal-session table (G4). Frames of a Three object
+    /// are served through sessions opened by `bud_storageOpenReveal`, never
+    /// as raw handle-passing.
+    reveal_gateway: Arc<Mutex<crate::storage::RevealGateway>>,
+    /// Prometheus metrics handle for RPC latency and rate-limit counters.
+    /// If `None`, metrics are silently skipped (e.g. in tests without a
+    /// Global registry).
+    metrics: Option<Arc<crate::core::metrics::Metrics>>,
+}
+
+impl RpcServer {
+    pub fn new(chain: ChainHandle, node: NodeClient) -> Self {
+        Self {
+            chain,
+            node,
+            security: RpcSecurityConfig::default(),
+            mode: RpcMode::Public,
+            reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            metrics: None,
+        }
+    }
+
+    pub fn with_security(
+        chain: ChainHandle,
+        node: NodeClient,
+        security: RpcSecurityConfig,
+    ) -> Self {
+        Self {
+            chain,
+            node,
+            security,
+            mode: RpcMode::Public,
+            reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            metrics: None,
+        }
+    }
+
+    pub fn with_security_and_mode(
+        chain: ChainHandle,
+        node: NodeClient,
+        security: RpcSecurityConfig,
+        mode: RpcMode,
+    ) -> Self {
+        Self {
+            chain,
+            node,
+            security,
+            mode,
+            reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
+            metrics: None,
+        }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    pub async fn run(self, addr: String) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use jsonrpsee::core::server::Methods;
+        use jsonrpsee::server::BatchRequestConfig;
+        use jsonrpsee::server::{
+            serve_with_graceful_shutdown, stop_channel, ServerBuilder, ServerConfig,
+        };
+
+        validate_rpc_security_config(&self.security)?;
+        let http_middleware = ServiceBuilder::new().layer(RpcSecurityLayer::new(
+            self.security.clone(),
+            self.metrics.clone(),
+            self.mode.clone(),
+        ));
+
+        // jsonrpsee 0.26 moved the transport limits off the server builder and
+        // onto `ServerConfig`; the defaults are unchanged, so only the values
+        // this node explicitly overrides are set here.
+        let mut config = ServerConfig::builder();
+        if let Some(limit) = self.security.max_request_body_size {
+            config = config.max_request_body_size(limit);
+        }
+        if let Some(limit) = self.security.max_connections {
+            config = config.max_connections(limit);
+        }
+        // Batch amplification bound (hardening research #42): the body-size
+        // cap alone still admits one request containing thousands of tiny
+        // method calls, turning a single authenticated HTTP request into a
+        // fan-out of per-method work. 100 calls per batch is far above any
+        // legitimate client pattern while keeping amplification bounded;
+        // oversized batches are rejected wholesale instead of partially
+        // executed (jsonrpsee drops the whole batch at `Limit`).
+        config = config.set_batch_request_config(BatchRequestConfig::Limit(100));
+        let builder = ServerBuilder::default()
+            .set_config(config.build())
+            .set_http_middleware(http_middleware);
+
+        let mode_label = match self.mode {
+            RpcMode::Public => "public",
+            RpcMode::Operator => "operator",
+        };
+        validate_operator_bind_address(&self.mode, &addr)?;
+        let methods: Methods = self.into_rpc().into();
+        let svc_builder = builder.to_service_builder();
+        let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
+        let (stop_handle, server_handle) = stop_channel();
+        info!("RPC Server ({mode_label}) started on {addr}");
+
+        tokio::spawn(async move {
+            let _keep_server_alive = server_handle;
+            loop {
+                let (socket, remote_addr) = tokio::select! {
+                    res = listener.accept() => {
+                        match res {
+                            Ok(value) => value,
+                            Err(error) => {
+                                tracing::error!("RPC accept failed: {error}");
+                                continue;
+                            }
+                        }
+                    }
+                    _ = stop_handle.clone().shutdown() => break,
+                };
+
+                let stop_handle_for_service = stop_handle.clone();
+                let svc_builder_for_service = svc_builder.clone();
+                let methods_for_service = methods.clone();
+                let svc = tower::service_fn(move |mut req: HttpRequest<hyper::body::Incoming>| {
+                    req.extensions_mut().insert::<SocketAddr>(remote_addr);
+                    let mut svc = svc_builder_for_service
+                        .clone()
+                        .build(methods_for_service.clone(), stop_handle_for_service.clone());
+                    async move { svc.call(req).await }
+                });
+
+                tokio::spawn(serve_with_graceful_shutdown(
+                    socket,
+                    svc,
+                    stop_handle.clone().shutdown(),
+                ));
+            }
+        });
+
+        Ok(())
+    }
+
+    fn require_operator(&self, method: &str) -> Result<(), ErrorObjectOwned> {
+        if self.mode == RpcMode::Operator {
+            Ok(())
+        } else {
+            Err(ErrorObjectOwned::owned(
+                -32004,
+                format!("{method} is available only on the operator RPC listener"),
+                None::<()>,
+            ))
+        }
+    }
+
+    fn to_hex(n: u64) -> String {
+        format!("0x{n:x}")
+    }
+
+    fn ai_readiness_json(chain_id: u64, active_bonded_operators: usize) -> serde_json::Value {
+        const REQUIRED_OPERATORS: usize = 3;
+        serde_json::json!({
+            "module": "ai_inference",
+            "status": "not_ready",
+            "chain_id": chain_id,
+            "active_bonded_operators": active_bonded_operators,
+            "required_distinct_operators": REQUIRED_OPERATORS,
+            "operator_quorum_available": active_bonded_operators >= REQUIRED_OPERATORS,
+            "readiness": {
+                "deterministic_scheduler": false,
+                "worker_daemon": false,
+                "full_execution_proof_verification": false,
+                "canonical_fee_settlement": false,
+                "process_level_byzantine_e2e": false,
+            },
+            "verification": {
+                "live": "structural_envelope_checks_only",
+                "target": "full Plonky3 STARK verification bound to request/model/result",
+            },
+            "economy": {
+                "status": "decision_locked_not_wired",
+                "pricing": "deterministic_compute_units",
+                "split": {
+                    "operator_percent": 80,
+                    "verifier_percent": 10,
+                    "data_owner_percent": 5,
+                    "treasury_percent": 5,
+                },
+            },
+            "data_layer": "requester-bound Pollen AccessGrant checks live; the grant builder issues to the requester",
+            "verification_level": "structural_envelope_checks_only",
+            "verification_level_note": "results are not STARK-proven; full_execution_proof_verification remains false",
+        })
+    }
+
+    /// Parses a 32-byte hex external-domain key. One helper, because five
+    /// endpoints read the same parameter and five inline copies would drift.
+    fn parse_external_domain_key(
+        domain_key_hex: &str,
+    ) -> Result<crate::cross_domain::external::DomainKey, ErrorObjectOwned> {
+        let clean = domain_key_hex.strip_prefix("0x").unwrap_or(domain_key_hex);
+        let bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid domain key: {e}"), None::<()>)
+        })?;
+        let key_bytes: [u8; 32] = bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Domain key must be 32 bytes", None::<()>)
+        })?;
+        Ok(crate::cross_domain::external::DomainKey(key_bytes))
+    }
+
+    fn to_0x_hash(h: String) -> String {
+        if h.is_empty() {
+            "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
+        } else if h.starts_with("0x") {
+            h
+        } else {
+            format!("0x{h}")
+        }
+    }
+
+    fn block_to_json(b: Block) -> serde_json::Value {
+        serde_json::json!({
+            "number": Self::to_hex(b.index),
+            "hash": Self::to_0x_hash(b.hash),
+            "parentHash": Self::to_0x_hash(b.previous_hash),
+            "timestamp": Self::to_hex(b.timestamp as u64),
+            "transactions": b.transactions.into_iter().map(Self::tx_to_json).collect::<Vec<_>>(),
+            "producer": b.producer.map(|p| p.to_string()),
+            "signature": b.signature.map(|s| format!("0x{}", hex::encode(s))),
+            "stateRoot": if b.state_root.is_empty() { serde_json::Value::Null } else { serde_json::json!(Self::to_0x_hash(b.state_root)) },
+            "txRoot": if b.tx_root.is_empty() { serde_json::Value::Null } else { serde_json::json!(Self::to_0x_hash(b.tx_root)) },
+        })
+    }
+
+    fn tx_to_json(t: Transaction) -> serde_json::Value {
+        serde_json::json!({
+            "hash": Self::to_0x_hash(t.hash),
+            "from": t.from.to_string(),
+            "to": t.to.to_string(),
+            "amount": Self::to_hex(t.amount),
+            "fee": Self::to_hex(t.fee),
+            "nonce": Self::to_hex(t.nonce),
+            "timestamp": Self::to_hex(t.timestamp as u64),
+            "type": format!("{:?}", t.tx_type),
+            "chainId": Self::to_hex(t.chain_id),
+            "signature": t.signature.map(|s| format!("0x{}", hex::encode(s))),
+        })
+    }
+
+    fn bytes32_to_0x(bytes: [u8; 32]) -> String {
+        format!("0x{}", hex::encode(bytes))
+    }
+
+    fn global_header_to_json(h: crate::settlement::GlobalBlockHeader) -> serde_json::Value {
+        serde_json::json!({
+            "version": Self::to_hex(u64::from(h.version)),
+            "globalHeight": Self::to_hex(h.global_height),
+            "hash": Self::bytes32_to_0x(h.calculate_hash_bytes()),
+            "previousGlobalHash": Self::bytes32_to_0x(h.previous_global_hash),
+            "chainId": Self::to_hex(h.chain_id),
+            "timestamp": Self::to_hex(h.timestamp_ms as u64),
+            "domainRegistryRoot": Self::bytes32_to_0x(h.domain_registry_root),
+            "domainCommitmentRoot": Self::bytes32_to_0x(h.domain_commitment_root),
+            "messageRoot": Self::bytes32_to_0x(h.message_root),
+            "bridgeStateRoot": Self::bytes32_to_0x(h.bridge_state_root),
+            "replayNonceRoot": Self::bytes32_to_0x(h.replay_nonce_root),
+            "proposer": h.proposer.map(|p| p.to_string()),
+            "settlementFinalityRoot": Self::bytes32_to_0x(h.settlement_finality_root),
+            // B.U.D.: storage_root anchoring - null when no
+            // Storage proofs in this block, 0x-prefixed hex when present.
+            "storageRoot": h.storage_root.map(Self::bytes32_to_0x),
+            // The two roots the fold gained after this list was written.
+            // A view that hides a field the consensus hash commits is a
+            // view callers reason on with half the truth; the header is
+            // the source and this function enumerates it. `aiRoot` was
+            // missing since the field itself landed - measured, not
+            // remembered - and `identityRoot` is not allowed to inherit
+            // that drift.
+            "aiRoot": h.ai_root.map(Self::bytes32_to_0x),
+            "identityRoot": h.identity_root.map(Self::bytes32_to_0x),
+        })
+    }
+
+    fn domain_commitment_to_json(c: crate::domain::DomainCommitment) -> serde_json::Value {
+        serde_json::json!({
+            "domainId": c.domain_id,
+            "domainHeight": Self::to_hex(c.domain_height),
+            "domainBlockHash": Self::bytes32_to_0x(c.domain_block_hash),
+            "parentDomainBlockHash": Self::bytes32_to_0x(c.parent_domain_block_hash),
+            "stateRoot": Self::bytes32_to_0x(c.state_root),
+            "txRoot": Self::bytes32_to_0x(c.tx_root),
+            "eventRoot": Self::bytes32_to_0x(c.event_root),
+            "finalityProofHash": Self::bytes32_to_0x(c.finality_proof_hash),
+            "consensusKind": format!("{:?}", c.consensus_kind),
+            "validatorSetHash": Self::bytes32_to_0x(c.validator_set_hash),
+            "timestamp": Self::to_hex(c.timestamp_ms as u64),
+            "sequence": Self::to_hex(c.sequence),
+            "producer": c.producer.map(|p| p.to_string()),
+            "leafHash": Self::bytes32_to_0x(c.leaf_hash()),
+        })
+    }
+
+    fn account_proof_to_json(
+        bundle: &crate::storage::merkle_trie::AccountProofBundle,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            // Named `proofRoot`, not `stateRoot`: this commits to the same
+            // accounts as the consensus root but under a different structure,
+            // and a client that conflates them will verify against the wrong
+            // value.
+            "proofRoot": Self::bytes32_to_0x(bundle.root),
+            "present": bundle.present,
+            "balance": Self::to_hex(bundle.balance),
+            "nonce": Self::to_hex(bundle.nonce),
+            "leafHash": Self::bytes32_to_0x(bundle.proof.leaf_hash),
+            "siblings": bundle
+                .proof
+                .siblings
+                .iter()
+                .map(|s| Self::bytes32_to_0x(*s))
+                .collect::<Vec<_>>(),
+            "directions": bundle.proof.directions.clone(),
+        })
+    }
+
+    fn consensus_domain_to_json(d: crate::domain::ConsensusDomain) -> serde_json::Value {
+        serde_json::json!({
+            "domainId": d.id,
+            "consensusKind": format!("{:?}", d.kind),
+            "status": format!("{:?}", d.status),
+            "domainChainId": Self::to_hex(d.domain_chain_id),
+            "configHash": Self::bytes32_to_0x(d.config_hash),
+            "validatorSetHash": Self::bytes32_to_0x(d.validator_set_hash),
+            "finalityAdapter": d.finality_adapter,
+            "minConfirmations": Self::to_hex(d.min_confirmations),
+            "powParameters": d.pow_parameters,
+            "bridgeEnabled": d.bridge_enabled,
+            "blockHashScheme": format!("{:?}", d.block_hash_scheme),
+            "stateRootScheme": format!("{:?}", d.state_root_scheme),
+            "txRootScheme": format!("{:?}", d.tx_root_scheme),
+        })
+    }
+
+    async fn bridge_roots_json(&self, label: &str) -> serde_json::Value {
+        let info = self.chain.get_settlement_info().await;
+        serde_json::json!({
+            "status": label,
+            "bridgeStateRoot": info["bridgeStateRoot"].clone(),
+            "replayNonceRoot": info["replayNonceRoot"].clone(),
+        })
+    }
+}
+
+fn validate_rpc_security_config(
+    security: &RpcSecurityConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if security.auth_required && security.api_key.as_deref().unwrap_or_default().is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "RPC auth_required=true but no API key configured",
+        )
+        .into());
+    }
+    // Authentication decides *who* may call; the transport limits decide how
+    // Much an accepted caller may cost. A listener that starts without both is
+    // Reachable by an authorised client and still trivially exhaustible, so the
+    // Absent limit is refused here rather than deferred to the transport crate.
+    let body_limit = security.max_request_body_size.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "RPC max_request_body_size is unset; refusing to serve an unbounded request body",
+        )
+    })?;
+    if body_limit == 0 || body_limit > RPC_BODY_LIMIT_CEILING {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "RPC max_request_body_size must be between 1 and {RPC_BODY_LIMIT_CEILING} bytes, got {body_limit}"
+            ),
+        )
+        .into());
+    }
+    let connection_limit = security.max_connections.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "RPC max_connections is unset; refusing to serve an unbounded connection count",
+        )
+    })?;
+    if connection_limit == 0 || connection_limit > RPC_CONNECTION_LIMIT_CEILING {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "RPC max_connections must be between 1 and {RPC_CONNECTION_LIMIT_CEILING}, got {connection_limit}"
+            ),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_operator_bind_address(
+    mode: &RpcMode,
+    addr: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if *mode != RpcMode::Operator {
+        return Ok(());
+    }
+    let socket_addr: SocketAddr = addr.parse().map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("operator RPC listener must be an explicit loopback socket address: {error}"),
+        )
+    })?;
+    if !socket_addr.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("operator RPC listener must bind to loopback, got {addr}"),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// The regression bench in `benches/micro/timing_safe.rs` reaches this
+/// function, which is why it is `pub`. It is NOT part of the public API
+/// surface (`#[doc(hidden)]`) and carries no stability guarantee for outside
+/// callers. If it changes, the timing-safe CI gate (static scan plus a
+/// dudect-style statistical test) has to stay green.
+#[doc(hidden)]
+pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    // Walk the expected value `b` in full on every call, fold the length
+    // difference into the accumulator, and clamp the candidate index into
+    // range instead of branching on a length mismatch: the work performed
+    // then depends only on `b.len()`, never on whether the lengths match or
+    // where the first differing byte sits. A short candidate re-reads its
+    // last byte and an empty one reads `b` itself; the length fold still
+    // refuses both. The earlier shape dummy-compared `b` against itself on
+    // the mismatch path, and same-pointer loads do not cost what
+    // cross-buffer loads cost - a small but systematic gap the timing_safe
+    // regression bench measured at several nanoseconds.
+    let a_b = a.as_bytes();
+    let b_b = b.as_bytes();
+    let mut acc: u8 = 0;
+    for byte in (a_b.len() ^ b_b.len()).to_le_bytes() {
+        acc |= byte;
+    }
+    let src: &[u8] = if a_b.is_empty() { b_b } else { a_b };
+    for (i, &expected) in b_b.iter().enumerate() {
+        // `src` is empty only when `b` is empty too, in which case this
+        // loop body never runs and the length fold alone decides.
+        let provided = src[core::cmp::min(i, src.len() - 1)];
+        acc |= provided ^ expected;
+        acc = std::hint::black_box(acc);
+    }
+    bool::from(acc.ct_eq(&0u8))
+}
+
+fn is_authorized<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
+    if !config.auth_required {
+        return true;
+    }
+
+    let Some(expected) = config.api_key.as_deref() else {
+        return false;
+    };
+
+    // Constant-time compare of provided secret material.
+    let api_ok = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|provided| constant_time_eq_str(provided, expected));
+
+    let bearer_expected = format!("Bearer {expected}");
+    let bearer_ok = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|provided| constant_time_eq_str(provided, &bearer_expected));
+
+    api_ok || bearer_ok
+}
+
+fn extract_direct_client_ip<B>(req: &HttpRequest<B>) -> Option<IpAddr> {
+    req.extensions()
+        .get::<SocketAddr>()
+        .map(std::net::SocketAddr::ip)
+}
+
+fn request_came_from_trusted_proxy<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
+    let Some(remote_ip) = extract_direct_client_ip(req) else {
+        return false;
+    };
+    config
+        .trusted_proxies
+        .iter()
+        .any(|allowed| allowed == "*" || allowed.parse::<IpAddr>().is_ok_and(|ip| ip == remote_ip))
+}
+
+fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Option<IpAddr> {
+    // Security model:
+    // 1. Prefer the real socket peer address when available.
+    // 2. Only honor forwarding headers if the socket peer is itself trusted.
+    // This closes both previous failure modes:
+    // - direct requests no longer self-DoS when allow-lists are enabled,
+    // - proxy headers are no longer trusted purely because `trusted_proxies`
+    //   Is non-empty.
+    let direct_ip = extract_direct_client_ip(req);
+
+    if !config.trusted_proxies.is_empty() && request_came_from_trusted_proxy(config, req) {
+        if let Some(forwarded_ip) = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            // Rightmost entry: the one the trusted proxy itself appended.
+            // Entries to its left are client-supplied and can be forged.
+            .and_then(|value| value.split(',').next_back())
+            .map(str::trim)
+            .and_then(|ip| ip.parse::<IpAddr>().ok())
+        {
+            return Some(forwarded_ip);
+        }
+
+        if let Some(real_ip) = req
+            .headers()
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|ip| ip.parse::<IpAddr>().ok())
+        {
+            return Some(real_ip);
+        }
+    }
+
+    direct_ip
+}
+
+/// The operator listener has no auth and always binds loopback. It accepts
+/// only a loopback `Host` and no `Origin` header, so a browser page cannot
+/// reach it.
+fn is_operator_request_allowed<B>(req: &HttpRequest<B>) -> bool {
+    if req.headers().contains_key("origin") {
+        return false;
+    }
+    req.headers()
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_loopback_host)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let valid_port = |rest: &str| {
+        rest.is_empty()
+            || rest
+                .strip_prefix(':')
+                .is_some_and(|p| p.parse::<u16>().is_ok())
+    };
+    let name = if host.starts_with('[') {
+        let Some(end) = host.find(']') else {
+            return false;
+        };
+        if !valid_port(&host[end + 1..]) {
+            return false;
+        }
+        &host[..=end]
+    } else {
+        match host.split_once(':') {
+            None => host,
+            Some((name, port)) => {
+                if port.parse::<u16>().is_err() {
+                    return false;
+                }
+                name
+            }
+        }
+    };
+    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "[::1]"
+}
+
+fn is_ip_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
+    if config.allowed_ips.is_empty() {
+        return true;
+    }
+
+    let client_ip = extract_client_ip(config, req);
+    let Some(ip) = client_ip else {
+        return false;
+    };
+
+    let ip_str = ip.to_string();
+    config
+        .allowed_ips
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == &ip_str)
+}
+
+/// How the CORS decision resolves. `cors_origins` used to only reject
+/// requests: no `Access-Control-*` header was ever added to a response. To a
+/// browser that blocked the allowed origin too, because a 200 without the
+/// headers is still withheld from JavaScript. A browser also puts no custom
+/// header on a preflight (`OPTIONS`), so with `auth_required=true` the
+/// preflight took a 401 and the real request was never sent. What the name
+/// `cors_origins` promised had no counterpart in the code.
+///
+/// The decision: CORS works by explicit allow. An empty `cors_origins` emits
+/// no CORS header at all (browser access is closed); a populated one reflects
+/// only a matching origin. `Access-Control-Allow-Credentials` is never sent:
+/// identity travels in the `x-api-key` / `Authorization` header, not in a
+/// cookie, so a `*` configuration cannot turn into session theft.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CorsOutcome {
+    /// CORS is off, or the request is not from a browser; no header is added.
+    NotApplicable,
+    /// The origin is allowed; the headers go on the response.
+    Allow(String),
+    /// The origin is not allowed; the request is rejected.
+    Deny,
+}
+
+/// A preflight cannot carry the identity headers the real request will carry,
+/// which is why it is answered before authentication. That is safe because a
+/// preflight changes no state: it answers only "may this origin try", and the
+/// IP allowlist and origin check run first.
+fn is_cors_preflight<B>(req: &HttpRequest<B>) -> bool {
+    req.method() == hyper::Method::OPTIONS
+        && req.headers().contains_key("access-control-request-method")
+}
+
+pub(crate) fn cors_outcome<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> CorsOutcome {
+    if config.cors_origins.is_empty() {
+        return CorsOutcome::NotApplicable;
+    }
+    let Some(origin) = req
+        .headers()
+        .get("origin")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return CorsOutcome::NotApplicable;
+    };
+    if config
+        .cors_origins
+        .iter()
+        .any(|allowed| allowed == "*" || allowed == origin)
+    {
+        CorsOutcome::Allow(origin.to_string())
+    } else {
+        CorsOutcome::Deny
+    }
+}
+
+/// `Vary: Origin` is required: the response varies by origin, and a cache in
+/// between must not serve one origin's response to another.
+fn apply_cors_headers(response: &mut HttpResponse, origin: &str) {
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(origin) {
+        headers.insert("access-control-allow-origin", value);
+    }
+    headers.insert("vary", HeaderValue::from_static("Origin"));
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    headers.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static("content-type, x-api-key, authorization"),
+    );
+    headers.insert("access-control-max-age", HeaderValue::from_static("600"));
+}
+
+fn preflight_response(origin: &str) -> HttpResponse {
+    let mut response = text_response(StatusCode::NO_CONTENT, "");
+    apply_cors_headers(&mut response, origin);
+    response
+}
+
+/// Upper bound for one `social_get_feed` page, whatever limit the caller asks for.
+const MAX_SOCIAL_FEED_LIMIT: usize = 200;
+
+fn clamp_feed_limit(limit: usize) -> usize {
+    limit.min(MAX_SOCIAL_FEED_LIMIT)
+}
+
+/// Upper bound for the length of one unpaginated list response (offers,
+/// data assets, grants, rankings, slashing history), so response size and
+/// serialization cost do not grow with chain state.
+const MAX_LIST_RESPONSE_ITEMS: usize = 1000;
+
+fn cap_list_response<T>(mut items: Vec<T>) -> Vec<T> {
+    items.truncate(MAX_LIST_RESPONSE_ITEMS);
+    items
+}
+
+fn is_per_ip_rate_limited(
+    config: &RpcSecurityConfig,
+    per_ip_rates: &Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+    client_ip: Option<IpAddr>,
+) -> bool {
+    let Some(limit) = config.rate_limit_per_minute else {
+        return true;
+    };
+    if limit == 0 {
+        return false;
+    }
+
+    let ip = match client_ip {
+        Some(ip) => ip,
+        None => return false,
+    };
+
+    let now = Instant::now();
+    let cutoff = now - Duration::from_secs(60);
+    let mut rates = match per_ip_rates.lock() {
+        Ok(rates) => rates,
+        Err(_) => return false,
+    };
+
+    // Opportunistically evict expired clients before admitting a new address.
+    // The retain scan happens only at the ceiling, not on every request.
+    if !rates.contains_key(&ip) && rates.len() >= MAX_TRACKED_RPC_CLIENTS {
+        rates.retain(|_, window| {
+            while window.front().is_some_and(|instant| *instant < cutoff) {
+                window.pop_front();
+            }
+            !window.is_empty()
+        });
+        if rates.len() >= MAX_TRACKED_RPC_CLIENTS {
+            // If every tracked client is still active, evict the least-recently
+            // Seen client instead of globally rejecting all new IPs. This keeps
+            // The map bounded without letting a rotational-IP attacker pin the
+            // Table forever and deny unrelated clients.
+            if let Some(oldest_ip) = rates
+                .iter()
+                .filter_map(|(client, window)| window.front().map(|first| (*client, *first)))
+                .min_by_key(|(_, first)| *first)
+                .map(|(client, _)| client)
+            {
+                rates.remove(&oldest_ip);
+            }
+        }
+        if rates.len() >= MAX_TRACKED_RPC_CLIENTS {
+            return false;
+        }
+    }
+
+    let window = rates.entry(ip).or_default();
+    while window.front().is_some_and(|instant| *instant < cutoff) {
+        window.pop_front();
+    }
+    if window.len() >= limit as usize {
+        return false;
+    }
+    window.push_back(now);
+    true
+}
+
+fn text_response(status: StatusCode, body: &'static str) -> HttpResponse {
+    HttpResponse::builder()
+        .status(status)
+        .header("content-type", HeaderValue::from_static("text/plain"))
+        .body(HttpBody::from(body))
+        // Every argument is a literal, so the builder cannot reject this.
+        // An RPC error response must never be what kills a node.
+        .unwrap_or_else(|_| HttpResponse::new(HttpBody::from(body)))
+}
+
+fn parse_hex32_field(hex_str: &str, field_name: &str) -> Result<[u8; 32], ErrorObjectOwned> {
+    let clean = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let bytes = hex::decode(clean).map_err(|e| {
+        ErrorObjectOwned::owned(-32602, format!("Invalid {field_name} hex: {e}"), None::<()>)
+    })?;
+    if bytes.len() != 32 {
+        return Err(ErrorObjectOwned::owned(
+            -32602,
+            format!("{field_name} must be 32 bytes"),
+            None::<()>,
+        ));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+/// Parses a signed grant authorisation: `{"ownerPublicKey": "0x…", "signature":
+/// "0x…"}`, the public key being the FIPS 204 ML-DSA-87 key of the account whose
+/// word the mutation is. The address the key derives to is the only identity the
+/// registry believes: `issuer` and `caller` used to be strings a caller typed,
+/// which let anybody mint or revoke grants on somebody else's content.
+/// Map a grant authorisation failure onto a JSON-RPC error code.
+///
+/// A node built without the wallet verifier cannot check a grant signature at
+/// all. That is an operator problem and gets the internal-error code, so a
+/// client does not retry it with a different key; every other refusal is about
+/// what the caller supplied and gets the invalid-params code.
+fn grant_auth_error(e: crate::storage::GrantAuthError) -> ErrorObjectOwned {
+    let code = match e {
+        crate::storage::GrantAuthError::VerifierUnavailable => -32603,
+        crate::storage::GrantAuthError::BadSignature
+        | crate::storage::GrantAuthError::WrongOwner => -32602,
+    };
+    ErrorObjectOwned::owned(code, e.to_string(), None::<()>)
+}
+
+fn parse_grant_auth(
+    v: Option<&serde_json::Value>,
+) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
+    parse_signed_key_object(v, "authorization", "ownerPublicKey")
+}
+
+/// Parses a viewer's reveal claim: `{"viewerPublicKey": "0x…", "signature":
+/// "0x…", "issuedAt": n}`. The same shape as a grant authorisation, under the
+/// name of the role that signs it: the key is the viewer's, and a client that
+/// sends the owner's key under `ownerPublicKey` here is told which field is
+/// missing instead of getting a signature refusal it cannot explain.
+fn parse_view_claim(
+    claim: &serde_json::Value,
+) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
+    parse_signed_key_object(Some(claim), "viewerClaim", "viewerPublicKey")
+}
+
+/// The shared reader behind [`parse_grant_auth`] and [`parse_view_claim`]: a
+/// JSON object carrying an ML-DSA-87 public key under `key_field` and a
+/// `signature`, both hex. `label` names the object in every refusal.
+fn parse_signed_key_object(
+    v: Option<&serde_json::Value>,
+    label: &str,
+    key_field: &str,
+) -> Result<crate::storage::GrantAuthorization, ErrorObjectOwned> {
+    let Some(v) = v.filter(|v| v.is_object()) else {
+        return Err(ErrorObjectOwned::owned(
+            -32602,
+            format!("{label} object required: {key_field} + signature"),
+            None::<()>,
+        ));
+    };
+    let al = |k: &str| -> Result<Vec<u8>, ErrorObjectOwned> {
+        let ham = v
+            .get(k)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("{label}.{k} must be a hex string"),
+                    None::<()>,
+                )
+            })?;
+        hex::decode(ham.strip_prefix("0x").unwrap_or(ham))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("{label}.{k}: {e}"), None::<()>))
+    };
+    let owner_key: [u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN] =
+        al(key_field)?.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "{label}.{key_field} must be {} bytes",
+                    crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN
+                ),
+                None::<()>,
+            )
+        })?;
+    let signature = al("signature")?;
+    Ok(crate::storage::GrantAuthorization {
+        owner_key,
+        signature,
+    })
+}
+
+/// Check a viewer's signed claim to open a reveal session and return the
+/// address it speaks for.
+///
+/// The claim is `{viewerPublicKey, signature, issuedAt}` in the same shape as
+/// a grant authorisation (the viewer signs with its own wallet key). The
+/// address is derived from the key, the signature is checked over
+/// [`crate::storage::view_claim_digest`] of this exact request, and a claim
+/// older than [`crate::storage::VIEW_CLAIM_MAX_AGE_SECS`] is refused. A
+/// claim dated in the future is refused too, so a
+/// caller cannot pre-sign claims that come alive later.
+/// The `owner` field of a reveal request against the owner the chain
+/// recorded for the content. A recorded owner that is somebody else is
+/// refused by name; content with no recorded owner is left to the grant
+/// lookup, which opens nothing sealed for it.
+fn check_claimed_owner(
+    recorded: Option<Address>,
+    claimed: &Address,
+) -> Result<(), ErrorObjectOwned> {
+    match recorded {
+        Some(recorded) if recorded != *claimed => Err(ErrorObjectOwned::owned(
+            -32006,
+            "reveal: owner is not the recorded owner of this content",
+            None::<()>,
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn verify_view_claim(
+    claim: &serde_json::Value,
+    content_id: &crate::storage::ContentId,
+    key_id: &[u8; 32],
+    owner: &Address,
+    packed: &[u8],
+    now: u64,
+) -> Result<Address, ErrorObjectOwned> {
+    let auth = parse_view_claim(claim)?;
+    let issued_at = claim
+        .get("issuedAt")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32602,
+                "viewerClaim.issuedAt must be unix seconds",
+                None::<()>,
+            )
+        })?;
+    let max_age = crate::storage::VIEW_CLAIM_MAX_AGE_SECS;
+    if issued_at > now || issued_at.saturating_add(max_age) < now {
+        return Err(ErrorObjectOwned::owned(
+            -32602,
+            format!(
+                "viewerClaim.issuedAt {issued_at} is in the future or more than {max_age} s older than {now}"
+            ),
+            None::<()>,
+        ));
+    }
+    let viewer = auth.derived_owner().map_err(grant_auth_error)?;
+    let payload_commitment = crate::storage::payload_commitment(packed);
+    let digest = crate::storage::view_claim_digest(
+        content_id,
+        &viewer,
+        key_id,
+        owner,
+        &payload_commitment,
+        issued_at,
+    );
+    auth.verify(&digest, &viewer).map_err(grant_auth_error)?;
+    Ok(viewer)
+}
+
+/// Map a reveal-gateway refusal to a JSON-RPC error. Each refusal kind gets
+/// its own code so a client can tell "you asked too much" (invalid params)
+/// from "the table is full" (resource) from "your session is gone" (lookup)
+/// without parsing prose.
+fn reveal_gateway_rpc_error(e: crate::storage::RevealGatewayError) -> ErrorObjectOwned {
+    use crate::storage::RevealGatewayError;
+    match e {
+        RevealGatewayError::AskTooLarge { count, max } => ErrorObjectOwned::owned(
+            -32602,
+            format!("reveal: asked {count} frames, ceiling is {max}"),
+            None::<()>,
+        ),
+        RevealGatewayError::UnknownSession(id) => {
+            ErrorObjectOwned::owned(-32001, format!("reveal: unknown session {id}"), None::<()>)
+        }
+        RevealGatewayError::Expired { id } => {
+            ErrorObjectOwned::owned(-32002, format!("reveal: session {id} expired"), None::<()>)
+        }
+        RevealGatewayError::SessionLimit { max } => ErrorObjectOwned::owned(
+            -32003,
+            format!("reveal: session table full ({max})"),
+            None::<()>,
+        ),
+        RevealGatewayError::Revoked { id } => ErrorObjectOwned::owned(
+            -32005,
+            format!("reveal: session {id} grant revoked"),
+            None::<()>,
+        ),
+        RevealGatewayError::Reveal(_) => ErrorObjectOwned::owned(-32603, e.to_string(), None::<()>),
+    }
+}
+
+fn parse_content_id(hex_str: &str) -> Result<ContentId, ErrorObjectOwned> {
+    Ok(ContentId(parse_hex32_field(hex_str, "ContentId")?))
+}
+
+fn parse_pollen_asset_id(hex_str: &str) -> Result<crate::pollen::AssetId, ErrorObjectOwned> {
+    Ok(crate::pollen::AssetId(parse_hex32_field(
+        hex_str, "AssetId",
+    )?))
+}
+
+/// One view-grant row as a client reads it. `live` is the registry's own answer
+/// for this moment, so a revoked row still appears with its history instead of
+/// vanishing from the listing that explains why a viewer was refused.
+fn view_grant_json(g: &crate::storage::ViewGrant) -> serde_json::Value {
+    serde_json::json!({
+        "grantId": g.grant_id,
+        "contentId": format!("0x{}", hex::encode(g.content_id.0)),
+        "issuer": g.issuer.to_hex(),
+        "grantee": g.grantee.map(|a| a.to_hex()),
+        "keyId": format!("0x{}", hex::encode(g.key_id)),
+        "policy": format!("{:?}", g.policy),
+        "openedEpoch": g.opened_epoch,
+        "revokedEpoch": g.revoked_epoch,
+        "live": g.is_live(),
+    })
+}
+
+/// Hand one Three event to the sink this node was started with.
+///
+/// A trait object rather than a concrete type, so a gateway's sink and a headless
+/// node's discarding one share a call site: the revoke path cannot end up
+/// reporting to a sink only one of them has.
+fn fire_three_event(sink: &mut dyn ThreeEventHook, event: ThreeHookEvent) {
+    emit_hook(sink, event);
+}
+
+fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
+    serde_json::json!({
+        "contentId": format!("0x{}", hex::encode(feed.content_id.as_bytes())),
+        "providerCommitment": format!("0x{}", hex::encode(feed.provider_commitment)),
+        "packedLen": feed.packed_len,
+        "packedIsZlib": feed.packed_is_zlib,
+        "transformShrank": feed.transform_shrank,
+        "progressivePrefixBlocks": feed.progressive_prefix_blocks,
+        "k": feed.k,
+        "preflightK": feed.preflight_k,
+        "plannedDrops": feed.planned_drops,
+        "ceilingDrops": feed.ceiling_drops,
+        "dropBound": feed.drop_bound,
+        "repairPermillage": feed.repair_permillage,
+        "repairMargin": feed.repair_margin,
+        "frameCount": feed.frame_count,
+        "dropWireLen": feed.drop_wire_len,
+        "streamCommitment": format!("0x{}", hex::encode(feed.stream_commitment)),
+        "streamPrefix": feed.stream_prefix,
+        "feedId": format!("0x{}", hex::encode(feed.feed_id)),
+        "videoCommitment": format!("0x{}", hex::encode(feed.video_commitment)),
+        "recipeCommitment": format!("0x{}", hex::encode(feed.recipe_commitment)),
+        "burstLen": feed.burst_len,
+        "burstFold": format!("0x{}", hex::encode(feed.burst_fold)),
+        "framesAccepted": feed.frames_accepted,
+        "framesRejected": feed.frames_rejected,
+        "meterWeight": feed.meter_weight,
+        "rasterModules": feed.raster_modules,
+        "rasterSide": feed.raster_side,
+        "pngLen": feed.png_len,
+        "ecLevel": feed.ec_level,
+        "codecAllowed": feed.codec_allowed,
+        "videoBlobKind": format!("{:?}", feed.video_blob_kind),
+        "seedIsPublic": feed.seed_is_public,
+        "regeneratedLen": feed.regenerated_len,
+        "sealedRecipe": format!("0x{}", hex::encode(feed.sealed_recipe)),
+        "publiclyReemitable": feed.publicly_reemitable,
+        "decodedBodyLen": feed.decoded_body_len,
+        "videoBodyLen": feed.video_body_len,
+        "recipeClass": feed.recipe_class,
+        "a4Agreement": feed.a4_agreement,
+        "nftMeta": format!("0x{}", hex::encode(feed.nft_meta)),
+        "visibility": feed.visibility.clone(),
+        "deleteRotatesKey": feed.rotate_key_on_delete,
+    })
+}
+
+/// A refused emit is the caller's arithmetic, not the node's, unless a stage
+/// below this one is what said no: an out-of-bounds request is a bad param and
+/// everything else is a server-side refusal the caller cannot fix by resending
+/// the same body.
+fn emit_reject(e: crate::storage::emit::EmitError) -> ErrorObjectOwned {
+    let code = match &e {
+        crate::storage::emit::EmitError::ZeroBlockLen
+        | crate::storage::emit::EmitError::TooLarge { .. }
+        | crate::storage::emit::EmitError::BurstTooWide { .. }
+        | crate::storage::emit::EmitError::FrameOutOfRange { .. }
+        | crate::storage::emit::EmitError::Edition(_)
+        | crate::storage::emit::EmitError::UnsealedGated => -32602,
+        _ => -32000,
+    };
+    ErrorObjectOwned::owned(code, format!("qr feed: {e}"), None::<()>)
+}
+
+/// Parse the optional `seal_seed` argument (32 bytes, hex, optional `0x`).
+/// `None` leaves the feed unsealed; a present-but-malformed seed is a caller
+/// fault, not a silent fallback to clear frames.
+fn parse_seal_seed(seed_hex: Option<String>) -> Result<Option<[u8; 32]>, ErrorObjectOwned> {
+    let Some(seed_hex) = seed_hex else {
+        return Ok(None);
+    };
+    let hex = seed_hex.strip_prefix("0x").unwrap_or(seed_hex.as_str());
+    let bytes = hex::decode(hex).map_err(|e| {
+        ErrorObjectOwned::owned(-32602, format!("seal_seed decode failed: {e}"), None::<()>)
+    })?;
+    let len = bytes.len();
+    let seed: [u8; 32] = bytes.try_into().map_err(|_| {
+        ErrorObjectOwned::owned(
+            -32602,
+            format!("seal_seed must be 32 bytes, got {len}"),
+            None::<()>,
+        )
+    })?;
+    Ok(Some(seed))
+}
+
+fn storage_deal_to_json(deal: &StorageDeal) -> serde_json::Value {
+    serde_json::json!({
+        "dealId": deal.deal_id,
+        "domainId": deal.domain_id,
+        "manifestId": format!("0x{}", hex::encode(deal.manifest_id.0)),
+        "shardId": format!("0x{}", hex::encode(deal.shard_id.0)),
+        "operator": format!("0x{}", deal.operator.to_hex()),
+        "replicaIndex": deal.replica_index,
+        "startEpoch": deal.deal_start_epoch,
+        "endEpoch": deal.deal_end_epoch,
+        "status": format!("{:?}", deal.status),
+    })
+}
+
+fn retrieval_challenge_to_json(challenge: &RetrievalChallenge) -> serde_json::Value {
+    serde_json::json!({
+        "challengeId": challenge.challenge_id,
+        "dealId": challenge.deal_id,
+        "shardId": format!("0x{}", hex::encode(challenge.shard_id.0)),
+        "byteStart": challenge.byte_start,
+        "byteEnd": challenge.byte_end,
+        "challengeEpoch": challenge.challenge_epoch,
+        "deadlineEpoch": challenge.deadline_epoch,
+        "opener": format!("0x{}", challenge.opener.to_hex()),
+        "openerBond": challenge.opener_bond,
+    })
+}
+
+fn storage_economics_event_to_json(
+    event: &crate::chain::blockchain::StorageEconomicsEvent,
+) -> serde_json::Value {
+    serde_json::json!({
+        "epoch": event.epoch,
+        "dealId": event.deal_id,
+        "operator": format!("0x{}", event.operator.to_hex()),
+        "amount": event.amount,
+        "balanceEffect": event.balance_effect,
+        "kind": format!("{:?}", event.kind),
+    })
+}
+
+#[jsonrpsee::core::async_trait]
+impl BudlumApiServer for RpcServer {
+    async fn chain_id(&self) -> Result<String, ErrorObjectOwned> {
+        let chain_id = self.chain.get_chain_id().await;
+        Ok(Self::to_hex(chain_id))
+    }
+
+    async fn block_number(&self) -> Result<String, ErrorObjectOwned> {
+        let height = self.chain.get_height().await;
+        Ok(Self::to_hex(height))
+    }
+
+    async fn get_block_by_number(
+        &self,
+        number: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        match self.chain.get_block(number).await {
+            Some(b) => Ok(Self::block_to_json(b)),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    async fn get_block_by_hash(&self, hash: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_hash = hash.strip_prefix("0x").unwrap_or(&hash);
+        match self.chain.get_block_by_hash(clean_hash.to_string()).await {
+            Some(b) => Ok(Self::block_to_json(b)),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    async fn get_balance(&self, address: String) -> Result<String, ErrorObjectOwned> {
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let balance = self.chain.get_balance(&addr).await;
+        Ok(Self::to_hex(balance))
+    }
+
+    async fn get_nonce(&self, address: String) -> Result<String, ErrorObjectOwned> {
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let nonce = self.chain.get_nonce(&addr).await;
+        Ok(Self::to_hex(nonce))
+    }
+
+    async fn get_account_proof(
+        &self,
+        address: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        // `None` means the node could not answer at all (the chain actor is
+        // gone). Reported as an error rather than an empty result: a caller
+        // must never be able to read "we did not answer" as "the account is
+        // absent", because absence here is a positive claim carrying a proof.
+        let bundle = self.chain.get_account_proof(&addr).await.ok_or_else(|| {
+            ErrorObjectOwned::owned(-32603, "Account proof unavailable", None::<()>)
+        })?;
+        // A bundle that does not verify against its own root is a node bug,
+        // not a client error, and must never reach the wire: a caller cannot
+        // tell a malformed proof from a forged one.
+        if !bundle.verify_self_consistent() {
+            return Err(ErrorObjectOwned::owned(
+                -32603,
+                "Account proof failed its own verification",
+                None::<()>,
+            ));
+        }
+        Ok(Self::account_proof_to_json(&bundle))
+    }
+
+    async fn send_raw_transaction(&self, tx: Transaction) -> Result<String, ErrorObjectOwned> {
+        if let Err(e) = crate::network::protocol::NetworkMessage::validate_tx_size(&tx) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("Transaction too large: {e:?}"),
+                None::<()>,
+            ));
+        }
+
+        if !tx.verify() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid transaction signature",
+                None::<()>,
+            ));
+        }
+
+        let tx_hash = tx.hash.clone();
+        let tx_clone = tx.clone();
+        self.chain.add_transaction(tx).await.map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid params: {e}"), None::<()>)
+        })?;
+        self.node.broadcast_tx_sync(tx_clone);
+        Ok(Self::to_0x_hash(tx_hash))
+    }
+
+    async fn get_transaction_by_hash(
+        &self,
+        hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_hash = hash.strip_prefix("0x").unwrap_or(&hash);
+        match self
+            .chain
+            .get_transaction_by_hash(clean_hash.to_string())
+            .await
+        {
+            Some(t) => Ok(Self::tx_to_json(t)),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    async fn get_transaction_receipt(
+        &self,
+        hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_hash = hash.strip_prefix("0x").unwrap_or(&hash);
+        match self.chain.get_tx_receipt(clean_hash.to_string()).await {
+            Some(receipt) => Ok(receipt),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    async fn gas_price(&self) -> Result<String, ErrorObjectOwned> {
+        let fee = self.chain.get_base_fee().await;
+        Ok(Self::to_hex(fee))
+    }
+
+    async fn estimate_gas(&self, tx: Transaction) -> Result<String, ErrorObjectOwned> {
+        if let Err(_e) = crate::network::protocol::NetworkMessage::validate_tx_size(&tx) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("Transaction too large: {_e:?}"),
+                None::<()>,
+            ));
+        }
+        // The chain charges a flat fee: `AccountState::validate_transaction`
+        // Rejects `fee < base_fee`, rejects a `max_fee` that diverges from
+        // `fee`, and rejects any `priority_fee`. `total_cost` is
+        // `amount + fee`. There is no gas metering - the `GasSchedule`
+        // Per-opcode numbers are not consulted on any settlement path.
+        //
+        // The previous answer was the literal `21000` for every transaction
+        // Type, which is Ethereum's transfer intrinsic and has nothing to do
+        // With what this chain charges. A wallet sizing a transaction from it
+        // Would price a stake, a vote and a bridge relay identically, and all
+        // Three wrong: the number the chain actually enforces is `base_fee`,
+        // Which is 10 on mainnet, 1 on testnet and devnet, and moves with
+        // `adjust_base_fee` every block.
+        //
+        // So the estimate is the fee floor the caller's transaction must
+        // Clear. If the caller already set a fee at or above the floor, that
+        // Fee is what will be charged and it is returned unchanged.
+        let base_fee = self.chain.get_base_fee().await;
+        Ok(Self::to_hex(tx.fee.max(base_fee)))
+    }
+
+    async fn tx_precheck(&self, tx: Transaction) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if let Err(_e) = crate::network::protocol::NetworkMessage::validate_tx_size(&tx) {
+            return Ok(serde_json::json!({
+                "accepted": false,
+                "reasons": ["transaction_too_large"]
+            }));
+        }
+        Ok(self.chain.tx_precheck(tx).await)
+    }
+
+    async fn syncing(&self) -> Result<bool, ErrorObjectOwned> {
+        Ok(self.node.is_syncing())
+    }
+
+    async fn net_version(&self) -> Result<String, ErrorObjectOwned> {
+        let chain_id = self.chain.get_chain_id().await;
+        Ok(chain_id.to_string())
+    }
+
+    async fn net_listening(&self) -> Result<bool, ErrorObjectOwned> {
+        Ok(true)
+    }
+
+    async fn net_peer_count(&self) -> Result<String, ErrorObjectOwned> {
+        Ok(Self::to_hex(
+            self.node
+                .peer_count
+                .load(std::sync::atomic::Ordering::SeqCst) as u64,
+        ))
+    }
+
+    async fn get_settlement_info(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(self.chain.get_settlement_info().await)
+    }
+
+    async fn get_global_header(&self, height: u64) -> Result<serde_json::Value, ErrorObjectOwned> {
+        match self.chain.get_global_header(height).await {
+            Some(header) => Ok(Self::global_header_to_json(header)),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let commitments = self.chain.get_domain_commitments().await;
+        Ok(serde_json::Value::Array(
+            commitments
+                .into_iter()
+                .map(Self::domain_commitment_to_json)
+                .collect(),
+        ))
+    }
+
+    async fn get_consensus_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let domains = self.chain.get_consensus_domains().await;
+        Ok(serde_json::Value::Array(
+            domains
+                .into_iter()
+                .map(Self::consensus_domain_to_json)
+                .collect(),
+        ))
+    }
+
+    async fn register_consensus_domain(
+        &self,
+        domain: crate::domain::ConsensusDomain,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registerConsensusDomain")?;
+        let domain_id = domain.id;
+        self.chain
+            .register_consensus_domain(domain)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid consensus domain: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let info = self.chain.get_settlement_info().await;
+        let registry_root = info["domainRegistryRoot"]
+            .as_str()
+            .map_or_else(|| "0x".to_string(), |root| format!("0x{root}"));
+        Ok(serde_json::json!({
+            "domainId": domain_id,
+            "domainRegistryRoot": registry_root,
+        }))
+    }
+
+    async fn register_external_domain(
+        &self,
+        registration: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: only the operator may declare the terms. BLG-0155
+        // (P07-F10): the bond itself is no longer a declared number - the
+        // registration debits the poster's balance into escrow before the
+        // registry sees it (Blockchain::register_external_domain).
+        self.require_operator("bud_registerExternalDomain")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            spec: crate::cross_domain::external::AdapterSpec,
+            policy: crate::cross_domain::external::VerificationPolicy,
+            /// Omitted economics default to the intake's conservative shape
+            /// at the given ceiling; explicit economics are taken as sent.
+            economics: Option<crate::cross_domain::external::DomainEconomics>,
+            routing_ceiling_atoms: Option<u128>,
+            versions: crate::cross_domain::external::VersionPolicy,
+            bond_atoms: u128,
+            poster: String,
+            golden: crate::cross_domain::external::RawConsensusEvidence,
+        }
+        let params: Params = serde_json::from_value(registration).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid registration: {e}"), None::<()>)
+        })?;
+        let clean = params.poster.strip_prefix("0x").unwrap_or(&params.poster);
+        let poster = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid poster address: {e}"), None::<()>)
+        })?;
+        let economics = match (params.economics, params.routing_ceiling_atoms) {
+            (Some(e), _) => e,
+            (None, Some(ceiling)) => {
+                crate::cross_domain::external::IntakeState::conservative_economics(ceiling)
+            }
+            (None, None) => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide either economics or routing_ceiling_atoms",
+                    None::<()>,
+                ))
+            }
+        };
+        let key = self
+            .chain
+            .register_external_domain(crate::cross_domain::external::RegistrationRequest {
+                spec: params.spec,
+                policy: params.policy,
+                economics,
+                versions: params.versions,
+                bond_atoms: params.bond_atoms,
+                poster,
+                golden: params.golden,
+            })
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("External domain registration refused: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({
+            "domainKey": format!("0x{}", hex::encode(key.as_bytes())),
+        }))
+    }
+
+    async fn submit_external_evidence(
+        &self,
+        evidence: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: `submitter` is an unsigned field, so a public caller
+        // could vote under any bonded prover's name.
+        self.require_operator("bud_submitExternalEvidence")?;
+        let evidence: crate::cross_domain::external::RawConsensusEvidence =
+            serde_json::from_value(evidence).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid evidence: {e}"), None::<()>)
+            })?;
+        let outcome = self
+            .chain
+            .submit_external_evidence(evidence)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("External evidence refused: {e}"),
+                    None::<()>,
+                )
+            })?;
+        match outcome {
+            Some(attestation) => serde_json::to_value(&attestation).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("Attestation serialization failed: {e}"),
+                    None::<()>,
+                )
+            }),
+            // The answer entered a quorum round that has not decided yet.
+            // Pending is a state, not an error: the watcher reads the round
+            // through bud_getExternalQuorumRound.
+            None => Ok(serde_json::json!({
+                "roundPending": true,
+            })),
+        }
+    }
+
+    async fn get_external_domain_profile(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let Some((profile, entry, descriptor)) = self.chain.get_external_domain_profile(key).await
+        else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No external domain is registered under this key",
+                None::<()>,
+            ));
+        };
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "profile": to_val("Profile", serde_json::to_value(&profile))?,
+            "intakeEntry": to_val("Intake entry", serde_json::to_value(&entry))?,
+            "descriptor": to_val("Descriptor", serde_json::to_value(&descriptor))?,
+        }))
+    }
+
+    async fn get_external_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let profiles = self.chain.get_external_domain_profiles().await;
+        let items: Vec<serde_json::Value> = profiles
+            .into_iter()
+            .map(|(profile, summary)| {
+                serde_json::json!({
+                    "domainKey": format!("0x{}", hex::encode(profile.domain.as_bytes())),
+                    "summary": summary,
+                    "profile": serde_json::to_value(&profile).unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "domains": items }))
+    }
+
+    async fn get_external_intake_digest(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let digest = self.chain.get_external_intake_digest().await.map_err(|e| {
+            ErrorObjectOwned::owned(-32603, format!("Intake digest failed: {e}"), None::<()>)
+        })?;
+        Ok(serde_json::json!({
+            "digest": format!("0x{}", hex::encode(digest)),
+        }))
+    }
+
+    async fn readmit_external_domain(
+        &self,
+        domain_key_hex: String,
+        reason: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_readmitExternalDomain")?;
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        self.chain
+            .readmit_external_domain(key, reason)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Readmission refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({ "readmitted": true }))
+    }
+
+    async fn schedule_external_fork(
+        &self,
+        domain_key_hex: String,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_scheduleExternalFork")?;
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        self.chain
+            .schedule_external_fork(key, old_version, new_version, fork_height, grace_heights)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Fork refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({ "scheduled": true }))
+    }
+
+    async fn slash_external_prover(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_slashExternalProver")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            domain_key_hex: String,
+            prover: String,
+            evidence_digest_hex: String,
+            value_atoms: u128,
+            challenger: String,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid slash request: {e}"), None::<()>)
+        })?;
+        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
+        let parse_addr = |s: &str, what: &str| -> Result<Address, ErrorObjectOwned> {
+            let clean = s.strip_prefix("0x").unwrap_or(s);
+            Address::from_hex(clean).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid {what}: {e}"), None::<()>)
+            })
+        };
+        let prover = parse_addr(&params.prover, "prover address")?;
+        let challenger = parse_addr(&params.challenger, "challenger address")?;
+        let digest_clean = params
+            .evidence_digest_hex
+            .strip_prefix("0x")
+            .unwrap_or(&params.evidence_digest_hex);
+        let digest_bytes = hex::decode(digest_clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid evidence digest: {e}"), None::<()>)
+        })?;
+        let evidence_digest: [u8; 32] = digest_bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Evidence digest must be 32 bytes", None::<()>)
+        })?;
+        let (taken, reward) = self
+            .chain
+            .slash_external_prover(key, prover, evidence_digest, params.value_atoms, challenger)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Slash refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "slashedAtoms": taken.to_string(),
+            "challengerRewardAtoms": reward.to_string(),
+        }))
+    }
+
+    async fn bond_external_prover(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_bondExternalProver")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            domain_key_hex: String,
+            prover: String,
+            bond_atoms: u128,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid bond request: {e}"), None::<()>)
+        })?;
+        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
+        let clean = params.prover.strip_prefix("0x").unwrap_or(&params.prover);
+        let prover = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid prover address: {e}"), None::<()>)
+        })?;
+        self.chain
+            .bond_external_prover(key, prover, params.bond_atoms)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Bond refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "bonded": true,
+            "prover": format!("0x{}", hex::encode(prover.as_bytes())),
+            "bondAtoms": params.bond_atoms.to_string(),
+        }))
+    }
+
+    async fn set_external_quorum_policy(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_setExternalQuorumPolicy")?;
+        #[derive(serde::Deserialize)]
+        struct Params {
+            domain_key_hex: String,
+            /// Optional full policy. When absent, `agreement_threshold` and
+            /// `max_participants` build the strict form - refuse on dispute,
+            /// refuse on low participation - which is the only form fit for
+            /// a state root that will be committed to.
+            policy: Option<crate::cross_domain::external::QuorumPolicy>,
+            agreement_threshold: Option<usize>,
+            max_participants: Option<usize>,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid quorum policy request: {e}"),
+                None::<()>,
+            )
+        })?;
+        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
+        let policy = match (params.policy, params.agreement_threshold) {
+            (Some(policy), _) => policy,
+            (None, Some(threshold)) => {
+                let max = params.max_participants.unwrap_or(threshold);
+                crate::cross_domain::external::QuorumPolicy::strict(threshold, max)
+            }
+            (None, None) => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide either `policy` or `agreement_threshold`",
+                    None::<()>,
+                ));
+            }
+        };
+        if policy.agreement_threshold == 0 || policy.max_participants < policy.agreement_threshold {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Quorum policy must have threshold >= 1 and max_participants >= threshold",
+                None::<()>,
+            ));
+        }
+        self.chain
+            .set_external_quorum_policy(key, policy)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Quorum policy refused: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "installed": true,
+            "agreementThreshold": policy.agreement_threshold,
+            "maxParticipants": policy.max_participants,
+        }))
+    }
+
+    async fn get_external_quorum_round(
+        &self,
+        domain_key_hex: String,
+        height: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let (policy, _) = self.chain.external_quorum_rounds(key).await;
+        let Some(round) = self.chain.external_quorum_round(key, height).await else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No quorum round is retained for this domain and height",
+                None::<()>,
+            ));
+        };
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        let progress = policy.map(|p| round.progress(&p));
+        Ok(serde_json::json!({
+            "round": to_val("Round", serde_json::to_value(&round))?,
+            "progress": to_val("Progress", serde_json::to_value(progress))?,
+        }))
+    }
+
+    async fn get_external_quorum_rounds(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let (policy, rounds) = self.chain.external_quorum_rounds(key).await;
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        let progresses: Vec<Option<crate::cross_domain::external::RoundProgress>> = rounds
+            .iter()
+            .map(|round| policy.as_ref().map(|p| round.progress(p)))
+            .collect();
+        Ok(serde_json::json!({
+            "policy": to_val("Policy", serde_json::to_value(policy))?,
+            "rounds": to_val("Rounds", serde_json::to_value(&rounds))?,
+            "progress": to_val("Progress", serde_json::to_value(&progresses))?,
+            "retentionBlocks": crate::cross_domain::external::ROUND_RETENTION_BLOCKS,
+        }))
+    }
+
+    async fn encode_external_evidence(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::zkvm_proof::{EVIDENCE_VERSION, MAX_PAYLOAD_BYTES};
+        use crate::cross_domain::external::{
+            encode_external_evidence, RawConsensusEvidence, VersionPolicy, ZkFinalityEvidence,
+        };
+        #[derive(serde::Deserialize)]
+        struct Params {
+            /// Full BudZKVM finality claim material; when present, the
+            /// payload is its encoding and the version is the adapter's.
+            zk_evidence: Option<ZkFinalityEvidence>,
+            /// Raw payload hex for adapters whose payloads are built
+            /// elsewhere (e.g. a sync-committee update).
+            payload_hex: Option<String>,
+            adapter_name: String,
+            network: String,
+            evidence_version: Option<u32>,
+            declared_height: u64,
+            declared_root_hex: String,
+            submitter: String,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid encode request: {e}"), None::<()>)
+        })?;
+        let (payload, evidence_version) = match (&params.zk_evidence, &params.payload_hex) {
+            (Some(zk), None) => {
+                let payload = zk.encode().map_err(|e| {
+                    ErrorObjectOwned::owned(-32602, format!("Encoding refused: {e}"), None::<()>)
+                })?;
+                if payload.len() > MAX_PAYLOAD_BYTES {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        format!(
+                            "Encoded payload is {} bytes, above the {} cap the decoder enforces",
+                            payload.len(),
+                            MAX_PAYLOAD_BYTES
+                        ),
+                        None::<()>,
+                    ));
+                }
+                (payload, EVIDENCE_VERSION)
+            }
+            (None, Some(hex_payload)) => {
+                let clean = hex_payload.strip_prefix("0x").unwrap_or(hex_payload);
+                let payload = hex::decode(clean).map_err(|e| {
+                    ErrorObjectOwned::owned(-32602, format!("Invalid payload hex: {e}"), None::<()>)
+                })?;
+                let version = params.evidence_version.ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        "A raw payload needs an explicit evidence_version",
+                        None::<()>,
+                    )
+                })?;
+                (payload, version)
+            }
+            _ => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide exactly one of `zk_evidence` or `payload_hex`",
+                    None::<()>,
+                ));
+            }
+        };
+        let adapter = crate::cross_domain::external::AdapterId::from_name(&params.adapter_name);
+        let clean = params
+            .submitter
+            .strip_prefix("0x")
+            .unwrap_or(&params.submitter);
+        let submitter = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid submitter: {e}"), None::<()>)
+        })?;
+        let root_clean = params
+            .declared_root_hex
+            .strip_prefix("0x")
+            .unwrap_or(&params.declared_root_hex);
+        let root_bytes = hex::decode(root_clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid declared root: {e}"), None::<()>)
+        })?;
+        let declared_root: [u8; 32] = root_bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Declared root must be 32 bytes", None::<()>)
+        })?;
+        let evidence = RawConsensusEvidence {
+            adapter,
+            evidence_version,
+            network: params.network.clone(),
+            payload,
+            declared_height: params.declared_height,
+            declared_root,
+            submitter,
+        };
+        // The consensus-domain carrier: the same encoding the finality
+        // dispatch decodes when an external domain backs a local one.
+        let carrier = encode_external_evidence(&evidence).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Carrier encoding refused: {e}"), None::<()>)
+        })?;
+        let carrier_bytes = serde_json::to_vec(&carrier).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("Carrier serialization failed: {e}"),
+                None::<()>,
+            )
+        })?;
+        // The version policy a registrar would declare for a fresh domain:
+        // one window, this version, no sunset.
+        let starting_versions = VersionPolicy::single(adapter, evidence_version, 0);
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "evidence": to_val("Evidence", serde_json::to_value(&evidence))?,
+            "evidenceDigest": format!("0x{}", hex::encode(evidence.digest())),
+            "domainKey": format!(
+                "0x{}",
+                hex::encode(
+                    crate::cross_domain::external::DomainKey::from_parts(
+                        &adapter,
+                        &params.network
+                    )
+                    .as_bytes()
+                )
+            ),
+            "finalityCarrierJson": String::from_utf8_lossy(&carrier_bytes),
+            "startingVersionPolicy": to_val("Versions", serde_json::to_value(&starting_versions))?,
+            "limits": {
+                "zkMaxPayloadBytes": MAX_PAYLOAD_BYTES,
+                "zkEvidenceVersion": EVIDENCE_VERSION,
+            },
+        }))
+    }
+
+    async fn get_external_domain_status(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::{
+            honesty_is_cheaper, profile_of, BOND_RATIO_DEN, BOND_RATIO_NUM, BOND_UNIT, BPS_DEN,
+        };
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let Some((registration, clock_height)) = self.chain.external_domain_registration(key).await
+        else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No external domain is registered under this key",
+                None::<()>,
+            ));
+        };
+        let profile = profile_of(&registration.record);
+        let (refused, attempts) = profile.refusal_ratio();
+        let economics = registration.economics;
+        let ceiling = economics.routing_ceiling_atoms;
+        let versions = &registration.versions;
+        let windows: Vec<serde_json::Value> = versions
+            .windows
+            .iter()
+            .map(|w: &crate::cross_domain::external::VersionWindow| {
+                serde_json::json!({
+                    "version": w.version,
+                    "validFromHeight": w.valid_from_height,
+                    "sunsetHeight": w.sunset_height,
+                    "coversCurrentClock": w.covers(clock_height),
+                })
+            })
+            .collect();
+        let provers: Vec<serde_json::Value> = registration
+            .provers
+            .values()
+            .map(|bond| {
+                let slashings: Vec<serde_json::Value> = bond
+                    .slashings
+                    .iter()
+                    .map(|s: &crate::cross_domain::external::Slashing| {
+                        serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
+                    })
+                    .collect();
+                serde_json::json!({
+                    "prover": format!("0x{}", hex::encode(bond.prover.as_bytes())),
+                    "bondAtoms": bond.bond_atoms.to_string(),
+                    "liveAtoms": bond.live_atoms().to_string(),
+                    "slashedAtoms": bond.slashed_atoms.to_string(),
+                    "sufficientForCurrentCeiling": bond.is_sufficient(ceiling),
+                    "accepted": bond.accepted,
+                    "refused": bond.refused,
+                    "slashings": slashings,
+                })
+            })
+            .collect();
+        let latest = registration.latest_attestation();
+        // "No backing yet" is a visible state, not an absent field: shown
+        // with the same value an adapter reports before its first cycle.
+        let last_backing = registration
+            .record
+            .last_backing
+            .unwrap_or_else(crate::cross_domain::external::no_backing);
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "summary": profile.summary_line(),
+            "profile": to_val("Profile", serde_json::to_value(&profile))?,
+            "registryClockHeight": clock_height,
+            "stalenessHeights": profile.staleness(clock_height),
+            "refusalRatio": { "refused": refused, "attempts": attempts },
+            "economics": {
+                "routingCeilingAtoms": ceiling.to_string(),
+                "requiredBondAtoms": economics.required_bond_atoms().to_string(),
+                "bondRatio": format!("{}/{}", BOND_RATIO_NUM, BOND_RATIO_DEN),
+                "bondUnit": BOND_UNIT,
+                "fee": {
+                    "baseAtoms": economics.fee.base_atoms.to_string(),
+                    "valueBps": economics.fee.value_bps,
+                    "bpsDenominator": BPS_DEN.to_string(),
+                    "feeAtCeilingAtoms": economics.fee.for_value(ceiling).to_string(),
+                },
+                "challenge": to_val("Challenge", serde_json::to_value(economics.challenge))?,
+                "unbondingHeights": economics.unbonding_heights,
+                // The registration-time inequality, re-evaluated live: lying
+                // at the ceiling must cost more than honest fees earn.
+                "honestyIsCheaperAtCeiling": honesty_is_cheaper(&economics, ceiling),
+            },
+            "versionPolicy": {
+                "windows": windows,
+                "maxGraceHeights": versions.max_grace_heights,
+                "acceptedList": versions.accepted_list(),
+                "currentVersionAtClock": versions.current_version_at(clock_height),
+            },
+            "provers": provers,
+            "latestAttestation": to_val("Attestation", serde_json::to_value(latest))?,
+            "lastBacking": to_val("Backing", serde_json::to_value(last_backing))?,
+            "attestationsHeld": registration.attestations.len(),
+            "admissionDigest": format!("0x{}", hex::encode(registration.admission_digest)),
+        }))
+    }
+
+    async fn replay_external_probes(
+        &self,
+        domain_key_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::{apply_patch, run_probe, ProbeOutcome};
+        let key = Self::parse_external_domain_key(&domain_key_hex)?;
+        let Some((_profile, entry, descriptor)) = self.chain.get_external_domain_profile(key).await
+        else {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "No external domain is registered under this key",
+                None::<()>,
+            ));
+        };
+        // The same construction the intake uses: rebuild the adapter from
+        // the stored spec, with the stored golden, and run the adapter's own
+        // probes. Nothing here mutates the registry - this is the dry run.
+        let bls = matches!(
+            entry.spec,
+            crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+        )
+        .then(crate::cross_domain::external::IntakeState::production_bls);
+        let adapter = entry.spec.build(bls, Some(entry.golden.clone()));
+        let golden_verified = adapter.verify(&entry.golden, &entry.policy).is_ok();
+        let probes: Vec<serde_json::Value> = adapter
+            .fault_probes()
+            .iter()
+            .map(|probe| {
+                // The corrupted evidence itself, applied by the same patch
+                // engine the harness uses: its digest lets an operator
+                // replay the exact probe bytes against another node.
+                let corrupted_digest = apply_patch(&entry.golden, &probe.patch)
+                    .ok()
+                    .map(|corrupted| format!("0x{}", hex::encode(corrupted.digest())));
+                let outcome = run_probe(adapter.as_ref(), &entry.golden, probe, &entry.policy);
+                let (verdict, detail) = match &outcome {
+                    ProbeOutcome::Refused { kind } => ("refused", kind.as_str().to_string()),
+                    ProbeOutcome::Accepted => (
+                        "ACCEPTED-CORRUPTION",
+                        "the adapter accepted corrupted evidence".to_string(),
+                    ),
+                    ProbeOutcome::WrongRefusal { got, wanted } => (
+                        "wrong-refusal",
+                        format!("got {}, wanted {}", got.as_str(), wanted.as_str()),
+                    ),
+                    ProbeOutcome::NotApplicable { reason } => ("not-applicable", reason.clone()),
+                };
+                serde_json::json!({
+                    "name": probe.name,
+                    "verdict": verdict,
+                    "detail": detail,
+                    "corruptedEvidenceDigest": corrupted_digest,
+                    "passed": matches!(outcome, ProbeOutcome::Refused { .. }),
+                })
+            })
+            .collect();
+        let passed = probes
+            .iter()
+            .filter(|p| p["passed"].as_bool().unwrap_or(false))
+            .count();
+        let total = probes.len();
+        Ok(serde_json::json!({
+            "adapter": format!("0x{}", hex::encode(descriptor.id.0)),
+            "goldenVerified": golden_verified,
+            "probes": probes,
+            "passed": passed,
+            "total": total,
+            "wouldPassAdmission": golden_verified && passed == total,
+        }))
+    }
+
+    async fn inspect_ethereum_update(
+        &self,
+        payload_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::ethereum::layout;
+        use crate::cross_domain::external::SyncCommitteeUpdate;
+        use crate::cross_domain::external::{
+            bits_for, epoch_of_slot, has_supermajority, minimum_signers, parse_update,
+            participation, period_of_slot, BITVECTOR_BYTES, EPOCHS_PER_SYNC_COMMITTEE_PERIOD,
+            SLOTS_PER_EPOCH, SYNC_COMMITTEE_SIZE,
+        };
+        let clean = payload_hex.strip_prefix("0x").unwrap_or(&payload_hex);
+        let payload = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payload hex: {e}"), None::<()>)
+        })?;
+        // The same parser the adapter runs - not a lookalike. A refusal here
+        // is exactly the refusal a submission would get.
+        let update: SyncCommitteeUpdate = parse_update(&payload).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Update refused: {e}"), None::<()>)
+        })?;
+        let signers = participation(&update.participation_bits);
+        let threshold = minimum_signers();
+        let range = |r: &std::ops::Range<usize>| serde_json::json!([r.start, r.end]);
+        Ok(serde_json::json!({
+            "finalizedRoot": format!("0x{}", hex::encode(update.finalized_root)),
+            "finalizedSlot": update.finalized_slot,
+            "finalizedEpoch": epoch_of_slot(update.finalized_slot),
+            "attestedSlot": update.attested_slot,
+            "attestedEpoch": epoch_of_slot(update.attested_slot),
+            "declaredPeriod": update.period,
+            "derivedPeriod": period_of_slot(update.attested_slot),
+            "nextCommitteeRoot": format!("0x{}", hex::encode(update.next_committee_root)),
+            "stateRoot": format!("0x{}", hex::encode(update.state_root)),
+            "participation": {
+                "signers": signers,
+                "committeeSize": SYNC_COMMITTEE_SIZE,
+                "minimumSigners": threshold,
+                "hasSupermajority": has_supermajority(signers),
+                "bitvectorBytes": BITVECTOR_BYTES,
+                // The smallest passing bitvector, for integrators building
+                // boundary tests against the same arithmetic.
+                "thresholdBitvectorHex": format!("0x{}", hex::encode(bits_for(threshold))),
+            },
+            "constants": {
+                "slotsPerEpoch": SLOTS_PER_EPOCH,
+                "epochsPerSyncCommitteePeriod": EPOCHS_PER_SYNC_COMMITTEE_PERIOD,
+                "zkProofSystem": format!(
+                    "{:?}",
+                    crate::cross_domain::external::ethereum::ZK_PROOF_SYSTEM
+                ),
+            },
+            // The byte layout the parser applied, so an integrator can build
+            // a payload from this response alone instead of reading source.
+            "layout": {
+                "totalBytes": layout::LEN,
+                "finalizedRoot": range(&layout::FINALIZED_ROOT),
+                "finalizedSlot": range(&layout::FINALIZED_SLOT),
+                "attestedSlot": range(&layout::ATTESTED_SLOT),
+                "period": range(&layout::PERIOD),
+                "nextCommitteeRoot": range(&layout::NEXT_COMMITTEE_ROOT),
+                "aggregatePubkey": range(&layout::AGGREGATE_PUBKEY),
+                "signature": range(&layout::SIGNATURE),
+                "participationBits": range(&layout::PARTICIPATION_BITS),
+                "stateRoot": range(&layout::STATE_ROOT),
+            },
+        }))
+    }
+
+    async fn plan_evm_verification(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        use crate::cross_domain::external::{
+            plan_from_observations, plan_verification, EvmGasSchedule, EvmHybridProof,
+            EvmPrecompiles, PrecompileObservation, BLS_G1_ADD_ADDRESS, BLS_G1_MSM_ADDRESS,
+            BLS_G2_ADD_ADDRESS, BLS_G2_MSM_ADDRESS, BLS_MAP_FP2_TO_G2_ADDRESS,
+            BLS_MAP_FP_TO_G1_ADDRESS, BLS_PAIRING_ADDRESS, MAX_ML_DSA_FIELD_BYTES,
+            ML_DSA_ETH_ADDRESS, ML_DSA_FIPS_ADDRESS,
+        };
+        use crate::cross_domain::external::{
+            EvmPlanError, EvmVerificationMode, EvmVerificationPlan, MessageBinding, MlDsaVariant,
+        };
+        #[derive(serde::Deserialize)]
+        struct Params {
+            /// Raw probe results, converted by the planner itself so an
+            /// address list cannot be mistaken for a capability list.
+            observations: Option<Vec<PrecompileObservation>>,
+            /// Pre-derived capabilities, for callers that already probed.
+            capabilities: Option<EvmPrecompiles>,
+            proof: EvmHybridProof,
+            schedule: Option<EvmGasSchedule>,
+            challenge_window: u64,
+        }
+        let params: Params = serde_json::from_value(request).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid plan request: {e}"), None::<()>)
+        })?;
+        let schedule = params.schedule.unwrap_or_default();
+        // The refusal is surfaced with its rule named, and the deploy-vs-fix
+        // hint depends on which rule fired: a shape problem is the caller's
+        // encoding, a capability problem is the target chain's reality.
+        let refusal_hint = |e: &EvmPlanError| {
+            match e {
+            EvmPlanError::WrongPointLength { .. }
+            | EvmPlanError::BadMlDsaLength { .. }
+            | EvmPlanError::IdentityPoint
+            | EvmPlanError::ZeroChainId => "fix the proof encoding",
+            EvmPlanError::UnboundMessagePoint => {
+                "bind the message point (ZkCircuit or NativeHashToCurve) or drop to a challenge mode"
+            }
+            EvmPlanError::MissingChallengeWindow => "set a non-zero challenge window",
+            EvmPlanError::MlDsaVariantUnavailable { .. } => {
+                "probe the other ML-DSA address or switch the proof's variant"
+            }
+        }
+        };
+        let plan: EvmVerificationPlan = match (&params.observations, params.capabilities) {
+            (Some(observations), _) => plan_from_observations(
+                observations,
+                &params.proof,
+                schedule,
+                params.challenge_window,
+            ),
+            (None, Some(capabilities)) => plan_verification(
+                capabilities,
+                &params.proof,
+                schedule,
+                params.challenge_window,
+            ),
+            (None, None) => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "Provide either `observations` or `capabilities`",
+                    None::<()>,
+                ));
+            }
+        }
+        .map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Plan refused: {e}; {}", refusal_hint(&e)),
+                None::<()>,
+            )
+        })?;
+        // A human-readable reading of the mode, so a deployment report does
+        // not require the enum's docs at hand. `FullCryptographic` is the
+        // only immediate finality; every other mode waits out a window.
+        let mode_meaning = match plan.mode {
+            EvmVerificationMode::FullCryptographic => "both halves verify now; immediate finality",
+            EvmVerificationMode::ClassicalOnlyChallenge => {
+                "BLS verifies now; the post-quantum half waits out the challenge window"
+            }
+            EvmVerificationMode::PostQuantumOnlyChallenge => {
+                "ML-DSA verifies now; the BLS half waits out the challenge window"
+            }
+            EvmVerificationMode::OptimisticChallenge => {
+                "no native verifier; the whole claim waits out the challenge window"
+            }
+        };
+        let binding_meaning = match params.proof.message_binding {
+            MessageBinding::ZkCircuit => "message point bound by a circuit",
+            MessageBinding::NativeHashToCurve => "message point bound by a native hash-to-curve",
+            MessageBinding::Unbound => "message point unbound - never full cryptographic",
+        };
+        let variant_name = |v: MlDsaVariant| match v {
+            MlDsaVariant::Fips204 => "FIPS-204",
+            MlDsaVariant::Eip8051Eth => "EIP-8051-ETH",
+        };
+        let capabilities = params
+            .observations
+            .as_deref()
+            .map(EvmPrecompiles::from_observations)
+            .or(params.capabilities);
+        let recognised: Vec<u64> = params
+            .observations
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|o| o.recognised())
+            .map(|o| o.address)
+            .collect();
+        let to_val = |what: &str, v: serde_json::Result<serde_json::Value>| {
+            v.map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("{what} serialization failed: {e}"),
+                    None::<()>,
+                )
+            })
+        };
+        Ok(serde_json::json!({
+            "plan": to_val("Plan", serde_json::to_value(&plan))?,
+            "modeMeaning": mode_meaning,
+            "bindingMeaning": binding_meaning,
+            "immediateFinality": plan.cryptographic,
+            "capabilities": to_val("Capabilities", serde_json::to_value(capabilities))?,
+            "postQuantumAvailable": capabilities.is_some_and(|c| c.has_ml_dsa()),
+            "postQuantumVariant": capabilities
+                .and_then(|c| c.ml_dsa_variant())
+                .map(variant_name),
+            "recognisedAddresses": recognised,
+            "calldataGas": params.proof.calldata_gas(schedule),
+            "limits": {
+                "maxMlDsaFieldBytes": MAX_ML_DSA_FIELD_BYTES,
+            },
+            "knownAddresses": {
+                "blsG1Add": BLS_G1_ADD_ADDRESS,
+                "blsG1Msm": BLS_G1_MSM_ADDRESS,
+                "blsG2Add": BLS_G2_ADD_ADDRESS,
+                "blsG2Msm": BLS_G2_MSM_ADDRESS,
+                "blsPairing": BLS_PAIRING_ADDRESS,
+                "blsMapFpToG1": BLS_MAP_FP_TO_G1_ADDRESS,
+                "blsMapFp2ToG2": BLS_MAP_FP2_TO_G2_ADDRESS,
+                "mlDsaFips": ML_DSA_FIPS_ADDRESS,
+                "mlDsaEth": ML_DSA_ETH_ADDRESS,
+            },
+        }))
+    }
+
+    async fn register_sovereign_template(
+        &self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registerSovereignTemplate")?;
+        let domain_id = template.domain_id;
+        self.chain
+            .register_sovereign_template(template)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid sovereign template: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({ "domainId": domain_id }))
+    }
+
+    async fn validate_sovereign_audit_export(
+        &self,
+        bundle: crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.chain
+            .validate_sovereign_audit_export(bundle)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid sovereign audit export: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({ "valid": true }))
+    }
+
+    async fn submit_domain_commitment(
+        &self,
+        commitment: crate::domain::DomainCommitment,
+    ) -> Result<String, ErrorObjectOwned> {
+        let _ = commitment;
+        Err(ErrorObjectOwned::owned(
+            -32602,
+            "Raw domain commitment submission is disabled; use bud_submitVerifiedDomainCommitment with a finality proof",
+            None::<()>,
+        ))
+    }
+
+    async fn submit_verified_domain_commitment(
+        &self,
+        payload: crate::domain::VerifiedDomainCommitment,
+    ) -> Result<String, ErrorObjectOwned> {
+        // Consensus-state isolation: `submit_verified_domain_commitment` writes
+        // to `external_roots` and `domain_registry`, so public listeners must
+        // not reach it directly, and the signed in-block StateUpdateTx carrier
+        // must be verified and enqueued fail-closed before applying state.
+        self.require_operator("bud_submitVerifiedDomainCommitment")?;
+        let hash = hex::encode(payload.leaf_hash());
+        let payload_clone = payload.clone();
+        let commitment = payload.commitment.clone();
+
+        self.chain
+            .verify_verified_domain_commitment(payload.clone())
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid verified domain commitment: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let tx = self
+            .chain
+            .build_state_update_transaction(commitment)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("Could not build state update transaction: {e}"),
+                    None::<()>,
+                )
+            })?;
+        let tx_clone = tx.clone();
+        self.chain.add_transaction(tx).await.map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("State update transaction rejected: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        self.chain
+            .submit_verified_domain_commitment(payload)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid verified domain commitment: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        self.node.broadcast_tx_sync(tx_clone);
+        self.node
+            .broadcast_verified_domain_commitment_sync(payload_clone);
+        Ok(format!("0x{hash}"))
+    }
+
+    async fn submit_cross_domain_message(
+        &self,
+        msg: crate::cross_domain::CrossDomainMessage,
+    ) -> Result<String, ErrorObjectOwned> {
+        let msg_id = hex::encode(msg.message_id);
+        let msg_clone = msg.clone();
+
+        // Relayer-gated: the message sender must be an active relayer in the
+        // Permissionless registry (no whitelist, only stake).
+        self.chain
+            .submit_relayed_cross_domain_message(msg)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid cross domain message: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        self.node.broadcast_cross_domain_message_sync(msg_clone);
+        Ok(format!("0x{msg_id}"))
+    }
+
+    async fn register_bridge_asset(
+        &self,
+        asset_id: crate::cross_domain::AssetId,
+        domain: crate::domain::DomainId,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registerBridgeAsset")?;
+        self.chain
+            .register_bridge_asset(asset_id, domain)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid bridge asset registration: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(self.bridge_roots_json("registered").await)
+    }
+
+    async fn mint_bridge_transfer(
+        &self,
+        source_domain: crate::domain::DomainId,
+        source_height: u64,
+        sequence: u64,
+        expected_block_hash: Option<crate::domain::Hash32>,
+        event: crate::cross_domain::DomainEvent,
+        proof: crate::cross_domain::MerkleProof,
+        relayer: crate::core::address::Address,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Bridge mint requires operator auth
+        self.require_operator("bud_mintBridgeTransfer")
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32000, format!("auth required: {e}"), None::<()>)
+            })?;
+        self.chain
+            .mint_bridge_transfer_from_verified_event(
+                source_domain,
+                source_height,
+                sequence,
+                expected_block_hash,
+                event,
+                proof,
+                relayer,
+            )
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid bridge mint transfer: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(self.bridge_roots_json("minted").await)
+    }
+
+    async fn burn_bridge_transfer(
+        &self,
+        message_id: crate::cross_domain::MessageId,
+        domain: crate::domain::DomainId,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Bridge burn requires operator auth
+        self.require_operator("bud_burnBridgeTransfer")?;
+        self.chain
+            .burn_bridge_transfer(message_id, domain)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid bridge burn transfer: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(self.bridge_roots_json("burned").await)
+    }
+
+    async fn burn_bridge_transfer_with_event(
+        &self,
+        message_id: crate::cross_domain::MessageId,
+        domain: crate::domain::DomainId,
+        domain_height: u64,
+        event_index: u32,
+        expiry_height: u64,
+        // BLG-0116 (P05-F09): the burner declares the Ethereum destination
+        // here, at burn time - the claim cannot name a different one.
+        recipient_eth: [u8; 20],
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Bridge burn with event requires operator auth
+        self.require_operator("bud_burnBridgeTransferWithEvent")?;
+        let event = self
+            .chain
+            .burn_bridge_transfer_with_event(
+                message_id,
+                domain,
+                domain_height,
+                event_index,
+                expiry_height,
+                recipient_eth,
+            )
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid bridge burn transfer: {e}"),
+                    None::<()>,
+                )
+            })?;
+        let mut roots = self.bridge_roots_json("burned").await;
+        roots["event"] = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+        Ok(roots)
+    }
+
+    async fn unlock_bridge_transfer(
+        &self,
+        message_id: crate::cross_domain::MessageId,
+        source_domain: crate::domain::DomainId,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Bridge unlock requires operator auth
+        self.require_operator("bud_unlockBridgeTransfer")?;
+        self.chain
+            .unlock_bridge_transfer(message_id, source_domain)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid bridge unlock transfer: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(self.bridge_roots_json("unlocked").await)
+    }
+
+    async fn unlock_bridge_transfer_verified(
+        &self,
+        target_domain: crate::domain::DomainId,
+        target_height: u64,
+        sequence: u64,
+        expected_block_hash: Option<crate::domain::Hash32>,
+        event: crate::cross_domain::DomainEvent,
+        proof: crate::cross_domain::MerkleProof,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Bridge unlock verified requires operator auth
+        self.require_operator("bud_unlockBridgeTransferVerified")?;
+        self.chain
+            .unlock_bridge_transfer_from_verified_event(
+                target_domain,
+                target_height,
+                sequence,
+                expected_block_hash,
+                event,
+                proof,
+            )
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid bridge unlock transfer: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(self.bridge_roots_json("unlocked").await)
+    }
+
+    async fn submit_relay_proof(
+        &self,
+        message_id: crate::cross_domain::message::MessageId,
+        relayer: String,
+        proof: crate::cross_domain::event_tree::MerkleProof,
+        source_domain: crate::domain::types::DomainId,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Audit 2026-09-09 (E-7): this RPC applies consensus state changes
+        // OUTSIDE block execution (bridge mint/unlock + balance credits via
+        // Blockchain::submit_relay_proof), so a public-listener caller would
+        // fork the node against the network. All five sibling bridge-mutating
+        // RPCs (mint/burn/unlock x3) carry this operator gate; this one did
+        // not. The consensus-correct rework (verify + ledger record only, with
+        // settlement via the on-chain RelayerResult transaction) is logged as
+        // an open design item; until it lands the gate is the minimum.
+        self.require_operator("bud_submitRelayProof")?;
+        let clean_addr = relayer.strip_prefix("0x").unwrap_or(&relayer);
+        let relayer_addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid relayer address: {e}"), None::<()>)
+        })?;
+
+        let message = self
+            .chain
+            .submit_relay_proof(message_id, relayer_addr, proof, source_domain)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Relay proof submission failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        Ok(serde_json::json!({
+            "status": "success",
+            "message_id": hex::encode(message.message_id),
+            "kind": format!("{:?}", message.kind),
+        }))
+    }
+
+    async fn seal_global_header(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_sealGlobalHeader")?;
+        let header = self.chain.seal_global_header().await.map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Unable to seal global header: {e}"),
+                None::<()>,
+            )
+        })?;
+        Ok(Self::global_header_to_json(header))
+    }
+
+    async fn registry_register(
+        &self,
+        tx: Transaction,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Permissionless registration reuses signed consensus transactions:
+        // Stake onboards validators; AiOperatorBond onboards RoleId(8)
+        // Compute operators. No RPC-side state mutation or approval gate.
+        if !matches!(
+            tx.tx_type,
+            crate::core::transaction::TransactionType::Stake
+                | crate::core::transaction::TransactionType::AiOperatorBond
+        ) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "registry_register requires a Stake or AiOperatorBond transaction",
+                None::<()>,
+            ));
+        }
+        if !tx.verify() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Invalid transaction signature",
+                None::<()>,
+            ));
+        }
+        let tx_hash = tx.hash.clone();
+        let tx_clone = tx.clone();
+        self.chain.add_transaction(tx).await.map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid params: {e}"), None::<()>)
+        })?;
+        self.node.broadcast_tx_sync(tx_clone);
+        Ok(serde_json::json!({
+            "txHash": Self::to_0x_hash(tx_hash),
+            "status": "pending",
+            "note": "bonding == registration; active once the signed transaction is applied",
+        }))
+    }
+
+    async fn registry_bond_relayer(
+        &self,
+        address: String,
+        amount: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // This legacy helper mutates stake without a signed transaction. Keep
+        // It operator-only; permissionless users use `bud_registryRegister`
+        // With a signed Stake transaction.
+        self.require_operator("bud_registryBondRelayer")?;
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        self.chain.bond_relayer(addr, amount).await.map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Relayer bond failed: {e}"), None::<()>)
+        })?;
+        let role = crate::registry::role::roles::RELAYER;
+        let active = self
+            .chain
+            .get_registry_member(addr, role)
+            .await
+            .is_some_and(|r| r.is_active());
+        Ok(serde_json::json!({
+            "address": Self::to_0x_hash(addr.to_hex()),
+            "role": "relayer",
+            "active": active,
+        }))
+    }
+
+    async fn registry_bond_prover(
+        &self,
+        address: String,
+        amount: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registryBondProver")?;
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        self.chain.bond_prover(addr, amount).await.map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Prover bond failed: {e}"), None::<()>)
+        })?;
+        let role = crate::registry::role::roles::PROVER;
+        let active = self
+            .chain
+            .get_registry_member(addr, role)
+            .await
+            .is_some_and(|r| r.is_active());
+        Ok(serde_json::json!({
+            "address": Self::to_0x_hash(addr.to_hex()),
+            "role": "prover",
+            "active": active,
+        }))
+    }
+
+    async fn registry_begin_role_bond_unbonding(
+        &self,
+        address: String,
+        role_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // The exit for a bond posted through the legacy operator helpers must
+        // Sit behind the same listener as the entry.
+        self.require_operator("bud_registryBeginRoleBondUnbonding")?;
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let role = crate::registry::RoleId::new(role_id);
+        let release_epoch = self
+            .chain
+            .begin_role_bond_unbonding(addr, role)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Role bond unbonding failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({
+            "address": Self::to_0x_hash(addr.to_hex()),
+            "roleId": role_id,
+            "status": "unbonding",
+            "releaseEpoch": release_epoch,
+        }))
+    }
+
+    async fn registry_withdraw_role_bond(
+        &self,
+        address: String,
+        role_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_registryWithdrawRoleBond")?;
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let role = crate::registry::RoleId::new(role_id);
+        let withdrawn = self
+            .chain
+            .withdraw_role_bond(addr, role)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Role bond withdrawal failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({
+            "address": Self::to_0x_hash(addr.to_hex()),
+            "roleId": role_id,
+            "status": "withdrawn",
+            "amount": withdrawn,
+        }))
+    }
+
+    async fn submit_zk_proof(
+        &self,
+        submission: crate::prover::ZkProofSubmission,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: `submission.message.sender` is an unsigned field and
+        // the proof fee is burned from that address when verification fails,
+        // so a public caller could burn the fee balance of any address
+        // (P18-F02). Until submissions carry a sender signature, the endpoint
+        // is restricted like its sibling domain-registration methods.
+        self.require_operator("bud_submitZkProof")?;
+        match self.chain.submit_zk_proof(submission).await {
+            Ok(crate::prover::ProofAcceptance::Accepted { rewarded, reward }) => {
+                Ok(serde_json::json!({
+                    "accepted": true,
+                    "status": "accepted",
+                    "rewarded": rewarded,
+                    "reward": reward,
+                }))
+            }
+            Ok(crate::prover::ProofAcceptance::Idempotent) => Ok(serde_json::json!({
+                "accepted": true,
+                "status": "idempotent",
+                "rewarded": false,
+                "reward": 0,
+            })),
+            Err(e) => Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("Proof rejected: {e}"),
+                None::<()>,
+            )),
+        }
+    }
+
+    async fn registry_query(
+        &self,
+        address: String,
+        role_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let role = crate::registry::RoleId::new(role_id);
+        match self.chain.get_registry_member(addr, role).await {
+            Some(reg) => Ok(serde_json::json!({
+                "address": Self::to_0x_hash(addr.to_hex()),
+                "roleId": role_id,
+                "registered": true,
+                "active": reg.is_active(),
+                "stake": reg.stake,
+                "status": format!("{:?}", reg.status),
+                "registeredEpoch": reg.registered_epoch,
+            })),
+            None => Ok(serde_json::json!({
+                "address": Self::to_0x_hash(addr.to_hex()),
+                "roleId": role_id,
+                "registered": false,
+                "active": false,
+            })),
+        }
+    }
+
+    async fn registry_active_members(
+        &self,
+        role_id: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let role = crate::registry::RoleId::new(role_id);
+        let members = self.chain.get_registry_active_members(role).await;
+        let list: Vec<serde_json::Value> = members
+            .iter()
+            .map(|reg| {
+                serde_json::json!({
+                    "address": Self::to_0x_hash(reg.account.to_hex()),
+                    "stake": reg.stake,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "roleId": role_id,
+            "count": list.len(),
+            "members": list,
+        }))
+    }
+
+    async fn submit_slashing_report(
+        &self,
+        mut report: crate::registry::SlashingReport,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Security: never trust caller-supplied provenance. An external
+        // Submitter cannot self-certify a report as ConsensusVerified to force a
+        // Slash - the RPC path is always Unverified. Only the node's own
+        // Consensus layer emits ConsensusVerified reports internally; a
+        // caller's claim is demoted first (BLG-0102/P04-F24).
+        report.demote_to_unverified();
+        // A reporter is required so the anti-spam fee can be charged.
+        if report.reporter.is_none() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "slashing report must include a 'reporter' (fee is charged to it)",
+                None::<()>,
+            ));
+        }
+        // A caller-supplied report stays `Unverified`: two signatures over two
+        // bare block hashes do not bind `height`, so this endpoint must never
+        // promote caller-supplied evidence to `ConsensusVerified`. The chain
+        // guard (`submit_registry_slashing_report`) refuses `Unverified`
+        // reports fail-closed; slashing travels the consensus path only.
+        match self.chain.submit_registry_slashing_report(report).await {
+            Ok(Some(outcome)) => Ok(serde_json::json!({
+                "slashed": true,
+                "condition": format!("{:?}", outcome.condition),
+                "penalty": outcome.penalty,
+                "remainingStake": outcome.remaining_stake,
+            })),
+            Ok(None) => Ok(serde_json::json!({
+                "slashed": false,
+                "note": "report accepted but offender not registered for that role",
+            })),
+            Err(e) => Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("Rejected slashing report: {e}"),
+                None::<()>,
+            )),
+        }
+    }
+
+    async fn submit_qc_fault_proof(
+        &self,
+        proof: crate::consensus::qc::QcFaultProof,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // (security audit §4) permissionless entry-point.
+        // The proof's correctness is enforced by
+        // `handle_qc_fault_proof` (merkle inclusion +
+        // Cryptographic dilithium verification), which is the
+        // Only acceptable gate - it costs ~millions of dollars
+        // Of compute to forge a valid proof, so a fee gate is
+        // Not required. On a successful proof the underlying
+        // QC blob's finality is invalidated from the proof's
+        // Checkpoint height (see
+        // `Blockchain::apply_qc_fault_verdict`).
+        match self.chain.handle_qc_fault_proof(proof).await {
+            Ok(()) => Ok(serde_json::json!({
+                "accepted": true,
+                "effect": "finality_invalidation",
+                "note": "QC blob finality has been invalidated from the proof's checkpoint height",
+            })),
+            Err(e) => Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid QC fault proof: {e}"),
+                None::<()>,
+            )),
+        }
+    }
+
+    async fn health(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let height = self.chain.get_height().await;
+        let syncing = self.node.is_syncing();
+        let peer_count = self
+            .node
+            .peer_count
+            .load(std::sync::atomic::Ordering::SeqCst);
+        Ok(serde_json::json!({
+            "status": if syncing { "syncing" } else { "healthy" },
+            "blockHeight": Self::to_hex(height),
+            "peerCount": peer_count,
+            "syncing": syncing,
+        }))
+    }
+
+    async fn node_info(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let chain_id = self.chain.get_chain_id().await;
+        let height = self.chain.get_height().await;
+        let validator_set_hash = self.chain.get_validator_set_hash().await;
+        let sync_state = if self.node.is_syncing() { 1u64 } else { 0u64 };
+        let peer_count = self
+            .node
+            .peer_count
+            .load(std::sync::atomic::Ordering::SeqCst);
+        Ok(serde_json::json!({
+            "chainId": Self::to_hex(chain_id),
+            "blockHeight": Self::to_hex(height),
+            "validatorSetHash": validator_set_hash,
+            "syncState": sync_state,
+            "peerCount": peer_count,
+            "peerId": self.node.peer_id.to_string(),
+            "rpcMode": match self.mode { RpcMode::Public => "public", RpcMode::Operator => "operator" },
+        }))
+    }
+
+    async fn admin_ban_peer(&self, peer_id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminBanPeer")?;
+        let parsed = PeerId::from_str(&peer_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("invalid peer id: {e}"), None::<()>)
+        })?;
+        self.node
+            .admin_ban_peer(parsed)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
+        Ok(serde_json::json!({ "banned": peer_id }))
+    }
+
+    async fn admin_unban_peer(
+        &self,
+        peer_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminUnbanPeer")?;
+        let parsed = PeerId::from_str(&peer_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("invalid peer id: {e}"), None::<()>)
+        })?;
+        self.node
+            .admin_unban_peer(parsed)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
+        Ok(serde_json::json!({ "unbanned": peer_id }))
+    }
+
+    async fn admin_list_banned_peers(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_adminListBannedPeers")?;
+        let banned = self
+            .node
+            .admin_list_banned_peers()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
+        Ok(serde_json::json!({ "bannedPeers": banned }))
+    }
+
+    // === B.U.D. Storage RPC implementations ====================
+    // The storage registry is owned by the chain layer; every RPC below is a
+    // Thin delegation to `self.chain` so the registry has a single writer and
+    // Block-application accounting stays authoritative. The RPC server used to
+    // Hold its own `Arc<Mutex<StorageRegistry>>`; that field became
+    // Write-only after the chain took ownership and has been removed rather
+    // Than left as a second, silently diverging copy.
+
+    async fn storage_register_manifest(
+        &self,
+        manifest: crate::storage::ContentManifest,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageRegisterManifest")?;
+        let manifest_id = self
+            .chain
+            .register_storage_manifest(manifest.clone())
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("register_manifest failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({
+            "manifestId": format!("0x{}", hex::encode(manifest_id.0)),
+            "totalSize": manifest.total_size,
+            "shardCount": manifest.shard_count,
+            // Echoed back so the caller can see what the chain committed to,
+            // rather than what it believes it sent. The declaration is inside
+            // `manifestId`, so a mismatch here means the manifest that
+            // registered is not the one the caller built.
+            "encryption": manifest.encryption.to_string(),
+        }))
+    }
+
+    async fn storage_verify_encoding(
+        &self,
+        data_hex: String,
+        manifest: crate::storage::ContentManifest,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Generated / Three has no body on the network. Re-encoding a recipe
+        // as if it were held bytes would launder a custody claim under the
+        // encode path.
+        if matches!(
+            manifest.source,
+            crate::storage::generated::ContentSource::Generated(_)
+                | crate::storage::generated::ContentSource::SealedGenerated(_)
+                | crate::storage::generated::ContentSource::Derived(_)
+        ) {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "verify_encoding refuses recipe sources (Generated/SealedGenerated/Derived): there is no body to re-encode",
+                None::<()>,
+            ));
+        }
+        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
+        // Same cap as the QR feed calls: the re-encode below is a full
+        // erasure encode, so the body size bounds its CPU cost.
+        if hex.len() / 2 > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "body over verify cap {}",
+                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
+                ),
+                None::<()>,
+            ));
+        }
+        let data = hex::decode(hex).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
+        })?;
+        // The encode is CPU bound: keep it off the async workers.
+        let (manifest, verdict) = tokio::task::spawn_blocking(move || {
+            let verdict = crate::storage::verify_object_encoding(&data, &manifest);
+            (manifest, verdict)
+        })
+        .await
+        .map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("verify_encoding task failed: {e}"),
+                None::<()>,
+            )
+        })?;
+        verdict.map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("verify_encoding failed: {e}"), None::<()>)
+        })?;
+        Ok(serde_json::json!({
+            "ok": true,
+            "manifestId": format!("0x{}", hex::encode(manifest.manifest_id.0)),
+            "scheme": {
+                "k": manifest.erasure.k,
+                "n": manifest.erasure.n,
+            },
+            "totalSize": manifest.total_size,
+        }))
+    }
+
+    async fn storage_qr_feed_preview(
+        &self,
+        data_hex: String,
+        block_len: u16,
+        manifest: Option<crate::storage::ContentManifest>,
+        seal_seed: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
+        let data = hex::decode(hex).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
+        })?;
+        if data.len() > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "body of {} bytes over emit cap {}",
+                    data.len(),
+                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
+                ),
+                None::<()>,
+            ));
+        }
+        let policy = crate::storage::emit::EmitPolicy {
+            block_len,
+            seal_seed: parse_seal_seed(seal_seed)?,
+            ..crate::storage::emit::EmitPolicy::default()
+        };
+        let feed = crate::storage::emit::qr_feed_preview(&data, &policy, manifest.as_ref())
+            .map_err(emit_reject)?;
+        Ok(qr_feed_json(&feed))
+    }
+
+    async fn storage_qr_feed_frames(
+        &self,
+        data_hex: String,
+        block_len: u16,
+        first_frame: u32,
+        count: u32,
+        seal_seed: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
+        let data = hex::decode(hex).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
+        })?;
+        if data.len() > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "body of {} bytes over emit cap {}",
+                    data.len(),
+                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
+                ),
+                None::<()>,
+            ));
+        }
+        let policy = crate::storage::emit::EmitPolicy {
+            block_len,
+            seal_seed: parse_seal_seed(seal_seed)?,
+            ..crate::storage::emit::EmitPolicy::default()
+        };
+        let (frames, fold) =
+            crate::storage::emit::qr_feed_frames_burst(&data, &policy, first_frame, count)
+                .map_err(emit_reject)?;
+        Ok(serde_json::json!({
+            "firstFrame": first_frame,
+            "count": frames.len(),
+            "fold": format!("0x{}", hex::encode(fold)),
+            "frames": frames.iter().map(hex::encode).collect::<Vec<String>>(),
+        }))
+    }
+
+    async fn storage_issue_view_grant(
+        &self,
+        content_id: String,
+        authorization: Option<serde_json::Value>,
+        grantee: Option<String>,
+        key_id: String,
+        policy: String,
+        opened_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let auth = parse_grant_auth(authorization.as_ref())?;
+        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
+        // that is an operator fault, and a client must not be told to fix a key
+        // it did get right. The registry derives the same address again; this
+        // pre-flight only chooses the error code.
+        auth.derived_owner().map_err(grant_auth_error)?;
+        let grantee = match grantee {
+            None => None,
+            Some(g) if g.is_empty() => None,
+            Some(g) => Some(
+                Address::from_hex(g.strip_prefix("0x").unwrap_or(&g)).map_err(|e| {
+                    ErrorObjectOwned::owned(-32602, format!("grantee: {e}"), None::<()>)
+                })?,
+            ),
+        };
+        let key_id = parse_hex32_field(&key_id, "key_id")?;
+        let policy = match policy.to_ascii_lowercase().as_str() {
+            "owneronly" | "owner_only" | "owner" => crate::storage::ViewPolicy::OwnerOnly,
+            "namedgrantee" | "named_grantee" | "named" | "dm" => {
+                crate::storage::ViewPolicy::NamedGrantee
+            }
+            "publickeyid" | "public_key_id" | "public" => crate::storage::ViewPolicy::PublicKeyId,
+            other => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("unknown view policy {other}"),
+                    None::<()>,
+                ));
+            }
+        };
+        let grant_id = self
+            .chain
+            .issue_view_grant(content_id, auth, grantee, key_id, policy, opened_epoch)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({ "grantId": grant_id }))
+    }
+
+    async fn storage_revoke_view_grant(
+        &self,
+        grant_id: u64,
+        authorization: Option<serde_json::Value>,
+        at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let auth = parse_grant_auth(authorization.as_ref())?;
+        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
+        // that is an operator fault, and a client must not be told to fix a key
+        // it did get right. The registry derives the same address again; this
+        // pre-flight only chooses the error code - and names the actor the revoke
+        // event is filed under, so a sink sees who spoke rather than a caller's
+        // claim about it.
+        let actor = auth.derived_owner().map_err(grant_auth_error)?;
+        // Bump the revoke generation BEFORE the chain mutation: a frame or
+        // open call whose grant question is in flight right now would
+        // otherwise apply a stale `true` after this revoke commits. The
+        // bump invalidates every in-flight answer; the reveal paths refuse
+        // and retry against the new state. A revoke that fails below keeps
+        // the bump - one harmless retry is the price of closing the race.
+        {
+            let mut gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            gw.bump_revoke_generation();
+        }
+        let revoked = self
+            .chain
+            .revoke_view_grant(grant_id, auth, at_epoch)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        // The frame path asks the chain again before every emit, but it asks
+        // without the gateway lock and applies the answer under it. A revoke
+        // that landed between those two steps was served once more on the
+        // stale `true`. Dropping this content's grant-backed sessions here,
+        // once the chain has revoked, leaves a racing frame call nothing to
+        // emit from. After the revoke, not before: an unauthorised revoke
+        // attempt must not be able to close other viewers' sessions.
+        {
+            let mut gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            gw.drop_sessions_for_content(&revoked.content_id);
+        }
+        // A revoke that only reaches the ledger leaves every product surface
+        // holding the session key it was promised. The hook is where that word is
+        // passed on: a headless node discards it, a gateway installs its own
+        // sink, and neither choice can change what a block commits.
+        fire_three_event(
+            &mut NopThreeHook,
+            ThreeHookEvent {
+                kind: ThreeHookKind::GrantRevoked,
+                content_id: revoked.content_id,
+                actor,
+                epoch: at_epoch,
+                grant_id: Some(grant_id),
+            },
+        );
+        Ok(serde_json::json!({
+            "revoked": true,
+            "grantId": grant_id,
+            "contentId": format!("0x{}", hex::encode(revoked.content_id.0)),
+        }))
+    }
+
+    async fn storage_social_delete(
+        &self,
+        content_id: String,
+        authorization: Option<serde_json::Value>,
+        at_epoch: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let auth = parse_grant_auth(authorization.as_ref())?;
+        let content_id = parse_content_id(&content_id)?;
+        // Same boundary rule as revoke: when this node cannot check the
+        // signature at all, that is an operator fault, not a client key fault.
+        let _actor = auth.derived_owner().map_err(grant_auth_error)?;
+        let outcome = self
+            .chain
+            .social_delete(content_id, auth, at_epoch)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "grantsRevoked": outcome.grants_revoked,
+            "keyRotated": outcome.key_rotated,
+        }))
+    }
+
+    async fn storage_list_view_grants(
+        &self,
+        content_id: String,
+        live_only: bool,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let (rows, live) = self
+            .chain
+            .view_grants(content_id)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        let kept: Vec<serde_json::Value> = rows
+            .iter()
+            .filter(|g| !live_only || g.is_live())
+            .map(view_grant_json)
+            .collect();
+        Ok(serde_json::json!({
+            "grants": kept,
+            "liveCount": live,
+            "count": kept.len(),
+        }))
+    }
+
+    async fn storage_may_view(
+        &self,
+        content_id: String,
+        viewer: String,
+        key_id: String,
+        owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let viewer = Address::from_hex(viewer.strip_prefix("0x").unwrap_or(&viewer))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("viewer: {e}"), None::<()>))?;
+        let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>))?;
+        let key_id = parse_hex32_field(&key_id, "key_id")?;
+        let allowed = self
+            .chain
+            .may_view_content(content_id, viewer, key_id, owner)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        Ok(serde_json::json!({ "allowed": allowed }))
+    }
+
+    async fn storage_open_reveal(
+        &self,
+        content_id: String,
+        recipe: serde_json::Value,
+        full_public: Option<serde_json::Value>,
+        packed: String,
+        viewer_claim: serde_json::Value,
+        owner: String,
+        key_id: String,
+        meter_budget: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let recipe: crate::storage::ThreeRecipe = serde_json::from_value(recipe)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("recipe: {e}"), None::<()>))?;
+        let full_public: Option<crate::storage::ThreeRecipePublic> = match full_public {
+            None => None,
+            Some(v) => Some(serde_json::from_value(v).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("fullPublic: {e}"), None::<()>)
+            })?),
+        };
+        let packed = hex::decode(packed.strip_prefix("0x").unwrap_or(&packed))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("packed: {e}"), None::<()>))?;
+        let owner = Address::from_hex(owner.strip_prefix("0x").unwrap_or(&owner))
+            .map_err(|e| ErrorObjectOwned::owned(-32602, format!("owner: {e}"), None::<()>))?;
+        let key_id = parse_hex32_field(&key_id, "key_id")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+
+        // The viewer is whoever signed the claim, never a field. Before this,
+        // `viewer` was a string the caller typed, so any caller could name a
+        // grantee and have this node build frames for content it holds no
+        // grant on. The derived address is what the grant lookup asks about.
+        let viewer = verify_view_claim(&viewer_claim, &content_id, &key_id, &owner, &packed, now)?;
+
+        // `owner` is a claim in the request; the chain holds who owns this
+        // content. A claim naming another address is refused here by name.
+        // The registry's `may_view` refuses it too, but silently, as a
+        // `false` grant, so a caller naming itself owner of somebody else's
+        // sealed content saw a generic refusal and an honest owner with a
+        // typo in the field saw the same one. Content with no recorded
+        // owner keeps the registry's answer: no grant, sealed refused.
+        let recorded = self
+            .chain
+            .confidential_owner(content_id)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        check_claimed_owner(recorded, &owner)?;
+
+        // The grant decision is the chain's; the gateway re-enforces it on the
+        // sealed path, but the authority that owns the registry answers it.
+        // Read the revoke generation first: a revoke that starts while this
+        // question is in flight invalidates the answer, and the comparison
+        // under the gateway lock below refuses the open instead of admitting
+        // a session on a pre-revoke `true`.
+        let generation = {
+            let gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            gw.revoke_generation()
+        };
+        let grant_allows = self
+            .chain
+            .may_view_content(content_id, viewer, key_id, owner)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+
+        let req = crate::storage::RevealRequest {
+            recipe,
+            full_public,
+            packed,
+            content_id,
+            viewer,
+            owner,
+            key_id,
+            meter_budget,
+        };
+        {
+            let mut gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            if gw.revoke_generation() != generation {
+                return Err(ErrorObjectOwned::owned(
+                    -32003,
+                    "reveal: a revoke started while the grant was being checked; retry the call",
+                    None::<()>,
+                ));
+            }
+            // Reclaim TTL-dead rows before admission so a burst of opens
+            // cannot be wedged by corpses, then refuse fast at the cap with
+            // its own code instead of paying for an open that admission
+            // would refuse.
+            gw.sweep(now);
+            if gw.session_count() >= crate::storage::MAX_REVEAL_SESSIONS {
+                return Err(ErrorObjectOwned::owned(
+                    -32003,
+                    format!(
+                        "reveal: session table full ({})",
+                        crate::storage::MAX_REVEAL_SESSIONS
+                    ),
+                    None::<()>,
+                ));
+            }
+        }
+        // The emitter builds a whole one-shot pass to check the stream pin.
+        // That runs off the async workers and outside the gateway lock, so
+        // frame serving, close and revoke of other viewers do not wait on it.
+        let prepared = tokio::task::spawn_blocking(move || {
+            crate::storage::RevealGateway::prepare_prechecked(req, grant_allows)
+        })
+        .await
+        .map_err(|_| ErrorObjectOwned::owned(-32603, "reveal open task failed", None::<()>))?
+        .map_err(reveal_gateway_rpc_error)?;
+        let mut gw = self.reveal_gateway.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+        })?;
+        // A revoke may have started while the pass was built: ask again.
+        if gw.revoke_generation() != generation {
+            return Err(ErrorObjectOwned::owned(
+                -32003,
+                "reveal: a revoke started while the grant was being checked; retry the call",
+                None::<()>,
+            ));
+        }
+        let session_id = gw
+            .open_prepared(prepared, now)
+            .map_err(reveal_gateway_rpc_error)?;
+        let commit = gw
+            .stream_commitment(session_id)
+            .map_err(reveal_gateway_rpc_error)?;
+        Ok(serde_json::json!({
+            "sessionId": session_id,
+            "streamCommitment": format!("0x{}", hex::encode(commit)),
+            "expiresAt": now.saturating_add(crate::storage::REVEAL_SESSION_TTL_SECS),
+            "frameBudget": meter_budget
+                .unwrap_or(crate::storage::DEFAULT_REVEAL_BUDGET_FRAMES),
+            "activeSessions": gw.session_count(),
+        }))
+    }
+
+    async fn storage_reveal_frames(
+        &self,
+        session_id: u64,
+        seq_start: u32,
+        count: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // The gateway enforces the ceiling too; answering before touching
+        // the table keeps a malformed ask off the shared lock entirely.
+        if count > crate::storage::MAX_FRAMES_PER_CALL {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "reveal: asked {count} frames, ceiling is {}",
+                    crate::storage::MAX_FRAMES_PER_CALL
+                ),
+                None::<()>,
+            ));
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        // The grant is asked again on every frame call. A session was checked
+        // once at open and then served until its TTL, so a grant revoked on
+        // chain kept serving frames for up to the whole TTL. The scope is
+        // read under the lock, the chain is asked without it, and the answer
+        // is applied under the lock again; a session closed in between is
+        // reported as unknown, which is what it is.
+        let (scope, generation): (Option<crate::storage::GrantScope>, u64) = {
+            let gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            let scope = gw
+                .grant_scope(session_id)
+                .map_err(reveal_gateway_rpc_error)?;
+            (scope, gw.revoke_generation())
+        };
+        let grant_allows = match scope {
+            None => true,
+            Some(scope) => self
+                .chain
+                .may_view_content(scope.content_id, scope.viewer, scope.key_id, scope.owner)
+                .await
+                .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?,
+        };
+        let mut gw = self.reveal_gateway.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+        })?;
+        // A revoke that started while the chain was being asked invalidates
+        // the answer above: the session may already be dropped and the grant
+        // it reports may be the pre-revoke one. Refuse the stale answer and
+        // make the caller retry against the new state instead of emitting
+        // frames on it.
+        if gw.revoke_generation() != generation {
+            return Err(ErrorObjectOwned::owned(
+                -32003,
+                "reveal: a revoke started while the grant was being checked; retry the call",
+                None::<()>,
+            ));
+        }
+        let (frames, fold) = gw
+            .emit_frames(session_id, seq_start, count, now, grant_allows)
+            .map_err(reveal_gateway_rpc_error)?;
+        let frames_hex: Vec<String> = frames.iter().map(hex::encode).collect();
+        Ok(serde_json::json!({
+            "frames": frames_hex,
+            "fold": format!("0x{}", hex::encode(fold)),
+        }))
+    }
+
+    async fn storage_close_reveal(&self, session_id: u64) -> Result<bool, ErrorObjectOwned> {
+        let mut gw = self.reveal_gateway.lock().map_err(|_| {
+            ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+        })?;
+        Ok(gw.close(session_id))
+    }
+
+    async fn storage_register_confidential_commit(
+        &self,
+        content_id: String,
+        encryption: String,
+        ciphertext_root: String,
+        proof_kind: String,
+        authorization: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_storageRegisterConfidentialCommit")?;
+        let content_id = parse_content_id(&content_id)?;
+        // The recorded owner is never typed by the caller: it is derived from
+        // the key and then proven by the signature the registry checks. Handing
+        // only a derived address here is what would let a holder of somebody
+        // else's public key register a commit under that address.
+        let auth = parse_grant_auth(authorization.as_ref())?;
+        // Refuse at the boundary when this node cannot check ML-DSA-87 at all:
+        // that is an operator fault, and a client must not be told to fix a key
+        // it did get right. The registry derives the same address again; this
+        // pre-flight only chooses the error code.
+        auth.derived_owner().map_err(grant_auth_error)?;
+        let encryption = match encryption.to_ascii_lowercase().as_str() {
+            "aes-256-gcm" | "aes256gcm" => crate::storage::ContentEncryption::ClientSide(
+                crate::storage::ContentCipher::Aes256Gcm,
+            ),
+            "chacha20-poly1305" | "chacha20poly1305" => {
+                crate::storage::ContentEncryption::ClientSide(
+                    crate::storage::ContentCipher::ChaCha20Poly1305,
+                )
+            }
+            "xchacha20-poly1305" | "xchacha20poly1305" => {
+                crate::storage::ContentEncryption::ClientSide(
+                    crate::storage::ContentCipher::XChaCha20Poly1305,
+                )
+            }
+            "plaintext" => crate::storage::ContentEncryption::Plaintext,
+            other => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("unknown encryption {other}"),
+                    None::<()>,
+                ));
+            }
+        };
+        let ciphertext_root = parse_hex32_field(&ciphertext_root, "ciphertext_root")?;
+        let proof_kind = match proof_kind.to_ascii_lowercase().as_str() {
+            "retrieval" | "retrievalchallenge" | "retrieval_challenge" => {
+                crate::storage::ConfidentialProofKind::RetrievalChallenge
+            }
+            "zk" | "zkstorage" | "zk_storage_proof" => {
+                crate::storage::ConfidentialProofKind::ZkStorageProof
+            }
+            "tee" | "teeattested" | "tee_attested" => {
+                crate::storage::ConfidentialProofKind::TeeAttested
+            }
+            "hybrid" | "hybridzktee" | "hybrid_zk_tee" => {
+                crate::storage::ConfidentialProofKind::HybridZkTee
+            }
+            other => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("unknown proof_kind {other}"),
+                    None::<()>,
+                ));
+            }
+        };
+        let commit = crate::storage::ConfidentialBodyCommit::new(
+            content_id,
+            encryption,
+            ciphertext_root,
+            proof_kind,
+        )
+        .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        let commitment = self
+            .chain
+            .register_confidential_commit(commit, auth)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "commitment": format!("0x{}", hex::encode(commitment)),
+            "contentId": format!("0x{}", hex::encode(content_id.0)),
+        }))
+    }
+
+    async fn storage_get_confidential_commit(
+        &self,
+        content_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let content_id = parse_content_id(&content_id)?;
+        let commit = self
+            .chain
+            .get_confidential_commit(content_id)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        // The address whose signature opens this body, read from the registry
+        // rather than echoed back from the request. A wallet signs a grant
+        // against exactly this value, so the node that will refuse the grant has
+        // to be the node that can report it.
+        let owner = self
+            .chain
+            .confidential_owner(content_id)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        match commit {
+            None => Ok(serde_json::json!({ "found": false })),
+            Some(c) => Ok(serde_json::json!({
+                "found": true,
+                "contentId": format!("0x{}", hex::encode(c.content_id.0)),
+                "encryption": c.encryption.to_string(),
+                "ciphertextRoot": format!("0x{}", hex::encode(c.ciphertext_root)),
+                "proofKind": format!("{:?}", c.proof_kind),
+                "commitment": format!("0x{}", hex::encode(c.commitment())),
+                "owner": owner.map(|a| a.to_hex()),
+            })),
+        }
+    }
+
+    async fn storage_open_deal(
+        &self,
+        domain_id: u32,
+        manifest: crate::storage::ContentManifest,
+        shard_id: String,
+        operator: String,
+        payer: String,
+        replica_index: u8,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        request_id: u64,
+        payer_signature: String,
+        operator_signature: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageOpenDeal")?;
+        let clean_shard = shard_id.strip_prefix("0x").unwrap_or(&shard_id);
+        let s_bytes = hex::decode(clean_shard).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid shard_id hex: {e}"), None::<()>)
+        })?;
+        if s_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "shard_id must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut s_arr = [0u8; 32];
+        s_arr.copy_from_slice(&s_bytes);
+        let s_id = ContentId(s_arr);
+
+        let op_addr = Address::from_hex(&operator).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid operator hex: {e}"), None::<()>)
+        })?;
+
+        let payer_addr = Address::from_hex(&payer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer hex: {e}"), None::<()>)
+        })?;
+
+        // The caller must prove control of BOTH addresses this call debits:
+        // the payer's escrow and the operator's bond. Without this, any
+        // caller that can reach the RPC listener can spend another user's
+        // balance and lock another operator's bond. The signed message binds
+        // every deal parameter that changes the debit, so a signature cannot
+        // be replayed against a different deal. This is the same pattern the
+        // challenge RPCs use (BUD_OPEN_CHALLENGE_V1 / BUD_ANSWER_CHALLENGE_V1),
+        // which is what makes the escrow and bond gates economically
+        // meaningful.
+        let payer_sig = hex::decode(payer_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid payer_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        let operator_sig = hex::decode(operator_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid operator_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        // The chain prices the payer escrow from the manifest entry for this
+        // shard (manifest.shard(&shard_id).size), so the signed preimage must
+        // bind that size and the manifest identity as well. Without them, a
+        // valid signature could be replayed with a forged manifest that
+        // declares a larger shard for the same shard_id and debits more than
+        // either signer authorized (HIGH, CWE-347).
+        let shard_bytes = manifest
+            .shard(&s_id)
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("shard {s_id:?} is not part of the manifest"),
+                    None::<()>,
+                )
+            })
+            .map(|shard| u64::from(shard.size))?;
+
+        // The signed preimage binds a caller-chosen `request_id` so one
+        // signed authorization cannot be replayed to open the same deal
+        // repeatedly and debit escrow and bond again (MEDIUM, CWE-294).
+        // The chain also refuses a second active deal over the same
+        // (manifest, shard, operator, replica, range), so replay is closed on
+        // both layers.
+        let chain_id = self.chain.get_chain_id().await;
+        let deal_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_OPEN_DEAL_V2",
+            &chain_id.to_le_bytes(),
+            &domain_id.to_le_bytes(),
+            s_id.as_bytes(),
+            op_addr.as_bytes(),
+            payer_addr.as_bytes(),
+            &replica_index.to_le_bytes(),
+            &start_epoch.to_le_bytes(),
+            &end_epoch.to_le_bytes(),
+            &shard_bytes.to_le_bytes(),
+            manifest.manifest_id.as_bytes(),
+            &economics.fee_per_byte_epoch.to_le_bytes(),
+            &economics.operator_bond.to_le_bytes(),
+            &request_id.to_le_bytes(),
+        ]);
+        crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
+            .map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
+        })?;
+        crate::crypto::primitives::verify_signature(&deal_msg, &operator_sig, op_addr.as_bytes())
+            .map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid operator signature: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        let deal_id = self
+            .chain
+            .open_storage_deal(
+                domain_id,
+                manifest.clone(),
+                s_id,
+                op_addr,
+                payer_addr,
+                replica_index,
+                start_epoch,
+                end_epoch,
+                economics.clone(),
+                domain_params,
+                merkle_proof.clone(),
+                storage_root,
+            )
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("open_deal failed: {e}"), None::<()>)
+            })?;
+
+        Ok(serde_json::json!({
+            "dealId": deal_id,
+            "status": "Active",
+            "operator": operator,
+        }))
+    }
+
+    async fn storage_accept_reallocation(
+        &self,
+        ticket_id: u64,
+        replacement_operator: String,
+        payer: String,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        request_id: u64,
+        payer_signature: String,
+        operator_signature: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageAcceptReallocation")?;
+        let op_addr = Address::from_hex(&replacement_operator).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid replacement operator hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        let payer_addr = Address::from_hex(&payer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer hex: {e}"), None::<()>)
+        })?;
+
+        // The caller must prove control of BOTH addresses this call debits:
+        // the payer's escrow and the replacement operator's bond. The
+        // signed message binds every parameter that changes the debit; the
+        // placement (manifest, shard, replica, bytes) is derived by the
+        // chain from the ticket, so a signature cannot be replayed against
+        // a different slot. Same pattern as BUD_OPEN_DEAL_V2.
+        let chain_id = self.chain.get_chain_id().await;
+        let deal_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_ACCEPT_REALLOCATION_V2",
+            &chain_id.to_le_bytes(),
+            &ticket_id.to_le_bytes(),
+            op_addr.as_bytes(),
+            payer_addr.as_bytes(),
+            &start_epoch.to_le_bytes(),
+            &end_epoch.to_le_bytes(),
+            &economics.fee_per_byte_epoch.to_le_bytes(),
+            &economics.operator_bond.to_le_bytes(),
+            &request_id.to_le_bytes(),
+        ]);
+        let payer_sig = hex::decode(payer_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid payer_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        let op_sig = hex::decode(operator_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid operator_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
+            .map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
+        })?;
+        crate::crypto::primitives::verify_signature(&deal_msg, &op_sig, op_addr.as_bytes())
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid operator signature: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let replacement_deal_id = self
+            .chain
+            .accept_storage_reallocation(
+                ticket_id,
+                op_addr,
+                payer_addr,
+                start_epoch,
+                end_epoch,
+                economics,
+                domain_params,
+                merkle_proof,
+                storage_root,
+            )
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("accept_reallocation failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        Ok(serde_json::json!({
+            "ticketId": ticket_id,
+            "replacementDealId": replacement_deal_id,
+            "status": "ActiveReplacement",
+            "operator": replacement_operator,
+        }))
+    }
+
+    async fn storage_get_manifest(
+        &self,
+        manifest_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let id = parse_content_id(&manifest_id)?;
+
+        // Shard ids are the handles a reader fetches bytes with, so listing
+        // them for content someone is selling hands out the content to
+        // anyone willing to skip the payment path. Pollen decides that, and
+        // it is asked before anything is serialised.
+        //
+        // The manifest's shape stays public: size and shard count leak
+        // nothing a buyer could not see in the listing, and an operator
+        // needs them to decide whether to serve. What is withheld is the
+        // shard list itself.
+        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
+
+        if let Some(manifest) = self.chain.get_storage_manifest(id).await {
+            let shards: Vec<serde_json::Value> = if protecting_asset.is_some() {
+                Vec::new()
+            } else {
+                manifest
+                    .shards
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "shardId": format!("0x{}", hex::encode(s.shard_id.0)),
+                            "size": s.size,
+                        })
+                    })
+                    .collect()
+            };
+            return Ok(serde_json::json!({
+                "manifestId": format!("0x{}", hex::encode(id.0)),
+                "found": true,
+                "totalSize": manifest.total_size,
+                "shardCount": manifest.shard_count,
+                // An operator deciding whether to serve these bytes, and a
+                // reader deciding whether a failed parse means "wrong key" or
+                // "corrupt shard", both need the declaration. Without it here
+                // the only honest answer either could give is "unknown".
+                "encryption": manifest.encryption.to_string(),
+                // Told plainly rather than by an empty list, so a caller
+                // knows to present a grant instead of concluding the object
+                // has no shards.
+                "protected": protecting_asset.is_some(),
+                "protectingAsset": protecting_asset
+                    .map(|a| format!("0x{}", hex::encode(a.0))),
+                "shards": shards,
+            }));
+        }
+
+        // The fallback path reaches the same shard ids through the deal
+        // records, so it has to answer to the same rule. Closing one and
+        // leaving the other would move the leak rather than fix it.
+        let deals = self.chain.get_storage_deals_by_manifest(id).await;
+        let shards: Vec<serde_json::Value> = if protecting_asset.is_some() {
+            Vec::new()
+        } else {
+            deals
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "shardId": format!("0x{}", hex::encode(d.shard_id.0)),
+                        "size": d.shard_bytes,
+                    })
+                })
+                .collect()
+        };
+        Ok(serde_json::json!({
+            "manifestId": format!("0x{}", hex::encode(id.0)),
+            "found": !deals.is_empty(),
+            "dealsObserved": deals.len(),
+            "protected": protecting_asset.is_some(),
+            "protectingAsset": protecting_asset
+                .map(|a| format!("0x{}", hex::encode(a.0))),
+            "shards": shards,
+        }))
+    }
+
+    async fn storage_get_deals_by_manifest(
+        &self,
+        manifest_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let id = parse_content_id(&manifest_id)?;
+        let deals_raw = self.chain.get_storage_deals_by_manifest(id).await;
+        // A deal record carries its shard id, which is the handle bytes are
+        // fetched with, so this endpoint leaks the same thing
+        // `storage_get_manifest` does and answers to the same rule. The
+        // count stays public: how many operators hold an object is an
+        // economic fact a buyer can already read from the listing.
+        let protecting_asset = self.chain.pollen_asset_for_content(id).await;
+        let count = deals_raw.len();
+        let deals: Vec<serde_json::Value> = if protecting_asset.is_some() {
+            Vec::new()
+        } else {
+            deals_raw
+                .into_iter()
+                .map(|deal| storage_deal_to_json(&deal))
+                .collect()
+        };
+        Ok(serde_json::json!({
+            "manifestId": format!("0x{}", hex::encode(id.0)),
+            "count": count,
+            "protected": protecting_asset.is_some(),
+            "protectingAsset": protecting_asset
+                .map(|a| format!("0x{}", hex::encode(a.0))),
+            "deals": deals,
+        }))
+    }
+
+    async fn storage_get_deals_by_shard(
+        &self,
+        manifest_id: String,
+        shard_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let mid = parse_content_id(&manifest_id)?;
+        let sid = parse_content_id(&shard_id)?;
+        let deals_raw = self.chain.get_storage_deals_by_shard(mid, sid).await;
+        // Closed for the same reason as the two endpoints above. This one
+        // matters even though the caller already knows the shard id: the
+        // deal record names the operators holding it, which is the second
+        // half of fetching bytes without paying.
+        let protecting_asset = self.chain.pollen_asset_for_content(mid).await;
+        let count = deals_raw.len();
+        let deals: Vec<serde_json::Value> = if protecting_asset.is_some() {
+            Vec::new()
+        } else {
+            deals_raw
+                .into_iter()
+                .map(|deal| storage_deal_to_json(&deal))
+                .collect()
+        };
+        Ok(serde_json::json!({
+            "manifestId": format!("0x{}", hex::encode(mid.0)),
+            "shardId": format!("0x{}", hex::encode(sid.0)),
+            "count": count,
+            "protected": protecting_asset.is_some(),
+            "protectingAsset": protecting_asset
+                .map(|a| format!("0x{}", hex::encode(a.0))),
+            "deals": deals,
+        }))
+    }
+
+    async fn storage_open_challenge(
+        &self,
+        request: RetrievalChallengeRequest,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageOpenChallenge")?;
+        // + the opener is required and must be non-zero
+        let opener = request
+            .opener
+            .ok_or_else(|| ErrorObjectOwned::owned(-32602, "opener is required", None::<()>))?;
+        if opener == crate::core::address::Address::zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "opener must not be zero address (H1)",
+                None::<()>,
+            ));
+        }
+
+        // Opener must cryptographically prove ownership of the
+        // Declared address. Without this, any caller can self-report any
+        // Address as the opener, rendering the opener_bond anti-spam gate
+        // Economically meaningless.
+        let opener_sig = request.opener_signature.as_deref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32602, "opener_signature is required", None::<()>)
+        })?;
+        let msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_OPEN_CHALLENGE_V1",
+            &request.deal_id.to_le_bytes(),
+            &request.byte_start.to_le_bytes(),
+            &request.byte_end.to_le_bytes(),
+            &request.challenge_epoch.to_le_bytes(),
+            &request.deadline_epoch.to_le_bytes(),
+            &request.opener_bond.to_le_bytes(),
+            opener.as_bytes(),
+        ]);
+        crate::crypto::primitives::verify_signature(&msg, opener_sig, opener.as_bytes()).map_err(
+            |e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid opener signature: {e}"),
+                    None::<()>,
+                )
+            },
+        )?;
+
+        let challenge_id = self
+            .chain
+            .open_storage_challenge(request)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid challenge: {e}"), None::<()>)
+            })?;
+        let challenge = self
+            .chain
+            .get_storage_challenges()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?
+            .into_iter()
+            .find(|challenge| challenge.challenge_id == challenge_id);
+        Ok(serde_json::json!({
+            "challengeId": challenge_id,
+            "challenge": challenge.as_ref().map(retrieval_challenge_to_json),
+        }))
+    }
+
+    async fn storage_answer_challenge(
+        &self,
+        response: RetrievalResponse,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageAnswerChallenge")?;
+        let responder = response.responder;
+
+        // Responder must cryptographically prove ownership of the
+        // Declared address. Without this, any caller can set responder to the
+        // Deal's operator address and bypass the NotTheOperator registry check.
+        let responder_sig = response.responder_signature.as_deref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32602, "responder_signature is required", None::<()>)
+        })?;
+        let msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_ANSWER_CHALLENGE_V1",
+            &response.challenge_id.to_le_bytes(),
+            &response._range_hash.0,
+            responder.as_bytes(),
+            &response.response_epoch.to_le_bytes(),
+        ]);
+        crate::crypto::primitives::verify_signature(&msg, responder_sig, responder.as_bytes())
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid responder signature: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let result = self
+            .chain
+            .answer_storage_challenge(response)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid response: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "challengeId": result.challenge_id,
+            "dealId": result.deal_id,
+            "outcome": format!("{:?}", result.outcome),
+            "finalizedEpoch": result.finalized_epoch,
+            "slashedBond": result.slashed_bond,
+        }))
+    }
+
+    async fn storage_get_economics_summary(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.chain
+            .get_storage_economics_summary()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))
+    }
+
+    async fn storage_get_economics_events(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let events = self
+            .chain
+            .get_storage_economics_events()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?;
+        Ok(serde_json::json!({
+            "count": events.len(),
+            "events": events.iter().map(storage_economics_event_to_json).collect::<Vec<_>>(),
+        }))
+    }
+
+    async fn storage_get_operator_economics(
+        &self,
+        operator: Address,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.chain
+            .get_storage_operator_economics(operator)
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))
+    }
+
+    async fn storage_get_outcome(
+        &self,
+        challenge_id: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        match self.chain.get_storage_outcome(challenge_id).await {
+            Some(r) => Ok(serde_json::json!({
+                "challengeId": r.challenge_id,
+                "dealId": r.deal_id,
+                "outcome": format!("{:?}", r.outcome),
+                "finalizedEpoch": r.finalized_epoch,
+                "slashedBond": r.slashed_bond,
+                "proofKind": RETRIEVAL_OUTCOME_PROOF_KIND,
+                "proof_kind": RETRIEVAL_OUTCOME_PROOF_KIND,
+            })),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    async fn storage_repair_band(
+        &self,
+        margin: u32,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let band: crate::chain::chain_actor::StorageRepairBand =
+            self.chain.get_storage_repair_band(margin).await;
+        let entry = |(manifest_id, live, k): &(crate::storage::ContentId, u32, u32)| {
+            serde_json::json!({
+                "manifestId": Self::to_0x_hash(hex::encode(manifest_id.0)),
+                "liveShards": live,
+                "k": k,
+            })
+        };
+        let repairable: Vec<serde_json::Value> = band.repairable.iter().map(entry).collect();
+        let unrecoverable: Vec<serde_json::Value> = band.unrecoverable.iter().map(entry).collect();
+        Ok(serde_json::json!({
+            "margin": band.margin,
+            "repairableCount": repairable.len(),
+            "repairable": repairable,
+            // Separate on purpose: below `k` no repair can restore the object,
+            // so this list needs an operator alarm, not a replacement deal.
+            "unrecoverableCount": unrecoverable.len(),
+            "unrecoverable": unrecoverable,
+        }))
+    }
+
+    async fn storage_active_operators(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Permissionless read of active STORAGE_OPERATOR (RoleId 5) members.
+        // Same surface as bud_registryActiveMembers; no admin gate.
+        let role = crate::registry::role::roles::STORAGE_OPERATOR;
+        let members = self.chain.get_registry_active_members(role).await;
+        let list: Vec<serde_json::Value> = members
+            .iter()
+            .map(|reg| {
+                serde_json::json!({
+                    "address": Self::to_0x_hash(reg.account.to_hex()),
+                    "stake": reg.stake,
+                    "role": "storage_operator",
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "roleId": role.value(),
+            "role": "storage_operator",
+            "count": list.len(),
+            "operators": list,
+        }))
+    }
+
+    async fn bns_resolve(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
+        let addr = self.chain.bns_resolve(name).await;
+        Ok(addr.map(|a| Self::to_0x_hash(a.to_hex())))
+    }
+
+    async fn bns_resolve_full(&self, name: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if let Some(resolved) = self.chain.bns_resolve_full(name.clone()).await {
+            Ok(serde_json::json!({
+                "name": resolved.name,
+                "owner": Self::to_0x_hash(resolved.owner.to_hex()),
+                "address": resolved.address.map(|a| Self::to_0x_hash(a.to_hex())),
+                "storage_root": resolved.storage_root.map(|r| format!("0x{}", hex::encode(r))),
+                "storage_domain_id": resolved.storage_domain_id,
+                "content_id": resolved.content_id.map(|c| format!("0x{}", hex::encode(c.0))),
+                "is_expired": resolved.is_expired,
+            }))
+        } else {
+            Ok(serde_json::json!(null))
+        }
+    }
+
+    async fn bns_resolve_content(&self, name: String) -> Result<Option<String>, ErrorObjectOwned> {
+        let cid = self.chain.bns_resolve_content(name).await;
+        Ok(cid.map(|c| format!("0x{}", hex::encode(c.0))))
+    }
+
+    async fn identity_resolve(&self, did: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let subject = crate::registry::address_of_did(&did).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32602,
+                "did must be `did:bud:<64 lowercase hex>`; malformed or uppercased DIDs are refused, not normalized",
+                None::<()>,
+            )
+        })?;
+        let Some((record, epoch)) = self.chain.identity_resolve(subject).await else {
+            return Ok(serde_json::json!(null));
+        };
+        Ok(serde_json::json!({
+            "did": did,
+            "subject": Self::to_0x_hash(record.subject.to_hex()),
+            "methods": record.methods.iter().map(|method| {
+                // An exhaustive match over `MethodKind`: when the registry
+                // grows a second scheme, this line fails to compile until the
+                // wire has a name for it - the same forcing the preimage
+                // encoder uses, because both would otherwise fold a new kind
+                // into the old name.
+                let kind = match method.kind {
+                    crate::registry::MethodKind::MlDsa87 => "ml-dsa-87",
+                };
+                serde_json::json!({
+                    "keyId": format!("0x{}", hex::encode(method.key_id)),
+                    "kind": kind,
+                    "revokedAt": method.revoked_at,
+                    "liveNow": method.is_live_at(epoch),
+                })
+            }).collect::<Vec<_>>(),
+            "credentialRoot": record.credential_root.map(|root| format!("0x{}", hex::encode(root))),
+            "guardians": record.guardians.iter()
+                .map(|guardian| Self::to_0x_hash(guardian.to_hex()))
+                .collect::<Vec<_>>(),
+            "recoveryThreshold": record.recovery_threshold,
+        }))
+    }
+
+    async fn identity_credential(
+        &self,
+        credential_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = credential_id.strip_prefix("0x").unwrap_or(&credential_id);
+        let bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid credential id: {e}"), None::<()>)
+        })?;
+        if bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("credential id must be 32 bytes, got {}", bytes.len()),
+                None::<()>,
+            ));
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&bytes);
+        let Some((credential, verdict)) = self.chain.identity_credential(id).await else {
+            return Ok(serde_json::json!(null));
+        };
+        Ok(serde_json::json!({
+            "id": format!("0x{}", hex::encode(id)),
+            "issuer": Self::to_0x_hash(credential.issuer.to_hex()),
+            "subject": Self::to_0x_hash(credential.subject.to_hex()),
+            "schema": credential.schema,
+            "fields": credential.fields.iter().map(|field| serde_json::json!({
+                "name": field.name,
+                "commitment": format!("0x{}", hex::encode(field.commitment)),
+            })).collect::<Vec<_>>(),
+            "root": format!("0x{}", hex::encode(credential.root())),
+            "issuedAt": credential.issued_at,
+            "expiresAt": credential.expires_at,
+            // The verdict is the registry's own `is_credential_valid`, moved
+            // verbatim: this view adds no opinion about validity, so it
+            // cannot drift from the rule the executor enforces.
+            "valid": verdict.is_ok(),
+            "refusal": verdict.as_ref().err().map(ToString::to_string),
+        }))
+    }
+
+    async fn identity_verify_presentation(
+        &self,
+        receipt: crate::registry::PresentationReceipt,
+        requester: String,
+        document: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = requester.strip_prefix("0x").unwrap_or(&requester);
+        let requester = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid requester address: {e}"),
+                None::<()>,
+            )
+        })?;
+        match self
+            .chain
+            .identity_verify_presentation(receipt, requester, document)
+            .await
+        {
+            Ok(()) => Ok(serde_json::json!({ "valid": true })),
+            // A refused presentation is an answer a service can act on;
+            // only the call itself failing is an RPC error.
+            Err(reason) => Ok(serde_json::json!({ "valid": false, "reason": reason })),
+        }
+    }
+
+    async fn bns_resolve_subdomain(
+        &self,
+        parent_name: String,
+        sub_label: String,
+    ) -> Result<Option<String>, ErrorObjectOwned> {
+        let addr = self
+            .chain
+            .bns_resolve_subdomain(parent_name, sub_label)
+            .await;
+        Ok(addr.map(|a| Self::to_0x_hash(a.to_hex())))
+    }
+
+    async fn bns_prepare_register(
+        &self,
+        name: String,
+        owner: String,
+        duration: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+
+        let data = bincode::serialize(&(name.clone(), duration))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let cost = self.chain.bns_calculate_cost(name.clone(), duration).await;
+
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: cost,
+            fee: 1000,
+            max_fee: 1000,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsRegister,
+        };
+
+        Ok(serde_json::json!({
+            "name": name,
+            "owner": owner,
+            "duration": duration,
+            "cost": cost,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_prepare_register_subdomain(
+        &self,
+        parent_name: String,
+        sub_label: String,
+        sub_owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_owner = sub_owner.strip_prefix("0x").unwrap_or(&sub_owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+
+        let data = bincode::serialize(&(parent_name.clone(), sub_label.clone(), owner_addr))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: Address::zero(),
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: 0,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsRegisterSubdomain,
+        };
+
+        Ok(serde_json::json!({
+            "parent": parent_name,
+            "sub_label": sub_label,
+            "sub_owner": sub_owner,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_prepare_set_content(
+        &self,
+        name: String,
+        owner: String,
+        cid: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+
+        let clean_cid = cid.strip_prefix("0x").unwrap_or(&cid);
+        let cid_bytes = hex::decode(clean_cid).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid CID hex: {e}"), None::<()>)
+        })?;
+        if cid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "CID must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut cid_arr = [0u8; 32];
+        cid_arr.copy_from_slice(&cid_bytes);
+        let cid_obj = crate::storage::content_id::ContentId(cid_arr);
+
+        let data = bincode::serialize(&(name.clone(), cid_obj))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsSetContent,
+        };
+        Ok(serde_json::json!({
+            "name": name,
+            "owner": owner,
+            "cid": cid,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn social_get_post(&self, id: u64) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if let Some(nft) = self.chain.nft_get(id).await {
+            Ok(serde_json::json!({
+                "id": nft.id,
+                "owner": Self::to_0x_hash(nft.owner.to_hex()),
+                "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                "minted_at": nft.minted_at_epoch,
+                "author": nft.author_name,
+            }))
+        } else {
+            Ok(serde_json::json!(null))
+        }
+    }
+
+    async fn social_get_profile(
+        &self,
+        address: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
+        let addr = Address::from_hex(clean_addr).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
+        })?;
+        let nfts = self.chain.nft_get_by_owner(addr).await;
+        let list: Vec<_> = nfts
+            .into_iter()
+            .map(|nft| {
+                serde_json::json!({
+                    "id": nft.id,
+                    "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                    "minted_at": nft.minted_at_epoch,
+                    "author": nft.author_name,
+                })
+            })
+            .collect();
+        Ok(serde_json::Value::Array(list))
+    }
+
+    async fn social_get_feed(&self, limit: usize) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let nfts = self.chain.nft_get_feed(clamp_feed_limit(limit)).await;
+        let list: Vec<_> = nfts
+            .into_iter()
+            .map(|nft| {
+                serde_json::json!({
+                    "id": nft.id,
+                    "owner": Self::to_0x_hash(nft.owner.to_hex()),
+                    "content_id": format!("0x{}", hex::encode(nft.content_id.0)),
+                    "minted_at": nft.minted_at_epoch,
+                    "author": nft.author_name,
+                })
+            })
+            .collect();
+        Ok(serde_json::Value::Array(list))
+    }
+
+    async fn social_prepare_post(
+        &self,
+        author: String,
+        cid: String,
+        author_name: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_author = author.strip_prefix("0x").unwrap_or(&author);
+        let author_addr = Address::from_hex(clean_author).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid author address: {e}"), None::<()>)
+        })?;
+
+        let clean_cid = cid.strip_prefix("0x").unwrap_or(&cid);
+        let cid_bytes = hex::decode(clean_cid).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid CID hex: {e}"), None::<()>)
+        })?;
+        if cid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "CID must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut cid_arr = [0u8; 32];
+        cid_arr.copy_from_slice(&cid_bytes);
+        let cid_obj = crate::storage::content_id::ContentId(cid_arr);
+
+        let data = bincode::serialize(&(cid_obj, author_name.clone()))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: author_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&author_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::NftMint,
+        };
+
+        Ok(serde_json::json!({
+            "author": author,
+            "cid": cid,
+            "author_name": author_name,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn social_prepare_burn(
+        &self,
+        owner: String,
+        nft_id: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+
+        let data = bincode::serialize(&nft_id)
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::NftBurn,
+        };
+
+        Ok(serde_json::json!({
+            "owner": owner,
+            "nft_id": nft_id,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn social_prepare_boost(
+        &self,
+        booster: String,
+        nft_id: u64,
+        amount: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_booster = booster.strip_prefix("0x").unwrap_or(&booster);
+        let booster_addr = Address::from_hex(clean_booster).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid booster address: {e}"), None::<()>)
+        })?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: booster_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&booster_addr).await,
+            data: Vec::new(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::NftBoost { nft_id, amount },
+        };
+
+        Ok(serde_json::json!({
+            "booster": booster,
+            "nft_id": nft_id,
+            "amount": amount,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn market_get_offers(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let offers = cap_list_response(self.chain.market_get_offers().await);
+        Ok(serde_json::json!(offers))
+    }
+
+    async fn market_prepare_offer(
+        &self,
+        seller: String,
+        cid: String,
+        price: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_seller = seller.strip_prefix("0x").unwrap_or(&seller);
+        let seller_addr = Address::from_hex(clean_seller).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid seller address: {e}"), None::<()>)
+        })?;
+
+        // `copy_from_slice` panics when the decoded length is not exactly 32.
+        // Every other 32-byte parse in this file goes through
+        // `parse_hex32_field`, which rejects the wrong length with -32602;
+        // these two were the only handlers left copying the raw decode.
+        let cid_obj = parse_content_id(&cid)?;
+
+        let data = bincode::serialize(&(cid_obj, price))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: seller_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&seller_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::AiOfferData {
+                cid: cid_obj,
+                price,
+            },
+        };
+
+        Ok(serde_json::json!({
+            "seller": seller,
+            "cid": cid,
+            "price": price,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn market_prepare_purchase(
+        &self,
+        buyer: String,
+        offer_id: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_buyer = buyer.strip_prefix("0x").unwrap_or(&buyer);
+        let buyer_addr = Address::from_hex(clean_buyer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid buyer address: {e}"), None::<()>)
+        })?;
+
+        let data = bincode::serialize(&offer_id)
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+
+        let tx = crate::core::transaction::Transaction {
+            from: buyer_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&buyer_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::AiPurchaseData { offer_id },
+        };
+
+        Ok(serde_json::json!({
+            "buyer": buyer,
+            "offer_id": offer_id,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn pollen_get_data_assets(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let assets = cap_list_response(self.chain.pollen_get_data_assets().await);
+        Ok(serde_json::json!(assets))
+    }
+
+    async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let grants = cap_list_response(self.chain.pollen_get_access_grants().await);
+        Ok(serde_json::json!(grants))
+    }
+
+    async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let authorizations = cap_list_response(self.chain.pollen_get_sale_authorizations().await);
+        Ok(serde_json::json!(authorizations))
+    }
+
+    async fn pollen_get_purchase_receipts(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let receipts = cap_list_response(self.chain.pollen_get_purchase_receipts().await);
+        Ok(serde_json::json!(receipts))
+    }
+
+    async fn pollen_build_ai_input_ref(
+        &self,
+        asset_id: String,
+        grant_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let asset_id = parse_pollen_asset_id(&asset_id)?;
+        let grant_id = parse_pollen_asset_id(&grant_id)?;
+        let input_ref = crate::pollen::AiDataInputRef { asset_id, grant_id }.encode();
+        Ok(serde_json::json!({
+            "assetId": asset_id.to_hex(),
+            "grantId": grant_id.to_hex(),
+            "inputRefHex": format!("0x{}", hex::encode(&input_ref)),
+            "inputRefBytes": input_ref,
+            "prefix": String::from_utf8_lossy(crate::pollen::POLLEN_AI_INPUT_REF_PREFIX),
+        }))
+    }
+
+    async fn pollen_prepare_sale_authorization(
+        &self,
+        seller: String,
+        asset_id: String,
+        unit_price: u64,
+        expires_at_block: u64,
+        max_grants: u32,
+        terms_hash: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_seller = seller.strip_prefix("0x").unwrap_or(&seller);
+        let seller_addr = Address::from_hex(clean_seller).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid seller address: {e}"), None::<()>)
+        })?;
+        if unit_price == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "unit_price must be greater than zero",
+                None::<()>,
+            ));
+        }
+        if max_grants == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "max_grants must be greater than zero",
+                None::<()>,
+            ));
+        }
+        let asset_id = parse_pollen_asset_id(&asset_id)?;
+        let terms_hash = parse_hex32_field(&terms_hash, "termsHash")?;
+        let valid_from_block = self.chain.get_height().await;
+        if expires_at_block <= valid_from_block {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "expires_at_block must be greater than current finalized height {valid_from_block}"
+                ),
+                None::<()>,
+            ));
+        }
+        let authorization = crate::pollen::SaleAuthorization::new_unsigned(
+            asset_id,
+            seller_addr,
+            unit_price,
+            valid_from_block,
+            expires_at_block,
+            max_grants,
+            terms_hash,
+        );
+        Ok(serde_json::json!({
+            "seller": seller_addr.to_hex(),
+            "assetId": asset_id.to_hex(),
+            "authorizationId": authorization.authorization_id.to_hex(),
+            "signingHash": format!("0x{}", hex::encode(authorization.signing_hash())),
+            "unsignedAuthorization": authorization,
+            "note": "seller_signature is sentinel until the owner signs this authorization; sentinel signatures are rejected on-chain",
+        }))
+    }
+
+    async fn pollen_prepare_purchase(
+        &self,
+        authorization_id: String,
+        buyer: String,
+        grantee: String,
+        grant_duration_blocks: u64,
+        max_reads: u32,
+        payment_commitment: String,
+        buyer_signature: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let authorization_id = parse_pollen_asset_id(&authorization_id)?;
+        let payment_commitment = parse_hex32_field(&payment_commitment, "paymentCommitment")?;
+        // Security check (HIGH): the buyer signature is required - an ed25519
+        // signature bound to every parameter of the purchase.
+        let clean_sig = buyer_signature
+            .strip_prefix("0x")
+            .unwrap_or(&buyer_signature);
+        let sig_bytes = hex::decode(clean_sig).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid buyerSignature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        if sig_bytes.len() != 64 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "buyerSignature must be 64 bytes",
+                None::<()>,
+            ));
+        }
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&sig_bytes);
+        let buyer_signature = crate::pollen::Signature64::from(sig_arr);
+        if payment_commitment == [0u8; 32] {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "payment_commitment cannot be zero",
+                None::<()>,
+            ));
+        }
+        if grant_duration_blocks == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "grant_duration_blocks must be greater than zero",
+                None::<()>,
+            ));
+        }
+        if max_reads == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "max_reads must be greater than zero",
+                None::<()>,
+            ));
+        }
+
+        let clean_buyer = buyer.strip_prefix("0x").unwrap_or(&buyer);
+        let buyer_addr = Address::from_hex(clean_buyer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid buyer address: {e}"), None::<()>)
+        })?;
+        let clean_grantee = grantee.strip_prefix("0x").unwrap_or(&grantee);
+        let grantee_addr = Address::from_hex(clean_grantee).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid grantee address: {e}"), None::<()>)
+        })?;
+
+        let authorizations = self.chain.pollen_get_sale_authorizations().await;
+        let authorization = authorizations
+            .into_iter()
+            .find(|auth| auth.authorization_id == authorization_id)
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(-32602, "SaleAuthorization not found", None::<()>)
+            })?;
+        let data_assets = self.chain.pollen_get_data_assets().await;
+        let asset = data_assets
+            .into_iter()
+            .find(|asset| asset.asset_id == authorization.asset_id)
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(-32602, "SaleAuthorization asset not found", None::<()>)
+            })?;
+
+        let current_block = self.chain.get_height().await;
+        let mut registry = crate::pollen::MarketplaceRegistry::new();
+        for policy in self.chain.pollen_get_encryption_policies().await {
+            registry
+                .set_encryption_policy(policy)
+                .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        }
+        registry
+            .register_data_asset(asset)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        registry
+            .create_sale_authorization(authorization)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        let (grant_id, receipt) = registry
+            .issue_grant_from_sale_authorization(
+                authorization_id,
+                buyer_addr,
+                grantee_addr,
+                current_block,
+                grant_duration_blocks,
+                max_reads,
+                payment_commitment,
+                buyer_signature,
+            )
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+        let grant = registry
+            .access_grants
+            .get(&grant_id)
+            .cloned()
+            .ok_or_else(|| ErrorObjectOwned::owned(-32603, "prepared grant missing", None::<()>))?;
+
+        Ok(serde_json::json!({
+            "authorizationId": authorization_id.to_hex(),
+            "buyer": buyer_addr.to_hex(),
+            "grantee": grantee_addr.to_hex(),
+            "grantId": grant_id.to_hex(),
+            "receiptId": receipt.receipt_id.to_hex(),
+            "paymentCommitment": format!("0x{}", hex::encode(payment_commitment)),
+            "currentBlock": current_block,
+            "grantDurationBlocks": grant_duration_blocks,
+            "maxReads": max_reads,
+            "expectedAccessGrant": grant,
+            "purchaseReceipt": receipt,
+            "note": "prepare-only; no state mutation or LUM/DeFi adapter is executed by this RPC",
+        }))
+    }
+
+    async fn budlumxyz_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let apps = self.chain.budlumxyz_get_apps().await;
+        Ok(serde_json::json!(apps))
+    }
+
+    async fn budlumxyz_prepare_register(
+        &self,
+        developer: String,
+        name: String,
+        category: crate::budlumxyz::types::AppCategory,
+        website_url: String,
+        manifest_id: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_dev = developer.strip_prefix("0x").unwrap_or(&developer);
+        let dev_addr = Address::from_hex(clean_dev).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid developer address: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        let m_id = if let Some(m_str) = manifest_id {
+            Some(parse_content_id(&m_str)?)
+        } else {
+            None
+        };
+
+        let tx = crate::core::transaction::Transaction {
+            from: dev_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&dev_addr).await,
+            data: Vec::new(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BudlumxyzRegisterApp {
+                name,
+                category,
+                website_url,
+                manifest_id: m_id,
+            },
+        };
+
+        Ok(serde_json::json!({
+            "developer": developer,
+            "name": tx.from.to_hex(),
+            "tx_template": tx,
+        }))
+    }
+
+    async fn relayer_prepare_external_tx(
+        &self,
+        from: String,
+        chain: crate::core::transaction::ExternalChain,
+        target_address: String,
+        payload: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_from = from.strip_prefix("0x").unwrap_or(&from);
+        let from_addr = Address::from_hex(clean_from).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid from address: {e}"), None::<()>)
+        })?;
+
+        let payload_bytes =
+            hex::decode(payload.strip_prefix("0x").unwrap_or(&payload)).map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid payload hex: {e}"), None::<()>)
+            })?;
+
+        let ext_tx = crate::core::transaction::ExternalTransaction {
+            chain,
+            target_address,
+            payload: payload_bytes,
+            external_nonce: 0,
+        };
+
+        let tx = crate::core::transaction::Transaction {
+            from: from_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 2000,
+            max_fee: 2000,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&from_addr).await,
+            data: Vec::new(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::UniversalRelay(ext_tx),
+        };
+
+        Ok(serde_json::json!({
+            "from": from,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn gateway_fetch_content(&self, name: String) -> Result<String, ErrorObjectOwned> {
+        // Security check (HIGH): Pollen-protected content must not be
+        // fetchable over this RPC without an AccessGrant. Same pattern as the
+        // storage_get_manifest and storage_get_deals_* handlers: if a
+        // protecting asset exists, access is refused.
+        //
+        // Security check (HIGH): the check used to look at storage_root only,
+        // so a record with content_id set and storage_root unset skipped the
+        // guard. The gateway serves storage_root, so the guard now checks
+        // every identity the record names (content_id and storage_root);
+        // a record with two different values cannot pick the unprotected one.
+        let resolved = self.chain.bns_resolve_full(name.clone()).await;
+        for cid in resolved
+            .as_ref()
+            .map(crate::gateway::pollen_guard_ids)
+            .unwrap_or_default()
+        {
+            if self.chain.pollen_asset_for_content(cid).await.is_some() {
+                return Err(ErrorObjectOwned::owned(
+                    -32603,
+                    "Content is Pollen-protected; an AccessGrant is required",
+                    None::<()>,
+                ));
+            }
+        }
+        let gateway =
+            crate::gateway::BudGateway::new(self.chain.clone(), Some(self.node.clone()), None);
+        let data = gateway.fetch_name_content(&name).await.map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32000,
+                format!("Gateway resolution failed: {e}"),
+                None::<()>,
+            )
+        })?;
+        Ok(hex::encode(data))
+    }
+
+    async fn gateway_render_content(
+        &self,
+        name: String,
+        format: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // The same Pollen check. Asking for a format cannot be a way around
+        // the access rules: protected content stays protected in whatever
+        // format it is requested.
+        let resolved = self.chain.bns_resolve_full(name.clone()).await;
+        for cid in resolved
+            .as_ref()
+            .map(crate::gateway::pollen_guard_ids)
+            .unwrap_or_default()
+        {
+            if self.chain.pollen_asset_for_content(cid).await.is_some() {
+                return Err(ErrorObjectOwned::owned(
+                    -32603,
+                    "Content is Pollen-protected; an AccessGrant is required",
+                    None::<()>,
+                ));
+            }
+        }
+        let parsed = parse_render_format(&format).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid render format: {e}"), None::<()>)
+        })?;
+        let gateway =
+            crate::gateway::BudGateway::new(self.chain.clone(), Some(self.node.clone()), None);
+        let (bytes, id) = gateway
+            .render_name_content(&name, &parsed)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32000, format!("Render failed: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "bytes": hex::encode(bytes),
+            "renderId": hex::encode(id),
+            "format": format,
+        }))
+    }
+
+    async fn passport_get_profile(
+        &self,
+        name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        crate::gateway::validate_passport_name(&name).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
+        })?;
+        let resolved = self.chain.bns_resolve_full(name.clone()).await;
+        let manifest_id = resolved.as_ref().and_then(|r| {
+            r.content_id
+                .or(r.storage_root.map(crate::storage::ContentId))
+        });
+        let manifest = if let Some(id) = manifest_id {
+            self.chain.get_storage_manifest(id).await
+        } else {
+            None
+        };
+        let data_assets = self.chain.pollen_get_data_assets().await;
+        let access_grants = self.chain.pollen_get_access_grants().await;
+        let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
+        let profile = crate::gateway::build_passport_profile(
+            name,
+            resolved,
+            manifest,
+            &data_assets,
+            &access_grants,
+            &sale_authorizations,
+        );
+        serde_json::to_value(profile).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("failed to serialize passport profile: {e}"),
+                None::<()>,
+            )
+        })
+    }
+
+    async fn passport_get_proof_bundle(
+        &self,
+        name: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        crate::gateway::validate_passport_name(&name).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid passport name: {e}"), None::<()>)
+        })?;
+        let resolved = self.chain.bns_resolve_full(name.clone()).await;
+        let manifest_id = resolved.as_ref().and_then(|r| {
+            r.content_id
+                .or(r.storage_root.map(crate::storage::ContentId))
+        });
+        let manifest = if let Some(id) = manifest_id {
+            self.chain.get_storage_manifest(id).await
+        } else {
+            None
+        };
+        let data_assets = self.chain.pollen_get_data_assets().await;
+        let access_grants = self.chain.pollen_get_access_grants().await;
+        let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
+        let profile = crate::gateway::build_passport_profile(
+            name,
+            resolved,
+            manifest,
+            &data_assets,
+            &access_grants,
+            &sale_authorizations,
+        );
+        let height = self.chain.get_height().await;
+        let bundle =
+            crate::gateway::try_build_passport_proof_bundle(&profile, height).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("failed to build passport proof bundle: {e}"),
+                    None::<()>,
+                )
+            })?;
+        serde_json::to_value(bundle).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("failed to serialize passport proof bundle: {e}"),
+                None::<()>,
+            )
+        })
+    }
+
+    async fn atlas_get_wallet_context(
+        &self,
+        address: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = address.strip_prefix("0x").unwrap_or(&address);
+        let address = Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid wallet address: {e}"), None::<()>)
+        })?;
+        let balance = self.chain.get_balance(&address).await;
+        let nonce = self.chain.get_nonce(&address).await;
+        let data_assets = self.chain.pollen_get_data_assets().await;
+        let access_grants = self.chain.pollen_get_access_grants().await;
+        let sale_authorizations = self.chain.pollen_get_sale_authorizations().await;
+        let context = crate::gateway::build_wallet_context(
+            address,
+            balance,
+            nonce,
+            &data_assets,
+            &access_grants,
+            &sale_authorizations,
+        );
+        serde_json::to_value(context).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("failed to serialize atlas wallet context: {e}"),
+                None::<()>,
+            )
+        })
+    }
+
+    // --- (§1): AI Inference & Verifier Layer ---
+
+    async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_id = model_id.strip_prefix("0x").unwrap_or(&model_id);
+        let id_bytes = hex::decode(clean_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid model_id hex: {e}"), None::<()>)
+        })?;
+        if id_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "model_id must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&id_bytes);
+        match self
+            .chain
+            .get_ai_model(crate::ai::types::AiModelId(arr))
+            .await
+        {
+            Some(spec) => Ok(serde_json::to_value(&spec).unwrap_or(serde_json::Value::Null)),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    async fn ai_register_model(
+        &self,
+        owner: String,
+        model_hash: String,
+        min_verifier_count: u32,
+        agreement_threshold: u32,
+        max_input_ref_bytes: u64,
+        max_output_ref_bytes: u64,
+        request_deadline_blocks: u64,
+        result_deadline_blocks: u64,
+        modality_bits: Option<u32>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = crate::core::address::Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+
+        let clean_hash = model_hash.strip_prefix("0x").unwrap_or(&model_hash);
+        let hash_bytes = hex::decode(clean_hash).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid model_hash hex: {e}"), None::<()>)
+        })?;
+        if hash_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "model_hash must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&hash_bytes);
+
+        let model_id = crate::ai::types::AiModelId::of(&owner_addr, &arr, 1);
+        let spec = crate::ai::types::AiModelSpec {
+            model_id,
+            model_hash: arr,
+            owner: owner_addr,
+            min_verifier_count,
+            agreement_threshold,
+            max_input_ref_bytes,
+            max_output_ref_bytes,
+            request_deadline_blocks,
+            result_deadline_blocks,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_dims: None,
+            execution_weights_digest: None,
+            modalities: modality_bits.map_or_else(
+                crate::ai_inference::perception::ModalitySet::text_only,
+                crate::ai_inference::perception::ModalitySet::from_bits,
+            ),
+        };
+
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: crate::core::address::Address::zero(),
+            amount: 0,
+            fee: crate::core::account::MIN_TX_FEE,
+            max_fee: crate::core::account::MIN_TX_FEE,
+            priority_fee: 0,
+            nonce: 0,
+            data: Vec::new(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::AiModelRegister(spec),
+        };
+
+        Ok(serde_json::json!({
+            "model_id": model_id.to_hex(),
+            "owner": owner_addr.to_hex(),
+            "tx_template": tx,
+        }))
+    }
+
+    async fn ai_submit_request(
+        &self,
+        requester: String,
+        model_id: String,
+        input_commitment: String,
+        input_ref_hex: String,
+        max_fee: u64,
+        callback: Option<String>,
+        deadline_block: u64,
+        perception_asset_id: Option<String>,
+        perception_content_id: Option<String>,
+        perception_kind_tag: Option<u32>,
+        perception_declared_units: Option<u32>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_req = requester.strip_prefix("0x").unwrap_or(&requester);
+        let req_addr = crate::core::address::Address::from_hex(clean_req).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid requester address: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        let clean_mid = model_id.strip_prefix("0x").unwrap_or(&model_id);
+        let mid_bytes = hex::decode(clean_mid).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid model_id hex: {e}"), None::<()>)
+        })?;
+        if mid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "model_id must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut mid = [0u8; 32];
+        mid.copy_from_slice(&mid_bytes);
+
+        let clean_com = input_commitment
+            .strip_prefix("0x")
+            .unwrap_or(&input_commitment);
+        let com_bytes = hex::decode(clean_com).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid input_commitment hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        if com_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "input_commitment must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut icom = [0u8; 32];
+        icom.copy_from_slice(&com_bytes);
+
+        let clean_ref = input_ref_hex.strip_prefix("0x").unwrap_or(&input_ref_hex);
+        let ref_bytes = hex::decode(clean_ref).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid input_ref hex: {e}"), None::<()>)
+        })?;
+        let input_ref = crate::ai::types::BoundedBytes::try_new(ref_bytes)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+
+        let cb = match callback {
+            Some(c) if !c.is_empty() => {
+                let clean_cb = c.strip_prefix("0x").unwrap_or(&c);
+                Some(
+                    crate::core::address::Address::from_hex(clean_cb).map_err(|e| {
+                        ErrorObjectOwned::owned(
+                            -32602,
+                            format!("Invalid callback address: {e}"),
+                            None::<()>,
+                        )
+                    })?,
+                )
+            }
+            _ => None,
+        };
+
+        let perception = match (
+            perception_asset_id,
+            perception_content_id,
+            perception_kind_tag,
+            perception_declared_units,
+        ) {
+            (Some(a), Some(c), Some(k), Some(u)) => {
+                let aid_bytes = hex::decode(a.strip_prefix("0x").unwrap_or(&a)).map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("Invalid perception asset_id hex: {e}"),
+                        None::<()>,
+                    )
+                })?;
+                if aid_bytes.len() != 32 {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "perception asset_id must be 32 bytes",
+                        None::<()>,
+                    ));
+                }
+                let mut aid = [0u8; 32];
+                aid.copy_from_slice(&aid_bytes);
+                let cid_bytes = hex::decode(c.strip_prefix("0x").unwrap_or(&c)).map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("Invalid perception content_id hex: {e}"),
+                        None::<()>,
+                    )
+                })?;
+                if cid_bytes.len() != 32 {
+                    return Err(ErrorObjectOwned::owned(
+                        -32602,
+                        "perception content_id must be 32 bytes",
+                        None::<()>,
+                    ));
+                }
+                let mut cid = [0u8; 32];
+                cid.copy_from_slice(&cid_bytes);
+                let kind = crate::ai_inference::perception::PerceptionKind::from_tag(
+                    u8::try_from(k).map_err(|_| {
+                        ErrorObjectOwned::owned(
+                            -32602,
+                            "perception kind tag out of range",
+                            None::<()>,
+                        )
+                    })?,
+                )
+                .ok_or_else(|| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("unknown perception kind tag: {k}"),
+                        None::<()>,
+                    )
+                })?;
+                Some(crate::ai_inference::perception::PerceptionRequest {
+                    asset_id: crate::pollen::AssetId(aid),
+                    content_id: crate::storage::content_id::ContentId(cid),
+                    kind,
+                    declared_units: u,
+                })
+            }
+            (None, None, None, None) => None,
+            _ => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "perception parameters must be given in full or not at all",
+                    None::<()>,
+                ));
+            }
+        };
+
+        let current_height = self.chain.get_height().await;
+        let mut req = crate::ai::types::AiInferenceRequest {
+            request_id: crate::ai::types::AiRequestId::default(),
+            requester: req_addr,
+            model_id: crate::ai::types::AiModelId(mid),
+            input_commitment: icom,
+            input_ref,
+            max_fee,
+            callback: cb,
+            submitted_at_block: current_height,
+            deadline_block,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception,
+        };
+        req.request_id = req.calculate_id();
+
+        let tx = crate::core::transaction::Transaction {
+            from: req_addr,
+            to: crate::core::address::Address::zero(),
+            amount: 0,
+            fee: crate::core::account::MIN_TX_FEE,
+            max_fee: crate::core::account::MIN_TX_FEE,
+            priority_fee: 0,
+            nonce: 0,
+            data: Vec::new(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::AiInferenceRequest(req.clone()),
+        };
+
+        Ok(serde_json::json!({
+            "request_id": req.request_id.to_hex(),
+            "requester": req_addr.to_hex(),
+            "tx_template": tx,
+        }))
+    }
+
+    async fn ai_submit_result(
+        &self,
+        verifier: String,
+        request_id: String,
+        output_commitment: String,
+        output_ref_hex: String,
+        result_nonce: u64,
+        signature_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_v = verifier.strip_prefix("0x").unwrap_or(&verifier);
+        let v_addr = crate::core::address::Address::from_hex(clean_v).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid verifier address: {e}"), None::<()>)
+        })?;
+
+        let clean_rid = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let rid_bytes = hex::decode(clean_rid).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if rid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut rid = [0u8; 32];
+        rid.copy_from_slice(&rid_bytes);
+
+        let clean_ocom = output_commitment
+            .strip_prefix("0x")
+            .unwrap_or(&output_commitment);
+        let com_bytes = hex::decode(clean_ocom).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid output_commitment hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        if com_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "output_commitment must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut ocom = [0u8; 32];
+        ocom.copy_from_slice(&com_bytes);
+
+        let clean_oref = output_ref_hex.strip_prefix("0x").unwrap_or(&output_ref_hex);
+        let ref_bytes = hex::decode(clean_oref).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid output_ref hex: {e}"), None::<()>)
+        })?;
+        let output_ref = crate::ai::types::BoundedBytes::try_new(ref_bytes)
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
+
+        let clean_sig = signature_hex.strip_prefix("0x").unwrap_or(&signature_hex);
+        let sig_bytes = hex::decode(clean_sig).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid signature hex: {e}"), None::<()>)
+        })?;
+
+        let current_height = self.chain.get_height().await;
+        let res = crate::ai::types::AiInferenceResult {
+            request_id: crate::ai::types::AiRequestId(rid),
+            verifier: v_addr,
+            output_commitment: ocom,
+            output_ref,
+            result_nonce,
+            signature: sig_bytes,
+            submitted_at_block: current_height,
+        };
+
+        let tx = crate::core::transaction::Transaction {
+            from: v_addr,
+            to: crate::core::address::Address::zero(),
+            amount: 0,
+            fee: crate::core::account::MIN_TX_FEE,
+            max_fee: crate::core::account::MIN_TX_FEE,
+            priority_fee: 0,
+            nonce: 0,
+            data: Vec::new(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::AiInferenceResult(res),
+        };
+
+        Ok(serde_json::json!({
+            "verifier": v_addr.to_hex(),
+            "tx_template": tx,
+        }))
+    }
+
+    async fn ai_get_outcome(
+        &self,
+        request_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_id = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let id_bytes = hex::decode(clean_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if id_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&id_bytes);
+        match self
+            .chain
+            .get_ai_outcome(crate::ai::types::AiRequestId(arr))
+            .await
+        {
+            Some(outcome) => Ok(serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null)),
+            None => Ok(serde_json::Value::Null),
+        }
+    }
+
+    async fn ai_get_active_verifiers(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let role = crate::registry::role::roles::AI_VERIFIER;
+        let members = self.chain.get_registry_active_members(role).await;
+        let list: Vec<serde_json::Value> = members
+            .iter()
+            .map(|reg| {
+                serde_json::json!({
+                    "address": Self::to_0x_hash(reg.account.to_hex()),
+                    "stake": reg.stake,
+                    "active": reg.is_active(),
+                })
+            })
+            .collect();
+        Ok(serde_json::Value::Array(list))
+    }
+
+    async fn ai_reclaim_fee(
+        &self,
+        request_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_id = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let rid_bytes = hex::decode(clean_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if rid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes (64 hex chars)".to_string(),
+                None::<()>,
+            ));
+        }
+        let mut id_bytes = [0u8; 32];
+        id_bytes.copy_from_slice(&rid_bytes);
+        let rid = crate::ai::types::AiRequestId::new(id_bytes);
+
+        match self.chain.get_ai_fee_reclaim_status(rid).await {
+            Ok((requester, max_fee)) => Ok(serde_json::json!({
+                "status": "reclaimable",
+                "request_id": request_id,
+                "requester": Self::to_0x_hash(requester.to_hex()),
+                "max_fee": max_fee,
+            })),
+            Err(e) => Ok(serde_json::json!({
+                "status": "error",
+                "request_id": request_id,
+                "message": e,
+            })),
+        }
+    }
+
+    async fn ai_equivocation_status(
+        &self,
+        request_id: String,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_id = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let rid_bytes = hex::decode(clean_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if rid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes (64 hex chars)".to_string(),
+                None::<()>,
+            ));
+        }
+        let mut id_bytes = [0u8; 32];
+        id_bytes.copy_from_slice(&rid_bytes);
+        let rid = crate::ai::types::AiRequestId::new(id_bytes);
+
+        let clean_verifier = verifier.strip_prefix("0x").unwrap_or(&verifier);
+        let verifier_addr =
+            crate::core::address::Address::from_hex(clean_verifier).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid verifier address: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let has_equivocated = self
+            .chain
+            .get_ai_equivocation_status(rid, verifier_addr)
+            .await;
+
+        Ok(serde_json::json!({
+            "request_id": request_id,
+            "verifier": verifier,
+            "has_equivocated": has_equivocated,
+        }))
+    }
+
+    async fn ai_cancel_status(
+        &self,
+        request_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_id = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let rid_bytes = hex::decode(clean_id).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if rid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes (64 hex chars)".to_string(),
+                None::<()>,
+            ));
+        }
+        let mut id_bytes = [0u8; 32];
+        id_bytes.copy_from_slice(&rid_bytes);
+        let rid = crate::ai::types::AiRequestId::new(id_bytes);
+
+        let is_cancelled = self.chain.get_ai_cancel_status(rid).await;
+
+        Ok(serde_json::json!({
+            "request_id": request_id,
+            "is_cancelled": is_cancelled,
+        }))
+    }
+
+    async fn ai_dispute_slash(
+        &self,
+        submitter: String,
+        request_id: String,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_sub = submitter.strip_prefix("0x").unwrap_or(&submitter);
+        let sub_addr = crate::core::address::Address::from_hex(clean_sub).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid submitter address: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        let clean_rid = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let rid_bytes = hex::decode(clean_rid).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if rid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes (64 hex chars)".to_string(),
+                None::<()>,
+            ));
+        }
+        let mut rid_arr = [0u8; 32];
+        rid_arr.copy_from_slice(&rid_bytes);
+        let rid = crate::ai::types::AiRequestId::new(rid_arr);
+
+        let clean_v = verifier.strip_prefix("0x").unwrap_or(&verifier);
+        let v_addr = crate::core::address::Address::from_hex(clean_v).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid verifier address: {e}"), None::<()>)
+        })?;
+
+        // Check dispute status before preparing tx
+        let status = self.chain.get_ai_dispute_status(rid, v_addr).await;
+        if !status.has_equivocated {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "No equivocation record for verifier {} on request {}",
+                    v_addr.to_hex(),
+                    rid.to_hex()
+                ),
+                None::<()>,
+            ));
+        }
+        if !status.is_disputable {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "Dispute window expired for verifier {} on request {}",
+                    v_addr.to_hex(),
+                    rid.to_hex()
+                ),
+                None::<()>,
+            ));
+        }
+
+        let tx = crate::core::transaction::Transaction {
+            from: sub_addr,
+            to: crate::core::address::Address::zero(),
+            amount: 0,
+            fee: crate::core::account::MIN_TX_FEE,
+            max_fee: crate::core::account::MIN_TX_FEE,
+            priority_fee: 0,
+            nonce: 0,
+            data: Vec::new(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::AiDisputeSlash {
+                request_id: rid,
+                verifier: v_addr,
+            },
+        };
+
+        Ok(serde_json::json!({
+            "submitter": submitter,
+            "request_id": request_id,
+            "verifier": verifier,
+            "tx_template": tx,
+            "dispute_status": {
+                "has_equivocated": status.has_equivocated,
+                "is_disputable": status.is_disputable,
+                "detected_block": status.detected_block,
+                "stake_at_risk": status.stake_amount,
+            },
+        }))
+    }
+
+    async fn ai_slashing_status(
+        &self,
+        request_id: String,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_rid = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let rid_bytes = hex::decode(clean_rid).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if rid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes (64 hex chars)".to_string(),
+                None::<()>,
+            ));
+        }
+        let mut rid_arr = [0u8; 32];
+        rid_arr.copy_from_slice(&rid_bytes);
+        let rid = crate::ai::types::AiRequestId::new(rid_arr);
+
+        let clean_v = verifier.strip_prefix("0x").unwrap_or(&verifier);
+        let v_addr = crate::core::address::Address::from_hex(clean_v).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid verifier address: {e}"), None::<()>)
+        })?;
+
+        let status = self.chain.get_ai_dispute_status(rid, v_addr).await;
+
+        Ok(serde_json::json!({
+            "request_id": request_id,
+            "verifier": verifier,
+            "has_equivocated": status.has_equivocated,
+            "is_disputable": status.is_disputable,
+            "detected_block": status.detected_block,
+            "dispute_window_remaining": status.dispute_window_remaining,
+            "is_staked": status.is_staked,
+            "stake_amount": status.stake_amount,
+        }))
+    }
+
+    async fn ai_verifier_stake(
+        &self,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_v = verifier.strip_prefix("0x").unwrap_or(&verifier);
+        let v_addr = crate::core::address::Address::from_hex(clean_v).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid verifier address: {e}"), None::<()>)
+        })?;
+
+        let info = self.chain.get_ai_verifier_stake(v_addr).await;
+
+        Ok(serde_json::json!({
+            "verifier": verifier,
+            "is_staked": info.is_staked,
+            "stake_amount": info.stake_amount,
+            "total_equivocations": info.total_equivocations,
+        }))
+    }
+
+    async fn ai_callback_queue(
+        &self,
+        callback_address: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_cb = callback_address
+            .strip_prefix("0x")
+            .unwrap_or(&callback_address);
+        let cb_addr = crate::core::address::Address::from_hex(clean_cb).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid callback address: {e}"), None::<()>)
+        })?;
+
+        let events = self.chain.get_ai_callback_queue(cb_addr).await;
+        let events_json: Vec<serde_json::Value> = events
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "request_id": format!("0x{}", e.request_id.to_hex()),
+                    "output_commitment": format!("0x{}", hex::encode(e.output_commitment)),
+                    "finalized_at_block": e.finalized_at_block,
+                    "callback_address": format!("0x{}", e.callback_address.to_hex()),
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "callback_address": callback_address,
+            "pending_count": events_json.len(),
+            "events": events_json,
+        }))
+    }
+
+    /// Query ZKVM execution proof for a (request, verifier) pair.
+    async fn ai_execution_proof(
+        &self,
+        request_id: String,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_req = request_id.strip_prefix("0x").unwrap_or(&request_id);
+        let req_bytes = hex::decode(clean_req).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid request_id hex: {e}"), None::<()>)
+        })?;
+        if req_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "request_id must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut req_arr = [0u8; 32];
+        req_arr.copy_from_slice(&req_bytes);
+        let req_id = crate::ai::types::AiRequestId::new(req_arr);
+        let clean_v = verifier.strip_prefix("0x").unwrap_or(&verifier);
+        let v_addr = crate::core::address::Address::from_hex(clean_v).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid verifier address: {e}"), None::<()>)
+        })?;
+
+        let proof = self.chain.get_ai_execution_proof(req_id, v_addr).await;
+
+        match proof {
+            Some(p) => Ok(serde_json::json!({
+                "request_id": request_id,
+                "verifier": verifier,
+                "has_proof": true,
+                "model_id": format!("0x{}", p.model_id.to_hex()),
+                "input_commitment": format!("0x{}", hex::encode(p.input_commitment)),
+                "output_commitment": format!("0x{}", hex::encode(p.output_commitment)),
+                "program_hash": format!("0x{}", hex::encode(p.program_hash)),
+                "steps": p.steps,
+                "gas_used": p.gas_used,
+                "proof_size_bytes": p.proof_bytes.len(),
+                "trustless": true,
+            })),
+            None => Ok(serde_json::json!({
+                "request_id": request_id,
+                "verifier": verifier,
+                "has_proof": false,
+                "trustless": false,
+            })),
+        }
+    }
+
+    /// Query QoS metrics for a verifier.
+    async fn ai_verifier_qos(
+        &self,
+        verifier: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_v = verifier.strip_prefix("0x").unwrap_or(&verifier);
+        let v_addr = crate::core::address::Address::from_hex(clean_v).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid verifier address: {e}"), None::<()>)
+        })?;
+
+        let qos = self.chain.get_ai_verifier_qos(v_addr).await;
+
+        match qos {
+            Some(q) => Ok(serde_json::json!({
+                "verifier": verifier,
+                "total_results_submitted": q.total_results_submitted,
+                "successful_finalizations": q.successful_finalizations,
+                "equivocation_count": q.equivocation_count,
+                "avg_response_blocks": q.avg_response_blocks,
+                "last_active_block": q.last_active_block,
+                "reliability_score": q.reliability_score(),
+                "finalization_rate": if q.total_results_submitted > 0 {
+                    q.successful_finalizations as f64 / q.total_results_submitted as f64
+                } else {
+                    0.0
+                },
+            })),
+            None => Ok(serde_json::json!({
+                "verifier": verifier,
+                "has_qos": false,
+                "reliability_score": 0.0,
+            })),
+        }
+    }
+
+    /// Get all verifiers ranked by reliability score.
+    async fn ai_verifier_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let ranking = cap_list_response(self.chain.get_ai_verifiers_by_reliability().await);
+        let ranking_json: Vec<serde_json::Value> = ranking
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                serde_json::json!({
+                    "rank": i + 1,
+                    "verifier": format!("0x{}", q.verifier.to_hex()),
+                    "reliability_score": q.reliability_score(),
+                    "total_results_submitted": q.total_results_submitted,
+                    "successful_finalizations": q.successful_finalizations,
+                    "equivocation_count": q.equivocation_count,
+                    "avg_response_blocks": q.avg_response_blocks,
+                    "last_active_block": q.last_active_block,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "total_verifiers": ranking_json.len(),
+            "ranking": ranking_json,
+        }))
+    }
+
+    /// Query an agent-to-agent payment by ID.
+    async fn ai_agent_payment(
+        &self,
+        payment_id: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = payment_id.strip_prefix("0x").unwrap_or(&payment_id);
+        let pid_bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payment_id hex: {e}"), None::<()>)
+        })?;
+        if pid_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "payment_id must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut pid = [0u8; 32];
+        pid.copy_from_slice(&pid_bytes);
+
+        let payment = self.chain.get_ai_agent_payment(pid).await;
+
+        match payment {
+            Some(p) => Ok(serde_json::json!({
+                "payment_id": payment_id,
+                "from_agent": format!("0x{}", p.from_agent.to_hex()),
+                "to_agent": format!("0x{}", p.to_agent.to_hex()),
+                "amount": p.amount,
+                "escrowed": p.is_escrowed(),
+                "request_id": p.request_id.map(|rid| format!("0x{}", rid.to_hex())),
+                "require_proof": p.require_proof,
+                "submitted_at_block": p.submitted_at_block,
+                "expiry_block": p.expiry_block,
+            })),
+            None => Ok(serde_json::json!({
+                "payment_id": payment_id,
+                "found": false,
+            })),
+        }
+    }
+
+    /// Query payments for an agent.
+    async fn ai_agent_payments(
+        &self,
+        agent: String,
+        direction: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = agent.strip_prefix("0x").unwrap_or(&agent);
+        let addr = crate::core::address::Address::from_hex(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid agent address: {e}"), None::<()>)
+        })?;
+        let dir = match direction.to_lowercase().as_str() {
+            "from" => crate::chain::chain_actor::AiPaymentDirection::From,
+            "to" => crate::chain::chain_actor::AiPaymentDirection::To,
+            _ => {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    "direction must be 'from' or 'to'",
+                    None::<()>,
+                ))
+            }
+        };
+
+        let payments = self.chain.get_ai_agent_payments(addr, dir).await;
+        let payments_json: Vec<serde_json::Value> = payments
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "payment_id": format!("0x{}", hex::encode(p.payment_id)),
+                    "from_agent": format!("0x{}", p.from_agent.to_hex()),
+                    "to_agent": format!("0x{}", p.to_agent.to_hex()),
+                    "amount": p.amount,
+                    "escrowed": p.is_escrowed(),
+                    "request_id": p.request_id.map(|rid| format!("0x{}", rid.to_hex())),
+                    "require_proof": p.require_proof,
+                    "submitted_at_block": p.submitted_at_block,
+                    "expiry_block": p.expiry_block,
+                })
+            })
+            .collect();
+
+        Ok(serde_json::json!({
+            "agent": agent,
+            "direction": direction,
+            "payment_count": payments_json.len(),
+            "payments": payments_json,
+        }))
+    }
+
+    /// Query the verifier whitelist.
+    async fn ai_verifier_whitelist(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let whitelist = self.chain.get_ai_verifier_whitelist().await;
+        let list: Vec<serde_json::Value> = whitelist
+            .iter()
+            .map(|v| serde_json::json!(format!("0x{}", v.to_hex())))
+            .collect();
+        Ok(serde_json::json!({
+            "whitelist_mode": !list.is_empty(),
+            "verifier_count": list.len(),
+            "verifiers": list,
+        }))
+    }
+
+    async fn ai_agent_reputation(
+        &self,
+        agent: crate::core::address::Address,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let rep = self.chain.get_ai_agent_reputation(agent).await;
+        match rep {
+            Some(r) => Ok(serde_json::json!({
+                "agent": format!("0x{}", r.agent.to_hex()),
+                "payments_completed": r.payments_completed,
+                "payments_defaulted": r.payments_defaulted,
+                "requests_submitted": r.requests_submitted,
+                "results_submitted": r.results_submitted,
+                "results_finalized": r.results_finalized,
+                "equivocations": r.equivocations,
+                "trust_score": r.trust_score(),
+                "active_block_span": r.active_block_span,
+                "first_active_block": r.first_active_block,
+                "last_active_block": r.last_active_block,
+            })),
+            None => Ok(serde_json::json!({
+                "error": "agent not found",
+                "agent": format!("0x{}", agent.to_hex()),
+            })),
+        }
+    }
+
+    async fn ai_agent_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // BLG-0201 (P10-F11): the score crosses the actor and the wire as a
+        // fixed-point permyriad integer (10_000 = full trust), never as an
+        // f64 - Z8. The unit is stated in the response so a client never has
+        // to guess whether 9000 is 9000.0 or 0.9.
+        let ranking = cap_list_response(self.chain.get_ai_agent_ranking().await);
+        let entries: Vec<serde_json::Value> = ranking
+            .iter()
+            .map(|(addr, score)| {
+                serde_json::json!({
+                    "agent": format!("0x{}", addr.to_hex()),
+                    "trust_score": score,
+                    "trust_score_basis": 10_000,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "agent_count": entries.len(),
+            "ranking": entries,
+        }))
+    }
+
+    async fn prune_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.chain.get_prune_status().await.map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32000,
+                format!("Failed to get prune status: {e}"),
+                None::<()>,
+            )
+        })
+    }
+
+    async fn request_prune(
+        &self,
+        min_blocks_to_keep: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_requestPrune")?;
+        let pruned_count = self
+            .chain
+            .request_prune(min_blocks_to_keep)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32000, format!("Pruning failed: {e}"), None::<()>)
+            })?;
+
+        Ok(serde_json::json!({
+            "status": "completed",
+            "pruned_blocks": pruned_count,
+        }))
+    }
+
+    ///: Read-only status.
+    async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let height = self.chain.get_height().await;
+        let chain_id = self.chain.get_chain_id().await;
+        let mempool = self.chain.get_mempool_size().await;
+        let base_fee = self.chain.get_base_fee().await;
+        let validator_set_hash = self.chain.get_validator_set_hash().await;
+        Ok(serde_json::json!({
+            "blockNumber": height,
+            "chainId": chain_id,
+            "mempoolSize": mempool,
+            "baseFee": base_fee,
+            "validatorSetHash": validator_set_hash,
+        }))
+    }
+
+    async fn get_validator_set(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let validator = self.chain.get_validator_address().await;
+        let set_hash = self.chain.get_validator_set_hash().await;
+        Ok(serde_json::json!({
+            "validatorAddress": validator.map(|a| format!("0x{}", a.to_hex())).unwrap_or_default(),
+            "validatorSetHash": set_hash,
+        }))
+    }
+
+    async fn get_domain_info(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let domain = self
+            .chain
+            .get_consensus_domains()
+            .await
+            .into_iter()
+            .find(|domain| domain.id == domain_id);
+        match domain {
+            Some(domain) => Ok(serde_json::json!({
+                "domainId": domain.id,
+                "registered": true,
+                "consensusKind": format!("{:?}", domain.kind),
+                "status": format!("{:?}", domain.status),
+                "domainChainId": Self::to_hex(domain.domain_chain_id),
+                "operator": domain.operator.map(|a| Self::to_0x_hash(a.to_hex())),
+                "operatorBond": Self::to_hex(domain.operator_bond),
+                "finalityAdapter": domain.finality_adapter,
+                "bridgeEnabled": domain.bridge_enabled,
+                "minConfirmations": Self::to_hex(domain.min_confirmations),
+                "lastCommittedHeight": Self::to_hex(domain.last_committed_height),
+                "lastCommittedHash": Self::bytes32_to_0x(domain.last_committed_hash),
+                "validatorSetHash": Self::bytes32_to_0x(domain.validator_set_hash),
+            })),
+            None => Ok(serde_json::json!({
+                "domainId": domain_id,
+                "registered": false,
+            })),
+        }
+    }
+
+    async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let history: Vec<crate::registry::permissionless::SlashingRecord> =
+            cap_list_response(self.chain.get_slashing_history().await);
+        let entries: Vec<serde_json::Value> = history
+            .into_iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "offender": Self::to_0x_hash(entry.report.offender.to_hex()),
+                    "roleId": entry.report.role.value(),
+                    "condition": format!("{:?}", entry.report.condition()),
+                    "penalty": entry.penalty,
+                    "remainingStake": entry.remaining_stake,
+                    "provenance": format!("{:?}", entry.report.provenance()),
+                    "reporter": entry.report.reporter.map(|a: crate::core::address::Address| Self::to_0x_hash(a.to_hex())),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "history": entries,
+            "count": entries.len(),
+        }))
+    }
+
+    async fn ai_stats(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let active_operators = self
+            .chain
+            .get_registry_active_members(crate::registry::role::roles::AI_OPERATOR)
+            .await;
+        let chain_id = self.chain.get_chain_id().await;
+        Ok(Self::ai_readiness_json(chain_id, active_operators.len()))
+    }
+}
+
+/// Turn the on-the-wire format string into a `RenderFormat`.
+///
+/// Accepted forms: `svg`, `png:<side>`, `frame:<index>`.
+///
+/// An unknown format is **rejected**, never defaulted. Falling back would
+/// return a different object under the identity of the one that was asked
+/// for: the format is part of the commitment, so handing SVG to someone who
+/// meant `png` and typed `pngg` is the wrong answer.
+///
+/// `QrStream` is deliberately absent. It is a transport representation, not a
+/// way of reading; asking for it over RPC would mean nothing.
+///
+/// # Errors
+///
+/// When the format is unrecognised, or a numeric parameter cannot be parsed.
+fn parse_render_format(format: &str) -> Result<crate::storage::render::RenderFormat, String> {
+    use crate::storage::render::RenderFormat;
+    match format.split_once(':') {
+        None if format == "svg" => Ok(RenderFormat::Svg),
+        Some(("png", size)) => size
+            .parse::<u16>()
+            .map(|size| RenderFormat::Png { size })
+            .map_err(|_| format!("png size is not a number: {size}")),
+        Some(("frame", frame)) => frame
+            .parse::<u16>()
+            .map(|frame| RenderFormat::VideoFrame { frame })
+            .map_err(|_| format!("frame index is not a number: {frame}")),
+        _ => Err(format!(
+            "unknown render format '{format}'; expected svg, png:<size> or frame:<index>"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn request_with_remote(remote: SocketAddr) -> HttpRequest<()> {
+        let mut req = HttpRequest::builder().uri("/").body(()).unwrap();
+        req.extensions_mut().insert(remote);
+        req
+    }
+
+    #[test]
+    fn p21_f01_default_config_has_a_rate_limit() {
+        assert!(RpcSecurityConfig::default().rate_limit_per_minute.is_some());
+    }
+
+    #[test]
+    fn from_env_without_rate_limit_uses_default_limit() {
+        let ips = vec!["127.0.0.1".to_string()];
+        let cfg = RpcSecurityConfig::from_env(false, None, ips.clone(), Vec::new(), None).unwrap();
+        assert_eq!(cfg.rate_limit_per_minute, Some(120));
+        let cfg = RpcSecurityConfig::from_env(false, None, ips, Vec::new(), Some(7)).unwrap();
+        assert_eq!(cfg.rate_limit_per_minute, Some(7));
+    }
+
+    #[test]
+    fn rpc_auth_required_without_api_key_fails_before_listen() {
+        let default_cfg = RpcSecurityConfig::default();
+        assert!(validate_rpc_security_config(&default_cfg).is_err());
+
+        let configured = RpcSecurityConfig {
+            api_key: Some("secret".into()),
+            ..Default::default()
+        };
+        assert!(validate_rpc_security_config(&configured).is_ok());
+        assert!(validate_rpc_security_config(&RpcSecurityConfig::operator_default()).is_ok());
+    }
+
+    #[test]
+    fn a_config_built_from_process_configuration_carries_transport_limits() {
+        let cfg = RpcSecurityConfig::from_env(false, None, Vec::new(), Vec::new(), None)
+            .expect("from_env without auth must succeed");
+        assert!(
+            cfg.max_request_body_size.unwrap_or(0) > 0,
+            "from_env left the body size to the transport crate"
+        );
+        assert!(
+            cfg.max_connections.unwrap_or(0) > 0,
+            "from_env left the connection count to the transport crate"
+        );
+        assert!(validate_rpc_security_config(&cfg).is_ok());
+    }
+
+    #[test]
+    fn an_unbounded_listener_is_refused_before_listen() {
+        let no_body = RpcSecurityConfig {
+            api_key: Some("secret".into()),
+            max_request_body_size: None,
+            ..Default::default()
+        };
+        assert!(
+            validate_rpc_security_config(&no_body).is_err(),
+            "a config with no body limit reached the listener"
+        );
+
+        let no_conns = RpcSecurityConfig {
+            api_key: Some("secret".into()),
+            max_connections: None,
+            ..Default::default()
+        };
+        assert!(
+            validate_rpc_security_config(&no_conns).is_err(),
+            "a config with no connection limit reached the listener"
+        );
+    }
+
+    #[test]
+    fn a_limit_that_does_not_limit_is_refused_before_listen() {
+        for (body, conns) in [
+            (Some(0u32), Some(10u32)),
+            (Some(16 * 1024 * 1024), Some(0)),
+            (Some(RPC_BODY_LIMIT_CEILING + 1), Some(10)),
+            (
+                Some(16 * 1024 * 1024),
+                Some(RPC_CONNECTION_LIMIT_CEILING + 1),
+            ),
+        ] {
+            let cfg = RpcSecurityConfig {
+                api_key: Some("secret".into()),
+                max_request_body_size: body,
+                max_connections: conns,
+                ..Default::default()
+            };
+            assert!(
+                validate_rpc_security_config(&cfg).is_err(),
+                "body={body:?} conns={conns:?} was accepted as a limit"
+            );
+        }
+    }
+
+    fn cors_config(origins: &[&str]) -> RpcSecurityConfig {
+        RpcSecurityConfig {
+            auth_required: true,
+            api_key: Some("secret".into()),
+            allowed_ips: Vec::new(),
+            cors_origins: origins.iter().map(|o| (*o).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn request_from_origin(origin: &str) -> HttpRequest<()> {
+        HttpRequest::builder()
+            .uri("/")
+            .header("origin", origin)
+            .body(())
+            .unwrap()
+    }
+
+    /// An allowed origin has to appear on the response: a browser withholds
+    /// the body of a header-less response from JavaScript.
+    #[test]
+    fn allowed_origin_is_reflected_into_the_response() {
+        let config = cors_config(&["https://budscan.example"]);
+        let req = request_from_origin("https://budscan.example");
+        let outcome = cors_outcome(&config, &req);
+        assert_eq!(
+            outcome,
+            CorsOutcome::Allow("https://budscan.example".into())
+        );
+
+        let mut response = text_response(StatusCode::OK, "ok");
+        apply_cors_headers(&mut response, "https://budscan.example");
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://budscan.example")
+        );
+        // A cache must not serve one origin's response to another.
+        assert_eq!(
+            response.headers().get("vary").and_then(|v| v.to_str().ok()),
+            Some("Origin")
+        );
+        // Identity travels in a header, not a cookie: the credentials grant is
+        // never sent, so a `*` configuration cannot turn into session theft.
+        assert!(response
+            .headers()
+            .get("access-control-allow-credentials")
+            .is_none());
+    }
+
+    #[test]
+    fn unlisted_origin_is_denied_and_gets_no_headers() {
+        let config = cors_config(&["https://budscan.example"]);
+        let req = request_from_origin("https://saldirgan.example");
+        let outcome = cors_outcome(&config, &req);
+        assert_eq!(outcome, CorsOutcome::Deny);
+        assert!(!matches!(outcome, CorsOutcome::Allow(_)));
+
+        // No header may leak to a refused origin: even a 403 body becomes
+        // readable to the browser if it is returned with the headers.
+        let response = text_response(StatusCode::FORBIDDEN, "Forbidden");
+        assert!(response
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none());
+    }
+
+    /// With CORS unconfigured no header is emitted - the default is closed.
+    #[test]
+    fn empty_cors_list_emits_no_headers() {
+        let config = RpcSecurityConfig {
+            api_key: Some("secret".into()),
+            ..Default::default()
+        };
+        let req = request_from_origin("https://budscan.example");
+        assert_eq!(cors_outcome(&config, &req), CorsOutcome::NotApplicable);
+    }
+
+    /// A preflight cannot carry a credential header. If we returned 401 the real
+    /// request would never be sent; that is why preflight is answered before auth.
+    #[test]
+    fn preflight_is_recognised_and_answered_without_credentials() {
+        let mut req = HttpRequest::builder()
+            .method(hyper::Method::OPTIONS)
+            .uri("/")
+            .header("origin", "https://budscan.example")
+            .header("access-control-request-method", "POST")
+            .body(())
+            .unwrap();
+        assert!(is_cors_preflight(&req));
+
+        // No identity header, and the allow decision still has to be reachable.
+        let config = cors_config(&["https://budscan.example"]);
+        assert!(!is_authorized(&config, &req));
+
+        let response = preflight_response("https://budscan.example");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-headers")
+                .and_then(|v| v.to_str().ok()),
+            Some("content-type, x-api-key, authorization")
+        );
+
+        // A plain OPTIONS is not a preflight.
+        *req.method_mut() = hyper::Method::POST;
+        assert!(!is_cors_preflight(&req));
+    }
+
+    async fn status_through_layer(
+        mode: RpcMode,
+        host: Option<&str>,
+        origin: Option<&str>,
+    ) -> StatusCode {
+        let layer = RpcSecurityLayer::new(
+            match mode {
+                RpcMode::Operator => RpcSecurityConfig::operator_default(),
+                RpcMode::Public => RpcSecurityConfig {
+                    auth_required: false,
+                    allowed_ips: Vec::new(),
+                    ..Default::default()
+                },
+            },
+            None,
+            mode,
+        );
+        let inner = tower::service_fn(|_req: HttpRequest<()>| async {
+            Ok::<_, std::convert::Infallible>(text_response(StatusCode::OK, "ok"))
+        });
+        let mut svc = layer.layer(inner);
+        let mut builder = HttpRequest::builder().uri("/");
+        if let Some(host) = host {
+            builder = builder.header("host", host);
+        }
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        let mut req = builder.body(()).unwrap();
+        req.extensions_mut()
+            .insert(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000));
+        svc.call(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn failed_api_key_attempts_are_rate_limited() {
+        let layer = RpcSecurityLayer::new(
+            RpcSecurityConfig {
+                auth_required: true,
+                api_key: Some("right-key".into()),
+                allowed_ips: Vec::new(),
+                rate_limit_per_minute: Some(2),
+                ..Default::default()
+            },
+            None,
+            RpcMode::Public,
+        );
+        let inner = tower::service_fn(|_req: HttpRequest<()>| async {
+            Ok::<_, std::convert::Infallible>(text_response(StatusCode::OK, "ok"))
+        });
+        let mut svc = layer.layer(inner);
+        let mut statuses = Vec::new();
+        for _ in 0..3 {
+            let mut req = HttpRequest::builder()
+                .uri("/")
+                .header("x-api-key", "wrong-key")
+                .body(())
+                .unwrap();
+            req.extensions_mut()
+                .insert(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000));
+            statuses.push(svc.call(req).await.unwrap().status());
+        }
+        assert_eq!(statuses[0], StatusCode::UNAUTHORIZED);
+        assert_eq!(statuses[1], StatusCode::UNAUTHORIZED);
+        assert_eq!(statuses[2], StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn operator_rejects_foreign_host() {
+        let op = RpcMode::Operator;
+        assert_ne!(
+            status_through_layer(op.clone(), Some("evil.example"), None).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("evil.example"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("evil.example:8546"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("127.0.0.1.evil.example"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("127.0.0.1:abc"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), None, None).await,
+            StatusCode::FORBIDDEN
+        );
+        for host in [
+            "127.0.0.1:8546",
+            "127.0.0.1",
+            "localhost",
+            "LocalHost:8546",
+            "[::1]",
+            "[::1]:8546",
+        ] {
+            assert_eq!(
+                status_through_layer(op.clone(), Some(host), None).await,
+                StatusCode::OK,
+                "host {host}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_rejects_origin_header() {
+        assert_ne!(
+            status_through_layer(
+                RpcMode::Operator,
+                Some("127.0.0.1:8546"),
+                Some("http://x.example")
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_through_layer(
+                RpcMode::Operator,
+                Some("127.0.0.1:8546"),
+                Some("http://x.example")
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn public_mode_ignores_host_and_origin_rules() {
+        assert_eq!(
+            status_through_layer(
+                RpcMode::Public,
+                Some("rpc.budlum.example"),
+                Some("http://x.example")
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
+    #[test]
+    fn operator_rpc_listener_must_bind_loopback() {
+        assert!(validate_operator_bind_address(&RpcMode::Operator, "127.0.0.1:8546").is_ok());
+        assert!(validate_operator_bind_address(&RpcMode::Operator, "[::1]:8546").is_ok());
+        assert!(validate_operator_bind_address(&RpcMode::Operator, "0.0.0.0:8546").is_err());
+        assert!(validate_operator_bind_address(&RpcMode::Operator, "localhost:8546").is_err());
+        assert!(validate_operator_bind_address(&RpcMode::Public, "0.0.0.0:8545").is_ok());
+    }
+
+    #[test]
+    fn ai_stats_fail_closed_until_runtime_wiring_is_complete() {
+        let stats = RpcServer::ai_readiness_json(1, 3);
+        assert_eq!(stats["status"], "not_ready");
+        assert_eq!(stats["active_bonded_operators"], 3);
+        assert!(stats["operator_quorum_available"]
+            .as_bool()
+            .unwrap_or(false));
+        assert!(!stats["readiness"]["deterministic_scheduler"]
+            .as_bool()
+            .unwrap_or(true));
+        assert!(!stats["readiness"]["worker_daemon"]
+            .as_bool()
+            .unwrap_or(true));
+        assert!(!stats["readiness"]["full_execution_proof_verification"]
+            .as_bool()
+            .unwrap_or(true));
+        assert_eq!(stats["economy"]["status"], "decision_locked_not_wired");
+    }
+
+    #[test]
+    fn feed_limit_is_clamped() {
+        assert_eq!(clamp_feed_limit(usize::MAX), MAX_SOCIAL_FEED_LIMIT);
+        assert_eq!(clamp_feed_limit(5), 5);
+    }
+
+    #[test]
+    fn list_responses_are_capped() {
+        let capped = cap_list_response(vec![0u8; MAX_LIST_RESPONSE_ITEMS + 50]);
+        assert_eq!(capped.len(), MAX_LIST_RESPONSE_ITEMS);
+        assert_eq!(cap_list_response(vec![1u8; 3]).len(), 3);
+    }
+
+    #[test]
+    fn test_per_ip_rate_limiting() {
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+        let ip = Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+
+        // First request: allowed
+        assert!(is_per_ip_rate_limited(&config, &per_ip_rates, ip));
+        // Second request: allowed
+        assert!(is_per_ip_rate_limited(&config, &per_ip_rates, ip));
+        // Third request: rate limited (exceeds limit of 2)
+        assert!(!is_per_ip_rate_limited(&config, &per_ip_rates, ip));
+    }
+
+    #[test]
+    fn rate_limit_table_evicts_oldest_client_instead_of_globally_rejecting() {
+        let config = RpcSecurityConfig {
+            rate_limit_per_minute: Some(2),
+            ..Default::default()
+        };
+        let per_ip_rates = Arc::new(Mutex::new(HashMap::new()));
+        let oldest_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let now = Instant::now();
+        {
+            let mut rates = per_ip_rates.lock().unwrap();
+            for i in 0..MAX_TRACKED_RPC_CLIENTS {
+                let ip = IpAddr::V4(Ipv4Addr::new(
+                    10,
+                    ((i >> 8) & 0xff) as u8,
+                    (i & 0xff) as u8,
+                    1,
+                ));
+                let mut window = VecDeque::new();
+                window.push_back(now - Duration::from_secs(59) + Duration::from_nanos(i as u64));
+                rates.insert(ip, window);
+            }
+            assert!(rates.contains_key(&oldest_ip));
+        }
+
+        let newcomer_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        assert!(is_per_ip_rate_limited(
+            &config,
+            &per_ip_rates,
+            Some(newcomer_ip)
+        ));
+
+        let rates = per_ip_rates.lock().unwrap();
+        assert_eq!(rates.len(), MAX_TRACKED_RPC_CLIENTS);
+        assert!(rates.contains_key(&newcomer_ip));
+        assert!(!rates.contains_key(&oldest_ip));
+    }
+
+    #[test]
+    fn direct_loopback_request_passes_allowlist_without_proxy_headers() {
+        let config = RpcSecurityConfig::default();
+        let req = request_with_remote(SocketAddr::from(([127, 0, 0, 1], 9000)));
+        assert_eq!(
+            extract_client_ip(&config, &req),
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+        assert!(is_ip_allowed(&config, &req));
+    }
+
+    #[test]
+    fn spoofed_forwarded_headers_are_ignored_without_trusted_proxy_match() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["10.0.0.5".into()],
+            trusted_proxies: vec!["10.10.10.10".into()],
+            ..Default::default()
+        };
+        let mut req = request_with_remote(SocketAddr::from(([198, 51, 100, 10], 9000)));
+        req.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("10.0.0.5"));
+        assert_eq!(
+            extract_client_ip(&config, &req),
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)))
+        );
+        assert!(!is_ip_allowed(&config, &req));
+    }
+
+    #[test]
+    fn forwarded_for_uses_the_entry_the_proxy_appended() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["10.0.0.5".into()],
+            trusted_proxies: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut req = request_with_remote(SocketAddr::from(([127, 0, 0, 1], 9000)));
+        req.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("10.0.0.5, 203.0.113.7"),
+        );
+        assert_eq!(
+            extract_client_ip(&config, &req),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)))
+        );
+        assert!(!is_ip_allowed(&config, &req));
+    }
+
+    #[test]
+    fn trusted_proxy_headers_are_honored_only_for_trusted_socket_peer() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["10.0.0.5".into()],
+            trusted_proxies: vec!["127.0.0.1".into()],
+            ..Default::default()
+        };
+        let mut req = request_with_remote(SocketAddr::from(([127, 0, 0, 1], 9000)));
+        req.headers_mut()
+            .insert("x-forwarded-for", HeaderValue::from_static("10.0.0.5"));
+        assert_eq!(
+            extract_client_ip(&config, &req),
+            Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)))
+        );
+        assert!(is_ip_allowed(&config, &req));
+    }
+}
+
+#[cfg(test)]
+mod render_format_tests {
+    use super::parse_render_format;
+    use crate::storage::render::RenderFormat;
+
+    /// Three formats are recognised, and their parameters are carried through.
+    #[test]
+    fn the_three_read_formats_parse() {
+        assert_eq!(parse_render_format("svg"), Ok(RenderFormat::Svg));
+        assert_eq!(
+            parse_render_format("png:256"),
+            Ok(RenderFormat::Png { size: 256 })
+        );
+        assert_eq!(
+            parse_render_format("frame:17"),
+            Ok(RenderFormat::VideoFrame { frame: 17 })
+        );
+    }
+
+    /// An unknown format is rejected, not defaulted.
+    ///
+    /// Falling back would return a different object under the identity of the
+    /// one that was asked for. The format is part of the commitment
+    /// (section 72): handing SVG to someone who meant `png` and typed `pngg`
+    /// is a wrong answer, not leniency.
+    #[test]
+    fn an_unknown_format_is_refused_not_defaulted() {
+        for bad in ["", "pngg", "webp", "SVG", "svg:1", "png", "frame"] {
+            assert!(
+                parse_render_format(bad).is_err(),
+                "'{bad}' is not a format and must be rejected"
+            );
+        }
+    }
+
+    /// An unparsable numeric parameter is an error, not a zero.
+    #[test]
+    fn a_bad_number_is_an_error() {
+        assert!(parse_render_format("png:large").is_err());
+        assert!(parse_render_format("png:-1").is_err());
+        // A u16 overflow is an error too: clamping quietly would produce a
+        // different object.
+        assert!(parse_render_format("png:70000").is_err());
+        assert!(parse_render_format("frame:abc").is_err());
+    }
+
+    /// `QrStream` cannot be requested over RPC.
+    ///
+    /// It is a transport representation, not a way of reading.
+    #[test]
+    fn the_transport_frame_is_not_a_read_format() {
+        assert!(parse_render_format("qrstream:0").is_err());
+        assert!(parse_render_format("qr:0:256").is_err());
+    }
+}
+
+#[cfg(test)]
+mod view_claim_tests {
+    use super::{check_claimed_owner, parse_grant_auth, verify_view_claim};
+    use crate::core::address::Address;
+    use crate::storage::ContentId;
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn parts() -> (ContentId, [u8; 32], Address, Vec<u8>) {
+        (
+            ContentId([7u8; 32]),
+            [3u8; 32],
+            Address::from([4u8; 32]),
+            b"packed-bytes".to_vec(),
+        )
+    }
+
+    /// The `owner` field is checked against the chain's record before the
+    /// grant lookup. A request naming another address as owner of recorded
+    /// content is refused by name; the recorded owner passes; content with no
+    /// record is left to the grant lookup rather than refused here.
+    #[test]
+    fn the_claimed_owner_must_be_the_recorded_owner() {
+        let recorded = Address::from([4u8; 32]);
+        let stranger = Address::from([5u8; 32]);
+        let err = check_claimed_owner(Some(recorded), &stranger).unwrap_err();
+        assert_eq!(err.code(), -32006, "{err:?}");
+        assert!(err.message().contains("recorded owner"), "{err:?}");
+        assert!(check_claimed_owner(Some(recorded), &recorded).is_ok());
+        assert!(check_claimed_owner(None, &stranger).is_ok());
+    }
+
+    /// A claim without a key or a signature is refused before any crypto.
+    #[test]
+    fn a_bare_viewer_address_is_not_a_claim() {
+        let (content, key, owner, packed) = parts();
+        let claim =
+            serde_json::json!("0x0202020202020202020202020202020202020202020202020202020202020202");
+        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
+        assert_eq!(err.code(), -32602, "{err:?}");
+        assert!(err.message().contains("viewerClaim"), "{err:?}");
+    }
+
+    /// The claim's key field is the viewer's, by name. A claim that carries
+    /// the grant field `ownerPublicKey` instead is refused with the field the
+    /// viewer has to send, not with a signature error.
+    #[test]
+    fn a_view_claim_names_the_viewer_key_field() {
+        let (content, key, owner, packed) = parts();
+        let claim = serde_json::json!({
+            "ownerPublicKey": "0x00",
+            "signature": "0x00",
+            "issuedAt": NOW,
+        });
+        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
+        assert_eq!(err.code(), -32602, "{err:?}");
+        assert!(
+            err.message().contains("viewerClaim.viewerPublicKey"),
+            "{err:?}"
+        );
+        let grant_err = parse_grant_auth(Some(&serde_json::json!({
+            "viewerPublicKey": "0x00",
+            "signature": "0x00",
+        })))
+        .unwrap_err();
+        assert!(
+            grant_err.message().contains("authorization.ownerPublicKey"),
+            "{grant_err:?}"
+        );
+    }
+
+    #[cfg(feature = "wallet-ml-dsa")]
+    fn signed_claim(
+        kp: &crate::crypto::primitives::WalletKeyPair,
+        content: &ContentId,
+        key: &[u8; 32],
+        owner: &Address,
+        packed: &[u8],
+        issued_at: u64,
+    ) -> serde_json::Value {
+        let digest = crate::storage::view_claim_digest(
+            content,
+            &kp.address(),
+            key,
+            owner,
+            &crate::storage::payload_commitment(packed),
+            issued_at,
+        );
+        serde_json::json!({
+            "viewerPublicKey": format!("0x{}", hex::encode(kp.public_key_bytes())),
+            "signature": format!("0x{}", hex::encode(kp.sign(&digest))),
+            "issuedAt": issued_at,
+        })
+    }
+
+    /// The viewer is the address the signing key derives to, and nothing else.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn the_viewer_is_whoever_signed() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let kp = WalletKeyPair::generate();
+        let claim = signed_claim(&kp, &content, &key, &owner, &packed, NOW);
+        let viewer = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW)
+            .expect("a claim signed by the viewer's own key is accepted");
+        assert_eq!(viewer, kp.address());
+    }
+
+    /// A claim signed for one object, key, owner or payload opens no other.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_claim_is_bound_to_the_request_it_was_signed_for() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let kp = WalletKeyPair::generate();
+        let claim = signed_claim(&kp, &content, &key, &owner, &packed, NOW);
+        let other_content = ContentId([8u8; 32]);
+        let other_key = [9u8; 32];
+        let other_owner = Address::from([5u8; 32]);
+        let other_packed = b"other-bytes".to_vec();
+        for (c, k, o, p) in [
+            (&other_content, &key, &owner, &packed),
+            (&content, &other_key, &owner, &packed),
+            (&content, &key, &other_owner, &packed),
+            (&content, &key, &owner, &other_packed),
+        ] {
+            let err = verify_view_claim(&claim, c, k, o, p, NOW).unwrap_err();
+            assert_eq!(err.code(), -32602, "{err:?}");
+        }
+    }
+
+    /// A stranger's key cannot speak for a grantee: the address is derived,
+    /// so the only way to be the grantee is to hold the grantee's key.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_stranger_cannot_name_the_grantee() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let grantee = WalletKeyPair::generate();
+        let stranger = WalletKeyPair::generate();
+        // The stranger signs the grantee's digest with its own key: the
+        // signature verifies under the stranger's key, but the key derives to
+        // the stranger, so the request is about the stranger, not the grantee.
+        let digest = crate::storage::view_claim_digest(
+            &content,
+            &grantee.address(),
+            &key,
+            &owner,
+            &crate::storage::payload_commitment(&packed),
+            NOW,
+        );
+        let claim = serde_json::json!({
+            "viewerPublicKey": format!("0x{}", hex::encode(stranger.public_key_bytes())),
+            "signature": format!("0x{}", hex::encode(stranger.sign(&digest))),
+            "issuedAt": NOW,
+        });
+        let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();
+        assert_eq!(err.code(), -32602, "{err:?}");
+    }
+
+    /// A captured claim dies with the session window, and future claims are invalid.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_claim_outside_the_window_is_refused() {
+        use crate::crypto::primitives::WalletKeyPair;
+        let (content, key, owner, packed) = parts();
+        let kp = WalletKeyPair::generate();
+        let max = crate::storage::VIEW_CLAIM_MAX_AGE_SECS;
+        let stale = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max - 1);
+        assert!(verify_view_claim(&stale, &content, &key, &owner, &packed, NOW).is_err());
+        let future = signed_claim(&kp, &content, &key, &owner, &packed, NOW + 1);
+        assert!(verify_view_claim(&future, &content, &key, &owner, &packed, NOW).is_err());
+        let edge = signed_claim(&kp, &content, &key, &owner, &packed, NOW - max);
+        assert!(verify_view_claim(&edge, &content, &key, &owner, &packed, NOW).is_ok());
+    }
+}

@@ -1,0 +1,214 @@
+name: Determinism
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+
+concurrency:
+  group: determinism-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  genesis-reproducibility:
+    # CI Expansion item 1: genesis reproducibility check.
+    # Build twice, it must produce the same genesis hash.
+    name: Genesis Reproducibility (item 1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Build (run 1)
+        run: |
+          set -euo pipefail
+          cargo build --release 2>&1 | tail -5
+      - name: Genesis hash (run 1)
+        run: |
+          set -euo pipefail
+          cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis_run1.txt
+          HASH1=$(grep "GENESIS_HASH=" /tmp/genesis_run1.txt | tail -1 | cut -d= -f2)
+          echo "Run 1 hash: ${HASH1}"
+          test -n "${HASH1}"
+          echo "HASH1=${HASH1}" >> "$GITHUB_ENV"
+      - name: Clean build cache
+        run: cargo clean 2>&1 | tail -3
+      - name: Build (run 2)
+        run: |
+          set -euo pipefail
+          cargo build --release 2>&1 | tail -5
+      - name: Genesis hash (run 2)
+        run: |
+          set -euo pipefail
+          cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis_run2.txt
+          HASH2=$(grep "GENESIS_HASH=" /tmp/genesis_run2.txt | tail -1 | cut -d= -f2)
+          echo "Run 2 hash: ${HASH2}"
+          test -n "${HASH2}"
+          echo "HASH2=${HASH2}" >> "$GITHUB_ENV"
+      - name: Compare hashes
+        run: |
+          set -euo pipefail
+          echo "Hash 1: ${HASH1}"
+          echo "Hash 2: ${HASH2}"
+          if [ "${HASH1}" != "${HASH2}" ]; then
+            echo "FAIL: Genesis hashes differ!"
+            exit 1
+          fi
+          echo "OK: Genesis hashes match."
+
+  cross-platform-determinism:
+    # CI Expansion item 2: cross-platform determinism matrix.
+    #
+    # Hardening (2026-07-21):
+    #   * Windows was added to the matrix (before: Ubuntu + macOS only - the
+    #     requirement asks for all three of "Linux/macOS/Windows").
+    #   * Real "cross" was closed: each OS used to run and pass its own test but
+    #     the OUTPUTS were not compared, so the same request producing a different
+    #     consensus result on a different platform (e.g. pointer width, float,
+    #     HashMap iteration leakage) could escape this gate. Now every OS uploads
+    #     the CONSENSUS_DIGEST value produced by the
+    #     `consensus_scenario_digest_cross_platform` test as an artifact, and the
+    #     `consensus-digest-compare` job subjects the three platforms' digests to
+    #     BYTE EQUALITY. On divergence it is a FAIL (the requirement:
+    #     "is the consensus output byte for byte identical").
+    name: Cross-Platform Digest (${{ matrix.os }}) (item 2)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Install protoc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        # When Chocolatey's community feed returns 503 (it did on 2026-08-12) this
+# step fails and the determinism gate goes red for a reason unrelated to the
+# code. A version + SHA256 pinned install from the official protobuf release
+# removes the dependency on a single third-party feed and makes the supply
+# chain verifiable too.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '35.1'
+          $sha = '5D3FF218D7D91EEA95F7569BCB5A98F3030F8996D44151279D9772EDCFF76082'
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v$ver/protoc-$ver-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile protoc.zip -MaximumRetryCount 5 -RetryIntervalSec 10
+          $got = (Get-FileHash protoc.zip -Algorithm SHA256).Hash
+          if ($got -ne $sha) { throw "protoc SHA256 uyusmadi: $got != $sha" }
+          Expand-Archive protoc.zip -DestinationPath "$env:RUNNER_TEMP\protoc"
+          echo "$env:RUNNER_TEMP\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & "$env:RUNNER_TEMP\protoc\bin\protoc.exe" --version
+      - name: Determinism testleri (mevcut suite)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release -- determinism --nocapture 2>&1 | tee det-${{ matrix.os }}.txt
+          # `grep -c` exits 1 when it matches nothing and >1 when it could not
+          # read the file at all. `|| true` collapsed those two into the same
+          # thing, and the second one is a missing measurement, not a zero.
+          set +e
+          N=$(grep -c "^test.*ok$" det-${{ matrix.os }}.txt)
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            echo "FAIL: could not read det-${{ matrix.os }}.txt (grep exit $grep_status) - the determinism count is missing, not zero."
+            exit 1
+          fi
+          echo "Determinism test count (${{ matrix.os }}): $N"
+          # The count was printed and then dropped, so a filter that selects
+          # NOTHING (a renamed test, a moved module, a `--release` build that
+          # compiled but ran no determinism case) produced a green step on this
+          # platform and the digest comparison below then compared three
+          # equally empty runs. The PoA isolation job in ci.yml already pins its
+          # count for the same reason; this is the same threshold, measured on
+          # the suite as it stands (>= 1 per platform, and identical across the
+          # three - the compare job owns that half).
+          if [ "${N:-0}" -lt 1 ]; then
+            echo "FAIL: no determinism test ran on ${{ matrix.os }} ($N) - a determinism gate that executes nothing is not determinism."
+            exit 1
+          fi
+      - name: Produce the consensus digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --release -- consensus_scenario_digest --nocapture 2>&1 | tee digest-${{ matrix.os }}.txt
+          grep -E "^CONSENSUS_DIGEST=[0-9a-f]{64}$" digest-${{ matrix.os }}.txt \
+            | tail -1 | cut -d= -f2 > digest-${{ matrix.os }}.hex
+          test -s digest-${{ matrix.os }}.hex
+          D=$(cat digest-${{ matrix.os }}.hex)
+          echo "CONSENSUS_DIGEST (${{ matrix.os }}): $D"
+          # False-green lock: the digest must be 64 hex characters.
+          test "${#D}" -eq 64
+      - name: Upload the digest artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: consensus-digest-${{ matrix.os }}
+          path: digest-${{ matrix.os }}.hex
+          if-no-files-found: error
+          retention-days: 30
+
+  consensus-digest-compare:
+    # The complement of item 2: the three platform digests must be byte-equal.
+    name: Consensus Digest Compare (Linux = macOS = Windows)
+    needs: cross-platform-determinism
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect the digest artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: consensus-digest-*
+          merge-multiple: true
+          path: digests
+      - name: Byte-equality gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l digests/
+          U="digests/digest-ubuntu-latest.hex"
+          M="digests/digest-macos-latest.hex"
+          W="digests/digest-windows-latest.hex"
+          for f in "$U" "$M" "$W"; do
+            if [ ! -s "$f" ]; then
+              echo "FAIL: missing digest artifact: $f"
+              exit 1
+            fi
+          done
+          DU=$(cat "$U"); DM=$(cat "$M"); DW=$(cat "$W")
+          echo "ubuntu:  $DU"
+          echo "macos:   $DM"
+          echo "windows: $DW"
+          if [ "$DU" != "$DM" ] || [ "$DU" != "$DW" ]; then
+            echo "FAIL: the consensus digest differs across platforms!"
+            echo "This means consensus output divergence between Linux/macOS/Windows"
+            echo "(consensus-critical nondeterminism)."
+            exit 1
+          fi
+          echo "OK: the consensus output is BYTE-EQUAL on all three platforms."

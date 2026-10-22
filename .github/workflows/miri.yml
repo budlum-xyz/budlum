@@ -1,0 +1,450 @@
+name: Miri UB Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+  workflow_dispatch:
+  # A weekly nightly run, continuous UB inspection
+  schedule:
+    - cron: '0 3 * * 1'  # Her Pazartesi 03:00 UTC
+
+concurrency:
+  group: miri-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  miri-crypto:
+    # CI Expansion item 4: Miri undefined behavior inspection.
+    # It looks for UB in the crypto and budzero modules.
+    #
+    # Hardening (2026-07-21): nightly is now DATE-PINNED (nightly-2026-07-19).
+    # Previously "nightly" was a floating tag, so when the Miri revision changed the
+    # CI result of the same commit could change (external-red risk + reproduction
+    # weakness). Removing or updating the pin is only done with a justification in
+    # the commit message (the same spirit as the MSRV pin discipline).
+    # Note: src/ and budzero carry `#![forbid(unsafe_code)]` and a clean 0-unsafe
+    # base; this gate is an early warning for UB surfacing through the
+    # dependency chain and for MIR-level errors.
+    name: Miri UB Inspection (crypto + budzero, nightly-2026-07-19) (item 4)
+    runs-on: ubuntu-latest
+    # Raising this number is not what fixes the storage step, and the two
+    # previous attempts to fix it that way are why the measurement is written
+    # out in full here.
+    #
+    # 60 was enough while the storage step aborted on its first test. It was
+    # raised to 120 on a reading of "past 27 minutes", and run 35913163691 was
+    # then cancelled at exactly 120 minutes, mid-suite, which also threw away
+    # the crypto and bud-zero results that had already passed.
+    #
+    # Counted from that run's log: the storage suite is 646 tests, of which 31
+    # finished in 76.4 minutes. That is 148 s/test, so the full suite needs
+    # about 26.5 HOURS. A GitHub-hosted job is capped at 6 hours, so no
+    # timeout-minutes value can ever let this step finish. The step is bounded
+    # below instead, and the remainder is reported rather than waited for.
+    #
+    # 210 covers crypto (up to ~75 min on slow EPYC runners) + bud-zero (12 min)
+    # + the bounded storage window (60 min) with comfortable headroom.
+    timeout-minutes: 210
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly Rust with Miri
+        run: |
+          rustup toolchain install nightly-2026-07-19 --component miri
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+          cache-on-failure: true
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Miri - crypto crate
+        run: |
+          set -euo pipefail
+          echo "Running Miri on crypto module..."
+          cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- crypto 2>&1 | tee /tmp/miri-crypto.txt
+          # A Miri run that passes ZERO suites is indistinguishable from a Miri
+          # run that never executed a test: both print a green step. The count
+          # was printed and then thrown away (`|| echo '0'` made the empty case
+          # the quietest one of all), so the number is turned into a threshold.
+          # `grep -c` exits 1 when it matches nothing and >1 when it could not
+          # read the file at all. `|| true` collapsed those two into the same
+          # thing, and the second one is a missing measurement, not a zero.
+          set +e
+          n=$(grep -c 'test result: ok' /tmp/miri-crypto.txt)
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            echo "::error::could not read /tmp/miri-crypto.txt (grep exit $grep_status) - the Miri crypto count is missing, not zero."
+            exit 1
+          fi
+          echo "Miri crypto: $n suites passed"
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::Miri crypto reported $n passing suites - a UB gate that inspects nothing is not a pass."
+            exit 1
+          fi
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+      - name: Miri - budzero bud-vm
+        # `bud-vm` is a member of the `budzero/` workspace, not of the root
+        # manifest (the root only path-depends on it), so the step runs from
+        # there; from the root `-p bud-vm` resolves through the dependency
+        # graph, which is not the same selection.
+        working-directory: budzero
+        run: |
+          set -euo pipefail
+          echo "Running Miri on bud-vm module..."
+          cargo +nightly-2026-07-19 miri test -p bud-vm --lib 2>&1 | tee /tmp/miri-budvm.txt
+          # A Miri run that passes ZERO suites is indistinguishable from a Miri
+          # run that never executed a test: both print a green step. The count
+          # was printed and then thrown away (`|| echo '0'` made the empty case
+          # the quietest one of all), so the number is turned into a threshold.
+          # `grep -c` exits 1 when it matches nothing and >1 when it could not
+          # read the file at all. `|| true` collapsed those two into the same
+          # thing, and the second one is a missing measurement, not a zero.
+          set +e
+          n=$(grep -c 'test result: ok' /tmp/miri-budvm.txt)
+          grep_status=$?
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            echo "::error::could not read /tmp/miri-budvm.txt (grep exit $grep_status) - the Miri bud-vm count is missing, not zero."
+            exit 1
+          fi
+          echo "Miri bud-vm: $n suites passed"
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::Miri bud-vm reported $n passing suites - a UB gate that inspects nothing is not a pass."
+            exit 1
+          fi
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+      - name: Miri - storage module
+        run: |
+          set -euo pipefail
+          echo "Running Miri on storage module..."
+          # NAMED, DATED EXCLUSION (2026-09-23). Every test below opens a real
+          # sled database, and sled's `Config::open` calls `libc::getrlimit`
+          # (sys_limits.rs:37) to size its cache. Miri cannot call foreign
+          # functions at all, so these abort with "unsupported operation" - not
+          # undefined behaviour, and not something this repository can fix
+          # without vendoring sled.
+          #
+          # This is the exact case the note below anticipated, and it revises
+          # that note's own evidence. Miri aborts the whole binary on the FIRST
+          # such error, so `set -euo pipefail` ended the step right there: while
+          # `continue-on-error` was in place this step was not succeeding nine
+          # times out of nine, it was FAILING nine times and being recoloured
+          # green. Verified in the log of run 35836929417, one of the nine
+          # counted as a success: same `getrlimit` abort, same line. The step
+          # never reached its own count, so the storage module has not been
+          # inspected for UB at any point in that window.
+          #
+          # The filters are bare function names, not full module paths: libtest
+          # `--skip` is a substring match, and a path written from the file
+          # layout can be silently wrong (the first attempt missed the extra
+          # `::tests::` inline module on the storage_economics cases, so that
+          # test was never skipped and the step aborted on it anyway). Each of
+          # the 37 names was checked to resolve to exactly one `fn` in src/.
+          # The list grew on 2026-10-20: the PR run aborted at
+          # `a_failed_persist_propagates_out_of_the_accounting_paths` with the
+          # same `getrlimit` error, and scanning the filtered set for the same
+          # `Storage::new` shape found the rest before Miri could abort on
+          # them one run at a time.
+          #
+          # Skipping the 37 FFI-bound tests lets the rest of the storage module
+          # - the pure serialization, hashing and state-machine logic, which is
+          # where UB would actually hide - be inspected for the first time. The
+          # skipped behaviour is still covered by the normal (non-Miri) test
+          # run in CI; only the UB inspection of them is impossible.
+          set +e
+          timeout 3600 cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage \
+            --skip startup_loads_consensus_state_from_storage \
+            --skip test_storage_maintenance_fail_closed_regression \
+            --skip storage_economics_state_persists_across_restart \
+            --skip test_durable_commit_batch_and_recovery \
+            --skip a_commit_without_bridge_state_carries_the_live_snapshot_forward \
+            --skip corrupt_height_markers_are_reported_not_read_as_zero \
+            --skip backup_restore_roundtrip_is_integrity_checked_and_non_destructive \
+            --skip load_mempool_txs_drops_corrupt_entries_without_aborting_startup \
+            --skip content_store_roundtrip_and_rejects_wrong_cid \
+            --skip sled_open_with_retry_waits_for_lock_release \
+            --skip sled_open_with_retry_reports_persistent_contention \
+            --skip json_is_no_longer_accepted_where_only_bincode_is_written \
+            --skip removing_the_fallback_does_not_make_bincode_strict \
+            --skip a_corrupt_schema_version_refuses_to_boot \
+            --skip test_chaos_settlement_state_survives_storage_reload \
+            --skip multi_consensus_settlement_state_round_trips_through_storage \
+            --skip storage_reload_skips_malformed_consensus_domains \
+            --skip storage_reload_skips_commitments_for_unknown_or_mismatched_domains \
+            --skip storage_reload_skips_global_headers_with_broken_hash_chain \
+            --skip bridge_state_roots_round_trip_through_storage_after_lock \
+            --skip a_failed_persist_propagates_out_of_the_accounting_paths \
+            --skip storage_registry_row_needs_its_version_tag \
+            --skip get_content_refuses_a_row_that_no_longer_hashes_to_its_key \
+            --skip snapshot_is_refused_while_a_commit_is_in_flight \
+            --skip corrupt_tx_index_row_is_an_error_not_a_miss \
+            --skip load_all_seen_blocks_skips_corrupt_records \
+            --skip repair_index_fails_on_gap \
+            --skip repair_index_ok_on_intact_chain \
+            --skip a_recommit_of_a_committed_height_needs_no_progress_marker \
+            --skip a_previous_hash_cycle_is_an_error_not_a_loop \
+            --skip a_record_under_the_wrong_hash_is_refused \
+            --skip delete_block_removes_its_tx_index_rows \
+            --skip check_integrity_accepts_a_pruned_prefix_but_not_a_gap \
+            --skip load_chain_reports_a_missing_indexed_parent \
+            --skip a_newer_schema_version_refuses_to_open \
+            --skip with_storage_refuses_unreadable_accounts \
+            --skip nft_burn_prunes_matching_storage_manifest_on_produce \
+            2>&1 | tee /tmp/miri-storage.txt
+          # BOUNDED WINDOW, and the bound is the point (see timeout-minutes).
+          # At 148 s/test the 646-test suite needs ~26.5 h, which is over four
+          # times the hard 6 h ceiling on a hosted job. Left unbounded the step
+          # does not fail - it gets the whole JOB cancelled, which is worse: it
+          # discards the crypto and bud-zero results that already passed and
+          # leaves no summary at all. Bounded, the job completes, reports how
+          # far the inspection actually got, and the shortfall is visible.
+          # Exit 124 is `timeout` hitting the cap: a measured partial, not a
+          # failure. Any other non-zero exit is still a real failure.
+          rc=${PIPESTATUS[0]}
+          set -e
+          # A Miri run that passes ZERO tests is indistinguishable from a Miri
+          # run that never executed one: both print a green step. So the number
+          # inspected is counted, printed, and floored - and with the window
+          # bounded it is also the honest coverage figure, not a formality.
+          # `grep -c` exits 1 when it matches nothing and >1 when it could not
+          # read the file at all; the second is a missing measurement, not a
+          # zero, so the two are kept apart.
+          set +e
+          n=$(grep -c '^test .* \.\.\. ok$' /tmp/miri-storage.txt)
+          grep_status=$?
+          total=$(sed -n 's/^running \([0-9]*\) tests$/\1/p' /tmp/miri-storage.txt | head -1)
+          set -e
+          if [ "$grep_status" -gt 1 ]; then
+            echo "::error::could not read /tmp/miri-storage.txt (grep exit $grep_status) - the Miri storage count is missing, not zero."
+            exit 1
+          fi
+          {
+            echo "### Miri storage UB inspection"
+            echo ""
+            echo "| measured | value |"
+            echo "| :-- | --: |"
+            echo "| tests inspected under Miri | ${n:-0} |"
+            echo "| tests in the suite | ${total:-unknown} |"
+            echo "| window | 3600 s |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Miri storage: ${n:-0} of ${total:-unknown} tests inspected"
+
+          if [ "$rc" -eq 124 ]; then
+            # The expected outcome today, and it is reported as a shortfall
+            # rather than dressed up: at ~148 s/test the suite needs ~26.5 h
+            # against a 6 h hard ceiling. This is a NOTICE, not a silent pass -
+            # the number above is the coverage claim, and it is a partial one.
+            echo "::warning::Miri storage inspection hit its 3600 s window after ${n:-0} of ${total:-unknown} tests. This is a measured shortfall, not a clean run: the full suite needs roughly 26.5 h and a hosted job is capped at 6 h. Weekly sharded storage Miri now carries that full-cost sweep on schedule/workflow_dispatch."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::Miri storage inspection failed with exit $rc - this is a real failure, not the time bound."
+            exit "$rc"
+          fi
+
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::Miri storage inspected ${n:-0} tests - a UB gate that inspects nothing is not a pass."
+            exit 1
+          fi
+        env:
+          # Tree Borrows, not the default Stacked Borrows, for this step only.
+          # With the sled tests skipped the run gets past `getrlimit` and 652
+          # tests execute - and then abort on a genuine Stacked Borrows
+          # violation inside crossbeam-epoch 0.9.21 (internal.rs:567,
+          # `element_of`), reached from a rayon worker thread via sled's
+          # `pin()`. Not one budlum frame appears in that backtrace.
+          #
+          # It is upstream and known: crossbeam-rs/crossbeam#545. The fix (PR
+          # #871) is not in a published release, and the maintainers' own
+          # guidance in that thread is to use Tree Borrows instead of Stacked
+          # Borrows. TB is the newer aliasing model and is deliberately less
+          # strict about exactly the raw-pointer patterns an epoch GC uses.
+          #
+          # This is narrower than the alternatives: `-Zmiri-disable-stacked-
+          # borrows` would switch the aliasing check OFF and keep the step
+          # green while checking less, which is the softening this PR exists to
+          # remove. TB keeps an aliasing model in force over all 652 tests. If
+          # budlum's own code violates aliasing, TB still says so.
+          MIRIFLAGS: "-Zmiri-disable-isolation -Zmiri-tree-borrows"
+        # `continue-on-error: true` was here with the note "the storage sled
+        # dependency may be incompatible with Miri". It was removed on the
+        # measurement that the last nine completed runs (35723653191,
+        # 35734888884, 35741876626, 35751380632, 35758105670, 35763407003,
+        # 35769354578, 35835976509, 35836929417) all showed this step green.
+        #
+        # THAT MEASUREMENT WAS WRONG, and the way it was wrong is worth keeping
+        # written down. It read the step's *conclusion* - the exact field
+        # `continue-on-error` overwrites. Re-reading the LOG of 35836929417
+        # shows the `getrlimit` abort on the first sled test. The step was
+        # failing in all nine and being recoloured, so the hedge was not
+        # guarding against a hypothetical incompatibility: it was hiding a real
+        # and total one, on the one module whose job is to persist consensus
+        # state.
+        #
+        # The standing rule this earns: when removing a softening, "the step
+        # was passing anyway" may only be established from log CONTENT. A
+        # conclusion field cannot be evidence about the thing that writes it.
+        # The honest response to a genuine incompatibility is what is now
+        # above - a named, dated exclusion of the offending tests, plus an
+        # aliasing model the dependency can actually run under - never a
+        # blanket "whatever happens here does not count".
+
+      # Miri's own output is the only thing that makes a red Miri check
+      # fixable, and it lives on the log host. The commands above already tee to
+      # /tmp, so re-reading those files costs nothing: same bytes, nine lines,
+      # verdict unchanged.
+      - name: Miri failure surface (annotations)
+        if: failure()
+        run: |
+          set +o pipefail
+          for f in /tmp/miri-crypto.txt /tmp/miri-budvm.txt /tmp/miri-storage.txt; do
+            [ -s "$f" ] || continue
+            sed -e 's/\x1b\[[0-9;]*m//g' "$f" \
+              | grep -E "error|Undefined Behavior|panicked|test result|FAILED|failures:" \
+              | head -n 9 | sed -e "s@^@::error::$f @"
+          done
+
+  asan:
+    # An alternative to cargo-careful. With the pinned nightly the 0.4.7 tool
+# cannot build a sysroot (std moved `panic_unwind` behind `dep:` while the tool
+    # as a feature). Moving nightly to suit the tool would mean giving up the
+# still asks for it implicitly as a feature).
+    #
+    # So the tool was not taken, the work the tool does was. cargo-careful does two
+# things: it builds std with debug_assertions and adds extra run-time checks.
+# Both can be obtained directly with flags:
+    #
+    #   -Zbuild-std                build std from source
+    #   -Zsanitizer=address        catch memory errors at run time
+    #   -Cdebug-assertions=on      re-enable the assertions std turns off for
+    #                              performance
+    #
+    # Let the coverage difference be honest: cargo-careful additionally enables some
+    # rustc checks, while ASan sees memory errors it does not. The two are not
+    # identical, but the gap covers most of what would otherwise stay uncovered in
+    # the tool's absence: what Miri
+# cannot execute: paths containing FFI and system calls.
+    #
+    # BLOCKS. It has a canary.
+    name: AddressSanitizer + debug std (in place of careful)
+    runs-on: ubuntu-latest
+    # Measured on PR #79 head 3a97569: the canary passed and the ASan lib
+    # suite reached 2956/3219 tests before the old 45 minute job timeout
+    # cancelled it mid-run; at 3778 tests a full pass takes ~81 minutes on a
+    # hosted runner. Keep the gate blocking and leave real wall-time headroom.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly, tarih-pinli)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: nightly-2026-07-19
+          components: rust-src
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: asan
+      - name: protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      # Canary: a program that deliberately accesses freed memory is written and
+      # ASan is expected to catch it. If it does not, the tool is not working.
+      # means the tool is not working and a clean run means nothing. The same thing
+      # was missing for years in the TSan job: "no error" could not be told apart
+      # from "the binary never ran".
+      - name: ASan canary (does the tool really catch it)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/asan-canary/src
+          cat > /tmp/asan-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "asan-canary"
+          version = "0.0.0"
+          edition = "2021"
+          EOF
+          cat > /tmp/asan-canary/src/main.rs <<'EOF'
+          // Access to freed memory. If ASan does not see this the scan is
+          // not trustworthy.
+          fn main() {
+              let p = {
+                  let v = vec![1u8, 2, 3, 4];
+                  v.as_ptr()
+              };
+              let x = unsafe { *p };
+              println!("{x}");
+          }
+          EOF
+          cd /tmp/asan-canary
+          export RUSTFLAGS="-Zsanitizer=address"
+          # Capture the output into a file FIRST, search SECOND.
+          #
+          # The first version was `cargo run ... | tee log | grep -q ...` and it
+          # did not work under `set -euo pipefail`: when the program
+          # exited non-zero pipefail killed the pipeline there, grep never ran, and
+          # the canary said "it could not catch it". ASan actually
+          # had caught it; the shadow byte dump was right there in the log. So the canary
+          # was measuring its own shell logic rather than the tool.
+          #
+          # This command is EXPECTED TO FAIL: it runs an intentional memory
+          # error. The verdict belongs to the grep below, and that one blocks.
+          #
+          # But `|| true` did more than tolerate the expected failure - it also
+          # erased the exit code, so a canary that never compiled and a canary
+          # that ASan correctly aborted looked identical here. The status is
+          # captured and printed as evidence instead; a canary that exits ZERO
+          # is its own finding, because a deliberate use-after-free that runs
+          # cleanly means the sanitizer is not instrumenting anything.
+          set +e
+          cargo +nightly-2026-07-19 run -Zbuild-std \
+            --target x86_64-unknown-linux-gnu > /tmp/asan-canary.log 2>&1
+          canary_status=$?
+          set -e
+          echo "ASAN_CANARY_EXIT: $canary_status (non-zero is expected here)"
+          if [ "$canary_status" -eq 0 ]; then
+            echo "CANARY FAILED: the deliberate memory error ran to a CLEAN EXIT," >&2
+            echo "so ASan is not instrumenting this binary at all." >&2
+            tail -25 /tmp/asan-canary.log >&2
+            exit 1
+          fi
+          if grep -qiE "AddressSanitizer|use-after-free|stack-use-after-scope" \
+               /tmp/asan-canary.log; then
+            echo "canary OK: ASan caught the deliberately written memory error."
+          else
+            echo "CANARY FAILED: ASan could not catch a memory error, so even a clean run" >&2
+            echo "of this job proves nothing." >&2
+            tail -25 /tmp/asan-canary.log >&2
+            exit 1
+          fi
+
+      - name: ASan + debug std (lib testleri)
+        run: |
+          set -euo pipefail
+          export RUSTFLAGS="-Zsanitizer=address -Cdebug-assertions=on"
+          export ASAN_OPTIONS="detect_leaks=0"
+          # `| tee` is safe here and only here: the job runs under
+          # `set -euo pipefail`, so a non-zero cargo exit still fails the step.
+          # Where that setting is absent the same rewrite silently turns a red
+          # ASan run green (this file's canary step records exactly that bug).
+          cargo +nightly-2026-07-19 test --lib -Zbuild-std \
+            --target x86_64-unknown-linux-gnu -- --test-threads=1 \
+            2>&1 | tee /tmp/asan-lib.log
+      - name: ASan failure surface (annotations)
+        if: failure()
+        run: |
+          set +o pipefail
+          if [ -s /tmp/asan-lib.log ]; then
+            sed -e 's/\x1b\[[0-9;]*m//g' /tmp/asan-lib.log \
+              | grep -E "ERROR|runtime error|SUMMARY|panicked|test result|error\[" \
+              | head -n 9 | sed -e "s@^@::error::@"
+            printf '::error::%s log lines; first 9 matching shown\n' "$(grep -c '' /tmp/asan-lib.log)"
+          else
+            echo "::error::/tmp/asan-lib.log is empty - the ASan step died before it produced output, which means the build of the sanitizer harness failed and its log is on the log host."
+          fi

@@ -1,0 +1,490 @@
+name: Extra Tooling (security + quality)
+#
+# This workflow runs extra tools the main CI does not cover.
+#
+# 2026-07-27 repair - the workflow WAS NEVER RUNNING:
+# the `slsa-provenance` job was calling a reusable workflow (`.github/workflows/*.yml@ref`)
+# inside `steps[].uses`. A reusable workflow is valid only at job level
+# (`jobs.<id>.uses`); used inside a step, GitHub rejects the whole
+# file. Result: every run was an instant "failure" with 0 jobs, and the other five
+# jobs never ran either. actionlint does not catch this (it passes clean locally),
+# which is why the bug went unnoticed.
+#
+# The SLSA job was removed rather than left as an imitation. The correct setup is a separate release
+# Workflow'u ister (job seviyesinde `uses:` + `permissions: id-token: write` +
+# with real base64-subjects generation). `hashFiles` does not produce the base64 digest
+# format SLSA expects, so even if it had run it would have produced invalid
+# provenance. That would be a fake supply-chain guarantee.
+#
+# The `|| true` / `|| echo` masks were also removed: by the standing rule,
+# a check that does not block merge is decorative. Which gate actually
+# blocks is written at the top of each job.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extra-tooling-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 1. cargo-auditable + cargo-audit ────────────────────────────────────────
+  # GATE: any cargo audit finding = FAIL.
+  # cargo-auditable embeds the dependency list inside the binary, so
+  # a distributed binary can be audited without the source tree
+  # (`cargo audit bin`). For a chain, being able to prove which crate versions
+  # the operator's binary was built from is a real need.
+  auditable-audit:
+    name: Auditable + Audit (binary SBOM + CVE)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install cargo-auditable + cargo-audit (version pinned)
+        run: |
+          set -euo pipefail
+          cargo install cargo-auditable --version 0.7.5 --locked
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo auditable --version
+          cargo audit --version
+
+      # Vacuous-gate protection: cargo audit "0 vulnerabilities" can indicate both a clean
+      # tree and a run that failed to download the advisory database.
+      # The canary generates a synthetic lockfile containing a known vulnerable version and
+      # proves the tool CATCHES it.
+      - name: Canary - evidence that the cargo audit alarm works
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/audit-canary
+          cat > /tmp/audit-canary/Cargo.lock <<'CANARY'
+          version = 3
+
+          [[package]]
+          name = "canary-app"
+          version = "0.1.0"
+          dependencies = ["time"]
+
+          [[package]]
+          name = "time"
+          version = "0.1.44"
+          source = "registry+https://github.com/rust-lang/crates.io-index"
+          CANARY
+          if cargo audit --file /tmp/audit-canary/Cargo.lock; then
+            echo "ERROR: cargo audit failed to catch the canary (time 0.1.44 / RUSTSEC-2020-0071) -> vacuous gate!"
+            exit 1
+          fi
+          echo "Canary caught -> the cargo audit alarm works."
+
+      - name: Build with auditable (embed the dependency list in the binary)
+        run: cargo auditable build --lib --locked
+
+      # NOTE: `--locked` is NOT a cargo audit flag (it belongs to cargo install);
+      # it used to be here and the command fell over immediately with
+      # "unexpected argument". The version was also moved 0.21.2 -> 0.22.2: 0.21.2
+      # cannot parse the CVSS 4.0 records in the advisory database and fails with
+      # "unsupported CVSS version: 4.0", so the gate would be permanently red for a
+      # reason unrelated to the code.
+      - name: The cargo audit gate (a finding = fail)
+        run: cargo audit
+
+  # -- 2. Unused dependencies -------------------------------------------------
+  # GATE. It used to be report-only because machete gave 9 candidates in this tree
+  # and some of them (chrono, group) were false positives caused by macro/trait
+  # indirection, so making it FAIL would have forced either loosening CI or
+  # stuffing used dependencies into the ignore list, leaving the gate hollow.
+  #
+  # That debt is closed: the real dead dependencies were removed and the false
+  # positives were moved into justified `[package.metadata.cargo-machete] ignored`
+  # entries. Measurement (2026-07-27): all four of the root, budzero, fuzz and
+  # wallet-core trees report "didn't find any unused dependencies". Zero findings
+  # is now the real state rather than a lack of calibration, so the gate can close.
+  #
+  # The canary is below: if an unused `libc` in a synthetic crate is not caught,
+  # the job declares itself untrustworthy and fails, so "0 findings" cannot pass empty.
+  dead-deps:
+    name: Dead Deps (machete + shear)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      # A pinned binary rather than building from source. The repository already
+      # uses this pattern (gitleaks, grype, typos, actionlint); it is applied
+      # sha256'lar indirilip hesaplandi; machete'ninki upstream .sha256
+      # consistently here, and it was compared byte for byte against the checksum file.
+      - name: Install cargo-machete + cargo-shear (version + sha256 pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/machete.tar.gz \
+            https://github.com/bnjbvr/cargo-machete/releases/download/v0.8.0/cargo-machete-v0.8.0-x86_64-unknown-linux-musl.tar.gz
+          echo "020f6608f9be1562d1fb601e5808e541ccb8806e7e4dfde27d48bc22254a002c  /tmp/machete.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/machete.tar.gz -C /tmp
+          install -m755 "$(find /tmp -name cargo-machete -type f | head -1)" /usr/local/bin/cargo-machete
+
+          curl -sSfL -o /tmp/shear.tar.gz \
+            https://github.com/Boshen/cargo-shear/releases/download/v1.4.1/cargo-shear-x86_64-unknown-linux-musl.tar.gz
+          echo "0768ac346bb6ed097b237d75046fb357a43941e5c39f6ebf5746f96a4cb7fe03  /tmp/shear.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/shear.tar.gz -C /tmp
+          install -m755 "$(find /tmp -name cargo-shear -type f | head -1)" /usr/local/bin/cargo-shear
+
+          cargo-machete --version
+          cargo-shear --version
+
+      # Canary: it verifies the tool really runs, even in report mode.
+      # It builds a synthetic crate carrying a deliberately unused dependency.
+      # It proves machete catches it; if it cannot, the report below passes empty
+      # with "0 findings" and nobody notices.
+      - name: Canary - evidence that the machete alarm works
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/machete-canary/src
+          cat > /tmp/machete-canary/Cargo.toml <<'CANARY'
+          [package]
+          name = "machete-canary"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          libc = "0.2"
+          CANARY
+          echo 'fn main() {}' > /tmp/machete-canary/src/main.rs
+          if cargo machete /tmp/machete-canary; then
+            echo "ERROR: machete failed to catch the unused 'libc' dependency -> vacuous gate!"
+            exit 1
+          fi
+          echo "Canary caught -> the machete alarm works."
+
+      # The gate: each workspace is scanned separately. When cargo-machete finds
+      # something it exits non-zero and, under `set -e`, the job fails there. False
+      # positives go into a justified `[package.metadata.cargo-machete] ignored`
+      # entry; ignoring is not free, the justification stays in the commit.
+      # The directory list is not maintained by hand. A hand-maintained list
+      # A hand-kept list silently goes stale when a crate is added: xtask/gates had
+      # not been added to the OSV scan, and there a gate caught it while here none did.
+      # Now every Cargo.toml is discovered, so a new crate joins on its own.
+      - name: The machete gate - every workspace in the repository
+        run: |
+          set -euo pipefail
+          fail=0
+          scanned=0
+          while IFS= read -r manifest; do
+            dir="$(dirname "$manifest")"
+            # Sub-crates are scanned from their own workspace roots.
+            grep -q '^\[workspace\]' "$manifest" || grep -q '^\[package\]' "$manifest" || continue
+            echo "── cargo machete: $dir ──"
+            scanned=$((scanned + 1))
+            if ! (cd "$dir" && cargo machete); then
+              echo "FAIL: there is an unused dependency inside $dir." >&2
+              fail=1
+            fi
+          done < <(find . -name Cargo.toml -not -path './target/*' -not -path '*/target/*' \
+                     -not -path './node_modules/*' | sort)
+          if [ "$scanned" -lt 4 ]; then
+            echo "FAIL: only $scanned manifests were scanned; the repository carries more than four, so the discovery step broke and this gate looks at nothing." >&2
+            exit 1
+          fi
+          echo "cargo machete: $scanned manifest tarandi."
+          exit "$fail"
+
+      # Promoted from report to gate. `cargo shear` is a second opinion on the
+      # same question `cargo machete` answers above, and the two disagree in
+      # both directions - that is the reason to run both, and it was also the
+      # excuse for never letting this one speak.
+      #
+      # A canary first, for the same reason machete has one: a tool that fails
+      # to install, or whose output shape moved, reports a clean tree the same
+      # way an actually clean tree does. `cargo shear` exits non-zero when it
+      # finds an unused dependency, so a crate with an obviously unused `libc`
+      # must make it fail; if it does not, the gate below is decoration.
+      - name: Shear canary (does the tool really catch it)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/shear-canary/src
+          cat > /tmp/shear-canary/Cargo.toml <<'CANARY'
+          [package]
+          name = "shear-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          libc = "0.2"
+          CANARY
+          echo 'fn main() {}' > /tmp/shear-canary/src/main.rs
+          if cargo shear /tmp/shear-canary; then
+            echo "ERROR: shear failed to catch the unused 'libc' dependency -> vacuous gate!" >&2
+            exit 1
+          fi
+          echo "Canary caught -> the shear alarm works."
+      # The gate. False positives are not silenced with a flag here either: shear
+      # reads `[workspace.metadata.cargo-shear] ignored`, and an entry there
+      # carries its justification in the commit that adds it, exactly like the
+      # machete side.
+      - name: The shear gate (a second opinion that can say no)
+        run: cargo shear
+
+  # -- 3. Binary size visibility ----------------------------------------------
+  # REPORT: not a gate. Failing on a size threshold before calibrating it would be
+  # arbitrary; a few runs of real data must be collected first. The report goes into the PR summary.
+  binary-size:
+    name: Binary Size (rapor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install cargo-bloat (version pinned)
+        run: cargo install cargo-bloat --version 0.12.1 --locked
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Size + the largest crates (into the PR summary)
+        run: |
+          set -uo pipefail
+          # Both masks here hid the same thing in two places: the release build
+          # ran in the step above, so a MISSING artifact is not a quiet
+          # "nothing to list", it is a build that did not produce what this job
+          # exists to measure. And `cargo bloat ... 2>/dev/null || echo` turned
+          # every failure of the tool into the sentence "(could not be run)"
+          # inside a green step - visibility with no consequence, which is the
+          # shape the charter calls a bos gecen kapi.
+          #
+          # Still not a size THRESHOLD (no number is agreed yet, and inventing
+          # one here would be a gate nobody chose). What blocks is narrower and
+          # certain: the measurement must exist.
+          set +e
+          ls -lh target/release/budlum-core target/release/libbudlum_core.rlib > /tmp/bloat-size.log 2>&1
+          size_status=$?
+          cargo bloat --release --crates -n 20 > /tmp/bloat-crates.log 2>&1
+          bloat_status=$?
+          set -e
+          {
+            echo "### Binary size"
+            echo '```'
+            cat /tmp/bloat-size.log
+            echo '```'
+            echo "### The crates taking the most space"
+            echo '```'
+            tail -40 /tmp/bloat-crates.log
+            echo '```'
+            echo "(ls exit: $size_status, cargo bloat exit: $bloat_status)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          fail=0
+          if [ "$size_status" -ne 0 ]; then
+            echo "::error::the release artifacts are not on disk after the release build - there is nothing to measure, so the size report is empty for a reason that is not size."
+            fail=1
+          fi
+          if [ "$bloat_status" -ne 0 ]; then
+            echo "::error::cargo bloat exited $bloat_status; the crate breakdown in this summary is missing, not small."
+            sed -e 's/^/::error::/' /tmp/bloat-crates.log | head -n 5
+            fail=1
+          fi
+          exit "$fail"
+
+  # -- 4. TOML formatting/lint -------------------------------------------------
+  # GATE: taplo lint + format --check = FAIL.
+  # Formatting drift in files such as Cargo.toml/deny.toml/config produces diff
+  # noise in hand-edited supply-chain policies and hides the real change.
+  # Gizler.
+  config-lint:
+    name: Config Lint (taplo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install taplo (version + sha256 pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/taplo.gz \
+            https://github.com/tamasfe/taplo/releases/download/0.9.3/taplo-linux-x86_64.gz
+          echo "889efcfa067b179fda488427d3b13ce2d679537da8b9ed8138ba415db7da2a5e  /tmp/taplo.gz" | sha256sum -c -
+          gunzip -c /tmp/taplo.gz > /tmp/taplo
+          install -m755 /tmp/taplo /usr/local/bin/taplo
+          taplo --version
+
+      # Canary: it produces a broken TOML and verifies taplo catches it.
+      - name: Canary - evidence that the taplo alarm works
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/taplo-canary
+          printf '[package\nname = "broken"\n' > /tmp/taplo-canary/broken.toml
+          if taplo lint /tmp/taplo-canary/broken.toml; then
+            echo "ERROR: taplo failed to catch the broken TOML -> vacuous gate!"
+            exit 1
+          fi
+          echo "Canary caught -> the taplo alarm works."
+
+      - name: The taplo lint gate
+        run: taplo lint
+
+  # -- 5. Kani model checking (bond arithmetic) --------------------------------
+  # GATE: it fails if a proof fails OR if the number of harnesses run does not
+  # bildirilenden azsa = FAIL.
+  #
+  # SECURITY.md recorded model checking as "open work": a script by this name used
+  # to exist, printing a stub message and pointing at a file absent from the tree;
+  # no workflow ran it. It counted as a gate but proved nothing, so it was deleted.
+  # This is the real one that replaces it.
+  # kurulum.
+  #
+  # The harnesses live in a separate package under `kani/`, like `fuzz/`. The reason
+  # is technical: Kani ships its own pinned nightly (0.67.0 -> rustc 1.93.0-nightly)
+  # and `budlum-core` declares `rust-version = "1.97.1"`, so cargo refuses to build
+  # the root crate. The upstream fix (kani#4645) is merged but not yet released.
+  # Lowering the MSRV for a verification tool would weaken the promise made to
+  # operators; the package stays separate.
+  kani-proofs:
+    name: Kani Proofs (bond arithmetic)
+    runs-on: ubuntu-latest
+    # 9 of the 12 harnesses finish in seconds, 3 do not. That is not a guess, it was
+    # measured: each harness was run in a separate job with its own cap.
+    #
+    #     penalty_never_exceeds_stake                       1s
+    #     remaining_stake_is_exact                          6s
+    #     the_clamp_catches_the_quotient_that_used_to_wrap  1s
+    #     no_ratio_can_make_the_penalty_exceed_the_bond     1s
+    #     overshoot harness'leri (5 adet)                 1-8s
+    #     ratio_endpoints_are_exact                       >22dk
+    #     penalty_is_monotonic_in_the_ratio               >22dk
+    #     penalty_is_monotonic_for_full_stakes            >22dk
+    #
+    # The slow three call `penalty_for` twice and relate the results.
+    # A clamp binds a single call to its own input; it gives the solver nothing for
+    # comparing two independent divisions. Splitting the asserts does not solve it
+    # either, measured: `ratio == 0` is free, `ratio == SCALE` still times out.
+    #
+    # So the PR gate runs the 9 fast harnesses, and the three run under `kani-slow-proofs`
+    # runs on the nightly schedule. The split is read from the `// SLOW:` marker in
+    # the source, not from a hand-kept name list, and the gate verifies the marker
+    # sits on a `#[kani::proof]`: otherwise the marker lowers the expected count
+    # without excluding any harness.
+    #
+    # `--harness-timeout` was tried and reverted: `-Z unstable-options`
+    # wants. Tying a gate to an unstable flag means the next Kani release
+    # would mean the gate breaking silently in the next version.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+
+      # The gate itself is proven before Kani is installed: the canary runs with fake
+      # output, so the question "is the gate vacuous" is answered even if the install breaks.
+      # Because the Rust version is a gate, the canary runs after the Rust install.
+      - name: The gate canary (independent of Kani)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- kani --self-test
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+
+      - name: Install Kani (version pinned)
+        run: |
+          set -euo pipefail
+          cargo install --locked kani-verifier --version 0.67.0
+          cargo kani setup
+
+      # `--output-format terse` gives one VERIFICATION result per line; the gate
+      # counts them and compares against the harness count in the source.
+      # Which harnesses run is read from the source rather than repeated here,
+      # is not written down: the two lists can drift apart silently. The evidence is at 0.67
+      # there is no `--exclude-harness`; `--harness` exists and may be repeated,
+      # so the selection is by inclusion rather than exclusion.
+      #
+      # `--exact` is NOT USED and that was measured. It refused the plain name and
+      # the prefixed one (`budlum_kani::proofs::x`) alike. Reading the 0.67.0
+      # source, `--exact` compares against `mangled_name`, in which the
+      # crate prefix is absent and the correct form would be `proofs::x`. But that
+      # means binding a gate to Kani's internal naming: if the naming scheme changes
+      # in the next version the gate silently matches no harness.
+      #
+      # Without `--exact`, `--harness` is a substring filter. Because the
+      # names here are unique it selects the same nine, and more importantly
+      # the NUMBER of matches is verified by the gate: expecting nine and running
+      # eight is caught by the `kani` gate. The filter loosened, the gate did not.
+      - name: Kani proofs (fast set)
+        working-directory: kani
+        run: |
+          set -euo pipefail
+          mapfile -t fast < <(cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- kani --fast-names)
+          [ "${#fast[@]}" -gt 0 ] || { echo "no fast harnesses found; the gate would be vacuous" >&2; exit 1; }
+          args=()
+          for h in "${fast[@]}"; do
+            [ -n "$h" ] && args+=(--harness "$h")
+          done
+          echo "running ${#fast[@]} fast harnesses: ${fast[*]}"
+          cargo kani "${args[@]}" --output-format terse 2>&1 | tee /tmp/kani.log
+
+      - name: The Kani gate
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- kani /tmp/kani.log
+
+  # The slow Kani set used to be duplicated here as `kani-slow-proofs`, guarded
+  # by `if: github.event_name == 'schedule'`. It now lives in kani-slow.yml,
+  # whose own header already claims the move was made so that "PRs never list
+  # it at all" - but the copy here was never deleted, so this workflow (which
+  # DOES run on pull_request) kept evaluating the guard to false and posting a
+  # permanent "Kani Proofs (slow set, scheduled) - Skipped" entry on every PR.
+  # That is the exact symptom the move was supposed to remove, and it made the
+  # check list read as though a gate were disabled.
+  #
+  # Deleted here rather than in kani-slow.yml: that file is schedule- and
+  # dispatch-only, so it is the copy that actually runs the harnesses.

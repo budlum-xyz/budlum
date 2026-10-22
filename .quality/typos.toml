@@ -1,0 +1,158 @@
+# typos-cli configuration, Budlum Core
+#
+# This repository is being made single language: code, API surface, comments and
+# documentation are all moving to English. While that migration runs, Turkish text
+# still remains in places, and because the typos default dictionary is English only,
+# running it uncalibrated turns almost all of 1000+ findings into English
+# "corrections" of Turkish words ("blok" -> "block", "adres" -> "address",
+# "sistem" -> "system"). That noise makes the gate unusable.
+#
+# The fix is NOT loosening but correct calibration: the Turkish word list below is
+# declared and everything else is a FAIL gate. The list shrinks as the migration
+# proceeds and is removed entirely once the last Turkish line is gone;
+# a real English spelling mistake is never ignored, it is fixed.
+
+[files]
+extend-exclude = [
+  "target/",
+  "budzero/target/",
+  "Cargo.lock",
+  "*.lock",
+  "supply-chain/",   # cargo-vet output, not hand edited
+  "proto/",          # the wire schema - changing a word breaks the protocol
+  "fuzz/corpus/",    # fuzzer produced binary seeds, not text
+  "fuzz/artifacts/",
+  "repo-lubot/patches/",  # git format-patch output: the text is another repo's
+                          # commit message, re-verified verbatim by `git am`, not
+                          # hand-edited here. A typo inside it is fixed upstream in
+                          # the crate, never by editing the mirror and calling it
+                          # an export.
+]
+
+[default]
+# Do not scan long identifier/hash-like alphanumeric strings (SHA, PeerID, address).
+extend-ignore-re = [
+  "\\b[0-9a-fA-F]{7,}\\b",              # git SHA / hex hash / hex address
+  "\\b12D3Koo[A-Za-z0-9]+\\b",          # libp2p PeerID
+  "sha256:[0-9a-f]+",                   # docker digest
+  "(?i)\\bbud1[a-z0-9]+\\b",            # bech32-style Budlum addresses
+]
+
+[default.extend-words]
+# -- Turkish words (false positives), removed as the migration proceeds --------
+# Each maps to itself = "this spelling is correct, do not suggest a fix".
+blok = "blok"
+Blok = "Blok"
+BLOK = "BLOK"
+adres = "adres"
+Adres = "Adres"
+sistem = "sistem"
+Sistem = "Sistem"
+SISTEM = "SISTEM"
+lokal = "lokal"
+Lokal = "Lokal"
+paralel = "paralel"
+Paralel = "Paralel"
+PARALEL = "PARALEL"
+parametre = "parametre"
+Parametre = "Parametre"
+standart = "standart"
+Standart = "Standart"
+paket = "paket"
+Paket = "Paket"
+grup = "grup"
+Grup = "Grup"
+matris = "matris"
+metod = "metod"
+modul = "modul"
+modulu = "modulu"
+stabilite = "stabilite"
+performans = "performans"
+Performans = "Performans"
+implemente = "implemente"
+aktive = "aktive"
+servise = "servise"
+platforma = "platforma"
+maks = "maks"
+testin = "testin"
+commitin = "commitin"
+committe = "committe"
+sizin = "sizin"
+sade = "sade"
+hava = "hava"
+Hava = "Hava"
+sart = "sart"
+laf = "laf"
+tak = "tak"
+gir = "gir"
+oyu = "oyu"
+daa = "daa"
+certi = "certi"
+nin = "nin"
+ine = "ine"
+iz = "iz"
+siz = "siz"
+ba = "ba"
+makro = "makro"
+versin = "versin"
+tipe = "tipe"
+serie = "serie"
+probleme = "probleme"
+Sur = "Sur"
+lik = "lik"
+foto = "foto"
+# -- added during the budscan round -------------------------------
+# All three are Turkish words; the English typos dictionary reads them as
+# "admin", "offset" and "vector" respectively. Verified by mutation: removing these
+# lines turns the gate red with 7 findings, so the calibration is not vacuous.
+#   adin   : the genitive of the noun "ad" (the resolution of a name), not "admin"
+#   ofset  : the 32 byte big-endian offset of the Arweave `note` field
+#   vektor : the shared test vector of the content-id equality test
+adin = "adin"
+Adin = "Adin"
+ofset = "ofset"
+Ofset = "Ofset"
+vektor = "vektor"
+vektoru = "vektoru"
+Vektor = "Vektor"
+
+# -- added during the proven-demand round --------------------------------
+# Both are Turkish words; the English typos dictionary reads them as "again" and
+# "popular".
+#   agin     : the genitive of "ag" (network)
+#   populer  : the Turkish spelling of popular; not "popular"
+agin = "agin"
+Agin = "Agin"
+populer = "populer"
+Populer = "Populer"
+populerlik = "populerlik"
+populerlikle = "populerlikle"
+# formatin : the genitive of the noun "format"; not "formation"
+formatin = "formatin"
+Formatin = "Formatin"
+
+# -- Proper names / technical terms ---------------------------------------
+# ser: serde's serialization module name (`serde::ser`, `toml::ser`) and a
+# three-letter label on two bincode `expect` calls. "set" is not what the word
+# means; renaming a module path to satisfy a spell-checker is the tail wagging.
+ser = "ser"
+Canva = "Canva"     # a product name (not Canvas)
+Groth = "Groth"     # the Groth16 zk-SNARK scheme (Jens Groth)
+LOD = "LOD"         # level of detail, the graphics term the culling module borrows
+PN = "PN"           # typos splits the acronym PNG and offers ON for the PN half
+# -- A deliberate test fixture ---------------------------------------------
+# budzero/bud-compiler: the negative test that verifies the "undeclared struct type"
+# error deliberately uses a misspelled type name in the source.
+# Fixing it would remove the very thing the test measures.
+Ponit = "Ponit"
+
+# -- Deliberate test data and a filter name ----------------------------------
+# tru   : json.rs negative test input, a deliberately truncated "true" literal.
+# paeth : the PNG Paeth predictor (src/storage/qr_video.rs), named after its author.
+tru = "tru"
+paeth = "paeth"
+# flate : typos splits the crate name `flate2` (zlib backend of the QR PNG code)
+#         and offers "flat". The crate name cannot change.
+flate = "flate"
+# loca  : the TrueType glyph location table tag in the font parser test data.
+loca = "loca"

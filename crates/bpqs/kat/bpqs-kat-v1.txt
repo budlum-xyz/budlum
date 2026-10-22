@@ -1,0 +1,13 @@
+# Budlum-BPQS known-answer vectors v1 (milestone M2, 2026-09-22;
+#       regenerated 2026-10-19 for the step-bound chains below)
+# construction: epoch-chained Winternitz (one-time per epoch, q_max=1,
+#       PRF-derived 16B randomizer, MESSAGE_BIND_V1, chain steps bound
+#       to their absolute position (P02-F19))
+# row: ParamsTestFast lane (N=32, LEN=67, T_LOG2=4) - identical hash
+#      discipline to the canonical L5/L3 rows, ceremony depth pruned.
+# pins: root_seed=0xA5*32, window=3, msg='bpqs-backend-differential-payload',
+#       signed at height 3 (epoch 1), quota counter 0.
+# sig_digest is SHA3-256 over the wire sketch (epoch_le || randomizer || LEN chains || path).
+backend=sha3-256 root=1023b0e0a0e245836313896ffce20769b19afb4563bb66b656fe6d9087416aad sig_digest=7e03cd0bdb981acfe9e3eb42560508a24a9d30f881bc517603cb75d6ec8088ce
+backend=shake256 root=a6835b7dd45ca360bd8f691bfbd8243c7533b1d00ee0219466f60f6995bda868 sig_digest=c1c9f6c932c3aa9eb1aef82714bcd6167d94be63af964bc26af43fe614f61bc8
+backend=poseidon2-goldilocks-16 root=e04fe8c8fda7460170d01d250ffaea2933a9c6bbd303b42fc8fdb8c45389b611 sig_digest=10b944e971fa0a9b8ac15dcec4469fd6f38dcb59740a8e731506df802ca6ba65

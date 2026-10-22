@@ -1,0 +1,81 @@
+name: Provenance (SBOM attestation)
+
+# An SBOM is a claim if who produced it is unknown.
+#
+# ci.yml already produces a CycloneDX SBOM and uploads it as an artifact. Whoever
+# downloads it can read the contents but cannot ask: did this file really come
+# from this repository, this commit, this workflow? An unsigned SBOM cannot be
+# told apart from a hand-written one, and that is exactly where a supply-chain
+# attack operates: the source is clean, the produced artifact is not.
+#
+# This workflow produces the SBOM and signs it with GitHub's attestation
+# infrastructure. That infrastructure uses Sigstore: a short-lived certificate
+# from Fulcio and a signature record through the Rekor transparency log, so no
+# long-lived key is held and the signing event is recorded irreversibly.
+#
+# What is not claimed: this is not SLSA Build L3. L3 requires an isolated build
+# platform and GitHub's hosted runners do not provide that isolation. This is a
+# signed statement saying the produced file was produced by this job, no more.
+# Claiming more would be a fake guarantee, and this repository lived through it
+# once: extra-tooling.yml carried a SLSA job that would produce invalid
+# provenance; it was removed and no imitation was put in its place.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provenance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sbom-attestation:
+    name: SBOM + a signed attestation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Required for attestation: id-token provides the OIDC identity and
+      # attestations lets the statement be written to the repository. Neither is granted outside this job.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+
+      - name: protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: SBOM uret (CycloneDX)
+        run: cargo run --release --manifest-path xtask/tools/Cargo.toml -- generate-sbom
+
+      # Canary: is the file to be signed really an SBOM. Signing an empty or
+      # broken file makes the signature itself meaningless; a signature says
+      # not that the content is correct but that it came out of this job.
+      # `generate-sbom` refuses to finish unless the file is CycloneDX with at
+      # least 50 components (xtask/tools, sbom.rs), so the step above is the
+      # canary; this step only proves the file is where the signer expects it.
+      - name: SBOM present
+        run: test -s sbom.cdx.json || { echo "the SBOM is empty or missing" >&2; exit 1; }
+
+      - name: Sign the SBOM (an attestation through Sigstore)
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: sbom.cdx.json
+
+      - name: SBOM artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-attested-${{ github.sha }}
+          path: sbom.cdx.json
+          retention-days: 90

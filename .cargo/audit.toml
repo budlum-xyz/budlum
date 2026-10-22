@@ -1,0 +1,11 @@
+# .cargo/audit.toml: the cargo-audit configuration
+#
+# An evidenced skip list of the KNOWN advisories in Cargo.lock. The counterpart
+# on the cargo-deny side, with the full evidence chain, is the .quality/deny.toml
+# [advisories] section. Any NEW CVE not listed here FAILs the job
+# (the rule: unmaintained only warns, a vulnerability fails).
+
+[advisories]
+# Empty on purpose. The hickory-proto 0.26.1 and yamux 0.14.0 locks closed
+# RUSTSEC-2026-0118 and RUSTSEC-2026-0119; a new entry needs evidence, reason and expiry.
+ignore = []

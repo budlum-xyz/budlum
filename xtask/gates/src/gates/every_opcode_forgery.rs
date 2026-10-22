@@ -1,0 +1,358 @@
+//! Every opcode must have a forgery test that actually attacks it.
+//!
+//! Ported from `scripts/check-every-opcode-has-a-forgery-test.sh`. The
+//! opcode set comes from the ISA enum; each opcode must appear in some
+//! `rejects_*` test, and those tests must assert the proof is refused
+//! (directly, through `prove_fails_after_tamper`, or at the VM).
+
+use std::fmt::Write as _;
+use std::path::Path;
+
+/// Blank `/* .. */` comments, keeping newlines.
+fn strip_block_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("*/") {
+            Some(end) => {
+                out.extend(after[..end].chars().filter(|c| *c == '\n'));
+                rest = &after[end + 2..];
+            }
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn strip_comments(text: &str) -> String {
+    strip_block_comments(text)
+        .lines()
+        .map(|l| {
+            let idx = l.find("//").unwrap_or(l.len());
+            l[..idx].to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Each forgery test must assert a failure (directly, via the helper, or
+/// at the VM).
+fn check_test_refusals(
+    tests: &std::collections::HashMap<String, String>,
+    problems: &mut Vec<String>,
+) -> usize {
+    let mut checked = 0usize;
+    checked += 1;
+    let helper = "prove_fails_after_tamper";
+    for (name, body) in tests {
+        let delegates = body.contains(helper);
+        let asserts_failure = body.contains("is_err()")
+            || body.contains("expect_err")
+            || body.contains("unwrap_err")
+            || body.contains("Err(VerifyError::");
+        let rejects_at_vm =
+            body.contains("assert_eq!(vm.registers") || body.contains("assert!(!receipt.success");
+        // A test may also pin the *reason* for the refusal rather than just
+        // its existence: build the error string and compare it. That is a
+        // stronger assertion than `is_err()` - it fails both when the forgery
+        // is accepted and when it is rejected by the wrong layer - so it must
+        // count. The marker is a comparison against the sentinel this suite
+        // uses for "the verifier returned Ok", since a test that never
+        // constructs that string is not measuring a refusal.
+        let pins_refusal_reason = body.contains("\"accepted\"");
+        if !delegates && !asserts_failure && !rejects_at_vm && !pins_refusal_reason {
+            problems.push(format!(
+                "`{name}` builds a forgery and never asserts the proof is \
+                 refused. A test that tampers and then expects success is \
+                 coverage on paper."
+            ));
+        }
+    }
+    checked
+}
+
+/// The shared helper must still assert failure.
+fn check_helper(
+    prover_src: &str,
+    tests: &std::collections::HashMap<String, String>,
+    problems: &mut Vec<String>,
+) -> usize {
+    let mut checked = 0usize;
+    checked += 1;
+    let helper = "prove_fails_after_tamper";
+    let helper_pos = prover_src.find(&format!("fn {helper}("));
+    match helper_pos {
+        None => {
+            if tests.values().any(|b| b.contains(helper)) {
+                problems.push(format!(
+                    "tests delegate to `{helper}` and it does not exist."
+                ));
+            }
+        }
+        Some(pos) => {
+            checked += 1;
+            match body_after(prover_src, pos) {
+                Some(hbody) if !hbody.contains("is_err()") => problems.push(format!(
+                    "`{helper}` no longer asserts that verification fails. Every \
+                     test delegating to it inherits that, so the whole forgery suite \
+                     would pass against a proof system that accepts tampered traces."
+                )),
+                None => problems.push(format!("`{helper}` exists but its body cannot be read.")),
+                _ => {}
+            }
+        }
+    }
+    checked
+}
+
+/// Every `rejects_*` test with its brace-matched body.
+fn collect_rejects_tests(prover_src: &str) -> std::collections::HashMap<String, String> {
+    let mut tests: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut rest = prover_src;
+    while let Some(pos) = rest.find("fn rejects_") {
+        let after = &rest[pos + "fn rejects_".len()..];
+        let name_end = after
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .unwrap_or(after.len());
+        let name = format!("rejects_{}", &after[..name_end]);
+        // The attributes sit between the previous item and the `fn`. An
+        // ignored test runs nothing.
+        let consumed = prover_src.len() - rest.len() + pos;
+        let head = &prover_src[..consumed];
+        let attrs = &head[head.rfind(['}', ';']).map_or(0, |i| i + 1)..];
+        if attrs.contains("#[ignore") {
+            rest = &after[name_end..];
+            continue;
+        }
+        if let Some(body) = body_after(rest, pos + "fn rejects_".len() + name_end) {
+            tests.insert(name, body);
+        }
+        rest = &after[name_end..];
+    }
+    tests
+}
+
+/// Brace-matched body beginning at the first `{` at or after `start`.
+fn body_after(text: &str, start: usize) -> Option<String> {
+    let open = text[start..].find('{')? + start;
+    let mut depth = 1i32;
+    let mut i = open + 1;
+    let b = text.as_bytes();
+    while i < b.len() {
+        match b[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(text[open..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// # Errors
+///
+/// Returns the list of violated claims.
+pub fn run(root: &Path) -> Result<String, String> {
+    let isa_path = root.join("budzero/bud-isa/src/lib.rs");
+    let prover_path = root.join("budzero/bud-proof/src/plonky3_prover.rs");
+    if !isa_path.is_file() {
+        return Err(format!(
+            "expected source file missing: {}",
+            isa_path.display()
+        ));
+    }
+    if !prover_path.is_file() {
+        return Err(format!(
+            "expected source file missing: {}",
+            prover_path.display()
+        ));
+    }
+    let isa_src = strip_comments(&std::fs::read_to_string(&isa_path).map_err(|e| e.to_string())?);
+    // Comments are stripped here too: a commented-out assert or column is no evidence.
+    let prover_src =
+        strip_comments(&std::fs::read_to_string(&prover_path).map_err(|e| e.to_string())?);
+    let mut problems: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+
+    // Enumerate opcodes from the ISA enum.
+    checked += 1;
+    let enum_start = isa_src.find("pub enum Opcode {");
+    let Some(enum_start) = enum_start else {
+        return Err(String::from("cannot find `Opcode` in the ISA to enumerate"));
+    };
+    let enum_body = &isa_src[enum_start..];
+    let enum_end = enum_body.find("\n}").unwrap_or(enum_body.len());
+    let mut opcodes: Vec<String> = Vec::new();
+    for line in enum_body[..enum_end].lines() {
+        let t = line.trim();
+        if let Some(eq) = t.find('=') {
+            let name = t[..eq].trim().to_string();
+            if !name.is_empty() && name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                opcodes.push(name);
+            }
+        }
+    }
+    if opcodes.len() < 10 {
+        return Err(format!(
+            "only {} opcodes parsed from the ISA, which is too few to be the \
+             real set; the enum shape changed and this gate is reading it wrong",
+            opcodes.len()
+        ));
+    }
+
+    let tests = collect_rejects_tests(&prover_src);
+    checked += 1;
+    if tests.is_empty() {
+        problems.push(
+            "no `rejects_*` tests found at all. Every AIR constraint is then \
+             unwatched: honest execution passing is not evidence, because a \
+             deleted constraint also lets honest execution pass."
+                .to_string(),
+        );
+    }
+
+    // 1. Coverage: each opcode must appear in some test body.
+    //
+    // Mentioning the opcode is necessary but not sufficient, and the gate
+    // used to stop here. That made the headline claim ("every opcode
+    // attacked") wider than what was measured: an opcode named only in a
+    // test's *setup* - the honest program a different opcode's forgery is
+    // built on - counted as attacked. `Opcode::Add` is the live example; it
+    // appears in five tests and none of them is named for it.
+    //
+    // A test that never modifies execution data cannot be forging anything:
+    // it runs an honest program and checks the honest answer. So a test
+    // counts as an attack only if it also *writes* into what is proved. The
+    // suite does that two ways, and both are accepted:
+    //
+    //   * directly rewriting a trace column (`COL_*`), or
+    //   * going through `prove_fails_after_tamper`, whose `tamper` closure
+    //     edits the `Vec<Step>` the trace is built from.
+    //
+    // Requiring `COL_*` alone was measured and is too narrow: 15 opcodes
+    // (Inv, And, Not, Eq, Neq, Gt, Lte, Gte, Jmp, Jnz, SRead, Syscall,
+    // PrivacyCommit, NullifierCheck, SumConservation) attack only through
+    // the helper. With both forms accepted all 33 opcodes stay covered, so
+    // this pins today's behaviour rather than describing an aspiration.
+    checked += 1;
+    let attacking_tests: Vec<(&String, &String)> = tests
+        .iter()
+        .filter(|(_, body)| body.contains("COL_") || body.contains("prove_fails_after_tamper"))
+        .collect();
+    let uncovered: Vec<&String> = opcodes
+        .iter()
+        .filter(|op| {
+            let a = format!("Opcode::{op},");
+            let b = format!("Opcode::{op})");
+            !attacking_tests
+                .iter()
+                .any(|(_, body)| body.contains(&a) || body.contains(&b))
+        })
+        .collect();
+    if !uncovered.is_empty() {
+        problems.push(format!(
+            "{} opcode(s) have no forgery test that modifies what is proved \
+             (a `COL_*` column or the steps passed to \
+             `prove_fails_after_tamper`): {}. Naming an opcode in a test's \
+             setup is not attacking it - a constraint nobody has watched \
+             fail is a constraint nobody has tested.",
+            uncovered.len(),
+            uncovered
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    checked += check_test_refusals(&tests, &mut problems);
+    checked += check_helper(&prover_src, &tests, &mut problems);
+
+    if checked == 0 {
+        return Err(String::from("gate checked nothing"));
+    }
+    if !problems.is_empty() {
+        let mut msg = String::new();
+        for p in &problems {
+            writeln!(msg, "FAIL: {p}").expect("writing to a String cannot fail");
+        }
+        return Err(msg);
+    }
+    Ok(format!(
+        "opcode forgery gate OK: {checked} checks, {} opcodes, {} forgery tests, every opcode attacked",
+        opcodes.len(),
+        tests.len()
+    ))
+}
+
+/// # Errors
+///
+/// Returns a finding when a defect fixture passes.
+pub fn self_test() -> Result<String, String> {
+    let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-eof")?;
+    let _ = std::fs::create_dir_all(dir.join("budzero/bud-isa/src"));
+    let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
+
+    let mut isa = String::from("pub enum Opcode {\n");
+    for i in 0..16 {
+        writeln!(isa, "    OP{i:02X} = 0x{i:02X},").expect("writing to a String cannot fail");
+    }
+    isa.push_str("}\n");
+    std::fs::write(dir.join("budzero/bud-isa/src/lib.rs"), isa).map_err(|e| e.to_string())?;
+    let prover = "fn rejects_op00() {\n    let t = tamper(Opcode::OP00);\n    assert!(prove_fails_after_tamper(t));\n}\nfn rejects_op01() {\n    let r = verify(Opcode::OP01);\n    assert!(r.is_err());\n}\nfn prove_fails_after_tamper(t: Trace) -> bool {\n    verify(t).is_err()\n}\n";
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_prover.rs"), prover)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        // 16 opcodes, only 2 covered -> must FAIL
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: uncovered opcodes passed"));
+    }
+    // Full coverage.
+    let mut prover2 = String::new();
+    for i in 0..16 {
+        writeln!(
+            prover2,
+            "fn rejects_op{i:02X}() {{ \n    let t = tamper(Opcode::OP{i:02X});\n    assert!(prove_fails_after_tamper(t));\n}}"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    prover2
+        .push_str("fn prove_fails_after_tamper(t: Trace) -> bool {\n    verify(t).is_err()\n}\n");
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_prover.rs"), prover2)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: full coverage was refused"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(String::from(
+        "every-opcode canary OK (partial coverage FAILs, full coverage PASSes).",
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignored_and_commented_tests_do_not_count() {
+        let src = strip_comments(
+            "#[test]\n#[ignore]\nfn rejects_a() { assert!(r.is_err()); }\n\
+             /* fn rejects_b() { x } */\n// fn rejects_c() { x }\n\
+             #[test]\nfn rejects_d() { assert!(r.is_err()); }\n",
+        );
+        let tests = collect_rejects_tests(&src);
+        assert!(!tests.contains_key("rejects_a"));
+        assert!(!tests.contains_key("rejects_b"));
+        assert!(!tests.contains_key("rejects_c"));
+        assert!(tests.contains_key("rejects_d"));
+    }
+}

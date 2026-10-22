@@ -1,0 +1,529 @@
+//! A security scan that cannot fail is a report, and it is filed as a gate.
+//!
+//! # What was measured
+//!
+//! Twenty-three places across the workflows soften a check: `continue-on-error`
+//! on a job or step, or `|| true` on the command that does the work. Some are
+//! right. A benchmark that prints a number, a size report, a teardown step
+//! that must run whatever happened before it: none of those should stop a
+//! merge.
+//!
+//! Five are not right, and they are all in the two files named for security:
+//!
+//!   zizmor          GitHub Actions static analysis, the tool that finds the
+//!                   pwn-request and cache-poisoning shapes
+//!   cargo-hack      feature matrix, which is how a feature combination that
+//!                   does not compile reaches main
+//!   mutants         mutation testing, the only check that measures whether
+//!                   the tests would notice a change
+//!   supply-chain    publisher visibility
+//!   tsan            `ThreadSanitizer`, data race detection
+//!
+//! `tsan` carries both softeners at once: `continue-on-error: true` on the job
+//! and `|| true` on the command. It cannot fail under any circumstance, and it
+//! has no canary, so nothing distinguishes "no data races" from "the binary
+//! never ran".
+//!
+//! For a chain, a data race is not a flaky test. Two nodes disagreeing about
+//! state because of one is a fork.
+//!
+//! # What this gate does, and what it does not
+//!
+//! It does not demand every softener be removed. Some scans are genuinely
+//! informational and some are too slow or too noisy to block on today, and
+//! saying otherwise would be a rule nobody could follow.
+//!
+//! It demands that each one is *listed*, with a reason, in this file. A
+//! softener that appears in a workflow and not here fails, and an entry here
+//! matching no softener fails too, so the list cannot outlive what it
+//! describes. That is the same shape as `PENDING_REVIEW` in the capability
+//! gate, for the same reason: a suppression nobody can audit is worse than the
+//! finding it hides.
+
+//! 2026-09-23: the allow-list reached zero. Every softener the list pointed
+//! at was replaced in the workflows by an explicit exit-code path, so the
+//! list now approves nothing - it only stands ready, and anything that
+//! reappears is refused until somebody writes its reason here.
+
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+/// A softened check, and why it is allowed to be soft.
+struct Allowed {
+    /// Workflow file name.
+    file: &'static str,
+    /// Job id or the step name it appears under.
+    what: &'static str,
+    /// Why this one does not block, in a sentence somebody can disagree with.
+    reason: &'static str,
+}
+
+/// Every softener in the tree, with its justification.
+///
+/// 2026-09-23: the list is empty. The last fourteen entries were retired in
+/// one pass - not by being justified harder but by the tree hardening out
+/// from under them: every remaining masked exit became an explicit exit-code
+/// path first (the report steps learned to report their own failure, then
+/// the sweep emptied the bag entirely), and a list that justifies nothing is
+/// only ever a lie waiting for a reader. Six entries were already dead on
+/// this branch before the sweep (dead-deps, fuzz-deep, miri-crypto, machete,
+/// binary-size, license-compliance), which is the dead-entry rule working as
+/// designed. Any softener that returns must come back through this list, in
+/// a commit that carries its reason, or it fails here.
+///
+/// Measured, not typed: the gate refuses an entry that matches nothing.
+const ALLOWED: &[Allowed] = &[];
+
+/// Softeners that must never exist, listed so a return is caught by name.
+///
+/// Five entries, and the first of them is the reason this gate exists: the
+/// failure it hid (tsan, softened in two places at once and canary-less) is
+/// a consensus failure rather than a test failure. These tools are not
+/// arguable in the way an allow-listed report is; a mask on any of them
+/// stands between a security verdict and the red check that owns it.
+const MUST_BLOCK: &[(&str, &str, &str)] = &[
+    (
+        "security-hardening.yml",
+        "tsan",
+        "ThreadSanitizer carries continue-on-error on the job and `|| true` on the \
+         command, so it cannot fail in any circumstance, and it has no canary, so a \
+         clean report is indistinguishable from a binary that never ran. For a chain \
+         a data race is not a flaky test: two nodes disagreeing about state because \
+         of one is a fork.",
+    ),
+    (
+        "security-audit.yml",
+        "zizmor",
+        "zizmor audits the workflows themselves, which is the entry surface the 2026 \
+         supply-chain wave came through, and this repository's CI signs the binary it \
+         publishes, so a misconfiguration here reaches the chain. It was softened as \
+         `informational` on an unmeasured premise. Measured: zero findings at the \
+         default persona, and of the pedantic persona's findings none reach medium. \
+         Blocking costs nothing today, so softening it bought nothing and silenced a \
+         gate.",
+    ),
+    (
+        "security-audit.yml",
+        "cargo-hack",
+        "the feature matrix was softened as slow and untriaged, and both halves were \
+         wrong: the job has passed on every recent run and takes under two minutes, \
+         less than half the CodeQL job beside it. What it checks is not covered \
+         elsewhere. `--each-feature` compiles each feature alone, and a feature only \
+         ever built alongside the others can lose the code behind its own `#[cfg]` and \
+         still compile. `pq-ml-dsa` is the alternative signature backend and `p2p-mdns` \
+         is a non-production capability; neither is on in a default build, so this job \
+         is the only thing that builds them at all.",
+    ),
+    (
+        "security-hardening.yml",
+        "mutants",
+        "mutation testing measures whether the tests would notice a change, which no \
+         other gate here measures: a green suite can be made of tests that assert \
+         nothing. It carried both `continue-on-error` and `|| true`, and underneath \
+         them the tool was not running at all, dying on `unexpected argument \
+         '--test-timeout'` seconds after install while the job reported green. That is \
+         the most expensive form of softening, because it hides absence rather than \
+         failure.",
+    ),
+    (
+        "security-hardening.yml",
+        "supply-chain",
+        "the reason for softening it was that publisher visibility is a listing with no \
+         threshold to fail against. There is one, and it is not a count: a dependency \
+         with zero owners cannot be patched by anybody, so if an advisory lands against \
+         it there is nobody to wait for. The job now gates on that, and on the tool \
+         reporting no crates at all, because a check that inspected nothing must not \
+         pass. It also could not finish before: `publishers` asks crates.io once per \
+         crate and 566 dependencies ran past the timeout, so the job was cancelled \
+         without output while `|| true` and `continue-on-error` made that look green.",
+    ),
+    (
+        "security-hardening.yml",
+        "loom",
+        "loom is the half TSan cannot do. TSan reports the races it observed on the \
+         schedule the machine picked; loom runs every interleaving the memory model \
+         permits and so proves a lock inversion cannot happen. The consensus engine \
+         nests three pairs of its four locks, and an inversion there deadlocks a \
+         validator rather than crashing it, which is the failure a node cannot \
+         report about itself. Softening this job would leave the ordering resting \
+         on an argument in a comment again.",
+    ),
+];
+
+/// One softener found in a workflow.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Soft {
+    file: String,
+    job: String,
+    kind: &'static str,
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// A `continue-on-error` line is soft unless its value is the literal `false`.
+/// An expression, `True` or `yes` all count as soft.
+fn continue_on_error_is_soft(bare: &str) -> bool {
+    let Some(value) = bare.strip_prefix("continue-on-error:") else {
+        return false;
+    };
+    let value = value.split('#').next().unwrap_or_default().trim();
+    !value.eq_ignore_ascii_case("false")
+}
+
+/// Job ids under the top-level `jobs:` key.
+fn job_ids(src: &str) -> Vec<String> {
+    let lines: Vec<&str> = src.lines().collect();
+    let Some(jobs_at) = lines.iter().position(|l| l.trim_end() == "jobs:") else {
+        return Vec::new();
+    };
+    let job_indent = lines[jobs_at + 1..]
+        .iter()
+        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map_or(2, |l| indent_of(l));
+    let mut out = Vec::new();
+    for raw in lines.iter().skip(jobs_at + 1) {
+        let line = raw.trim_end();
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let ind = indent_of(line);
+        if ind == 0 {
+            break;
+        }
+        if ind == job_indent && t.ends_with(':') {
+            out.push(t.trim_end_matches(':').to_string());
+        }
+    }
+    out
+}
+
+/// Every must-block job has to still exist, or the block says nothing.
+fn missing_must_block(jobs: &[(String, String)]) -> Vec<String> {
+    MUST_BLOCK
+        .iter()
+        .filter(|(file, job, _)| !jobs.iter().any(|(f, j)| f == file && j == job))
+        .map(|(file, job, _)| {
+            format!(
+                "{file}: job `{job}` is on the must-block list and no longer exists. \
+                 Deleting or renaming it removes the check without a finding."
+            )
+        })
+        .collect()
+}
+
+/// Find every `continue-on-error` and `|| true` under each job.
+fn softeners_in(path: &Path, src: &str) -> Vec<Soft> {
+    let file = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let lines: Vec<&str> = src.lines().collect();
+    let Some(jobs_at) = lines.iter().position(|l| l.trim_end() == "jobs:") else {
+        return Vec::new();
+    };
+    let job_indent = lines[jobs_at + 1..]
+        .iter()
+        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map_or(2, |l| indent_of(l));
+
+    let mut out = Vec::new();
+    let mut job = String::new();
+    for raw in lines.iter().skip(jobs_at + 1) {
+        let line = raw.trim_end();
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let ind = indent_of(line);
+        if ind == 0 {
+            break;
+        }
+        if ind == job_indent && t.ends_with(':') {
+            job = t.trim_end_matches(':').to_string();
+            continue;
+        }
+        if job.is_empty() {
+            continue;
+        }
+        let bare = t.strip_prefix("- ").unwrap_or(t);
+        if continue_on_error_is_soft(bare) {
+            out.push(Soft {
+                file: file.clone(),
+                job: job.clone(),
+                kind: "continue-on-error",
+            });
+        }
+        if t.contains("|| true") {
+            out.push(Soft {
+                file: file.clone(),
+                job: job.clone(),
+                kind: "|| true",
+            });
+        }
+        if t.contains("||true") || t.contains("|| exit 0") || t.trim_end().ends_with("; true") {
+            out.push(Soft {
+                file: file.clone(),
+                job: job.clone(),
+                kind: "masked exit",
+            });
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root.join(".github/workflows")) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("yml") || x.eq_ignore_ascii_case("yaml"))
+            {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn judge(found: &[Soft]) -> Vec<String> {
+    let mut problems = Vec::new();
+
+    for (file, job, why) in MUST_BLOCK {
+        if found.iter().any(|s| s.file == *file && s.job == *job) {
+            problems.push(format!(
+                "{file}: job `{job}` must not be softened.\n    {why}"
+            ));
+        }
+    }
+
+    let listed: BTreeSet<(&str, &str)> = ALLOWED.iter().map(|a| (a.file, a.what)).collect();
+
+    for s in found {
+        if MUST_BLOCK
+            .iter()
+            .any(|(f, j, _)| *f == s.file && *j == s.job)
+        {
+            continue;
+        }
+        if !listed.contains(&(s.file.as_str(), s.job.as_str())) {
+            problems.push(format!(
+                "{}: job `{}` carries `{}` and is not listed in this gate. A check that \
+                 cannot fail is a report; say so here with a reason, or make it block.",
+                s.file, s.job, s.kind
+            ));
+        }
+    }
+
+    for a in ALLOWED {
+        if !found.iter().any(|s| s.file == a.file && s.job == a.what) {
+            problems.push(format!(
+                "{}: `{}` is listed here as softened, with the reason \"{}\", and nothing \
+                 in the workflow softens it. Either it started blocking, in which case \
+                 remove the entry, or it moved. A justification for something that no \
+                 longer exists is a suppression nobody can audit.",
+                a.file, a.what, a.reason
+            ));
+        }
+    }
+    problems
+}
+
+/// # Errors
+///
+/// Returns the softened checks that are unlisted, or listed and gone.
+pub fn run(root: &Path) -> Result<String, String> {
+    let files = collect(root);
+    if files.is_empty() {
+        return Err(String::from(
+            "no workflows found; this gate is watching nothing.",
+        ));
+    }
+    let mut found = Vec::new();
+    let mut jobs: Vec<(String, String)> = Vec::new();
+    for f in &files {
+        let src = std::fs::read_to_string(f)
+            .map_err(|e| format!("cannot read workflow {}: {e}", f.display()))?;
+        let name = f
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        jobs.extend(job_ids(&src).into_iter().map(|j| (name.clone(), j)));
+        found.extend(softeners_in(f, &src));
+    }
+
+    let mut problems = judge(&found);
+    problems.extend(missing_must_block(&jobs));
+    if problems.is_empty() {
+        return Ok(format!(
+            "Security scan gate OK: {} softened checks across {} workflows, each listed \
+             with a reason, and nothing on the must-block list is softened.",
+            found.len(),
+            files.len()
+        ));
+    }
+    let mut msg = String::new();
+    let _ = writeln!(msg, "{} finding(s):\n", problems.len());
+    for p in &problems {
+        let _ = writeln!(msg, "  {p}\n");
+    }
+    Err(msg)
+}
+
+fn check_softener_shapes(problems: &mut Vec<String>) {
+    // Softener shapes beyond the two literal ones.
+    let shapes = "\
+jobs:
+  a:
+    steps:
+      - run: cargo test ||true
+  b:
+    steps:
+      - run: cargo test || exit 0
+  c:
+    steps:
+      - run: cargo test; true
+  d:
+    continue-on-error: ${{ matrix.soft }}
+    steps:
+      - run: x
+  e:
+    continue-on-error: True
+    steps:
+      - run: x
+  f:
+    continue-on-error: false
+    steps:
+      - run: x
+";
+    let shape_jobs: BTreeSet<String> = softeners_in(Path::new("x.yml"), shapes)
+        .into_iter()
+        .map(|s| s.job)
+        .collect();
+    let expected: BTreeSet<String> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|j| (*j).to_string())
+        .collect();
+    if shape_jobs != expected {
+        problems.push(format!(
+            "BROKEN: softener shapes read as {shape_jobs:?}, expected {expected:?}"
+        ));
+    }
+}
+
+fn check_allowed_type(problems: &mut Vec<String>) {
+    // The allow-list is empty on the tree, so `Allowed` would never be
+    // constructed outside this canary; keep the type live and pin the rule
+    // that re-growing the list is a deliberate act, never a leftover.
+    let kept_alive = Allowed {
+        file: "x.yml",
+        what: "self-test",
+        reason: "constructed only so an empty allow-list never turns the type into dead code",
+    };
+    if kept_alive.file != "x.yml" || kept_alive.what != "self-test" || kept_alive.reason.is_empty()
+    {
+        problems.push(String::from("BROKEN: the Allowed type drifted"));
+    }
+}
+
+/// # Errors
+///
+/// The canaries that did not behave.
+pub fn self_test() -> Result<String, String> {
+    let mut problems: Vec<String> = Vec::new();
+
+    let wf = "\
+name: X
+on: push
+jobs:
+  reporter:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: echo hi
+  masked:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test || true
+  strict:
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test
+";
+    let found = softeners_in(Path::new("x.yml"), wf);
+    if found.len() != 2 {
+        problems.push(format!("BROKEN: expected two softeners, read {found:?}"));
+    }
+    if !found
+        .iter()
+        .any(|s| s.job == "reporter" && s.kind == "continue-on-error")
+    {
+        problems.push(String::from("BROKEN: continue-on-error was not seen"));
+    }
+    if !found
+        .iter()
+        .any(|s| s.job == "masked" && s.kind == "|| true")
+    {
+        problems.push(String::from("BROKEN: `|| true` was not seen"));
+    }
+    if found.iter().any(|s| s.job == "strict") {
+        problems.push(String::from("VACUOUS: a strict job was called softened"));
+    }
+
+    check_softener_shapes(&mut problems);
+
+    // A must-block job that disappeared must be reported.
+    if missing_must_block(&[]).len() != MUST_BLOCK.len() {
+        problems.push(String::from(
+            "VACUOUS: a removed must-block job was not reported",
+        ));
+    }
+    if job_ids(wf) != ["reporter", "masked", "strict"] {
+        problems.push(String::from("BROKEN: job ids were not read"));
+    }
+
+    // An unlisted softener must be refused.
+    let unlisted = vec![Soft {
+        file: "brand-new.yml".to_string(),
+        job: "whatever".to_string(),
+        kind: "|| true",
+    }];
+    // ALLOWED entries will also report as missing here; only the unlisted
+    // finding is what this canary is about.
+    if !judge(&unlisted).iter().any(|p| p.contains("brand-new.yml")) {
+        problems.push(String::from("VACUOUS: an unlisted softener was accepted"));
+    }
+
+    // The must-block entry, softened, must be refused.
+    let blocked = vec![Soft {
+        file: "security-hardening.yml".to_string(),
+        job: "tsan".to_string(),
+        kind: "continue-on-error",
+    }];
+    if !judge(&blocked)
+        .iter()
+        .any(|p| p.contains("must not be softened"))
+    {
+        problems.push(String::from(
+            "VACUOUS: a must-block job was accepted while softened",
+        ));
+    }
+
+    check_allowed_type(&mut problems);
+
+    if !problems.is_empty() {
+        return Err(problems.join("\n  "));
+    }
+    Ok(String::from(
+        "security scan gate self-test OK: continue-on-error and `|| true` are both seen, \
+         a strict job is not called softened, an unlisted softener is refused, and a \
+         must-block job carrying a softener is refused.",
+    ))
+}

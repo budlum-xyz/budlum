@@ -1,0 +1,9 @@
+target/
+# A CI artifact (the output of the xtask/tools generate-sbom tool); it is not committed
+sbom.cdx.json
+protoc-*.zip
+# Build status
+
+# Python bytecode caches (never source)
+__pycache__/
+*.pyc

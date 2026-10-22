@@ -1,0 +1,14 @@
+[package]
+name = "ai-tune"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The training plan (LoRA BF16/FP16 - FP4 does not exist in the type system) and the output hash lock"
+
+[dependencies]
+ai-core = { path = "../ai-core" }
+ai-data = { path = "../ai-data" }
+
+[lints]
+workspace = true

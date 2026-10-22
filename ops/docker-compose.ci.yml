@@ -1,0 +1,55 @@
+# CI-only overrides for the devnet compose stack.
+#
+# `docker-compose.yml` is the file people copy. It therefore keeps RPC
+# authentication ON and does not publish the public RPC port, because the
+# README points at it from a "quick start" section and someone will eventually
+# run it on a machine with a public address. A default that is only safe as
+# long as nobody takes it seriously is not a safe default.
+#
+# The smoke harness needs the opposite: an unauthenticated listener it can
+# probe with plain curl and no headers. Those settings live here, applied
+# explicitly:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
+#
+# Anyone running that command has stated what they want. Anyone running plain
+# `docker compose up` gets the authenticated stack.
+
+services:
+  node1:
+    # Publish the public RPC to the host so the smoke script can reach it at
+    # 127.0.0.1:8545. Bound to loopback: this overlay turns RPC auth off, and a
+    # runner with a reachable address must not serve that listener to anyone
+    # but the smoke script.
+    ports:
+      - "4001:4001"
+      - "127.0.0.1:8545:8545"
+      - "127.0.0.1:9090:9090"
+    environment:
+      - RUST_LOG=info
+      # Disabled so the smoke probes can call JSON-RPC without credentials.
+      # This is the line that must never reach a real deployment, which is why
+      # it lives in a file that has to be named on the command line.
+      - BUDLUM_RPC_AUTH_REQUIRED=0
+      - BUDLUM_RPC_ALLOWED_IPS=
+
+  # node2-4 also start an RPC listener (default `rpc_auth_required=true`) but
+  # the smoke stack configures no API key for them, so without this override
+  # they exit at startup with "RPC auth is required but no API key was
+  # configured" and crash-loop. The whole four-node mesh must be up for the
+  # liveness, metrics and RPC-isolation probes to mean anything.
+  node2:
+    environment:
+      - RUST_LOG=info
+      - BUDLUM_RPC_AUTH_REQUIRED=0
+      - BUDLUM_RPC_ALLOWED_IPS=
+  node3:
+    environment:
+      - RUST_LOG=info
+      - BUDLUM_RPC_AUTH_REQUIRED=0
+      - BUDLUM_RPC_ALLOWED_IPS=
+  node4:
+    environment:
+      - RUST_LOG=info
+      - BUDLUM_RPC_AUTH_REQUIRED=0
+      - BUDLUM_RPC_ALLOWED_IPS=

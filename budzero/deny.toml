@@ -1,0 +1,63 @@
+# budzero/deny.toml: the BudZero/BudZKVM supply chain gate
+#
+# The same policy as the root deny.toml; the BudZero graph is checked in its own
+# matrix step. The schema was updated to cargo-deny 0.20+ (the old keys were removed;
+# the behaviour is preserved exactly: a license outside allow = FAIL, an unknown source = FAIL).
+
+[graph]
+targets = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "CC0-1.0",
+    "ISC",
+    "OpenSSL",
+    "Zlib",
+    # The same reason as the root: the bud-node -> libp2p -> idna_adapter chain brings in
+    # the icu_* crates; Unicode-3.0 is an OSI approved permissive license.
+    "Unicode-3.0",
+    # PolyForm Shield 1.0.0: the same as the root repository - the workspace member license.
+    "LicenseRef-PolyForm-Shield-1.0.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Exactly one git source, mirroring ../.quality/deny.toml.
+#
+# bud-node depends on libp2p, which comes from the rust-libp2p tree pinned by
+# revision: 0.57.0 is tagged upstream but not on crates.io, and it is the only
+# build that closes GHSA-vxx9-2994-q338 (yamux) plus GHSA-3v94-mw7p-v465 and
+# GHSA-q2qq-hmj6-3wpp (hickory-proto). Every in-registry route was measured and
+# rejected: libp2p-yamux 0.47 binds yamux 0.12.1 *and* 0.13.3 under separate
+# package aliases, so `cargo update yamux@0.12.1 --precise 0.13.10` fails with
+# "candidate versions found which didn't match", and a [patch] entry aimed at
+# crates.io is refused ("patches must point to different sources").
+# libp2p-dns 0.44 requires hickory-resolver ^0.25.2, which 0.26.1 cannot
+# satisfy, and RUSTSEC-2026-0118 has `patched = []` for the whole 0.25 line.
+#
+# `unknown-git = "deny"` still holds: any other git dependency fails the gate.
+# Remove this together with the pin once 0.57.0 is published.
+allow-git = ["https://github.com/libp2p/rust-libp2p"]
+
+[advisories]
+# The same policy as the root (the reasons are detailed in ../../deny.toml):
+# unmaintained -> not a fail (it stays visible through the cargo audit warnings),
+# unsound -> a FAIL in a direct dependency (strict).
+unmaintained = "none"
+unsound = "workspace"
+# Empty on purpose: RUSTSEC-2026-0118 and RUSTSEC-2026-0119 are closed by the
+# hickory-proto 0.26.1 lock. A new entry needs evidence, reason and expiry.
+ignore = []

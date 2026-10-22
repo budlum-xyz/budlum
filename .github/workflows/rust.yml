@@ -1,0 +1,104 @@
+# Rust Quality: the Rust-level inspections the other twenty workflows do not run.
+#
+# WHAT IS MISSING (as of 2026-09-09, checked against every file in
+# .github/workflows/):
+#
+#   - ThreadSanitizer: MOVED to security-hardening.yml (2026-09-27, PR #81
+#     review finding). One TSan scan, one policy: that job runs the same lib
+#     suite under TSan with the measured suppression list, the reviewed
+#     per-rule ceilings (.github/tsan-suppressions-baseline.txt) and two
+#     canaries. The copy that used to live here ran WITHOUT the suppression
+#     policy, so the known sled shutdown races failed it every week: it
+#     measured an unmaintained dependency's noise and called it our code.
+#     Two scans of one suite under two policies is two answers for one
+#     question; the account with the evidence keeps the job.
+#   - Clippy drift on the NEXT stable toolchain. The pin is 1.97.1 and
+#     ci.yml clippy runs under exactly that pin - which is why three new
+#     1.98 lints surfaced on a developer machine before anyone saw them in
+#     CI. A weekly clippy on latest stable fails BEFORE the pin bump
+#     becomes a surprise, and the fix is a deliberate choice: clean the
+#     lint or bump the pin, never silently wait.
+#   - Publisher visibility. cargo-vet answers "did a human vouch for this
+#     version", cargo-audit/OSV/Grype answer "is it vulnerable",
+#     cargo-deny answers "is the license acceptable". Nothing answers "WHO
+#     publishes the dependencies, and how many parties is that". The
+#     2024-25 supply-chain incidents were all single-publisher trust
+#     failures; the number is a report, not a verdict.
+#
+# These checks run for listed PR bases and weekly, not on every push.
+
+name: Rust Quality
+
+on:
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+  schedule:
+    - cron: "0 6 * * 2" # weekly, Tuesday 06:00 UTC (Monday 05:30 is security-hardening)
+  workflow_dispatch:
+
+concurrency:
+  group: rust-quality-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  next-stable:
+    name: Clippy drift (next stable toolchain)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # DELIBERATE-TOOLCHAIN-DIVERGENCE
+      # This job checks the tree against the newest stable compiler on purpose, so the pin is not used.
+      - name: Install Rust (latest stable, NOT the pin)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo clippy on latest stable (deny warnings)
+        # Same command ci.yml runs under the pin, on a moving toolchain.
+        # A failure here means the NEXT pin bump will fail CI: fix the new
+        # lints now, or schedule the pin bump with eyes open. This job is
+        # an early warning, never a silent one: it blocks, it does not
+        # report-and-pass.
+        run: cargo clippy --all-targets -- -D warnings
+
+  publishers:
+    name: cargo supply-chain (publisher visibility)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install cargo-supply-chain (locked, as cargo-mutants is installed)
+        run: cargo install cargo-supply-chain --locked
+      - name: Publisher report (who publishes the dependency tree)
+        # A report, not a verdict: the same shape as the binary-size job in
+        # extra-tooling.yml. The summary lands on the run page; the number
+        # that matters is "distinct publishers", read next to "known
+        # auditors" from cargo-vet.
+        run: |
+          set -euo pipefail
+          cargo supply-chain update
+          {
+            echo "## Dependency publishers"
+            echo
+            cargo supply-chain crates
+          } >> "$GITHUB_STEP_SUMMARY"

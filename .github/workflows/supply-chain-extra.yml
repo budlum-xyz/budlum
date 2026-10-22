@@ -1,0 +1,178 @@
+name: Supply Chain Extra (udeps + geiger)
+
+on:
+  push:
+    branches: [ main ]
+  # Both jobs here are required checks on main. A required check that never
+  # runs on a pull request leaves every PR permanently "expected" and
+  # unmergeable, so this has to fire on PRs too. The path filter is gone for
+  # the same reason: a filtered-out run reports nothing rather than success,
+  # which branch protection reads as still-waiting.
+  pull_request:
+    branches: [ main, fix/architecture-tip-adlari ]
+  schedule:
+    # Weekly hygiene scan (effects of cargo update + new deps)
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+# Read-only.
+concurrency:
+  group: supply-chain-extra-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  udeps:
+    name: "Udeps: the unused dependency gate"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # udeps requires nightly (rustc private API); install + run on the same nightly.
+      # DELIBERATE-TOOLCHAIN-DIVERGENCE
+      # cargo-udeps needs a nightly compiler, so this job cannot use the stable pin.
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Install cargo-udeps (locked; the crates.io version is evidenced in the log)
+        run: cargo +nightly install cargo-udeps --locked
+      - name: Canary (vacuous-gate protection)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- udeps --self-test
+      # `|| true` used to swallow the tool's exit status entirely, so a
+      # cargo-udeps that died at startup produced an empty report and the gate
+      # read it as clean. The status is captured instead of discarded: a
+      # non-zero exit is tolerated only when the tool still emitted a
+      # parseable report (udeps exits non-zero *because* it found unused
+      # dependencies, which is a finding, not a failure).
+      - name: "Measurement + gate (ratchet: a finding outside the baseline = FAIL)"
+        run: |
+          set -euo pipefail
+
+          set +e
+          cargo +nightly udeps --all-targets > /tmp/udeps1.txt 2>&1
+          status1=$?
+          set -e
+          cat /tmp/udeps1.txt
+          if [ "$status1" -ne 0 ] && ! grep -q '^unused dependencies:' /tmp/udeps1.txt; then
+            echo "cargo-udeps died with $status1 without producing a parsable report." >&2
+            exit "$status1"
+          fi
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- udeps /tmp/udeps1.txt
+
+          cd budzero
+
+          set +e
+          cargo +nightly udeps --all-targets > /tmp/udeps2.txt 2>&1
+          status2=$?
+          set -e
+          cat /tmp/udeps2.txt
+          if [ "$status2" -ne 0 ] && ! grep -q '^unused dependencies:' /tmp/udeps2.txt; then
+            echo "cargo-udeps (budzero) died with $status2 without producing a parsable report." >&2
+            exit "$status2"
+          fi
+          cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- udeps /tmp/udeps2.txt
+
+  geiger:
+    name: "Geiger: unsafe visibility (the first-party 0 evidence layer)"
+    runs-on: ubuntu-latest
+    # 35 -> 55: the clean below adds one cold build per workspace until the
+    # shared cache saves this job's fresh artifacts again; 35 was sized for a
+    # cache-fresh run. The first green run re-establishes the cache and the
+    # number can come back down.
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Install cargo-geiger (locked; the crates.io version is evidenced in the log)
+        run: cargo install cargo-geiger --locked
+      - name: Canary (vacuous-gate protection)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- geiger --self-test
+      # `|| true` used to swallow EVERY error: even if the scan died halfway the
+      # gate counted a truncated report as clean. Removing it was right, but the
+      # first fix was too strict - even when the scan completes successfully,
+      # cargo-geiger prints "error: Found N warnings" and returns non-zero when it
+      # finds `unsafe` in dependencies. Third-party `unsafe` is not this gate's
+      # subject (first-party crates already carry `#![forbid(unsafe_code)]`), so that
+      # exit code is not a scan failure.
+      #
+      # The distinction comes from the report: if the report contains a first-party
+      # line the scan completed and `budlum-gates geiger` makes the decision; if it
+      # does not, the scan really died and the gate already returns an error (the
+      # fp_seen == 0 branch). This catches the state `|| true` was hiding without
+      # wrongly treating dependency `unsafe` as fatal.
+      - name: Measurement + the first-party gate (budlum + budzero)
+        run: |
+          set -euo pipefail
+
+          # The shared rust-cache restores stale dep-info from earlier builds:
+          # after the Plonky3 0.6.3 -> 0.7.0 swap a cached unit's .d file still
+          # lists p3-monty-31-0.6.3/src/lib.rs, the source is not on disk, and
+          # cargo-geiger dies with Io(NotFound) instead of scanning. Without a
+          # clean, every dependency swap breaks this job instead of the scan.
+          cargo clean
+
+          set +e
+          cargo geiger --all-targets > /tmp/geiger1.txt 2>&1
+          status1=$?
+          set -e
+          cat /tmp/geiger1.txt
+          if [ "$status1" -ne 0 ] && ! grep -qE '(budlum-core|bud-[a-z]+) [0-9]' /tmp/geiger1.txt; then
+            echo "cargo-geiger died with $status1 without completing the scan:" >&2
+            echo "there is not a single first-party line in the report." >&2
+            exit "$status1"
+          fi
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- geiger /tmp/geiger1.txt
+
+          # budzero is a separate workspace and its root is a VIRTUAL manifest (only
+          # [workspace], no package). cargo-geiger refuses to run at such a root:
+          # reddediyor: "is a virtual manifest, but this command requires
+          # "running against an actual package". So until now this step had not
+          # scanned a single crate of budzero - during the `|| true` era this passed
+          # silently, and it surfaced once the gate became fail-closed.
+          #
+          #
+          # The fix is scanning crate by crate. Each of the eight members is a real
+          # package; their reports are merged and passed through a single gate, so a
+          # crate being skipped without being scanned is noticed too.
+          cd budzero
+          : > /tmp/geiger2.txt
+          # Same staleness, second workspace: budzero/target carries the same
+          # cached dep-info trap as the root build above.
+          cargo clean
+          for crate in bud-compiler bud-vm bud-isa bud-state bud-proof bud-node bud-cli verifier-registry; do
+            set +e
+            # cargo-geiger wants an ABSOLUTE path: given a relative one
+            # it says "is not an absolute path. Please provide an absolute path."
+            # and exits with 101.
+            cargo geiger --all-targets --manifest-path "$PWD/$crate/Cargo.toml" > "/tmp/geiger-$crate.txt" 2>&1
+            status2=$?
+            set -e
+            cat "/tmp/geiger-$crate.txt"
+            if [ "$status2" -ne 0 ] && ! grep -qE '(budlum-core|bud-[a-z]+|verifier-registry) [0-9]' "/tmp/geiger-$crate.txt"; then
+              echo "cargo-geiger ($crate) died with $status2 without completing the scan:" >&2
+              echo "there is not a single first-party line in the report." >&2
+              exit "$status2"
+            fi
+            cat "/tmp/geiger-$crate.txt" >> /tmp/geiger2.txt
+          done
+          cargo run --release --manifest-path ../xtask/gates/Cargo.toml -- geiger /tmp/geiger2.txt

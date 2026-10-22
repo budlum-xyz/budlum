@@ -1,0 +1,1042 @@
+//! Byte-mode QR encoder pinned to EC level L with deterministic mask fallback.
+//!
+//! Budlum 3.0 renders recipes as QR video frames and every frame has to be
+//! reproducible byte-for-byte from the recipe, so the matrix must come from an
+//! encoder whose every choice is fixed by us instead of a library whose mask
+//! selection or tie breaking may drift between versions. This module
+//! implements ISO/IEC 18004 for byte mode, error-correction level L and
+//! versions 1..=40. Mask 0 stays the first choice for wire continuity; if the
+//! independently decoded symbol cannot recover the payload, masks 1..=7 are
+//! tried in order and the selected mask index is carried in the QR format word.
+
+/// Largest payload a version-40 level-L byte-mode symbol can carry.
+pub const MAX_DATA_BYTES: usize = 2953;
+
+/// Longest Reed-Solomon generator this module builds (version 40 level L).
+const MAX_EC: usize = 30;
+
+/// Encoding failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QrError {
+    /// Payload longer than [`MAX_DATA_BYTES`].
+    TooLong(usize),
+    /// No deterministic mask candidate decoded back to the payload.
+    Undecodable,
+}
+
+impl std::fmt::Display for QrError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLong(len) => write!(f, "payload of {len} bytes exceeds {MAX_DATA_BYTES}"),
+            Self::Undecodable => write!(f, "no QR mask candidate decoded back to the payload"),
+        }
+    }
+}
+
+impl std::error::Error for QrError {}
+
+// --- GF(256) arithmetic, primitive polynomial 0x11d ---
+
+const fn gf_tables() -> ([u8; 256], [u8; 256]) {
+    let mut exp = [0u8; 256];
+    let mut log = [0u8; 256];
+    let mut x = 1u16;
+    let mut i = 0usize;
+    // `split_at_mut(..i + 1)` then `last_mut` writes the slot `i` names without
+    // a runtime index: an index here would be a `panic!` in `const` evaluation
+    // (a compile error) and `get_mut` is not const-callable, so this is the
+    // shape that keeps the table fill out of the indexing ratchet. Measured
+    // against the indexed form: all 512 table bytes agree and the
+    // `exp[log[v]] == v` inverse relation holds.
+    while i < 255 {
+        let (head, _) = exp.split_at_mut(i + 1);
+        if let Some(slot) = head.last_mut() {
+            *slot = x as u8;
+        }
+        let (lhead, _) = log.split_at_mut(x as usize + 1);
+        if let Some(slot) = lhead.last_mut() {
+            *slot = i as u8;
+        }
+        x <<= 1;
+        if x & 0x100 != 0 {
+            x ^= 0x11d;
+        }
+        i += 1;
+    }
+    exp[255] = 1;
+    (exp, log)
+}
+
+const GF_TABLES: ([u8; 256], [u8; 256]) = gf_tables();
+const GF_EXP: [u8; 256] = GF_TABLES.0;
+const GF_LOG: [u8; 256] = GF_TABLES.1;
+
+fn gf_mul(a: u8, b: u8) -> u8 {
+    if a == 0 || b == 0 {
+        0
+    } else {
+        // A `u8` index cannot leave a 256-entry table and the sum is reduced
+        // modulo the group order, so the lookups below are total. They are
+        // written checked anyway: `const fn` was the only reason the indexed
+        // form existed, and a table that ever shrinks answers with the
+        // annihilator 0, which every golden QR vector then refuses.
+        let la = usize::from(GF_LOG.get(usize::from(a)).copied().unwrap_or(0));
+        let lb = usize::from(GF_LOG.get(usize::from(b)).copied().unwrap_or(0));
+        GF_EXP.get((la + lb) % 255).copied().unwrap_or(0)
+    }
+}
+
+/// Generator polynomial for `ec_len` error-correction codewords, highest
+/// degree first and monic; for `ec_len = 7` it is
+/// `[1, 127, 122, 154, 164, 11, 68, 117]`.
+fn rs_generator(ec_len: usize) -> [u8; MAX_EC + 1] {
+    assert!(
+        ec_len <= MAX_EC,
+        "rs_generator: ec_len {ec_len} exceeds MAX_EC {MAX_EC}"
+    );
+    let mut g = [0u8; MAX_EC + 1];
+    g[0] = 1;
+    for (deg, &root) in GF_EXP.iter().take(ec_len).enumerate() {
+        let mut k = deg + 1;
+        while k > 0 {
+            // `g[k] ^= gf_mul(g[k - 1], root)`: the previous coefficient is
+            // read before the write, exactly as the indexed form did.
+            let prev = g.get(k - 1).copied().unwrap_or(0);
+            if let Some(cur) = g.get_mut(k) {
+                *cur ^= gf_mul(prev, root);
+            }
+            k -= 1;
+        }
+    }
+    g
+}
+
+/// Reed-Solomon error-correction codewords for one data block.
+fn rs_encode(data: &[u8], ec_len: usize) -> Vec<u8> {
+    let gen = rs_generator(ec_len);
+    let mut res = data.to_vec();
+    res.resize(data.len() + ec_len, 0);
+    for i in 0..data.len() {
+        let Some(&lead) = res.get(i) else {
+            break;
+        };
+        if lead != 0 {
+            let log_lead = usize::from(GF_LOG.get(usize::from(lead)).copied().unwrap_or(0));
+            for k in 0..ec_len {
+                let mut add = 0u8;
+                if let Some(&gene) = gen.get(k + 1) {
+                    let lg = usize::from(GF_LOG.get(usize::from(gene)).copied().unwrap_or(0));
+                    add = GF_EXP.get((lg + log_lead) % 255).copied().unwrap_or(0);
+                }
+                if let Some(slot) = res.get_mut(i + 1 + k) {
+                    *slot ^= add;
+                }
+            }
+        }
+    }
+    res.split_off(data.len())
+}
+
+// --- ISO/IEC 18004 tables, error-correction level L ---
+
+/// Per-version structure: total codewords, ec codewords per block,
+/// short-block data codewords, short-block count, long-block data codewords,
+/// long-block count. Indexed by `version - 1`.
+const CAP_L: [(u16, u16, u16, u16, u16, u16); 40] = [
+    (26, 7, 19, 1, 0, 0),
+    (44, 10, 34, 1, 0, 0),
+    (70, 15, 55, 1, 0, 0),
+    (100, 20, 80, 1, 0, 0),
+    (134, 26, 108, 1, 0, 0),
+    (172, 18, 68, 2, 0, 0),
+    (196, 20, 78, 2, 0, 0),
+    (242, 24, 97, 2, 0, 0),
+    (292, 30, 116, 2, 0, 0),
+    (346, 18, 68, 2, 69, 2),
+    (404, 20, 81, 4, 0, 0),
+    (466, 24, 92, 2, 93, 2),
+    (532, 26, 107, 4, 0, 0),
+    (581, 30, 115, 3, 116, 1),
+    (655, 22, 87, 5, 88, 1),
+    (733, 24, 98, 5, 99, 1),
+    (815, 28, 107, 1, 108, 5),
+    (901, 30, 120, 5, 121, 1),
+    (991, 28, 113, 3, 114, 4),
+    (1085, 28, 107, 3, 108, 5),
+    (1156, 28, 116, 4, 117, 4),
+    (1258, 28, 111, 2, 112, 7),
+    (1364, 30, 121, 4, 122, 5),
+    (1474, 30, 117, 6, 118, 4),
+    (1588, 26, 106, 8, 107, 4),
+    (1706, 28, 114, 10, 115, 2),
+    (1828, 30, 122, 8, 123, 4),
+    (1921, 30, 117, 3, 118, 10),
+    (2051, 30, 116, 7, 117, 7),
+    (2185, 30, 115, 5, 116, 10),
+    (2323, 30, 115, 13, 116, 3),
+    (2465, 30, 115, 17, 0, 0),
+    (2611, 30, 115, 17, 116, 1),
+    (2761, 30, 115, 13, 116, 6),
+    (2876, 30, 121, 12, 122, 7),
+    (3034, 30, 121, 6, 122, 14),
+    (3196, 30, 122, 17, 123, 4),
+    (3362, 30, 122, 4, 123, 18),
+    (3532, 30, 117, 20, 118, 4),
+    (3706, 30, 118, 19, 119, 6),
+];
+
+/// Alignment-pattern centre coordinates per version, zero padded to seven
+/// entries. Indexed by `version - 1`.
+const ALIGN: [[u8; 7]; 40] = [
+    [0, 0, 0, 0, 0, 0, 0],
+    [6, 18, 0, 0, 0, 0, 0],
+    [6, 22, 0, 0, 0, 0, 0],
+    [6, 26, 0, 0, 0, 0, 0],
+    [6, 30, 0, 0, 0, 0, 0],
+    [6, 34, 0, 0, 0, 0, 0],
+    [6, 22, 38, 0, 0, 0, 0],
+    [6, 24, 42, 0, 0, 0, 0],
+    [6, 26, 46, 0, 0, 0, 0],
+    [6, 28, 50, 0, 0, 0, 0],
+    [6, 30, 54, 0, 0, 0, 0],
+    [6, 32, 58, 0, 0, 0, 0],
+    [6, 34, 62, 0, 0, 0, 0],
+    [6, 26, 46, 66, 0, 0, 0],
+    [6, 26, 48, 70, 0, 0, 0],
+    [6, 26, 50, 74, 0, 0, 0],
+    [6, 30, 54, 78, 0, 0, 0],
+    [6, 30, 56, 82, 0, 0, 0],
+    [6, 30, 58, 86, 0, 0, 0],
+    [6, 34, 62, 90, 0, 0, 0],
+    [6, 28, 50, 72, 94, 0, 0],
+    [6, 26, 50, 74, 98, 0, 0],
+    [6, 30, 54, 78, 102, 0, 0],
+    [6, 28, 54, 80, 106, 0, 0],
+    [6, 32, 58, 84, 110, 0, 0],
+    [6, 30, 58, 86, 114, 0, 0],
+    [6, 34, 62, 90, 118, 0, 0],
+    [6, 26, 50, 74, 98, 122, 0],
+    [6, 30, 54, 78, 102, 126, 0],
+    [6, 26, 52, 78, 104, 130, 0],
+    [6, 30, 56, 82, 108, 134, 0],
+    [6, 34, 60, 86, 112, 138, 0],
+    [6, 30, 58, 86, 114, 142, 0],
+    [6, 34, 62, 90, 118, 146, 0],
+    [6, 30, 54, 78, 102, 126, 150],
+    [6, 24, 50, 76, 102, 128, 154],
+    [6, 28, 54, 80, 106, 132, 158],
+    [6, 32, 58, 84, 110, 136, 162],
+    [6, 26, 54, 82, 110, 138, 166],
+    [6, 30, 58, 86, 114, 142, 170],
+];
+
+const fn side_len(version: u8) -> usize {
+    17 + 4 * version as usize
+}
+
+/// Table row of a version, `None` when the version is outside 1..=40. Every
+/// caller reads its row through this so a bad version is a refusal, never a
+/// slice index aborting the node.
+fn cap_l(version: u8) -> Option<(u16, u16, u16, u16, u16, u16)> {
+    let idx = usize::from(version).checked_sub(1)?;
+    CAP_L.get(idx).copied()
+}
+
+fn data_codewords(version: u8) -> usize {
+    // A version with no table row has no capacity; zero makes `version_for`
+    // refuse the payload instead of reading out of range.
+    let Some((_, _, sd, sn, ld, ln)) = cap_l(version) else {
+        return 0;
+    };
+    usize::from(sd) * usize::from(sn) + usize::from(ld) * usize::from(ln)
+}
+
+/// Byte-mode payload capacity of a version: data codewords minus the 4-bit
+/// mode indicator and the 8- or 16-bit character count.
+fn capacity_bytes(version: u8) -> usize {
+    let header_bits = if version < 10 { 12 } else { 20 };
+    (data_codewords(version) * 8 - header_bits) / 8
+}
+
+fn version_for(len: usize) -> Result<u8, QrError> {
+    (1..=40u8)
+        .find(|&v| capacity_bytes(v) >= len)
+        .ok_or(QrError::TooLong(len))
+}
+
+struct BitWriter {
+    bytes: Vec<u8>,
+    len: usize,
+}
+
+impl BitWriter {
+    const fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, value: u32, bits: u32) {
+        for i in (0..bits).rev() {
+            let idx = self.len / 8;
+            if idx >= self.bytes.len() {
+                self.bytes.resize(idx + 1, 0);
+            }
+            if (value >> i) & 1 != 0 {
+                // `idx` was just reserved above; the checked access keeps the
+                // arithmetic in one place instead of trusting it.
+                if let Some(slot) = self.bytes.get_mut(idx) {
+                    *slot |= 0x80 >> (self.len % 8);
+                }
+            }
+            self.len += 1;
+        }
+    }
+
+    fn into_bytes(mut self) -> Vec<u8> {
+        self.bytes.truncate(self.len.div_ceil(8));
+        self.bytes
+    }
+}
+
+/// Terminated, padded and block-interleaved codeword stream.
+fn build_codewords(data: &[u8]) -> Result<(Vec<u8>, u8), QrError> {
+    let version = version_for(data.len())?;
+    let dcw = data_codewords(version);
+    let count_bits = if version < 10 { 8 } else { 16 };
+    let mut bits = BitWriter::new();
+    bits.push(0b0100, 4);
+    bits.push(data.len() as u32, count_bits);
+    for &b in data {
+        bits.push(u32::from(b), 8);
+    }
+    let term = core::cmp::min(4, dcw * 8 - bits.len);
+    bits.push(0, term as u32);
+    let pad = (8 - bits.len % 8) % 8;
+    bits.push(0, pad as u32);
+    let mut bytes = bits.into_bytes();
+    let mut alt = false;
+    while bytes.len() < dcw {
+        bytes.push(if alt { 0x11 } else { 0xec });
+        alt = !alt;
+    }
+
+    let Some((_, ec, sd, sn, ld, ln)) = cap_l(version) else {
+        return Err(QrError::TooLong(data.len()));
+    };
+    let (sd, sn, ld, ln, ec) = (
+        sd as usize,
+        sn as usize,
+        ld as usize,
+        ln as usize,
+        ec as usize,
+    );
+    let mut blocks: Vec<&[u8]> = Vec::with_capacity(sn + ln);
+    let mut at = 0usize;
+    for _ in 0..sn {
+        let Some(part) = bytes.get(at..at + sd) else {
+            break;
+        };
+        blocks.push(part);
+        at += sd;
+    }
+    for _ in 0..ln {
+        let Some(part) = bytes.get(at..at + ld) else {
+            break;
+        };
+        blocks.push(part);
+        at += ld;
+    }
+    debug_assert_eq!(at, dcw);
+    let ecs: Vec<Vec<u8>> = blocks.iter().map(|b| rs_encode(b, ec)).collect();
+
+    let mut stream = Vec::with_capacity(cap_l(version).map_or(0, |row| usize::from(row.0)));
+    for i in 0..core::cmp::max(sd, ld) {
+        for b in &blocks {
+            if let Some(&v) = b.get(i) {
+                stream.push(v);
+            }
+        }
+    }
+    for i in 0..ec {
+        for e in &ecs {
+            if let Some(&v) = e.get(i) {
+                stream.push(v);
+            }
+        }
+    }
+    Ok((stream, version))
+}
+
+// --- format information ---
+
+const FORMAT_XOR_MASK: u32 = 0x5412;
+
+/// 15-bit format word for a 5-bit `(ec level, mask)` payload. Level L is
+/// `01`, so mask 0 gives `0b01_000` and the word `0x77c4`.
+const fn format_word(data: u32) -> u32 {
+    let mut rem = data;
+    let mut i = 0;
+    while i < 10 {
+        rem = (rem << 1) ^ ((rem >> 9) * 0x537);
+        i += 1;
+    }
+    ((data << 10) | (rem & 0x3ff)) ^ FORMAT_XOR_MASK
+}
+
+/// Cell of format bit `i` in the copy around the top-left finder. Bit 0 sits
+/// at (0,8) and the strip runs down column 8 to (5,8), steps over the timing
+/// row at (7,8), takes the corner (8,8)/(8,7) and finishes left along row 8.
+/// This is the orientation `qrcode` writes and `rqrr` reads; a mirrored
+/// layout still carries a BCH-valid word yet fails every independent decoder,
+/// which is how the sweep that settled it was run.
+const fn format_cell_main(i: usize) -> (usize, usize) {
+    if i < 6 {
+        (i, 8)
+    } else if i == 6 {
+        (7, 8)
+    } else if i == 7 {
+        (8, 8)
+    } else if i == 8 {
+        (8, 7)
+    } else {
+        (8, 14 - i)
+    }
+}
+
+/// Cell of format bit `i` in the second copy: bits 0-6 down column 8 below
+/// the top-right finder, bits 7-14 right along row 8 left of the bottom-left
+/// finder.
+const fn format_cell_side(i: usize, side: usize) -> (usize, usize) {
+    if i < 7 {
+        (side - 1 - i, 8)
+    } else {
+        (8, side - 15 + i)
+    }
+}
+
+// --- matrix construction ---
+
+/// A finished symbol: the module grid plus the version it was built for.
+#[derive(Clone)]
+pub struct EncodedMatrix {
+    version: u8,
+    mask: u8,
+    dark: Vec<Vec<bool>>,
+}
+
+impl EncodedMatrix {
+    pub const fn version(&self) -> u8 {
+        self.version
+    }
+
+    /// ISO mask pattern carried by this symbol's format word.
+    pub const fn mask(&self) -> u8 {
+        self.mask
+    }
+
+    pub const fn side_len(&self) -> usize {
+        self.dark.len()
+    }
+
+    pub fn is_dark(&self, row: usize, col: usize) -> bool {
+        // The matrix is square and `side_len` names its edge, so a caller that
+        // steps past the edge reads a light cell instead of aborting the node.
+        self.dark
+            .get(row)
+            .and_then(|r| r.get(col))
+            .is_some_and(|v| *v)
+    }
+}
+
+/// Encodes a byte-mode, level-L symbol for `data` with deterministic mask fallback.
+/// # Errors
+///
+/// Propagates `QrError` from the step that failed; its variants name the refused conditions.
+pub fn encode(data: &[u8]) -> Result<EncodedMatrix, QrError> {
+    let (stream, version) = build_codewords(data)?;
+    let side = side_len(version);
+    let mut dark = vec![vec![false; side]; side];
+    let mut reserved = vec![vec![false; side]; side];
+    let set =
+        |dark: &mut Vec<Vec<bool>>, reserved: &mut Vec<Vec<bool>>, r: usize, c: usize, v: bool| {
+            if let (Some(row), Some(res)) = (dark.get_mut(r), reserved.get_mut(r)) {
+                if let (Some(cell), Some(flag)) = (row.get_mut(c), res.get_mut(c)) {
+                    *cell = v;
+                    *flag = true;
+                }
+            }
+        };
+
+    // finder patterns with their light separators
+    for (fr, fc) in [(0usize, 0usize), (0, side - 7), (side - 7, 0)] {
+        for r in fr.saturating_sub(1)..=(fr + 7).min(side - 1) {
+            for c in fc.saturating_sub(1)..=(fc + 7).min(side - 1) {
+                let dr = r as isize - (fr + 3) as isize;
+                let dc = c as isize - (fc + 3) as isize;
+                let dist = dr.abs().max(dc.abs()) as usize;
+                set(&mut dark, &mut reserved, r, c, dist != 2 && dist < 4);
+            }
+        }
+    }
+
+    // timing patterns
+    for i in 8..side - 8 {
+        let bit = i % 2 == 0;
+        set(&mut dark, &mut reserved, 6, i, bit);
+        set(&mut dark, &mut reserved, i, 6, bit);
+    }
+
+    // alignment patterns, skipping the three that collide with finders
+    let last = side - 7;
+    let centers: Vec<usize> = ALIGN
+        .get(usize::from(version).saturating_sub(1))
+        .copied()
+        .unwrap_or([0u8; 7])
+        .iter()
+        .copied()
+        .filter(|&p| p != 0)
+        .map(|p| p as usize)
+        .collect();
+    for &ar in &centers {
+        for &ac in &centers {
+            if (ar, ac) == (6, 6) || (ar, ac) == (6, last) || (ar, ac) == (last, 6) {
+                continue;
+            }
+            for dr in -2isize..=2 {
+                for dc in -2isize..=2 {
+                    let r = (ar as isize + dr) as usize;
+                    let c = (ac as isize + dc) as usize;
+                    set(&mut dark, &mut reserved, r, c, dr.abs().max(dc.abs()) != 1);
+                }
+            }
+        }
+    }
+
+    // dark module and format reservations (values written after masking)
+    set(&mut dark, &mut reserved, side - 8, 8, true);
+    for i in 0..15 {
+        let (r, c) = format_cell_main(i);
+        if let Some(slot) = reserved.get_mut(r).and_then(|row| row.get_mut(c)) {
+            *slot = true;
+        }
+        let (r, c) = format_cell_side(i, side);
+        if let Some(slot) = reserved.get_mut(r).and_then(|row| row.get_mut(c)) {
+            *slot = true;
+        }
+    }
+
+    // version information, versions 7 and up
+    if version >= 7 {
+        let mut rem = u32::from(version);
+        for _ in 0..12 {
+            rem = (rem << 1) ^ ((rem >> 11) * 0x1f25);
+        }
+        let word = (u32::from(version) << 12) | (rem & 0xfff);
+        for i in 0..18 {
+            let bit = (word >> i) & 1 != 0;
+            set(&mut dark, &mut reserved, side - 11 + i % 3, i / 3, bit);
+            set(&mut dark, &mut reserved, i / 3, side - 11 + i % 3, bit);
+        }
+    }
+
+    // data placement: two-module-wide zigzag, column 6 skipped
+    let total_bits = stream.len() * 8;
+    let mut bit_at = 0usize;
+    let mut col = side as isize - 1;
+    let mut upward = true;
+    while col >= 1 {
+        if col == 6 {
+            col -= 1;
+        }
+        for i in 0..side {
+            let row = if upward { side - 1 - i } else { i };
+            for dx in 0..2 {
+                let c = (col - dx as isize) as usize;
+                if reserved.get(row).and_then(|r| r.get(c)).is_some_and(|v| *v) {
+                    continue;
+                }
+                if bit_at < total_bits {
+                    let bit = stream
+                        .get(bit_at / 8)
+                        .copied()
+                        .is_some_and(|byte| (byte >> (7 - bit_at % 8)) & 1 != 0);
+                    if let Some(slot) = dark.get_mut(row).and_then(|r| r.get_mut(c)) {
+                        *slot = bit;
+                    }
+                    bit_at += 1;
+                }
+            }
+        }
+        col -= 2;
+        upward = !upward;
+    }
+    debug_assert_eq!(bit_at, total_bits);
+
+    for mask in 0..8u8 {
+        let mut candidate = dark.clone();
+        apply_data_mask(&mut candidate, &reserved, mask);
+        write_format_and_dark_module(&mut candidate, side, mask);
+        let matrix = EncodedMatrix {
+            version,
+            mask,
+            dark: candidate,
+        };
+        if matrix_decodes_to(&matrix, data) {
+            return Ok(matrix);
+        }
+    }
+
+    Err(QrError::Undecodable)
+}
+
+fn mask_applies(mask: u8, r: usize, c: usize) -> bool {
+    match mask {
+        0 => (r + c).is_multiple_of(2),
+        1 => r.is_multiple_of(2),
+        2 => c.is_multiple_of(3),
+        3 => (r + c).is_multiple_of(3),
+        4 => (r / 2 + c / 3).is_multiple_of(2),
+        // Not a divisibility test: this one is a SUM of two remainders being
+        // zero, which is why it reads differently from its neighbours and why
+        // clippy does not flag it. Kept in spec form on purpose.
+        5 => (r * c) % 2 + (r * c) % 3 == 0,
+        6 => ((r * c) % 2 + (r * c) % 3).is_multiple_of(2),
+        7 => ((r + c) % 2 + (r * c) % 3).is_multiple_of(2),
+        _ => false,
+    }
+}
+
+fn apply_data_mask(dark: &mut [Vec<bool>], reserved: &[Vec<bool>], mask: u8) {
+    for r in 0..dark.len() {
+        let cols = dark.get(r).map_or(0, |row| row.len());
+        for c in 0..cols {
+            let reserved_cell = reserved
+                .get(r)
+                .and_then(|row| row.get(c))
+                .is_some_and(|v| *v);
+            if !reserved_cell && mask_applies(mask, r, c) {
+                if let Some(slot) = dark.get_mut(r).and_then(|row| row.get_mut(c)) {
+                    *slot = !*slot;
+                }
+            }
+        }
+    }
+}
+
+/// The 5 bits the format word is built from: the two EC-level bits above the
+/// three mask bits. The fields are combined with `|`; an `^` cancels any bit
+/// set on BOTH sides. Today level L (`0b01_000`) and the low three mask bits
+/// cannot overlap, so the two operators agree on every real input - which is
+/// exactly why mutation testing's `|` -> `^` swap survived every symbol test.
+/// Keeping the combination in one helper lets the test suite feed it
+/// overlapping inputs and kill that mutant at its source.
+fn level_mask_bits(level: u32, mask: u32) -> u32 {
+    level | (mask & 0b111)
+}
+
+fn write_format_and_dark_module(dark: &mut [Vec<bool>], side: usize, mask: u8) {
+    // format information, level L plus the selected mask, then the forced dark module
+    let word = format_word(level_mask_bits(0b01_000, u32::from(mask)));
+    for i in 0..15 {
+        let bit = (word >> i) & 1 != 0;
+        let (r, c) = format_cell_main(i);
+        if let Some(slot) = dark.get_mut(r).and_then(|row| row.get_mut(c)) {
+            *slot = bit;
+        }
+        let (r, c) = format_cell_side(i, side);
+        if let Some(slot) = dark.get_mut(r).and_then(|row| row.get_mut(c)) {
+            *slot = bit;
+        }
+    }
+    if let Some(slot) = dark.get_mut(side - 8).and_then(|row| row.get_mut(8)) {
+        *slot = true;
+    }
+}
+
+/// Quiet zone in modules on every side, and how many pixels one module gets
+/// when the matrix is rendered for the decoder.
+///
+/// The ISO quiet zone for a QR symbol is four modules; the scale is what makes
+/// the rendered image large enough for `rqrr` to find the finder patterns.
+const QUIET_MODULES: usize = 4;
+const PIXELS_PER_MODULE: usize = 4;
+
+/// Side of the rendered image in pixels: the symbol plus a quiet zone on both
+/// sides, scaled up.
+///
+/// This used to be an inline expression, and mutation testing showed it was
+/// unguarded: three surviving mutants (run 36119848850, shard 22/24) rewrote
+/// `(side + 2 * quiet) * scale` into `(side * 2 * quiet) * scale` and
+/// `2 + quiet`, and `quiet + side` into `quiet * side`, and every test stayed
+/// green. The decoder tolerates a too-large canvas, so the arithmetic was
+/// never actually checked. Now it is named and pinned by a test.
+const fn rendered_side_px(side: usize) -> usize {
+    (side + 2 * QUIET_MODULES) * PIXELS_PER_MODULE
+}
+
+fn matrix_decodes_to(matrix: &EncodedMatrix, data: &[u8]) -> bool {
+    let side = matrix.side_len();
+    let (quiet, scale) = (QUIET_MODULES, PIXELS_PER_MODULE);
+    let img = rendered_side_px(side);
+    let mut prepared = rqrr::PreparedImage::prepare_from_bitmap(img, img, |x, y| {
+        let (c, r) = (x / scale, y / scale);
+        let inside = quiet..quiet + side;
+        inside.contains(&r) && inside.contains(&c) && matrix.is_dark(r - quiet, c - quiet)
+    });
+    let grids = prepared.detect_grids();
+    if grids.len() != 1 {
+        return false;
+    }
+    let mut out = Vec::new();
+    grids[0].decode_to(&mut out).is_ok() && out.as_slice() == data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode_roundtrip(data: &[u8]) {
+        let m = encode(data).unwrap();
+        let side = m.side_len();
+        let (quiet, scale) = (4usize, 4usize);
+        let img = (side + 2 * quiet) * scale;
+        let mut prepared = rqrr::PreparedImage::prepare_from_bitmap(img, img, |x, y| {
+            let (c, r) = (x / scale, y / scale);
+            let inside = quiet..quiet + side;
+            inside.contains(&r) && inside.contains(&c) && m.is_dark(r - quiet, c - quiet)
+        });
+        let grids = prepared.detect_grids();
+        assert_eq!(grids.len(), 1, "one grid must be detectable");
+        // decode_to skips decode's UTF-8 step that forces a String;
+        // the frames carry a binary payload, so the raw bytes are compared.
+        let mut out = Vec::new();
+        grids[0].decode_to(&mut out).expect("grid must decode");
+        assert_eq!(out.as_slice(), data);
+    }
+
+    #[test]
+    fn gf_arithmetic_matches_field_laws() {
+        assert_eq!(gf_mul(0, 123), 0);
+        assert_eq!(gf_mul(1, 123), 123);
+        assert_eq!(gf_mul(2, 2), 4);
+        assert_eq!(gf_mul(0x53, 140), 1); // 140 = 0x8c is the inverse of 0x53
+    }
+
+    #[test]
+    fn generator_polynomial_matches_known_vector() {
+        let g = rs_generator(7);
+        assert_eq!(&g[..8], &[1, 127, 122, 154, 164, 11, 68, 117]);
+    }
+
+    #[test]
+    fn rs_encode_matches_known_vector() {
+        let data = b" [\x0bx\xd1r\xdcMC@\xec\x11\xec\x11\xec\x11";
+        assert_eq!(rs_encode(data, 10), b"\xc4#'w\xeb\xd7\xe7\xe2]\x17");
+    }
+
+    #[test]
+    fn capacity_table_anchors() {
+        assert_eq!(CAP_L[0], (26, 7, 19, 1, 0, 0));
+        assert_eq!(CAP_L[9], (346, 18, 68, 2, 69, 2));
+        assert_eq!(capacity_bytes(1), 17);
+        assert_eq!(capacity_bytes(10), 271);
+        assert_eq!(capacity_bytes(40), MAX_DATA_BYTES);
+    }
+
+    #[test]
+    fn version_selection_boundaries() {
+        assert_eq!(version_for(0).unwrap(), 1);
+        assert_eq!(version_for(17).unwrap(), 1);
+        assert_eq!(version_for(18).unwrap(), 2);
+        assert_eq!(version_for(271).unwrap(), 10);
+        assert_eq!(version_for(272).unwrap(), 11);
+        assert_eq!(version_for(MAX_DATA_BYTES).unwrap(), 40);
+        assert_eq!(version_for(MAX_DATA_BYTES + 1), Err(QrError::TooLong(2954)));
+    }
+
+    #[test]
+    fn format_words_match_the_level_l_table() {
+        let expected = [
+            0x77c4u32, 0x72f3, 0x7daa, 0x789d, 0x662f, 0x6318, 0x6c41, 0x6976,
+        ];
+        for (mask, want) in expected.iter().enumerate() {
+            assert_eq!(format_word(0b01_000 | mask as u32), *want, "mask {mask}");
+        }
+    }
+
+    #[test]
+    fn mask_predicates_match_iso_spot_checks() {
+        assert!(mask_applies(0, 2, 4));
+        assert!(!mask_applies(0, 2, 5));
+        assert!(mask_applies(1, 2, 5));
+        assert!(!mask_applies(1, 3, 5));
+        assert!(mask_applies(2, 7, 6));
+        assert!(!mask_applies(2, 7, 7));
+        assert!(mask_applies(3, 4, 5));
+        assert!(!mask_applies(3, 4, 6));
+        assert!(mask_applies(4, 2, 3));
+        assert!(!mask_applies(4, 4, 3));
+        // Mask 4 is the one place where `+` and `-` are indistinguishable by
+        // the two spot checks above: `(a + b) % 2` and `(a - b) % 2` always
+        // agree, because a sum and a difference share their parity. Mutation
+        // testing found exactly that hole (run 36063084319, shard 6/8:
+        // MISSED `replace + with - in mask_applies`). The case below separates
+        // them: with `+` the answer is a plain `false`, with `-` the usize
+        // subtraction underflows, so the mutant can no longer survive.
+        assert!(!mask_applies(4, 0, 3));
+        assert!(mask_applies(5, 2, 3));
+        assert!(!mask_applies(5, 1, 1));
+        assert!(mask_applies(6, 1, 2));
+        assert!(!mask_applies(6, 1, 3));
+        assert!(mask_applies(7, 1, 3));
+        assert!(!mask_applies(7, 1, 1));
+    }
+
+    #[test]
+    fn mask_zero_remains_the_first_successful_wire_choice() {
+        let m = encode(b"A").unwrap();
+        assert_eq!(m.mask(), 0, "readable mask-0 payloads keep byte continuity");
+        assert!(matrix_decodes_to(&m, b"A"));
+    }
+
+    /// Mutation testing replaced `QrError`'s `Display::fmt` body with
+    /// `Ok(Default::default())` and nothing failed (run 36149222233, shard
+    /// 15/24): the messages were never read. An error type whose text can be
+    /// emptied without a test noticing is an error type that will one day
+    /// print nothing at the moment somebody needs it most.
+    #[test]
+    fn error_messages_name_the_condition_and_the_number() {
+        let too_long = QrError::TooLong(9_999).to_string();
+        assert!(
+            too_long.contains("9999") && too_long.contains(&MAX_DATA_BYTES.to_string()),
+            "TooLong must state both the payload size and the ceiling: {too_long}"
+        );
+        let undecodable = QrError::Undecodable.to_string();
+        assert!(
+            undecodable.contains("mask") && !undecodable.is_empty(),
+            "Undecodable must say what failed: {undecodable}"
+        );
+    }
+
+    /// `EncodedMatrix::mask` is a getter, and a getter pinned to `0` survived
+    /// every test (same run, shard 15/24). The mask is written into the format
+    /// word, so a getter that lies makes the symbol and its report disagree.
+    #[test]
+    fn encoded_matrix_reports_the_mask_it_carries() {
+        let m = encode(b"mask getter").expect("encode");
+        assert!(m.mask() < 8, "the ISO mask is one of eight");
+        // The format word is derived from the mask; deriving it twice from the
+        // getter and from the field must agree, so a constant getter is caught
+        // even when the chosen mask happens to be that constant.
+        assert_eq!(
+            format_word(0b01_000 | u32::from(m.mask() & 0b111)),
+            format_word(0b01_000 | u32::from(m.mask & 0b111)),
+            "the getter must report the field the encoder wrote"
+        );
+        for mask in 0..8u8 {
+            let probe = EncodedMatrix {
+                version: m.version(),
+                mask,
+                dark: m.dark.clone(),
+            };
+            assert_eq!(probe.mask(), mask, "mask {mask} was not reported");
+        }
+    }
+
+    /// `write_format_and_dark_module` combines the EC level with the mask
+    /// through `level_mask_bits`, which uses `|`. Mutation testing turned that
+    /// into `^` and no test failed (same run, shard 20/24): on level L the
+    /// level bits and the mask bits never overlap, so `|` and `^` agree by
+    /// construction on every real input. The earlier version of this test
+    /// re-stated that arithmetic inline and never touched the production
+    /// helper, so it guarded nothing. The combination now lives in
+    /// `level_mask_bits`, and the test drives the PRODUCTION function with
+    /// overlapping fields, where `^` cancels a shared bit and `|` keeps it:
+    /// the day the level gains a low bit, the mutant dies here.
+    #[test]
+    fn level_mask_bits_keeps_overlapping_fields() {
+        // Non-overlapping inputs (today's level L and any mask): the result
+        // is the plain union, and both field groups survive it intact.
+        for mask in 0..8u32 {
+            assert_eq!(
+                level_mask_bits(0b01_000, mask),
+                0b01_000 | mask,
+                "mask {mask}"
+            );
+            assert_eq!(
+                level_mask_bits(0b01_000, mask) & 0b11_000,
+                0b01_000,
+                "level L bits were lost"
+            );
+            assert_eq!(
+                level_mask_bits(0b01_000, mask) & 0b00_111,
+                mask,
+                "mask bits were lost"
+            );
+        }
+        // Overlapping inputs: a `|` -> `^` mutant clears every shared bit and
+        // fails both lines below, which is the point of the helper.
+        assert_eq!(
+            level_mask_bits(0b01_001, 0b001),
+            0b01_001,
+            "the shared low bit must survive"
+        );
+        assert_eq!(
+            level_mask_bits(0b11_111, 0b111),
+            0b11_111,
+            "fully overlapping fields must not cancel"
+        );
+        // The mask input is three bits wide; wider inputs must not leak into
+        // the level field.
+        assert_eq!(
+            level_mask_bits(0b00_000, 0b1_1010),
+            0b010,
+            "mask bits above the low three must be cut"
+        );
+    }
+
+    /// `matrix_decodes_to` answers "does this symbol decode to EXACTLY this
+    /// payload", and the two halves of that question are joined by `&&`.
+    /// Mutation testing turned it into `||` (run 36149222233, shard 22/24)
+    /// and nothing failed, because every existing call passed the payload the
+    /// symbol was built from: the left half was always true. With `||` a
+    /// symbol that decodes to something else would be accepted, which is the
+    /// one thing this function exists to rule out - it is the check the
+    /// encoder's mask search relies on.
+    #[test]
+    fn decoding_to_a_different_payload_is_not_a_match() {
+        let m = encode(b"A").expect("encode");
+        assert!(matrix_decodes_to(&m, b"A"), "its own payload must match");
+        assert!(
+            !matrix_decodes_to(&m, b"B"),
+            "a symbol that decodes to A does not match B"
+        );
+        assert!(
+            !matrix_decodes_to(&m, b"AA"),
+            "a longer payload is not a match either"
+        );
+        assert!(
+            !matrix_decodes_to(&m, b""),
+            "an empty expectation is not a match"
+        );
+    }
+
+    /// The rendered canvas is a symbol plus four quiet modules on EACH side,
+    /// four pixels per module. Mutation testing killed the previous version of
+    /// this arithmetic three different ways without a single test noticing,
+    /// because `rqrr` decodes fine from an oversized canvas. Pin the numbers:
+    /// a quiet zone that is too small breaks real scanners even when this
+    /// in-process decoder is happy.
+    #[test]
+    fn rendered_canvas_is_symbol_plus_two_quiet_zones_scaled() {
+        // 21 modules is version 1; 21 + 4 + 4 = 29 modules, times 4 px = 116.
+        assert_eq!(rendered_side_px(21), 116);
+        // 25 modules is version 2: 25 + 8 = 33 modules, times 4 px = 132.
+        assert_eq!(rendered_side_px(25), 132);
+        // Growing the symbol by one module grows the canvas by exactly one
+        // module worth of pixels - a multiplication in place of the addition
+        // would grow it by far more.
+        assert_eq!(
+            rendered_side_px(22) - rendered_side_px(21),
+            PIXELS_PER_MODULE
+        );
+        // The quiet zone is counted twice, not once: the difference between a
+        // canvas with and without it is 2 x 4 modules.
+        assert_eq!(
+            rendered_side_px(21) - 21 * PIXELS_PER_MODULE,
+            2 * QUIET_MODULES * PIXELS_PER_MODULE
+        );
+    }
+
+    #[test]
+    fn format_covers_the_standard_cells() {
+        let side = side_len(3);
+        let mut main: Vec<(usize, usize)> = (0..15).map(format_cell_main).collect();
+        main.sort_unstable();
+        let mut want: Vec<(usize, usize)> = Vec::new();
+        for r in 0..6 {
+            want.push((r, 8));
+        }
+        want.extend([(7, 8), (8, 8), (8, 7)]);
+        for c in 0..6 {
+            want.push((8, c));
+        }
+        want.sort_unstable();
+        assert_eq!(main, want);
+
+        let mut side_cells: Vec<(usize, usize)> =
+            (0..15).map(|i| format_cell_side(i, side)).collect();
+        side_cells.sort_unstable();
+        let mut want: Vec<(usize, usize)> = Vec::new();
+        for r in side - 7..side {
+            want.push((r, 8));
+        }
+        for c in side - 8..side {
+            want.push((8, c));
+        }
+        want.sort_unstable();
+        assert_eq!(side_cells, want);
+    }
+
+    #[test]
+    fn symbol_carries_the_function_patterns() {
+        let m = encode(b"A").unwrap();
+        assert_eq!(m.version(), 1);
+        assert_eq!(m.side_len(), 21);
+        for (fr, fc) in [(0, 0), (0, 14), (14, 0)] {
+            for r in 0..7 {
+                for c in 0..7 {
+                    let dr = (r as isize - 3).abs();
+                    let dc = (c as isize - 3).abs();
+                    let want = dr.max(dc) != 2;
+                    assert_eq!(
+                        m.is_dark(fr + r, fc + c),
+                        want,
+                        "finder at ({},{})",
+                        fr + r,
+                        fc + c
+                    );
+                }
+            }
+        }
+        for i in 8..13 {
+            assert_eq!(m.is_dark(6, i), i % 2 == 0);
+            assert_eq!(m.is_dark(i, 6), i % 2 == 0);
+        }
+        assert!(m.is_dark(13, 8), "dark module");
+    }
+
+    #[test]
+    fn encoded_matrix_reads_back_through_an_independent_decoder() {
+        for data in [
+            &b"A"[..],
+            &b"Budlum 3.0 recipe frame"[..],
+            &vec![0xa5; 17][..],
+            &vec![0x5a; 18][..],
+            &vec![7; 32][..],
+            &vec![9; 271][..],
+            &vec![11; 272][..],
+            &vec![13; 1000][..],
+            &vec![17; MAX_DATA_BYTES][..],
+        ] {
+            decode_roundtrip(data);
+        }
+    }
+
+    #[test]
+    fn every_version_boundary_roundtrips() {
+        let mut size = 1usize;
+        let mut checked = 0;
+        while size <= MAX_DATA_BYTES {
+            decode_roundtrip(&vec![size as u8; size]);
+            checked += 1;
+            size = (size + size / 8 + 1).min(MAX_DATA_BYTES + 1);
+        }
+        assert!(
+            checked >= 30,
+            "sweep must cover the versions, got {checked}"
+        );
+    }
+}

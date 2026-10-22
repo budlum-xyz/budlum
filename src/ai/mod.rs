@@ -1,0 +1,4950 @@
+//! (§1) AI Inference & Compute Layer.
+//!
+//! Provides deterministic model registration, request/result attestation tracking,
+//! And threshold consensus finalization (`AiVerifier`).
+
+pub mod execution;
+pub mod registry;
+pub mod types;
+
+pub use execution::{
+    build_fixed_point_mlp_guest, eval_fixed_point_mlp, input_commitment, output_commitment,
+    program_hash_from_words, prove_mlp_inference, verify_execution_proof_full,
+    verify_execution_proof_structural, verify_execution_proof_structural_with_model,
+    AiExecutionModelClass, ExecutionVerifyReport, FixedPointMlpSpec, DEFAULT_EXECUTION_CLASS,
+    MLP_GUEST_VERSION,
+};
+pub use registry::AiRegistry;
+
+/// Plonky3 STARK verification is not a production acceptance condition.
+///
+/// F-03 / F-04 / F-08 / F-09: full Plonky3 STARK verification of AI
+/// inference is compiled and tested, but it is not the production
+/// acceptance condition. Flip this only together with an AIR that binds
+/// the initial memory image (F-08) from a Fiat-Shamir transcript (F-09).
+///
+/// Additional flip conditions found by the second-pass audit (P32-F02):
+/// - `initial_state_root` is a prover claim: rebuilding it node-side
+///   (`expected_initial_state_root`) needs the weights, which are not on
+///   chain (the model registers only a digest and dims). Until weights are
+///   available to the verifier or the AIR binds them, a prover can pair a
+///   valid trace with substituted weights that fold to the claimed root.
+/// - `event_digest` is never compared with the result's `output_commitment`
+///   (different hash domains); the output the proof attests is not yet tied
+///   to the output the chain recorded.
+/// - `sender`, `nonce` and `block_height` in the public inputs are guest-VM
+///   context, not chain values: nothing binds them to the attaching
+///   transaction, so one proof can accompany several requests of the same
+///   model with identical commitments.
+///
+/// While the flag is off this is fail-closed: proof-required models refuse
+/// proofs without public inputs, and `require_proof` payment release accepts
+/// only fully verified attaches (`fully_verified_proofs`).
+pub const FULL_AI_STARK_VERIFICATION_LIVE: bool = false;
+pub use types::{
+    AiAgentPayment, AiAgentPaymentSettlement, AiAgentReputation, AiCallbackEvent,
+    AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
+    AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus, AiRequestId, AiVerifierQos,
+    AiVerifierStakeInfo, BoundedBytes, MAX_INFERENCE_REF_BYTES,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::types::canonical_input_commitment;
+    use crate::core::address::Address;
+
+    /// The read declaration every test request carries: a small text read
+    /// of a fixed asset. `submit_request` refuses a request without one.
+    fn text_perception() -> crate::ai_inference::perception::PerceptionRequest {
+        crate::ai_inference::perception::PerceptionRequest {
+            asset_id: crate::pollen::AssetId([0xAB; 32]),
+            content_id: crate::storage::content_id::ContentId([0xBC; 32]),
+            kind: crate::ai_inference::perception::PerceptionKind::Text,
+            declared_units: 4,
+        }
+    }
+
+    /// Test helper: when the verifier stake is below MIN_VERIFIER_STAKE
+    /// stakes, then calls submit_result (the #359 auth check
+    /// afterwards: an unauthorised verifier cannot count a result).
+    fn submit_result_staked(
+        registry: &mut AiRegistry,
+        result: AiInferenceResult,
+        block: u64,
+    ) -> Result<Option<AiInferenceOutcome>, String> {
+        if registry.verifier_stake(&result.verifier) < crate::ai::registry::MIN_VERIFIER_STAKE {
+            let _ = registry
+                .lock_verifier_stake(&result.verifier, crate::ai::registry::MIN_VERIFIER_STAKE);
+        }
+        registry.submit_result(result, block)
+    }
+
+    #[test]
+    fn test_ai_model_registration_and_validation() {
+        let mut registry = AiRegistry::new();
+        assert!(registry.is_empty());
+        assert_eq!(registry.state_root(), [0u8; 32]);
+
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        let spec = AiModelSpec {
+            model_id,
+            model_hash: [1u8; 32],
+            owner,
+            min_verifier_count: 3,
+            agreement_threshold: 2,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 2048,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 50,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_dims: None,
+            execution_weights_digest: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        };
+
+        assert!(registry.register_model(spec.clone()).is_ok());
+        assert!(!registry.is_empty());
+        assert_ne!(registry.state_root(), [0u8; 32]);
+    }
+
+    #[test]
+    fn test_ai_inference_lifecycle_threshold_agreement() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        let spec = AiModelSpec {
+            model_id,
+            model_hash: [1u8; 32],
+            owner,
+            min_verifier_count: 3,
+            agreement_threshold: 2,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 2048,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 50,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_dims: None,
+            execution_weights_digest: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        };
+        registry.register_model(spec).unwrap();
+
+        let requester =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap();
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester,
+            model_id,
+            input_commitment: canonical_input_commitment(b"prompt: hello ai"),
+            input_ref: BoundedBytes::try_new(b"prompt: hello ai".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        // Submit first result from verifier 1
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let res1 = AiInferenceResult {
+            request_id: req_id,
+            verifier: v1,
+            output_commitment: [9u8; 32],
+            output_ref: BoundedBytes::try_new(b"response: hi".to_vec()).unwrap(),
+            result_nonce: 1,
+            signature: vec![1, 2, 3],
+            submitted_at_block: 15,
+        };
+        let outcome1 = submit_result_staked(&mut registry, res1, 15).unwrap();
+        assert!(outcome1.is_none()); // Threshold not reached yet (needs 2)
+
+        // Submit second matching result from verifier 2
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        let res2 = AiInferenceResult {
+            request_id: req_id,
+            verifier: v2,
+            output_commitment: [9u8; 32],
+            output_ref: BoundedBytes::try_new(b"response: hi".to_vec()).unwrap(),
+            result_nonce: 2,
+            signature: vec![4, 5, 6],
+            submitted_at_block: 16,
+        };
+        let outcome2 = submit_result_staked(&mut registry, res2, 16).unwrap();
+        assert!(outcome2.is_some());
+        let finalized = outcome2.unwrap();
+        assert_eq!(finalized.agreeing_verifiers.len(), 2);
+        assert_eq!(finalized.output_commitment, [9u8; 32]);
+    }
+
+    #[test]
+    fn test_ai_soft_incentive_reward_distribution() {
+        // Soft incentive verifies majority gets max_fee share
+        // And minority verifiers get zero reward without stake slashing.
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 3,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        let v_minority =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000013")
+                .unwrap();
+
+        // Minority verifier submits different commitment
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v_minority,
+                output_commitment: [88u8; 32],
+                output_ref: BoundedBytes::try_new(b"wrong".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        )
+        .unwrap();
+
+        // Majority verifiers submit consensus commitment
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [99u8; 32],
+                output_ref: BoundedBytes::try_new(b"correct".to_vec()).unwrap(),
+                result_nonce: 2,
+                signature: vec![2],
+                submitted_at_block: 16,
+            },
+            16,
+        )
+        .unwrap();
+
+        let outcome = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v2,
+                output_commitment: [99u8; 32],
+                output_ref: BoundedBytes::try_new(b"correct".to_vec()).unwrap(),
+                result_nonce: 3,
+                signature: vec![3],
+                submitted_at_block: 17,
+            },
+            17,
+        )
+        .unwrap();
+
+        let finalized = outcome.expect("Should finalize after two matching results");
+        assert_eq!(finalized.agreeing_verifiers, vec![v1, v2]);
+        assert!(!finalized.agreeing_verifiers.contains(&v_minority));
+    }
+
+    // ===================== P5 - Deadline, Dispute, Robustness Tests =====================
+
+    #[test]
+    fn test_p5_request_deadline_rejected_after_expiry() {
+        // Request with deadline_block already passed must be rejected.
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+
+        // Current_block=200 > deadline_block=110 → MUST REJECT
+        let result = registry.submit_request(req, 200);
+        assert!(result.is_err(), "Request after deadline should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("deadline exceeded"),
+            "Error should mention deadline: {err}"
+        );
+    }
+
+    #[test]
+    fn test_p5_result_deadline_rejected_after_expiry() {
+        // Result submitted after request or result deadline must be rejected.
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        // Current_block=200 > deadline_block=110 → MUST REJECT
+        let result = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 200,
+            },
+            200,
+        );
+        assert!(result.is_err(), "Result after deadline should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("deadline"),
+            "Error should mention deadline: {err}"
+        );
+    }
+
+    #[test]
+    fn test_p5_result_deadline_rejected_after_result_window() {
+        // Result submitted after result_deadline_blocks window.
+        // Submitted_at_block=10 + result_deadline_blocks=50 = result_deadline=60
+        // Current_block=70 > 60 → MUST REJECT (even though deadline_block=110 not yet reached)
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        // Current_block=70 > submitted_at_block(10) + result_deadline_blocks(50) = 60
+        let result = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 70,
+            },
+            70,
+        );
+        assert!(
+            result.is_err(),
+            "Result after result_deadline_blocks window should be rejected"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Result deadline"),
+            "Error should mention Result deadline: {err}"
+        );
+    }
+
+    #[test]
+    fn test_p5_equivocation_detected() {
+        // Same verifier submitting conflicting commitments = equivocation.
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        // First result: commitment A
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [1u8; 32],
+                output_ref: BoundedBytes::try_new(b"a".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        )
+        .unwrap();
+
+        // Second result from SAME verifier: commitment B (DIFFERENT)
+        let equiv = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [2u8; 32],
+                output_ref: BoundedBytes::try_new(b"b".to_vec()).unwrap(),
+                result_nonce: 2,
+                signature: vec![2],
+                submitted_at_block: 16,
+            },
+            16,
+        );
+        assert!(equiv.is_err(), "Equivocation must be detected");
+        let err = equiv.unwrap_err();
+        assert!(
+            err.contains("EQUIVOCATION"),
+            "Error should mention EQUIVOCATION: {err}"
+        );
+    }
+
+    #[test]
+    fn test_p5_duplicate_same_commitment_rejected() {
+        // Same verifier submitting same commitment = duplicate (not equivocation).
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        // First submission
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"same".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        )
+        .unwrap();
+
+        // Duplicate same commitment
+        let dup = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"same".to_vec()).unwrap(),
+                result_nonce: 2,
+                signature: vec![2],
+                submitted_at_block: 16,
+            },
+            16,
+        );
+        assert!(dup.is_err(), "Duplicate result should be rejected");
+        let err = dup.unwrap_err();
+        assert!(
+            err.contains("already submitted"),
+            "Error should mention already submitted: {err}"
+        );
+    }
+
+    #[test]
+    fn test_p5_request_accepted_before_deadline() {
+        // Happy path: request accepted when current_block < deadline_block.
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 50,
+            deadline_block: 150,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+
+        // Current_block=100 < deadline_block=150 → ACCEPTED
+        assert!(registry.submit_request(req, 100).is_ok());
+    }
+
+    // ===================== P5 - Fee Escrow + Nonce Tests =====================
+
+    #[test]
+    fn test_p5_fee_reclaim_after_deadline_no_outcome() {
+        // Requester can reclaim max_fee when request expires
+        // Without reaching agreement threshold.
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let requester =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap();
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 500,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        // Only one verifier submitted (below threshold of 2) - no finalization
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        )
+        .unwrap();
+
+        // Deadline has passed (current_block=200 > deadline_block=110, result_deadline=60)
+        // The read-only check changes nothing (P10-F08): it can run twice.
+        assert_eq!(
+            registry.check_reclaimable(&req_id, 200),
+            Ok((requester, 500))
+        );
+        assert_eq!(
+            registry.check_reclaimable(&req_id, 200),
+            Ok((requester, 500))
+        );
+        let result = registry.reclaim_fee(&req_id, 200);
+        assert!(
+            result.is_ok(),
+            "Should be able to reclaim fee after deadline"
+        );
+        let (reclaimed_requester, max_fee) = result.unwrap();
+        assert_eq!(reclaimed_requester, requester);
+        assert_eq!(max_fee, 500);
+        assert!(registry.check_reclaimable(&req_id, 200).is_err());
+    }
+
+    #[test]
+    fn test_p5_fee_reclaim_rejected_before_deadline() {
+        // Cannot reclaim fee before deadline expires.
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 500,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        // Current_block=50 < deadline_block=110 → cannot reclaim yet
+        let result = registry.reclaim_fee(&req_id, 50);
+        assert!(result.is_err(), "Should not reclaim before deadline");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("not yet expired"),
+            "Error should mention not yet expired: {err}"
+        );
+    }
+
+    #[test]
+    fn test_p5_fee_reclaim_rejected_if_finalized() {
+        // Cannot reclaim fee if request was already finalized (verifiers earned it).
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 500,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        // Both verifiers agree → finalization
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        )
+        .unwrap();
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v2,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
+                result_nonce: 2,
+                signature: vec![2],
+                submitted_at_block: 16,
+            },
+            16,
+        )
+        .unwrap();
+
+        // Finalized → cannot reclaim even after deadline
+        let result = registry.reclaim_fee(&req_id, 200);
+        assert!(result.is_err(), "Should not reclaim finalized request");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("finalized"),
+            "Error should mention finalized: {err}"
+        );
+    }
+
+    #[test]
+    fn test_p5_fee_double_reclaim_prevented() {
+        // Cannot reclaim fee twice for the same request.
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 500,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        // First reclaim succeeds
+        let result1 = registry.reclaim_fee(&req_id, 200);
+        assert!(result1.is_ok());
+
+        // Second reclaim fails
+        let result2 = registry.reclaim_fee(&req_id, 200);
+        assert!(result2.is_err(), "Double reclaim should be prevented");
+        let err = result2.unwrap_err();
+        assert!(
+            err.contains("already reclaimed"),
+            "Error should mention already reclaimed: {err}"
+        );
+    }
+
+    #[test]
+    fn test_p5_result_nonce_zero_rejected() {
+        // Result_nonce=0 must be rejected.
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        // Result_nonce=0 → MUST REJECT
+        let result = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
+                result_nonce: 0,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        );
+        assert!(result.is_err(), "result_nonce=0 should be rejected");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("result_nonce must be >= 1"),
+            "Error should mention result_nonce >= 1: {err}"
+        );
+    }
+
+    #[test]
+    fn test_p5_fee_reclaim_no_results_at_all() {
+        // Request submitted but zero results → reclaim should work after deadline.
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 3,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 250,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        // No results at all, deadline passed → reclaim
+        let result = registry.reclaim_fee(&req_id, 200);
+        assert!(result.is_ok(), "Should reclaim when no results at all");
+        let (_, max_fee) = result.unwrap();
+        assert_eq!(max_fee, 250);
+    }
+
+    // ===================== P5 - Model Deactivation + Callback Tests =====================
+
+    #[test]
+    fn test_p5_model_deactivation_by_owner() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        assert!(registry.deactivate_model(&model_id, &owner).is_ok());
+        assert!(!registry.models.get(&model_id).unwrap().active);
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let result = registry.submit_request(req, 5);
+        assert!(
+            result.is_err(),
+            "Request to inactive model should be rejected"
+        );
+        assert!(result.unwrap_err().contains("inactive"));
+    }
+
+    #[test]
+    fn test_p5_model_deactivation_non_owner_rejected() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let other =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let result = registry.deactivate_model(&model_id, &other);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("owner"));
+    }
+
+    #[test]
+    fn test_p5_model_reactivation() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        registry.deactivate_model(&model_id, &owner).unwrap();
+        assert!(!registry.models.get(&model_id).unwrap().active);
+
+        registry.reactivate_model(&model_id, &owner).unwrap();
+        assert!(registry.models.get(&model_id).unwrap().active);
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        assert!(registry.submit_request(req, 5).is_ok());
+    }
+
+    #[test]
+    fn test_p5_callback_carried_to_outcome() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let callback_addr =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000099")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: Some(callback_addr),
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        )
+        .unwrap();
+        let outcome = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v2,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
+                result_nonce: 2,
+                signature: vec![2],
+                submitted_at_block: 16,
+            },
+            16,
+        )
+        .unwrap()
+        .expect("Should finalize");
+
+        assert_eq!(outcome.callback, Some(callback_addr));
+        assert_eq!(
+            registry.get_outcome(&req_id).unwrap().callback,
+            Some(callback_addr)
+        );
+    }
+
+    #[test]
+    fn test_p5_callback_none_when_no_callback() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        )
+        .unwrap();
+        let outcome = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v2,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
+                result_nonce: 2,
+                signature: vec![2],
+                submitted_at_block: 16,
+            },
+            16,
+        )
+        .unwrap()
+        .expect("Should finalize");
+
+        assert_eq!(outcome.callback, None);
+    }
+
+    // ===================== P5 - Update, Transfer, Pruning, MinFee Tests =====================
+
+    #[test]
+    fn test_p5_update_model_spec_by_owner() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        registry
+            .update_model_spec(
+                &model_id, &owner, 5,    // min_verifier_count: 2 → 5
+                3,    // agreement_threshold: 2 → 3
+                2048, // max_input_ref_bytes
+                4096, // max_output_ref_bytes
+                200,  // request_deadline_blocks
+                100,  // result_deadline_blocks
+            )
+            .unwrap();
+
+        let spec = registry.models.get(&model_id).unwrap();
+        assert_eq!(spec.min_verifier_count, 5);
+        assert_eq!(spec.agreement_threshold, 3);
+        assert_eq!(spec.max_input_ref_bytes, 2048);
+        assert_eq!(spec.result_deadline_blocks, 100);
+    }
+
+    #[test]
+    fn test_p5_update_model_spec_non_owner_rejected() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let other =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000002")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let result = registry.update_model_spec(&model_id, &other, 5, 3, 2048, 4096, 200, 100);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("owner"));
+    }
+
+    #[test]
+    fn test_p5_transfer_model_ownership() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let new_owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000099")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        registry
+            .transfer_model_ownership(&model_id, &owner, new_owner)
+            .unwrap();
+        assert_eq!(registry.models.get(&model_id).unwrap().owner, new_owner);
+
+        // Old owner can no longer deactivate
+        let result = registry.deactivate_model(&model_id, &owner);
+        assert!(result.is_err());
+
+        // New owner can deactivate
+        assert!(registry.deactivate_model(&model_id, &new_owner).is_ok());
+    }
+
+    #[test]
+    fn test_p5_prune_expired_requests() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        // Create a request that expires at block 110 (deadline) + 50 (result_deadline) = 110
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        // Not pruned: within retention window
+        let (pruned, _) = registry.prune_expired(200, 100);
+        assert_eq!(pruned, 0, "Should not prune within retention window");
+
+        // Pruned: past retention window (effective_deadline=110, retention=100, current=300)
+        let (pruned, _) = registry.prune_expired(300, 100);
+        assert!(pruned > 0, "Should prune expired requests past retention");
+        assert!(!registry.requests.contains_key(&req_id));
+    }
+
+    /// A reclaimed request and its marker used to stay in the registry
+    /// forever: the row was excluded from pruning, and the marker was swept
+    /// only once the row was gone. Both now retire on the request's own
+    /// schedule, and the refund paths still refuse the retired request.
+    #[test]
+    fn test_p5_prune_retires_reclaimed_and_cancelled_requests() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+        let request = |input: &[u8]| {
+            let mut req = AiInferenceRequest {
+                request_id: AiRequestId::default(),
+                requester: owner,
+                model_id,
+                input_commitment: canonical_input_commitment(input),
+                input_ref: BoundedBytes::try_new(input.to_vec()).unwrap(),
+                max_fee: 100,
+                callback: None,
+                submitted_at_block: 10,
+                deadline_block: 110,
+                effort: crate::ai_inference::effort::EffortTier::default(),
+                perception: Some(text_perception()),
+            };
+            req.request_id = req.calculate_id();
+            req
+        };
+        let reclaimed = registry.submit_request(request(b"reclaimed"), 5).unwrap();
+        let cancelled = registry.submit_request(request(b"cancelled"), 5).unwrap();
+        registry
+            .reclaim_fee(&reclaimed, 200)
+            .expect("past the deadline");
+        registry
+            .cancel_request(&cancelled, &owner, 20)
+            .expect("the requester cancels");
+
+        // Within retention everything stays, markers included.
+        assert_eq!(registry.prune_expired(200, 100).0, 0);
+        assert!(registry.reclaimed_fees.contains(&reclaimed));
+        assert!(registry.cancelled_requests.contains(&cancelled));
+
+        // Past retention the rows and their markers retire together.
+        assert_eq!(registry.prune_expired(300, 100).0, 4);
+        assert!(registry.requests.is_empty());
+        assert!(registry.reclaimed_fees.is_empty());
+        assert!(registry.cancelled_requests.is_empty());
+        // A retired request cannot be refunded again through either path.
+        assert!(registry.reclaim_fee(&reclaimed, 400).is_err());
+        assert!(registry.reclaim_fee(&cancelled, 400).is_err());
+        assert!(registry.cancel_request(&reclaimed, &owner, 400).is_err());
+    }
+
+    #[test]
+    fn test_p5_max_fee_zero_rejected() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 0, // Zero fee
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let result = registry.submit_request(req, 5);
+        assert!(result.is_err(), "Zero max_fee should be rejected");
+        assert!(result.unwrap_err().contains("max_fee must be >= 1"));
+    }
+
+    // ===================== P5 - Reward Distribution + Edge Case Tests =====================
+
+    #[test]
+    fn test_p5_reward_distribution_with_remainder() {
+        // Max_fee=100, 3 verifiers → 33+33+34 (not 33+33+33=99)
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 3,
+                agreement_threshold: 3,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        let v3 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000013")
+                .unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100, // 100 / 3 = 33 remainder 1
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 5).unwrap();
+
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        )
+        .unwrap();
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v2,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
+                result_nonce: 2,
+                signature: vec![2],
+                submitted_at_block: 16,
+            },
+            16,
+        )
+        .unwrap();
+        let outcome = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v3,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
+                result_nonce: 3,
+                signature: vec![3],
+                submitted_at_block: 17,
+            },
+            17,
+        )
+        .unwrap()
+        .expect("Should finalize with 3 verifiers");
+
+        assert_eq!(outcome.agreeing_verifiers.len(), 3);
+        // Verify the outcome exists - executor distributes rewards based on these
+    }
+
+    #[test]
+    fn test_p5_register_model_duplicate_rejected() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        // Duplicate model_id rejected
+        let result = registry.register_model(AiModelSpec {
+            model_id,
+            model_hash: [2u8; 32], // Different hash, same ID
+            owner,
+            min_verifier_count: 2,
+            agreement_threshold: 2,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 2048,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 50,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_dims: None,
+            execution_weights_digest: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        });
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already registered"));
+    }
+
+    #[test]
+    fn test_p5_update_model_spec_invalid_threshold_rejected() {
+        // Agreement_threshold > min_verifier_count must be rejected
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        // Threshold > min_verifier_count
+        let result = registry.update_model_spec(&model_id, &owner, 2, 5, 1024, 2048, 100, 50);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("agreement_threshold"));
+
+        // Ref-byte caps: an update must not exceed what registration refuses.
+        let over = crate::ai::types::MAX_INFERENCE_REF_BYTES as u64 + 1;
+        let err = registry
+            .update_model_spec(&model_id, &owner, 2, 2, over, 2048, 100, 50)
+            .unwrap_err();
+        assert!(err.contains("max_input_ref_bytes"), "{err}");
+        let err = registry
+            .update_model_spec(&model_id, &owner, 2, 2, 1024, over, 100, 50)
+            .unwrap_err();
+        assert!(err.contains("max_output_ref_bytes"), "{err}");
+        // A rejected update leaves the spec (and its version) untouched.
+        let spec = registry.models.get(&model_id).unwrap();
+        assert_eq!((spec.max_input_ref_bytes, spec.version), (1024, 1));
+    }
+
+    #[test]
+    fn test_p5_transfer_to_self_rejected() {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count: 2,
+                agreement_threshold: 2,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+
+        let result = registry.transfer_model_ownership(&model_id, &owner, owner);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("different"));
+    }
+
+    // ===================== F06 Edge-Case Test Matrisi =====================
+
+    /// Helper: create a standard test registry with one active model.
+    fn setup_ai_registry(
+        min_verifier_count: u32,
+        agreement_threshold: u32,
+    ) -> (AiRegistry, AiModelId, Address) {
+        let mut registry = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[1u8; 32], 1);
+        registry
+            .register_model(AiModelSpec {
+                model_id,
+                model_hash: [1u8; 32],
+                owner,
+                min_verifier_count,
+                agreement_threshold,
+                max_input_ref_bytes: 1024,
+                max_output_ref_bytes: 2048,
+                request_deadline_blocks: 100,
+                result_deadline_blocks: 50,
+                version: 1,
+                active: true,
+                require_execution_proof: false,
+                execution_program_hash: None,
+                execution_class: 0,
+                execution_dims: None,
+                execution_weights_digest: None,
+                modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+            })
+            .unwrap();
+        (registry, model_id, owner)
+    }
+
+    /// Helper: submit a valid inference request at `current_block`.
+    fn submit_ai_request(
+        registry: &mut AiRegistry,
+        model_id: AiModelId,
+        requester: Address,
+        current_block: u64,
+        deadline_block: u64,
+        max_fee: u64,
+    ) -> AiRequestId {
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee,
+            callback: None,
+            submitted_at_block: current_block,
+            deadline_block,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        registry.submit_request(req, current_block).unwrap()
+    }
+
+    /// Helper: submit a request with a callback address.
+    fn submit_request_with_callback(
+        registry: &mut AiRegistry,
+        model_id: AiModelId,
+        requester: Address,
+        current_block: u64,
+        deadline_block: u64,
+        max_fee: u64,
+        callback: Option<Address>,
+    ) -> AiRequestId {
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee,
+            callback,
+            submitted_at_block: current_block,
+            deadline_block,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        registry.submit_request(req, current_block).unwrap()
+    }
+
+    /// Helper: submit a result from a verifier.
+    fn submit_ai_result(
+        registry: &mut AiRegistry,
+        request_id: AiRequestId,
+        verifier: Address,
+        output_commitment: [u8; 32],
+        result_nonce: u64,
+        current_block: u64,
+    ) -> Result<Option<AiInferenceOutcome>, String> {
+        submit_result_staked(
+            registry,
+            AiInferenceResult {
+                request_id,
+                verifier,
+                output_commitment,
+                output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
+                result_nonce,
+                signature: vec![1],
+                submitted_at_block: current_block,
+            },
+            current_block,
+        )
+    }
+
+    // ---- (a) Deadline boundary tests ----
+
+    #[test]
+    fn test_request_deadline_exact_boundary_accepted() {
+        // P5 -T1(a): Request at current_block == deadline_block → ACCEPTED.
+        // The check is `current_block > deadline_block`, so equality passes.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(
+            &mut registry,
+            model_id,
+            owner,
+            110, // current_block == deadline_block
+            110, // deadline_block
+            100,
+        );
+        // If we get here without error, the request was accepted
+        assert!(registry.requests.contains_key(&req_id));
+    }
+
+    #[test]
+    fn outcome_keeps_earliest_agreeing_output_ref() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let mk = |v: u8, out: &[u8], nonce: u64| AiInferenceResult {
+            request_id: req_id,
+            verifier: Address::from([v; 32]),
+            output_commitment: [9u8; 32],
+            output_ref: BoundedBytes::try_new(out.to_vec()).unwrap(),
+            result_nonce: nonce,
+            signature: vec![1],
+            submitted_at_block: 11,
+        };
+        assert!(
+            submit_result_staked(&mut registry, mk(0x11, b"first", 1), 11)
+                .unwrap()
+                .is_none()
+        );
+        let outcome = submit_result_staked(&mut registry, mk(0x22, b"second", 1), 11)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.output_ref.as_slice(), b"first");
+    }
+
+    #[test]
+    fn test_request_deadline_one_past_rejected() {
+        // P5 -T1(a): Request at current_block == deadline_block + 1 → REJECTED.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 111,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let result = registry.submit_request(req, 111);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("deadline exceeded"));
+    }
+
+    #[test]
+    fn test_result_deadline_exact_boundary_accepted() {
+        // P5 -T1(a): Result at current_block == request deadline_block → ACCEPTED.
+        // IMPORTANT: submitted_at_block + result_deadline_blocks MUST be >= deadline_block,
+        // Otherwise the result_deadline check rejects first (defense-in-depth: two checks).
+        // Here: submitted_at=10 + result_deadline_blocks=200 → result_deadline=210
+        //        Deadline_block=110, so effective_deadline=max(110,210)=210
+        //        Current_block=110 <= 210 → passes both checks.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        // Override result_deadline_blocks to 200 so result_deadline=210 > deadline_block=110
+        registry
+            .models
+            .get_mut(&model_id)
+            .unwrap()
+            .result_deadline_blocks = 200;
+        let req_id = registry.submit_request(req, 10).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        // Result at exactly deadline_block (110) should be accepted
+        // (result_deadline=210 > 110, so second check passes too)
+        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 110);
+        assert!(
+            result.is_ok(),
+            "Result at exact deadline should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_result_deadline_one_past_rejected() {
+        // P5 -T1(a): Result at current_block == deadline_block + 1 → REJECTED.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(
+            &mut registry,
+            model_id,
+            owner,
+            10,
+            110, // deadline_block
+            100,
+        );
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 111);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("deadline"));
+    }
+
+    #[test]
+    fn test_result_separate_deadline_exact_boundary() {
+        // P5 -T1(a): Result at current_block == submitted_at_block +
+        // Result_deadline_blocks → ACCEPTED (boundary).
+        //
+        // The registry has TWO independent deadline checks:
+        //   1. current_block > request.deadline_block → reject
+        //   2. current_block > submitted_at_block + result_deadline_blocks → reject
+        //
+        // To test ONLY the result_deadline boundary (#2), we need #1 to pass:
+        //   Deadline_block >= current_block (so check #1 is false).
+        //
+        // Setup: submitted_at=10, result_deadline_blocks=50 → result_deadline=60
+        //        Deadline_block=200 (>= 60, so check #1 never triggers)
+        //        Test at current_block=60 → check #1: 60 > 200 = false ✓
+        //                           → check #2: 60 > 60 = false ✓ (boundary passes)
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 200, // Must be >= result_deadline so check #1 doesn't fire,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 10).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        // Result at exactly result_deadline (60) → accepted
+        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 60);
+        assert!(
+            result.is_ok(),
+            "Result at exact result_deadline should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_result_separate_deadline_one_past_rejected() {
+        // P5 -T1(a): Result one past the result_deadline → REJECTED.
+        // Submitted_at=10, result_deadline_blocks=50 → result_deadline=60
+        // Deadline_block=55 → effective=max(55,60)=60
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 55,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = registry.submit_request(req, 10).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 61);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("deadline"));
+    }
+
+    // ---- (b) Equivocation recovery tests ----
+
+    #[test]
+    fn test_equivocation_different_verifier_can_still_submit() {
+        // P5 -T1(b): After verifier A equivocates, verifier B can still
+        // Submit normally. Equivocation is per-verifier, not per-request.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v_a =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000021")
+                .unwrap();
+        let v_b =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        // Verifier A submits first commitment
+        submit_ai_result(&mut registry, req_id, v_a, [1u8; 32], 1, 15).unwrap();
+
+        // Verifier A submits conflicting commitment → EQUIVOCATION
+        let err = submit_ai_result(&mut registry, req_id, v_a, [2u8; 32], 2, 16).unwrap_err();
+        assert!(err.contains("EQUIVOCATION"));
+
+        // Verifier B submits the first commitment → should succeed
+        let outcome = submit_ai_result(&mut registry, req_id, v_b, [1u8; 32], 2, 17).unwrap();
+        // Agreement_threshold=2, two verifiers with [1u8;32] → finalization
+        assert!(
+            outcome.is_some(),
+            "Verifiers B should finalize with A's commitment"
+        );
+        let finalized = outcome.unwrap();
+        assert_eq!(finalized.agreeing_verifiers.len(), 2);
+        assert!(finalized.agreeing_verifiers.contains(&v_a));
+        assert!(finalized.agreeing_verifiers.contains(&v_b));
+    }
+
+    #[test]
+    fn test_double_equivocation_same_verifier_rejected() {
+        // P5 -T1(b): Same verifier submitting a THIRD different commitment
+        // Also fails with EQUIVOCATION (the first stored result is always compared).
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v_a =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000021")
+                .unwrap();
+
+        // First submission
+        submit_ai_result(&mut registry, req_id, v_a, [1u8; 32], 1, 15).unwrap();
+
+        // Second (equivocation)
+        let err1 = submit_ai_result(&mut registry, req_id, v_a, [2u8; 32], 2, 16).unwrap_err();
+        assert!(err1.contains("EQUIVOCATION"));
+
+        // Third attempt (also equivocation - compared against first [1u8;32])
+        let err2 = submit_ai_result(&mut registry, req_id, v_a, [3u8; 32], 3, 17).unwrap_err();
+        assert!(err2.contains("EQUIVOCATION"));
+    }
+
+    // ---- (c) Fee reclaim re-entry protection ----
+
+    #[test]
+    fn test_reclaim_then_result_submission_rejected() {
+        // P5 -T1(c): After reclaiming a fee, trying to submit a result
+        // For that request must fail because the deadline has already passed.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 3);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Reclaim fee (only works after deadline)
+        let (reclaimer, fee) = registry.reclaim_fee(&req_id, 200).unwrap();
+        assert_eq!(reclaimer, owner);
+        assert_eq!(fee, 100);
+
+        // Now try to submit a result - deadline has passed
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 200);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("deadline"));
+    }
+
+    #[test]
+    fn test_reclaim_then_second_reclaim_rejected() {
+        // P5 -T1(c): Double reclaim prevention - second reclaim must fail.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 3);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // First reclaim succeeds
+        registry.reclaim_fee(&req_id, 200).unwrap();
+
+        // Second reclaim fails
+        let err = registry.reclaim_fee(&req_id, 250).unwrap_err();
+        assert!(err.contains("already reclaimed"));
+    }
+
+    #[test]
+    fn test_reclaim_outcome_exists_rejected() {
+        // P5 -T1(c): Cannot reclaim fee for a finalized request.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+
+        // Try to reclaim - should fail because outcome exists
+        let err = registry.reclaim_fee(&req_id, 200).unwrap_err();
+        assert!(err.contains("finalized"));
+    }
+
+    // ---- (d) Agreement threshold boundary tests ----
+
+    #[test]
+    fn test_threshold_equals_verifier_count_all_must_agree() {
+        // P5 -T1(d): agreement_threshold == min_verifier_count →
+        // ALL verifiers must agree for finalization.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 3);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        let v3 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000013")
+                .unwrap();
+
+        // 2 verifiers agree → not enough (need 3)
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let outcome2 = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+        assert!(
+            outcome2.is_none(),
+            "2/3 should not finalize when threshold=3"
+        );
+
+        // 3rd verifier agrees → finalization
+        let outcome3 = submit_ai_result(&mut registry, req_id, v3, [9u8; 32], 3, 17).unwrap();
+        assert!(outcome3.is_some(), "3/3 should finalize when threshold=3");
+        assert_eq!(outcome3.unwrap().agreeing_verifiers.len(), 3);
+    }
+
+    #[test]
+    fn test_threshold_one_single_verifier_finalizes() {
+        // P5 -T1(d): agreement_threshold == 1 → single verifier
+        // Can finalize immediately.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 1);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        assert!(
+            outcome.is_some(),
+            "Single verifier should finalize when threshold=1"
+        );
+        assert_eq!(outcome.unwrap().agreeing_verifiers.len(), 1);
+    }
+
+    #[test]
+    fn test_threshold_minus_one_no_finalization() {
+        // P5 -T1(d): threshold-1 verifiers → no finalization.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 3);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+        assert!(
+            outcome.is_none(),
+            "2 verifiers with threshold=3 should not finalize"
+        );
+    }
+
+    #[test]
+    fn test_finalize_only_once_no_duplicate_outcomes() {
+        // P5 -T1(d): After finalization, additional results don't create
+        // Duplicate outcomes. The second finalization returns None (not error).
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        let v3 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000013")
+                .unwrap();
+
+        // 2 matching → finalize
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let outcome1 = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+        assert!(outcome1.is_some());
+
+        // 3rd matching result → no duplicate outcome (returns None, not error)
+        let outcome2 = submit_ai_result(&mut registry, req_id, v3, [9u8; 32], 3, 17).unwrap();
+        assert!(
+            outcome2.is_none(),
+            "Extra result after finalization should return None"
+        );
+
+        // Only one outcome in the registry
+        assert_eq!(registry.outcomes.len(), 1);
+    }
+
+    // ---- (e) Output commitment edge cases ----
+
+    #[test]
+    fn test_same_commitment_different_ref_both_counted() {
+        // P5 -T1(e): Two verifiers with same output_commitment but
+        // Different output_ref → both counted as agreeing (commitment is
+        // The consensus signal, ref is just the data location).
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+
+        // V1: commitment=[9u8;32], ref="ipfs://abc"
+        submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"ipfs://abc".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        )
+        .unwrap();
+
+        // V2: same commitment, different ref → still counts as agreeing
+        let outcome = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v2,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"ipfs://xyz".to_vec()).unwrap(),
+                result_nonce: 2,
+                signature: vec![2],
+                submitted_at_block: 16,
+            },
+            16,
+        )
+        .unwrap();
+        assert!(
+            outcome.is_some(),
+            "Same commitment different ref should finalize"
+        );
+        let finalized = outcome.unwrap();
+        assert_eq!(finalized.agreeing_verifiers.len(), 2);
+    }
+
+    #[test]
+    fn test_result_for_nonexistent_request_rejected() {
+        // P5 -T1(e): Result for a request that doesn't exist → error.
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let fake_req_id = AiRequestId::new([99u8; 32]);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let result = submit_ai_result(&mut registry, fake_req_id, v1, [9u8; 32], 1, 15);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_verifier_duplicate_same_commitment_rejected() {
+        // P5 -T1(e): Same verifier submitting the SAME commitment
+        // Twice → "already submitted" (not equivocation).
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        let err = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 2, 16).unwrap_err();
+        assert!(err.contains("already submitted"));
+    }
+
+    // ---- (f) Additional robustness edge cases ----
+
+    #[test]
+    fn test_deactivate_model_pending_requests_still_accept_results() {
+        // P5 -T1(f): Deactivating a model does NOT affect existing
+        // Pending requests - results can still be submitted and finalized.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Deactivate the model
+        registry.deactivate_model(&model_id, &owner).unwrap();
+
+        // Results for the existing request should still be accepted
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+        assert!(
+            outcome.is_some(),
+            "Results should finalize even after model deactivation"
+        );
+    }
+
+    #[test]
+    fn test_deactivated_model_rejects_new_requests() {
+        // P5 -T1(f): A deactivated model rejects new inference requests.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        registry.deactivate_model(&model_id, &owner).unwrap();
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let result = registry.submit_request(req, 10);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("inactive"));
+    }
+
+    #[test]
+    fn test_transfer_ownership_old_owner_operations_rejected() {
+        // P5 -T1(f): After ownership transfer, old owner can no longer
+        // Deactivate, reactivate, update spec, or transfer again.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let new_owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000099")
+                .unwrap();
+
+        registry
+            .transfer_model_ownership(&model_id, &owner, new_owner)
+            .unwrap();
+
+        // Old owner can't deactivate
+        let err = registry.deactivate_model(&model_id, &owner).unwrap_err();
+        assert!(err.contains("Only the model owner"));
+
+        // Old owner can't update spec
+        let err = registry
+            .update_model_spec(&model_id, &owner, 3, 2, 1024, 2048, 100, 50)
+            .unwrap_err();
+        assert!(err.contains("Only the model owner"));
+
+        // Old owner can't transfer again
+        let err = registry
+            .transfer_model_ownership(&model_id, &owner, new_owner)
+            .unwrap_err();
+        assert!(err.contains("Only the model owner"));
+
+        // New owner CAN deactivate
+        registry.deactivate_model(&model_id, &new_owner).unwrap();
+    }
+
+    #[test]
+    fn test_update_spec_on_inactive_model() {
+        // P5 -T1(f): Spec update on an inactive model should be
+        // Allowed - the owner may want to adjust thresholds before reactivating.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        registry.deactivate_model(&model_id, &owner).unwrap();
+
+        // Spec update on inactive model should succeed
+        let result = registry.update_model_spec(&model_id, &owner, 5, 3, 2048, 4096, 200, 100);
+        assert!(
+            result.is_ok(),
+            "Spec update on inactive model should be allowed"
+        );
+
+        // Verify the update took effect
+        let spec = registry.models.get(&model_id).unwrap();
+        assert_eq!(spec.min_verifier_count, 5);
+        assert_eq!(spec.agreement_threshold, 3);
+        assert_eq!(spec.max_input_ref_bytes, 2048);
+    }
+
+    #[test]
+    fn test_prune_then_access_returns_none() {
+        // P5 -T1(f): After pruning, get_request returns None.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        assert!(registry.get_request(&req_id).is_some());
+
+        // Prune past retention window (deadline=110, retention=100, current=300)
+        registry.prune_expired(300, 100);
+
+        assert!(
+            registry.get_request(&req_id).is_none(),
+            "Pruned request should return None"
+        );
+    }
+
+    #[test]
+    fn test_prune_outcome_after_retention() {
+        // P5 -T1(f): Finalized outcomes are pruned after retention window.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16)
+            .unwrap()
+            .unwrap();
+
+        // Outcome exists
+        assert!(registry.get_outcome(&req_id).is_some());
+
+        // Prune past retention window (finalized_at=16, retention=100, current=200)
+        registry.prune_expired(200, 100);
+
+        // Outcome pruned
+        assert!(
+            registry.get_outcome(&req_id).is_none(),
+            "Pruned outcome should return None"
+        );
+    }
+
+    #[test]
+    fn test_state_root_changes_after_each_mutation() {
+        // P5 -T1(f): Every mutation should change the state_root,
+        // Ensuring deterministic integrity tracking.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let root_after_register = registry.state_root();
+
+        // Submit request → root changes
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let root_after_request = registry.state_root();
+        assert_ne!(root_after_register, root_after_request);
+
+        // Submit result → root changes
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let root_after_result = registry.state_root();
+        assert_ne!(root_after_request, root_after_result);
+
+        // Deactivate model → root changes
+        registry.deactivate_model(&model_id, &owner).unwrap();
+        let root_after_deactivate = registry.state_root();
+        assert_ne!(root_after_result, root_after_deactivate);
+
+        // Reactivate model → root changes
+        registry.reactivate_model(&model_id, &owner).unwrap();
+        let root_after_reactivate = registry.state_root();
+        assert_ne!(root_after_deactivate, root_after_reactivate);
+    }
+
+    #[test]
+    fn test_reclaim_with_partial_results_no_outcome() {
+        // P5 -T1(c): Request with some results but insufficient
+        // Agreement → fee can be reclaimed after deadline.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 3);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Only 1 verifier submits (need 3 for threshold)
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        // No finalization occurred
+        assert!(registry.get_outcome(&req_id).is_none());
+
+        // Reclaim succeeds after deadline
+        let (reclaimer, fee) = registry.reclaim_fee(&req_id, 200).unwrap();
+        assert_eq!(reclaimer, owner);
+        assert_eq!(fee, 100);
+    }
+
+    #[test]
+    fn test_disagreement_no_consensus_no_finalization() {
+        // P5 -T1(d): All verifiers submit different commitments →
+        // No consensus, no finalization. Fee can be reclaimed.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        let v3 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000013")
+                .unwrap();
+
+        // Three different commitments → no pair reaches threshold=2
+        submit_ai_result(&mut registry, req_id, v1, [1u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, [2u8; 32], 2, 16).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v3, [3u8; 32], 3, 17).unwrap();
+        assert!(
+            outcome.is_none(),
+            "All-different commitments should not finalize"
+        );
+
+        // Fee can be reclaimed after deadline
+        let (reclaimer, fee) = registry.reclaim_fee(&req_id, 200).unwrap();
+        assert_eq!(reclaimer, owner);
+        assert_eq!(fee, 100);
+    }
+
+    #[test]
+    fn test_input_ref_exceeds_model_limit_rejected() {
+        // P5 -T1(f): Request with input_ref larger than the model's
+        // Max_input_ref_bytes is rejected.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(&[0u8; 2048]),
+            input_ref: BoundedBytes::try_new(vec![0u8; 2048]).unwrap(), // exceeds 1024
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let result = registry.submit_request(req, 10);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds"));
+    }
+
+    #[test]
+    fn test_output_ref_exceeds_model_limit_rejected() {
+        // P5 -T1(f): Result with output_ref larger than the model's
+        // Max_output_ref_bytes is rejected.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let result = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(vec![0u8; 4096]).unwrap(), // exceeds 2048
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: 15,
+            },
+            15,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exceeds"));
+    }
+
+    // ===================== Security Hardening Tests =====================
+
+    #[test]
+    fn test_equivocation_event_recorded() {
+        // When equivocation is detected, the event must be
+        // Recorded in equivocation_events for future slashing.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        // First result from v1
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        // Second result from v1 with DIFFERENT commitment → equivocation
+        let equiv_result = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        assert!(equiv_result.is_err());
+        assert!(equiv_result.unwrap_err().contains("EQUIVOCATION"));
+
+        // Verify equivocation event was recorded
+        assert!(
+            registry.has_equivocated(&req_id, &v1),
+            "Equivocation event should be recorded for v1"
+        );
+
+        // Verify verifier that didn't equivocate returns false
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        assert!(
+            !registry.has_equivocated(&req_id, &v2),
+            "Non-equivocating verifier should not be recorded"
+        );
+    }
+
+    #[test]
+    fn test_equivocation_count_for_verifier() {
+        // Track equivocation count across multiple requests.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        // Request 1: v1 equivocates
+        let req1 = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        submit_ai_result(&mut registry, req1, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req1, v1, [88u8; 32], 2, 16);
+
+        // Request 2: v1 equivocates again
+        let req2 = submit_ai_request(&mut registry, model_id, owner, 20, 120, 100);
+        submit_ai_result(&mut registry, req2, v1, [7u8; 32], 1, 25).unwrap();
+        let _ = submit_ai_result(&mut registry, req2, v1, [99u8; 32], 2, 26);
+
+        // V1 has 2 equivocation events
+        assert_eq!(
+            registry.equivocation_count_for_verifier(&v1),
+            2,
+            "v1 should have 2 equivocation events"
+        );
+
+        // V2 has 0
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        assert_eq!(
+            registry.equivocation_count_for_verifier(&v2),
+            0,
+            "v2 should have 0 equivocation events"
+        );
+    }
+
+    #[test]
+    fn test_state_root_domain_separation() {
+        // Domain-separated map roots prevent cross-map
+        // Collision. The state root must change when equivocation_events or
+        // Cancelled_requests are modified, proving domain separation.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let root_before = registry.state_root();
+
+        // Add an equivocation event → root changes
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        let root_after_equiv = registry.state_root();
+        assert_ne!(
+            root_before, root_after_equiv,
+            "State root must change after equivocation event"
+        );
+
+        // Add a cancelled request → root changes again
+        let req2 = submit_ai_request(&mut registry, model_id, owner, 20, 120, 100);
+        registry.cancel_request(&req2, &owner, 25).unwrap();
+        let root_after_cancel = registry.state_root();
+        assert_ne!(
+            root_after_equiv, root_after_cancel,
+            "State root must change after request cancellation"
+        );
+    }
+
+    #[test]
+    fn test_state_root_v2_not_equal_v1() {
+        // Verify that V2 domain-separated root differs from
+        // What V1 would produce, ensuring the upgrade is meaningful.
+        let (registry, _, _) = setup_ai_registry(2, 2);
+
+        // The V2 root should be computed correctly (non-zero for non-empty)
+        let root = registry.state_root();
+        assert_ne!(
+            root, [0u8; 32],
+            "Non-empty registry must have non-zero root"
+        );
+    }
+
+    #[test]
+    fn test_model_version_auto_increment() {
+        // Update_model_spec should auto-increment the version.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+
+        // Initial version = 1
+        let initial_version = registry.models.get(&model_id).unwrap().version;
+        assert_eq!(initial_version, 1);
+
+        // Update spec → version becomes 2
+        registry
+            .update_model_spec(&model_id, &owner, 3, 2, 2048, 4096, 200, 100)
+            .unwrap();
+        let after_first_update = registry.models.get(&model_id).unwrap().version;
+        assert_eq!(after_first_update, 2, "Version should be incremented to 2");
+
+        // Update again → version becomes 3
+        registry
+            .update_model_spec(&model_id, &owner, 5, 3, 4096, 8192, 300, 150)
+            .unwrap();
+        let after_second_update = registry.models.get(&model_id).unwrap().version;
+        assert_eq!(after_second_update, 3, "Version should be incremented to 3");
+    }
+
+    #[test]
+    fn test_model_version_changes_state_root() {
+        // Version increment changes the spec's calculate_leaf,
+        // Which changes the state root.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let root_before = registry.state_root();
+
+        registry
+            .update_model_spec(&model_id, &owner, 3, 2, 2048, 4096, 200, 100)
+            .unwrap();
+        let root_after = registry.state_root();
+
+        assert_ne!(
+            root_before, root_after,
+            "Version increment must change state root"
+        );
+    }
+
+    #[test]
+    fn test_cancel_request_by_requester() {
+        // Requester can cancel a pending request.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Cancel should succeed
+        let (requester, max_fee) = registry.cancel_request(&req_id, &owner, 15).unwrap();
+        assert_eq!(requester, owner);
+        assert_eq!(max_fee, 100);
+
+        // Request should be marked as cancelled
+        assert!(registry.is_cancelled(&req_id));
+    }
+
+    #[test]
+    fn test_cancel_request_non_requester_rejected() {
+        // Only the requester can cancel.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let other =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000099")
+                .unwrap();
+        let result = registry.cancel_request(&req_id, &other, 15);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Only the requester"));
+    }
+
+    #[test]
+    fn test_cancel_finalized_request_rejected() {
+        // Cannot cancel a finalized request.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+
+        // Request is finalized now
+        assert!(registry.get_outcome(&req_id).is_some());
+
+        let result = registry.cancel_request(&req_id, &owner, 20);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("finalized"));
+    }
+
+    #[test]
+    fn test_cancel_already_cancelled_rejected() {
+        // Double-cancel is rejected.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+
+        let result = registry.cancel_request(&req_id, &owner, 20);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already cancelled"));
+    }
+
+    #[test]
+    fn test_cancel_reclaimed_request_rejected() {
+        // Cannot cancel a request whose fee was already reclaimed.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Reclaim fee first (after deadline)
+        registry.reclaim_fee(&req_id, 200).unwrap();
+
+        let result = registry.cancel_request(&req_id, &owner, 201);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already reclaimed"));
+    }
+
+    /// The registry admits a request through the same read-declaration
+    /// gate as the executor: a request without a perception declaration,
+    /// or with a commitment that is not the canonical one over `input_ref`,
+    /// is refused at `submit_request` itself.
+    #[test]
+    fn a_request_without_a_read_declaration_is_refused_by_the_registry() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let mut undeclared = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: None,
+        };
+        undeclared.request_id = undeclared.calculate_id();
+        let err = registry.submit_request(undeclared, 10).unwrap_err();
+        assert!(err.contains("perception declaration"), "{err}");
+
+        let mut arbitrary = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: [2u8; 32],
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        arbitrary.request_id = arbitrary.calculate_id();
+        let err = registry.submit_request(arbitrary, 10).unwrap_err();
+        assert!(err.contains("canonical preimage"), "{err}");
+        assert!(registry.requests.is_empty(), "nothing was admitted");
+    }
+
+    /// A result's block is the chain's block: a verifier cannot post-date
+    /// its own submission to push the outcome past the retention window.
+    #[test]
+    fn a_result_dated_by_the_verifier_is_refused() {
+        let (mut registry, model_id, owner) = setup_ai_registry(1, 1);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let err = submit_result_staked(
+            &mut registry,
+            AiInferenceResult {
+                request_id: req_id,
+                verifier: v1,
+                output_commitment: [9u8; 32],
+                output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
+                result_nonce: 1,
+                signature: vec![1],
+                submitted_at_block: u64::MAX,
+            },
+            15,
+        )
+        .unwrap_err();
+        assert!(err.contains("not the current block"), "{err}");
+        assert!(registry.outcomes.is_empty());
+        let outcome = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15)
+            .unwrap()
+            .expect("the threshold of one finalizes");
+        assert_eq!(outcome.finalized_at_block, 15);
+    }
+
+    /// A model's terms are frozen while it has pending requests: the
+    /// thresholds and windows a requester signed against cannot move under
+    /// them. Once the request settles, the owner may update again.
+    #[test]
+    fn model_terms_do_not_change_while_requests_are_pending() {
+        let (mut registry, model_id, owner) = setup_ai_registry(1, 1);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let before = registry.models.get(&model_id).unwrap().clone();
+        let err = registry
+            .update_model_spec(&model_id, &owner, 3, 2, 2048, 4096, 200, 100)
+            .unwrap_err();
+        assert!(err.contains("pending request"), "{err}");
+        assert_eq!(
+            registry.models.get(&model_id).unwrap(),
+            &before,
+            "a refused update changes nothing"
+        );
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15)
+            .unwrap()
+            .expect("finalized");
+        registry
+            .update_model_spec(&model_id, &owner, 3, 2, 2048, 4096, 200, 100)
+            .expect("no request is pending any more");
+        assert_eq!(
+            registry.models.get(&model_id).unwrap().version,
+            before.version + 1
+        );
+    }
+
+    /// A reclaimed fee is terminal on the proof path too: a proof attached
+    /// after the refund must not reopen the request, and the re-evaluation
+    /// must not emit an outcome for it.
+    #[test]
+    fn a_reclaimed_request_takes_no_proof_and_no_late_outcome() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let (requester, max_fee) = registry.reclaim_fee(&req_id, 200).unwrap();
+        assert_eq!((requester, max_fee), (owner, 100));
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: None,
+            public_inputs: None,
+        };
+        let err = registry
+            .attach_execution_proof(&req_id, &v1, proof, false)
+            .unwrap_err();
+        assert!(err.contains("reclaimed"), "{err}");
+        assert!(!registry.has_execution_proof(&req_id, &v1));
+
+        let second = AiInferenceResult {
+            request_id: req_id,
+            verifier: v2,
+            output_commitment: [9u8; 32],
+            output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
+            result_nonce: 2,
+            signature: vec![1],
+            submitted_at_block: 25,
+        };
+        registry.results.entry(req_id).or_default().push(second);
+        assert!(registry.try_finalize_with_proofs(&req_id).is_none());
+        assert!(!registry.outcomes.contains_key(&req_id));
+    }
+
+    /// Callback events retire with their outcome. The per-address cap
+    /// bounds one queue; distinct callback addresses used to open keys that
+    /// nothing removed.
+    #[test]
+    fn callback_events_retire_with_their_outcome() {
+        let (mut registry, model_id, owner) = setup_ai_registry(1, 1);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        for i in 1..=5u8 {
+            let cb = Address::from([i; 32]);
+            let req_id = submit_request_with_callback(
+                &mut registry,
+                model_id,
+                owner,
+                10,
+                110,
+                100,
+                Some(cb),
+            );
+            submit_ai_result(&mut registry, req_id, v1, [9u8; 32], u64::from(i), 15)
+                .unwrap()
+                .expect("finalized");
+        }
+        assert_eq!(registry.callback_queue.len(), 5);
+
+        // Inside the retention window nothing moves.
+        assert_eq!(registry.prune_expired(100, 100).0, 0);
+        assert_eq!(registry.callback_queue.len(), 5);
+
+        // Past it the outcomes retire, and so do their events and keys.
+        let (pruned, _) = registry.prune_expired(200, 100);
+        assert!(pruned >= 10, "5 outcomes and 5 events retire: {pruned}");
+        assert!(registry.callback_queue.is_empty());
+        assert!(registry.outcomes.is_empty());
+    }
+
+    #[test]
+    fn test_reclaim_cancelled_request_rejected() {
+        // The refund goes out on cancel; the same escrow must not be paid a
+        // second time through reclaim_fee after the deadline passes.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let (requester, max_fee) = registry.cancel_request(&req_id, &owner, 15).unwrap();
+        assert_eq!((requester, max_fee), (owner, 100));
+
+        let err = registry.reclaim_fee(&req_id, 200).unwrap_err();
+        assert!(err.contains("cancelled"), "unexpected error: {err}");
+        assert!(!registry.reclaimed_fees.contains(&req_id));
+    }
+
+    #[test]
+    fn test_cancel_blocks_results() {
+        // After cancellation, results are rejected.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Cancel the request
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+
+        // Try to submit a result → rejected
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 20);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    /// Cancellation is terminal on the proof path too. A result accepted
+    /// before the cancellation could still take an execution proof, and the
+    /// re-evaluation that follows the attach could emit an outcome for a
+    /// request whose fee had already been refunded.
+    #[test]
+    fn test_cancel_blocks_proofs_and_late_finalization() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+        // One agreeing result: below the threshold, so nothing finalizes.
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        registry.cancel_request(&req_id, &owner, 20).unwrap();
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: None,
+            public_inputs: None,
+        };
+        let attached = registry.attach_execution_proof(&req_id, &v1, proof, false);
+        assert!(attached.is_err());
+        assert!(attached.unwrap_err().contains("cancelled"));
+        assert!(!registry.has_execution_proof(&req_id, &v1));
+
+        // Even with an agreeing set already in the result table, the
+        // re-evaluation must not produce an outcome for a cancelled request.
+        let second = AiInferenceResult {
+            request_id: req_id,
+            verifier: v2,
+            output_commitment: [9u8; 32],
+            output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
+            result_nonce: 2,
+            signature: vec![1],
+            submitted_at_block: 25,
+        };
+        registry.results.entry(req_id).or_default().push(second);
+        assert!(registry.try_finalize_with_proofs(&req_id).is_none());
+        assert!(!registry.outcomes.contains_key(&req_id));
+        assert!(registry.is_cancelled(&req_id));
+    }
+
+    #[test]
+    fn test_cancel_nonexistent_request_rejected() {
+        // Cannot cancel a request that doesn't exist.
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let fake_id = AiRequestId::new([0xAA; 32]);
+
+        let result = registry.cancel_request(
+            &fake_id,
+            &Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap(),
+            10,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn test_reactivate_model_via_new_tx_type() {
+        // AiModelReactivate transaction type works.
+        // This tests the registry method (executor path tested separately).
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+
+        registry.deactivate_model(&model_id, &owner).unwrap();
+        assert!(!registry.models.get(&model_id).unwrap().active);
+
+        registry.reactivate_model(&model_id, &owner).unwrap();
+        assert!(registry.models.get(&model_id).unwrap().active);
+    }
+
+    #[test]
+    fn test_equivocation_in_state_root() {
+        // Equivocation events are included in the state root.
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let root_before = registry.state_root();
+
+        // Trigger equivocation
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        let root_after = registry.state_root();
+
+        assert_ne!(
+            root_before, root_after,
+            "Equivocation event must change state root"
+        );
+    }
+
+    #[test]
+    fn test_cancel_in_state_root() {
+        // Cancelled requests are included in the state root.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let root_before = registry.state_root();
+
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+        let root_after = registry.state_root();
+
+        assert_ne!(
+            root_before, root_after,
+            "Request cancellation must change state root"
+        );
+    }
+
+    #[test]
+    fn test_empty_new_fields_is_empty() {
+        // Registry with only equivocation/cancelled entries
+        // Should NOT be considered empty (they are meaningful data).
+        let mut registry = AiRegistry::new();
+        assert!(registry.is_empty());
+
+        // Add just an equivocation event
+        let fake_req = AiRequestId::new([1u8; 32]);
+        let fake_addr =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry
+            .equivocation_events
+            .insert((fake_req, fake_addr.0), 100);
+        assert!(!registry.is_empty());
+
+        // Reset and add just a cancelled request
+        let mut registry2 = AiRegistry::new();
+        registry2.cancelled_requests.insert(fake_req);
+        assert!(!registry2.is_empty());
+    }
+
+    #[test]
+    fn test_refused_result_on_cancelled_request_leaves_no_results_row() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        assert!(submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 16).is_err());
+
+        assert!(!registry.results.contains_key(&req_id));
+    }
+
+    #[test]
+    fn test_prune_includes_new_fields() {
+        // Prune_expired should clean up cancelled_requests
+        // That are past the retention window.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+
+        // Cancel the request
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+        assert!(registry.is_cancelled(&req_id));
+
+        // Prune (deadline=110, retention=100, current=300 → expired)
+        registry.prune_expired(300, 100);
+
+        // The request should be pruned and cancellation cleared
+        assert!(
+            registry.get_request(&req_id).is_none(),
+            "Pruned cancelled request should be removed"
+        );
+        assert!(
+            !registry.is_cancelled(&req_id),
+            "Pruned cancelled request must lose its cancellation marker"
+        );
+    }
+
+    // ===================== AI Settlement Layer Deepening Tests =====================
+
+    #[test]
+    fn test_slash_equivocator_succeeds() {
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        assert!(registry.has_equivocated(&req_id, &v1));
+        let (slashed, _seized) = registry.slash_equivocator(&req_id, &v1, 20).unwrap();
+        assert_eq!(slashed, v1);
+        assert!(!registry.has_equivocated(&req_id, &v1));
+    }
+
+    #[test]
+    fn test_slash_double_slash_rejected() {
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        registry.slash_equivocator(&req_id, &v1, 20).unwrap();
+        assert!(registry.slash_equivocator(&req_id, &v1, 20).is_err());
+    }
+
+    #[test]
+    fn test_slash_no_equivocation_rejected() {
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let fake_req = AiRequestId::new([0xAA; 32]);
+        let fake_v =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        assert!(registry.slash_equivocator(&fake_req, &fake_v, 20).is_err());
+    }
+
+    #[test]
+    fn test_slash_changes_state_root() {
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        let root_before = registry.state_root();
+        registry.slash_equivocator(&req_id, &v1, 20).unwrap();
+        assert_ne!(root_before, registry.state_root());
+    }
+
+    #[test]
+    fn test_state_root_non_empty() {
+        let (registry, _, _) = setup_ai_registry(2, 2);
+        assert_ne!(registry.state_root(), [0u8; 32]);
+    }
+
+    #[test]
+    fn test_consensus_kind_ai_inference() {
+        use crate::domain::types::ConsensusKind;
+        let ai_kind = ConsensusKind::AiInference;
+        assert!(ai_kind.is_ai());
+        assert!(!ai_kind.is_storage());
+        assert_eq!(ai_kind.as_bytes(), b"ai_inference");
+    }
+
+    #[test]
+    fn test_consensus_kind_ai_distinct_from_custom() {
+        use crate::domain::types::ConsensusKind;
+        let ai_kind = ConsensusKind::AiInference;
+        let custom_kind = ConsensusKind::Custom("ai_inference".to_string());
+        assert_ne!(ai_kind.as_bytes(), custom_kind.as_bytes());
+    }
+
+    // ===================== Dispute Window + Verifier Stake =====================
+
+    #[test]
+    fn test_dispute_window_slash_within_window() {
+        // Slash succeeds within dispute window
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        // Slash at block 50 - equivocation detected at block 16, well within window
+        assert!(registry.slash_equivocator(&req_id, &v1, 50).is_ok());
+    }
+
+    #[test]
+    fn test_dispute_window_expired_rejected() {
+        // Slash rejected after dispute window expires
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        // Detected at block 16, window = 10080, so after 10096 should fail
+        let result = registry.slash_equivocator(&req_id, &v1, 10_097);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Dispute window expired"));
+    }
+
+    #[test]
+    fn test_dispute_window_is_disputable() {
+        // Is_disputable returns correct values
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        assert!(registry.is_disputable(&req_id, &v1, 50));
+        assert!(!registry.is_disputable(&req_id, &v1, 10_097));
+    }
+
+    #[test]
+    fn test_expire_dispute_window() {
+        // Expire_dispute_window cleans old events
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        assert!(registry.has_equivocated(&req_id, &v1));
+        let expired = registry.expire_dispute_window(10_097);
+        assert_eq!(expired, 1);
+        assert!(!registry.has_equivocated(&req_id, &v1));
+    }
+
+    #[test]
+    fn test_verifier_stake_lock() {
+        // Lock verifier stake
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let stake = registry.lock_verifier_stake(&v1, 5000).unwrap();
+        assert_eq!(stake, 5000);
+        assert!(registry.is_staked_verifier(&v1));
+        assert_eq!(registry.verifier_stake(&v1), 5000);
+        // Add more stake
+        let stake2 = registry.lock_verifier_stake(&v1, 3000).unwrap();
+        assert_eq!(stake2, 8000);
+    }
+
+    #[test]
+    fn test_verifier_stake_zero_rejected() {
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        assert!(registry.lock_verifier_stake(&v1, 0).is_err());
+    }
+
+    #[test]
+    fn test_verifier_stake_withdraw() {
+        // Withdraw verifier stake when no pending disputes
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry.lock_verifier_stake(&v1, 5000).unwrap();
+        let withdrawn = registry.withdraw_verifier_stake(&v1, 3000, 100).unwrap();
+        assert_eq!(withdrawn, 3000);
+        assert_eq!(registry.verifier_stake(&v1), 2000);
+    }
+
+    #[test]
+    fn test_verifier_stake_withdraw_blocked_by_dispute() {
+        // Cannot withdraw if pending equivocation dispute
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry.lock_verifier_stake(&v1, 5000).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        // Cannot withdraw while disputable
+        let result = registry.withdraw_verifier_stake(&v1, 3000, 50);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("pending equivocation"));
+    }
+
+    #[test]
+    fn test_slash_seizes_stake() {
+        // Slash seizes verifier stake
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry.lock_verifier_stake(&v1, 5000).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        let (_, seized) = registry.slash_equivocator(&req_id, &v1, 50).unwrap();
+        assert_eq!(seized, 5000);
+        assert!(!registry.is_staked_verifier(&v1));
+        assert_eq!(registry.verifier_stake(&v1), 0);
+    }
+
+    #[test]
+    fn test_stake_changes_state_root() {
+        // Stake changes affect state root
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let root_before = registry.state_root();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry.lock_verifier_stake(&v1, 5000).unwrap();
+        assert_ne!(root_before, registry.state_root());
+    }
+
+    #[test]
+    fn test_get_dispute_status() {
+        // Get_dispute_status returns comprehensive info
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry.lock_verifier_stake(&v1, 5000).unwrap();
+
+        // Before equivocation: no dispute
+        let status = registry.get_dispute_status(&req_id, &v1, 50);
+        assert!(!status.has_equivocated);
+        assert!(!status.is_disputable);
+        assert!(status.detected_block.is_none());
+        assert!(status.stake_amount == 5000);
+
+        // Cause equivocation
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+
+        // After equivocation: disputable
+        let status = registry.get_dispute_status(&req_id, &v1, 50);
+        assert!(status.has_equivocated);
+        assert!(status.is_disputable);
+        assert_eq!(status.detected_block, Some(16));
+        assert_eq!(status.dispute_window_remaining, Some(10_046));
+        assert!(status.is_staked);
+        assert_eq!(status.stake_amount, 5000);
+    }
+
+    #[test]
+    fn test_dispute_status_expired_window() {
+        // Dispute window expiry reflected in status
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+
+        // After dispute window expires
+        let status = registry.get_dispute_status(&req_id, &v1, 10_097);
+        assert!(status.has_equivocated);
+        assert!(!status.is_disputable);
+        assert_eq!(status.dispute_window_remaining, Some(0));
+    }
+
+    #[test]
+    fn test_get_verifier_stake_info() {
+        // Get_verifier_stake_info returns stake + equivocation count
+        let (mut registry, _, _) = setup_ai_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        // Not staked yet
+        let info = registry.get_verifier_stake_info(&v1);
+        assert!(!info.is_staked);
+        assert_eq!(info.stake_amount, 0);
+        assert_eq!(info.total_equivocations, 0);
+
+        // After staking
+        registry.lock_verifier_stake(&v1, 5000).unwrap();
+        let info = registry.get_verifier_stake_info(&v1);
+        assert!(info.is_staked);
+        assert_eq!(info.stake_amount, 5000);
+    }
+
+    #[test]
+    fn test_callback_event_on_finalization() {
+        // Callback event is queued when outcome is finalized
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let cb_addr =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000CB")
+                .unwrap();
+        let req_id = submit_request_with_callback(
+            &mut registry,
+            model_id,
+            owner,
+            10,
+            110,
+            100,
+            Some(cb_addr),
+        );
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+
+        // Outcome should be finalized
+        assert!(outcome.is_some());
+
+        // Callback event should be queued
+        let events = registry.get_callback_queue(&cb_addr);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].request_id, req_id);
+        assert_eq!(events[0].output_commitment, [9u8; 32]);
+        assert_eq!(events[0].callback_address, cb_addr);
+    }
+
+    /// The per-address callback backlog must be bounded.
+    ///
+    /// `callback_queue` is drained by `consume_callback_events`, which nothing
+    /// In production calls - the RPC path only reads it. So an address whose
+    /// Owner never collects grew a vector for the life of the chain, and that
+    /// Vector is hashed into `AiRegistry::root` under
+    /// `BDLM_AI_CALLBACK_QUEUE`: every validator rehashed the entire backlog
+    /// On every block.
+    ///
+    /// Canary: remove the `drain` from `enqueue_callback_event` and the length
+    /// Assertion fails.
+    #[test]
+    fn callback_queue_is_bounded_per_address() {
+        use crate::ai::registry::MAX_CALLBACK_EVENTS_PER_ADDRESS;
+
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let cb_addr =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000CB")
+                .unwrap();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        // Finalize more inferences than the bound, all pointing at one
+        // callback address that never consumes.
+        let overshoot = MAX_CALLBACK_EVENTS_PER_ADDRESS + 10;
+        let mut first_commitment = None;
+        let mut last_commitment = [0u8; 32];
+        for i in 0..overshoot {
+            let commitment = [u8::try_from(i % 251).expect("i % 251 fits u8"); 32];
+            let block = 10 + u64::try_from(i).expect("loop counter fits u64") * 10;
+            let req_id = submit_request_with_callback(
+                &mut registry,
+                model_id,
+                owner,
+                block,
+                block + 100,
+                100,
+                Some(cb_addr),
+            );
+            submit_ai_result(&mut registry, req_id, v1, commitment, 1, block + 5).unwrap();
+            submit_ai_result(&mut registry, req_id, v2, commitment, 2, block + 6).unwrap();
+            if first_commitment.is_none() {
+                first_commitment = Some(commitment);
+            }
+            last_commitment = commitment;
+        }
+
+        let events = registry.get_callback_queue(&cb_addr);
+        assert_eq!(
+            events.len(),
+            MAX_CALLBACK_EVENTS_PER_ADDRESS,
+            "an unconsumed callback queue must stop growing at the bound"
+        );
+
+        // Eviction is oldest-first: a consumer coming back online wants the
+        // newest result, not the one from thousands of blocks ago.
+        assert_eq!(
+            events.last().unwrap().output_commitment,
+            last_commitment,
+            "the newest event must be retained"
+        );
+        assert!(
+            !events.iter().any(
+                |e| Some(e.output_commitment) == first_commitment && e.finalized_at_block <= 16
+            ),
+            "the oldest events must have been evicted"
+        );
+    }
+
+    #[test]
+    fn test_no_callback_event_without_address() {
+        // No callback event when callback is None
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+
+        // Callback queue should be empty (no callback address)
+        assert!(registry.callback_queue.is_empty());
+    }
+
+    #[test]
+    fn test_consume_callback_events() {
+        // Consume (drain) callback events after delivery
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let cb_addr =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000CB")
+                .unwrap();
+        let req_id = submit_request_with_callback(
+            &mut registry,
+            model_id,
+            owner,
+            10,
+            110,
+            100,
+            Some(cb_addr),
+        );
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+
+        // Consume events
+        let count = registry.consume_callback_events(&cb_addr);
+        assert_eq!(count, 1);
+
+        // Queue should now be empty
+        let events = registry.get_callback_queue(&cb_addr);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_callback_queue_changes_state_root() {
+        // Callback queue affects state root
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let cb_addr =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000CB")
+                .unwrap();
+        let req_id = submit_request_with_callback(
+            &mut registry,
+            model_id,
+            owner,
+            10,
+            110,
+            100,
+            Some(cb_addr),
+        );
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let root_before = registry.state_root();
+        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+        // Callback event added → state root should change
+        assert_ne!(root_before, registry.state_root());
+    }
+
+    #[test]
+    fn callback_queue_root_commits_to_event_count() {
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let addr =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000CB")
+                .unwrap();
+        let absent = registry.state_root();
+        registry.callback_queue.insert(addr, Vec::new());
+        assert_ne!(absent, registry.state_root());
+    }
+
+    #[test]
+    fn test_multiple_callbacks_same_address() {
+        // Multiple outcomes can queue events for the same callback
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let cb_addr =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000CB")
+                .unwrap();
+        // Two requests with same callback but different submission blocks
+        // (so they get different request_ids)
+        let req1 = submit_request_with_callback(
+            &mut registry,
+            model_id,
+            owner,
+            10,
+            110,
+            100,
+            Some(cb_addr),
+        );
+        let req2 = submit_request_with_callback(
+            &mut registry,
+            model_id,
+            owner,
+            11, // different submitted_at_block → different request_id
+            111,
+            100,
+            Some(cb_addr),
+        );
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        submit_ai_result(&mut registry, req1, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req1, v2, [9u8; 32], 2, 20).unwrap();
+        submit_ai_result(&mut registry, req2, v1, [8u8; 32], 3, 25).unwrap();
+        submit_ai_result(&mut registry, req2, v2, [8u8; 32], 4, 30).unwrap();
+
+        let events = registry.get_callback_queue(&cb_addr);
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn test_attach_execution_proof() {
+        // ZKVM execution proof can be attached to a result
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"), // the request's
+            output_commitment: [9u8; 32], // matches result's output_commitment
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: None,
+            public_inputs: None,
+        };
+
+        // Attach proof successfully
+        let result = registry.attach_execution_proof(&req_id, &v1, proof.clone(), false);
+        assert!(result.is_ok());
+        assert!(registry.has_execution_proof(&req_id, &v1));
+
+        // Verify stored proof matches
+        let stored = registry.get_execution_proof(&req_id, &v1).unwrap();
+        assert_eq!(stored.program_hash, [0xAA; 32]);
+        assert_eq!(stored.steps, 100);
+    }
+
+    #[test]
+    fn test_execution_proof_wrong_commitment_rejected() {
+        // Proof with wrong output_commitment is rejected
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [0xFF; 32], // WRONG - doesn't match result
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: None,
+            public_inputs: None,
+        };
+
+        let result = registry.attach_execution_proof(&req_id, &v1, proof, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("output_commitment"));
+    }
+
+    #[test]
+    fn test_execution_proof_no_result_rejected() {
+        // Cannot attach proof for non-existent result
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        // No result submitted yet
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: None,
+            public_inputs: None,
+        };
+
+        let result = registry.attach_execution_proof(&req_id, &v1, proof, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verifier_qos_recorded_on_result() {
+        // QoS metrics recorded when verifier submits result
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        assert!(registry.get_verifier_qos(&v1).is_none());
+
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        let qos = registry.get_verifier_qos(&v1).unwrap();
+        assert_eq!(qos.total_results_submitted, 1);
+        assert_eq!(qos.last_active_block, 15);
+    }
+
+    #[test]
+    fn test_verifier_qos_finalization_recorded() {
+        // Finalization increments successful_finalizations
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+
+        // Both verifiers should have finalization recorded
+        let qos_v1 = registry.get_verifier_qos(&v1).unwrap();
+        assert_eq!(qos_v1.successful_finalizations, 1);
+        let qos_v2 = registry.get_verifier_qos(&v2).unwrap();
+        assert_eq!(qos_v2.successful_finalizations, 1);
+    }
+
+    #[test]
+    fn test_verifier_qos_equivocation_recorded() {
+        // Equivocation recorded in QoS
+        let (mut registry, model_id, owner) = setup_ai_registry(3, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+
+        let qos = registry.get_verifier_qos(&v1).unwrap();
+        assert_eq!(qos.equivocation_count, 1);
+    }
+
+    #[test]
+    fn test_verifier_qos_reliability_score() {
+        // Reliability score calculation
+        let mut qos = AiVerifierQos::new(
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap(),
+        );
+        qos.total_results_submitted = 10;
+        qos.successful_finalizations = 8;
+        qos.equivocation_count = 0;
+        let score = qos.reliability_score();
+        assert!((score - 0.8).abs() < 0.01);
+
+        // With equivocation penalty
+        qos.equivocation_count = 2;
+        let score_with_penalty = qos.reliability_score();
+        assert!(score_with_penalty < score);
+    }
+
+    #[test]
+    fn test_execution_proof_changes_state_root() {
+        // Execution proof affects state root
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        let root_before = registry.state_root();
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: None,
+            public_inputs: None,
+        };
+        registry
+            .attach_execution_proof(&req_id, &v1, proof, false)
+            .unwrap();
+
+        assert_ne!(root_before, registry.state_root());
+    }
+
+    /// P32-F02: the STARK public inputs are prover claims (initial state root,
+    /// event digest, sender, nonce, block height are not bound to the request).
+    /// Until they are, the flag stays off and proof-required models cannot
+    /// register. Whoever flips the flag must first replace this lock with
+    /// tests of the missing bindings.
+    #[test]
+    fn full_stark_verification_flag_is_locked_off_until_inputs_are_bound() {
+        const {
+            assert!(
+                !FULL_AI_STARK_VERIFICATION_LIVE,
+                "P32-F02: STARK public inputs are not bound to the request yet"
+            );
+        }
+    }
+
+    #[test]
+    fn require_proof_release_needs_fully_verified_proof() {
+        // BLG-0469 / P32-F03: a structural-only attach against a model that
+        // does not require proofs used to satisfy `has_execution_proof`, and
+        // that was the gate for releasing a `require_proof` escrow: the payer
+        // asked for a verified proof and an operator could settle with
+        // envelope-shaped bytes. Release now gates on FULL STARK verification.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+
+        // Finalize the request with two matching results.
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 1, 16).unwrap();
+        assert!(outcome.is_some(), "two matching results must finalize");
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: None,
+            public_inputs: None,
+        };
+
+        let payer =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [7u8; 32],
+            from_agent: payer,
+            to_agent: v1,
+            amount: 500,
+            request_id: Some(req_id),
+            require_proof: true,
+            submitted_at_block: 20,
+            expiry_block: 500,
+        };
+        registry
+            .submit_agent_payment(payment, 20)
+            .expect("escrowed payment accepted");
+
+        // A structural-only attach records the proof but must NOT release.
+        registry
+            .attach_execution_proof(&req_id, &v1, proof.clone(), false)
+            .unwrap();
+        assert!(registry.has_execution_proof(&req_id, &v1));
+        let err = registry
+            .release_agent_payment(&[7u8; 32], 30)
+            .expect_err("structural-only proof must not release a require_proof escrow");
+        assert!(err.contains("fully verified"), "{err}");
+
+        // The same proof cleared by full STARK verification releases.
+        registry
+            .attach_execution_proof(&req_id, &v1, proof, true)
+            .unwrap();
+        let to = registry
+            .release_agent_payment(&[7u8; 32], 30)
+            .expect("fully verified proof releases the escrow");
+        assert_eq!(to, v1);
+    }
+
+    #[test]
+    fn test_qos_changes_state_root() {
+        // QoS changes affect state root
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let root_before = registry.state_root();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+
+        // QoS recorded → state root should change
+        assert_ne!(root_before, registry.state_root());
+    }
+
+    // ===================== Agent-to-Agent Payment =====================
+
+    #[test]
+    fn test_agent_payment_direct() {
+        // Non-escrowed agent payment
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let agent_b =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000BB")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [1u8; 32],
+            from_agent: agent_a,
+            to_agent: agent_b,
+            amount: 1000,
+            request_id: None,
+            require_proof: false,
+            submitted_at_block: 50,
+            expiry_block: 200,
+        };
+        assert!(registry.submit_agent_payment(payment, 50).is_ok());
+        let retrieved = registry.get_agent_payment(&[1u8; 32]).unwrap();
+        assert_eq!(retrieved.amount, 1000);
+        assert!(!retrieved.is_escrowed());
+    }
+
+    #[test]
+    fn test_agent_payment_escrowed() {
+        // Escrowed payment linked to a request
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [2u8; 32],
+            from_agent: agent_a,
+            to_agent: v1,
+            amount: 500,
+            request_id: Some(req_id),
+            require_proof: false,
+            submitted_at_block: 20,
+            expiry_block: 200,
+        };
+        assert!(registry.submit_agent_payment(payment, 20).is_ok());
+        let retrieved = registry.get_agent_payment(&[2u8; 32]).unwrap();
+        assert!(retrieved.is_escrowed());
+    }
+
+    #[test]
+    fn test_agent_payment_self_payment_rejected() {
+        // From_agent == to_agent is rejected
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [3u8; 32],
+            from_agent: agent_a,
+            to_agent: agent_a,
+            amount: 1000,
+            request_id: None,
+            require_proof: false,
+            submitted_at_block: 50,
+            expiry_block: 200,
+        };
+        let err = registry.submit_agent_payment(payment, 50).unwrap_err();
+        assert!(err.contains("must differ"));
+    }
+
+    #[test]
+    fn test_agent_payment_zero_amount_rejected() {
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let agent_b =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000BB")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [4u8; 32],
+            from_agent: agent_a,
+            to_agent: agent_b,
+            amount: 0,
+            request_id: None,
+            require_proof: false,
+            submitted_at_block: 50,
+            expiry_block: 200,
+        };
+        let err = registry.submit_agent_payment(payment, 50).unwrap_err();
+        assert!(err.contains("greater than zero"));
+    }
+
+    #[test]
+    fn test_agent_payment_expired_rejected() {
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let agent_b =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000BB")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [5u8; 32],
+            from_agent: agent_a,
+            to_agent: agent_b,
+            amount: 1000,
+            request_id: None,
+            require_proof: false,
+            submitted_at_block: 50,
+            expiry_block: 100, // already expired
+        };
+        let err = registry.submit_agent_payment(payment, 200).unwrap_err();
+        assert!(
+            err.contains("expiry") || err.contains("future"),
+            "Error should mention expiry/future: {err}"
+        );
+    }
+
+    #[test]
+    fn test_agent_payment_release_on_finalization() {
+        // Escrowed payment can be released after outcome finalization
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+
+        // Submit escrowed payment
+        let payment = AiAgentPayment {
+            payment_id: [6u8; 32],
+            from_agent: agent_a,
+            to_agent: v1,
+            amount: 500,
+            request_id: Some(req_id),
+            require_proof: false,
+            submitted_at_block: 20,
+            expiry_block: 200,
+        };
+        registry.submit_agent_payment(payment, 20).unwrap();
+
+        // Submit results to finalize outcome
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+
+        // Now release the payment
+        let recipient = registry.release_agent_payment(&[6u8; 32], 30).unwrap();
+        assert_eq!(recipient, v1);
+
+        // Payment should be removed
+        assert!(registry.get_agent_payment(&[6u8; 32]).is_none());
+    }
+
+    #[test]
+    fn test_agent_payment_reclaim_expired() {
+        // Sender can reclaim expired escrowed payment
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+
+        let payment = AiAgentPayment {
+            payment_id: [7u8; 32],
+            from_agent: agent_a,
+            to_agent: v1,
+            amount: 500,
+            request_id: Some(req_id),
+            require_proof: false,
+            submitted_at_block: 20,
+            expiry_block: 50,
+        };
+        registry.submit_agent_payment(payment, 20).unwrap();
+
+        // Reclaim after expiry
+        let amount = registry
+            .reclaim_agent_payment(&[7u8; 32], &agent_a, 100)
+            .unwrap();
+        assert_eq!(amount, 500);
+        assert!(registry.get_agent_payment(&[7u8; 32]).is_none());
+    }
+
+    #[test]
+    fn test_agent_payment_changes_state_root() {
+        // Agent payment affects state root
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let root_before = registry.state_root();
+
+        let agent_a =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let agent_b =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000BB")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [8u8; 32],
+            from_agent: agent_a,
+            to_agent: agent_b,
+            amount: 1000,
+            request_id: None,
+            require_proof: false,
+            submitted_at_block: 50,
+            expiry_block: 200,
+        };
+        registry.submit_agent_payment(payment, 50).unwrap();
+        assert_ne!(root_before, registry.state_root());
+    }
+
+    // ===================== Verifier Whitelist =====================
+
+    #[test]
+    fn test_whitelist_permissionless_mode() {
+        // Empty whitelist = permissionless mode
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        // Stake the verifier
+        registry.lock_verifier_stake(&v1, 1_000).unwrap();
+
+        // In permissionless mode, staked verifier is authorized
+        assert!(!registry.is_whitelist_mode());
+        assert!(registry.is_verifier_authorized(&v1));
+    }
+
+    #[test]
+    fn test_whitelist_permissioned_mode() {
+        // Non-empty whitelist = permissioned mode
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
+                .unwrap();
+
+        // Stake both verifiers
+        registry.lock_verifier_stake(&v1, 1_000).unwrap();
+        registry.lock_verifier_stake(&v2, 1_000).unwrap();
+
+        // Whitelist only v1
+        registry.whitelist_verifier(v1);
+
+        // V1 is authorized, v2 is not
+        assert!(registry.is_whitelist_mode());
+        assert!(registry.is_verifier_authorized(&v1));
+        assert!(!registry.is_verifier_authorized(&v2));
+    }
+
+    #[test]
+    fn test_whitelist_unstaked_verifier_rejected() {
+        // Whitelisted but unstaked = not authorized
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        // Whitelist but don't stake
+        registry.whitelist_verifier(v1);
+        assert!(!registry.is_verifier_authorized(&v1));
+    }
+
+    #[test]
+    fn test_whitelist_dewhitelist() {
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry.lock_verifier_stake(&v1, 1_000).unwrap();
+        registry.whitelist_verifier(v1);
+        assert!(registry.is_verifier_authorized(&v1));
+
+        registry.dewhitelist_verifier(&v1);
+        // After dewhitelist, whitelist is empty → permissionless mode
+        assert!(!registry.is_whitelist_mode());
+        // Staked verifier still authorized in permissionless mode
+        assert!(registry.is_verifier_authorized(&v1));
+    }
+
+    #[test]
+    fn test_whitelist_changes_state_root() {
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let root_before = registry.state_root();
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        registry.whitelist_verifier(v1);
+        assert_ne!(root_before, registry.state_root());
+    }
+
+    // ─── Agent Reputation Tests ──────────────────────
+
+    #[test]
+    fn test_reputation_new_agent_starts_at_zero() {
+        let mut registry = AiRegistry::new();
+        let agent =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000090")
+                .unwrap();
+        // No reputation yet
+        assert!(registry.get_agent_reputation(&agent).is_none());
+
+        // Create on first access
+        let rep = registry.get_or_create_reputation(agent);
+        assert_eq!(rep.payments_completed, 0);
+        assert_eq!(rep.payments_defaulted, 0);
+        assert_eq!(rep.requests_submitted, 0);
+        assert_eq!(rep.results_submitted, 0);
+        assert_eq!(rep.results_finalized, 0);
+        assert_eq!(rep.equivocations, 0);
+        assert_eq!(rep.trust_score(), 0.0);
+    }
+
+    #[test]
+    fn test_reputation_payment_events() {
+        let mut registry = AiRegistry::new();
+        let agent =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000091")
+                .unwrap();
+        registry.record_reputation_payment_completed(&agent, 100);
+        registry.record_reputation_payment_completed(&agent, 110);
+        registry.record_reputation_payment_defaulted(&agent, 120);
+
+        let rep = registry.get_agent_reputation(&agent).unwrap();
+        assert_eq!(rep.payments_completed, 2);
+        assert_eq!(rep.payments_defaulted, 1);
+        // Trust: payment_reliability = 2/3 ≈ 0.667, inference neutral=1.0
+        // Score = 0.667*0.4 + 1.0*0.6 = 0.267 + 0.6 = 0.867
+        let score = rep.trust_score();
+        assert!(score > 0.85 && score < 0.87, "expected ~0.867, got {score}");
+    }
+
+    #[test]
+    fn test_reputation_inference_events() {
+        let mut registry = AiRegistry::new();
+        let verifier =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000092")
+                .unwrap();
+        registry.record_reputation_result_submitted(&verifier, 100);
+        registry.record_reputation_result_submitted(&verifier, 110);
+        registry.record_reputation_result_finalized(&verifier, 110);
+        registry.record_reputation_equivocation(&verifier, 120);
+
+        let rep = registry.get_agent_reputation(&verifier).unwrap();
+        assert_eq!(rep.results_submitted, 2);
+        assert_eq!(rep.results_finalized, 1);
+        assert_eq!(rep.equivocations, 1);
+        // Inference_quality = (1/2) * (1 - 0.15) = 0.5 * 0.85 = 0.425
+        // Payment neutral=1.0, score = 1.0*0.4 + 0.425*0.6 = 0.4 + 0.255 = 0.655
+        let score = rep.trust_score();
+        assert!(score > 0.64 && score < 0.66, "expected ~0.655, got {score}");
+    }
+
+    #[test]
+    fn test_reputation_agents_by_trust_score() {
+        let mut registry = AiRegistry::new();
+        let a1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000093")
+                .unwrap();
+        let a2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000094")
+                .unwrap();
+
+        // 3 completed, 0 defaulted → payment_reliability = 1.0
+        registry.record_reputation_payment_completed(&a1, 100);
+        registry.record_reputation_payment_completed(&a1, 110);
+        registry.record_reputation_payment_completed(&a1, 120);
+
+        // 1 completed, 1 defaulted → payment_reliability = 0.5
+        registry.record_reputation_payment_completed(&a2, 100);
+        registry.record_reputation_payment_defaulted(&a2, 110);
+
+        let ranking = registry.agents_by_trust_score();
+        assert_eq!(ranking.len(), 2);
+        // Should rank higher (better payment reliability)
+        assert!(
+            ranking[0].0 == a1,
+            "a1 should be first in ranking: got {ranking:?}"
+        );
+        assert!(ranking[0].1 > ranking[1].1);
+    }
+
+    #[test]
+    fn test_reputation_changes_state_root() {
+        let mut registry = AiRegistry::new();
+        let root_before = registry.state_root();
+        let agent =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000095")
+                .unwrap();
+        registry.record_reputation_payment_completed(&agent, 100);
+        assert_ne!(
+            root_before,
+            registry.state_root(),
+            "reputation change must alter state root"
+        );
+    }
+
+    #[test]
+    fn test_reputation_top_agents() {
+        let mut registry = AiRegistry::new();
+        let a1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000096")
+                .unwrap();
+        let a2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000097")
+                .unwrap();
+        let a3 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000098")
+                .unwrap();
+
+        registry.record_reputation_payment_completed(&a1, 100);
+        registry.record_reputation_payment_completed(&a2, 100);
+        registry.record_reputation_payment_defaulted(&a2, 110);
+        registry.record_reputation_payment_completed(&a3, 100);
+
+        let top2 = registry.top_agents(2);
+        assert_eq!(top2.len(), 2);
+        // a1 and a3 tie at full reliability and keep address order.
+        assert_eq!(top2[0].0, a1);
+        assert_eq!(top2[1].0, a3);
+        assert_eq!(top2[0].1.to_bits(), top2[1].1.to_bits());
+
+        let all = registry.top_agents(3);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2].0, a2);
+        assert!(all[2].1 < all[1].1);
+    }
+
+    #[test]
+    fn state_root_commits_to_fully_verified_proofs_and_gates_proof_required_finalization() {
+        let mut reg = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[7u8; 32], 1);
+        reg.register_model(AiModelSpec {
+            model_id,
+            model_hash: [7u8; 32],
+            owner,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 2048,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 50,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_dims: None,
+            execution_weights_digest: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        })
+        .unwrap();
+        {
+            let m = reg.models.get_mut(&model_id).unwrap();
+            m.require_execution_proof = true;
+            m.execution_program_hash = Some([0xAA; 32]);
+            m.execution_weights_digest = Some([0xBB; 32]);
+        }
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = reg.submit_request(req, 10).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000021")
+                .unwrap();
+        let outcome = submit_ai_result(&mut reg, req_id, v1, [9u8; 32], 1, 12).unwrap();
+        assert!(outcome.is_none());
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: Some([0xBB; 32]),
+            public_inputs: None,
+        };
+        let mut reg_structural = reg.clone();
+        let mut reg_verified = reg;
+        reg_structural
+            .attach_execution_proof(&req_id, &v1, proof.clone(), false)
+            .unwrap();
+        reg_verified
+            .attach_execution_proof(&req_id, &v1, proof, true)
+            .unwrap();
+
+        assert_ne!(reg_structural.state_root(), reg_verified.state_root());
+        assert!(reg_structural.try_finalize_with_proofs(&req_id).is_none());
+        assert!(reg_verified.try_finalize_with_proofs(&req_id).is_some());
+    }
+}

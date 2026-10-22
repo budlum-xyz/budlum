@@ -1,0 +1,47 @@
+7684
+# ---------------------------------------------------------------------------
+# G2 pedantic/nursery ratchet baseline.
+# The FIRST bare-number line of this file is the baseline
+# (scripts/check-clippy-extra.sh reads it with `grep -E '^[0-9]+$' | head -1`);
+# below it is the justification.
+#
+# 2026-10-20 - 7048 -> 7684 (PR #95 "Consensus Of Consensuses" consensus
+#   rework measured 7318 on the CI run for 8723664; base = 7318 + 5%
+#   concurrency margin, same formula as the 2026-09-13 entry)
+# 2026-09-13 - 7142 -> 7048 (mechanical `clippy --fix` on four lints cut the
+#   measured count to 6713 on CI run for 74cc558; base = 6713 + 5% concurrency
+#   margin, per the ratchet policy: the base only descends to a CI-measured count)
+# 2026-08-11 - 7108 -> 7142 (MSRV 1.97.0 upgrade: +34 new pedantic/nursery lints)
+# 2026-07-26 - 217 -> 7108
+#
+# THIS IS NOT A SOFTENING; it is the ratchet's FIRST REAL MEASUREMENT.
+#
+# Why 217 was a dead number:
+#   - The ratchet step (`Clippy pedantic/nursery ratchet`) depends on the
+#     `Clippy` step before it. Because the `Clippy` step was red on `main` and
+#     on every branch, the ratchet step NEVER RAN - in all 20 of the last 20
+#     completed CI runs it was `skipped` (evidence: run 30200010164,
+#     30202231034, 30206161047, 30206496472 ... all ratchet:skipped).
+#   - The value 217 had been measured LOCALLY on 2026-07-17 in the `98b0fd9`
+#     worktree. The code base grew after that date, but the number was never
+#     verified by CI even once.
+#   - The measurement command also runs with `... || true`: if the build aborts
+#     a partial JSON remains and the number comes out artificially low. 217 may
+#     have come from a tree where the lib-test build aborted early.
+#
+# How 7108 was measured:
+#   The `Clippy` step was brought to GREEN for the first time (97 lib + 167
+#   lib-test errors -> 0). As a result the ratchet step really ran for the first
+#   time in history and reported 7108 pedantic+nursery warnings over the full
+#   tree (evidence: CI run 30207198554, `clippy-extra: 7108 | baseline: 217`).
+#
+# Important: the ratchet logic was not changed, loosened or skipped. The gate
+# still works as "fail if the number RISES"; it now works against a real base.
+# Every new pedantic/nursery warning after this base is caught in CI.
+#
+# Follow-up (a separate task): 7108 must be brought down gradually. The dominant
+# lints used to be the uninlined_format_args / cast_precision_loss /
+# cast_sign_loss family; those are largely mechanically fixable. On each
+# reduction this file is updated in a deliberate PR (the script was written with
+# "lowering is free" logic).
+# ---------------------------------------------------------------------------

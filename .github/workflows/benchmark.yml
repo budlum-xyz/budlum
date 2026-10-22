@@ -1,0 +1,96 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    # CI Expansion item 10: performance regression tracking.
+    # It runs the Criterion benchmarks and stores the results as an artifact.
+    name: Benchmark Regression (item 10)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # The micro benches are plain binaries (`[[bin]] bench_*` in
+      # Cargo.toml), not Criterion targets: there is no bench target named
+      # `micro` or `single_node`, and with pipefail on that error is now
+      # visible instead of being swallowed by `tee`. Each binary prints its
+      # own timing report; the output is the artifact. One release build for
+      # the four binaries (the same profile `cargo bench` inherits), then each
+      # runs on its own so a failure names the binary.
+      - name: Run the micro and single-node benchmarks
+        run: |
+          # pipefail: without it the step reports tee's exit status and a
+          # failed bench uploads an artifact under a green check.
+          set -euo pipefail
+          cargo build --release --bin bench_sig_verify --bin bench_merkle_update \
+            --bin bench_merkle_scaling --bin bench_internal_pipeline_tps
+          ./target/release/bench_sig_verify 2>&1 | tee /tmp/bench-micro.txt
+          ./target/release/bench_merkle_update 2>&1 | tee -a /tmp/bench-micro.txt
+          ./target/release/bench_merkle_scaling 2>&1 | tee -a /tmp/bench-micro.txt
+          ./target/release/bench_internal_pipeline_tps 2>&1 | tee /tmp/bench-single.txt
+          echo "Benchmark runs completed."
+      # BudZero canonical-program benches: prove/verify times for the three
+      # programs the regeneration gate reproduces (storage challenge, private
+      # transfer, matmul guest). One sample each keeps the job well inside the
+      # timeout; the JSON lines are recorded as artifacts.
+      - name: Run the BudZero canonical benches
+        run: |
+          set -euo pipefail
+          (cd budzero && cargo bench --bench canonical_programs --features "" 2>&1) | tee /tmp/bench-budzero-canonical.txt
+          (cd budzero && cargo bench --bench proof_baseline 2>&1) | tee /tmp/bench-budzero-baseline.txt
+          echo "BudZero bench runs completed."
+      # BLG-1049 (P58-F03, decision B interim): the job is named "Benchmark
+      # Regression" but had no baseline and no threshold - it could not fail
+      # on a regression. The interim gate makes a vacuous run fail: every
+      # micro bench must emit its throughput line and every BudZero bench its
+      # metric, or the job goes red. A numeric regression gate (the A part)
+      # needs recorded baseline history and lands when there is a baseline to
+      # compare against; until then a run that produces no numbers is itself a
+      # failure, never a silent green.
+      - name: Fail on a vacuous benchmark run (BLG-1049 interim)
+        run: |
+          set -euo pipefail
+          for f in /tmp/bench-micro.txt /tmp/bench-single.txt; do
+            if ! grep -qE 'Throughput:|Avg per' "$f"; then
+              echo "::error file=$f::no benchmark metric in $f - a vacuous run must fail (BLG-1049)"
+              exit 1
+            fi
+          done
+          for f in /tmp/bench-budzero-canonical.txt /tmp/bench-budzero-baseline.txt; do
+            if [ ! -s "$f" ]; then
+              echo "::error file=$f::empty BudZero bench output - a vacuous run must fail (BLG-1049)"
+              exit 1
+            fi
+          done
+          echo "all benchmark runs produced metrics"
+
+      - name: Store the results as an artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: benchmark-results
+          path: /tmp/bench-*.txt
+          # BudZero canonical JSON lines included via the same glob (bench-budzero-*.txt).
+          retention-days: 30

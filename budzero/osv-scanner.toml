@@ -1,0 +1,72 @@
+# budzero/osv-scanner.toml - OSV exceptions for the BudZero workspace
+#
+# BudZero is a separate Cargo workspace (it has its own Cargo.lock), so
+# osv-scanner matches it against the config beside it, not the root config.
+# The content is deliberately kept identical to the root osv-scanner.toml: the same
+# dependency family, the same reasons. If one is updated the other must be too.
+#
+# WHY A SEPARATE SCANNER: cargo-audit and cargo-deny read only the RustSec advisory
+# database. OSV.dev is an aggregator (RustSec + GHSA + NVD + CVE) and it also sees
+# records that have NO COUNTERPART in RustSec. This is not a theoretical difference:
+# the first run caught CVE-2026-32314 / GHSA-vxx9-2994-q338 (yamux, CVSS 8.7),
+# while on the same tree `cargo audit` said "0 vulnerabilities found" because this record
+# has no RustSec counterpart (rustsec/advisory-db/crates/yamux -> 404).
+#
+# POLICY: every finding not listed here is a FAIL. Each exception is written with
+# evidence of why it is UNREACHABLE in the code (VEX logic); "noise" or
+# "for now" are not accepted as reasons. A reachable finding is not ignored,
+# the dependency is upgraded.
+
+[[IgnoredVulns]]
+id = "GHSA-vxx9-2994-q338"   # CVE-2026-32314 - yamux remote panic (DoS), CVSS 8.7
+reason = """
+Unreachable: the patched code path is in use, the unpatched one is only compiled.
+
+libp2p-yamux 0.47.0 pulls in two yamux versions as dependencies at once
+(yamux012 = 0.12.1, yamux013 = 0.13.10) and Config decides which one runs.
+In the upstream source `impl Default for Config` -> `Config013`, so
+`yamux::Config::default()` establishes the 0.13.10 connection. The Budlum swarm
+passes exactly `yamux::Config::default` inside src/network/node.rs;
+the only APIs that switch to the 0.12 path, `WindowUpdateMode` / `client()` /
+`server()`, do not appear in the repository at all (verified with grep).
+
+The advisory's fixed version is 0.13.10 and the version we run is already
+0.13.10. The vulnerable 0.12.1 stays in the graph only because of libp2p-yamux's
+dual-version design; no connection is established through it.
+
+Follow-up: this exception is deleted once libp2p-yamux drops 0.12 support. If the
+yamux configuration in node.rs changes and moves to the 0.12 path this reason
+is void - the exception must then be removed and the finding becomes real.
+"""
+
+[[IgnoredVulns]]
+id = "GHSA-q2qq-hmj6-3wpp"   # hickory-proto O(n^2) DNS message encoding
+reason = """
+Quadratic CPU consumption while producing a DNS message - triggering it requires
+encoding a response, that is SERVING DNS. Budlum only resolves (the libp2p-dns
+client side resolver); there is no hickory-server in the tree. The premise is locked
+by src/tests/advisory_reachability.rs::no_dns_server_surface_in_tree.
+The patched version is 0.26.1; because libp2p is pinned to ^0.25.2, upstream is awaited.
+"""
+
+# -- informational records of the "unmaintained" class ----------------------
+# The following are not vulnerabilities but maintenance status warnings (RUSTSEC-*-XXXX
+# "unmaintained"). Repository policy does not count them as a FAIL through
+# `unmaintained = "none"` in deny.toml; visibility comes from the cargo audit report in CI and
+# they are tracked on the org roadmap. Because OSV returns them like vulnerabilities we
+# mirror the same policy here, otherwise the two tools would contradict each other.
+# Note: only records that REALLY appear in the BudZero graph are kept in this file;
+# osv-scanner reports unused exceptions as "unused ignores" and an accumulation of
+# dead exceptions erodes the gate's credibility.
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0089"
+reason = "atomic-polyfill unmaintained (a maintenance warning, not a vulnerability) - the OSV mirror of the deny.toml `unmaintained = \"none\"` policy."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0141"
+reason = "bincode 1.x unmaintained - tracked on the org roadmap (the bincode 2 migration touches consensus critical byte formats, a separate task)."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "paste unmaintained (a maintenance warning, not a vulnerability); a proc-macro, no runtime surface."
+

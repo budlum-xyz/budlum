@@ -1,0 +1,1077 @@
+//! Three **QR-video** container (plan CI A4 root).
+//!
+//! In-tree lab container `BDLV`: ordered deterministic QR-PNG frames bound to a
+//! stream commitment. This **is** the QR-video object the recipe re-emits.
+//! H.264/VP9 remain optional external channels behind [`crate::storage::qr_codec`];
+//! they are not required for the product claim "recipe -> QR video -> content".
+//!
+//! # Wire
+//!
+//! ```text
+//! magic[4] = BDLV
+//! version u8 = 1
+//! flags u8 = 0
+//! fps u16 LE
+//! frame_count u32 LE
+//! stream_commitment [32]
+//! recipe_commitment [32]
+//! repeated:
+//!   png_len u32 LE
+//!   png [png_len]
+//! ```
+
+use crate::core::hash::hash_fields_bytes;
+use crate::storage::qr_png::{frame_to_qr_png, QrPngError, MAX_PNG_SIDE_PX};
+use crate::storage::qr_recipe::ThreeRecipePublic;
+
+/// Wire magic.
+pub const VIDEO_MAGIC: [u8; 4] = *b"BDLV";
+pub const VIDEO_VERSION: u8 = 1;
+/// Default fps for progressive playback pacing (display hint; not consensus time).
+pub const DEFAULT_FPS: u16 = 10;
+/// Max frames in one lab video (`DoS` bound).
+pub const MAX_VIDEO_FRAMES: u32 = 50_000;
+
+/// Largest PNG one frame of a BDLV blob may carry. An honest frame is a few hundred pixels
+/// square, so this leaves room while a hostile length field cannot ask for more.
+///
+/// Convenience: pub so a frame producer can refuse past the same
+/// PNG size bound the blob reader enforces in this module.
+pub const MAX_FRAME_PNG_BYTES: usize = 4 * 1024 * 1024;
+
+/// Errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QrVideoError {
+    /// Empty frame list.
+    Empty,
+    /// Too many frames.
+    TooMany(u32),
+    /// Truncated / bad magic.
+    BadBlob,
+    /// Nested PNG/QR.
+    Png(String),
+    /// Stream / recipe mismatch on open.
+    CommitmentMismatch,
+    /// Decode of a QR PNG failed.
+    Decode(String),
+    /// An optical frame larger than one pinned QR symbol can carry.
+    FrameTooLarge {
+        /// The frame length seen.
+        len: usize,
+        /// The symbol capacity.
+        max: usize,
+    },
+}
+
+impl std::fmt::Display for QrVideoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "qr video empty"),
+            Self::TooMany(n) => write!(f, "qr video too many frames {n}"),
+            Self::BadBlob => write!(f, "qr video bad blob"),
+            Self::Png(s) => write!(f, "qr video png: {s}"),
+            Self::CommitmentMismatch => write!(f, "qr video commitment mismatch"),
+            Self::Decode(s) => write!(f, "qr video decode: {s}"),
+            Self::FrameTooLarge { len, max } => {
+                write!(f, "qr video frame too large: {len} > {max}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for QrVideoError {}
+
+impl From<QrPngError> for QrVideoError {
+    fn from(e: QrPngError) -> Self {
+        Self::Png(e.to_string())
+    }
+}
+
+/// Built QR-video.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QrVideo {
+    pub fps: u16,
+    pub stream_commitment: [u8; 32],
+    pub recipe_commitment: [u8; 32],
+    /// Deterministic QR PNG frames in order.
+    pub png_frames: Vec<Vec<u8>>,
+}
+
+impl QrVideo {
+    /// Mux optical A3 frames into QR PNGs + BDLV blob fields.
+    /// # Errors
+    ///
+    /// Propagates `QrVideoError` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn from_optical_frames(
+        recipe: &ThreeRecipePublic,
+        stream_commitment: &[u8; 32],
+        optical_frames: &[Vec<u8>],
+        fps: u16,
+    ) -> Result<Self, QrVideoError> {
+        if optical_frames.is_empty() {
+            return Err(QrVideoError::Empty);
+        }
+        if optical_frames.len() as u32 > MAX_VIDEO_FRAMES {
+            return Err(QrVideoError::TooMany(optical_frames.len() as u32));
+        }
+        // Refuse an unrenderable frame before drawing any of them: the
+        // carousel wire allows drops larger than one pinned QR symbol (other
+        // transports carry them fine), but this container cannot.
+        if let Some(len) = optical_frames
+            .iter()
+            .map(Vec::len)
+            .find(|l| *l > crate::storage::qr_matrix::MAX_QR_PAYLOAD)
+        {
+            return Err(QrVideoError::FrameTooLarge {
+                len,
+                max: crate::storage::qr_matrix::MAX_QR_PAYLOAD,
+            });
+        }
+        let recipe_commitment = crate::storage::qr_recipe::three_recipe_digest(recipe);
+        let mut png_frames = Vec::with_capacity(optical_frames.len());
+        for fr in optical_frames {
+            png_frames.push(frame_to_qr_png(fr)?);
+        }
+        Ok(Self {
+            fps,
+            stream_commitment: *stream_commitment,
+            recipe_commitment,
+            png_frames,
+        })
+    }
+
+    /// Serialize to BDLV bytes.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&VIDEO_MAGIC);
+        out.push(VIDEO_VERSION);
+        out.push(0);
+        out.extend_from_slice(&self.fps.to_le_bytes());
+        out.extend_from_slice(&(self.png_frames.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.stream_commitment);
+        out.extend_from_slice(&self.recipe_commitment);
+        for png in &self.png_frames {
+            out.extend_from_slice(&(png.len() as u32).to_le_bytes());
+            out.extend_from_slice(png);
+        }
+        out
+    }
+
+    /// Parse BDLV.
+    /// # Errors
+    ///
+    /// Propagates `QrVideoError` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn from_bytes(blob: &[u8]) -> Result<Self, QrVideoError> {
+        if blob.len() < 4 + 1 + 1 + 2 + 4 + 32 + 32 {
+            return Err(QrVideoError::BadBlob);
+        }
+        if blob.get(0..4) != Some(VIDEO_MAGIC.as_slice()) {
+            return Err(QrVideoError::BadBlob);
+        }
+        if blob.get(4).copied() != Some(VIDEO_VERSION) {
+            return Err(QrVideoError::BadBlob);
+        }
+        let fps = u16_le(blob, 6)?;
+        let n = u32_le(blob, 8)? as usize;
+        if n == 0 || n as u32 > MAX_VIDEO_FRAMES {
+            return Err(QrVideoError::BadBlob);
+        }
+        let mut stream = [0u8; 32];
+        stream.copy_from_slice(blob.get(12..44).ok_or(QrVideoError::BadBlob)?);
+        let mut recipe = [0u8; 32];
+        recipe.copy_from_slice(blob.get(44..76).ok_or(QrVideoError::BadBlob)?);
+        let mut off = 76usize;
+        let mut png_frames = Vec::with_capacity(n);
+        for _ in 0..n {
+            let len = u32_le(blob, off)? as usize;
+            if len > MAX_FRAME_PNG_BYTES {
+                return Err(QrVideoError::BadBlob);
+            }
+            off += 4;
+            let end = off.checked_add(len).ok_or(QrVideoError::BadBlob)?;
+            let png = blob.get(off..end).ok_or(QrVideoError::BadBlob)?.to_vec();
+            off = end;
+            png_frames.push(png);
+        }
+        // One byte string per video: bytes after the last frame would change
+        // `blob_commitment` and leave the content alone.
+        if off != blob.len() {
+            return Err(QrVideoError::BadBlob);
+        }
+        Ok(Self {
+            fps,
+            stream_commitment: stream,
+            recipe_commitment: recipe,
+            png_frames,
+        })
+    }
+
+    /// Commitment over the full BDLV bytes (NFT / recipe pin optional).
+    #[must_use]
+    pub fn blob_commitment(blob: &[u8]) -> [u8; 32] {
+        hash_fields_bytes(&[b"BDLM_THREE_QR_VIDEO_V1", blob])
+    }
+}
+
+fn u16_le(b: &[u8], off: usize) -> Result<u16, QrVideoError> {
+    let s = b.get(off..off + 2).ok_or(QrVideoError::BadBlob)?;
+    let mut a = [0u8; 2];
+    a.copy_from_slice(s);
+    Ok(u16::from_le_bytes(a))
+}
+fn u32_le(b: &[u8], off: usize) -> Result<u32, QrVideoError> {
+    let s = b.get(off..off + 4).ok_or(QrVideoError::BadBlob)?;
+    let mut a = [0u8; 4];
+    a.copy_from_slice(s);
+    Ok(u32::from_le_bytes(a))
+}
+
+/// Decode one QR PNG back to optical frame bytes via rqrr.
+/// # Errors
+///
+/// Propagates `QrVideoError` from the step that failed; its variants name the refused
+/// conditions.
+pub fn png_to_optical_frame(png: &[u8]) -> Result<Vec<u8>, QrVideoError> {
+    let (w, h, grey) = decode_png_grey(png).map_err(QrVideoError::Decode)?;
+    // rqrr wants a flat grid; use PreparedImage
+    let mut img = rqrr::PreparedImage::prepare_from_greyscale(w, h, |x, y| {
+        grey.get(y * w + x).copied().unwrap_or(255)
+    });
+    let grids = img.detect_grids();
+    if grids.is_empty() {
+        return Err(QrVideoError::Decode("no qr grid".into()));
+    }
+    let grid = grids
+        .first()
+        .ok_or_else(|| QrVideoError::Decode("no qr grid".into()))?;
+    // Binary optical frames: decode_to writes raw bytes (not UTF-8 String).
+    let mut data = Vec::new();
+    grid.decode_to(&mut data)
+        .map_err(|e| QrVideoError::Decode(format!("{e:?}")))?;
+    Ok(data)
+}
+
+/// Demux BDLV → optical frames (ordered).
+/// # Errors
+///
+/// Propagates `QrVideoError` from the step that failed; its variants name the refused
+/// conditions.
+pub fn demux_optical_frames(video: &QrVideo) -> Result<Vec<Vec<u8>>, QrVideoError> {
+    let mut out = Vec::with_capacity(video.png_frames.len());
+    for png in &video.png_frames {
+        out.push(png_to_optical_frame(png)?);
+    }
+    Ok(out)
+}
+
+/// Greyscale decode for 8 bit PNGs of color type 0, 2, 4 or 6, all five
+/// filter types, no interlace. Every chunk CRC is checked. Grey is channel 0
+/// of each pixel (the red channel for RGB and RGBA). 16 bit, palette and
+/// interlaced images are refused with an explicit error.
+fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
+    if png.len() < 8 {
+        return Err("png magic".into());
+    }
+    let magic = png.get(0..8).ok_or_else(|| "png magic".to_string())?;
+    if magic != [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
+        return Err("png magic".into());
+    }
+    let mut off = 8usize;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut channels = 0usize;
+    let mut idat = Vec::new();
+    let mut saw_ihdr = false;
+    let mut saw_idat = false;
+    let mut idat_closed = false;
+    let mut saw_plte = false;
+    let mut saw_iend = false;
+    while off < png.len() {
+        let len_bytes = png.get(off..off + 4).ok_or_else(|| "png len".to_string())?;
+        let mut lb = [0u8; 4];
+        lb.copy_from_slice(len_bytes);
+        let len = u32::from_be_bytes(lb) as usize;
+        let chunk_kind = png
+            .get(off + 4..off + 8)
+            .ok_or_else(|| "png ty".to_string())?;
+        let body_start = off.checked_add(8).ok_or("png chunk")?;
+        let crc_end = body_start
+            .checked_add(len)
+            .and_then(|end| end.checked_add(4))
+            .ok_or_else(|| "png chunk".to_string())?;
+        let chunk_body = png
+            .get(body_start..crc_end - 4)
+            .ok_or_else(|| "png chunk".to_string())?;
+        let crc_bytes = png
+            .get(crc_end - 4..crc_end)
+            .ok_or_else(|| "png chunk".to_string())?;
+        // PNG CRC-32 (spec, ISO 3309) runs over type then data with no length
+        // between them. This is a fixed external format, not a Budlum digest.
+        let mut crc = flate2::Crc::new();
+        crc.update(chunk_kind);
+        crc.update(chunk_body);
+        if crc.sum().to_be_bytes() != crc_bytes {
+            return Err("png crc".into());
+        }
+        off = crc_end;
+        // BLG-0431: CRC-valid chunks still need a valid PNG grammar.
+        if !saw_ihdr && chunk_kind != b"IHDR" {
+            return Err("ihdr must be first".into());
+        }
+        if chunk_kind == b"IHDR" {
+            if saw_ihdr || chunk_body.len() != 13 {
+                return Err("ihdr".into());
+            }
+            saw_ihdr = true;
+            let depth = chunk_body.get(8).copied().unwrap_or(0);
+            let color = chunk_body.get(9).copied().unwrap_or(0);
+            if depth != 8 {
+                return Err("png bit depth".into());
+            }
+            channels = match color {
+                0 => 1,
+                2 => 3,
+                4 => 2,
+                6 => 4,
+                3 => return Err("png palette".into()),
+                _ => return Err("png color type".into()),
+            };
+            if chunk_body.get(10).copied() != Some(0) || chunk_body.get(11).copied() != Some(0) {
+                return Err("png method".into());
+            }
+            if chunk_body.get(12).copied() != Some(0) {
+                return Err("png interlace".into());
+            }
+            let mut wb = [0u8; 4];
+            let mut hb = [0u8; 4];
+            wb.copy_from_slice(chunk_body.get(0..4).ok_or_else(|| "w".to_string())?);
+            hb.copy_from_slice(chunk_body.get(4..8).ok_or_else(|| "h".to_string())?);
+            width = u32::from_be_bytes(wb);
+            height = u32::from_be_bytes(hb);
+        } else if chunk_kind == b"PLTE" {
+            // Optional suggested palette for truecolour PNGs; greyscale must
+            // not carry one. This decoder does not support indexed colour.
+            if saw_plte
+                || saw_idat
+                || !matches!(channels, 3 | 4)
+                || len == 0
+                || len > 768
+                || !len.is_multiple_of(3)
+            {
+                return Err("png palette placement".into());
+            }
+            saw_plte = true;
+        } else if chunk_kind == b"IDAT" {
+            if idat_closed {
+                return Err("png noncontiguous idat".into());
+            }
+            saw_idat = true;
+            idat.extend_from_slice(chunk_body);
+        } else if chunk_kind == b"IEND" {
+            if len != 0 || !saw_idat || off != png.len() {
+                return Err("png iend".into());
+            }
+            saw_iend = true;
+            break;
+        } else {
+            if chunk_kind.first().is_none_or(|byte| byte & 0x20 == 0) {
+                return Err("png unknown critical chunk".into());
+            }
+            if saw_idat {
+                idat_closed = true;
+            }
+        }
+    }
+    if !saw_iend {
+        return Err("png missing iend".into());
+    }
+    if width == 0 || height == 0 || channels == 0 {
+        return Err("no ihdr".into());
+    }
+    // A hostile IHDR can declare any u32 geometry; the IDAT must then inflate
+    // to `h * (1 + w*channels)` bytes, which is the unbounded allocation this ceiling
+    // closes. Our encoder never emits a side over `MAX_PNG_SIDE_PX`, so
+    // anything larger is refused before a single inflated byte is produced.
+    if width > MAX_PNG_SIDE_PX || height > MAX_PNG_SIDE_PX {
+        return Err("png side too large".into());
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let row = 1 + w * channels;
+    let expected = h.checked_mul(row).ok_or("png dims overflow")?;
+    let mut raw = inflate_zlib_stored(&idat, expected)?;
+    if raw.len() != expected {
+        return Err(format!("raw len {} != {}", raw.len(), expected));
+    }
+    unfilter(&mut raw, h, row, channels)?;
+    let mut grey = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let v = raw.get(y * row + 1 + x * channels).copied().unwrap_or(0);
+            if let Some(slot) = grey.get_mut(y * w + x) {
+                *slot = v;
+            }
+        }
+    }
+    Ok((w, h, grey))
+}
+
+/// Undo PNG scanline filters in place. `bpp` is bytes per pixel (8 bit depth).
+fn unfilter(raw: &mut [u8], h: usize, row: usize, bpp: usize) -> Result<(), String> {
+    for y in 0..h {
+        let base = y * row;
+        let filter = raw.get(base).copied().ok_or("filter")?;
+        if filter > 4 {
+            return Err("filter".into());
+        }
+        for i in 1..row {
+            let at = |dy: usize, back: usize| -> u8 {
+                if (dy == 1 && y == 0) || i <= back {
+                    return 0;
+                }
+                raw.get(base + i - back - dy * row).copied().unwrap_or(0)
+            };
+            let a = at(0, bpp);
+            let b = at(1, 0);
+            let c = at(1, bpp);
+            let pred = match filter {
+                0 => 0,
+                1 => a,
+                2 => b,
+                3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+                _ => paeth(a, b, c),
+            };
+            if let Some(slot) = raw.get_mut(base + i) {
+                *slot = slot.wrapping_add(pred);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn paeth(a: u8, b: u8, c: u8) -> u8 {
+    let p = i32::from(a) + i32::from(b) - i32::from(c);
+    let pa = (p - i32::from(a)).abs();
+    let pb = (p - i32::from(b)).abs();
+    let pc = (p - i32::from(c)).abs();
+    if pa <= pb && pa <= pc {
+        a
+    } else if pb <= pc {
+        b
+    } else {
+        c
+    }
+}
+
+fn inflate_zlib_stored(z: &[u8], limit: usize) -> Result<Vec<u8>, String> {
+    // Our encoder writes zlib stored only - parse that; also accept flate2 for safety.
+    // `limit` is the IHDR-derived byte count the caller expects; reading one
+    // past it turns a zip-bomb IDAT (tiny input, huge stream) into a bounded
+    // error instead of a multi-gigabyte allocation.
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    let d = ZlibDecoder::new(z);
+    let mut out = Vec::new();
+    let capped = (limit as u64).saturating_add(1);
+    d.take(capped)
+        .read_to_end(&mut out)
+        .map_err(|e| e.to_string())?;
+    if out.len() > limit {
+        return Err("inflate too large".into());
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::qr_carousel::CarouselParams;
+    use crate::storage::three_pipe::{encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Golden vector: the header of a single-frame BDLV blob and its full sha256.
+    /// Frame modules now come from our deterministic-mask qr_encode, so
+    /// this vector pins the byte-level behaviour of the encoder and the mux.
+    #[test]
+    fn video_wire_matches_the_golden_vectors() {
+        let pc = [
+            0x7eu8, 0x38, 0x0b, 0x6b, 0x1a, 0x1e, 0x98, 0x17, 0x93, 0xbc, 0x14, 0xe8, 0x97, 0x0f,
+            0xef, 0xe3, 0xa2, 0x5c, 0xff, 0x38, 0x95, 0xba, 0xc6, 0x5b, 0x5e, 0x5c, 0xc2, 0xc9,
+            0xf8, 0x55, 0xac, 0x0d,
+        ];
+        let recipe = ThreeRecipePublic {
+            payload_commitment: pc,
+            carousel: CarouselParams {
+                k: 3,
+                block_len: 8,
+                total_len: 24,
+            },
+            stream_id: [0u8; 32],
+            block_len: 8,
+        };
+        let v = QrVideo::from_optical_frames(&recipe, &pc, &[b"vektor kare".to_vec()], 10).unwrap();
+        let blob = v.to_bytes();
+        assert_eq!(blob.len(), 503);
+        assert_eq!(
+            hex(&blob[..76]),
+            "42444c5601000a00010000007e380b6b1a1e981793bc14e8970fefe3a25cff3895bac65b5e5cc2c9f855ac0dba46b1eab74314497ca00de7ae9ee2d4976fdaa64bd1e51f397c7eedcbce8962"
+        );
+        use sha2::Digest as _;
+        let mut h = sha2::Sha256::new();
+        h.update(&blob);
+        assert_eq!(
+            hex(&h.finalize()),
+            "bab09b692296eb54e81010842ab0d000e91553f86e0a4a4e7242bbecfc2fbe3e"
+        );
+    }
+
+    /// A frame no pinned QR symbol can carry must be refused before any
+    /// frame is drawn, with the size named in the refusal. The carousel
+    /// wire itself stays transport-agnostic; this container is the QR one.
+    #[test]
+    fn oversized_frame_is_refused_before_render() {
+        let pc = [0u8; 32];
+        let recipe = ThreeRecipePublic {
+            payload_commitment: pc,
+            carousel: CarouselParams {
+                k: 1,
+                block_len: 8,
+                total_len: 8,
+            },
+            stream_id: [0u8; 32],
+            block_len: 8,
+        };
+        let fat = vec![1u8; crate::storage::qr_matrix::MAX_QR_PAYLOAD + 1];
+        assert_eq!(
+            QrVideo::from_optical_frames(&recipe, &pc, &[b"once".to_vec(), fat], 10).unwrap_err(),
+            QrVideoError::FrameTooLarge {
+                len: crate::storage::qr_matrix::MAX_QR_PAYLOAD + 1,
+                max: crate::storage::qr_matrix::MAX_QR_PAYLOAD,
+            }
+        );
+    }
+
+    #[test]
+    fn foreign_video_version_is_gated() {
+        let pc = [0u8; 32];
+        let recipe = ThreeRecipePublic {
+            payload_commitment: pc,
+            carousel: CarouselParams {
+                k: 1,
+                block_len: 8,
+                total_len: 8,
+            },
+            stream_id: [0u8; 32],
+            block_len: 8,
+        };
+        let v = QrVideo::from_optical_frames(&recipe, &pc, &[b"kare".to_vec()], 10).unwrap();
+        let mut blob = v.to_bytes();
+        blob[4] = 2;
+        assert_eq!(
+            QrVideo::from_bytes(&blob).unwrap_err(),
+            QrVideoError::BadBlob
+        );
+    }
+
+    #[test]
+    fn a_frame_over_the_png_byte_ceiling_is_refused() {
+        let content = b"qr-video-oversize".repeat(8);
+        let enc = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None)
+            .unwrap()
+            .pipe;
+        let frames: Vec<_> = enc.frames.iter().take(1).cloned().collect();
+        let video =
+            QrVideo::from_optical_frames(&enc.recipe, &enc.stream_commitment, &frames, DEFAULT_FPS)
+                .unwrap();
+        let mut blob = video.to_bytes();
+        blob.truncate(76);
+        let len = MAX_FRAME_PNG_BYTES + 1;
+        blob.extend_from_slice(&u32::try_from(len).unwrap().to_le_bytes());
+        blob.resize(blob.len() + len, 0);
+        assert_eq!(
+            QrVideo::from_bytes(&blob).unwrap_err(),
+            QrVideoError::BadBlob
+        );
+    }
+
+    #[test]
+    fn trailing_bytes_after_the_last_frame_are_refused() {
+        let content = b"qr-video-trailing".repeat(8);
+        let enc = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None)
+            .unwrap()
+            .pipe;
+        let frames: Vec<_> = enc.frames.iter().take(3).cloned().collect();
+        let video =
+            QrVideo::from_optical_frames(&enc.recipe, &enc.stream_commitment, &frames, DEFAULT_FPS)
+                .unwrap();
+        let mut blob = video.to_bytes();
+        assert!(QrVideo::from_bytes(&blob).is_ok());
+        blob.push(0);
+        assert_eq!(
+            QrVideo::from_bytes(&blob).unwrap_err(),
+            QrVideoError::BadBlob
+        );
+    }
+
+    #[test]
+    fn video_round_trip_optical() {
+        let content = b"qr-video-root-content".repeat(8);
+        let enc = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None)
+            .unwrap()
+            .pipe;
+        // Use a short prefix of frames for speed in unit test (systematic enough for small)
+        let frames: Vec<_> = enc
+            .frames
+            .iter()
+            .take(enc.frames.len().min(40))
+            .cloned()
+            .collect();
+        let video =
+            QrVideo::from_optical_frames(&enc.recipe, &enc.stream_commitment, &frames, DEFAULT_FPS)
+                .unwrap();
+        let blob = video.to_bytes();
+        let parsed = QrVideo::from_bytes(&blob).unwrap();
+        assert_eq!(parsed.png_frames.len(), frames.len());
+        // Decode first QR PNG back to optical frame
+        let got0 = png_to_optical_frame(&parsed.png_frames[0]).unwrap();
+        assert_eq!(got0, frames[0]);
+    }
+
+    /// The lossy half of the K10 claim, measured here rather than asserted.
+    ///
+    /// Two things are checked, because the claim has two halves and they run
+    /// through different code. A drop's body is 4000 bytes at the low level, so
+    /// that half is measured on the drop stream itself; the container half is
+    /// measured at the block length the QR PNG encoder can actually carry.
+    ///
+    /// The channel model is deterministic: one frame in ten is gone, and half of
+    /// those are gone because a flipped bit inside the body tripped the drop's
+    /// FNV check, which is what a frame that arrives damaged does. Under that
+    /// channel a single cycle of `k` frames cannot finish, and the redundancy
+    /// `CarouselFrame::drops_for_loss` prescribes does.
+    ///
+    /// Not measured here, and not claimed: what an H.264 encoder at CRF 28 keeps
+    /// of a QR frame. This container muxes PNGs, so no codec sits on this path.
+    /// The prescribed redundancy for a given loss rate is `CarouselFrame`'s own
+    /// claim and is measured in the `bud` crate, which owns that type.
+    #[test]
+    fn k10_channel_loss_survives_the_video_container() {
+        use crate::storage::qr_carousel::Drop as CarouselDrop;
+        use crate::storage::qr_carousel::{CarouselDecoder, CarouselEncoder};
+
+        // (a) The low-level half: 4000 bytes per drop body, no container.
+        let block: u16 = 4000;
+        let payload: Vec<u8> = (0..usize::from(block) * 16)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let enc = CarouselEncoder::new(&payload, block).unwrap();
+        let k = usize::from(enc.params().k);
+        assert_eq!(k, 16, "sixteen blocks of 4000 bytes is the claim's k");
+        let raw: Vec<Vec<u8>> = (0..(4 * k) as u32)
+            .map(|s| enc.drop_at(s).to_bytes())
+            .collect();
+        let (survivors, dropped, refused) = channel(&raw);
+        assert!(
+            dropped + refused >= 3,
+            "the channel must actually damage the stream, measured {dropped} dropped and {refused} refused"
+        );
+        assert!(
+            refused > 0,
+            "a flipped body bit must be refused by the drop's own check"
+        );
+        let mut tek = CarouselDecoder::new();
+        for f in survivors.iter().take(k) {
+            if let Ok(d) = CarouselDrop::from_bytes(f) {
+                let _ = tek.push(&d);
+            }
+        }
+        assert!(
+            !tek.is_complete(),
+            "k frames with a tenth lost cannot be complete; that is what the factor is for"
+        );
+        let mut cift = CarouselDecoder::new();
+        for f in &survivors {
+            if let Ok(d) = CarouselDrop::from_bytes(f) {
+                let _ = cift.push(&d);
+            }
+        }
+        assert!(cift.is_complete(), "missing {}", cift.missing());
+        assert_eq!(
+            cift.finish().unwrap(),
+            payload,
+            "recovery must be byte-exact"
+        );
+
+        // (b) The container half: the same channel applied after a BDLV mux, so
+        // the mux itself is proven lossless and the frames that arrive are the
+        // frames that were sent.
+        let small = CarouselEncoder::new(&payload, 1000).unwrap();
+        let frames: Vec<Vec<u8>> = (0..(4 * usize::from(small.params().k)) as u32)
+            .map(|s| small.drop_at(s).to_bytes())
+            .collect();
+        let pc = [0x5au8; 32];
+        let recipe = ThreeRecipePublic {
+            payload_commitment: pc,
+            carousel: small.params(),
+            stream_id: [0u8; 32],
+            block_len: 1000,
+        };
+        let video = QrVideo::from_optical_frames(&recipe, &pc, &frames, DEFAULT_FPS).unwrap();
+        let parsed = QrVideo::from_bytes(&video.to_bytes()).unwrap();
+        let demuxed = demux_optical_frames(&parsed).unwrap();
+        assert_eq!(demuxed.len(), frames.len(), "the mux loses a frame");
+        for (got, sent) in demuxed.iter().zip(&frames) {
+            assert_eq!(got, sent, "a frame must come back byte-identical");
+        }
+        let (survivors, _, _) = channel(&demuxed);
+        let mut dec = CarouselDecoder::new();
+        for f in &survivors {
+            if let Ok(d) = CarouselDrop::from_bytes(f) {
+                let _ = dec.push(&d);
+            }
+        }
+        assert!(
+            dec.is_complete(),
+            "the same loss through the container must still recover, missing {}",
+            dec.missing()
+        );
+        assert_eq!(
+            dec.finish().unwrap(),
+            payload,
+            "container recovery must be exact"
+        );
+    }
+
+    /// One frame in ten is taken by the channel: every other one by bit rot in
+    /// the body, the rest by disappearing. Returns what a receiver would hand to
+    /// the decoder plus the two counts.
+    fn channel(frames: &[Vec<u8>]) -> (Vec<Vec<u8>>, usize, usize) {
+        use crate::storage::qr_carousel::CarouselError;
+        use crate::storage::qr_carousel::Drop as CarouselDrop;
+        let mut out = Vec::with_capacity(frames.len());
+        let mut dropped = 0usize;
+        let mut refused = 0usize;
+        for (i, f) in frames.iter().enumerate() {
+            if i % 10 != 0 {
+                out.push(f.clone());
+                continue;
+            }
+            if (i / 10) % 2 == 0 {
+                dropped += 1;
+                continue;
+            }
+            let mut hurt = f.clone();
+            let mid = hurt.len() / 2;
+            hurt[mid] ^= 0x80;
+            match CarouselDrop::from_bytes(&hurt) {
+                Err(CarouselError::BodyHashMismatch) => refused += 1,
+                Err(other) => panic!("a flipped body bit must fail the hash, not {other:?}"),
+                Ok(_) => panic!("a flipped body bit slipped past the drop check"),
+            }
+        }
+        (out, dropped, refused)
+    }
+
+    /// Minimal PNG chunk writer with a real CRC-32 over type and data.
+    fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut crc = flate2::Crc::new();
+        crc.update(ty);
+        crc.update(data);
+        let mut c = Vec::new();
+        c.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        c.extend_from_slice(ty);
+        c.extend_from_slice(data);
+        c.extend_from_slice(&crc.sum().to_be_bytes());
+        c
+    }
+
+    #[test]
+    fn png_grammar_rejects_crc_valid_chunk_aliases_before_inflate() {
+        let canonical = png_with_ihdr_and_idat(1, 1, &[]);
+        let magic = &canonical[..8];
+        let ihdr = &canonical[8..33];
+        let idat = chunk(b"IDAT", &[]);
+        let iend = chunk(b"IEND", &[]);
+        let cases = [
+            ([magic, ihdr, ihdr, &idat, &iend].concat(), "ihdr"),
+            (
+                [magic, &chunk(b"tEXt", b"note"), ihdr, &idat, &iend].concat(),
+                "ihdr must be first",
+            ),
+            (
+                [magic, ihdr, &chunk(b"ABCD", &[]), &idat, &iend].concat(),
+                "png unknown critical chunk",
+            ),
+            (
+                [magic, ihdr, &idat, &chunk(b"tEXt", b"note"), &idat, &iend].concat(),
+                "png noncontiguous idat",
+            ),
+            ([magic, ihdr, &idat].concat(), "png missing iend"),
+            ([canonical.as_slice(), &[0]].concat(), "png iend"),
+            ([canonical.as_slice(), &iend].concat(), "png iend"),
+            (
+                [magic, ihdr, &idat, &chunk(b"IEND", &[0])].concat(),
+                "png iend",
+            ),
+        ];
+        for (png, reason) in cases {
+            assert_eq!(decode_png_grey(&png).unwrap_err(), reason);
+        }
+    }
+
+    fn png_with_ihdr_and_idat(w: u32, h: u32, idat: &[u8]) -> Vec<u8> {
+        let mut p = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.push(8); // bit depth
+        ihdr.push(2); // color RGB
+        ihdr.push(0); // compression
+        ihdr.push(0); // filter
+        ihdr.push(0); // interlace
+        p.extend_from_slice(&chunk(b"IHDR", &ihdr));
+        p.extend_from_slice(&chunk(b"IDAT", idat));
+        p.extend_from_slice(&chunk(b"IEND", &[]));
+        p
+    }
+
+    /// A hostile IHDR declaring a side over the encoder ceiling must be
+    /// refused before a single inflated byte is produced.
+    #[test]
+    fn hostile_oversize_ihdr_is_refused_before_inflate() {
+        let bomb = png_with_ihdr_and_idat(
+            1_000_000,
+            1_000_000,
+            &[0x78, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff],
+        );
+        assert_eq!(decode_png_grey(&bomb), Err("png side too large".into()));
+    }
+
+    /// The ceiling is tied to the geometry the encoder can emit (largest
+    /// honest side is (177 + 8) * 4 = 740 px), not to a far larger value.
+    /// A side just over the honest maximum is refused before inflate.
+    #[test]
+    fn side_over_the_honest_encoder_maximum_is_refused() {
+        let over = 1025;
+        let hostile =
+            png_with_ihdr_and_idat(over, over, &[0x78, 0x01, 0x01, 0x00, 0x00, 0xff, 0xff]);
+        assert_eq!(decode_png_grey(&hostile), Err("png side too large".into()));
+    }
+
+    /// A tiny IDAT that inflates far past the IHDR-declared size (zip bomb)
+    /// must stop at the expected byte count instead of allocating the full
+    /// stream.
+    #[test]
+    fn zip_bomb_idat_is_refused() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        // Inflates to 1 MiB of zeros; the 100x100 RGB8 IHDR expects 30100 bytes.
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(&vec![0u8; 1 << 20]).unwrap();
+        let idat = enc.finish().unwrap();
+        let bomb = png_with_ihdr_and_idat(100, 100, &idat);
+        assert_eq!(decode_png_grey(&bomb), Err("inflate too large".into()));
+    }
+
+    /// Test-only PNG writer: 8 or 16 bit, any color type, chosen filter type.
+    fn enc_png(
+        w: u32,
+        h: u32,
+        color: u8,
+        depth: u8,
+        interlace: u8,
+        filter: u8,
+        samples: &[u8],
+    ) -> Vec<u8> {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let ch = match color {
+            0 | 3 => 1usize,
+            2 => 3,
+            4 => 2,
+            _ => 4,
+        };
+        let bpp = ch * usize::from(depth / 8).max(1);
+        let row = w as usize * bpp;
+        let mut raw = Vec::new();
+        for y in 0..h as usize {
+            raw.push(filter);
+            for i in 0..row {
+                let cur = samples[y * row + i];
+                let a = if i >= bpp {
+                    samples[y * row + i - bpp]
+                } else {
+                    0
+                };
+                let b = if y > 0 { samples[(y - 1) * row + i] } else { 0 };
+                let c = if y > 0 && i >= bpp {
+                    samples[(y - 1) * row + i - bpp]
+                } else {
+                    0
+                };
+                let pred = match filter {
+                    0 => 0,
+                    1 => a,
+                    2 => b,
+                    3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+                    _ => {
+                        let p = i32::from(a) + i32::from(b) - i32::from(c);
+                        let (pa, pb, pc) = (
+                            (p - i32::from(a)).abs(),
+                            (p - i32::from(b)).abs(),
+                            (p - i32::from(c)).abs(),
+                        );
+                        if pa <= pb && pa <= pc {
+                            a
+                        } else if pb <= pc {
+                            b
+                        } else {
+                            c
+                        }
+                    }
+                };
+                raw.push(cur.wrapping_sub(pred));
+            }
+        }
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
+        z.write_all(&raw).unwrap();
+        let idat = z.finish().unwrap();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[depth, color, 0, 0, interlace]);
+        let mut p = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        p.extend_from_slice(&chunk(b"IHDR", &ihdr));
+        p.extend_from_slice(&chunk(b"IDAT", &idat));
+        p.extend_from_slice(&chunk(b"IEND", &[]));
+        p
+    }
+
+    fn grey_pattern(w: usize, h: usize) -> Vec<u8> {
+        (0..w * h)
+            .map(|i| ((i * 37 + (i / w) * 11) % 256) as u8)
+            .collect()
+    }
+
+    /// Expand grey samples to the given color type; channel 0 carries the grey value.
+    fn expand(grey: &[u8], color: u8) -> Vec<u8> {
+        let mut v = Vec::new();
+        for &g in grey {
+            match color {
+                0 => v.push(g),
+                2 => v.extend_from_slice(&[g, g ^ 0x5a, g.wrapping_add(7)]),
+                4 => v.extend_from_slice(&[g, 0x80]),
+                _ => v.extend_from_slice(&[g, g ^ 0x5a, g.wrapping_add(7), 0xff]),
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn every_filter_and_color_type_decodes_to_the_same_grey() {
+        let (w, h) = (13usize, 9usize);
+        let grey = grey_pattern(w, h);
+        for color in [0u8, 2, 4, 6] {
+            for filter in 0u8..=4 {
+                let png = enc_png(
+                    w as u32,
+                    h as u32,
+                    color,
+                    8,
+                    0,
+                    filter,
+                    &expand(&grey, color),
+                );
+                let got = decode_png_grey(&png)
+                    .unwrap_or_else(|e| panic!("color {color} filter {filter}: {e}"));
+                assert_eq!(got, (w, h, grey.clone()), "color {color} filter {filter}");
+            }
+        }
+    }
+
+    #[test]
+    fn paeth_grey_png_yields_the_original_optical_frame() {
+        let frame = b"paeth-reencoded-frame-001".to_vec();
+        let png = crate::storage::qr_png::frame_to_qr_png(&frame).unwrap();
+        let (w, h, grey) = decode_png_grey(&png).unwrap();
+        let re = enc_png(w as u32, h as u32, 0, 8, 0, 4, &grey);
+        assert_eq!(png_to_optical_frame(&re).unwrap(), frame);
+    }
+
+    #[test]
+    fn own_png_roundtrip_is_unchanged() {
+        let frame = b"own-png-roundtrip-002".to_vec();
+        let png = crate::storage::qr_png::frame_to_qr_png(&frame).unwrap();
+        assert_eq!(png_to_optical_frame(&png).unwrap(), frame);
+    }
+
+    #[test]
+    fn png_crc_is_the_standard_unprefixed_crc32() {
+        // The IEND chunk CRC is the well known constant AE 42 60 82. A length
+        // prefix in the CRC input would change it and break every PNG reader.
+        let iend = chunk(b"IEND", &[]);
+        assert_eq!(iend.get(8..12), Some(&[0xAE, 0x42, 0x60, 0x82][..]));
+    }
+
+    #[test]
+    fn bad_chunk_crc_is_refused() {
+        let grey = grey_pattern(4, 4);
+        let mut png = enc_png(4, 4, 0, 8, 0, 0, &grey);
+        // IHDR CRC sits at 8 + 8 + 13 .. +4.
+        png[8 + 8 + 13] ^= 0xff;
+        assert!(decode_png_grey(&png).unwrap_err().contains("crc"));
+        // Corrupt IDAT data instead (CRC no longer matches).
+        let mut png2 = enc_png(4, 4, 0, 8, 0, 0, &grey);
+        png2[8 + 25 + 8] ^= 0x01;
+        assert!(decode_png_grey(&png2).unwrap_err().contains("crc"));
+    }
+
+    #[test]
+    fn unsupported_formats_are_refused_explicitly() {
+        let g8 = grey_pattern(4, 4);
+        let g16: Vec<u8> = g8.iter().flat_map(|&b| [b, b]).collect();
+        let e16 = decode_png_grey(&enc_png(4, 4, 0, 16, 0, 0, &g16)).unwrap_err();
+        assert_eq!(e16, "png bit depth");
+        let ep = decode_png_grey(&enc_png(4, 4, 3, 8, 0, 0, &g8)).unwrap_err();
+        assert_eq!(ep, "png palette");
+        let ei = decode_png_grey(&enc_png(4, 4, 0, 8, 1, 0, &g8)).unwrap_err();
+        assert_eq!(ei, "png interlace");
+    }
+
+    #[test]
+    fn unknown_filter_type_is_refused() {
+        // Build a PNG whose filter byte is 5 by hand.
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut raw = Vec::new();
+        for _ in 0..4 {
+            raw.push(5u8);
+            raw.extend_from_slice(&[0u8; 4]);
+        }
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::default());
+        z.write_all(&raw).unwrap();
+        let png = png_with_ihdr_gray(4, 4, &z.finish().unwrap());
+        assert_eq!(decode_png_grey(&png).unwrap_err(), "filter");
+    }
+
+    fn png_with_ihdr_gray(w: u32, h: u32, idat: &[u8]) -> Vec<u8> {
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+        let mut p = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        p.extend_from_slice(&chunk(b"IHDR", &ihdr));
+        p.extend_from_slice(&chunk(b"IDAT", idat));
+        p.extend_from_slice(&chunk(b"IEND", &[]));
+        p
+    }
+}
