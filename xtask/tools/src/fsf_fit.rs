@@ -188,7 +188,7 @@ pub fn render() -> String {
             "(source: `xtask/tools/src/fsf_fit.rs`). It is phase 0:",
             "a clean-room curation of FSF/Free Software Directory project ideas against",
             "Budlum modules, not a completed implementation and not a claim that the FSF",
-            "work has been fully adapted. It does not copy upstream project code.",
+            "work has been fully adapted. It does **not** copy upstream project code.",
             "Budlum is currently licensed under PolyForm Shield, so GPL/AGPL source",
             "imports are treated as design-only unless a separate legal/provenance",
             "decision creates an explicit boundary.",

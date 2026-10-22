@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 854;
+pub const TRACE_WIDTH: usize = 889;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -166,7 +166,15 @@ pub const COL_CMP_LT_RAW: usize = 257; // raw less-than result computed from bit
 // indices do not move; the remainder is appended past the end of the old
 // layout.
 pub const POSEIDON_ROUNDS: usize = 30;
+///
+/// Convenience: the round split is part of the AIR definition this
+/// module publishes; `POSEIDON_HALF_FULL` derives from it here, and it
+/// stays pub so the split is read, not restated, by other tooling.
 pub const POSEIDON_FULL_ROUNDS: usize = 8;
+///
+/// Convenience: published with the rest of the Poseidon round split
+/// for the same reason as `POSEIDON_FULL_ROUNDS`; the runnable total
+/// in-tree is `POSEIDON_ROUNDS`.
 pub const POSEIDON_PARTIAL_ROUNDS: usize = 22;
 pub const POSEIDON_HALF_FULL: usize = POSEIDON_FULL_ROUNDS / 2;
 
@@ -192,11 +200,19 @@ pub const fn poseidon_sbox_offset(round: usize) -> usize {
 }
 
 /// Total S-box intermediates per block (x2 and x4 each need this many).
+///
+/// Convenience: pub with the rest of the column layout this module
+/// defines, so an external verifier or trace tool lays out the same
+/// columns; the layout constants beside it are what read it in-tree.
 pub const POSEIDON_SBOX_SLOTS: usize = poseidon_sbox_offset(POSEIDON_ROUNDS);
 
 pub const COL_POSEIDON_STATE_BASE: usize = 258; // 258..497 - state[r][i] at round entry
 pub const COL_POSEIDON_X2_BASE: usize = COL_POSEIDON_STATE_BASE + POSEIDON_ROUNDS * 8;
 pub const COL_POSEIDON_X4_BASE: usize = COL_POSEIDON_X2_BASE + POSEIDON_SBOX_SLOTS;
+///
+/// Convenience: the end of the Poseidon column block, pub so trace
+/// tooling outside this crate can bound the block without restating the
+/// layout arithmetic that defines it here.
 pub const COL_POSEIDON_END: usize = COL_POSEIDON_X4_BASE + POSEIDON_SBOX_SLOTS;
 
 // (security audit) public-input binding witness columns.
@@ -227,6 +243,9 @@ pub const COL_INFERENCE_IS_EXPAND: usize = 690; // 1 on expansion rows (8 follow
 pub const COL_INFERENCE_MODEL_COMMIT: usize = 691; // model commitment limb (u64 → Goldilocks)
 pub const COL_INFERENCE_INPUT_COMMIT: usize = 692; // input commitment limb
 pub const COL_INFERENCE_OUTPUT_COMMIT: usize = 693; // output commitment limb
+
+/// Inverse witness for the dynamic-storage-slot flag `imm == -1`.
+pub const COL_STORAGE_SLOT_INV: usize = COL_INFERENCE_MODEL_COMMIT;
 
 pub const COL_TRACE_LEN_CTR: usize = 694; // 1 column - running count of cpu_active=1 rows
 pub const COL_GAS_LIMIT: usize = 695; // 1 column - vm.gas_limit, first row
@@ -641,25 +660,27 @@ pub const COL_MEM_SAME_INV: usize = 786;
 /// and a part of the sort key, and the address below it is 32 bit.
 pub const COL_MEM_TID: usize = 787;
 
-/// The 32 bits of `COL_MEM_ADDR`. The address is a number inside its table, so
-/// it is below `2^32`. The VM refuses a memory larger than that, and the stack
-/// and storage addresses are far below it.
-///
-/// The bound is what keeps the sort key `tid * 2^32 + addr` a 34 bit number.
-/// Without it a field element near `p` is an address, and a step between two
-/// keys can wrap into the 34 bit range in the wrong direction.
+/// The 64 bits of canonical `COL_MEM_ADDR` (`0..32` low limb `a_lo`,
+/// `32..64` high limb `a_hi`). Memory (`tid = 1`) and stack (`tid = 2`)
+/// addresses enforce `a_hi == 0` so cell indices stay below `2^32`; storage
+/// rows (`tid = 3`) span the full canonical Goldilocks field so Poseidon-derived
+/// `Map<K, V>` slots execute and verify identically.
 pub const COL_MEM_ADDR_BITS_BASE: usize = 788;
-pub const MEM_ADDR_BITS: usize = 32;
+pub const MEM_ADDR_BITS: usize = 64;
+
+/// Inverse witness for `0xFFFF_FFFF - a_hi`, enforcing canonical Goldilocks
+/// representation (`a_hi == 0xFFFF_FFFF ==> a_lo == 0`).
+pub const COL_MEM_HI_MAX_INV: usize = 852;
+
+/// Boolean flag and inverse witness pinning `m_top_same == (ntop == top)` where
+/// `top = tid * 2^32 + a_hi < 2^34` across consecutive live memory rows.
+pub const COL_MEM_TOP_SAME: usize = 853;
+pub const COL_MEM_TOP_SAME_INV: usize = 854;
 
 /// The memory table order witness: 34 bits of the step from this row to the
-/// next one.
-///
-/// Rows are sorted by `(key, clk)` with `key = tid * 2^32 + addr`. For a pair
-/// of active rows the step is `clk' - clk - 1` when both rows name one cell and
-/// `key' - key - 1` when they do not. A step that goes backward is a field
-/// element near `2^64` and has no 34 bit form. This holds because `clk` is
-/// below `MAX_TRACE_LEN` (`2^20`, see `adapter.rs`) and `key` is below `2^34`.
-pub const COL_MEM_ORD_BITS_BASE: usize = 820;
+/// next one across lexicographic `(top, a_lo, clk)` where
+/// `top = tid * 2^32 + a_hi < 2^34`, `a_lo < 2^32`, and `clk < 2^20`.
+pub const COL_MEM_ORD_BITS_BASE: usize = 855;
 pub const MEM_ORD_BITS: usize = 34;
 
 /// Fold constants for [`COL_REG_INIT_ACC`].
@@ -757,6 +778,12 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         let rd_val_new: AB::Expr = cur[COL_RD_VAL_NEW].into();
         let imm: AB::Expr = cur[COL_IMM].into();
         let next_pc: AB::Expr = cur[COL_NEXT_PC].into();
+
+        let storage_delta: AB::Expr = imm.clone() + one.clone();
+        let storage_delta_z: AB::Expr = storage_delta.clone() * cur[COL_STORAGE_SLOT_INV].into();
+        let is_dynamic_slot: AB::Expr = one.clone() - storage_delta_z.clone();
+        let storage_slot: AB::Expr = is_dynamic_slot.clone() * rs2_val.clone()
+            + (one.clone() - is_dynamic_slot) * imm.clone();
 
         let is_add: AB::Expr = cur[COL_IS_ADD].into();
         let is_sub: AB::Expr = cur[COL_IS_SUB].into();
@@ -1798,6 +1825,28 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 .assert_zero(cur[COL_FINAL_ROOT_0 + j].into() - public_inputs[18 + j].into());
         }
 
+        // (2a) The final root is the storage-writes fold: last real row,
+        //      COL_FINAL_ROOT_0..7 == COL_STATE_WRITES_0..7.
+        //
+        //      The AIR has no final-image fold yet (BLG-0232): nothing
+        //      derives a post-state root from last accesses, so on its own
+        //      (2) compares a prover-copied column against the public input
+        //      it was copied from and any root baked in before proving
+        //      verifies. The one post-execution commitment the AIR truly
+        //      computes is the SWrite accumulator bound in (2b), and the
+        //      chain already only accepts `final_state_root ==
+        //      state_writes_digest` for exactly that reason. Tying the two
+        //      columns together makes that convention a constraint rather
+        //      than a prover promise: until the real final-image fold
+        //      lands, the final root a proof can carry is the digest of the
+        //      storage writes the execution actually performed.
+        for j in 0..8 {
+            builder
+                .when(is_halt.clone())
+                .when(cpu_active.clone())
+                .assert_zero(cur[COL_FINAL_ROOT_0 + j].into() - cur[COL_STATE_WRITES_0 + j].into());
+        }
+
         // (2b) state_writes_digest: last real row, COL_STATE_WRITES_0..7 ==
         //      public[48..56] (HIGH CWE-345, 2026-08-17). Without this
         //      the proof never commits to the VM's post-execution storage
@@ -2296,34 +2345,19 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         builder.assert_bool(m_same.clone());
 
         // A cell is a table id and an address inside it. The sort key joins
-        // them: `tid * 2^32 + addr`. The address is below `2^32` (bits below),
-        // so two cells have one key only if they are one cell.
+        // them: `tid * 2^32 + addr`. The key is injective only while the
+        // address is below `2^32`, which the constraint below enforces for
+        // memory and stack rows but not for storage: storage slots are
+        // full-width Goldilocks elements. The initial-image flag is therefore
+        // pinned to the memory table (see the `COL_MEM_IS_INIT` block), so no
+        // storage row ever enters this fold. With the folded domain bounded to
+        // `tid in {1, 2}` and `addr < 2^32`, two cells have one key only if
+        // they are one cell.
         let two_pow_32 = AB::Expr::from(AB::F::from_u64(1u64 << 32));
         let m_tid: AB::Expr = cur[COL_MEM_TID].into();
         let nm_tid: AB::Expr = nxt[COL_MEM_TID].into();
         let m_key = m_tid.clone() * two_pow_32.clone() + m_addr.clone();
-        let nm_key = nm_tid * two_pow_32 + nm_addr.clone();
-
-        // `m_same` is pinned to the cell equality it claims, with the
-        // inverse witness pattern the register table uses above. The zero rule
-        // below made a cleared flag cost the prover a value, but it still let
-        // a read return zero after a write of the same cell.
-        let mem_pair_live = m_active.clone() * nm_active.clone();
-        let mem_addr_diff = nm_key.clone() - m_key.clone();
-        let mem_same_inv: AB::Expr = cur[COL_MEM_SAME_INV].into();
-        let mem_diff_z = mem_addr_diff.clone() * mem_same_inv;
-        builder
-            .when_transition()
-            .when(mem_pair_live.clone())
-            .assert_bool(mem_diff_z.clone());
-        builder
-            .when_transition()
-            .when(mem_pair_live.clone())
-            .assert_zero(mem_addr_diff * (one.clone() - mem_diff_z.clone()));
-        builder
-            .when_transition()
-            .when(mem_pair_live.clone())
-            .assert_eq(m_same.clone(), one.clone() - mem_diff_z);
+        let nm_key = nm_tid.clone() * two_pow_32.clone() + nm_addr.clone();
 
         // The table is a prefix: active rows first, padding after. Every rule
         // of the table is gated by `m_active * nm_active`, so an inactive row
@@ -2342,26 +2376,92 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 * (m_tid.clone() - AB::Expr::from(AB::F::from_u64(3))),
         );
 
-        // The address is a 32 bit number. Every row, padding included: a
-        // padding row holds zero and its bits are zero.
+        // Two-limb canonical decomposition of `COL_MEM_ADDR = a_lo + 2^32 * a_hi`
+        // on every row (padding included: zero splits into 0 + 0).
+        // Memory (`tid = 1`), stack (`tid = 2`), and padding (`tid = 0`) assert
+        // `a_hi == 0` via `(tid - 3) * a_hi == 0`; storage rows (`tid = 3`) span
+        // the full canonical Goldilocks field `[0, P - 1]` with `a_hi == 2^32 - 1 ==> a_lo == 0`.
+        let mut m_addr_lo = AB::Expr::from(AB::F::ZERO);
+        let mut m_addr_hi = AB::Expr::from(AB::F::ZERO);
+        let mut nm_addr_lo = AB::Expr::from(AB::F::ZERO);
+        let mut nm_addr_hi = AB::Expr::from(AB::F::ZERO);
+        for i in 0..32 {
+            let coeff = AB::Expr::from(AB::F::from_u64(1u64 << i));
+            let bit_lo: AB::Expr = cur[COL_MEM_ADDR_BITS_BASE + i].into();
+            let bit_hi: AB::Expr = cur[COL_MEM_ADDR_BITS_BASE + 32 + i].into();
+            builder.assert_bool(bit_lo.clone());
+            builder.assert_bool(bit_hi.clone());
+            m_addr_lo += bit_lo * coeff.clone();
+            m_addr_hi += bit_hi * coeff.clone();
+            let nbit_lo: AB::Expr = nxt[COL_MEM_ADDR_BITS_BASE + i].into();
+            let nbit_hi: AB::Expr = nxt[COL_MEM_ADDR_BITS_BASE + 32 + i].into();
+            nm_addr_lo += nbit_lo * coeff.clone();
+            nm_addr_hi += nbit_hi * coeff;
+        }
+        builder.assert_eq(
+            m_addr.clone(),
+            m_addr_lo.clone() + m_addr_hi.clone() * two_pow_32.clone(),
+        );
+        builder
+            .assert_zero((m_tid.clone() - AB::Expr::from(AB::F::from_u64(3))) * m_addr_hi.clone());
         {
-            let mut bits_sum = AB::Expr::from(AB::F::ZERO);
-            for i in 0..MEM_ADDR_BITS {
-                let bit: AB::Expr = cur[COL_MEM_ADDR_BITS_BASE + i].into();
-                builder.assert_bool(bit.clone());
-                bits_sum += bit * AB::Expr::from(AB::F::from_u64(1u64 << i));
-            }
-            builder.assert_eq(m_addr.clone(), bits_sum);
+            let hi_gap = AB::Expr::from(AB::F::from_u64(0xFFFF_FFFF)) - m_addr_hi.clone();
+            let hi_inv: AB::Expr = cur[COL_MEM_HI_MAX_INV].into();
+            let is_hi_max = one.clone() - hi_gap.clone() * hi_inv;
+            builder.assert_zero(hi_gap * is_hi_max.clone());
+            builder.assert_zero(is_hi_max * m_addr_lo.clone());
         }
 
-        // Sorted by `(key, clk)`, strictly. LogUp compares multisets and
-        // cannot see the order, so without this a write could be moved to
-        // another time, and the events of one cell could be split in two
-        // blocks with a zero read at the start of the second.
+        // Exact two-limb cell identity and strict lexicographic ordering over
+        // `(top, a_lo, clk)` where `top = tid * 2^32 + a_hi < 2^34`.
+        let mem_pair_live = m_active.clone() * nm_active.clone();
+        let m_top = m_tid.clone() * two_pow_32.clone() + m_addr_hi;
+        let nm_top = nm_tid * two_pow_32 + nm_addr_hi;
+        let m_top_same: AB::Expr = cur[COL_MEM_TOP_SAME].into();
+        let m_top_same_inv: AB::Expr = cur[COL_MEM_TOP_SAME_INV].into();
+        builder.assert_bool(m_top_same.clone());
+        let top_diff = nm_top.clone() - m_top.clone();
+        let top_diff_nz = top_diff.clone() * m_top_same_inv;
+        builder
+            .when_transition()
+            .when(mem_pair_live.clone())
+            .assert_bool(top_diff_nz.clone());
+        builder
+            .when_transition()
+            .when(mem_pair_live.clone())
+            .assert_zero(top_diff * (one.clone() - top_diff_nz.clone()));
+        builder
+            .when_transition()
+            .when(mem_pair_live.clone())
+            .assert_eq(m_top_same.clone(), one.clone() - top_diff_nz);
+
+        let lo_diff = nm_addr_lo.clone() - m_addr_lo.clone();
+        let mem_same_inv: AB::Expr = cur[COL_MEM_SAME_INV].into();
+        let lo_diff_nz = lo_diff.clone() * mem_same_inv;
+        builder
+            .when_transition()
+            .when(mem_pair_live.clone())
+            .assert_bool(lo_diff_nz.clone());
+        builder
+            .when_transition()
+            .when(mem_pair_live.clone())
+            .assert_zero(lo_diff * (one.clone() - lo_diff_nz.clone()));
+        builder
+            .when_transition()
+            .when(mem_pair_live.clone())
+            .assert_eq(
+                m_same.clone(),
+                m_top_same.clone() * (one.clone() - lo_diff_nz),
+            );
+
+        // Sorted by `(top, a_lo, clk)`, strictly. Every limb difference sits
+        // inside `[0, 2^34 - 1]`, so a step in the wrong direction wraps near
+        // `P` and cannot be decomposed into 34 boolean bits.
         {
             let nclk: AB::Expr = nxt[COL_MEM_CLK].into();
-            let step = m_same.clone() * (nclk - m_clk.clone() - one.clone())
-                + (one.clone() - m_same.clone()) * (nm_key.clone() - m_key.clone() - one.clone());
+            let step = (one.clone() - m_top_same.clone()) * (nm_top - m_top - one.clone())
+                + (m_top_same - m_same.clone()) * (nm_addr_lo - m_addr_lo - one.clone())
+                + m_same.clone() * (nclk - m_clk.clone() - one.clone());
             let mut bits_sum = AB::Expr::from(AB::F::ZERO);
             for i in 0..MEM_ORD_BITS {
                 let bit: AB::Expr = cur[COL_MEM_ORD_BITS_BASE + i].into();
@@ -2399,6 +2499,18 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // An initial-image row is a read by definition; it describes memory as
         // it was before the program ran.
         builder.assert_zero(m_is_init.clone() * m_is_write.clone());
+        // Only the memory table may be seeded. The fold key joins a table id to
+        // an address as `tid * 2^32 + addr`, and that key is injective only
+        // while the address stays below `2^32` - which is exactly what the
+        // address bound enforces for memory and stack rows, but not for
+        // storage rows, whose slots span the whole Goldilocks field. An
+        // unpinned flag therefore let a seeded storage slot and a memory cell
+        // share one fold key, so a proof about the storage slot verified
+        // against the initial-image root of a memory cell. Storage and stack
+        // both start empty by design (no path seeds them), so pinning the flag
+        // to the memory table costs nothing and leaves the key injective.
+        builder
+            .assert_zero(m_is_init.clone() * (m_tid.clone() - AB::Expr::from(AB::F::from_u64(1))));
         // The flag lives on active rows, and only on the first row of an
         // address block. The fold below is still the weak one described at
         // `COL_MEM_INIT_ACC`; the step that replaces its constants closes that.
@@ -2646,6 +2758,12 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let is_real_mem_op = is_load.clone() * rs1_idx_z + is_store.clone();
             let is_stack_op = is_push.clone() + is_pop.clone() + is_call.clone() + is_ret.clone();
             let is_storage_op = is_sread.clone() + is_swrite.clone();
+            builder
+                .when(is_storage_op.clone())
+                .assert_bool(storage_delta_z.clone());
+            builder
+                .when(is_storage_op.clone())
+                .assert_zero(storage_delta.clone() * (one.clone() - storage_delta_z.clone()));
             // A `VerifyMerkle` expansion row reads one sibling word from the
             // path buffer, and the original step reads the key. Those reads go
             // through the memory table like any other, so they have to appear
@@ -2671,7 +2789,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             // address inside the table: the stack slot, or the storage slot.
             let stack_addr = (is_push.clone() + is_call.clone()) * cur_stack_ptr.clone()
                 + (is_pop.clone() + is_ret.clone()) * (cur_stack_ptr.clone() - one.clone());
-            let storage_addr: AB::Expr = cur[COL_IMM].into();
+            let storage_addr: AB::Expr = storage_slot.clone();
             let two_val_tid = AB::Expr::from(AB::F::from_u64(2));
             let three_val_tid = AB::Expr::from(AB::F::from_u64(3));
             let cpu_mem_tid = is_real_mem_op.clone()
@@ -3111,7 +3229,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let expected_s0 = p_poseidon.clone() * rs1_val.clone()
                 + p_commit.clone() * rs1_val.clone()
                 + p_null.clone() * rs2_val.clone()
-                + p_sw.clone() * imm.clone();
+                + p_sw.clone() * storage_slot.clone();
             let expected_s1 = p_poseidon.clone() * rs2_val.clone()
                 + p_commit.clone() * rs2_val.clone()
                 + p_null.clone() * domain_nullifier

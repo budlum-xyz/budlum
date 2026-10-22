@@ -116,6 +116,7 @@ mod byzantine_settlement_tests {
                     .unwrap();
             let proof_pos = FinalityProof::PoS {
                 cert: FinalityCert {
+                    chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                     epoch: 1,
                     checkpoint_height: i,
                     checkpoint_hash: b_pos.hash.clone(),
@@ -387,14 +388,15 @@ mod byzantine_settlement_tests {
                 state_updates: vec![(victim, u64::MAX - 1001)],
             },
         );
-        let err = crate::execution::executor::Executor::apply_transaction(&mut node.state, &tx)
-            .expect_err(
-                "an attacker without a validator seat must not move another account's nonce",
-            );
-        assert!(
-            err.contains("state_update_authority"),
-            "wrong refusal: {err}"
-        );
+        // The checked entry point keeps the structured error: the plain
+        // `apply_transaction` facade flattens to the message only, which would
+        // make this assert on prose instead of the refusal's identity.
+        let err =
+            crate::execution::executor::Executor::apply_transaction_checked(&mut node.state, &tx)
+                .expect_err(
+                    "an attacker without a validator seat must not move another account's nonce",
+                );
+        assert_eq!(err.code(), "state_update_authority", "wrong refusal: {err}");
         assert_eq!(
             node.state.get_nonce(&victim),
             0,

@@ -1,10 +1,13 @@
 //! The post-quantum anchor for GlobalBlockHeader-level trust.
 //!
-//! WIRING: unwired - the anchor-emission caller is the consensus slice that
-//! lands with domain finality proof wiring (devnet first; production gated
-//! until the VerifyMerkle third-party opcode audit - see [`AnchorMode`]).
-//! [`rotate_anchor_key_with_committee`] is already the named caller for
-//! cold-wallet key rotation. Rules are pinned by this file's tests.
+//! WIRING: wired - anchor emission runs from the global-header seal in
+//! `src/chain/blockchain.rs` through `emit_anchor_node_local`, node-local
+//! and mode-gated (devnet writes the anchor line; production stays gated
+//! until the VerifyMerkle third-party opcode audit - see [`AnchorMode`]),
+//! and cold-wallet key rotation enters through
+//! `Blockchain::rotate_anchor_key_with_committee`, which drives
+//! [`rotate_anchor_key_with_committee`] here. Rules are pinned by this
+//! file's tests.
 //!
 //! Budlum has four consensus domains (PoW, PoS, BFT, PoA), and each produces
 //! its own finality proof. Instead of making every domain separately
@@ -51,6 +54,10 @@ use sha3::{Digest, Sha3_256};
 use super::cold_quorum::{verify_quorum, DeviceSignature, QuorumError};
 use super::cold_wallet::{ColdWalletState, RotationError};
 use crate::consensus::merkle_tree::{combine_sha3, merkle_root, promote_sha3};
+
+#[cfg(test)]
+pub(crate) use super::pq_anchor_verify::{check_signature_list, verify_one};
+pub use super::pq_anchor_verify::{verify_anchor_full, verify_anchor_light, MAX_ANCHOR_SIGNATURES};
 
 /// The signature schemes the anchor surface understands.
 ///
@@ -462,154 +469,6 @@ pub fn enforce_anchor_mode(mode: AnchorMode) -> Result<(), AnchorError> {
     }
 }
 
-fn verify_one(
-    algorithm: AnchorSignatureAlgorithm,
-    public_key: &[u8],
-    payload: &[u8],
-    signature: &[u8],
-) -> Result<(), AnchorError> {
-    if !algorithm.is_supported() {
-        return Err(AnchorError::UnsupportedAlgorithm { algorithm });
-    }
-    crate::crypto::primitives::verify_ml_dsa_87_signature(payload, signature, public_key)
-        .map_err(|_| AnchorError::InvalidSignature)
-}
-
-/// Ensures a signer's (algorithm, key) pair is authorized by the keybook
-/// **for the anchor's key epoch** (BLG-0070): a rotated-out entry cannot
-/// authorize anything, however it got into the book.
-fn in_keybook(
-    keybook: &[AnchorKeyEntry],
-    algorithm: AnchorSignatureAlgorithm,
-    public_key: &[u8],
-    key_epoch: u32,
-) -> bool {
-    keybook
-        .iter()
-        .any(|e| e.algorithm == algorithm && e.public_key == public_key && e.key_epoch == key_epoch)
-}
-
-/// BLG-0075 (P03-F18): how many signatures one anchor may carry. Each one
-/// costs an ML-DSA-87 verification; an unbounded list is a DoS multiplier.
-pub const MAX_ANCHOR_SIGNATURES: usize = 8;
-
-/// BLG-0075: refuse oversized or self-duplicate signature lists before any
-/// expensive verification runs.
-fn check_signature_list(signatures: &[AnchorSignature]) -> Result<(), AnchorError> {
-    if signatures.is_empty() {
-        return Err(AnchorError::MissingAlgorithm {
-            algorithm: AnchorSignatureAlgorithm::MlDsa87,
-        });
-    }
-    if signatures.len() > MAX_ANCHOR_SIGNATURES {
-        return Err(AnchorError::TooManySignatures {
-            max: MAX_ANCHOR_SIGNATURES,
-            presented: signatures.len(),
-        });
-    }
-    for (i, sig) in signatures.iter().enumerate() {
-        for prev in &signatures[..i] {
-            if prev.algorithm == sig.algorithm && prev.public_key == sig.public_key {
-                return Err(AnchorError::DuplicateSignature);
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Full verification: every signature verifies, every signer is keybooked,
-/// and every supported algorithm the production profile expects is present.
-/// A reserved-algorithm signature does not breed an automatic pass: reserved
-/// families fail closed at signature verification anyway.
-///
-/// # Errors
-///
-/// The first [`AnchorError`] that applies.
-pub fn verify_anchor_full(
-    anchor: &PqAnchor,
-    keybook: &[AnchorKeyEntry],
-    current_key_epoch: u32,
-) -> Result<(), AnchorError> {
-    check_signature_list(&anchor.signatures)?;
-    // BLG-0070 (P03-F13): an anchor from a rotated-out epoch is dead on
-    // arrival. Without this comparison an old key kept verifying until the
-    // keybook was edited by hand.
-    if anchor.key_epoch != current_key_epoch {
-        return Err(AnchorError::StaleAnchorEpoch {
-            anchor_epoch: anchor.key_epoch,
-            current_epoch: current_key_epoch,
-        });
-    }
-    let payload = anchor_payload_for(
-        anchor.height,
-        &anchor.aggregate_root,
-        anchor.stark_root.as_ref(),
-        anchor.crossdomain_root.as_ref(),
-        anchor.key_epoch,
-    );
-    for sig in &anchor.signatures {
-        if !in_keybook(keybook, sig.algorithm, &sig.public_key, anchor.key_epoch) {
-            return Err(AnchorError::SignerNotInKeybook);
-        }
-        verify_one(sig.algorithm, &sig.public_key, &payload, &sig.signature)?;
-    }
-    if !anchor
-        .signatures
-        .iter()
-        .any(|s| s.algorithm == AnchorSignatureAlgorithm::MlDsa87)
-    {
-        return Err(AnchorError::MissingAlgorithm {
-            algorithm: AnchorSignatureAlgorithm::MlDsa87,
-        });
-    }
-    Ok(())
-}
-
-/// Light verification for wallets and mesh nodes (threshold-of-algorithms):
-/// any ONE supported, keybooked, verifying signature is enough. The
-/// heavy-node rule ([`verify_anchor_full`]) still applies to everything
-/// carrying production weight; accepting one-algorithm verification is how
-/// the small-payload goal survives the future dual-signature upgrade rather
-/// than being undone by it.
-///
-/// # Errors
-///
-/// [`AnchorError::MissingAlgorithm`] when no single supported signature
-/// verifies against the keybook.
-pub fn verify_anchor_light(
-    anchor: &PqAnchor,
-    keybook: &[AnchorKeyEntry],
-    current_key_epoch: u32,
-) -> Result<(), AnchorError> {
-    // BLG-0075: the same list bound applies to the light path.
-    check_signature_list(&anchor.signatures)?;
-    // BLG-0070: light verification applies the same epoch rule.
-    if anchor.key_epoch != current_key_epoch {
-        return Err(AnchorError::StaleAnchorEpoch {
-            anchor_epoch: anchor.key_epoch,
-            current_epoch: current_key_epoch,
-        });
-    }
-    let payload = anchor_payload_for(
-        anchor.height,
-        &anchor.aggregate_root,
-        anchor.stark_root.as_ref(),
-        anchor.crossdomain_root.as_ref(),
-        anchor.key_epoch,
-    );
-    for sig in &anchor.signatures {
-        if !in_keybook(keybook, sig.algorithm, &sig.public_key, anchor.key_epoch) {
-            continue;
-        }
-        if verify_one(sig.algorithm, &sig.public_key, &payload, &sig.signature).is_ok() {
-            return Ok(());
-        }
-    }
-    Err(AnchorError::MissingAlgorithm {
-        algorithm: AnchorSignatureAlgorithm::MlDsa87,
-    })
-}
-
 /// Assembles an anchor from ordered domain leaves plus optional STARK and
 /// cross-domain roots, signed by one signer.
 ///
@@ -706,15 +565,10 @@ pub fn emit_anchor_node_local(
     key_epoch: u32,
     signer: &dyn AnchorSigner,
 ) -> Result<EmissionOutcome, AnchorError> {
-    match mode {
-        AnchorMode::GatedOff => return Ok(EmissionOutcome::Skipped),
-        AnchorMode::Devnet => {}
-        AnchorMode::ProductionApproved => {
-            return Err(AnchorError::ProductionBlocked {
-                blocker: "verifymerkle-opcode-external-audit-pending (decision record 2026-09-17, item 6)",
-            });
-        }
+    if mode == AnchorMode::GatedOff {
+        return Ok(EmissionOutcome::Skipped);
     }
+    enforce_anchor_mode(mode)?;
     let anchor = build_anchor_for_height(
         height,
         window_leaves,
@@ -742,7 +596,7 @@ pub fn emit_anchor_node_local(
 /// item 4): when the anchor key is compromised, the 3-of-6 cold committee
 /// rotates the cold wallet's key epoch directly - no on-chain vote stalls
 /// the response. The rotation certificate signed by the committee is
-/// domain-separated (`BDLM_PQ_ANCHOR_ROTATION_V1`) and binds the height and
+/// domain-separated (`BDLM_PQ_ANCHOR_ROTATION_V2`) and binds the height and
 /// the reason, so a rotation nobody can explain afterwards is as impossible
 /// here as it is in the cold wallet itself.
 ///

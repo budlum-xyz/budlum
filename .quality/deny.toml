@@ -40,6 +40,12 @@ allow = [
     # outside SPDX). Because cargo-deny also checks the license of workspace members
     # it goes into the allow list.
     "LicenseRef-PolyForm-Shield-1.0.0",
+    # A justified addition (fuzz workspace entered the deny matrix, 2026-10-19):
+    # libfuzzer-sys 0.4.13 is `(MIT OR Apache-2.0) AND NCSA` - the NCSA arm is
+    # the University of Illinois/NCSA license on LLVM's libFuzzer runtime the
+    # crate wraps. NCSA is OSI-approved and permissive (not copyleft), and the
+    # crate is reachable only from the fuzz workspace: nothing shipped links it.
+    "NCSA",
 ]
 
 # On copyleft (GPL / AGPL / LGPL / SSPL): there is deliberately no `deny`

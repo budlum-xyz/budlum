@@ -399,6 +399,7 @@ message ProtoBlockHeader {
     // Shards commitment (state-machine sharding, Whitepaper v1.3). Empty
     // when sharding is not active for the block.
     bytes shards_root = 17;
+    repeated bytes slashing_reports = 18;
 }
 
 message ProtoBlock {
@@ -426,6 +427,7 @@ message ProtoBlock {
     // Shards commitment (state-machine sharding, Whitepaper v1.3). Empty
     // when sharding is not active for the block.
     bytes shards_root = 21;
+    repeated bytes slashing_reports = 22;
 }
 
 
