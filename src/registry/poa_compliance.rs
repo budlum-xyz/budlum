@@ -302,6 +302,10 @@ impl PoaComplianceRegistry {
             hasher.update(rec.frozen_at_block.to_le_bytes());
         }
         for (tx_hash, rec) in &self.travel_rules {
+            // Length first, like every other variable-shaped feed into a
+            // consensus preimage: the key is a fixed `[u8; 32]` today, and
+            // the prefix keeps the fold injective if it ever widens.
+            hasher.update((tx_hash.len() as u64).to_le_bytes());
             hasher.update(tx_hash);
             hasher.update(rec.subject.as_bytes());
             hasher.update(rec.metadata_hash);

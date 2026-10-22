@@ -381,7 +381,7 @@ impl ReedSolomon {
         }
 
         let work = len.saturating_mul(self.m);
-        let parity = if work >= PARITY_ROW_WINDOW && self.m > 1 {
+        let parity = if !cfg!(miri) && work >= PARITY_ROW_WINDOW && self.m > 1 {
             use rayon::prelude::*;
             (0..self.m)
                 .into_par_iter()
@@ -741,6 +741,17 @@ pub fn verify_object_encoding(data: &[u8], claimed: &ContentManifest) -> Result<
         return Err(ErasureError::ShardMismatch(format!(
             "body of {} bytes is over the verify cap {MAX_VERIFY_ENCODING_BYTES}",
             data.len()
+        )));
+    }
+    // The coder cuts the body into `k` stripes and emits `n` shards, so total
+    // allocation and Reed-Solomon work scale with `ceil(len / k) * n`. Reject
+    // caller-chosen expansion beyond honest erasure schemes before allocating.
+    const MAX_ENCODE_EXPANSION: u32 = 8;
+    let scheme = claimed.erasure;
+    if scheme.k == 0 || scheme.n > scheme.k.saturating_mul(MAX_ENCODE_EXPANSION) {
+        return Err(ErasureError::InvalidScheme(format!(
+            "claimed scheme (k={}, n={}) expands the body by more than {MAX_ENCODE_EXPANSION}x",
+            scheme.k, scheme.n
         )));
     }
     if u64::try_from(data.len()).ok() != Some(claimed.content_size()) {
@@ -1575,5 +1586,20 @@ mod tests {
             }
         }
         assert_eq!(reconstruct_object(&manifest, &present).unwrap(), data);
+    }
+
+    #[test]
+    fn verify_object_encoding_rejects_excessive_expansion_before_encode() {
+        let data = vec![42u8; 64];
+        let honest = encode_object(&data, ErasureScheme { k: 4, n: 6 })
+            .unwrap()
+            .to_manifest()
+            .unwrap();
+        let mut amplified = honest;
+        amplified.erasure = ErasureScheme { k: 1, n: 255 };
+        assert!(matches!(
+            verify_object_encoding(&data, &amplified),
+            Err(ErasureError::InvalidScheme(_))
+        ));
     }
 }

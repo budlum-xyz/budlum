@@ -1043,9 +1043,6 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.bridge_state);
             hash_opt_serializable(&mut hasher, &self.message_registry);
             hash_opt_serializable(&mut hasher, &self.external_roots);
-            // BLG-0155: the escrow is consensus state and must cross the
-            // wire inside the digest, not outside it.
-            hash_opt_serializable(&mut hasher, &self.external_bond_escrow);
             // The proof market carries assigned tasks, each naming a prover
             // and an epoch, and unpaid receipts, each naming an amount. A
             // field that crosses the wire outside the digest is a field a
@@ -1085,8 +1082,11 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.poa_compliance);
         }
         // Schema 9: the lifetime burned total bounds mint headroom, so a node
-        // that dropped it would mint into room that burns had closed.
+        // that dropped it would mint into room that burns had closed; the
+        // external bond escrow is gated identically so pre-schema-9 snapshots
+        // preserve their stored digest.
         if self.schema_version >= 9 {
+            hash_opt_serializable(&mut hasher, &self.external_bond_escrow);
             hasher.update(self.burned_total.to_le_bytes());
         }
 
@@ -2428,6 +2428,10 @@ mod tests {
     /// The schema-6 wave's key: dropped from every old-blob the trio
     /// assembles, exactly as identity's was for the schema-5 wave.
     const SCHEMA6_KEYS: &[&str] = &["vault"];
+    /// The schema-9 wave's key: the lifetime burned total, digested from
+    /// schema 9. Old blobs lack the key and it restores as zero - "nothing
+    /// was ever recorded burned", which under-counts rather than fabricates.
+    const SCHEMA9_KEYS: &[&str] = &["burned_total"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
@@ -2502,6 +2506,7 @@ mod tests {
 
     fn schema2_cert() -> FinalityCert {
         FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 2,
             checkpoint_hash: "cp".into(),
@@ -2576,6 +2581,8 @@ mod tests {
             "poa_onboarding",
             // compliance ledger (schema-7 wave: default-filled AND digested)
             "poa_compliance",
+            // lifetime burned total (schema-9 wave: default-filled AND digested)
+            "burned_total",
             // identity registry (schema-5 wave: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 wave: same discipline)
@@ -2610,7 +2617,7 @@ mod tests {
 
         let blob = as_legacy_blob(
             &full,
-            &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat(),
+            &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat(),
             2,
         );
         // Premise: the blob really behaves like a schema-2 record - the new
@@ -2618,7 +2625,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 2);
-        for key in &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat() {
+        for key in &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat() {
             assert!(
                 !obj.contains_key(*key),
                 "the source blob contains a key it must not have: {key}"
@@ -2659,6 +2666,10 @@ mod tests {
             "a field never present in the blob came back as data; that is not loss, it is fabrication"
         );
         assert_eq!(restored.trust_policy, SnapshotTrustPolicy::AllowUnsigned);
+        assert_eq!(
+            restored.burned_total, 0,
+            "the schema-9 burned total was fabricated from a blob that never carried it"
+        );
         assert_eq!(
             serde_json::to_value(restored.tokenomics).unwrap(),
             serde_json::to_value(crate::tokenomics::TokenomicsParams::default()).unwrap(),
@@ -2718,13 +2729,13 @@ mod tests {
 
         let blob = as_legacy_blob(
             &full,
-            &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat(),
+            &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat(),
             3,
         );
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 3);
-        for key in &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat() {
+        for key in &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat() {
             assert!(
                 !obj.contains_key(*key),
                 "the source blob carries a v4 key it must not: {key}"
@@ -2743,6 +2754,10 @@ mod tests {
         assert!(
             restored.vault.is_none(),
             "the schema-6 vault field was fabricated from a blob that never carried it"
+        );
+        assert_eq!(
+            restored.burned_total, 0,
+            "the schema-9 burned total was fabricated from a blob that never carried it"
         );
         // v2 + v3 alanlarinin tumu verisiyle tasindi.
         let mut preserved = SCHEMA2_FIELDS.to_vec();
@@ -2869,5 +2884,33 @@ mod tests {
                 "unexpected refusal class (version {version}): {err}"
             );
         }
+    }
+
+    #[test]
+    fn schema9_gates_external_bond_escrow_digest_without_breaking_legacy_snapshots() {
+        let state = AccountState::new();
+        let mut s9_none = StateSnapshotV2::from_state(&state, legacy_params(1));
+        s9_none.external_bond_escrow = None;
+        s9_none.snapshot_hash = hex::encode(s9_none.calculate_digest());
+
+        let mut escrow = BTreeMap::new();
+        escrow.insert(Address::from([5u8; 32]), 1_000);
+        let mut s9_populated = s9_none.clone();
+        s9_populated.external_bond_escrow = Some(escrow);
+        assert!(
+            !s9_populated.verify(),
+            "schema 9 digest must commit external_bond_escrow"
+        );
+
+        let mut s8_a = s9_none;
+        s8_a.schema_version = 8;
+        let digest_a = s8_a.calculate_digest();
+        let mut s8_b = s9_populated;
+        s8_b.schema_version = 8;
+        assert_eq!(
+            digest_a,
+            s8_b.calculate_digest(),
+            "pre-schema-9 snapshots must ignore external_bond_escrow so stored digests remain valid"
+        );
     }
 }

@@ -725,11 +725,22 @@ impl IdentityRegistry {
             for guardian in &record.guardians {
                 guardians = hash_fields_bytes(&[&guardians, guardian.as_bytes()]);
             }
+            // The live root set decides `is_credential_valid` just as the
+            // latest-only root above does, so it is folded in too: a node that
+            // serves a record with a root silently dropped would otherwise
+            // keep a state root that still verifies (`BTreeSet` order).
+            let mut roots_input = Vec::with_capacity(record.credential_roots.len() * 32);
+            for root in &record.credential_roots {
+                roots_input.extend_from_slice(root);
+            }
+            let credential_roots =
+                hash_fields_bytes(&[b"bud-identity-credential-roots", roots_input.as_slice()]);
             acc = hash_fields_bytes(&[
                 &acc,
                 subject.as_bytes(),
                 &methods,
                 &credential_root,
+                &credential_roots,
                 &guardians,
             ]);
         }
@@ -924,13 +935,30 @@ pub struct SubjectConsent {
 }
 
 /// The digest a subject's issuance consent is made over: the credential's
-/// id (which folds the fields root, the issuer and the issuance time) and
-/// this chain.
+/// id (which folds the fields root, the issuer and the issuance time), the
+/// subject, the validity window, and this chain.
+///
+/// The id alone is not enough. It commits to the fields root, the issuer and
+/// the issuance time, but not to `subject` - the field that selects whose
+/// record the credential lands in - and not to `expires_at`, the field
+/// `is_credential_valid` enforces. An issuer holding one consent could
+/// otherwise submit the same field set with the expiry removed and land a
+/// credential that never lapses, on the strength of a signature the subject
+/// gave for a bounded one. Revocation is issuer-only, so the subject could
+/// not undo it.
 #[must_use]
 pub fn issue_consent_digest(credential: &CredentialCommitment, chain_id: u64) -> Vec<u8> {
     let mut msg = Vec::new();
-    msg.extend_from_slice(b"BUDLUM_ID_ISSUE_CONSENT_V1");
+    msg.extend_from_slice(b"BUDLUM_ID_ISSUE_CONSENT_V2");
     msg.extend_from_slice(&credential_id(credential));
+    msg.extend_from_slice(credential.subject.as_bytes());
+    match credential.expires_at {
+        Some(expires_at) => {
+            msg.push(1);
+            msg.extend_from_slice(&expires_at.to_le_bytes());
+        }
+        None => msg.push(0),
+    }
     msg.extend_from_slice(&chain_id.to_le_bytes());
     msg
 }
@@ -1352,6 +1380,109 @@ mod tests {
 
     fn value_digest(n: u8) -> [u8; 32] {
         hash_fields_bytes(&[b"v", &[n]])
+    }
+
+    /// The live root set is state, not decoration.
+    ///
+    /// `is_credential_valid` accepts any root in `credential_roots`, so a
+    /// record served with one of those roots silently removed would decide a
+    /// different authorization outcome. Both commitments the verifier reads
+    /// must therefore cover the set: the registry state root here, and the
+    /// signed identity preimage (`encode_identity_record`) covered by its own
+    /// test next to the encoder.
+    #[test]
+    fn the_registry_root_covers_the_live_credential_root_set() {
+        let mut registry = IdentityRegistry::default();
+        let subject = subject_record().subject;
+        registry
+            .apply(
+                &ConsensusKind::PoA,
+                IdentityOp::Register {
+                    record: subject_record(),
+                },
+                100,
+            )
+            .unwrap();
+        let before = registry.root();
+
+        registry
+            .records
+            .get_mut(&subject)
+            .unwrap()
+            .credential_roots
+            .insert([0x5au8; 32]);
+        let after_one = registry.root();
+        assert_ne!(
+            before, after_one,
+            "a root that decides validity must move the state root"
+        );
+
+        registry
+            .records
+            .get_mut(&subject)
+            .unwrap()
+            .credential_roots
+            .insert([0x5bu8; 32]);
+        assert_ne!(
+            after_one,
+            registry.root(),
+            "each root in the set must be committed, not just the count"
+        );
+    }
+
+    /// A consent collected for one credential must not authorize another.
+    ///
+    /// `credential_id` folds the fields root, the issuer and the issuance time,
+    /// so a credential that differs only in its subject or in its validity
+    /// window hashes to the same id. Both of those are what the Issue door acts
+    /// on - the subject picks the record, the expiry bounds validity - so both
+    /// must move the consent digest. Otherwise an issuer could take one consent
+    /// and land the same credential with the expiry stripped.
+    #[test]
+    fn the_issue_consent_covers_the_subject_and_the_validity_window() {
+        let (credential, _) = credential();
+        let base = issue_consent_digest(&credential, 1);
+
+        let mut other_subject = credential.clone();
+        other_subject.subject = addr(2);
+        assert_eq!(
+            credential_id(&other_subject),
+            credential_id(&credential),
+            "the fixture must differ only in a field the id does not fold, \
+             or this test proves nothing"
+        );
+        assert_ne!(
+            base,
+            issue_consent_digest(&other_subject, 1),
+            "a consent for one subject must not authorize another"
+        );
+
+        let mut never_expires = credential.clone();
+        never_expires.expires_at = None;
+        assert_eq!(
+            credential_id(&never_expires),
+            credential_id(&credential),
+            "dropping the expiry must not change the id, or this test proves nothing"
+        );
+        assert_ne!(
+            base,
+            issue_consent_digest(&never_expires, 1),
+            "a consent for a bounded credential must not authorize an unbounded one"
+        );
+
+        let mut later = credential.clone();
+        later.expires_at = Some(2_000);
+        assert_ne!(
+            base,
+            issue_consent_digest(&later, 1),
+            "the consent must name the exact validity window"
+        );
+
+        assert_ne!(
+            base,
+            issue_consent_digest(&credential, 2),
+            "and the chain it was given on"
+        );
     }
 
     #[test]

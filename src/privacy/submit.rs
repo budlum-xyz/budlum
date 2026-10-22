@@ -111,6 +111,25 @@ impl PrivateTransferSubmit {
         h.finalize().into()
     }
 
+    /// Domain-separated authorization preimage binding `public_digest` to the
+    /// chain id, sending account, and sender nonce (BLG-0275 / P17-F09).
+    #[must_use]
+    pub fn authorization_message(
+        chain_id: u64,
+        sender: &[u8; 32],
+        sender_nonce: u64,
+        public_digest: &[u8; 32],
+    ) -> [u8; 32] {
+        use sha3::{Digest, Sha3_256};
+        let mut h = Sha3_256::new();
+        h.update(b"BUDLUM_PRIVATE_TRANSFER_AUTH_V1");
+        h.update(chain_id.to_le_bytes());
+        h.update(sender);
+        h.update(sender_nonce.to_le_bytes());
+        h.update(public_digest);
+        h.finalize().into()
+    }
+
     pub fn verify_digest_matches(&self) -> bool {
         self.public_digest
             == Self::compute_public_digest(&self.nullifiers, &self.output_commitments)

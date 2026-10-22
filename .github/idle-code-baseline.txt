@@ -42,8 +42,6 @@ bud/src/bud_format.rs	fn	k_bud_exe_revolutionary
 bud/src/bud_format.rs	fn	k_bud_generative_removed
 bud/src/bud_format.rs	fn	k_bud_image_revolutionary
 bud/src/bud_format.rs	fn	k_bud_pdf_revolutionary
-bud/src/bud_format.rs	fn	k_bud_repo_dep
-bud/src/bud_format.rs	fn	k_bud_report_exists
 bud/src/bud_format.rs	fn	k_bud_video_revolutionary
 bud/src/bud_format.rs	fn	sign_pq
 bud/src/bud_format.rs	fn	verify_pq_signature
@@ -450,7 +448,6 @@ bud/src/bud_format_qrvideo.rs	fn	add_drop
 bud/src/bud_format_qrvideo.rs	fn	add_frame
 bud/src/bud_format_qrvideo.rs	fn	composition
 bud/src/bud_format_qrvideo.rs	fn	derivative_growth
-bud/src/bud_format_qrvideo.rs	fn	derive_stream
 bud/src/bud_format_qrvideo.rs	fn	qr_cannot_be_stored
 bud/src/bud_format_qrvideo.rs	fn	qrv_digest
 bud/src/bud_format_qrvideo.rs	fn	repair_drop
@@ -461,7 +458,6 @@ bud/src/bud_format_r3fix.rs	const	R3F_MAGIC
 bud/src/bud_format_r3fix.rs	const	R3F_VERSION
 bud/src/bud_format_r3fix.rs	const	R3_MEASURED_RATIOS
 bud/src/bud_format_r3fix.rs	fn	for_mime
-bud/src/bud_format_r3fix.rs	fn	qr_is_not_stored
 bud/src/bud_format_r3fix.rs	fn	r3_measured_ratio
 bud/src/bud_format_r3fix.rs	fn	r3f_digest
 bud/src/bud_format_ratioconsensus.rs	const	DOMAIN
@@ -761,7 +757,6 @@ budzero/bud-compiler/src/parser.rs	const	MAX_NESTING_DEPTH
 budzero/bud-compiler/src/sema.rs	fn	is_opaque_bytes32
 budzero/bud-isa/src/lib.rs	enum	DecodeError
 budzero/bud-isa/src/lib.rs	fn	decode_for_profile
-budzero/bud-isa/src/lib.rs	fn	requires_mainnet_activation
 budzero/bud-node/src/bitswap.rs	fn	decode_request
 budzero/bud-node/src/bitswap.rs	fn	decode_response
 budzero/bud-node/src/bitswap.rs	fn	encode_request
@@ -815,7 +810,6 @@ budzero/bud-vm/src/lib.rs	fn	poseidon4_hash3
 budzero/bud-vm/src/lib.rs	fn	poseidon4_hash_state
 budzero/bud-vm/src/lib.rs	fn	poseidon_full_hash_state
 budzero/bud-vm/src/lib.rs	fn	poseidon_full_state
-budzero/verifier-registry/src/evidence.rs	enum	SlashingProof
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_attester_proof
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_content_validation
 budzero/verifier-registry/src/evidence.rs	fn	consensus_invalid_relay_proof
@@ -1053,7 +1047,6 @@ src/account_abstraction/quantum_account.rs	enum	SeedError
 src/account_abstraction/quantum_account.rs	fn	guardian_root
 src/account_abstraction/quantum_account.rs	fn	is_timelock_satisfied
 src/account_abstraction/quantum_account.rs	fn	seed_from_entropy
-src/account_abstraction/quantum_account.rs	fn	storage_cost
 src/account_abstraction/quantum_account.rs	fn	verify_multisig_threshold
 src/account_abstraction/quantum_account.rs	fn	verify_recovery_policy
 src/account_abstraction/quantum_account.rs	fn	verify_storage_bound
@@ -1061,7 +1054,6 @@ src/account_abstraction/quantum_account.rs	struct	BftGuardianFinality
 src/account_abstraction/quantum_account.rs	struct	GuardianVote
 src/account_abstraction/quantum_account.rs	struct	RecoveryProposal
 src/account_abstraction/registry.rs	enum	QuantumAccountRegistryError
-src/account_abstraction/registry.rs	fn	is_registered
 src/account_abstraction/registry.rs	fn	register_with_pacts
 src/account_abstraction/registry.rs	struct	QuantumAccountRegistry
 src/account_abstraction/tee_attestation.rs	const	MAX_QUOTE_LEN
@@ -1142,7 +1134,6 @@ src/ai/registry.rs	fn	update_model_spec
 src/ai/registry.rs	fn	withdraw_verifier_stake
 src/ai/types.rs	const	MAX_INFERENCE_REF_BYTES
 src/ai/types.rs	fn	calculate_signing_hash
-src/ai/types.rs	struct	AiResultId
 src/bin/budlum-relayer.rs	enum	RelayDirection
 src/bin/budlum-relayer.rs	fn	build_deposit_proof
 src/bin/budlum-relayer.rs	fn	get_block_number
@@ -1176,7 +1167,6 @@ src/chain/blockchain.rs	fn	emit_mempool_eviction
 src/chain/blockchain.rs	fn	emit_reorg
 src/chain/blockchain.rs	fn	emit_tx_processed
 src/chain/blockchain.rs	fn	enqueue_bridge_relay
-src/chain/blockchain.rs	fn	expired_relays
 src/chain/blockchain.rs	fn	finalize_missed_storage_challenges
 src/chain/blockchain.rs	fn	find_fork_point
 src/chain/blockchain.rs	fn	freeze_poa_account
@@ -1193,7 +1183,6 @@ src/chain/blockchain.rs	fn	record_liveness_epoch
 src/chain/blockchain.rs	fn	relay_ledger_root
 src/chain/blockchain.rs	fn	reset_pending_storage_root
 src/chain/blockchain.rs	fn	sovereign_template_root
-src/chain/blockchain.rs	fn	verify_domain_commitment_finality
 src/chain/blockchain.rs	fn	verify_domain_event_proof
 src/chain/chain_actor.rs	enum	ChainCommand
 src/chain/chain_actor.rs	fn	apply_snapshot
@@ -1210,7 +1199,6 @@ src/chain/chain_actor.rs	fn	get_state_snapshot_data
 src/chain/chain_actor.rs	fn	get_storage_deals
 src/chain/chain_actor.rs	fn	issue_storage_challenges
 src/chain/chain_actor.rs	fn	lock_bridge_transfer
-src/chain/chain_actor.rs	fn	storage_prune
 src/chain/chain_actor.rs	fn	submit_storage_proof
 src/chain/fee_market.rs	const	DEFAULT_BASE_FEE_MAX_CHANGE_DENOMINATOR
 src/chain/fee_market.rs	const	DEFAULT_ELASTICITY_MULTIPLIER
@@ -1262,10 +1250,8 @@ src/cli/commands.rs	struct	RpcSection
 src/cli/commands.rs	struct	SignerSection
 src/cli/commands.rs	struct	StorageSection
 src/cli/commands.rs	struct	ValidatorSection
-src/consensus/merkle_tree.rs	fn	merkle_parent_layer
 src/consensus/merkle_tree.rs	fn	merkle_rebuild_root
 src/consensus/merkle_tree.rs	fn	merkle_sibling_index
-src/consensus/mod.rs	const	MAX_BLOCK_SIZE
 src/consensus/mod.rs	const	MAX_FUTURE_BLOCK_TIME_MS
 src/consensus/poa.rs	fn	active_validator_count
 src/consensus/poa.rs	fn	expected_proposer_with_entropy
@@ -1307,7 +1293,6 @@ src/core/account.rs	fn	has_consensus_keys
 src/core/account.rs	fn	has_role
 src/core/account.rs	fn	init_genesis
 src/core/account.rs	fn	is_consensus_validator
-src/core/account.rs	fn	is_eligible
 src/core/account.rs	fn	is_ai_operator
 src/core/account.rs	fn	is_storage_operator
 src/core/account.rs	fn	process_timed_burn
@@ -1372,7 +1357,6 @@ src/core/transaction.rs	fn	sign_v5
 src/core/transaction.rs	fn	sign_v6
 src/cross_domain/bridge_relayer.rs	enum	PipelineError
 src/cross_domain/bridge_relayer.rs	fn	event_proof
-src/cross_domain/bridge_relayer.rs	struct	BridgeRelayerPipeline
 src/cross_domain/chain_adapter.rs	fn	supports
 src/cross_domain/evm/adapter.rs	const	DEFAULT_DEPOSIT_TOPIC0
 src/cross_domain/evm/adapter.rs	fn	test_default
@@ -1446,7 +1430,6 @@ src/domain/commitment_registry.rs	fn	get_by_block_hash
 src/domain/finality_adapter.rs	fn	hash_pow_header
 src/domain/finality_adapter.rs	fn	poa_authority_set_hash
 src/domain/finality_adapter.rs	fn	poa_commit_signing_message
-src/domain/finality_adapter.rs	fn	pow_min_difficulty_bits
 src/domain/finality_adapter.rs	fn	required_signatures
 src/domain/finality_adapter.rs	struct	PoAAuthoritySignature
 src/domain/finality_adapter.rs	struct	PoWHeader
@@ -1526,7 +1509,6 @@ src/execution/proof_verifier.rs	const	GAS_PER_DEGREE_BIT
 src/execution/proof_verifier.rs	const	MAX_DEGREE_BITS
 src/execution/proof_verifier.rs	const	MIN_PROOF_FORMAT_VERSION
 src/execution/proof_verifier.rs	enum	ProofVerifyError
-src/execution/proof_verifier.rs	fn	verify
 src/execution/proof_verifier.rs	struct	VerifiedProof
 src/execution/zkvm.rs	fn	execute_bytecode_mainnet
 src/execution/zkvm.rs	fn	prove_bytecode
@@ -1618,8 +1600,6 @@ src/ai_inference/storage.rs	fn	is_training_corpus
 src/ai_inference/storage.rs	struct	AiDatasetStorageDeal
 src/ai_inference/verify.rs	fn	generate_and_verify_proof
 src/ai_inference/verify.rs	fn	verify_inference_stark
-src/mempool/pool.rs	fn	drain
-src/mempool/pool.rs	fn	max_pool_bytes
 src/network/gossip_dedup.rs	const	DEFAULT_DEDUP_WINDOW
 src/network/gossip_dedup.rs	const	MAX_DUPLICATE_COUNT
 src/network/gossip_dedup.rs	const	MAX_PEER_SCORE
@@ -1634,7 +1614,6 @@ src/network/gossip_dedup.rs	fn	is_below_threshold
 src/network/gossip_dedup.rs	fn	peer_score
 src/network/gossip_dedup.rs	fn	peers_below_threshold
 src/network/gossip_dedup.rs	fn	record_invalid
-src/network/gossip_dedup.rs	fn	record_valid
 src/network/gossip_dedup.rs	fn	remove_peer
 src/network/gossip_dedup.rs	fn	total_duplicates
 src/network/gossip_dedup.rs	fn	total_processed
@@ -1695,7 +1674,6 @@ src/network/peer_manager.rs	fn	set_max_peers_per_subnet
 src/network/peer_manager.rs	fn	subnet_connection_count
 src/network/peer_manager.rs	fn	tracked_peer_count
 src/network/peer_manager.rs	struct	PeerScore
-src/network/protocol.rs	const	MAX_BLOCK_SIZE
 src/network/protocol.rs	const	MAX_TX_SIZE
 src/network/protocol.rs	enum	MessageError
 src/pollen/content_gate.rs	enum	ContentGateError
@@ -1704,13 +1682,11 @@ src/pollen/content_gate.rs	fn	is_protected
 src/pollen/data_rights.rs	const	ENCODED_LEN
 src/pollen/offers.rs	fn	active_encryption_policies
 src/pollen/offers.rs	fn	authorize_content_read
-src/pollen/offers.rs	fn	bind_content_to_asset
 src/pollen/offers.rs	fn	get_encryption_policy
 src/pollen/offers.rs	fn	get_sale_authorization
 src/pollen/offers.rs	fn	purchase_signing_hash
 src/privacy/note_registry.rs	const	MAX_LIVE_COMMITMENTS
 src/privacy/note_registry.rs	const	MAX_SPENT_NULLIFIERS
-src/privacy/note_registry.rs	fn	apply_transfer_with_proofs
 src/privacy/note_registry.rs	fn	contains_commitment
 src/privacy/note_registry.rs	fn	derive_nullifier
 src/privacy/note_registry.rs	fn	is_nullifier_spent
@@ -1723,13 +1699,8 @@ src/privacy/submit.rs	const	MAX_PRIVATE_IO
 src/privacy/submit.rs	const	ML_DSA_87_AUTH_SIG_LEN
 src/privacy/submit.rs	fn	compute_public_digest
 src/prover/mod.rs	fn	payload_binding_hash
-src/registry/evidence.rs	enum	SlashingProof
 src/registry/evidence.rs	fn	consensus_invalid_attester_proof
 src/registry/evidence.rs	fn	consensus_invalid_content_validation
-src/registry/evidence.rs	fn	consensus_invalid_relay_front_running
-src/registry/evidence.rs	fn	consensus_invalid_relay_griefing
-src/registry/evidence.rs	fn	consensus_invalid_relay_proof
-src/registry/evidence.rs	fn	consensus_invalid_relay_wrong_relay
 src/registry/liveness.rs	fn	missed_count
 src/registry/params.rs	fn	proportional_fee
 src/registry/permissionless.rs	const	MAX_SLASHING_HISTORY
@@ -1738,9 +1709,7 @@ src/registry/permissionless.rs	fn	begin_unbonding_with_delay
 src/registry/permissionless.rs	fn	is_active_ai_verifier
 src/registry/permissionless.rs	fn	is_active_prover
 src/registry/permissionless.rs	fn	is_slashable
-src/registry/permissionless.rs	fn	register_ai_verifier
 src/registry/permissionless.rs	fn	register_storage_operator
-src/registry/permissionless.rs	fn	register_verifier
 src/registry/permissionless.rs	fn	registrations_as_seq
 src/registry/poa_compliance.rs	enum	ComplianceAction
 src/registry/poa_compliance.rs	enum	PoaComplianceError
@@ -1756,21 +1725,14 @@ src/registry/poa_compliance.rs	struct	ComplianceAuditEvent
 src/registry/poa_compliance.rs	struct	FreezeRecord
 src/registry/poa_compliance.rs	struct	ScreeningRecord
 src/registry/poa_compliance.rs	struct	TravelRuleRecord
-src/registry/poa_membership.rs	fn	add_admin
-src/registry/poa_membership.rs	fn	approve
 src/registry/poa_membership.rs	fn	reject
-src/registry/poa_membership.rs	fn	submit_application
 src/registry/poa_membership.rs	struct	PoaMember
 src/registry/poa_onboarding.rs	const	DEFAULT_KYC_HORIZON
 src/registry/poa_onboarding.rs	enum	OnboardingDecision
-src/registry/poa_onboarding.rs	fn	add_admin
-src/registry/poa_onboarding.rs	fn	approve
 src/registry/poa_onboarding.rs	fn	is_authorized_now
 src/registry/poa_onboarding.rs	fn	kyc_expiry_of
-src/registry/poa_onboarding.rs	fn	registry_mut
 src/registry/poa_onboarding.rs	fn	reject
 src/registry/poa_onboarding.rs	fn	renew_kyc
-src/registry/poa_onboarding.rs	fn	submit_application
 src/registry/poa_onboarding.rs	struct	OnboardingEvent
 src/registry/poa_onboarding.rs	struct	PoAWhitelist
 src/relayer/policy.rs	const	MAX_RELAYER_BIDS_PER_INTENT

@@ -228,7 +228,8 @@ fn run_one_with_seed(name: &str, program: &[u64], samples: u32, seed: impl Fn(&m
             chain_id: 1,
             program_hash: program_hash(program),
             initial_state_root,
-            final_state_root: [0u8; 32],
+            // The AIR ties the final root to the storage-writes fold.
+            final_state_root: receipt.state_writes_digest,
             sender: 0,
             nonce: 0,
             block_height: 0,

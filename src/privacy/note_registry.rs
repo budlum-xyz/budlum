@@ -86,6 +86,11 @@ impl L1NoteRegistry {
 
     /// BLG-0058: has this *note* been spent already? The chain-internal
     /// filter (decision A) that stops resurrection.
+    ///
+    /// WIRING: the spent-note half of the double-spend pair, exposed
+    /// for the spend path's precheck; today the resurrection guard in
+    /// `insert_note` is the caller, and the executor asks the nullifier
+    /// half beside it.
     pub fn is_commitment_spent(&self, c: &NoteHash) -> bool {
         self.spent_commitments.contains(c)
     }
@@ -98,7 +103,7 @@ impl L1NoteRegistry {
         // BLG-0058: a spent note cannot be resurrected. Without this check a
         // PrivacyNoteInsert revived the commitment and a fresh proof minted a
         // fresh nullifier, letting the same note be spent again.
-        if self.spent_commitments.contains(&commitment) {
+        if self.is_commitment_spent(&commitment) {
             return Err("note commitment already spent".into());
         }
         if self.spent_nullifiers.contains(&commitment) {
@@ -272,8 +277,8 @@ impl L1NoteRegistry {
 
     /// Derive nullifier from commitment and proof.
     ///
-    /// BLG-0061 (P03-F04): the result is a *packed note hash* — a canonical
-    /// Goldilocks element in the low eight bytes and zeros above — because a
+    /// BLG-0061 (P03-F04): the result is a *packed note hash* - a canonical
+    /// Goldilocks element in the low eight bytes and zeros above - because a
     /// raw SHA-256 output fails `is_note_hash` and every derived nullifier
     /// would be refused at the transaction boundary. The digest is reduced
     /// modulo `GOLDILOCKS_P` (V2). The earlier V1 form (`SHA-256(tag || c ||

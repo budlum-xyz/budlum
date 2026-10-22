@@ -602,13 +602,43 @@ impl PoSEngine {
                         }
                     }
 
-                    // Take the pool only now. A node that is not the leader
-                    // drops this block, and the evidence must stay queued.
+                    // Hand over only what a block can still carry, and take
+                    // nothing out of the pool yet. The whole pool used to be
+                    // inlined here with no size limit and then cleared before
+                    // the block was even validated: an oversized entry made
+                    // the block fail `validate_block_size`, the slot was
+                    // lost, and the evidence it had just taken was gone. The
+                    // pool is only pruned by `record_block_with_chain`, once
+                    // the block that carried an entry is actually committed.
                     if block.slashing_evidence.is_none() {
-                        if let Ok(mut evidences) = self.slashing_evidence.write() {
-                            if !evidences.is_empty() {
-                                block.slashing_evidence = Some(evidences.clone());
-                                evidences.clear();
+                        if let Ok(evidences) = self.slashing_evidence.read() {
+                            // Same reservation the block builder makes for
+                            // evidence in `collect_block_transactions`.
+                            const BLOCK_HEADER_JSON_ALLOWANCE: usize = 4096;
+                            let mut remaining = crate::consensus::MAX_BLOCK_SIZE
+                                .saturating_sub(BLOCK_HEADER_JSON_ALLOWANCE)
+                                .saturating_sub(
+                                    serde_json::to_vec(&block.transactions)
+                                        .map_or(usize::MAX, |bytes| bytes.len()),
+                                );
+                            let mut taken = Vec::new();
+                            let mut used = 0usize;
+                            for evidence in evidences.iter() {
+                                let encoded = serde_json::to_vec(evidence)
+                                    .map(|bytes| bytes.len())
+                                    .unwrap_or(usize::MAX);
+                                if encoded <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES
+                                    && used.saturating_add(encoded)
+                                        <= crate::consensus::MAX_SLASHING_EVIDENCE_BYTES
+                                    && encoded <= remaining
+                                {
+                                    used = used.saturating_add(encoded);
+                                    remaining = remaining.saturating_sub(encoded);
+                                    taken.push(evidence.clone());
+                                }
+                            }
+                            if !taken.is_empty() {
+                                block.slashing_evidence = Some(taken);
                             }
                         }
                     }
@@ -799,6 +829,15 @@ impl ConsensusEngine for PoSEngine {
                             return Err(ConsensusError(format!(
                                 "PoS leader round {round} claimed too early: block timestamp {} < floor {}",
                                 block.timestamp, floor
+                            )));
+                        }
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis();
+                        if now_ms < floor {
+                            return Err(ConsensusError(format!(
+                                "PoS leader round {round} claimed ahead of wall clock: now {now_ms} < floor {floor}"
                             )));
                         }
                     }
@@ -1163,6 +1202,15 @@ impl ConsensusEngine for PoSEngine {
         chain: &[Block],
         _storage: Option<&crate::storage::db::Storage>,
     ) {
+        // The block is committed: the evidence it carried has now done its
+        // job and leaves the pool. Everything the pool still holds is
+        // retried on the next slot, so an entry that lost its race with a
+        // full block is never destroyed.
+        if let Some(committed) = &block.slashing_evidence {
+            if let Ok(mut evidences) = self.slashing_evidence.write() {
+                evidences.retain(|pooled| !committed.contains(pooled));
+            }
+        }
         if self.config.epoch_length == 0 {
             tracing::error!("Cannot refresh PoS randomness with zero epoch length");
             return;

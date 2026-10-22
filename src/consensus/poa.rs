@@ -517,6 +517,15 @@ impl ConsensusEngine for PoAEngine {
                             block.timestamp, floor
                         )));
                     }
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis();
+                    if now_ms < floor {
+                        return Err(ConsensusError(format!(
+                            "PoA leader round {round} claimed ahead of wall clock: now {now_ms} < floor {floor}"
+                        )));
+                    }
                 }
             }
             // V5-SECURITY-12: Use previous block hash as entropy for leader verification.

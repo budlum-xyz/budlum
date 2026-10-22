@@ -2184,12 +2184,12 @@ mod tests {
             signature: vec![1],
             submitted_at_block: 11,
         };
-        assert!(registry
-            .submit_result(mk(0x11, b"first", 1), 11)
-            .unwrap()
-            .is_none());
-        let outcome = registry
-            .submit_result(mk(0x22, b"second", 1), 11)
+        assert!(
+            submit_result_staked(&mut registry, mk(0x11, b"first", 1), 11)
+                .unwrap()
+                .is_none()
+        );
+        let outcome = submit_result_staked(&mut registry, mk(0x22, b"second", 1), 11)
             .unwrap()
             .unwrap();
         assert_eq!(outcome.output_ref.as_slice(), b"first");
@@ -4865,5 +4865,86 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert_eq!(all[2].0, a2);
         assert!(all[2].1 < all[1].1);
+    }
+
+    #[test]
+    fn state_root_commits_to_fully_verified_proofs_and_gates_proof_required_finalization() {
+        let mut reg = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[7u8; 32], 1);
+        reg.register_model(AiModelSpec {
+            model_id,
+            model_hash: [7u8; 32],
+            owner,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 2048,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 50,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_dims: None,
+            execution_weights_digest: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        })
+        .unwrap();
+        {
+            let m = reg.models.get_mut(&model_id).unwrap();
+            m.require_execution_proof = true;
+            m.execution_program_hash = Some([0xAA; 32]);
+            m.execution_weights_digest = Some([0xBB; 32]);
+        }
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = reg.submit_request(req, 10).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000021")
+                .unwrap();
+        let outcome = submit_ai_result(&mut reg, req_id, v1, [9u8; 32], 1, 12).unwrap();
+        assert!(outcome.is_none());
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: Some([0xBB; 32]),
+            public_inputs: None,
+        };
+        let mut reg_structural = reg.clone();
+        let mut reg_verified = reg;
+        reg_structural
+            .attach_execution_proof(&req_id, &v1, proof.clone(), false)
+            .unwrap();
+        reg_verified
+            .attach_execution_proof(&req_id, &v1, proof, true)
+            .unwrap();
+
+        assert_ne!(reg_structural.state_root(), reg_verified.state_root());
+        assert!(reg_structural.try_finalize_with_proofs(&req_id).is_none());
+        assert!(reg_verified.try_finalize_with_proofs(&req_id).is_some());
     }
 }

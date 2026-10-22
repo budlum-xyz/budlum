@@ -118,7 +118,7 @@ fn row(label: &str, keygen_us: f64, sign_us: f64, verify_us: f64, sig_bytes: usi
 
 fn bench_bpqs_row<H: budlum_bpqs::BpqsHash>(label: &str) {
     let t0 = Instant::now();
-    let mut signer = BpqsSigner::<BenchFast, H>::ceremonial_keygen([7u8; 32], EpochWindow(3))
+    let mut signer = BpqsSigner::<BenchFast, H>::fresh_device([7u8; 32], EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     let keygen_us = t0.elapsed().as_micros() as f64;
 

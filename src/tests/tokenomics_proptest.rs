@@ -203,7 +203,7 @@ mod tests {
     proptest! {
         /// BLG-0080 (P03-F23) + BLG-0077 (P03-F20): parameter sweep the old
         /// tests never did. The burn can never exceed the money it comes
-        /// from, whatever ratio a hand-built parameter set carries — the
+        /// from, whatever ratio a hand-built parameter set carries - the
         /// ratios are capped inside the formula, not only at genesis.
         #[test]
         fn metabolic_burn_never_exceeds_the_fee(

@@ -7,6 +7,9 @@ pub const MIN_DOMAIN_OPERATOR_BOND: u64 = 10_000;
 
 /// Most zk programs one domain may allow at the same time. Each entry is hashed into the
 /// registry leaf and checked on proof submission.
+///
+/// Convenience: pub so a domain operator can refuse past the same
+/// allowlist bound the registry enforces in this module.
 pub const MAX_ZK_PROGRAMS_PER_DOMAIN: usize = 64;
 
 /// The maximum number of domains that may be kept registered.
@@ -56,7 +59,28 @@ impl ConsensusDomainRegistry {
         }
     }
 
+    /// Restore a domain loaded back from storage.
+    ///
+    /// Persistence is not registration: a domain that was frozen before a
+    /// restart must come back frozen. Routing the load through `register`
+    /// dropped it at the register-as-Active rule and genesis bootstrap then
+    /// re-registered the same id as Active, so a freeze silently evaporated
+    /// across every restart. Every other registration shape check still
+    /// runs: a malformed stored record is refused here exactly as a
+    /// malformed fresh registration would be.
+    pub fn restore_persisted(&mut self, domain: ConsensusDomain) -> Result<(), String> {
+        self.register_inner(domain, false)
+    }
+
     pub fn register(&mut self, domain: ConsensusDomain) -> Result<(), String> {
+        self.register_inner(domain, true)
+    }
+
+    fn register_inner(
+        &mut self,
+        domain: ConsensusDomain,
+        require_active: bool,
+    ) -> Result<(), String> {
         if self.domains.contains_key(&domain.id) {
             return Err(format!("Domain {} is already registered", domain.id));
         }
@@ -83,8 +107,10 @@ impl ConsensusDomainRegistry {
         }
         // A new registration starts Active. Frozen and Retired are reached
         // only through `transition_status_checked`; registering straight into
-        // them would skip the lifecycle guard (P25-F10).
-        if domain.status != DomainStatus::Active {
+        // them would skip the lifecycle guard (P25-F10). Restoring persisted
+        // state is the one caller exempt from this, by the argument on
+        // `restore_persisted`.
+        if require_active && domain.status != DomainStatus::Active {
             return Err(format!(
                 "Domain {} must register as Active, not {:?}",
                 domain.id, domain.status

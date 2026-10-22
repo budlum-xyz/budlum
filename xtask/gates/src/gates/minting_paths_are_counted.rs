@@ -59,9 +59,8 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          One in the verified-burn unlock (decision K4-A): the owner gets back \
          the burned amount, which the lock debited from the owner less the \
          relayer fee the mint paid out of the arriving asset. \
-         Two in the relay unlock of a burned bridge transfer: the owner share \
-         and the relayer cut, which together equal the amount that the lock \
-         debited from the owner. \
+         One in the relay unlock of a burned bridge transfer: the owner share \
+         returned on burn (the relayer cut was already paid at mint). \
          One in `apply_bridge_sweep_to_state`: the refund of an expired lock \
          to its owner, again the amount the lock debited. \
          One in the storage reward tick: the operator is paid out of the fee \
@@ -78,33 +77,38 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          One in the block-application storage prune: the operator bond that \
          `open_deal` debited, returned when the owner burns the content and \
          the prune ends the deal early. \
+         One in that same prune: the storage fee for the epochs the ended \
+         deal will no longer serve, which `open_deal` debited from the payer \
+         up front, returned to that payer; what the operator already earned \
+         for the served epochs came out of the same escrowed fee, so the \
+         refund cannot exceed what was taken. \
          None of these create new supply. The bridge mint paths use \
          `try_mint_balance` and are not on this list.",
     ),
     (
-        "src/chain/chain_actor.rs",
-        1,
-        "the manual storage prune returns the operator bond that `open_deal` \
-         debited from that operator when it opened the deal. The block \
-         application path runs the same settlement; the bond is money \
-         changing place, not new supply.",
-    ),
-    (
         "src/execution/executor.rs",
-        3,
-        "bridge unlock inside a RelayerResult (the owner's locked money is \
-         returned and the relayer's cut is carved out of that same refund) and \
+        2,
+        "bridge unlock inside a RelayerResult (the owner's burned share is \
+         returned; the relayer's cut was already minted on target arrival) and \
          the producer's share of a transaction fee that was already paid. The \
          bridge mint inside a RelayerResult is not on this list: it creates \
          supply and goes through `try_mint_balance`.",
     ),
     (
         "src/core/account.rs",
-        2,
+        4,
         "one is the release of the unbonding queue (money already committed as stake \
          and already counted against the ceiling is returned - not new supply \
-         but supply changing category); the other is the body of `try_mint_balance` itself, \
-         the line that performs the actual addition after checking the ceiling.",
+         but supply changing category); one is the body of `try_mint_balance` itself, \
+         the line that performs the actual addition after checking the ceiling. \
+         The other two are the external-domain bond escrow (BLG-0155): \
+         `release_external_bond` returns what `lock_external_bond` took out \
+         of the same poster's balance, capped at what the escrow actually \
+         holds, and `slash_external_bond` pays the challenger a reward no \
+         larger than the amount the same call takes out of the prover's \
+         escrow, with the remainder recorded in `burned_total`. The escrow \
+         counts in `total_bud_committed` the whole time it is held, so \
+         neither line opens minting headroom.",
     ),
 ];
 

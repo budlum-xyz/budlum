@@ -31,6 +31,8 @@ use crate::registry::role::roles;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+type InvalidVoteSample = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// Per-validator, per-epoch invalid-signature-vote counter.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InvalidVoteTracker {
@@ -42,6 +44,11 @@ pub struct InvalidVoteTracker {
     /// Validators already reported this epoch, to avoid re-slashing every extra
     /// Invalid vote after the threshold is crossed.
     reported: BTreeMap<Address, ()>,
+    /// Self-authenticated invalid vote samples `(auth_msg, auth_sig, vote_msg, bad_sig)`
+    /// retained locally so an emitted report carries cryptographic proof checkable
+    /// inside `apply_block_effects` by any validating peer.
+    #[serde(skip)]
+    samples: BTreeMap<Address, Vec<InvalidVoteSample>>,
 }
 
 impl InvalidVoteTracker {
@@ -85,6 +92,7 @@ impl InvalidVoteTracker {
             self.current_epoch = epoch;
             self.counts.clear();
             self.reported.clear();
+            self.samples.clear();
         }
 
         let count = self.counts.entry(validator).or_insert(0);
@@ -94,16 +102,62 @@ impl InvalidVoteTracker {
         let threshold = params.max_invalid_votes_per_epoch;
         if threshold > 0 && current >= threshold && !self.reported.contains_key(&validator) {
             self.reported.insert(validator, ());
-            return Some(SlashingReport::consensus_invalid_signature_spam(
-                validator,
-                roles::VALIDATOR,
-                epoch,
-                current,
-                threshold,
-                None,
-            ));
+            let collected = self.samples.remove(&validator).unwrap_or_default();
+            return Some(
+                SlashingReport::consensus_invalid_signature_spam_with_samples(
+                    validator,
+                    roles::VALIDATOR,
+                    epoch,
+                    current,
+                    threshold,
+                    collected,
+                    None,
+                ),
+            );
         }
         None
+    }
+
+    /// Record a self-authenticated invalid vote sample alongside incrementing the
+    /// per-epoch counter so emitted spam reports carry cryptographic evidence checkable
+    /// inside `apply_block_effects`.
+    pub fn record_invalid_vote_with_sample(
+        &mut self,
+        epoch: u64,
+        validator: Address,
+        sample: (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
+        params: &RegistryParams,
+    ) -> Option<SlashingReport> {
+        const MAX_SPAM_REPORT_SAMPLES: usize = 256;
+        if epoch < self.current_epoch {
+            return None;
+        }
+        if crate::chain::finality::vote_auth_signing_message(&sample.2, &sample.3) != sample.0 {
+            return None;
+        }
+        if crate::chain::finality::vote_message_epoch(&sample.2) != Some(epoch) {
+            return None;
+        }
+        if epoch != self.current_epoch {
+            self.current_epoch = epoch;
+            self.counts.clear();
+            self.reported.clear();
+            self.samples.clear();
+        }
+        let entry = self.samples.entry(validator).or_default();
+        if entry
+            .iter()
+            .any(|existing| existing.2 == sample.2 && existing.3 == sample.3)
+        {
+            return None;
+        }
+        let sample_cap = params
+            .max_invalid_votes_per_epoch
+            .min(MAX_SPAM_REPORT_SAMPLES as u64) as usize;
+        if entry.len() < sample_cap {
+            entry.push(sample);
+        }
+        self.record_invalid_vote(epoch, validator, params)
     }
 }
 
@@ -197,6 +251,7 @@ mod tests {
                 epoch,
                 count,
                 threshold,
+                ..
             } => {
                 assert_eq!(*epoch, 5);
                 assert_eq!(*count, 3);

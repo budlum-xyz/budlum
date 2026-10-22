@@ -15,17 +15,22 @@ permissions:
 jobs:
   storage-shards:
     # User decision 2026-09-24: pay the full storage UB inspection cost rather
-    # than leaving the 3600 s PR window as the only evidence. Six scheduled
-    # shards keep each hosted job under the 6 h ceiling (measured full cost:
-    # ~26.5 runner-hours/week). This workflow has no pull_request trigger, so
-    # PRs never list a permanent Skipped check for the scheduled-only sweep.
-    name: Miri storage full shard ${{ matrix.shard_index }}/6 (weekly)
+    # than leaving the 3600 s PR window as the only evidence. Twenty-four
+    # scheduled shards keep each hosted job under the 6 h ceiling (measured
+    # full cost: ~26.5 runner-hours/week). This workflow has no pull_request
+    # trigger, so PRs never list a permanent Skipped check for the
+    # scheduled-only sweep.
+    name: Miri storage full shard ${{ matrix.shard_index }}/24 (weekly)
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
-        shard_index: [0, 1, 2, 3, 4, 5]
+        shard_index:
+          [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+            12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+          ]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -39,11 +44,11 @@ jobs:
           cache-on-failure: true
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: Miri storage shard ${{ matrix.shard_index }} of 6
+      - name: Miri storage shard ${{ matrix.shard_index }} of 24
         run: |
           set -euo pipefail
           shard='${{ matrix.shard_index }}'
-          shards=6
+          shards=24
           echo "Enumerating storage tests for shard $shard/$shards..."
           cargo +nightly-2026-07-19 miri test -p budlum-core --lib -- storage --list \
             2>&1 | tee /tmp/miri-storage-list.txt
@@ -80,9 +85,35 @@ jobs:
             storage_reload_skips_commitments_for_unknown_or_mismatched_domains
             storage_reload_skips_global_headers_with_broken_hash_chain
             bridge_state_roots_round_trip_through_storage_after_lock
+            a_failed_persist_propagates_out_of_the_accounting_paths
+            storage_registry_row_needs_its_version_tag
+            get_content_refuses_a_row_that_no_longer_hashes_to_its_key
+            snapshot_is_refused_while_a_commit_is_in_flight
+            corrupt_tx_index_row_is_an_error_not_a_miss
+            load_all_seen_blocks_skips_corrupt_records
+            repair_index_fails_on_gap
+            repair_index_ok_on_intact_chain
+            a_recommit_of_a_committed_height_needs_no_progress_marker
+            a_previous_hash_cycle_is_an_error_not_a_loop
+            a_record_under_the_wrong_hash_is_refused
+            delete_block_removes_its_tx_index_rows
+            check_integrity_accepts_a_pruned_prefix_but_not_a_gap
+            load_chain_reports_a_missing_indexed_parent
+            a_newer_schema_version_refuses_to_open
+            with_storage_refuses_unreadable_accounts
+            nft_burn_prunes_matching_storage_manifest_on_produce
           )
 
-          args=(storage --test-threads=1)
+          # Pass the selected tests as exact libtest filters. The previous
+          # form passed every non-selected test as its own `--skip` pattern:
+          # with 898 listed tests that was ~862 substring patterns for a
+          # 36-test shard. Under Miri, libtest spent the whole measured
+          # window (2 h 42 min in run 39489412201) matching those patterns
+          # before it ever printed `running N tests`, so the shard inspected
+          # nothing and only ever ended by cancellation. Exact filters name
+          # the same selected set directly; the FFI-bound tests are excluded
+          # by not being selected, exactly as before.
+          args=(--exact --test-threads=1)
           selected=0
           forced_skipped=0
           for i in "${!tests[@]}"; do
@@ -100,8 +131,7 @@ jobs:
             fi
             if [ "$skip" -eq 0 ]; then
               selected=$((selected + 1))
-            else
-              args+=(--skip "$name")
+              args+=("$name")
             fi
           done
           if [ "$selected" -lt 1 ]; then

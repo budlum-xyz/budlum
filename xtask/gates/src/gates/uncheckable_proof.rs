@@ -158,7 +158,7 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-uncheck")?;
     let _ = std::fs::create_dir_all(dir.join("src/domain"));
 
-    let good = "pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {\n    false\n}\nfn f() {\n    match (a, b) {\n        (Some(_), Some(_)) if !Self::storage_challenge_proofs_are_checkable() => Ok(()),\n        (Some(_), None) => Err(StorageError::InvalidMerkleProof(\"x\".into())),\n        (None, _) => Ok(()),\n    }\n    DefaultAdapter::verify(&e, &i, &p);\n}\nfn an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable() {}\nfn the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof() {}\n";
+    let good = "pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {\n    false\n}\nfn f() {\n    match (a, b) {\n        (Some(_), Some(_)) if !Self::storage_challenge_proofs_are_checkable() => Ok(()),\n        (Some(_), None) => Err(StorageError::InvalidMerkleProof(\"x\".into())),\n        (None, _) => Ok(()),\n    }\n    DefaultAdapter::verify(&e, &i, &p);\n}\n#[test]\nfn an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable() {}\n#[test]\nfn the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof() {}\n";
     std::fs::write(dir.join("src/domain/storage_deal.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);

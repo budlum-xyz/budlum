@@ -9,6 +9,12 @@ use std::collections::BTreeMap;
 /// message cost memory and hashing time without limit.
 const MAX_CUSTOM_KIND_BYTES: usize = 256;
 
+/// Longest a message row may be retained. `expiry_height` and `source_height`
+/// are chosen by whoever built the message, so a row that names `u64::MAX`
+/// would otherwise never be pruned and the registry would grow without bound.
+/// Ten years of six-second blocks.
+const MAX_MESSAGE_LIFETIME_BLOCKS: u64 = 52_560_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CrossDomainMessageRegistry {
     #[serde(with = "crate::core::map_keys")]
@@ -37,7 +43,12 @@ impl CrossDomainMessageRegistry {
             } else {
                 m.source_height
             };
-            horizon.saturating_add(retention_blocks) > current_height
+            // The horizon is chosen by whoever built the message, so a
+            // far-future or `u64::MAX` value would make the row immortal.
+            // A horizon beyond the maximum lifetime counts as already
+            // expired, so no declared height can outlive the bound.
+            horizon <= current_height.saturating_add(MAX_MESSAGE_LIFETIME_BLOCKS)
+                && horizon.saturating_add(retention_blocks) > current_height
         });
         before - self.messages.len()
     }
@@ -206,6 +217,42 @@ mod tests {
         registry.insert(fresh).unwrap();
         let dropped = registry.prune_expired(100_000, 1_000);
         assert_eq!(dropped, 1);
+        assert_eq!(registry.len(), 1);
+    }
+
+    /// A horizon the submitter chooses must not buy immortality.
+    ///
+    /// `expiry_height` and `source_height` come from whoever built the
+    /// message, so without a lifetime bound a row declaring `u64::MAX` is
+    /// retained at every reachable height and the sweep bounds nothing. The
+    /// declared-but-unreachable horizon is treated as already expired.
+    #[test]
+    fn a_message_declaring_an_immortal_horizon_is_pruned() {
+        let mut registry = CrossDomainMessageRegistry::new();
+        let mut immortal = make_message(3);
+        immortal.expiry_height = u64::MAX;
+        immortal.message_id = immortal.calculate_message_id();
+        registry.insert(immortal).unwrap();
+        assert_eq!(registry.len(), 1);
+
+        // At the current height the row is neither expired nor beyond its
+        // retention window, yet it is dropped: its declared horizon is past
+        // the farthest height the registry will ever keep a row for.
+        let dropped = registry.prune_expired(1_000, 1_000);
+        assert_eq!(dropped, 1, "a u64::MAX horizon must not be immortal");
+        assert!(registry.is_empty());
+    }
+
+    /// The bound is a horizon, not a blanket drop: a message whose declared
+    /// expiry sits inside the maximum lifetime is still kept while it lives.
+    #[test]
+    fn a_horizon_inside_the_lifetime_bound_is_still_retained() {
+        let mut registry = CrossDomainMessageRegistry::new();
+        let mut far = make_message(4);
+        far.expiry_height = MAX_MESSAGE_LIFETIME_BLOCKS - 1;
+        far.message_id = far.calculate_message_id();
+        registry.insert(far).unwrap();
+        assert_eq!(registry.prune_expired(1_000, 1_000), 0);
         assert_eq!(registry.len(), 1);
     }
 }

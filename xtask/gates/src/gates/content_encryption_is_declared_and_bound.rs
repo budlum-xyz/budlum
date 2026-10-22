@@ -346,6 +346,15 @@ fn check_call_sites(code: &str) -> Checks {
     let checked = 1;
     let mut problems = Vec::new();
     let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    // The Stored helper forwards its own `encryption` parameter: inside
+    // `manifest_id_from_parts_stored` there is no `self` yet, and the
+    // parameter is precisely the declaration its callers hand it (the
+    // constructor stores that same value in the field). A call is excused
+    // from the `self.encryption` shape only inside that helper's body and
+    // only when the helper really binds the name as its parameter;
+    // everywhere else a bare `encryption` could be any literal a caller
+    // invented, which is the defect this check exists for.
+    let stored_span = stored_helper_span(&compact);
     let needle = "manifest_id_from_parts(";
     let mut calls = 0usize;
     let mut i = 0;
@@ -376,7 +385,9 @@ fn check_call_sites(code: &str) -> Checks {
             }
         }
         let call = &compact[abs..end.min(compact.len())];
-        if !call.contains("self.encryption") {
+        let forwards_own_param = stored_span.is_some_and(|(lo, hi)| abs >= lo && abs <= hi)
+            && call.contains(",encryption,");
+        if !call.contains("self.encryption") && !forwards_own_param {
             problems.push(format!(
                 "a `manifest_id_from_parts` call does not pass `self.encryption`: {call}. \
                  The id would then commit to a declaration the manifest does not carry."
@@ -390,6 +401,32 @@ fn check_call_sites(code: &str) -> Checks {
         ));
     }
     Checks::new(checked, problems)
+}
+
+/// The byte span of `manifest_id_from_parts_stored` in whitespace-compact
+/// code, when the helper exists and binds `encryption: &ContentEncryption`
+/// as a parameter. `None` when either shape is missing, so a bare
+/// `encryption` argument is then accepted nowhere.
+fn stored_helper_span(compact: &str) -> Option<(usize, usize)> {
+    let start = compact.find("fnmanifest_id_from_parts_stored(")?;
+    let open = compact[start..].find('{')? + start;
+    if !compact[start..open].contains("encryption:&ContentEncryption") {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (k, c) in compact[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((start, open + k));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The tag must be written out per variant, not derived from ordering.
@@ -797,5 +834,22 @@ mod shape_tests {
         let good = "self.id = manifest_id_from_parts(\n    &self.shards,\n    &self.encryption,\n);\nfn manifest_id_from_parts(a: u8) {}";
         assert!(check_call_sites(good).problems.is_empty());
         assert!(!check_call_sites("fn other() {}").problems.is_empty());
+    }
+
+    #[test]
+    fn stored_helper_may_forward_its_own_parameter_and_nothing_else_may() {
+        // The helper has no `self`: forwarding the parameter it was handed
+        // is the declaration reaching the id, not a literal beside it.
+        let helper = "pub fn manifest_id_from_parts_stored(shards: &[u8], encryption: &ContentEncryption) -> u8 {\n    manifest_id_from_parts(shards, erasure, encryption, size)\n}\nfn manifest_id_from_parts(a: u8) {}";
+        assert!(check_call_sites(helper).problems.is_empty());
+        // The same bare name outside the helper is the invented-literal
+        // shape and stays a finding.
+        let stray =
+            "fn anywhere() { let id = manifest_id_from_parts(shards, erasure, encryption, size); }";
+        assert!(!check_call_sites(stray).problems.is_empty());
+        // And a helper that does not bind the name as its parameter does
+        // not earn the shape either.
+        let unbound = "pub fn manifest_id_from_parts_stored(shards: &[u8]) -> u8 {\n    manifest_id_from_parts(shards, erasure, encryption, size)\n}";
+        assert!(!check_call_sites(unbound).problems.is_empty());
     }
 }

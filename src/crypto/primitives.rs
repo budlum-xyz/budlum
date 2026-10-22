@@ -162,7 +162,7 @@ impl BlsKeypair {
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         // Validate G2 encoding AND that pk matches sk. F10: the length is
-        // exact — trailing garbage is not silently ignored — and the zero
+        // exact - trailing garbage is not silently ignored - and the zero
         // scalar is refused (its public key is the identity point).
         if bytes.len() != 32 + 96 {
             return Err(CryptoError::InvalidKey(
@@ -1142,6 +1142,10 @@ fn stdout_has_64_hex_run(stdout: &[u8]) -> bool {
 /// fully captured, so any printed 64-hex public key is observable. A canary
 /// test proves the detector itself works (red-green).
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "re-executes the test binary (process spawn) to capture stdout; Miri cannot spawn processes"
+)]
 fn keypair_generate_does_not_leak_public_key_via_println() {
     match std::env::var("BUDLUM_STDOUT_PROBE").as_deref() {
         Ok("child") => {

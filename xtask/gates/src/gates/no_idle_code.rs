@@ -806,9 +806,16 @@ fn exemptions_in(text: &str) -> Exempt {
     let mut names = BTreeSet::new();
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim_start();
-        let Some(mut rest) = t.strip_prefix("pub ") else {
+        // `pub(crate)` is a declaration the scan reports, so the reader has
+        // to see it too: matching only the `pub ` spelling left crate-visible
+        // items with no way to carry a note.
+        let Some(mut rest) = t
+            .strip_prefix("pub")
+            .filter(|r| r.starts_with(' ') || r.starts_with('('))
+        else {
             continue;
         };
+        rest = rest.trim_start();
         // Skip a visibility restriction, then the modifiers, in the same
         // spirit as the scan's own extractor.
         if rest.starts_with('(') {
@@ -847,7 +854,10 @@ fn exemptions_in(text: &str) -> Exempt {
         let noted = lines[from..i]
             .iter()
             .rev()
-            .take_while(|l| !l.trim_start().starts_with("pub "))
+            .take_while(|l| {
+                let lt = l.trim_start();
+                !(lt.starts_with("pub ") || lt.starts_with("pub("))
+            })
             .any(|l| has_reasoned_token(l));
         if noted {
             names.insert(ident);
@@ -1154,12 +1164,17 @@ fn build_clean_tree(root: &Path) -> std::io::Result<()> {
     let src = root.join("src");
     fs::create_dir_all(&src)?;
     let mut driver = String::from("fn drive() {\n");
-    for i in 1..=210 {
-        fs::write(
-            src.join(format!("m{i}.rs")),
-            format!("pub fn reached{i}() -> u32 {{ {i} }}\n"),
-        )?;
-        let _ = writeln!(driver, "    let _ = crate::m{i}::reached{i}();");
+    // The vacuity floor is 2000 public items; 21 files of 100 reached
+    // functions clear it without the self-test having to copy thousands of
+    // files for every canary tree it stages.
+    for file in 1..=21usize {
+        let mut body = String::new();
+        for i in 1..=100usize {
+            let n = (file - 1) * 100 + i;
+            let _ = writeln!(body, "pub fn reached{n}() -> u32 {{ {n} }}");
+            let _ = writeln!(driver, "    let _ = crate::m{file}::reached{n}();");
+        }
+        fs::write(src.join(format!("m{file}.rs")), body)?;
     }
     driver.push_str("}\n");
     fs::write(src.join("driver.rs"), driver)?;
@@ -1706,6 +1721,25 @@ fn wiring_exemption_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
             "canary: an item with a WIRING: note above it was reported idle",
+        ));
+    }
+
+    // The same note settles a crate-visible item: the scan reports
+    // `pub(crate)` declarations, so the exemption reader has to see them
+    // too - matching only the `pub ` spelling left such an item with no
+    // way to carry its note.
+    if !accepts_with(
+        clean,
+        tmp,
+        "wiring_crate_item",
+        &[(
+            "src/staged_crate.rs",
+            "/// WIRING: called from the policy refresh beside it today.\npub(crate) fn staged_crate_helper() -> u32 { 10 }\n",
+        )],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a pub(crate) item with a WIRING: note above it was reported idle",
         ));
     }
 
