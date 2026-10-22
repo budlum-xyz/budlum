@@ -164,6 +164,10 @@ impl QuantumAccount {
     /// (u128 intermediate, pico resolution), and callers that need a human
     /// number format it once, at the edge.
     #[must_use]
+    ///
+    /// WIRING: exposed for the quantum-account fee reporting edge; the
+    /// f64 form it replaced (BLG-0279) had no remaining production
+    /// caller, so the exact value waits for that edge to land.
     pub fn storage_cost_pico(&self) -> u64 {
         if self.storage_bytes == 0 {
             return 0;
@@ -243,12 +247,9 @@ impl QuantumAccount {
     fn verify_no_duplicate_guardians(&self) -> Result<(), &'static str> {
         // n <= MAX_MULTISIG_OWNERS (16), so the quadratic sweep is free and
         // needs no allocation - a HashSet would be the slower "optimization".
-        let n = self.guardians.len();
-        for i in 0..n {
-            for j in i + 1..n {
-                if self.guardians[i] == self.guardians[j] {
-                    return Err("KQ-WALLET-GUARDIAN-SET: duplicate guardian key");
-                }
+        for (i, a) in self.guardians.iter().enumerate() {
+            if self.guardians.iter().skip(i + 1).any(|b| b == a) {
+                return Err("KQ-WALLET-GUARDIAN-SET: duplicate guardian key");
             }
         }
         Ok(())
@@ -414,7 +415,7 @@ impl BftGuardianFinality {
         // BLG-0276: vote deduplication does not validate the guardian SET.
         // Reject a padded list before computing a quorum over its length.
         for (i, guardian) in guardians.iter().enumerate() {
-            if guardians[..i].contains(guardian) {
+            if guardians.iter().take(i).any(|g| g == guardian) {
                 return Err("K-BUD-BFT-GUARDIAN: duplicate guardian in policy");
             }
         }

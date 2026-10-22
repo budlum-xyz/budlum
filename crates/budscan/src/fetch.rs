@@ -91,6 +91,9 @@ pub trait Transport {
 
 /// One shard entry of a [`BudManifest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// WIRING: exposed as the shard entry of the browser-side manifest
+/// above; it travels wherever a `BudManifest` is built or read.
 pub struct BudShard {
     pub index: u32,
     pub shard_id: ContentId,
@@ -107,6 +110,10 @@ pub struct BudShard {
 /// bytes the chain writes into the preimage, so a manifest with a source regime
 /// verifies without this crate knowing the regime.
 #[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// WIRING: exposed for the Budscan browser core, which fetches and
+/// verifies manifests off-chain through this crate's API; in-tree the
+/// parity tests pin its shape against the node's manifest.
 pub struct BudManifest {
     pub shards: Vec<BudShard>,
     pub erasure_k: u32,
@@ -124,6 +131,10 @@ impl BudManifest {
     /// no encryption, no dictionary. This is what a small unsharded upload
     /// registers.
     #[must_use]
+    ///
+    /// WIRING: exposed for the browser-side upload path that registers a
+    /// small object without sharding it; in-tree the constructor is
+    /// exercised through the parity fixtures.
     pub fn single_shard(bytes: &[u8]) -> Self {
         let size = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
         Self {
@@ -165,6 +176,12 @@ impl BudManifest {
         buf.extend_from_slice(&self.source_commitment);
         buf.extend_from_slice(&self.edition_commitment);
         if let Some(dict) = &self.dictionary_id {
+            // The chain's `manifest_id_from_parts` writes the field label
+            // before the presence byte. Without it, every dictionary-bound
+            // manifest hashes differently here than on the chain, so a
+            // legitimately registered object fails the id check that decides
+            // whether the fetched content may be shown at all.
+            buf.extend_from_slice(b"BDLM_DICTIONARY");
             buf.push(1u8);
             buf.extend_from_slice(&dict.0);
         }
@@ -175,18 +192,40 @@ impl BudManifest {
     /// in index order cut `bytes` (the last one zero padded) and every cut has
     /// the shard's `ContentId`, and the object is exactly `content_size` long.
     #[must_use]
+    ///
+    /// WIRING: exposed for the browser-side fetch that verifies a joined
+    /// object against its manifest before handing it to the page; the
+    /// parity tests pin the rule against the node's manifest in-tree.
     pub fn describes(&self, bytes: &[u8]) -> bool {
         if bytes.len() as u64 != self.content_size {
             return false;
         }
+        if self.shards.len() > MAX_MANIFEST_SHARDS
+            || self
+                .shards
+                .iter()
+                .any(|s| s.size as usize > MAX_CONTENT_BYTES)
+        {
+            return false;
+        }
         let mut data: Vec<&BudShard> = self.shards.iter().filter(|s| !s.parity).collect();
         data.sort_by_key(|s| s.index);
+        let data_count = data.len();
         let mut off = 0usize;
-        for shard in data {
+        for (position, shard) in data.iter().enumerate() {
             let len = shard.size as usize;
             let Some(end) = off.checked_add(len) else {
                 return false;
             };
+            if position + 1 < data_count && end > bytes.len() {
+                // Only the final stripe may run past the object. Without this
+                // check every earlier stripe whose declared size ran past the
+                // end was zero-padded up to its declared size and hashed, so a
+                // manifest carrying `MAX_MANIFEST_SHARDS` maximal stripes made
+                // a single fetch hash hundreds of gigabytes. A cut that ends
+                // inside the object cannot describe it.
+                return false;
+            }
             let id = if end <= bytes.len() {
                 ContentId::of(&bytes[off..end])
             } else {
@@ -227,6 +266,9 @@ impl Fetched {
 /// different limits would open a gap in which one accepts what the other
 /// refuses.
 pub const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Maximum shard count accepted in a fetched manifest, matching `budlum-core`.
+const MAX_MANIFEST_SHARDS: usize = 65_536;
 
 /// Fetch a target and verify it.
 ///
@@ -448,6 +490,22 @@ mod tests {
         );
     }
 
+    /// The same parity vector, for a manifest that carries a dedup dictionary.
+    ///
+    /// The single-shard vector above only covers the dictionary-free preimage,
+    /// which is why the missing `BDLM_DICTIONARY` label went unnoticed: every
+    /// id it pins stayed correct. This one is pinned with the chain's
+    /// computation (`src/storage/manifest.rs`, same bytes, same value).
+    #[test]
+    fn a_dictionary_bound_manifest_id_matches_the_chain_vector() {
+        let mut manifest = BudManifest::single_shard(b"hello");
+        manifest.dictionary_id = Some(ContentId([0x11; 32]));
+        assert_eq!(
+            manifest.manifest_id().to_string(),
+            "44a313a2852858e91df89880151350a22a8c236a3c0f1fc7c916c2dfb8f5c257"
+        );
+    }
+
     /// A sharded object with a zero padded final stripe verifies; a flipped
     /// byte in any shard does not.
     #[test]
@@ -579,5 +637,13 @@ mod tests {
         let t = Table::bud(&manifest, &big);
         let err = fetch_and_verify(&t, &Target::Bud(id)).unwrap_err();
         assert!(err.contains("limit"), "{err}");
+    }
+
+    #[test]
+    fn describes_refuses_oversized_shard_entry_without_allocating_4gib() {
+        let body = b"hello world";
+        let mut manifest = BudManifest::single_shard(body);
+        manifest.shards[0].size = u32::MAX;
+        assert!(!manifest.describes(body));
     }
 }

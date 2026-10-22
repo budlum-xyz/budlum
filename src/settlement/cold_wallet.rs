@@ -396,6 +396,11 @@ impl ColdWalletState {
 
     /// S2: pin the trusted committee at installation. A wallet without a
     /// pinned committee refuses every quorum (fail closed).
+    ///
+    /// WIRING: the installation door for the dormant cold-wallet path named
+    /// in the module header; a restored wallet gets its committee back with
+    /// the persisted state instead, which is why nothing in-tree calls this
+    /// outside tests yet.
     #[must_use]
     pub fn with_trusted_devices(
         mut self,
@@ -703,7 +708,7 @@ impl ColdWalletState {
     /// this device's counters, budget and refusal history untouched - a forged
     /// quorum must cost the cold side nothing, and a refusal entry written for
     /// a request that presented no valid signature would drink history capacity
-    /// the attacker controls. Once the signatures are proven, [`Self::sign`]
+    /// the attacker controls. Once the signatures are proven, `Self::sign`
     /// runs all eight policy rules and its counters as usual, with the proven
     /// signer count standing in for the presented one.
     ///
@@ -740,7 +745,7 @@ impl ColdWalletState {
         // epoch right here, before the policy layer even looks at the request.
         if presented_key_epoch != self.key_epoch {
             // BLG-0072 (P03-F15): no signature has been checked yet, so this
-            // refusal must NOT enter the bounded refusal history — an
+            // refusal must NOT enter the bounded refusal history - an
             // unsigned caller could otherwise push real refusals out of it.
             // `check` decides without recording; only the authenticated path
             // below may append to the log.

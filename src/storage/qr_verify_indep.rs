@@ -807,12 +807,19 @@ mod tests {
     }
 
     #[test]
-    fn stream_id_not_derived_from_the_bytes_fools_only_the_primary_path() {
-        let packed =
-            pl::pack_payload(pl::PayloadKind::ContentBytes, &xorshift_bytes(5, 300)).unwrap();
+    fn stream_id_not_derived_from_the_bytes_is_refused_by_both_paths() {
+        // The primary receive path recomputes the stream commitment at
+        // finish, so it is no longer fooled either; the claim below is
+        // therefore built by hand, the way a lying primary would present it.
+        let body = xorshift_bytes(5, 300);
+        let packed = pl::pack_payload(pl::PayloadKind::ContentBytes, &body).unwrap();
         let sc = [7u8; 32];
         let frames = frames_under(&packed, &sc, 64, 12);
-        let claim = claim_from_primary(&sc, &frames);
+        assert!(decode_frames(&sc, &frames).is_err());
+        let claim = PrimaryClaim {
+            kind_tag: pl::PayloadKind::ContentBytes.tag(),
+            content_sha256: calculate_hash_bytes(&body),
+        };
         assert_eq!(
             confirm(&sc, &frames, &claim),
             Err(IndepError::StreamCommitment)

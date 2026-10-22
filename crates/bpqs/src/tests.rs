@@ -37,7 +37,7 @@ impl BpqsParams for ParamsFastL3 {
 
 #[test]
 fn l3_code_path_roundtrips() {
-    let mut signer = BpqsSigner::<ParamsFastL3, H>::ceremonial_keygen([7u8; 32], EpochWindow(4))
+    let mut signer = BpqsSigner::<ParamsFastL3, H>::fresh_device([7u8; 32], EpochWindow(4))
         .unwrap_or_else(|e| panic!("l3 keygen: {e}"));
     let sig = signer
         .sign_at_height(9, b"anchor")
@@ -48,7 +48,7 @@ fn l3_code_path_roundtrips() {
 
 #[test]
 fn signature_wire_size_matches_the_cost_model() {
-    // BLG-0053 (F17): the sketch must count every serialized field —
+    // BLG-0053 (F17): the sketch must count every serialized field -
     // epoch 4 + randomizer 16 + LEN*32 chains + T_LOG2*32 path. The old
     // formula omitted the randomizer (2660) and disagreed with
     // SECURITY-ARGUMENT.md's 2676.
@@ -61,7 +61,7 @@ fn signature_wire_size_matches_the_cost_model() {
 
 #[test]
 fn quota_violation_is_epoch_scoped_not_window_scoped() {
-    let mut signer = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen([1u8; 32], EpochWindow(2))
+    let mut signer = BpqsSigner::<ParamsTestFast, H>::fresh_device([1u8; 32], EpochWindow(2))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     // One mint inside epoch 1 (heights 2,3 share it), then refusal there,
     // then epoch 2 (height 4) signs again: the quota binds the epoch,
@@ -82,7 +82,7 @@ fn quota_violation_is_epoch_scoped_not_window_scoped() {
 fn keygen_root_wrapper_equals_full_signer_public() {
     let a = keygen_root::<H, ParamsTestFast>([5u8; 32], EpochWindow(2))
         .unwrap_or_else(|e| panic!("wrapper keygen: {e}"));
-    let b = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen([5u8; 32], EpochWindow(2))
+    let b = BpqsSigner::<ParamsTestFast, H>::fresh_device([5u8; 32], EpochWindow(2))
         .unwrap_or_else(|e| panic!("signer keygen: {e}"));
     assert_eq!(a, b.public().clone());
 }
@@ -109,7 +109,7 @@ fn epoch_chain_derivation_is_message_independent() {
 #[test]
 #[ignore = "ceremony-scale keygen; run in release on a machine lane"]
 fn full_size_ceremony_l5() {
-    let mut signer = BpqsSigner::<ParamsL5, H>::ceremonial_keygen([0xA5u8; 32], EpochWindow(4096))
+    let mut signer = BpqsSigner::<ParamsL5, H>::fresh_device([0xA5u8; 32], EpochWindow(4096))
         .unwrap_or_else(|e| panic!("l5 ceremony: {e}"));
     let sig = signer
         .sign_at_height(1_000_000, b"anchor")
@@ -131,9 +131,8 @@ fn kat_freeze_digest_is_stable() {
         (0x04, 4, 12, b"delta"),
     ] {
         let seed = [seed_byte; 32];
-        let mut signer =
-            BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen(seed, EpochWindow(window))
-                .unwrap_or_else(|e| panic!("kat keygen: {e}"));
+        let mut signer = BpqsSigner::<ParamsTestFast, H>::fresh_device(seed, EpochWindow(window))
+            .unwrap_or_else(|e| panic!("kat keygen: {e}"));
         let sig = signer
             .sign_at_height(height, msg)
             .unwrap_or_else(|e| panic!("kat sign: {e}"));
@@ -150,7 +149,7 @@ fn kat_freeze_digest_is_stable() {
         kat_hasher.update(signer.public().root);
         kat_hasher.update([window as u8, height as u8]);
     }
-    let mut l3 = BpqsSigner::<ParamsFastL3, H>::ceremonial_keygen([9u8; 32], EpochWindow(4))
+    let mut l3 = BpqsSigner::<ParamsFastL3, H>::fresh_device([9u8; 32], EpochWindow(4))
         .unwrap_or_else(|e| panic!("kat l3 keygen: {e}"));
     let sig3 = l3
         .sign_at_height(10, b"omega")
@@ -172,9 +171,13 @@ fn kat_freeze_digest_is_stable() {
 /// the M1 battery green; an editor who changes it must say why in the commit
 /// message (the test prints the live value, so forgery is visible in CI).
 const EXPECTED_KAT_DIGEST: [u8; 32] = [
-    85, 145, 87, 46, 99, 103, 152, 205, 42, 80, 194, 210, 180, 78, 135, 22, 169, 19, 217, 123, 43,
-    0, 188, 129, 248, 88, 2, 110, 247, 204, 237, 164,
+    169, 239, 64, 79, 241, 21, 27, 52, 16, 246, 253, 195, 121, 55, 240, 103, 245, 119, 132, 243,
+    142, 76, 243, 28, 38, 0, 160, 211, 186, 223, 154, 246,
 ];
 // Re-frozen 2026-09-22 for the bar-1 wire change (randomizer field +
 // MESSAGE_BIND_V1): the migration is justified in the commit message of the
 // implementation; the hasher now also absorbs sig.randomizer.
+// Re-frozen 2026-10-19 for P02-F19: every WOTS chain step now binds its
+// absolute step index into the preimage (see `wots::chain_step`), so every
+// chain digest, public root and signature moved; kat/bpqs-kat-v1.txt and
+// KAT_ROWS were regenerated in the same change.

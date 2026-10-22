@@ -64,10 +64,10 @@ const TID_MEMORY: u64 = 1;
 const TID_STACK: u64 = 2;
 const TID_STORAGE: u64 = 3;
 
-/// The sort key of a memory event. The AIR computes the same number from the
-/// table id and the address columns.
+/// The field fold tag of a memory event in `COL_MEM_INIT_ACC`, matching
+/// `m_tid * 2^32 + m_addr` in Goldilocks arithmetic.
 fn mem_key(tid: u64, addr: u64) -> u64 {
-    (tid << 32).wrapping_add(addr)
+    (Goldilocks::new(tid) * Goldilocks::new(1u64 << 32) + Goldilocks::new(addr)).as_canonical_u64()
 }
 
 pub struct Plonky3Adapter;
@@ -294,30 +294,30 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
                 });
             }
             bud_isa::Opcode::SRead => {
-                let slot = if step.instruction.imm == -1 {
-                    step.src2_val as i32
+                let slot: u64 = if step.instruction.imm == -1 {
+                    step.src2_val
                 } else {
-                    step.instruction.imm
+                    bud_vm::constant_storage_slot(step.instruction.imm)
                 };
                 events.push(MemEvent {
                     clk,
                     tid: TID_STORAGE,
-                    addr: slot as u64,
+                    addr: slot,
                     val: step.dst_val,
                     is_write: false,
                     is_init: false,
                 });
             }
             bud_isa::Opcode::SWrite => {
-                let slot = if step.instruction.imm == -1 {
-                    step.src2_val as i32
+                let slot: u64 = if step.instruction.imm == -1 {
+                    step.src2_val
                 } else {
-                    step.instruction.imm
+                    bud_vm::constant_storage_slot(step.instruction.imm)
                 };
                 events.push(MemEvent {
                     clk,
                     tid: TID_STORAGE,
-                    addr: slot as u64,
+                    addr: slot,
                     val: step.src1_val,
                     is_write: true,
                     is_init: false,
@@ -326,13 +326,20 @@ fn memory_events(trace: &[Step]) -> Vec<MemEvent> {
             _ => {}
         }
     }
-    events.sort_by_key(|e| (e.tid, e.addr, e.clk));
-    // Mark the pre-execution rows now that the events are grouped by address.
+    events.sort_by_key(|e| (e.tid, Goldilocks::new(e.addr).as_canonical_u64(), e.clk));
+    // Mark the pre-execution rows now that the events are grouped by canonical cell.
+    //
+    // Only the memory table carries seeded state: storage and stack both start
+    // empty, and the AIR pins `COL_MEM_IS_INIT` to `tid == 1` because the
+    // initial-image fold key `tid * 2^32 + addr` is injective only for bounded
+    // addresses, which full-width storage slots do not have. Marking a storage
+    // row here would make the honest matrix fail that AIR constraint.
     let mut prev_cell: Option<(u64, u64)> = None;
     for e in events.iter_mut() {
-        let first_at_cell = prev_cell != Some((e.tid, e.addr));
-        prev_cell = Some((e.tid, e.addr));
-        e.is_init = first_at_cell && !e.is_write && e.val != 0;
+        let canon_addr = Goldilocks::new(e.addr).as_canonical_u64();
+        let first_at_cell = prev_cell != Some((e.tid, canon_addr));
+        prev_cell = Some((e.tid, canon_addr));
+        e.is_init = e.tid == TID_MEMORY && first_at_cell && !e.is_write && e.val != 0;
     }
     events
 }
@@ -779,16 +786,10 @@ pub fn trace_matrix(
                 ])
             }
             bud_isa::Opcode::SWrite => {
-                // HIGH CWE-345: SWrite feeds the state-write chain.
-                // slot = imm (matching the AIR's storage_addr = COL_IMM and
-                // the memory-event slot resolution), val = rs1.
-                // prev accumulator lanes come from the trace's current
-                // COL_STATE_WRITES_0..7 (zero on the first row, carried
-                // otherwise).
-                let slot = if step.instruction.imm == -1 {
-                    step.src2_val as i32
+                let slot: u64 = if step.instruction.imm == -1 {
+                    step.src2_val
                 } else {
-                    step.instruction.imm
+                    bud_vm::constant_storage_slot(step.instruction.imm)
                 };
                 let mut prev = [0u64; 4];
                 for k in 0..4 {
@@ -797,7 +798,7 @@ pub fn trace_matrix(
                     prev[k] = lo | (hi << 32);
                 }
                 Some([
-                    slot as u64,
+                    slot,
                     step.src1_val,
                     prev[0],
                     prev[1],
@@ -1187,6 +1188,16 @@ pub fn trace_matrix(
         values[row_start + COL_CPU_ACTIVE] = Goldilocks::new(0);
     }
 
+    for i in 0..num_rows {
+        let row_start = i * TRACE_WIDTH;
+        let delta = values[row_start + COL_IMM] + Goldilocks::ONE;
+        values[row_start + COL_STORAGE_SLOT_INV] = if delta == Goldilocks::ZERO {
+            Goldilocks::ZERO
+        } else {
+            Goldilocks::new(bud_vm::field_inverse_goldilocks(delta.as_canonical_u64()))
+        };
+    }
+
     for (i, e) in events.iter().enumerate() {
         let row_start = i * TRACE_WIDTH;
         values[row_start + COL_REG_CLK] = Goldilocks::new(e.clk);
@@ -1234,16 +1245,31 @@ pub fn trace_matrix(
         }
     }
 
+    // Padding rows (all zeros) still satisfy `(0xFFFF_FFFF - a_hi) * inv`
+    // because `is_hi_max * a_lo == 1 * 0 == 0` ONLY if `hi_gap == 0`; when
+    // `a_hi == 0`, `hi_gap = 0xFFFF_FFFF != 0`, so every row needs `COL_MEM_HI_MAX_INV`!
+    let default_hi_max_inv = Goldilocks::new(bud_vm::field_inverse_goldilocks(0xFFFF_FFFF));
+    for r in 0..num_rows {
+        values[r * TRACE_WIDTH + COL_MEM_HI_MAX_INV] = default_hi_max_inv;
+    }
+
     for (i, e) in mem_events.iter().enumerate() {
         let row_start = i * TRACE_WIDTH;
+        let canon_addr = Goldilocks::new(e.addr).as_canonical_u64();
+        let addr_lo = canon_addr & 0xFFFF_FFFF;
+        let addr_hi = canon_addr >> 32;
         values[row_start + COL_MEM_CLK] = Goldilocks::new(e.clk);
         values[row_start + COL_MEM_TID] = Goldilocks::new(e.tid);
-        values[row_start + COL_MEM_ADDR] = Goldilocks::new(e.addr);
-        // An address past 32 bits has no bit form. Its bits stay the low 32,
-        // and the AIR refuses the row.
+        values[row_start + COL_MEM_ADDR] = Goldilocks::new(canon_addr);
         for b in 0..MEM_ADDR_BITS {
-            values[row_start + COL_MEM_ADDR_BITS_BASE + b] = Goldilocks::new((e.addr >> b) & 1);
+            values[row_start + COL_MEM_ADDR_BITS_BASE + b] = Goldilocks::new((canon_addr >> b) & 1);
         }
+        let hi_gap = 0xFFFF_FFFFu64 - addr_hi;
+        values[row_start + COL_MEM_HI_MAX_INV] = Goldilocks::new(if hi_gap != 0 {
+            bud_vm::field_inverse_goldilocks(hi_gap)
+        } else {
+            0
+        });
         values[row_start + COL_MEM_VAL] = Goldilocks::new(e.val);
         values[row_start + COL_MEM_IS_WRITE] = if e.is_write {
             Goldilocks::new(1)
@@ -1253,30 +1279,38 @@ pub fn trace_matrix(
         values[row_start + COL_MEM_ACTIVE] = Goldilocks::new(1);
         values[row_start + COL_MEM_IS_INIT] = Goldilocks::new(u64::from(e.is_init));
 
-        if i < n_mem - 1 && mem_events[i + 1].tid == e.tid && mem_events[i + 1].addr == e.addr {
-            values[row_start + COL_MEM_SAME] = Goldilocks::new(1);
-        }
-
-        // Inverse witness for `COL_MEM_SAME`, only read where this row and the
-        // next one both hold a memory event. It inverts the step between the
-        // two sort keys.
         if i < n_mem - 1 {
             let next = &mem_events[i + 1];
-            let diff = mem_key(next.tid, next.addr).wrapping_sub(mem_key(e.tid, e.addr));
-            let inv = if diff != 0 {
-                bud_vm::field_inverse_goldilocks(diff)
+            let next_canon = Goldilocks::new(next.addr).as_canonical_u64();
+            let next_lo = next_canon & 0xFFFF_FFFF;
+            let next_hi = next_canon >> 32;
+            let top = (e.tid << 32) | addr_hi;
+            let next_top = (next.tid << 32) | next_hi;
+
+            let top_diff = (Goldilocks::new(next_top) - Goldilocks::new(top)).as_canonical_u64();
+            values[row_start + COL_MEM_TOP_SAME] = Goldilocks::new(u64::from(top_diff == 0));
+            values[row_start + COL_MEM_TOP_SAME_INV] = Goldilocks::new(if top_diff != 0 {
+                bud_vm::field_inverse_goldilocks(top_diff)
             } else {
                 0
-            };
-            values[row_start + COL_MEM_SAME_INV] = Goldilocks::new(inv);
+            });
 
-            // The step to the next row, in bits. The events are sorted by
-            // `(tid, addr, clk)` and no two are equal, so the step is never
-            // negative on an honest trace.
-            let step = if next.tid == e.tid && next.addr == e.addr {
-                next.clk.wrapping_sub(e.clk).wrapping_sub(1)
+            let lo_diff = (Goldilocks::new(next_lo) - Goldilocks::new(addr_lo)).as_canonical_u64();
+            values[row_start + COL_MEM_SAME_INV] = Goldilocks::new(if lo_diff != 0 {
+                bud_vm::field_inverse_goldilocks(lo_diff)
             } else {
-                diff.wrapping_sub(1)
+                0
+            });
+            let same_cell = top_diff == 0 && lo_diff == 0;
+            values[row_start + COL_MEM_SAME] = Goldilocks::new(u64::from(same_cell));
+
+            // The step to the next row, in bits, sorted strictly by `(top, lo, clk)`.
+            let step = if same_cell {
+                next.clk.wrapping_sub(e.clk).wrapping_sub(1)
+            } else if top_diff == 0 {
+                next_lo.wrapping_sub(addr_lo).wrapping_sub(1)
+            } else {
+                next_top.wrapping_sub(top).wrapping_sub(1)
             };
             for b in 0..MEM_ORD_BITS {
                 values[row_start + COL_MEM_ORD_BITS_BASE + b] = Goldilocks::new((step >> b) & 1);
@@ -1588,7 +1622,11 @@ fn aux_trace_generator(
             let stack_ptr = row[COL_STACK_PTR];
             let stack_addr =
                 (is_push + is_call) * stack_ptr + (is_pop + is_ret) * (stack_ptr - Goldilocks::ONE);
-            let storage_addr = row[COL_IMM];
+            let slot_delta = row[COL_IMM] + Goldilocks::ONE;
+            let slot_delta_z = slot_delta * row[COL_STORAGE_SLOT_INV];
+            let is_dynamic_slot = Goldilocks::ONE - slot_delta_z;
+            let storage_addr = is_dynamic_slot * row[COL_RS2_VAL]
+                + (Goldilocks::ONE - is_dynamic_slot) * row[COL_IMM];
             let cpu_mem_tid = is_real_mem_op
                 + is_merkle_mem_op
                 + Goldilocks::from_u64(TID_STACK) * is_stack_op
@@ -2105,7 +2143,11 @@ mod tests {
             crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
             crate::adapter::register_image_commitment_of_reads(&initial_register_reads(&vm.trace)),
         );
-        let final_root = [0u8; 32];
+        // The AIR ties the final root to the storage-writes fold (2a), so
+        // the honest final root is the receipt's write digest - the same
+        // convention the chain enforces. A program that writes nothing
+        // folds to zero and lands on the same all-zero root as before.
+        let final_root = receipt.state_writes_digest;
 
         let program_bytes: Vec<u8> = program
             .iter()
@@ -2200,7 +2242,9 @@ mod tests {
                     &vm.trace,
                 )),
             ),
-            final_state_root: [0u8; 32],
+            // The AIR ties the final root to the storage-writes fold, so an
+            // honest run of a writing program carries that digest as both.
+            final_state_root: receipt.state_writes_digest,
             sender: vm.context.sender,
             nonce: vm.context.nonce,
             block_height: vm.context.block_height,
@@ -2461,7 +2505,9 @@ mod tests {
             crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
             crate::adapter::register_image_commitment_of_reads(&initial_register_reads(&vm.trace)),
         );
-        let final_root = [0u8; 32];
+        // As in `prove_and_verify_full`: the honest final root is the
+        // storage-writes fold the AIR binds (2a).
+        let final_root = receipt.state_writes_digest;
         let program_bytes: Vec<u8> = program
             .iter()
             .flat_map(|&inst| inst.to_le_bytes().to_vec())
@@ -6115,6 +6161,51 @@ mod tests {
     }
 
     #[test]
+    fn proves_dynamic_storage_slot_write_read() {
+        let program = vec![
+            inst(Opcode::SWrite, 0, 1, 2, -1), // storage[r2] = r1(=99)
+            inst(Opcode::SRead, 3, 0, 2, -1),  // r3 = storage[r2]
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        prove_and_verify(program, |vm| {
+            vm.registers[1] = 99;
+            vm.registers[2] = 0xDEAD_BEEFu64;
+        });
+    }
+
+    /// A **negative** constant slot is one field element everywhere: the key
+    /// the VM writes its storage map with, the address the prover puts in the
+    /// memory table, and the `COL_IMM` the AIR reads the slot from. Encoded as
+    /// the i64 two's complement (`2^64 - |imm|`) the honest trace could never
+    /// be proven: the memory LogUp had no matching row and the `SWrite` gadget
+    /// bound the wrong slot.
+    #[test]
+    fn proves_a_negative_constant_storage_slot() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 777),
+            inst(Opcode::SWrite, 0, 1, 0, -5), // storage[-5] = r1
+            inst(Opcode::SRead, 2, 0, 0, -5),  // r2 = storage[-5]
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(1024);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the negative-slot run must succeed");
+        assert_eq!(vm.registers[2], 777);
+        let canonical = bud_vm::GOLDILOCKS_P - 5;
+        assert_eq!(bud_vm::constant_storage_slot(-5), canonical);
+        assert_eq!(
+            vm.storage.get(&canonical),
+            Some(&777),
+            "the VM must key storage by the canonical field element the AIR proves"
+        );
+        assert!(
+            !vm.storage.contains_key(&(-5i64 as u64)),
+            "the two's-complement encoding must not be used"
+        );
+        prove_and_verify(program, |_| {});
+    }
+
+    #[test]
     fn proves_storage_multiple_slots() {
         let program = vec![
             inst(Opcode::SWrite, 0, 1, 0, 1), // storage[1] = r1(=10)
@@ -7872,7 +7963,7 @@ mod tests {
     /// address. Moving a row means moving all of them. `COL_MEM_INIT_ACC` is a
     /// running sum, so it stays. The order witness describes the step to the
     /// next row, not the event, so it stays too.
-    const MEM_TABLE_COLS: [usize; 9 + MEM_ADDR_BITS] = {
+    const MEM_TABLE_COLS: [usize; 12 + MEM_ADDR_BITS] = {
         let head = [
             COL_MEM_CLK,
             COL_MEM_TID,
@@ -7883,8 +7974,11 @@ mod tests {
             COL_MEM_SAME,
             COL_MEM_SAME_INV,
             COL_MEM_IS_INIT,
+            COL_MEM_HI_MAX_INV,
+            COL_MEM_TOP_SAME,
+            COL_MEM_TOP_SAME_INV,
         ];
-        let mut cols = [0usize; 9 + MEM_ADDR_BITS];
+        let mut cols = [0usize; 12 + MEM_ADDR_BITS];
         let mut i = 0;
         while i < head.len() {
             cols[i] = head[i];
@@ -7898,12 +7992,19 @@ mod tests {
         cols
     };
 
-    /// Set the address of a memory row together with its bits.
+    /// Set the address of a memory row together with its canonical limbs.
     fn set_mem_addr(values: &mut [Goldilocks], row: usize, addr: u64) {
-        values[row * TRACE_WIDTH + COL_MEM_ADDR] = Goldilocks::new(addr);
+        let canon = Goldilocks::new(addr).as_canonical_u64();
+        let hi_gap = 0xFFFF_FFFFu64 - (canon >> 32);
+        values[row * TRACE_WIDTH + COL_MEM_ADDR] = Goldilocks::new(canon);
+        values[row * TRACE_WIDTH + COL_MEM_HI_MAX_INV] = Goldilocks::new(if hi_gap != 0 {
+            bud_vm::field_inverse_goldilocks(hi_gap)
+        } else {
+            0
+        });
         for b in 0..MEM_ADDR_BITS {
             values[row * TRACE_WIDTH + COL_MEM_ADDR_BITS_BASE + b] =
-                Goldilocks::new((addr >> b) & 1);
+                Goldilocks::new((canon >> b) & 1);
         }
     }
 
@@ -8642,19 +8743,66 @@ mod tests {
         vm.storage.insert(5, 7);
         let receipt = vm.run_receipt(&storage_program);
         assert!(receipt.success, "the storage run must succeed");
-        assert_eq!(initial_memory_reads(&vm.trace).len(), 1);
+        assert!(
+            initial_memory_reads(&vm.trace).is_empty(),
+            "seeded storage is not part of the memory image: the AIR pins the \
+             initial-image flag to the memory table so the fold key stays injective"
+        );
 
         let verdict = verify_forged_matrix_with_reads(
             &storage_program,
             &vm.trace,
             vm.gas_limit,
             vm.gas_used,
-            memory_reads,
+            memory_reads.clone(),
             |_| {},
         );
         assert!(
             verdict.is_err(),
             "the root of a seeded memory cell was accepted for a seeded \
+             storage slot. verdict={verdict:?}"
+        );
+
+        // The wide-slot case, past `2^32`: that is where the fold key
+        // `tid * 2^32 + addr` stops being injective, because a full-width
+        // storage slot can take any value in the field. Seeded storage is not
+        // part of the memory image at all, so the image root cannot be made to
+        // stand for it.
+        let wide_program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Load, 2, 0, 0, 99),
+            inst(Opcode::Poseidon, 3, 1, 2, 0),
+            inst(Opcode::SRead, 4, 0, 3, -1),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut probe_vm = Vm::new(1024);
+        let receipt = probe_vm.run_receipt(&wide_program);
+        assert!(receipt.success, "the wide-slot probe run must succeed");
+        let wide_slot = probe_vm.registers[3];
+        assert!(
+            wide_slot > u64::from(u32::MAX),
+            "the Poseidon slot must exceed 2^32: {wide_slot}"
+        );
+        let mut wide_vm = Vm::new(1024);
+        wide_vm.storage.insert(wide_slot, 7);
+        let receipt = wide_vm.run_receipt(&wide_program);
+        assert!(receipt.success, "the wide-slot storage run must succeed");
+        assert_eq!(wide_vm.registers[4], 7);
+        assert!(
+            initial_memory_reads(&wide_vm.trace).is_empty(),
+            "a seeded wide storage slot is not part of the memory image"
+        );
+        let verdict = verify_forged_matrix_with_reads(
+            &wide_program,
+            &wide_vm.trace,
+            wide_vm.gas_limit,
+            wide_vm.gas_used,
+            memory_reads.clone(),
+            |_| {},
+        );
+        assert!(
+            verdict.is_err(),
+            "the root of a seeded memory cell was accepted for a seeded wide \
              storage slot. verdict={verdict:?}"
         );
     }
@@ -10686,7 +10834,7 @@ mod tests {
         pi.final_state_root = [0xAB; 32];
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            matches!(res, Err(VerifyError::PublicInputsMismatch)),
             "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
@@ -10701,7 +10849,7 @@ mod tests {
             build_arith_proof_forged(|pi| pi.final_state_root = [0xAB; 32]);
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            matches!(res, Err(crate::adapter::VerifyError::InvalidProof)),
+            matches!(res, Err(VerifyError::InvalidProof)),
             "the final-root fold constraint must refuse a trace that commits to a root the execution never produced, got {res:?}"
         );
     }
@@ -10712,7 +10860,7 @@ mod tests {
         pi.initial_state_root = [0xCD; 32];
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            matches!(res, Err(VerifyError::PublicInputsMismatch)),
             "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
@@ -10726,7 +10874,7 @@ mod tests {
             build_arith_proof_forged(|pi| pi.initial_state_root = [0xCD; 32]);
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            matches!(res, Err(crate::adapter::VerifyError::InvalidProof)),
+            matches!(res, Err(VerifyError::InvalidProof)),
             "the initial-root fold constraint must refuse a forged starting image, got {res:?}"
         );
     }
@@ -10743,7 +10891,7 @@ mod tests {
         // would prove the hole, not close it.
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            matches!(res, Err(VerifyError::PublicInputsMismatch)),
             "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
@@ -10756,7 +10904,7 @@ mod tests {
         pi.trace_len = pi.trace_len.wrapping_add(1);
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            matches!(res, Err(VerifyError::PublicInputsMismatch)),
             "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
@@ -10770,7 +10918,7 @@ mod tests {
         pi.event_digest = [0xEF; 32];
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            matches!(res, Err(VerifyError::PublicInputsMismatch)),
             "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
@@ -10782,7 +10930,7 @@ mod tests {
         pi.exit_code = 1;
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            matches!(res, Err(VerifyError::PublicInputsMismatch)),
             "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
@@ -10794,7 +10942,7 @@ mod tests {
         pi.chain_id = 0xDEAD_BEEF;
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
         assert!(
-            matches!(res, Err(crate::adapter::VerifyError::PublicInputsMismatch)),
+            matches!(res, Err(VerifyError::PublicInputsMismatch)),
             "a pi the envelope was not built for must die at the envelope hash gate, got {res:?}"
         );
     }
@@ -11457,6 +11605,35 @@ mod tests {
     /// `assertions_on_constants` rejects it. In a `const` block the same
     /// assertion is evaluated at compile time, which is strictly stronger -
     /// a PCS that starts claiming ZK stops the build instead of failing a run.
+    #[test]
+    fn proves_poseidon_derived_wide_dynamic_storage_slot() {
+        // Mimics compiled `Map<K, V>` codegen: hash `(base_slot, key)` via
+        // `Opcode::Poseidon` into `r3` (full-width Goldilocks element > 2^32),
+        // write via `SWrite` (`imm = -1`), read back via `SRead` (`imm = -1`),
+        // and verify the STARK proof end-to-end.
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Load, 2, 0, 0, 99),
+            inst(Opcode::Poseidon, 3, 1, 2, 0),
+            inst(Opcode::Load, 4, 0, 0, 777),
+            inst(Opcode::SWrite, 0, 4, 3, -1),
+            inst(Opcode::SRead, 5, 0, 3, -1),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut check_vm = Vm::new(4096);
+        let receipt = check_vm.run_receipt(&program);
+        assert!(receipt.success, "poseidon dynamic slot program failed");
+        let wide_slot = check_vm.registers[3];
+        assert!(
+            wide_slot > u64::from(u32::MAX),
+            "Poseidon slot must exceed 2^32 to exercise the full-width storage key: {wide_slot}"
+        );
+        assert_eq!(check_vm.registers[5], 777);
+        assert_eq!(check_vm.storage.get(&wide_slot), Some(&777));
+
+        prove_and_verify(program, |_| {});
+    }
+
     #[test]
     fn zk_flag_is_pinned() {
         const {

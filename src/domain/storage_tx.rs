@@ -432,9 +432,12 @@ fn declare_self_host_policy(
         .storage_registry
         .get_manifest(manifest_id)
         .ok_or(StorageTxError::ManifestNotRegistered)?;
-    if manifest.owner != *sender {
+    if !state.storage_registry.has_claim(manifest_id, sender) {
         return Err(StorageTxError::OwnerIsNotSender {
-            owner: manifest.owner,
+            owner: state
+                .storage_registry
+                .owner_of(manifest_id)
+                .unwrap_or_default(),
             sender: *sender,
         });
     }
@@ -470,11 +473,15 @@ fn register_manifest(
             sender: *sender,
         });
     }
-    if state
-        .storage_registry
-        .get_manifest(&manifest.manifest_id)
-        .is_some()
-    {
+    if let Some(asset_owner) = state.marketplace.bound_asset_owner(&manifest.manifest_id) {
+        if asset_owner != *sender {
+            return Err(StorageTxError::OwnerIsNotSender {
+                owner: asset_owner,
+                sender: *sender,
+            });
+        }
+    }
+    if state.storage_registry.is_registered(&manifest.manifest_id) {
         return Err(StorageTxError::AlreadyRegistered);
     }
     if matches!(manifest.source, crate::storage::ContentSource::Generated(_)) {
@@ -1097,5 +1104,72 @@ mod tests {
         assert_eq!(outcome(&state, id), CodingAuditOutcome::Open);
         assert!(!in_cooldown(&state, &operator));
         assert_eq!(state.storage_registry.root(), root);
+    }
+
+    #[test]
+    fn front_run_manifest_registration_neither_blocks_real_owner_nor_defeats_paid_binding() {
+        let mut state = AccountState::new();
+        let squatter = Address::from([0xAA; 32]);
+        let real_owner = owner();
+
+        let squatter_manifest = manifest_owned_by(squatter);
+        let real_manifest = manifest_owned_by(real_owner);
+        assert_eq!(squatter_manifest.manifest_id, real_manifest.manifest_id);
+
+        // When the seller lists the paid asset first, neither a plaintext nor a
+        // third-party manifest registration may hijack `manifest_id`.
+        let asset =
+            crate::pollen::DataAsset::new(real_owner, real_manifest.manifest_id, [0x11; 32], true);
+        let asset_id = state.marketplace.register_data_asset(asset).unwrap();
+        state
+            .marketplace
+            .bind_content_to_asset(real_manifest.manifest_id, asset_id, real_owner)
+            .unwrap();
+        assert_eq!(
+            execute_storage_tx(
+                &mut state,
+                &ctx(squatter),
+                &StorageTx::RegisterManifest {
+                    manifest: squatter_manifest,
+                },
+            )
+            .unwrap_err(),
+            StorageTxError::OwnerIsNotSender {
+                owner: real_owner,
+                sender: squatter,
+            }
+        );
+
+        // Conversely, once an account owns a registered manifest, a third party
+        // can neither re-register it nor paywall/retract it under `PollenRegisterDataAsset`.
+        let mut state2 = AccountState::new();
+        execute_storage_tx(
+            &mut state2,
+            &ctx(real_owner),
+            &StorageTx::RegisterManifest {
+                manifest: real_manifest.clone(),
+            },
+        )
+        .expect("real owner registers manifest");
+        assert_eq!(
+            state2.storage_registry.owner_of(&real_manifest.manifest_id),
+            Some(real_owner)
+        );
+        assert!(
+            !state2
+                .storage_registry
+                .retract_plaintext_manifest_for_owner(&real_manifest.manifest_id, &squatter),
+            "stranger must not be able to retract real owner's manifest"
+        );
+        assert!(
+            state2
+                .storage_registry
+                .retract_plaintext_manifest_for_owner(&real_manifest.manifest_id, &real_owner),
+            "owner may retract its own un-dealt plaintext manifest when listing a paid asset"
+        );
+        assert!(state2
+            .storage_registry
+            .get_manifest(&real_manifest.manifest_id)
+            .is_none());
     }
 }

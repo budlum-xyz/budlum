@@ -164,6 +164,26 @@ pub fn field_inverse_goldilocks(val: u64) -> u64 {
 /// STARK AIR (`plonky3_air`) constrains execution over.
 pub const GOLDILOCKS_P: u64 = 18446744069414584321;
 
+/// The storage slot a **constant** `SRead`/`SWrite` immediate names, as the
+/// one field element the AIR, the VM and the prover must all agree on.
+///
+/// `imm == -1` is the dynamic form (slot from `rs2`) and is not this helper's
+/// business. Any other negative immediate is `P - |imm|`, the Goldilocks
+/// modular negative that `COL_IMM` carries and that `Load`-immediate and
+/// `PrivacyCommit` already use. Encoding it as the i64 two's complement
+/// (`2^64 - |imm|`) instead made the honest trace unprovable: the memory
+/// LogUp had no matching row and the `SWrite` gadget bound the wrong slot.
+///
+/// `unsigned_abs` is used so `i32::MIN` cannot overflow the negation.
+#[must_use]
+pub fn constant_storage_slot(imm: i32) -> u64 {
+    if imm < 0 {
+        GOLDILOCKS_P.wrapping_sub(u64::from(imm.unsigned_abs()))
+    } else {
+        imm as u64
+    }
+}
+
 /// Goldilocks field addition (`(a + b) mod P`).
 ///
 /// The VM **must** compute arithmetic in the same field the AIR
@@ -504,7 +524,7 @@ impl Vm {
                 let slot = if inst.imm == -1 {
                     src2_val
                 } else {
-                    i64::from(inst.imm) as u64
+                    constant_storage_slot(inst.imm)
                 };
                 let val = *self.storage.get(&slot).unwrap_or(&0);
                 self.registers[dst_idx as usize] = val;
@@ -515,7 +535,7 @@ impl Vm {
                 let slot = if inst.imm == -1 {
                     src2_val
                 } else {
-                    i64::from(inst.imm) as u64
+                    constant_storage_slot(inst.imm)
                 };
                 self.storage.insert(slot, src1_val);
                 self.state_writes.push((slot, src1_val));
@@ -1449,10 +1469,16 @@ pub const POSEIDON_RC_FULL: [[u64; 8]; 30] = [
 
 /// Full rounds for the Goldilocks width-8 Poseidon1 instance (4 leading + 4
 /// trailing).
+///
+/// Convenience: pub with the round constants of the instance this VM
+/// executes, so the proving side reads the same split the VM runs.
 pub const POSEIDON_FULL_ROUNDS: usize = 8;
 
 /// Partial rounds for the same instance (see [`POSEIDON_RC_FULL`] for the
 /// derivation).
+///
+/// Convenience: pub with the round constants of the instance this VM
+/// executes, so the proving side reads the same split the VM runs.
 pub const POSEIDON_PARTIAL_ROUNDS: usize = 22;
 
 /// S-box exponent. `gcd(7, P - 1) = 1` over Goldilocks, so `x -> x^7` is a

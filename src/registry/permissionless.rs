@@ -266,6 +266,32 @@ pub struct PermissionlessRegistry {
     /// deterministic - it depends only on the number of records, not on time,
     /// node age, or when a node joined.
     slashing_history: Vec<SlashingRecord>,
+    #[serde(default)]
+    charged_offences: BTreeMap<String, std::collections::BTreeSet<(u8, u64, u64)>>,
+}
+
+fn permissionless_member_key(role: RoleId, account: Address) -> String {
+    format!(
+        "{}:{}",
+        hex::encode(role.as_bytes()),
+        hex::encode(account.as_bytes())
+    )
+}
+
+fn permissionless_offence_window(
+    proof: &crate::registry::evidence::SlashingProof,
+) -> Option<(u8, u64, u64)> {
+    use crate::registry::evidence::SlashingProof;
+    match proof {
+        SlashingProof::Liveness {
+            window_start_epoch,
+            window_end_epoch,
+            ..
+        } => Some((1, *window_start_epoch, *window_end_epoch)),
+        SlashingProof::DoubleSign { height, .. } => Some((2, *height, *height)),
+        SlashingProof::InvalidSignatureSpam { epoch, .. } => Some((3, *epoch, *epoch)),
+        SlashingProof::Other { .. } => None,
+    }
 }
 
 /// A persisted, actioned slashing report plus the outcome it produced.
@@ -312,6 +338,7 @@ impl PermissionlessRegistry {
             registrations: BTreeMap::new(),
             params: RegistryParams::default(),
             slashing_history: Vec::new(),
+            charged_offences: BTreeMap::new(),
         }
     }
 
@@ -320,6 +347,7 @@ impl PermissionlessRegistry {
             registrations: BTreeMap::new(),
             params,
             slashing_history: Vec::new(),
+            charged_offences: BTreeMap::new(),
         }
     }
 
@@ -522,6 +550,9 @@ impl PermissionlessRegistry {
                     }
                 } else {
                     reg.stake = total_stake;
+                    if matches!(reg.status, MemberStatus::Unbonding { .. }) {
+                        reg.status = MemberStatus::Active;
+                    }
                 }
             }
             None => {
@@ -748,19 +779,41 @@ impl PermissionlessRegistry {
         // The history is the ledger of what has already been applied: a
         // repeated liveness report is answered with a no-op instead of a
         // second stake cut.
-        if self.slashing_history.iter().any(|r| r.report == *report) {
+        let window_key = permissionless_offence_window(&report.proof);
+        let member_key = permissionless_member_key(report.role, report.offender);
+        if let Some(wk) = window_key {
+            if self
+                .charged_offences
+                .get(&member_key)
+                .is_some_and(|set| set.contains(&wk))
+            {
+                return Ok(None);
+            }
+        }
+        let in_history = self.slashing_history.iter().any(|r| {
+            if r.report.offender != report.offender || r.report.role != report.role {
+                return false;
+            }
+            match (window_key, permissionless_offence_window(&r.report.proof)) {
+                (Some(a), Some(b)) => a == b,
+                _ => r.report == *report,
+            }
+        });
+        if in_history {
             return Ok(None);
         }
         let ratio = self.params.slash_ratio(condition);
         match self.slash(report.offender, report.role, condition, ratio) {
             Ok(outcome) => {
-                // A slash with a zero penalty is recorded too; the G0 decision
-                // of 2026-08-22, aligned with budzero. The earlier early return
-                // erased a zero-penalty slash from the record entirely: the
-                // report was actionable and the event happened, yet it never
-                // appeared in the audit trail. Record integrity is worth more
-                // than the zero penalty itself, and the two ledgers must give
-                // the same answer to the same question.
+                if let Some(wk) = window_key {
+                    let set = self.charged_offences.entry(member_key).or_default();
+                    set.insert(wk);
+                    if set.len() > MAX_SLASHING_HISTORY {
+                        if let Some(&oldest) = set.iter().next() {
+                            set.remove(&oldest);
+                        }
+                    }
+                }
                 self.record_slash(SlashingRecord {
                     report: report.clone(),
                     penalty: outcome.penalty,
@@ -948,6 +1001,7 @@ impl PermissionlessRegistry {
     pub fn has_non_default_state(&self) -> bool {
         !self.registrations.is_empty()
             || !self.slashing_history.is_empty()
+            || !self.charged_offences.is_empty()
             || self.params != RegistryParams::default()
     }
 
@@ -967,6 +1021,12 @@ impl PermissionlessRegistry {
         for record in &self.slashing_history {
             hasher.update(
                 bincode::serialize(record).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
+            );
+        }
+        if !self.charged_offences.is_empty() {
+            hasher.update(
+                bincode::serialize(&self.charged_offences)
+                    .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
             );
         }
         hasher.finalize().into()
@@ -1760,5 +1820,27 @@ mod tests {
             "a ratio one unit above the ceiling must take the whole bond, \
              not wrap to a fraction of it"
         );
+    }
+
+    #[test]
+    fn rebond_from_unbonding_restores_active_member_status() {
+        let mut reg = PermissionlessRegistry::new();
+        let addr = Address::from([0x42; 32]);
+        let min_stake = reg.params().min_stake;
+        reg.register(addr, roles::VALIDATOR, min_stake, 0)
+            .expect("register validator");
+        reg.upsert_stake(addr, roles::VALIDATOR, 0, 1);
+        assert!(matches!(
+            reg.get(&addr, roles::VALIDATOR).unwrap().status,
+            MemberStatus::Unbonding { .. }
+        ));
+        assert!(!reg.is_active(&addr, roles::VALIDATOR));
+
+        reg.upsert_stake(addr, roles::VALIDATOR, min_stake, 2);
+        assert_eq!(
+            reg.get(&addr, roles::VALIDATOR).unwrap().status,
+            MemberStatus::Active
+        );
+        assert!(reg.is_active(&addr, roles::VALIDATOR));
     }
 }

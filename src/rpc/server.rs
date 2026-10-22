@@ -736,15 +736,31 @@ fn validate_operator_bind_address(
 #[doc(hidden)]
 pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
-    // Length mismatch must still run a dummy compare to avoid leaking length via early return
-    // Of short-circuit equality on the string content alone.
+    // Walk the expected value `b` in full on every call, fold the length
+    // difference into the accumulator, and clamp the candidate index into
+    // range instead of branching on a length mismatch: the work performed
+    // then depends only on `b.len()`, never on whether the lengths match or
+    // where the first differing byte sits. A short candidate re-reads its
+    // last byte and an empty one reads `b` itself; the length fold still
+    // refuses both. The earlier shape dummy-compared `b` against itself on
+    // the mismatch path, and same-pointer loads do not cost what
+    // cross-buffer loads cost - a small but systematic gap the timing_safe
+    // regression bench measured at several nanoseconds.
     let a_b = a.as_bytes();
     let b_b = b.as_bytes();
-    if a_b.len() != b_b.len() {
-        let _ = a_b.ct_eq(a_b);
-        return false;
+    let mut acc: u8 = 0;
+    for byte in (a_b.len() ^ b_b.len()).to_le_bytes() {
+        acc |= byte;
     }
-    bool::from(a_b.ct_eq(b_b))
+    let src: &[u8] = if a_b.is_empty() { b_b } else { a_b };
+    for (i, &expected) in b_b.iter().enumerate() {
+        // `src` is empty only when `b` is empty too, in which case this
+        // loop body never runs and the length fold alone decides.
+        let provided = src[core::cmp::min(i, src.len() - 1)];
+        acc |= provided ^ expected;
+        acc = std::hint::black_box(acc);
+    }
+    bool::from(acc.ct_eq(&0u8))
 }
 
 fn is_authorized<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
@@ -2649,9 +2665,45 @@ impl BudlumApiServer for RpcServer {
         &self,
         payload: crate::domain::VerifiedDomainCommitment,
     ) -> Result<String, ErrorObjectOwned> {
+        // Consensus-state isolation: `submit_verified_domain_commitment` writes
+        // to `external_roots` and `domain_registry`, so public listeners must
+        // not reach it directly, and the signed in-block StateUpdateTx carrier
+        // must be verified and enqueued fail-closed before applying state.
+        self.require_operator("bud_submitVerifiedDomainCommitment")?;
         let hash = hex::encode(payload.leaf_hash());
         let payload_clone = payload.clone();
         let commitment = payload.commitment.clone();
+
+        self.chain
+            .verify_verified_domain_commitment(payload.clone())
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid verified domain commitment: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let tx = self
+            .chain
+            .build_state_update_transaction(commitment)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("Could not build state update transaction: {e}"),
+                    None::<()>,
+                )
+            })?;
+        let tx_clone = tx.clone();
+        self.chain.add_transaction(tx).await.map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("State update transaction rejected: {e}"),
+                None::<()>,
+            )
+        })?;
 
         self.chain
             .submit_verified_domain_commitment(payload)
@@ -2664,26 +2716,7 @@ impl BudlumApiServer for RpcServer {
                 )
             })?;
 
-        // C3 (decision 50): the commitment's nonce writes travel in a signed
-        // StateUpdateTx, enqueued here so they apply inside block execution.
-        // The commitment broadcast below keeps the domain registry in sync
-        // across peers until that advancement moves in-block too.
-        match self.chain.build_state_update_transaction(commitment).await {
-            Ok(tx) => {
-                let tx_clone = tx.clone();
-                // The commitment is already applied above, so a refused
-                // transaction must not turn the call into an error: the
-                // caller would see a failure for state that did change.
-                match self.chain.add_transaction(tx).await {
-                    Ok(()) => self.node.broadcast_tx_sync(tx_clone),
-                    Err(e) => tracing::warn!("State update transaction rejected: {e}"),
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Could not build state update transaction: {e}");
-            }
-        }
-
+        self.node.broadcast_tx_sync(tx_clone);
         self.node
             .broadcast_verified_domain_commitment_sync(payload_clone);
         Ok(format!("0x{hash}"))
@@ -3184,21 +3217,11 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        // BLG-0102 (P04-F24): the promotion flow the module docs promise.
-        // A double-sign proof is self-contained - two signatures by the
-        // offender over two different hashes at one height - so it earns
-        // ConsensusVerified by opening those signatures HERE, before any
-        // fee or action. Other conditions need consensus context and are
-        // refused rather than pretended.
-        if let Err(e) = report.promote_self_proven() {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                format!(
-                    "Rejected slashing report: no self-contained proof ({e});                      liveness and relay claims travel the consensus path"
-                ),
-                None::<()>,
-            ));
-        }
+        // A caller-supplied report stays `Unverified`: two signatures over two
+        // bare block hashes do not bind `height`, so this endpoint must never
+        // promote caller-supplied evidence to `ConsensusVerified`. The chain
+        // guard (`submit_registry_slashing_report`) refuses `Unverified`
+        // reports fail-closed; slashing travels the consensus path only.
         match self.chain.submit_registry_slashing_report(report).await {
             Ok(Some(outcome)) => Ok(serde_json::json!({
                 "slashed": true,
@@ -3892,6 +3915,7 @@ impl BudlumApiServer for RpcServer {
         proof_kind: String,
         authorization: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_storageRegisterConfidentialCommit")?;
         let content_id = parse_content_id(&content_id)?;
         // The recorded owner is never typed by the caller: it is derived from
         // the key and then proven by the signature the registry checks. Handing

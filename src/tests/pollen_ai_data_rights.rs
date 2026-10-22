@@ -209,6 +209,26 @@ fn signed_sale_authorization(asset: &DataAsset) -> crate::pollen::SaleAuthorizat
     authorization
 }
 
+/// Register a plaintext manifest owned by `owner` and return its content id.
+///
+/// `PollenRegisterDataAsset` requires positive ownership: the content id must
+/// already be registered to the sender. Without that precondition any funded
+/// account could bind - and permanently paywall - an id it does not own, so
+/// every test that lists a paid asset registers its content first.
+fn registered_plaintext_content(state: &mut AccountState, owner: Address, seed: u8) -> ContentId {
+    let bytes: Vec<u8> = (0..4096u32)
+        .map(|i| ((i % 251) as u8).wrapping_add(seed))
+        .collect();
+    let encoded =
+        crate::storage::encode_object(&bytes, crate::storage::ErasureScheme { k: 4, n: 6 })
+            .expect("encode");
+    let mut manifest = encoded.to_manifest().expect("manifest");
+    manifest.owner = owner;
+    let content_id = manifest.manifest_id;
+    state.storage_registry.register_manifest(&manifest);
+    content_id
+}
+
 fn pollen_tx(from: Address, tx_type: TransactionType, nonce: u64) -> Transaction {
     Transaction::new_with_chain_id(
         from,
@@ -234,7 +254,8 @@ fn tx_backed_pollen_asset_and_grant_unlock_ai_read() {
     let model_id = spec.model_id;
     state.ai_registry.register_model(spec).unwrap();
 
-    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x44; 32], true);
+    let content_id = registered_plaintext_content(&mut state, owner, 0x44);
+    let asset = DataAsset::new(owner, content_id, [0x44; 32], true);
     let asset_id = asset.asset_id;
     Executor::apply_transaction_checked(
         &mut state,
@@ -421,7 +442,8 @@ fn tx_backed_pollen_rejects_a_backdated_or_expired_grant() {
     let requester = addr(2);
     let mut state = AccountState::new();
     state.add_balance(&owner, 100);
-    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x66; 32], true);
+    let content_id = registered_plaintext_content(&mut state, owner, 0x66);
+    let asset = DataAsset::new(owner, content_id, [0x66; 32], true);
     Executor::apply_transaction_checked(
         &mut state,
         &pollen_tx(

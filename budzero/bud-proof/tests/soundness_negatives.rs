@@ -213,7 +213,9 @@ fn a_wrong_state_writes_digest_baked_in_before_proving_is_refused() {
         chain_id: 1,
         program_hash,
         initial_state_root,
-        final_state_root: [0u8; 32],
+        // The AIR ties the final root to the storage-writes fold, so the
+        // honest final root for a writing program is its write digest.
+        final_state_root: receipt.state_writes_digest,
         sender: vm.context.sender,
         nonce: vm.context.nonce,
         block_height: vm.context.block_height,

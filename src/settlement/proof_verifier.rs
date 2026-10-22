@@ -87,7 +87,7 @@ impl SettlementProofVerifier {
             return Err(ProofVerificationError::EventLeafMismatch);
         }
         // BLG-0081 (P03-F24): a carried cross-domain message must be
-        // self-consistent — its id has to match its body. The bridge checks
+        // self-consistent - its id has to match its body. The bridge checks
         // this on mint (bridge.rs); the verifier accepted any body under any
         // id, and only the id is bound into the leaf.
         if let Some(message) = &event.message {

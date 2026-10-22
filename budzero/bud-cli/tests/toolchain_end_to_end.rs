@@ -78,7 +78,9 @@ fn public_inputs_with_writes(
         chain_id: 1,
         program_hash: keccak256(&bytecode_bytes),
         initial_state_root,
-        final_state_root: [0u8; 32],
+        // The AIR ties the final root to the storage-writes fold, so the
+        // honest final root is the write digest passed in.
+        final_state_root: state_writes_digest,
         sender: vm.context.sender,
         nonce: vm.context.nonce,
         block_height: vm.context.block_height,

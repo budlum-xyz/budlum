@@ -432,11 +432,19 @@ fn two_splits_of_source_and_dictionary_get_different_ids() {
     let spec = generated_spec();
     let digest = ContentId(crate::storage::generated::generated_spec_digest(&spec));
     let a = manifest_owned_by(alice).with_source(crate::storage::ContentSource::Generated(spec));
-    let mut b = a.clone();
-    b.source = crate::storage::ContentSource::Stored;
-    b.dictionary_id = Some(digest);
-    // The dictionary bytes carry a label, so they cannot mimic the source bytes.
-    assert!(b.verify_id().is_err());
+    // The same 32 bytes worn as a dictionary commitment instead of as the
+    // generated-source commitment. First as a stale-id mutation: the id the
+    // clone carries was derived from the source reading, so verification
+    // must refuse it outright.
+    let mut stale = a.clone();
+    stale.source = crate::storage::ContentSource::Stored;
+    stale.dictionary_id = Some(digest);
+    assert!(stale.verify_id().is_err());
+    // Then built honestly, so the ids can be compared as ids: the dictionary
+    // bytes carry a label in the preimage, so they cannot mimic the source
+    // bytes and the two manifests must not collide.
+    let b = manifest_owned_by(alice).with_dictionary_id(Some(digest));
+    assert!(b.verify_id().is_ok());
     assert_ne!(a.manifest_id, b.manifest_id);
     assert_ne!(register_hash(alice, a), register_hash(alice, b));
 }

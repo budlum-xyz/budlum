@@ -9,7 +9,11 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-const FLAGS: &[(&str, &str)] = &[("COL_REG_SAME", "r_same"), ("COL_MEM_SAME", "m_same")];
+const FLAGS: &[(&str, &str)] = &[
+    ("COL_REG_SAME", "r_same"),
+    ("COL_MEM_SAME", "m_same"),
+    ("COL_MEM_TOP_SAME", "m_top_same"),
+];
 
 fn strip_all(src: &str) -> String {
     // Literals and comments are blanked together: a `//` inside a string must
@@ -137,7 +141,7 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-gf")?;
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
 
-    let good = "pub const COL_REG_SAME: usize = 28;\npub const COL_MEM_SAME: usize = 54;\n        let r_same: AB::Expr = cur[COL_REG_SAME].into();\n        builder.assert_bool(r_same.clone());\n        builder.when_transition().assert_eq(r_same.clone(), one.clone() - reg_diff_z);\n        let m_same: AB::Expr = cur[COL_MEM_SAME].into();\n        builder.assert_bool(m_same.clone());\n        builder.when_transition().assert_zero(\n            m_active.clone() * (one.clone() - m_same.clone()) * nm_val.clone(),\n        );\n";
+    let good = "pub const COL_REG_SAME: usize = 28;\npub const COL_MEM_SAME: usize = 54;\npub const COL_MEM_TOP_SAME: usize = 853;\n        let r_same: AB::Expr = cur[COL_REG_SAME].into();\n        builder.assert_bool(r_same.clone());\n        builder.when_transition().assert_eq(r_same.clone(), one.clone() - reg_diff_z);\n        let m_same: AB::Expr = cur[COL_MEM_SAME].into();\n        builder.assert_bool(m_same.clone());\n        builder.when_transition().assert_zero(\n            m_active.clone() * (one.clone() - m_same.clone()) * nm_val.clone(),\n        );\n        let m_top_same: AB::Expr = cur[COL_MEM_TOP_SAME].into();\n        builder.assert_bool(m_top_same.clone());\n        builder.when_transition().assert_eq(m_top_same.clone(), one.clone() - top_diff_z);\n";
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), good)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {

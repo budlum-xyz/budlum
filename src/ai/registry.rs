@@ -182,6 +182,7 @@ impl AiRegistry {
             && self.verifier_effort_ceilings.is_empty()
             && self.callback_queue.is_empty()
             && self.execution_proofs.is_empty()
+            && self.fully_verified_proofs.is_empty()
             && self.verifier_qos.is_empty()
             && self.agent_payments.is_empty()
             && self.settled_agent_payments.is_empty()
@@ -489,7 +490,7 @@ impl AiRegistry {
         let mut agreeing_verifiers = Vec::new();
         for (verifier, _) in candidates {
             if spec.require_execution_proof
-                && !self.has_execution_proof(&request_id_for_proof, &verifier)
+                && !self.has_verified_execution_proof(&request_id_for_proof, &verifier)
             {
                 continue;
             }
@@ -1477,7 +1478,12 @@ impl AiRegistry {
         use std::collections::BTreeMap;
         let mut by_commit: BTreeMap<[u8; 32], Vec<Address>> = BTreeMap::new();
         for r in entries {
-            if spec.require_execution_proof && !self.has_execution_proof(request_id, &r.verifier) {
+            // A model that requires an execution proof settles only on a proof
+            // that cleared full STARK verification (`fully_verified_proofs`),
+            // never on structural-only envelope bytes (CWE-345).
+            if spec.require_execution_proof
+                && !self.has_verified_execution_proof(request_id, &r.verifier)
+            {
                 continue;
             }
             by_commit
@@ -1955,6 +1961,10 @@ impl AiRegistry {
 
     /// Get all agents sorted by trust score (descending - highest trust first).
     /// Returns Vec of (agent_address, trust_score) tuples.
+    ///
+    /// WIRING: the read model for ranking agents by trust; the operator
+    /// surface that lists agents this way does not call it yet, so the
+    /// ordering is pinned by this module's tests.
     pub fn agents_by_trust_score(&self) -> Vec<(Address, f64)> {
         let mut scored: Vec<(Address, f64)> = self
             .agent_reputations
@@ -1966,6 +1976,9 @@ impl AiRegistry {
     }
 
     /// Get the top-N agents by trust score.
+    ///
+    /// WIRING: the bounded cut of the ranking above, for the same
+    /// unwired operator surface; pinned by tests beside it.
     pub fn top_agents(&self, n: usize) -> Vec<(Address, f64)> {
         self.agents_by_trust_score().into_iter().take(n).collect()
     }
@@ -2089,6 +2102,17 @@ impl AiRegistry {
             hasher.update(req_id.0);
             hasher.update(verifier_bytes);
             hasher.update(proof.calculate_leaf());
+        }
+
+        // Domain: fully_verified_proofs
+        //
+        // The verification verdict gates both AI inference finalization and
+        // `require_proof` escrow release, and cannot be re-derived from
+        // `execution_proofs` envelopes alone (CWE-345).
+        hasher.update(b"BDLM_AI_FULLY_VERIFIED_PROOFS");
+        for (req_id, verifier_bytes) in &self.fully_verified_proofs {
+            hasher.update(req_id.0);
+            hasher.update(verifier_bytes);
         }
 
         // Domain: verifier_qos

@@ -63,8 +63,16 @@ pub struct CrossDomainMessage {
     /// refused at the relayed-message door: the self-declared `sender`
     /// field alone let anybody name an active relayer and register
     /// arbitrary messages (or pre-register a predictable lock id).
+    ///
+    /// IDENTITY: excluded - the key is the envelope that authenticates the
+    /// id, and [`CrossDomainMessage::verify_sender_signature`] requires it
+    /// to derive the `sender` the id already binds, so a different key
+    /// under the same id proves control of nothing new.
     #[serde(default)]
     pub sender_public_key: Vec<u8>,
+    /// IDENTITY: excluded - the signature is computed over the id, so it
+    /// cannot be an input to it; the door verifies it against
+    /// `sender_public_key` and the id instead.
     #[serde(default)]
     pub sender_signature: Vec<u8>,
 }
@@ -101,6 +109,11 @@ impl CrossDomainMessage {
     /// Signs [`CrossDomainMessage::message_id`] with the sender's Ed25519
     /// account key (BLG-0113/P05-F06). The V4 derivation makes the key
     /// bytes the address itself, so the envelope is self-identifying.
+    ///
+    /// WIRING: exposed for the sender side of the relayed-message door:
+    /// whoever originates a message signs the envelope here before the
+    /// chain verifies it; in-tree origination is chain-built, so tests
+    /// pin this half.
     pub fn sign_sender_ed25519(&mut self, keypair: &crate::crypto::primitives::KeyPair) {
         self.sender_public_key = keypair.public_key_bytes().to_vec();
         self.sender_signature = keypair.sign(&self.message_id).to_vec();

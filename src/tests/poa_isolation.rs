@@ -520,4 +520,44 @@ mod poa_compliance_gate {
             .poa_compliance
             .is_frozen(ComplianceDomainKind::PoA, &target));
     }
+
+    #[test]
+    fn governance_poa_freeze_replays_with_identical_state_root() {
+        use crate::core::account::PendingPoaCompliance;
+        let mut live = chain();
+        let mut follower = chain();
+        let admin = addr(12);
+        let target = addr(0x52);
+        for node in [&mut live, &mut follower] {
+            node.state
+                .poa_onboarding
+                .registry_mut()
+                .add_admin(12, admin);
+            node.state.pending_poa_freezes.push(PendingPoaCompliance {
+                domain_id: 12,
+                admin,
+                target,
+                reason_hash: [9u8; 32],
+            });
+        }
+        let (block, _) = live
+            .produce_block(addr(0x90))
+            .expect("block produced with queued PoA compliance freeze");
+        follower
+            .validate_and_add_block(block.clone())
+            .expect("validator accepts block without state root mismatch");
+        assert!(live
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, &target));
+        assert!(follower
+            .state
+            .poa_compliance
+            .is_frozen(ComplianceDomainKind::PoA, &target));
+        assert_eq!(
+            live.state.calculate_state_root(),
+            follower.state.calculate_state_root()
+        );
+        assert_eq!(block.state_root, follower.state.calculate_state_root());
+    }
 }
