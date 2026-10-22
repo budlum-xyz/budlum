@@ -1,0 +1,331 @@
+//!: Domain edge-case test suite'leri.
+//!
+//! BFT view-change/leader election, PoS slashing triggers, PoW difficulty
+//! Separate edge-case tests for adjustment.
+
+#[cfg(test)]
+mod tests {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::address::Address;
+
+    use std::sync::Arc;
+
+    fn setup_chain() -> Blockchain {
+        let consensus = Arc::new(PoWEngine::new(0));
+        Blockchain::new(consensus, None, 45262, None)
+    }
+
+    fn addr(byte: u8) -> Address {
+        Address::from([byte; 32])
+    }
+
+    // ─── PoW Difficulty Adjustment ───
+
+    #[test]
+    fn pow_difficulty_adjusts_after_blocks() {
+        use crate::consensus::pow::PoWConfig;
+
+        // Blocks arrive on a one second slot while the engine expects ten, so
+        // the first retarget boundary must raise the difficulty by one digit.
+        let engine = Arc::new(PoWEngine::with_config(PoWConfig {
+            difficulty: 1,
+            target_block_time: 10,
+            adjustment_interval: 4,
+            ..Default::default()
+        }));
+        let mut bc = Blockchain::new(engine.clone(), None, 45262, None);
+        let producer = addr(0x01);
+
+        assert_eq!(engine.difficulty_for_next_block(&bc.chain), 1);
+        for _ in 0..6 {
+            bc.produce_block(producer).expect("produce must succeed");
+        }
+
+        assert!(
+            bc.chain.len() > 4,
+            "the chain must pass a retarget boundary"
+        );
+        assert_eq!(
+            engine.difficulty_for_next_block(&bc.chain),
+            2,
+            "fast blocks must raise the difficulty by one digit"
+        );
+    }
+
+    #[test]
+    fn pow_genesis_block_has_zero_difficulty() {
+        let bc = setup_chain();
+        assert_eq!(bc.chain.len(), 1, "genesis block must exist at chain start");
+        // Genesis block is block 0
+        assert_eq!(bc.chain[0].index, 0);
+    }
+
+    /// Renamed from `pow_empty_block_rejected_by_validation`, which claimed a
+    /// rejection this test never asserted and the engine never performs:
+    /// `PoWEngine::validate_block` checks the previous hash, the block hash and
+    /// the difficulty target, and says nothing about the transaction list. An
+    /// empty block is valid under PoW - that is what keeps a chain live when
+    /// the mempool is empty. The old name asserted the opposite of the design
+    /// while the body asserted success, so nothing was ever going to catch the
+    /// contradiction.
+    #[test]
+    fn pow_produces_a_block_with_an_empty_mempool() {
+        let mut bc = setup_chain();
+        let producer = addr(0x02);
+
+        let result = bc.produce_block(producer);
+        assert!(
+            result.is_some(),
+            "an empty mempool must still yield a block; PoW validity does not depend on transactions"
+        );
+    }
+
+    // ─── PoS / BFT Slashing Triggers ───
+
+    #[test]
+    fn pos_validator_registration_with_stake() {
+        let mut bc = setup_chain();
+        let validator = addr(0x10);
+
+        bc.fund_development_account(&validator)
+            .expect("devnet faucet");
+        // Validator registration via stake (permissionless)
+        // The chain must accept stake-based registration
+        // Validator set is managed by the permissionless registry, not
+        // Necessarily mirrored into bc.state.validators on stake alone.
+        // Smoke: genesis account exists; registration path is covered elsewhere.
+        assert!(
+            bc.state.accounts.contains_key(&validator),
+            "genesis account must exist for validator candidate"
+        );
+    }
+
+    /// Renamed from `pos_double_producer_address_rejected`, which asserted the
+    /// exact opposite of its own name: both blocks must succeed. Producing two
+    /// sequential blocks from one address is ordinary behaviour, not a double
+    /// -sign - a double-sign is two *different* blocks at the *same* height,
+    /// and that is covered by the equivocation tests, not here. A name
+    /// promising a rejection over a body asserting acceptance is worse than no
+    /// test: a reader counting coverage sees the double-sign case handled.
+    #[test]
+    fn the_same_producer_may_extend_the_chain_on_consecutive_heights() {
+        let mut bc = setup_chain();
+        let producer = addr(0x20);
+
+        let r1 = bc.produce_block(producer);
+        assert!(r1.is_some(), "first block must succeed");
+
+        let r2 = bc.produce_block(producer);
+        assert!(
+            r2.is_some(),
+            "consecutive heights from one producer are sequential production, not equivocation"
+        );
+
+        let (h1, h2) = (
+            r1.expect("checked above").0.index,
+            r2.expect("checked above").0.index,
+        );
+        assert_ne!(
+            h1, h2,
+            "the two blocks must sit at different heights, or this is not the sequential case"
+        );
+    }
+
+    // ─── BFT View-Change / Leader Election ───
+
+    #[test]
+    fn bft_leader_deterministic_selection() {
+        // Leader selection hashes the height, the previous block hash and the
+        // ordered validator set. The same inputs give the same leader, and
+        // the entropy is part of the input.
+        use crate::consensus::poa::PoAEngine;
+        use crate::core::account::{AccountState, Validator};
+
+        let mut state = AccountState::new();
+        for i in 1..=5u8 {
+            let address = addr(i);
+            let mut validator = Validator::new(address, 1000);
+            validator.active = true;
+            state.validators.insert(address, validator);
+        }
+        let active = state.get_active_validators();
+        let entropy_a = [1u8; 32];
+        let entropy_b = [2u8; 32];
+        for height in 1..40u64 {
+            let first = PoAEngine::leader_slot_with_entropy(height, &active, &entropy_a, 0);
+            let again = PoAEngine::leader_slot_with_entropy(height, &active, &entropy_a, 0);
+            assert_eq!(first, again, "same inputs must give the same leader");
+            assert!(first.is_some_and(|slot| slot < active.len()));
+        }
+        let differs = (1..40u64).any(|height| {
+            PoAEngine::leader_slot_with_entropy(height, &active, &entropy_a, 0)
+                != PoAEngine::leader_slot_with_entropy(height, &active, &entropy_b, 0)
+        });
+        assert!(differs, "the previous block hash must change the leader");
+    }
+
+    #[test]
+    fn bft_block_validation_rejects_wrong_chain_id() {
+        let mut bc1 = setup_chain(); // chain_id 45262
+        let mut block = crate::core::block::Block::new_with_chain_id(
+            1,
+            bc1.chain[0].hash.clone(),
+            vec![],
+            9999,
+        );
+        block.hash = block.calculate_hash();
+        let error = bc1
+            .validate_and_add_block(block)
+            .map(|_| ())
+            .expect_err("a block of another chain must be refused");
+        assert!(
+            error.to_lowercase().contains("chain"),
+            "the refusal must name the chain id: {error}"
+        );
+        assert_eq!(bc1.chain.len(), 1, "nothing was added");
+    }
+
+    // ─── Domain Isolation Edge Cases ───
+
+    #[test]
+    fn cross_chain_id_block_rejected() {
+        let mut bc = setup_chain();
+        let consensus2 = Arc::new(PoWEngine::new(0));
+        let mut bc2 = Blockchain::new(consensus2, None, 9999, None);
+
+        let producer = addr(0x40);
+        for _ in 0..3 {
+            let _ = bc2.produce_block(producer);
+        }
+
+        // Try to add a block from chain 9999 into the devnet chain
+        let foreign_block = bc2.chain[1].clone();
+        let result = bc.validate_and_add_block(foreign_block);
+        assert!(
+            result.is_err(),
+            "block from different chain_id must be rejected"
+        );
+    }
+
+    #[test]
+    fn reorg_with_same_chain_id_succeeds() {
+        let consensus_a = Arc::new(PoWEngine::new(0));
+        let mut chain_a = Blockchain::new(consensus_a.clone(), None, 45262, None);
+        let mut chain_b = Blockchain::new(consensus_a, None, 45262, None);
+
+        let producer = addr(0x50);
+
+        for _ in 0..3 {
+            let _ = chain_a.produce_block(producer);
+        }
+        for _ in 0..5 {
+            let _ = chain_b.produce_block(producer);
+        }
+
+        // Reorg to longer chain
+        let result = chain_a.try_reorg(chain_b.chain.clone());
+        assert!(
+            result.is_ok(),
+            "reorg to longer chain with same ID must succeed"
+        );
+    }
+
+    // ─── Block Timestamp Edge Cases ───
+
+    #[test]
+    fn block_with_zero_timestamp_accepted_in_genesis() {
+        let bc = setup_chain();
+        assert_eq!(
+            bc.chain[0].timestamp, 0,
+            "genesis block timestamp should be 0"
+        );
+    }
+
+    #[test]
+    fn consecutive_blocks_increasing_timestamp() {
+        let mut bc = setup_chain();
+        let producer = addr(0x60);
+
+        let _ = bc.produce_block(producer);
+        let _ = bc.produce_block(producer);
+
+        // Timestamps must be strictly increasing
+        assert!(
+            bc.chain[2].timestamp > bc.chain[1].timestamp,
+            "consecutive block timestamps must be strictly increasing"
+        );
+    }
+
+    // --- The sovereign domain template: binding it to a consensus domain ---
+
+    /// A template registered through the chain has to declare the same kind as
+    /// the real domain.
+    ///
+    /// `Blockchain::register_sovereign_template` binds the two records
+    /// together. Without that binding a template would be valid on its own, and
+    /// a domain actually running PoS could be presented to an audit as
+    /// "permissioned and KYC'd".
+    #[test]
+    fn a_sovereign_template_must_match_the_registered_domain() {
+        use crate::domain::sovereign::{
+            ComplianceEvidence, DomainLifecycleState, SovereignDomainClass, SovereignDomainTemplate,
+        };
+        use crate::domain::ConsensusKind;
+
+        let mut bc = setup_chain();
+        let domain = crate::domain::plugin::default_domain(
+            77,
+            ConsensusKind::PoA,
+            4077,
+            "poa-authority-quorum",
+            0,
+        );
+        let operator = domain
+            .operator
+            .expect("the default domain carries an operator");
+        bc.register_consensus_domain(domain)
+            .expect("the domain registers");
+
+        let evidence = ComplianceEvidence {
+            policy_hash: [1u8; 32],
+            authority_set_hash: [2u8; 32],
+            jurisdiction_hash: [3u8; 32],
+            audit_commitment: [4u8; 32],
+        };
+
+        // The wrong kind: the domain is PoA and the template says PoS.
+        let mismatched = SovereignDomainTemplate::new(
+            77,
+            SovereignDomainClass::Cbdc,
+            ConsensusKind::PoS,
+            operator,
+            false,
+            evidence.clone(),
+            DomainLifecycleState::Draft,
+        );
+        assert!(
+            bc.register_sovereign_template(mismatched).is_err(),
+            "a kind mismatch has to be refused"
+        );
+
+        // The right kind and operator: accepted.
+        let matching = SovereignDomainTemplate::new(
+            77,
+            SovereignDomainClass::Cbdc,
+            ConsensusKind::PoA,
+            operator,
+            true,
+            evidence,
+            DomainLifecycleState::Draft,
+        );
+        let root_before = bc.sovereign_template_root();
+        bc.register_sovereign_template(matching)
+            .expect("a matching template has to be accepted");
+        assert_ne!(
+            bc.sovereign_template_root(),
+            root_before,
+            "an accepted template must change the root"
+        );
+    }
+}

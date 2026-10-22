@@ -1,0 +1,20 @@
+[package]
+name = "budlum-tools"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Repository tooling, written in Rust rather than shell."
+publish = false
+
+# No dependencies, and that is deliberate. This crate's job is to run processes,
+# write files and return exit codes; all three exist in std. `xtask/gates` took
+# syn for a reason (AST correctness); there is no such reason here.
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

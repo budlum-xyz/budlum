@@ -1,0 +1,42 @@
+name: Dependency Review (PR security gate)
+
+# On every pull_request this gate has the dependencies newly introduced in the
+# PR diff inspected against the GitHub Advisory database for known
+# vulnerability/license problems. While cargo-audit / cargo-deny scan the WHOLE
+# dependency tree, this gate focuses only on the DELTA the PR brings, so if a PR
+# tries to add a version with a known vulnerability (dependabot included) it is
+# REJECTED before merging to main. Complementary, not a repetition.
+
+# Enable Dependency graph in repository settings for this check.
+on:
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+
+# Salt-okur.
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dependency-review:
+    name: Dependency Review (GH Advisory, PR diff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Dependency Review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # A moderate+ vulnerable dependency introduced in the PR diff = fail.
+          # (low = warning only; high/critical is too late; moderate is the balance.)
+          fail-on-severity: moderate
+          # The license denial list is managed in .quality/deny.toml [licenses]; here
+          # the focus is advisories only; the job result is the signal. A
+          # summary comment would need `pull-requests: write`, which this
+          # workflow does not hold on purpose.
+          comment-summary-in-pr: never

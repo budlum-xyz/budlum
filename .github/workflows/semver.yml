@@ -1,0 +1,150 @@
+name: Semver Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+
+concurrency:
+  group: semver-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  semver-check:
+    # CI Expansion item 5: cargo-semver-checks, public API breakage detection.
+    #
+    # Hardening (2026-07-21): the old version carried `continue-on-error: true` on
+    # both steps, so the gate could NEVER go red (observation mode = decoration).
+    # It also had no base mechanism: `check-release` cannot work for `budlum-core`,
+    # which is not published to crates.io. The new model:
+    #   * Base = `pull_request.base.sha` on a PR, `push.before` on a main push.
+    #   * Two separate checkouts (current/baseline) + `--baseline-root`.
+    #   * A nightly toolchain (for cargo-semver-checks rustdoc-json generation).
+    #   * Gate: `semver` (Rust, xtask/gates) - FAIL if there is a breakage and
+    #     `.github/semver-exceptions.txt` is empty. Exception lines follow the
+    #     approved, justified "evidenced skip-list" pattern
+    #     (the same discipline as .quality/deny.toml [advisories]).
+    name: "Semver Check (item 5: public API breakage gate)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout (current)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: current
+          persist-credentials: false
+      - name: Checkout (baseline = merge base)
+        # Skipped when there is no baseline to compare against: on the very
+        # first push to a branch `github.event.before` is the all-zero SHA, and
+        # asking the remote for that ref fails with "not our ref". The gate
+        # step below already treats a missing base as "nothing to compare" and
+        # passes with an explicit log line, so the run stays honest rather than
+        # red for a reason that has nothing to do with the public API.
+        if: >-
+          github.event.pull_request.base.sha != '' ||
+          (github.event.before != '' &&
+           github.event.before != '0000000000000000000000000000000000000000')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: baseline
+          ref: ${{ github.event.pull_request.base.sha || github.event.before }}
+          persist-credentials: false
+      - name: Install Rust (stable pin)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: Install pinned nightly (rustdoc-json backend for semver-checks)
+        # On nightly 'rustdoc' is NOT a separate component, it is part of the rustc
+        # component (rustup: exit 1 with "did you mean 'rust-docs'?", 2026-07-21 CI evidence).
+        run: rustup toolchain install nightly-2026-07-19 --profile minimal
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+          # In the two-checkout layout there is no Cargo.toml at the workspace root;
+          # rust-cache's `cargo metadata` call blows up at the root (Error log).
+          workspaces: ./current
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Install cargo-semver-checks (locked)
+        run: cargo +1.97.1 install cargo-semver-checks --locked
+      - name: Gate canary (vacuous-gate protection)
+        run: BUDLUM_ROOT="$PWD/current" cargo run --release --manifest-path ./current/xtask/gates/Cargo.toml -- semver --self-test
+      - name: Diagnosis (permanent evidence step) - rustdoc-json directly
+        # This one is a DIAGNOSTIC, not a gate, and it now says so in its exit
+        # code rather than in a flag. It exists to make the error body that the
+        # cargo-semver-checks wrapper swallows visible raw; the verdict on the
+        # public API belongs to the gate step below, which blocks.
+        #
+        # `continue-on-error: true` is gone anyway, because it made this step
+        # unable to report its own tooling failure: the run is captured with
+        # `set +e`, the exit code is printed as RUSTDOC_DIRECT_EXIT (a red
+        # rustdoc here is evidence, not a verdict), and the step only fails if
+        # the diagnosis itself produced nothing - no output to read. A silent
+        # evidence step is the thing this step was added to prevent.
+        #
+        # NOTE: `-o <dir>` is FORBIDDEN, cargo rustdoc adds --out-dir itself; a
+        # second one dies with "Option 'out-dir' given more than once" (2026-07-21
+        # local evidence). The JSON lands in target/doc/budlum_core.json.
+        env:
+          RUSTUP_TOOLCHAIN: nightly-2026-07-19
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-C debuginfo=0"
+          RUST_BACKTRACE: "1"
+        run: |
+          set +e
+          cd current
+          cargo rustdoc -p budlum-core --lib -- -Z unstable-options --output-format json \
+            > /tmp/rustdoc-direct.log 2>&1
+          status=$?
+          echo "RUSTDOC_DIRECT_EXIT: $status"
+          tail -60 /tmp/rustdoc-direct.log
+          # A SUCCESSFUL rustdoc is legitimately quiet, so silence is only a
+          # defect when the command failed: an error with no error body is a
+          # diagnosis step that diagnosed nothing, which is precisely the state
+          # it exists to prevent.
+          if [ "$status" -ne 0 ] && [ ! -s /tmp/rustdoc-direct.log ]; then
+            echo "::error::rustdoc exited $status and wrote nothing - the evidence step produced no evidence."
+            exit 1
+          fi
+          exit 0
+      - name: Semver gate - budlum-core vs baseline
+        env:
+          SEMVER_BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          # Root cause (closed, 2026-07-21): the rustdoc-json death came not from
+          # nightly but from the --all-features heuristic - the pq-dilithium + pq-ml-dsa
+          # compile_error! lock. The gate builds the crate default feature set.
+          # Root cause (closed, 2026-09-03): `--baseline-root` let cargo-semver-checks
+          # build both rustdocs in a placeholder project of its own, after a fresh
+          # `cargo update` there, so a crates.io release that does not compile
+          # (tinyvec 1.13.0, 21:13 UTC) turned this job red while Cargo.lock still
+          # pinned 1.11.0 and every `--locked` job on the same commit was green. The
+          # gate now runs `cargo rustdoc --locked` inside each checkout and passes the
+          # two JSON files with --current-rustdoc / --baseline-rustdoc.
+          # The nightly pin remains mandatory for rustdoc-json's -Z requirement.
+          RUSTUP_TOOLCHAIN: nightly-2026-07-19
+          CARGO_BUILD_JOBS: "2"
+          RUSTFLAGS: "-C debuginfo=0"
+        run: |
+          set +e
+          if [ -z "${SEMVER_BEFORE}" ] || [ "${SEMVER_BEFORE}" = "0000000000000000000000000000000000000000" ]; then
+            echo "NO BASE (first push/suspicious state) - the gate is not skipped, PASS with an info log."
+            echo "NOTE: budlum-core is not published on crates.io; a base is mandatory."
+            exit 0
+          fi
+          BUDLUM_ROOT="$PWD/current" cargo run --release --manifest-path ./current/xtask/gates/Cargo.toml -- semver ./current ./baseline
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::gate exit=$rc - runner memory snapshot (for OOM evidence):"
+            # The verdict is `$rc` and it is returned unchanged below; this is
+            # the OOM evidence beside it. `|| true` meant a runner without
+            # `free` produced no snapshot and said nothing about why, leaving
+            # the OOM hypothesis neither supported nor refuted.
+            if ! free -m; then
+              echo "::warning::\`free\` is unavailable on this runner - no memory snapshot, so an OOM cannot be confirmed or ruled out from this run."
+            fi
+          fi
+          exit "$rc"

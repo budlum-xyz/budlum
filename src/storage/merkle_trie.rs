@@ -1,0 +1,808 @@
+//! Sparse fixed-depth (256) binary Merkle trie for account state.
+//!
+//! - Leaf: `SHA-256(0x01 || address || balance_le || nonce_le)`
+//! - Internal: `SHA-256(0x00 || left || right)`
+//! - Empty subtree: 32 zero bytes
+//! - Root: `SHA-256(BDLM_MERKLE_TRIE_V1 || raw_root)`
+//!
+//! Path bits are MSB-first (address bit 0 = root branch).
+//!
+//! WIRING: wired - reached from the chain actor's `GetAccountProof` command
+//! and served on the RPC surface as `bud_getAccountProof`.
+//!
+//! # Why a second root exists
+//!
+//! Consensus reads the root built in `core::account::calculate_state_root`:
+//! a sequential Merkle tree over the account map, cached and updated
+//! incrementally. That root is correct for what it does, and it stays the
+//! consensus root; changing it would fork the chain.
+//!
+//! It cannot, however, carry an account proof. Its leaf order follows the
+//! iteration order of the account map, so a leaf's *position* has no
+//! cryptographic relation to the address it describes. A proof drawn from
+//! it establishes that some leaf is in the tree, not which address that leaf
+//! belongs to, and it cannot establish absence at all without shipping every
+//! leaf so the caller can look for the address itself: an O(n) witness.
+//!
+//! In this trie position *is* the address, bit by bit. Inclusion and absence
+//! are the same fixed-depth proof, and a proof for one address cannot be
+//! relabelled as a proof for another (see [`MerkleProof::verify`]).
+//!
+//! So this is a second, proof-bearing root, served alongside the consensus
+//! root and never in place of it. The bundle returned by [`prove_account`]
+//! carries its own root precisely because a caller must not assume the two
+//! roots are equal - they commit to the same accounts under different
+//! structures.
+
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
+
+const TRIE_DEPTH: usize = 256;
+const DOMAIN_PREFIX: &[u8] = b"BDLM_MERKLE_TRIE_V1";
+
+/// Merkle proof for one address (present or absent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MerkleProof {
+    pub address: [u8; 32],
+    /// Sibling hashes from leaf toward root (`TRIE_DEPTH` entries).
+    pub siblings: Vec<[u8; 32]>,
+    /// At each step, `true` means the proved node is the right child.
+    pub directions: Vec<bool>,
+    pub leaf_hash: [u8; 32],
+}
+
+impl MerkleProof {
+    pub fn verify(&self, expected_root: &[u8; 32]) -> bool {
+        if self.siblings.len() != TRIE_DEPTH || self.directions.len() != TRIE_DEPTH {
+            return false;
+        }
+        let mut current = self.leaf_hash;
+        for i in 0..TRIE_DEPTH {
+            // The path is keyed by the address the proof claims: at each
+            // level the direction must match the corresponding bit of
+            // `self.address`, or the proof is for a different key and must
+            // not verify. Without this, a caller could relabel a valid proof
+            // as belonging to another address (LOW, CWE-345).
+            let expected_direction = get_bit(&self.address, TRIE_DEPTH - 1 - i);
+            if self.directions[i] != expected_direction {
+                return false;
+            }
+            let (left, right) = if self.directions[i] {
+                (self.siblings[i], current)
+            } else {
+                (current, self.siblings[i])
+            };
+            current = combine_nodes(&left, &right);
+        }
+        &finalize_root(&current) == expected_root
+    }
+}
+
+/// Sparse binary Merkle trie keyed by 256-bit addresses.
+#[derive(Debug, Clone, Default)]
+pub struct MerkleTrie {
+    leaves: BTreeMap<[u8; 32], (u64, u64)>,
+    /// Hashes of every non-empty subtree that holds two or more leaves, and
+    /// of every single leaf subtree at the depth where it becomes alone.
+    /// Built once on the first root or proof request and dropped by every
+    /// change, so a trie held across requests pays for the hashing once.
+    index: OnceLock<NodeIndex>,
+}
+
+/// Subtree hashes keyed by `(depth, address prefix padded with zeros)`.
+#[derive(Debug, Clone, Default)]
+struct NodeIndex {
+    root: [u8; 32],
+    nodes: HashMap<(usize, [u8; 32]), [u8; 32]>,
+}
+
+impl MerkleTrie {
+    pub const fn new() -> Self {
+        Self {
+            leaves: BTreeMap::new(),
+            index: OnceLock::new(),
+        }
+    }
+
+    fn node_index(&self) -> &NodeIndex {
+        self.index.get_or_init(|| {
+            let leaves: Vec<_> = self.leaves.iter().map(|(a, (b, n))| (*a, *b, *n)).collect();
+            let mut nodes = HashMap::new();
+            let root = index_subtree(&leaves, 0, &mut nodes);
+            NodeIndex { root, nodes }
+        })
+    }
+
+    pub fn insert(&mut self, address: &[u8; 32], balance: u64, nonce: u64) {
+        self.leaves.insert(*address, (balance, nonce));
+        self.index = OnceLock::new();
+    }
+
+    pub fn remove(&mut self, address: &[u8; 32]) {
+        self.leaves.remove(address);
+        self.index = OnceLock::new();
+    }
+
+    pub fn root(&mut self) -> [u8; 32] {
+        self.root_ref()
+    }
+
+    pub fn root_ref(&self) -> [u8; 32] {
+        finalize_root(&self.node_index().root)
+    }
+
+    pub fn proof(&self, address: &[u8; 32]) -> MerkleProof {
+        let leaf_hash = self
+            .leaves
+            .get(address)
+            .map_or([0u8; 32], |(b, n)| hash_leaf(address, *b, *n));
+
+        let index = self.node_index();
+        let mut siblings = Vec::with_capacity(TRIE_DEPTH);
+        let mut directions = Vec::with_capacity(TRIE_DEPTH);
+
+        // Leaf → root: step 0 uses address bit 255, step 255 uses bit 0.
+        for step in 0..TRIE_DEPTH {
+            let bit_index = TRIE_DEPTH - 1 - step;
+            let bit = get_bit(address, bit_index);
+            directions.push(bit);
+
+            // Sibling = hash of all leaves that share bits [0, bit_index)
+            // With `address` and have the opposite bit at `bit_index`.
+            //
+            // Those leaves are a *contiguous* range of the map. Path bits are
+            // MSB-first over the address bytes, which is exactly the order
+            // `BTreeMap<[u8; 32], _>` keeps its keys in, so every address
+            // sharing a bit prefix sits between the two addresses that pad
+            // that prefix with all-zeros and all-ones. Scanning the whole map
+            // at each of the 256 levels instead made one proof cost O(256 n);
+            // measured at 5000 accounts that was 224 ms of work per proof, on
+            // an endpoint a remote caller chooses when to invoke.
+            //
+            // The hash comes from the node index. A sibling that lies below
+            // the point where a single leaf became alone has no entry; it is
+            // that one leaf folded up from the bottom.
+            let (lo, hi) = sibling_bounds(address, bit_index);
+            let key = node_key(&flip_bit(address, bit_index), bit_index + 1);
+            let sibling = match index.nodes.get(&key) {
+                Some(hash) => *hash,
+                None => self
+                    .leaves
+                    .range(lo..=hi)
+                    .next()
+                    .map_or([0u8; 32], |(a, (b, n))| {
+                        fold_single_leaf(a, *b, *n, bit_index + 1)
+                    }),
+            };
+            siblings.push(sibling);
+        }
+
+        MerkleProof {
+            address: *address,
+            siblings,
+            directions,
+            leaf_hash,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.leaves.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.leaves.is_empty()
+    }
+
+    pub fn bulk_insert(&mut self, entries: &[([u8; 32], u64, u64)]) {
+        for (addr, balance, nonce) in entries {
+            self.leaves.insert(*addr, (*balance, *nonce));
+        }
+        self.index = OnceLock::new();
+    }
+}
+
+/// A proof about one account, together with the root it was drawn against.
+///
+/// The root travels with the proof because a verifier that already trusts a
+/// root must check the proof against *that* root, and a verifier that does
+/// not must obtain it independently. Shipping the root here does not make it
+/// trusted; it makes the claim self-describing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountProofBundle {
+    /// Root of the proof-bearing trie. Not the consensus state root.
+    pub root: [u8; 32],
+    /// `false` means the trie proves the address is absent, which is a
+    /// positive result, not a failure to answer.
+    pub present: bool,
+    pub balance: u64,
+    pub nonce: u64,
+    pub proof: MerkleProof,
+}
+
+impl AccountProofBundle {
+    /// Check the bundle against its own stated root.
+    ///
+    /// This is the weakest useful check: it says the bundle is internally
+    /// consistent. A caller that wants a claim about chain state must compare
+    /// `root` against a root it obtained some other way.
+    ///
+    /// The account fields are bound to the leaf: a present claim must
+    /// recompute to `proof.leaf_hash` from `(address, balance, nonce)`, and an
+    /// absent claim must carry the empty leaf with zero fields. Checking only
+    /// the path from `leaf_hash` to `root` left `present`, `balance` and
+    /// `nonce` free, so a bundle could carry a valid path under altered
+    /// values, or report a present account as absent.
+    pub fn verify_self_consistent(&self) -> bool {
+        let expected_leaf = if self.present {
+            hash_leaf(&self.proof.address, self.balance, self.nonce)
+        } else {
+            if self.balance != 0 || self.nonce != 0 {
+                return false;
+            }
+            [0u8; 32]
+        };
+        if self.proof.leaf_hash != expected_leaf {
+            return false;
+        }
+        self.proof.verify(&self.root)
+    }
+}
+
+/// Build the proof-bearing trie over `accounts` and prove one address.
+///
+/// Absence is proved, not reported: an address with no entry yields
+/// `present: false` and a proof that verifies against the same root.
+///
+/// # Cost
+///
+/// This builds the trie from scratch on every call, which is right for a
+/// one-off and wrong for a serving endpoint. Measured at 5000 accounts: one
+/// proof 229 ms, ten proofs 2.23 s - the tenth caller pays to rebuild the
+/// same tree the first caller already built. A caller answering repeated
+/// requests should hold the trie across them and call [`prove_from_trie`].
+pub fn prove_account<I>(accounts: I, address: &[u8; 32]) -> AccountProofBundle
+where
+    I: IntoIterator<Item = ([u8; 32], u64, u64)>,
+{
+    let mut trie = MerkleTrie::new();
+    for (addr, balance, nonce) in accounts {
+        trie.insert(&addr, balance, nonce);
+    }
+    prove_from_trie(&trie, address)
+}
+
+/// Prove one address against an already-built trie.
+///
+/// The proof is identical to [`prove_account`]'s; only who pays for building
+/// the tree differs.
+#[must_use]
+pub fn prove_from_trie(trie: &MerkleTrie, address: &[u8; 32]) -> AccountProofBundle {
+    let (balance, nonce) = trie.leaves.get(address).copied().unwrap_or((0, 0));
+    let present = trie.leaves.contains_key(address);
+    AccountProofBundle {
+        root: trie.root_ref(),
+        present,
+        balance,
+        nonce,
+        proof: trie.proof(address),
+    }
+}
+
+// ─── Hashing ─────────────────────────────────────────────────────────
+
+/// Lowest and highest address in the sibling subtree at `bit_index`.
+///
+/// The subtree holds every address that agrees with `address` on bits
+/// `[0, bit_index)` and disagrees at `bit_index`. Padding the remaining bits
+/// with zeros gives the lowest such address and with ones the highest, so the
+/// subtree is the inclusive range between them.
+fn sibling_bounds(address: &[u8; 32], bit_index: usize) -> ([u8; 32], [u8; 32]) {
+    let mut lo = [0u8; 32];
+    for i in 0..bit_index {
+        if get_bit(address, i) {
+            set_bit(&mut lo, i);
+        }
+    }
+    if !get_bit(address, bit_index) {
+        set_bit(&mut lo, bit_index);
+    }
+    let mut hi = lo;
+    for i in (bit_index + 1)..TRIE_DEPTH {
+        set_bit(&mut hi, i);
+    }
+    (lo, hi)
+}
+
+fn set_bit(address: &mut [u8; 32], level: usize) {
+    let byte_idx = level / 8;
+    let bit_idx = 7 - (level % 8);
+    if let Some(byte) = address.get_mut(byte_idx) {
+        *byte |= 1 << bit_idx;
+    }
+}
+
+fn hash_leaf(address: &[u8; 32], balance: u64, nonce: u64) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update([0x01]);
+    h.update(address);
+    h.update(balance.to_le_bytes());
+    h.update(nonce.to_le_bytes());
+    h.finalize().into()
+}
+
+fn hash_internal(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update([0x00]);
+    h.update(left);
+    h.update(right);
+    h.finalize().into()
+}
+
+/// Sparse rule: two empty children collapse to empty (not H(0||0)).
+fn combine_nodes(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    if *left == [0u8; 32] && *right == [0u8; 32] {
+        return [0u8; 32];
+    }
+    hash_internal(left, right)
+}
+
+fn finalize_root(raw: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(DOMAIN_PREFIX);
+    h.update(raw);
+    h.finalize().into()
+}
+
+#[cfg(test)]
+fn empty_trie_root() -> [u8; 32] {
+    finalize_root(&[0u8; 32])
+}
+
+/// Hash of a subtree at `from_bit` that holds only this leaf: the leaf hash
+/// folded up through an empty sibling at every level below `from_bit`.
+fn fold_single_leaf(address: &[u8; 32], balance: u64, nonce: u64, from_bit: usize) -> [u8; 32] {
+    let empty = [0u8; 32];
+    let mut node = hash_leaf(address, balance, nonce);
+    for level in (from_bit..TRIE_DEPTH).rev() {
+        node = if get_bit(address, level) {
+            combine_nodes(&empty, &node)
+        } else {
+            combine_nodes(&node, &empty)
+        };
+    }
+    node
+}
+
+/// Address with bit `level` toggled.
+fn flip_bit(address: &[u8; 32], level: usize) -> [u8; 32] {
+    let mut flipped = *address;
+    if let Some(byte) = flipped.get_mut(level / 8) {
+        *byte ^= 1 << (7 - (level % 8));
+    }
+    flipped
+}
+
+/// Index key of the subtree under the first `bits` bits of `address`.
+fn node_key(address: &[u8; 32], bits: usize) -> (usize, [u8; 32]) {
+    let mut prefix = [0u8; 32];
+    for (i, byte) in prefix.iter_mut().enumerate() {
+        let start = i * 8;
+        let source = address.get(i).copied().unwrap_or(0);
+        if start + 8 <= bits {
+            *byte = source;
+        } else if start < bits {
+            *byte = source & (0xFFu8 << (8 - (bits - start)));
+        }
+    }
+    (bits, prefix)
+}
+
+/// Hash a sorted leaf slice under a fixed prefix of `from_bit` bits and
+/// record every subtree hash on the way into `nodes`.
+///
+/// Same result as the reference `hash_leaves`; a subtree with one leaf is
+/// folded directly instead of being split down to depth 256.
+fn index_subtree(
+    leaves: &[([u8; 32], u64, u64)],
+    from_bit: usize,
+    nodes: &mut HashMap<(usize, [u8; 32]), [u8; 32]>,
+) -> [u8; 32] {
+    let Some(&(first, first_balance, first_nonce)) = leaves.first() else {
+        return [0u8; 32];
+    };
+    let hash = if from_bit >= TRIE_DEPTH {
+        hash_leaf(&first, first_balance, first_nonce)
+    } else if leaves.len() == 1 {
+        fold_single_leaf(&first, first_balance, first_nonce, from_bit)
+    } else {
+        // Leaves are sorted and share the first `from_bit` bits, so the ones
+        // with a zero bit at `from_bit` come first.
+        let split = leaves.partition_point(|entry| !get_bit(&entry.0, from_bit));
+        let (left_leaves, right_leaves) = leaves.split_at(split);
+        let l = index_subtree(left_leaves, from_bit + 1, nodes);
+        let r = index_subtree(right_leaves, from_bit + 1, nodes);
+        combine_nodes(&l, &r)
+    };
+    nodes.insert(node_key(&first, from_bit), hash);
+    hash
+}
+
+/// Reference hash of a leaf set, kept to check [`index_subtree`] in tests.
+#[cfg(test)]
+fn hash_leaves(leaves: &[([u8; 32], u64, u64)], from_bit: usize) -> [u8; 32] {
+    if leaves.is_empty() {
+        return [0u8; 32];
+    }
+    if from_bit >= TRIE_DEPTH {
+        let (addr, b, n) = leaves[0];
+        return hash_leaf(&addr, b, n);
+    }
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for &entry in leaves {
+        if get_bit(&entry.0, from_bit) {
+            right.push(entry);
+        } else {
+            left.push(entry);
+        }
+    }
+    let l = hash_leaves(&left, from_bit + 1);
+    let r = hash_leaves(&right, from_bit + 1);
+    combine_nodes(&l, &r)
+}
+
+const fn get_bit(address: &[u8; 32], level: usize) -> bool {
+    let byte_idx = level / 8;
+    let bit_idx = 7 - (level % 8);
+    if byte_idx >= 32 {
+        return false;
+    }
+    (address[byte_idx] >> bit_idx) & 1 == 1
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(b: u8) -> [u8; 32] {
+        let mut a = [0u8; 32];
+        a[0] = b;
+        a
+    }
+
+    #[test]
+    fn empty_trie_has_deterministic_root() {
+        let mut trie = MerkleTrie::new();
+        let root = trie.root();
+        assert_ne!(root, [0u8; 32]);
+        assert_eq!(root, empty_trie_root());
+        assert_eq!(root, trie.root());
+    }
+
+    #[test]
+    fn insert_changes_root() {
+        let mut trie = MerkleTrie::new();
+        let before = trie.root();
+        trie.insert(&addr(1), 1000, 5);
+        assert_ne!(before, trie.root());
+    }
+
+    #[test]
+    fn same_entries_same_root() {
+        let mut a = MerkleTrie::new();
+        let mut b = MerkleTrie::new();
+        a.insert(&addr(1), 1000, 5);
+        a.insert(&addr(2), 2000, 10);
+        b.insert(&addr(1), 1000, 5);
+        b.insert(&addr(2), 2000, 10);
+        assert_eq!(a.root(), b.root());
+    }
+
+    #[test]
+    fn different_order_same_root() {
+        let mut a = MerkleTrie::new();
+        let mut b = MerkleTrie::new();
+        a.insert(&addr(1), 1000, 5);
+        a.insert(&addr(2), 2000, 10);
+        b.insert(&addr(2), 2000, 10);
+        b.insert(&addr(1), 1000, 5);
+        assert_eq!(a.root(), b.root());
+    }
+
+    #[test]
+    fn update_balance_changes_root() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(&addr(1), 1000, 5);
+        let r1 = trie.root();
+        trie.insert(&addr(1), 2000, 5);
+        assert_ne!(r1, trie.root());
+    }
+
+    #[test]
+    fn remove_restores_previous_root() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(&addr(1), 1000, 5);
+        let with = trie.root();
+        trie.insert(&addr(2), 2000, 10);
+        assert_ne!(with, trie.root());
+        trie.remove(&addr(2));
+        assert_eq!(with, trie.root());
+    }
+
+    #[test]
+    fn proof_verifies_correctly() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(&addr(1), 1000, 5);
+        trie.insert(&addr(2), 2000, 10);
+        trie.insert(&addr(3), 3000, 15);
+        let root = trie.root();
+        assert!(trie.proof(&addr(2)).verify(&root));
+    }
+
+    #[test]
+    fn proof_fails_with_wrong_root() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(&addr(1), 1000, 5);
+        assert!(!trie.proof(&addr(1)).verify(&[0xFF; 32]));
+    }
+
+    #[test]
+    fn proof_fails_with_tampered_sibling() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(&addr(1), 1000, 5);
+        trie.insert(&addr(2), 2000, 10);
+        let root = trie.root();
+        let mut proof = trie.proof(&addr(1));
+        proof.siblings[0] = [0xFF; 32];
+        assert!(!proof.verify(&root));
+    }
+
+    #[test]
+    fn bulk_insert_produces_same_root() {
+        let mut a = MerkleTrie::new();
+        let mut b = MerkleTrie::new();
+        let entries: Vec<_> = (0..50)
+            .map(|i| (addr(i), u64::from(i) * 100, u64::from(i)))
+            .collect();
+        for (x, y, z) in &entries {
+            a.insert(x, *y, *z);
+        }
+        b.bulk_insert(&entries);
+        assert_eq!(a.root(), b.root());
+    }
+
+    #[test]
+    fn hundred_accounts_deterministic() {
+        let mut a = MerkleTrie::new();
+        for i in 0..100u8 {
+            a.insert(&addr(i), u64::from(i) * 1000, u64::from(i));
+        }
+        let r1 = a.root();
+        let mut b = MerkleTrie::new();
+        for i in (0..100u8).rev() {
+            b.insert(&addr(i), u64::from(i) * 1000, u64::from(i));
+        }
+        assert_eq!(r1, b.root());
+    }
+
+    #[test]
+    fn proof_for_nonexistent_address() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(&addr(1), 1000, 5);
+        let root = trie.root();
+        let proof = trie.proof(&addr(99));
+        assert!(proof.verify(&root));
+    }
+
+    #[test]
+    fn an_absent_account_is_proved_absent_not_merely_unanswered() {
+        let entries = vec![(addr(1), 100u64, 1u64), (addr(2), 200, 2)];
+        let bundle = prove_account(entries.clone(), &addr(9));
+        assert!(!bundle.present, "absent address reported as present");
+        assert_eq!(bundle.balance, 0);
+        assert_eq!(bundle.nonce, 0);
+        assert!(
+            bundle.verify_self_consistent(),
+            "absence is a proof and must verify against the same root"
+        );
+
+        let present = prove_account(entries, &addr(1));
+        assert!(present.present);
+        assert_eq!(present.balance, 100);
+        assert!(present.verify_self_consistent());
+        assert_eq!(
+            present.root, bundle.root,
+            "both bundles were drawn against the same account set"
+        );
+    }
+
+    #[test]
+    fn a_proof_cannot_be_relabelled_onto_another_address() {
+        let entries = vec![(addr(1), 100u64, 1u64), (addr(2), 200, 2)];
+        let bundle = prove_account(entries, &addr(1));
+        let mut forged = bundle.clone();
+        forged.proof.address = addr(2);
+        assert!(
+            !forged.verify_self_consistent(),
+            "a proof for one address verified as a proof for another"
+        );
+    }
+
+    #[test]
+    fn the_absence_witness_is_fixed_depth_regardless_of_account_count() {
+        // This is the property the consensus root cannot offer: proving an
+        // address is absent there needs every leaf, so the witness grows with
+        // the account set. Here it is TRIE_DEPTH whatever the set size is.
+        for count in [1usize, 8, 64] {
+            let entries: Vec<_> = (0..count)
+                .map(|i| (addr(i as u8), i as u64, i as u64))
+                .collect();
+            let bundle = prove_account(entries, &addr(200));
+            assert!(!bundle.present);
+            assert_eq!(bundle.proof.siblings.len(), TRIE_DEPTH);
+            assert_eq!(bundle.proof.directions.len(), TRIE_DEPTH);
+            assert!(bundle.verify_self_consistent());
+        }
+    }
+
+    #[test]
+    fn a_tampered_balance_breaks_the_bundle() {
+        let entries = vec![(addr(1), 100u64, 1u64)];
+        let mut bundle = prove_account(entries, &addr(1));
+        bundle.balance = 999;
+        // The struct field is a convenience copy; the binding claim lives in
+        // the leaf hash, so recomputing the leaf from the lied-about balance
+        // must not verify.
+        let lied_leaf = hash_leaf(&addr(1), bundle.balance, bundle.nonce);
+        assert_ne!(
+            lied_leaf, bundle.proof.leaf_hash,
+            "the balance field is not bound to the proof"
+        );
+        assert!(
+            !bundle.verify_self_consistent(),
+            "the bundle's own check must catch the altered balance"
+        );
+    }
+
+    /// Every account field is bound: an altered nonce, a present account
+    /// relabelled absent, and an absent account relabelled present all fail
+    /// the bundle's own check.
+    #[test]
+    fn altered_account_fields_fail_the_bundles_own_check() {
+        let entries = vec![(addr(1), 100u64, 1u64), (addr(2), 200, 2)];
+        let honest = prove_account(entries.clone(), &addr(1));
+        assert!(honest.verify_self_consistent());
+
+        let mut nonce = honest.clone();
+        nonce.nonce = 7;
+        assert!(!nonce.verify_self_consistent(), "nonce is bound");
+
+        let mut hidden = honest.clone();
+        hidden.present = false;
+        hidden.balance = 0;
+        hidden.nonce = 0;
+        assert!(
+            !hidden.verify_self_consistent(),
+            "a present account cannot be reported absent"
+        );
+
+        let absent = prove_account(entries, &addr(9));
+        assert!(absent.verify_self_consistent());
+        let mut invented = absent.clone();
+        invented.present = true;
+        invented.balance = 5;
+        assert!(
+            !invented.verify_self_consistent(),
+            "an absent account cannot be reported present"
+        );
+        let mut nonzero_absent = absent;
+        nonzero_absent.balance = 5;
+        assert!(
+            !nonzero_absent.verify_self_consistent(),
+            "an absent claim carries zero fields"
+        );
+    }
+
+    #[test]
+    fn a_reused_trie_gives_the_same_proof_as_a_fresh_one() {
+        // This is what makes caching safe: the tree carries no per-request
+        // state, so a proof drawn from a held trie is byte-identical to one
+        // drawn from a tree built for that single request. If this ever
+        // stopped holding, the cache would be serving a different answer
+        // than the uncached path and nothing else would notice.
+        let entries = vec![(addr(1), 100u64, 1u64), (addr(2), 200, 2), (addr(7), 7, 7)];
+        let mut held = MerkleTrie::new();
+        held.bulk_insert(&entries);
+
+        for target in [addr(1), addr(2), addr(7), addr(200)] {
+            let fresh = prove_account(entries.clone(), &target);
+            let cached = prove_from_trie(&held, &target);
+            assert_eq!(fresh, cached, "the held trie answered differently");
+            assert!(cached.verify_self_consistent());
+        }
+    }
+
+    #[test]
+    fn a_trie_held_across_a_state_change_answers_for_the_state_it_holds() {
+        // The cache is keyed by height for exactly this reason. A trie built
+        // before a balance changed still verifies - against its own, now
+        // stale, root. That is why the key must be the height and not, say,
+        // a timestamp or a "dirty" flag someone remembers to set.
+        let before = vec![(addr(1), 100u64, 1u64)];
+        let after = vec![(addr(1), 999u64, 2u64)];
+        let mut held = MerkleTrie::new();
+        held.bulk_insert(&before);
+
+        let stale = prove_from_trie(&held, &addr(1));
+        let current = prove_account(after, &addr(1));
+
+        assert!(
+            stale.verify_self_consistent(),
+            "the stale proof still verifies"
+        );
+        assert_ne!(
+            stale.root, current.root,
+            "a state change must move the root, or staleness would be undetectable"
+        );
+        assert_eq!(stale.balance, 100, "the held trie reports what it holds");
+    }
+
+    /// Addresses spread over the key space plus a pair that share 200 bits.
+    fn spread_entries() -> Vec<([u8; 32], u64, u64)> {
+        let mut entries = Vec::new();
+        for i in 0u64..60 {
+            let digest: [u8; 32] = Sha256::digest(i.to_le_bytes()).into();
+            entries.push((digest, i + 1, i));
+        }
+        let mut near = [0xA5u8; 32];
+        entries.push((near, 11, 1));
+        near[25] ^= 0x01;
+        entries.push((near, 12, 2));
+        entries
+    }
+
+    /// P26-F03: the indexed root equals the reference recursive hash.
+    #[test]
+    fn the_indexed_root_matches_the_reference_hash() {
+        let entries = spread_entries();
+        let mut trie = MerkleTrie::new();
+        trie.bulk_insert(&entries);
+        let mut sorted = entries;
+        sorted.sort_by_key(|entry| entry.0);
+        assert_eq!(trie.root_ref(), finalize_root(&hash_leaves(&sorted, 0)));
+    }
+
+    /// P26-F03: proofs drawn from the index verify for present and absent
+    /// addresses, including ones that diverge below a lone leaf.
+    #[test]
+    fn indexed_proofs_verify_for_present_and_absent_addresses() {
+        let entries = spread_entries();
+        let mut trie = MerkleTrie::new();
+        trie.bulk_insert(&entries);
+        let root = trie.root_ref();
+        for (address, _, _) in &entries {
+            assert!(trie.proof(address).verify(&root));
+        }
+        let mut absent = [0xA5u8; 32];
+        absent[30] ^= 0x01;
+        assert!(trie.proof(&absent).verify(&root));
+        absent[31] ^= 0x80;
+        assert!(trie.proof(&absent).verify(&root));
+    }
+
+    /// P26-F03: a change drops the index, so the next root is the new one.
+    #[test]
+    fn a_change_after_a_proof_moves_the_indexed_root() {
+        let mut trie = MerkleTrie::new();
+        trie.insert(&addr(1), 10, 1);
+        let before = trie.root_ref();
+        let _ = trie.proof(&addr(1));
+        trie.insert(&addr(2), 20, 2);
+        assert_ne!(before, trie.root_ref());
+        trie.remove(&addr(2));
+        assert_eq!(before, trie.root_ref());
+    }
+}

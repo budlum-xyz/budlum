@@ -1,0 +1,115 @@
+# Semgrep: rule-based SAST scanning.
+#
+# It does not overlap with CodeQL, it completes it: CodeQL does data-flow (taint)
+# analysis, Semgrep matches syntactic patterns. The p/rust + p/security-audit +
+# p/secrets rule sets catch patterns CodeQL's Rust query library does not cover
+# (dangerous API calls, hardcoded credential shapes).
+#
+# Gate policy: a finding = FAIL. Per the standing rule, "running and returning
+# green is not enough, it must actually block the merge", so `continue-on-error`
+# is NOT USED. The SARIF is still uploaded to the Security tab (`if: always`),
+# so the findings are visible in the UI even on FAIL.
+#
+# `rust.lang.security.temp-dir.temp-dir` is excluded: the self-test canaries in
+# xtask/gates set up temporary trees with `temp_dir().join("budlum-gates-
+# <name>-<pid>-<nanos>")`. The name is unique by pid + nanos (the equivalent
+# of shell `mktemp -d`), the content is only a fixture and not a security
+# operation; xtask/gates is deliberately built with zero dependencies (which is
+# why the tempfile crate cannot be used). The rule triggers on no file in main,
+# so the exclusion loses no coverage for real code.
+#
+# The container image is pinned by version + digest (Security Plan section 3.1
+# supply-chain discipline; the same way actions are pinned to full SHAs repo-wide).
+
+name: Semgrep
+
+on:
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 4 * * 1" # weekly, Monday 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semgrep-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: Semgrep (p/rust + p/security-audit + p/secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      # semgrep/semgrep:1.171.0 - digest pinned (a tag is mutable, a digest is not).
+      image: semgrep/semgrep@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Version evidence
+        run: semgrep --version
+
+      # Vacuous-gate protection: having no findings in the repo and the scan never
+      # running give the same output (0 findings). The canary produces a deliberately
+      # unsafe file and proves Semgrep CATCHES it; if it cannot, the gate is
+      # untrustworthy and the job breaks here.
+      - name: Canary - evidence that the Semgrep alarm works
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/semgrep-canary
+          cat > /tmp/semgrep-canary/canary.py <<'CANARY'
+          import subprocess
+
+
+          def run(user_input):
+              # Deliberately unsafe: shell=True + user input (p/security-audit).
+              subprocess.run("echo " + user_input, shell=True)
+          CANARY
+          if semgrep --config=p/security-audit --error --quiet /tmp/semgrep-canary; then
+            echo "ERROR: Semgrep failed to catch the canary -> the scan is untrustworthy (vacuous gate)!"
+            exit 1
+          fi
+          echo "Canary caught -> the Semgrep alarm works."
+
+      # --exclude-rule rust.lang.security.args.args:
+      # The rule targets argv[0] being used as the basis of a security decision.
+      # There are two hits (src/main.rs, src/bin/budlum-relayer.rs) and neither
+      # reads argv[0] at all: parsing starts at index 1 and 3 respectively.
+      # No authorization/identity decision depends on this vector. Inline
+      # `nosemgrep` markers had been added and Semgrep applies them correctly -
+      # but it STILL writes them to the SARIF with `suppressions: [{kind: inSource}]`,
+      # and GitHub lists suppressed results as open alerts. The result: two
+      # permanent false alerts in the Security tab. Excluding the rule at scan level
+      # keeps the SARIF clean; the markers stay in the source as justification.
+      #
+      - name: Semgrep scan (a finding = fail)
+        run: |
+          set -euo pipefail
+          semgrep scan \
+            --config=p/rust \
+            --config=p/security-audit \
+            --config=p/secrets \
+            --exclude-rule=rust.lang.security.args.args \
+            --exclude-rule=rust.lang.security.temp-dir.temp-dir \
+            --sarif --output=semgrep.sarif \
+            --error \
+            --metrics=off \
+            --exclude=target \
+            --exclude=budzero/target \
+            .
+
+      - name: Upload SARIF (findings visible in the Security tab even on FAIL)
+        if: always()
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep

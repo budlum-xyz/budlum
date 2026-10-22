@@ -1,0 +1,248 @@
+//! The tokenomics property-based test set - CI expansion, item 8.
+//!
+//! It exercises the $BUD tokenomics invariants across thousands of random
+//! scenarios:
+//! 1. The total supply never exceeds 100M.
+//! 2. No burn operation creates a negative balance.
+//! 3. The sum of burns and mints is always consistent.
+
+#[cfg(test)]
+mod tests {
+    use crate::core::account::AccountState;
+    use crate::core::address::Address;
+
+    use crate::tokenomics::{TokenomicsParams, BUD_TOTAL_SUPPLY};
+    use proptest::prelude::*;
+
+    /// The address generator - a random 32 bytes.
+    fn arb_address() -> impl Strategy<Value = Address> {
+        any::<[u8; 32]>().prop_map(Address::from)
+    }
+
+    /// The balance generator. The ceiling is the fixed supply divided by the
+    /// largest entry count, so 49 entries at the ceiling reach the supply cap
+    /// and the cap check below can fail. A ceiling of 10M base units could
+    /// never come near the 10^14 cap.
+    fn arb_balance() -> impl Strategy<Value = u64> {
+        0..=(BUD_TOTAL_SUPPLY / 49)
+    }
+
+    proptest! {
+        /// INVARIANT 1: the total supply never exceeds 100M.
+        ///
+        /// Across random balance distributions, the total supply of the genesis
+        /// state must not exceed BUD_TOTAL_SUPPLY.
+        #[test]
+        fn total_supply_never_exceeds_100m(
+            balances in prop::collection::vec((arb_address(), arb_balance()), 1..50)
+        ) {
+            let mut state = AccountState::new();
+            let params = TokenomicsParams::default();
+
+            // The sum of the genesis allocations equals BUD_TOTAL_SUPPLY.
+            assert_eq!(params.total(), BUD_TOTAL_SUPPLY);
+
+            // Adding random balances must not exceed the total supply.
+            let mut total_added: u64 = 0;
+            for (addr, balance) in &balances {
+                state.add_balance(addr, *balance);
+                total_added = total_added.saturating_add(*balance);
+            }
+
+            // The critical invariant: the genesis distribution itself must not
+            // exceed 100M, and circulating_supply has to equal genesis plus the
+            // balances the test added. The value used to be computed and never
+            // asserted, which made this test vacuous - it always passed. (On a
+            // real network minting happens only in the genesis block.)
+            // `state` starts as an empty AccountState (genesis is not applied
+            // here), so circulating_supply is exactly the sum of the balances
+            // the test added.
+            let supply = state.circulating_supply();
+            assert_eq!(
+                supply,
+                u128::from(total_added),
+                "circulating_supply has to equal the sum of the added balances"
+            );
+            assert!(
+                supply <= u128::from(BUD_TOTAL_SUPPLY),
+                "circulating_supply ({supply}) sabit {BUD_TOTAL_SUPPLY} arz tavanini asamaz"
+            );
+        }
+
+        /// INVARIANT 2: no burn operation creates a negative balance.
+        ///
+        /// A burn deducts from a balance and adds to nothing.
+        /// The balance must not fall below 0.
+        #[test]
+        fn burn_never_creates_negative_balance(
+            initial_balance in 1..10_000_000u64,
+            burn_amount in 1..20_000_000u64,
+        ) {
+            let mut state = AccountState::new();
+            let addr = Address::from([0xAA; 32]);
+            state.add_balance(&addr, initial_balance);
+            let supply_before = state.circulating_supply();
+
+            let burned = state.burn_from(&addr, burn_amount);
+
+            // The burn takes exactly what the balance can pay and nothing
+            // else, the balance never grows, and the supply falls by the
+            // burned amount.
+            let expected = burn_amount.min(initial_balance);
+            assert_eq!(burned, expected);
+            assert_eq!(state.get_balance(&addr), initial_balance - expected);
+            assert_eq!(
+                state.circulating_supply(),
+                supply_before - u128::from(burned)
+            );
+        }
+
+        /// INVARIANT 3: burn and mint consistency.
+        ///
+        /// When the timed burn (the annual burn) and the metabolic burn (the
+        /// transaction fee burn) run together, the total supply has to stay
+        /// consistent.
+        #[test]
+        fn burn_mint_consistency(
+            fee in 1..100_000u64,
+        ) {
+            let params = TokenomicsParams::default();
+
+            // Metabolic burn = fee * tx_fee_burn_ratio / FIXED_POINT_SCALE
+            let metabolic_burn = params.metabolic_burn(fee);
+
+            // The burn must not exceed the fee.
+            assert!(
+                metabolic_burn <= fee,
+                "Metabolic burn ({metabolic_burn}) should not exceed fee ({fee})"
+            );
+
+            // Annual burn = burn_reserve * annual_ratio / FIXED_POINT_SCALE
+            let annual_burn = params.annual_burn_amount();
+            assert!(
+                annual_burn <= params.burn_reserve,
+                "Annual burn ({}) should not exceed burn reserve ({})",
+                annual_burn,
+                params.burn_reserve
+            );
+        }
+
+        /// INVARIANT 4: vesting schedule consistency.
+        ///
+        /// Vesting must never unlock more than the total.
+        #[test]
+        fn vesting_never_exceeds_total(
+            total in 1..10_000_000u64,
+            cliff in 1..1000u64,
+            duration in 1..10000u64,
+            epoch in 0..20000u64,
+        ) {
+            use crate::tokenomics::VestingSchedule;
+
+            let duration = duration.max(cliff); // duration >= cliff
+            let schedule = VestingSchedule {
+                total,
+                start_epoch: 0,
+                cliff_epochs: cliff,
+                duration_epochs: duration,
+            };
+
+            let unlocked = schedule.unlocked_at(epoch);
+            let locked = schedule.locked_at(epoch);
+
+            // Unlocked + locked = total
+            assert_eq!(
+                unlocked + locked,
+                total,
+                "Unlocked ({unlocked}) + locked ({locked}) should equal total ({total})"
+            );
+
+            // Unlocked must never exceed the total.
+            assert!(
+                unlocked <= total,
+                "Unlocked ({unlocked}) should not exceed total ({total})"
+            );
+
+            // Locked must never be negative - it is a u64 so it cannot be, but verify it.
+            assert!(
+                locked <= total,
+                "Locked ({locked}) should not exceed total ({total})"
+            );
+        }
+
+        /// INVARIANT 5: validator reward consistency.
+        ///
+        /// calculate_epoch_reward(0) is nothing at all, the reward never
+        /// decreases with stake, and a year of epochs never pays more than
+        /// the annual yield the parameters promise (there is no floor that
+        /// could push a dust stake above its share).
+        #[test]
+        fn epoch_reward_consistency(
+            stake in 0..100_000_000_000u64,
+        ) {
+            let params = TokenomicsParams::default();
+            let reward = params.calculate_epoch_reward(stake);
+
+            if stake == 0 {
+                assert_eq!(reward, 0, "Zero stake must produce no reward at all");
+            }
+            assert!(
+                params.calculate_epoch_reward(stake.saturating_add(1)) >= reward,
+                "the reward must not decrease with stake"
+            );
+            let annual_yield = (u128::from(stake) * u128::from(params.validator_annual_yield_ratio_fixed))
+                / u128::from(crate::core::chain_config::FIXED_POINT_SCALE);
+            let paid = u128::from(reward) * u128::from(params.epochs_per_year);
+            assert!(
+                paid <= annual_yield,
+                "a year of epoch rewards ({paid}) exceeds the annual yield ({annual_yield})"
+            );
+        }
+    }
+
+    proptest! {
+        /// BLG-0080 (P03-F23) + BLG-0077 (P03-F20): parameter sweep the old
+        /// tests never did. The burn can never exceed the money it comes
+        /// from, whatever ratio a hand-built parameter set carries - the
+        /// ratios are capped inside the formula, not only at genesis.
+        #[test]
+        fn metabolic_burn_never_exceeds_the_fee(
+            fee in 0u64..=4_000_000_000_000_000u64,
+            ratio in 0u64..=u64::MAX,
+        ) {
+            let params = TokenomicsParams {
+                tx_fee_burn_ratio_fixed: ratio,
+                ..TokenomicsParams::default()
+            };
+            assert!(params.metabolic_burn(fee) <= fee);
+        }
+
+        #[test]
+        fn annual_burn_never_exceeds_the_reserve(
+            reserve in 0u64..=4_000_000_000_000_000u64,
+            ratio in 0u64..=u64::MAX,
+        ) {
+            let params = TokenomicsParams {
+                burn_reserve: reserve,
+                annual_burn_ratio_fixed: ratio,
+                ..TokenomicsParams::default()
+            };
+            assert!(params.annual_burn_amount() <= reserve);
+        }
+
+        /// The epoch reward can never exceed the stake it is paid on.
+        #[test]
+        fn epoch_reward_never_exceeds_the_stake(
+            stake in 0u64..=4_000_000_000_000_000u64,
+            ratio in 0u64..=u64::MAX,
+            epochs in 0u64..=1_000_000u64,
+        ) {
+            let params = TokenomicsParams {
+                validator_annual_yield_ratio_fixed: ratio,
+                epochs_per_year: epochs,
+                ..TokenomicsParams::default()
+            };
+            assert!(params.calculate_epoch_reward(stake) <= stake);
+        }
+    }
+}

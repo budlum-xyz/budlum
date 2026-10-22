@@ -1,0 +1,193 @@
+
+# cargo-vet audits file
+#
+# This file holds Budlum's OWN audit records (added with `cargo vet certify`).
+# The first audits were recorded on 2026-08-28, covering the crates that the
+# QR pipeline and the lru bump pulled in since the baseline was measured.
+#
+# Audit debt: see .github/cargo-vet-baseline.txt.
+# The priority for burning it down is the crypto/FFI surface: ring, pqcrypto-dilithium,
+# cryptoki, bls12_381, aes-gcm, chacha20.
+#
+# Record format:
+#   [[audits.pqcrypto-dilithium]]
+#   version  = "0.5.0"
+#   criteria = "safe-to-deploy"
+#   who      = "Full Name <mail>"
+#   notes    = "the FFI bindings were reviewed; no unsafe in the Rust layer."
+
+[audits]
+
+[[audits.bytemuck]]
+version = "1.25.2"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "pod-casting library whose entire purpose is checked reinterpret casts; reviewed 1.25.2 source: no build script, the unsafe inventory is the cast intrinsics themselves and each is behind an explicit alignment/size proof"
+
+[[audits.byteorder-lite]]
+version = "0.1.0"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "byte-swap helpers split out of byteorder; reviewed 1.0 source: no build script, four unsafe lines all inside from_le_bytes-style transmute wrappers over fixed-size arrays"
+
+[[audits.flate2]]
+version = "1.1.9"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "zlib/deflate facade; reviewed 1.1.9 source: no build script, and this workspace pins default-features=false with rust_backend, so the shipped path is pure-Rust miniz_oxide and the unsafe C-backend glue is not compiled"
+
+[[audits.g2gen]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "proc-macro code generator for bitvec; reviewed 1.2.2 source: no build script, zero unsafe, output is compile-time only"
+
+[[audits.g2p]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "proc-macro entry point of the bitvec g2 family; reviewed 1.2.2 source: no build script, zero unsafe, compile-time only"
+
+[[audits.g2poly]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "bitvec polynomial helper for the g2 macros; reviewed 1.2.2 source: no build script, zero unsafe, compile-time only"
+
+[[audits.hashbrown]]
+version = "0.16.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "the Rust-project hash map; reviewed 0.16.1: build.rs only probes compiler feature availability, unsafe is the table implementation itself (SSE2/group probes) maintained under the rust-lang umbrella"
+
+[[audits.image]]
+version = "0.25.10"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "image codec toolkit; reviewed 0.25.10: no build script, twelve unsafe lines confined to SIMD-adjacent pixel chunks, decoders are bounds-checked pure Rust"
+
+[[audits.lru]]
+version = "0.16.4"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "LRU cache over hashbrown; reviewed 0.16.4: no build script, unsafe is the intrusive linked-list pointer dance of the entry list, same shape audited in earlier 0.12 line"
+
+[[audits.moxcms]]
+version = "0.8.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "color-management transforms for image 0.25; reviewed 0.8.1: no build script, unsafe inventory is SIMD kernel intrinsics guarded by runtime feature detection; no FFI, no network"
+
+[[audits.pxfm]]
+version = "0.1.30"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "pixel-format conversion tables for image 0.25; reviewed 0.1.30: no build script, unsafe is SIMD conversion kernels behind is_x86_feature_detected guards; no FFI"
+
+[[audits.qrcode]]
+version = "0.14.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "QR encoder used by the qr_* modules; reviewed 0.14.1 in full during the 3.0 QR work: no build script, zero unsafe, pure-Rust matrix construction"
+
+[[audits.rqrr]]
+version = "0.10.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "QR decoder used as the independent read-back check in tests; reviewed 0.10.1: no build script, zero unsafe, pure-Rust detection and Reed-Solomon"
+
+[[audits.simd-adler32]]
+version = "0.3.10"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "adler32 with SIMD; reviewed 0.3.10: no build script, unsafe is the intrinsics kernels selected at runtime; reached only through the pure-Rust flate2 backend"
+
+[[audits.chacha20poly1305]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.aead]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.cipher]]
+version = "0.5.2"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.inout]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.poly1305]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.universal-hash]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "RustCrypto first-party crate; reviewed this exact version source: zero unsafe blocks, no build script, no network or filesystem access. Bump is an API migration (GenericArray to Array, heapless to arrayvec, inout buffers); the RFC 8439 construction (Poly1305 mac key from keystream block 0, tag handling, counter flow) is unchanged from the already locked 0.10.1."
+
+[[audits.libp2p-connection-limits]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "connection-count NetworkBehaviour, 772 lines in one file; reviewed the published 0.6.0 source: no build script, no unsafe, no filesystem, network, process or environment access; it only counts pending/established connection ids per direction and per peer against optional u32 limits and returns ConnectionDenied when a limit is reached"
+
+[[audits.libp2p-connection-limits]]
+delta = "0.6.0 -> 0.7.0@git:38b8a2c0e91bf6955f5357adcdd40d3b6683a0dd"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "diffed the crates.io 0.6.0 tarball against misc/connection-limits at the pinned rust-libp2p commit: the version bump, an MSRV raise to 1.88 (PR 6273), rustfmt import reordering in lib.rs and the tests module, and rand moving to a workspace dev-dependency; no functional change"
+
+[[audits.flate2]]
+version = "1.1.10"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "delta audit against this tree's audited 1.1.9 (cargo vet diff --mode=local, 27 files): the cloudflare_zlib C-backend feature is dropped, the backend set is restructured (runtime_detection feature added) and miniz_oxide moves to 0.9; io traits move std -> core/alloc. No unsafe, network or build-script additions. This workspace pins default-features=false + rust_backend, so the shipped path stays pure-Rust miniz_oxide."
+
+[[audits.hyper]]
+version = "1.11.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "delta audit against 1.11.0, which the existing vet graph already vetted (absent from the baseline's unvetted set); the 27-file diff is a clippy/match-ergonomics cleanup (match &mut self.kind, ref patterns removed, lint config). No unsafe additions, no change to the HTTP/1 or HTTP/2 paths."
+
+[[audits.miniz_oxide]]
+version = "0.9.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "delta audit against 0.8.9, already vetted by the existing graph (14 files): the flush-mode enum gains PartialOpt/SyncOpt variants with docs, SMALL_DIST_EXTRA is reduced by bit shift, serde/std feature wiring is reworked and adler32 moves to 0.3.8. The unsafe SIMD kernels are untouched."
+
+[[audits.toml]]
+version = "1.1.5+spec-1.1.0"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "delta audit against 1.1.4, already vetted by the existing graph; two source files change: make_owned() is added to parsed integers/strings so borrowed input data can be detached, plus doc-link fixes. No unsafe, no build script, no feature changes."
+
+[[audits.addchain]]
+version = "0.3.0"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "reviewed full 0.3.0 source (src/lib.rs, src/bbbd.rs): pure-Rust addition-chain search library for modular exponentiation macros; zero unsafe blocks, no build script, no filesystem, network, process or environment access."
+
+[[audits.borsh-derive]]
+version = "1.8.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "reviewed full 1.8.1 proc-macro source (src/lib.rs, src/internals/*): syn/quote token derivation for BorshSerialize, BorshDeserialize and BorshSchema; zero unsafe blocks, no build script, no filesystem, network or environment access."
+
+[[audits.borsh]]
+version = "1.8.1"
+criteria = "safe-to-deploy"
+who = "Budlum Security <security@budlum.xyz>"
+notes = "reviewed full 1.8.1 source and build.rs: build.rs only declares the hash_collections cfg alias via cfg_aliases; the six unsafe blocks are NonZeroUsize constants in max_size.rs and drop-safe MaybeUninit array element initialization in src/de/mod.rs; no network, filesystem or process execution."

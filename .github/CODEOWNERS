@@ -1,0 +1,32 @@
+# BLG-1048 (P58-F02, decision A): the sensitive surfaces below carry owners
+# again. The file used to be empty ("disabled to prevent PR deadlock"), which
+# left workflows, .quality, baselines, deny.toml and Cargo.toml with no review
+# owner at all - the baseline rule was convention plus ci-workflow-guards
+# only. Coverage is scoped to the surfaces whose loosening is invisible in
+# code review; everything else stays ownerless so routine PRs do not deadlock.
+# Bot PRs (dependabot) touch these paths when they edit workflows or the
+# manifests - those PRs need a human look by design; the grouping and
+# open-pull-requests-limit in dependabot.yml keep the volume reviewable.
+#
+# Owners are the repository owner (this is a single-maintainer repository;
+# the previous note's "assign to teams" has no team to assign to here).
+
+# CI and its guardrails: every workflow, the lint/deny tables and the
+# quality gates.
+/.github/workflows/ @lubothebook
+/.quality/ @lubothebook
+/.github/clippy-extra-baseline.txt @lubothebook
+/.github/codeql/ @lubothebook
+/codeql/ @lubothebook
+
+# Supply-chain and policy manifests: a loosened deny or audit table is
+# invisible in a code diff.
+/budzero/deny.toml @lubothebook
+/.cargo/audit.toml @lubothebook
+/supply-chain/ @lubothebook
+/audits.toml @lubothebook
+/.github/dependabot.yml @lubothebook
+
+# The dependency surface itself: manifest changes route to the same owner.
+/Cargo.toml @lubothebook
+/Cargo.lock @lubothebook

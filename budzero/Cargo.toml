@@ -1,0 +1,39 @@
+[workspace]
+members = [
+  "bud-compiler",
+  "bud-vm",
+  "bud-isa",
+  "bud-state",
+  "bud-proof",
+  "bud-node",
+  "bud-cli",
+  "verifier-registry",
+]
+resolver = "2"
+
+[workspace.package]
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+
+# A panic gate. The same reason as in the root manifest; because this is a separate
+# workspace it must be written again: together with the `panic = "abort"` below, a
+# every `unwrap`/`expect` on that path is a liveness hole if it can be triggered - a
+# verifier running the production crates dies on a single malformed input. Measurement: the
+# gate had 127 violations before it was opened (bud-compiler/parser.rs 81, plonky3_prover 14,
+# bud_stark/prover.rs 4, ...); all were closed or exempted with a reason.
+# Tests are exempt: a panic is the right behaviour there.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+# budzero is a separate workspace, so it does not inherit the root manifest's
+# profile and would otherwise wrap arithmetic silently in release builds.
+# bud-vm evaluates Goldilocks field arithmetic and bud-proof derives trace
+# indices and degree_bits from it, a silent wrap there produces a wrong proof
+# rather than a crash. Mirrors the root Cargo.toml.
+[profile.release]
+overflow-checks = true
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true
+

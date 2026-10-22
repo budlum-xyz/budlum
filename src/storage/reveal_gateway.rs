@@ -1,0 +1,1090 @@
+//! G4 reveal gateway (plan §CH G4): the bounded session table a gateway or
+//! RPC handler owns on top of [`crate::storage::three_rpc`].
+//!
+//! `three_rpc::open_reveal_session` opens one session; a network-facing
+//! handler serves frames across several calls and must not let sessions (or
+//! a flood of them) live forever. This module is that layer:
+//!
+//! * a session cap ([`MAX_REVEAL_SESSIONS`]) so a flood of opens is refused
+//!   instead of growing the table without bound,
+//! * a wall-clock TTL ([`REVEAL_SESSION_TTL_SECS`]) so a dead viewer's
+//!   session is reclaimed,
+//! * one frame-serving surface that expires and sweeps on access,
+//! * a default frame budget and a per-call frame ceiling, so a remote caller
+//!   that omitted `meter_budget` cannot turn one open into an unbounded read.
+//!
+//! The grant is checked before a session opens: [`RevealGateway::open`]
+//! re-derives it from a registry (in-process gateways);
+//! [`RevealGateway::prepare_prechecked`] trusts a decision the chain actor
+//! already made. Both funnel into the same meter-and-budget construction, so
+//! a sealed recipe with no live grant is refused either way.
+
+use crate::core::address::Address;
+use crate::core::hash::hash_fields_bytes;
+use crate::storage::content_id::ContentId;
+use crate::storage::qr_recipe::ThreeRecipe;
+use crate::storage::three_rpc::{
+    open_reveal_session, open_reveal_session_prechecked, RevealHandle, RevealRequest,
+    RevealRpcError,
+};
+use crate::storage::view_grant::ViewGrantRegistry;
+use std::collections::BTreeMap;
+
+/// Per-gateway secret mixed into every issued session id. The id is the only
+/// credential the frame endpoint sees, so it must not be guessable: a
+/// sequential counter would let any RPC caller enumerate live sessions of
+/// other clients (read their frames, or close them out from under them).
+#[derive(Clone)]
+struct IdNonce([u8; 32]);
+
+impl std::fmt::Debug for IdNonce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IdNonce(<redacted>)")
+    }
+}
+
+/// Hard cap on open reveal sessions. A flood of opens is refused here rather
+/// than growing the table without bound.
+pub const MAX_REVEAL_SESSIONS: usize = 1024;
+
+/// Wall-clock lifetime of an open reveal session, in seconds. The product
+/// read path is a short burst; five minutes is far longer than a burst and
+/// far shorter than "forever".
+pub const REVEAL_SESSION_TTL_SECS: u64 = 300;
+
+/// Default frame budget applied when the caller passes no budget. A remote
+/// caller that asks for uncapped reads still gets a cap; the cap is the
+/// meter's, so the read path is charged and refused rather than served
+/// without bound.
+pub const DEFAULT_REVEAL_BUDGET_FRAMES: u64 = 10_000;
+
+/// Hard ceiling for one frame-serving call. A single response that would
+/// materialise more frames than this is refused up front, independent of the
+/// budget, so a huge `count` cannot build a huge response in one go.
+pub const MAX_FRAMES_PER_CALL: u32 = 256;
+
+/// Refusals of the reveal gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RevealGatewayError {
+    /// The session table is at its cap.
+    SessionLimit {
+        /// The cap that was reached.
+        max: usize,
+    },
+    /// The id was never issued, or was already closed.
+    UnknownSession(u64),
+    /// The session outlived its TTL.
+    Expired {
+        /// The id that expired.
+        id: u64,
+    },
+    /// One frame-serving call asked for more than [`MAX_FRAMES_PER_CALL`].
+    AskTooLarge {
+        /// The count that was asked.
+        count: u32,
+        /// The ceiling.
+        max: u32,
+    },
+    /// The grant the session was opened under is gone; the session with it.
+    Revoked {
+        /// The id whose grant was revoked.
+        id: u64,
+    },
+    /// The underlying reveal/open failure.
+    Reveal(RevealRpcError),
+}
+
+impl std::fmt::Display for RevealGatewayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SessionLimit { max } => {
+                write!(f, "reveal gateway: session table full ({max})")
+            }
+            Self::UnknownSession(id) => write!(f, "reveal gateway: unknown session {id}"),
+            Self::Expired { id } => write!(f, "reveal gateway: session {id} expired"),
+            Self::AskTooLarge { count, max } => {
+                write!(f, "reveal gateway: asked {count} frames, ceiling is {max}")
+            }
+            Self::Revoked { id } => write!(f, "reveal gateway: session {id} grant revoked"),
+            Self::Reveal(e) => write!(f, "reveal gateway: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for RevealGatewayError {}
+
+impl From<RevealRpcError> for RevealGatewayError {
+    fn from(e: RevealRpcError) -> Self {
+        Self::Reveal(e)
+    }
+}
+
+/// The grant a sealed session was admitted under: what to ask the registry
+/// again before frames are served.
+///
+/// A grant is chain state and can be revoked while a session is open. A
+/// session that was checked once at open and then served until its TTL
+/// outlived the revocation by up to the whole TTL; the scope is kept so the
+/// frame path can ask the same question the open path asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantScope {
+    /// The content the grant is about.
+    pub content_id: ContentId,
+    /// The viewer the session was opened for.
+    pub viewer: Address,
+    /// The key handle the grant names.
+    pub key_id: [u8; 32],
+    /// The owner whose grant is authoritative.
+    pub owner: Address,
+}
+
+impl GrantScope {
+    /// The scope a request rests on: `None` for a public recipe, which no
+    /// grant guards, the request's grant coordinates for a sealed one.
+    const fn of(req: &RevealRequest) -> Option<Self> {
+        match req.recipe {
+            ThreeRecipe::Public(_) => None,
+            ThreeRecipe::Sealed(_) => Some(Self {
+                content_id: req.content_id,
+                viewer: req.viewer,
+                key_id: req.key_id,
+                owner: req.owner,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GatewaySession {
+    handle: RevealHandle,
+    expires_at: u64,
+    /// `Some` while the session rests on a grant that can be revoked.
+    grant: Option<GrantScope>,
+}
+
+/// A session whose emitter is built but not yet in the table.
+#[derive(Debug)]
+///
+/// Convenience: pub because it is the session between
+/// `prepare_prechecked` and `open_prepared`, held by the caller
+/// across the two phases of the reveal door.
+pub struct PreparedReveal {
+    handle: RevealHandle,
+    grant: Option<GrantScope>,
+}
+
+/// The session table a gateway/RPC handler owns.
+#[derive(Debug, Clone)]
+pub struct RevealGateway {
+    sessions: BTreeMap<u64, GatewaySession>,
+    /// Internal uniqueness counter; never issued raw (see [`IdNonce`]).
+    next_id: u64,
+    id_nonce: IdNonce,
+    /// Bumped when a revoke flow starts, BEFORE the chain mutation commits.
+    /// Reveal paths ask the chain for a grant decision without holding the
+    /// gateway lock and apply the answer under it; a revoke that lands
+    /// between the question and the answer would otherwise be served once
+    /// on the stale `true`. Callers read the counter before asking the chain
+    /// and refuse the call when it changed, so the racing ask is retried
+    /// against the new state instead of emitted.
+    revoke_generation: u64,
+}
+
+impl Default for RevealGateway {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RevealGateway {
+    /// New, empty table with a fresh secret id nonce.
+    #[must_use]
+    pub fn new() -> Self {
+        use rand::Rng;
+        let mut nonce = [0u8; 32];
+        rand::rng().fill_bytes(&mut nonce);
+        Self {
+            sessions: BTreeMap::new(),
+            next_id: 0,
+            id_nonce: IdNonce(nonce),
+            revoke_generation: 0,
+        }
+    }
+
+    /// The current revoke generation; reveal paths compare it before and
+    /// after asking the chain for a grant decision.
+    #[must_use]
+    pub const fn revoke_generation(&self) -> u64 {
+        self.revoke_generation
+    }
+
+    /// Start a revoke flow: call this BEFORE the chain mutation is
+    /// submitted, so every grant decision already in flight is stale by the
+    /// time the mutation can land. A revoke that fails keeps the bump; the
+    /// only cost is one retry of the racing reveal call, and its next chain
+    /// question gets the truthful answer.
+    pub const fn bump_revoke_generation(&mut self) {
+        self.revoke_generation = self.revoke_generation.wrapping_add(1);
+    }
+
+    /// Derive the public id for an internal counter value: a keyed hash, so
+    /// ids look random to anyone without the nonce yet never repeat for one
+    /// gateway instance.
+    fn derive_id(&self, counter: u64, now: u64) -> u64 {
+        let digest =
+            hash_fields_bytes(&[&self.id_nonce.0, &counter.to_be_bytes(), &now.to_be_bytes()]);
+        let mut head = [0u8; 8];
+        head.copy_from_slice(digest.get(..8).unwrap_or(&[0u8; 8]));
+        u64::from_be_bytes(head)
+    }
+
+    /// Number of open sessions (used by tests and telemetry).
+    #[must_use]
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Open a session with a live-grant check derived from `registry`.
+    ///
+    /// `recorded_owner` is the owner the manifest names for the content; see
+    /// [`open_reveal_session`] for why the request's own `owner` field is
+    /// not trusted.
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::Reveal`] when the owner claim, the grant check
+    /// or the emitter refuses; [`RevealGatewayError::SessionLimit`] at the
+    /// cap.
+    pub fn open(
+        &mut self,
+        registry: &ViewGrantRegistry,
+        recorded_owner: &Address,
+        req: RevealRequest,
+        now: u64,
+    ) -> Result<u64, RevealGatewayError> {
+        let req = Self::with_default_budget(req);
+        let handle = open_reveal_session(registry, recorded_owner, &req)?;
+        self.admit(handle, GrantScope::of(&req), now)
+    }
+
+    /// A request that names no budget gets the default cap, and a request
+    /// that names a larger one is cut down to it. Both open paths go
+    /// through here: the gateway is a network-facing table, and "uncapped"
+    /// is not a remote option on either of them. The registry path used to
+    /// pass `None` straight through, and a caller supplied `u64::MAX` used
+    /// to replace the cap, so the budget was only a ceiling for callers
+    /// that left the field out.
+    const fn with_default_budget(mut req: RevealRequest) -> RevealRequest {
+        req.meter_budget = match req.meter_budget {
+            Some(asked) if asked < DEFAULT_REVEAL_BUDGET_FRAMES => Some(asked),
+            _ => Some(DEFAULT_REVEAL_BUDGET_FRAMES),
+        };
+        req
+    }
+
+    /// Do the expensive part of an open with a grant decision the chain actor
+    /// already made, without touching the table.
+    ///
+    /// The emitter builds a whole one-shot pass to check the recipe's stream
+    /// pin. That work needs no table, so a handler runs it before it takes
+    /// the gateway lock and the lock only covers [`Self::open_prepared`].
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::Reveal`] when the decision or the emitter
+    /// refuses.
+    pub fn prepare_prechecked(
+        req: RevealRequest,
+        grant_allows: bool,
+    ) -> Result<PreparedReveal, RevealGatewayError> {
+        let req = Self::with_default_budget(req);
+        let handle = open_reveal_session_prechecked(&req, grant_allows)?;
+        Ok(PreparedReveal {
+            grant: GrantScope::of(&req),
+            handle,
+        })
+    }
+
+    /// Admit a session prepared by [`Self::prepare_prechecked`].
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::SessionLimit`] at the cap.
+    pub fn open_prepared(
+        &mut self,
+        prepared: PreparedReveal,
+        now: u64,
+    ) -> Result<u64, RevealGatewayError> {
+        self.admit(prepared.handle, prepared.grant, now)
+    }
+
+    /// Open a session with a grant decision the chain actor already made.
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::Reveal`] when the decision or the emitter
+    /// refuses; [`RevealGatewayError::SessionLimit`] at the cap.
+    #[cfg(test)]
+    pub fn open_prechecked(
+        &mut self,
+        req: RevealRequest,
+        grant_allows: bool,
+        now: u64,
+    ) -> Result<u64, RevealGatewayError> {
+        let prepared = Self::prepare_prechecked(req, grant_allows)?;
+        self.open_prepared(prepared, now)
+    }
+
+    /// Shared admission: sweep first (an expired session cannot be pinned by
+    /// a new flood), refuse at the cap, then insert.
+    fn admit(
+        &mut self,
+        handle: RevealHandle,
+        grant: Option<GrantScope>,
+        now: u64,
+    ) -> Result<u64, RevealGatewayError> {
+        self.sweep(now);
+        if self.sessions.len() >= MAX_REVEAL_SESSIONS {
+            return Err(RevealGatewayError::SessionLimit {
+                max: MAX_REVEAL_SESSIONS,
+            });
+        }
+        // Bounded collision retry: two derived ids colliding is a ~2^-64
+        // event; eight misses in a row is not a live table, it is a broken
+        // rng, and a broken rng must not mint guessable ids either.
+        let mut id = self.derive_id(self.next_id, now);
+        let mut tries = 0u8;
+        while self.sessions.contains_key(&id) {
+            if tries == 8 {
+                return Err(RevealGatewayError::SessionLimit {
+                    max: MAX_REVEAL_SESSIONS,
+                });
+            }
+            tries += 1;
+            self.next_id = self.next_id.saturating_add(1);
+            id = self.derive_id(self.next_id, now);
+        }
+        self.next_id = self.next_id.saturating_add(1);
+        self.sessions.insert(
+            id,
+            GatewaySession {
+                handle,
+                expires_at: now.saturating_add(REVEAL_SESSION_TTL_SECS),
+                grant,
+            },
+        );
+        Ok(id)
+    }
+
+    /// The grant a session rests on, so the caller can ask its authority
+    /// again before serving frames. `None` for a public recipe.
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::UnknownSession`] for an unknown id.
+    pub fn grant_scope(&self, id: u64) -> Result<Option<GrantScope>, RevealGatewayError> {
+        self.sessions
+            .get(&id)
+            .map(|session| session.grant)
+            .ok_or(RevealGatewayError::UnknownSession(id))
+    }
+
+    /// Stream commitment for the receivers of this session.
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::UnknownSession`] for an unknown id.
+    pub fn stream_commitment(&self, id: u64) -> Result<[u8; 32], RevealGatewayError> {
+        let session = self
+            .sessions
+            .get(&id)
+            .ok_or(RevealGatewayError::UnknownSession(id))?;
+        Ok(session.handle.stream_commitment())
+    }
+
+    /// Serve a frame range from an open session, under its budget.
+    ///
+    /// Expires the session in place if its TTL has run out.
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::UnknownSession`] for an unknown id;
+    /// [`RevealGatewayError::Expired`] past the TTL;
+    /// [`RevealGatewayError::Reveal`] when the frame ask exceeds the budget
+    /// or the emitter fails.
+    ///
+    /// `grant_allows` is the authority's current answer for the session's
+    /// [`GrantScope`] (see [`Self::grant_scope`]); a public recipe ignores
+    /// it. A sealed session whose grant is gone is dropped and refused with
+    /// [`RevealGatewayError::Revoked`], so a revocation on chain ends the
+    /// session at the next frame ask instead of at the TTL.
+    ///
+    /// PARTIAL: allowed - the only removals happen on the expired and the
+    /// revoked paths: an entry whose TTL has run out, or whose grant the
+    /// authority has withdrawn, is already dead, so dropping it there is
+    /// the reclamation itself and the refusal (`Expired`, `Revoked`)
+    /// reports the same fact to the caller. Nothing a live caller owns is
+    /// ever taken away before a refusal: the budget check and the session
+    /// lookup both refuse before any mutation, and a failing emitter leaves
+    /// the still valid session in place for a retry.
+    pub fn emit_frames(
+        &mut self,
+        id: u64,
+        seq_start: u32,
+        count: u32,
+        now: u64,
+        grant_allows: bool,
+    ) -> Result<(Vec<Vec<u8>>, [u8; 32]), RevealGatewayError> {
+        if count > MAX_FRAMES_PER_CALL {
+            return Err(RevealGatewayError::AskTooLarge {
+                count,
+                max: MAX_FRAMES_PER_CALL,
+            });
+        }
+        let session = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(RevealGatewayError::UnknownSession(id))?;
+        if now >= session.expires_at {
+            let _ = self.sessions.remove(&id);
+            return Err(RevealGatewayError::Expired { id });
+        }
+        if session.grant.is_some() && !grant_allows {
+            let _ = self.sessions.remove(&id);
+            return Err(RevealGatewayError::Revoked { id });
+        }
+        Ok(session.handle.emit_frames(seq_start, count)?)
+    }
+
+    /// Close a session early. Returns whether it existed.
+    #[must_use]
+    pub fn close(&mut self, id: u64) -> bool {
+        self.sessions.remove(&id).is_some()
+    }
+
+    /// Drop every grant-backed session over `content_id`. Returns how many
+    /// were dropped.
+    ///
+    /// The revocation path calls this once the chain has revoked a grant on
+    /// the content. The frame path asks the chain again before every emit,
+    /// but it asks without the table lock and applies the answer under it;
+    /// a revocation that landed between the two steps would otherwise be
+    /// served once more on a stale `true`. Dropping the sessions here closes
+    /// that window: a frame call that raced the revoke finds no session to
+    /// emit from. Public sessions rest on no grant and are left alone.
+    pub fn drop_sessions_for_content(&mut self, content_id: &ContentId) -> usize {
+        let before = self.sessions.len();
+        self.sessions.retain(|_, s| {
+            s.grant
+                .as_ref()
+                .is_none_or(|scope| scope.content_id != *content_id)
+        });
+        before - self.sessions.len()
+    }
+
+    /// Drop every session whose TTL has run out. Returns how many were
+    /// removed.
+    pub fn sweep(&mut self, now: u64) -> usize {
+        let before = self.sessions.len();
+        self.sessions.retain(|_, s| s.expires_at > now);
+        before - self.sessions.len()
+    }
+}
+
+#[cfg(test)]
+mod gateway_tests {
+    use super::*;
+    use crate::storage::content_id::ContentId;
+    use crate::storage::qr_carousel::CarouselEncoder;
+    use crate::storage::qr_payload::{pack_payload, payload_commitment, PayloadKind};
+    use crate::storage::qr_recipe::{ThreeRecipe, ThreeRecipePublic};
+    use crate::storage::view_grant::ViewPolicy;
+
+    fn addr(b: u8) -> Address {
+        Address::from([b; 32])
+    }
+
+    fn sample() -> (ThreeRecipePublic, Vec<u8>) {
+        let packed = pack_payload(PayloadKind::ContentBytes, b"gateway-reveal-body").unwrap();
+        let commit = payload_commitment(&packed);
+        let enc = CarouselEncoder::new(&packed, 32).unwrap();
+        let stream = enc.params().stream_commitment(&commit);
+        (ThreeRecipePublic::new(commit, enc.params(), stream), packed)
+    }
+
+    fn req(
+        recipe: ThreeRecipe,
+        full: Option<ThreeRecipePublic>,
+        packed: Vec<u8>,
+        viewer: Address,
+        owner: Address,
+        key_id: [u8; 32],
+        budget: Option<u64>,
+    ) -> RevealRequest {
+        RevealRequest {
+            recipe,
+            full_public: full,
+            packed,
+            content_id: ContentId([9u8; 32]),
+            viewer,
+            owner,
+            key_id,
+            meter_budget: budget,
+        }
+    }
+
+    /// P30-F04: the expensive half of an open needs no table, so a handler
+    /// can run it before it takes the gateway lock. The prepared session is
+    /// admitted later and is the same session an open would have made.
+    #[test]
+    fn a_session_is_prepared_without_the_table_and_admitted_later() {
+        let (full, packed) = sample();
+        let make = || {
+            req(
+                ThreeRecipe::Public(full.clone()),
+                None,
+                packed.clone(),
+                addr(1),
+                addr(2),
+                [3u8; 32],
+                None,
+            )
+        };
+        let prepared = RevealGateway::prepare_prechecked(make(), false).unwrap();
+        let mut gw = RevealGateway::new();
+        assert_eq!(gw.session_count(), 0, "preparing must not touch the table");
+        let id = gw.open_prepared(prepared, 100).unwrap();
+        assert_eq!(gw.session_count(), 1);
+        assert!(gw.emit_frames(id, 0, 1, 101, false).is_ok());
+    }
+
+    /// A public recipe opens without a grant and serves frames back, with a
+    /// deterministic stream commitment the receiver can pin.
+    #[test]
+    fn public_recipe_opens_and_serves_frames() {
+        let (full, packed) = sample();
+        let mut gw = RevealGateway::new();
+        let id = gw
+            .open_prechecked(
+                req(
+                    ThreeRecipe::Public(full.clone()),
+                    None,
+                    packed,
+                    addr(1),
+                    addr(2),
+                    [7u8; 32],
+                    None,
+                ),
+                false,
+                100,
+            )
+            .unwrap();
+        assert_eq!(gw.session_count(), 1);
+        assert_ne!(gw.stream_commitment(id).unwrap(), [0u8; 32]);
+
+        let (frames, fold) = gw.emit_frames(id, 0, 2, 100, true).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_ne!(fold, [0u8; 32]);
+    }
+
+    /// Issued ids are keyed hashes, not a counter: a sequential id would be
+    /// a guessable bearer credential for the frame endpoint and the close
+    /// endpoint.
+    #[test]
+    fn issued_ids_are_keyed_not_counters() {
+        let (full, packed) = sample();
+        let make = |packed: Vec<u8>| {
+            req(
+                ThreeRecipe::Public(full.clone()),
+                None,
+                packed,
+                addr(1),
+                addr(2),
+                [7u8; 32],
+                None,
+            )
+        };
+        let mut gw = RevealGateway::new();
+        let a = gw
+            .open_prechecked(make(packed.clone()), false, 100)
+            .unwrap();
+        let b = gw
+            .open_prechecked(make(packed.clone()), false, 100)
+            .unwrap();
+        assert_ne!(a, 0);
+        assert_ne!(b, a.wrapping_add(1));
+        assert_ne!(a, b.wrapping_add(1));
+        let mut other = RevealGateway::new();
+        let c = other.open_prechecked(make(packed), false, 100).unwrap();
+        assert_ne!(a, c, "a fresh nonce must not reissue the same id");
+    }
+
+    /// A sealed recipe under a false decision is refused, and under a true
+    /// decision served - the grant decision is the only door.
+    #[test]
+    fn sealed_recipe_obeys_the_prechecked_decision() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let viewer = addr(2);
+        let sealed = ThreeRecipe::Sealed(full.clone().seal());
+        let mut gw = RevealGateway::new();
+
+        let refused = gw.open_prechecked(
+            req(
+                sealed.clone(),
+                Some(full.clone()),
+                packed.clone(),
+                viewer,
+                owner,
+                [7u8; 32],
+                None,
+            ),
+            false,
+            100,
+        );
+        assert!(matches!(
+            refused,
+            Err(RevealGatewayError::Reveal(RevealRpcError::Forbidden))
+        ));
+
+        let id = gw
+            .open_prechecked(
+                req(sealed, Some(full), packed, viewer, owner, [7u8; 32], None),
+                true,
+                100,
+            )
+            .unwrap();
+        assert!(gw.emit_frames(id, 0, 1, 100, true).is_ok());
+    }
+
+    /// The registry path re-derives the grant: no live grant refuses, a live
+    /// grant admits.
+    #[test]
+    fn registry_path_requires_a_live_grant() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let viewer = addr(2);
+        let key_id = [7u8; 32];
+        let mut reg = ViewGrantRegistry::new();
+        let mut gw = RevealGateway::new();
+        let sealed = ThreeRecipe::Sealed(full.clone().seal());
+
+        let refused = gw.open(
+            &reg,
+            &owner,
+            req(
+                sealed.clone(),
+                Some(full.clone()),
+                packed.clone(),
+                viewer,
+                owner,
+                key_id,
+                None,
+            ),
+            100,
+        );
+        assert!(matches!(
+            refused,
+            Err(RevealGatewayError::Reveal(RevealRpcError::Forbidden))
+        ));
+
+        reg.issue(
+            ContentId([9u8; 32]),
+            owner,
+            Some(viewer),
+            key_id,
+            ViewPolicy::NamedGrantee,
+            0,
+        )
+        .unwrap();
+
+        let id = gw
+            .open(
+                &reg,
+                &owner,
+                req(sealed, Some(full), packed, viewer, owner, key_id, None),
+                100,
+            )
+            .unwrap();
+        assert!(gw.emit_frames(id, 0, 1, 100, true).is_ok());
+    }
+
+    /// A revoked grant ends the session at the next frame ask, well inside
+    /// the TTL. Before this the session served until its TTL ran out, so a
+    /// revocation on chain took effect up to `REVEAL_SESSION_TTL_SECS` late.
+    #[test]
+    fn a_revoked_grant_ends_the_session_before_its_ttl() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let viewer = addr(2);
+        let key_id = [7u8; 32];
+        let mut reg = ViewGrantRegistry::new();
+        let mut gw = RevealGateway::new();
+        let grant_id = reg
+            .issue(
+                ContentId([9u8; 32]),
+                owner,
+                Some(viewer),
+                key_id,
+                ViewPolicy::NamedGrantee,
+                0,
+            )
+            .unwrap();
+        let sealed = ThreeRecipe::Sealed(full.clone().seal());
+        let id = gw
+            .open(
+                &reg,
+                &owner,
+                req(sealed, Some(full), packed, viewer, owner, key_id, None),
+                100,
+            )
+            .unwrap();
+        let scope = gw
+            .grant_scope(id)
+            .unwrap()
+            .expect("a sealed session keeps its scope");
+        assert_eq!(scope.viewer, viewer);
+        // The frame path asks the authority the same question the open
+        // path asked, with the coordinates the session kept.
+        let asks = |reg: &ViewGrantRegistry| {
+            reg.may_view(
+                &scope.content_id,
+                &scope.viewer,
+                &scope.key_id,
+                &scope.owner,
+            )
+        };
+        assert!(gw.emit_frames(id, 0, 1, 101, asks(&reg)).is_ok());
+
+        reg.revoke(grant_id, owner, 1).unwrap();
+        assert!(!asks(&reg));
+        assert!(matches!(
+            gw.emit_frames(id, 0, 1, 102, asks(&reg)),
+            Err(RevealGatewayError::Revoked { id: revoked }) if revoked == id
+        ));
+        assert_eq!(gw.session_count(), 0, "a revoked session is dropped");
+        assert!(matches!(
+            gw.grant_scope(id),
+            Err(RevealGatewayError::UnknownSession(_))
+        ));
+    }
+
+    /// A public recipe rests on no grant: the authority's answer is not
+    /// consulted and a `false` does not end the session.
+    #[test]
+    fn a_public_session_has_no_grant_to_revoke() {
+        let (full, packed) = sample();
+        let mut gw = RevealGateway::new();
+        let id = gw
+            .open_prechecked(
+                req(
+                    ThreeRecipe::Public(full),
+                    None,
+                    packed,
+                    addr(1),
+                    addr(2),
+                    [7u8; 32],
+                    None,
+                ),
+                false,
+                100,
+            )
+            .unwrap();
+        assert_eq!(gw.grant_scope(id).unwrap(), None);
+        assert!(gw.emit_frames(id, 0, 1, 101, false).is_ok());
+    }
+
+    /// A session outlives its TTL: serving refuses, the table drops it, and
+    /// sweep reports the removal.
+    #[test]
+    fn session_expires_and_sweeps() {
+        let (full, packed) = sample();
+        let mut gw = RevealGateway::new();
+        let id = gw
+            .open_prechecked(
+                req(
+                    ThreeRecipe::Public(full),
+                    None,
+                    packed,
+                    addr(1),
+                    addr(2),
+                    [7u8; 32],
+                    None,
+                ),
+                false,
+                100,
+            )
+            .unwrap();
+
+        // Inside the TTL: fine.
+        assert!(gw
+            .emit_frames(id, 0, 1, 100 + REVEAL_SESSION_TTL_SECS - 1, true)
+            .is_ok());
+
+        // Past the TTL: refused and removed in place.
+        assert_eq!(
+            gw.emit_frames(id, 0, 1, 100 + REVEAL_SESSION_TTL_SECS, true)
+                .unwrap_err(),
+            RevealGatewayError::Expired { id }
+        );
+        assert_eq!(gw.session_count(), 0);
+    }
+
+    /// A flood of opens is refused at the cap instead of growing the table.
+    #[test]
+    fn session_cap_refuses_a_flood() {
+        let (full, packed) = sample();
+        let mut gw = RevealGateway::new();
+        for _ in 0..MAX_REVEAL_SESSIONS {
+            gw.open_prechecked(
+                req(
+                    ThreeRecipe::Public(full.clone()),
+                    None,
+                    packed.clone(),
+                    addr(1),
+                    addr(2),
+                    [7u8; 32],
+                    None,
+                ),
+                false,
+                100,
+            )
+            .unwrap();
+        }
+        assert_eq!(gw.session_count(), MAX_REVEAL_SESSIONS);
+        let refused = gw.open_prechecked(
+            req(
+                ThreeRecipe::Public(full),
+                None,
+                packed,
+                addr(1),
+                addr(2),
+                [7u8; 32],
+                None,
+            ),
+            false,
+            100,
+        );
+        assert_eq!(
+            refused,
+            Err(RevealGatewayError::SessionLimit {
+                max: MAX_REVEAL_SESSIONS
+            })
+        );
+    }
+
+    /// A remote caller that passes no budget still gets the default cap, so a
+    /// single open cannot turn into an unbounded read.
+    #[test]
+    fn missing_budget_gets_the_default_cap() {
+        let (full, packed) = sample();
+        let mut gw = RevealGateway::new();
+        let id = gw
+            .open_prechecked(
+                req(
+                    ThreeRecipe::Public(full),
+                    None,
+                    packed,
+                    addr(1),
+                    addr(2),
+                    [7u8; 32],
+                    None,
+                ),
+                false,
+                100,
+            )
+            .unwrap();
+
+        // Under the cap, fine; a single ask over the per-call ceiling refuses.
+        assert_eq!(
+            gw.emit_frames(id, 0, MAX_FRAMES_PER_CALL + 1, 100, true),
+            Err(RevealGatewayError::AskTooLarge {
+                count: MAX_FRAMES_PER_CALL + 1,
+                max: MAX_FRAMES_PER_CALL
+            })
+        );
+    }
+
+    /// The registry path applies the default budget too: a session opened
+    /// with no budget runs out at `DEFAULT_REVEAL_BUDGET_FRAMES`, it does not
+    /// serve without bound.
+    #[test]
+    fn the_registry_path_caps_a_missing_budget() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let viewer = addr(2);
+        let key_id = [7u8; 32];
+        let reg = ViewGrantRegistry::new();
+        let mut gw = RevealGateway::new();
+        let id = gw
+            .open(
+                &reg,
+                &owner,
+                req(
+                    ThreeRecipe::Public(full),
+                    None,
+                    packed,
+                    viewer,
+                    owner,
+                    key_id,
+                    None,
+                ),
+                100,
+            )
+            .unwrap();
+        let mut served = 0u64;
+        let mut refused = false;
+        // Well past the default cap if nothing stopped it.
+        for _ in 0..(DEFAULT_REVEAL_BUDGET_FRAMES / u64::from(MAX_FRAMES_PER_CALL) + 2) {
+            match gw.emit_frames(id, 0, MAX_FRAMES_PER_CALL, 100, true) {
+                Ok(_) => served += u64::from(MAX_FRAMES_PER_CALL),
+                Err(RevealGatewayError::Reveal(_)) => {
+                    refused = true;
+                    break;
+                }
+                Err(other) => panic!("unexpected refusal: {other:?}"),
+            }
+        }
+        assert!(refused, "an unbudgeted registry session was never metered");
+        assert!(served <= DEFAULT_REVEAL_BUDGET_FRAMES);
+    }
+
+    /// A caller supplied budget above the default is cut to the default, so
+    /// the cap holds for a remote caller that names a huge number.
+    #[test]
+    fn a_huge_caller_budget_is_cut_to_the_default() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let mut gw = RevealGateway::new();
+        let id = gw
+            .open(
+                &ViewGrantRegistry::new(),
+                &owner,
+                req(
+                    ThreeRecipe::Public(full),
+                    None,
+                    packed,
+                    addr(2),
+                    owner,
+                    [7u8; 32],
+                    Some(u64::MAX),
+                ),
+                100,
+            )
+            .unwrap();
+        let mut served = 0u64;
+        let mut refused = false;
+        for _ in 0..(DEFAULT_REVEAL_BUDGET_FRAMES / u64::from(MAX_FRAMES_PER_CALL) + 2) {
+            match gw.emit_frames(id, 0, MAX_FRAMES_PER_CALL, 100, true) {
+                Ok(_) => served += u64::from(MAX_FRAMES_PER_CALL),
+                Err(RevealGatewayError::Reveal(_)) => {
+                    refused = true;
+                    break;
+                }
+                Err(other) => panic!("unexpected refusal: {other:?}"),
+            }
+        }
+        assert!(refused, "a u64::MAX budget replaced the cap");
+        assert!(served <= DEFAULT_REVEAL_BUDGET_FRAMES);
+    }
+
+    /// A revocation drops the grant-backed sessions of that content and
+    /// nothing else: a frame call that raced the revoke finds no session.
+    #[test]
+    fn a_revocation_drops_the_sessions_of_that_content() {
+        let (full, packed) = sample();
+        let owner = addr(1);
+        let viewer = addr(2);
+        let key_id = [7u8; 32];
+        let revoked_content = ContentId([9u8; 32]);
+        let other_content = ContentId([10u8; 32]);
+        let mut reg = ViewGrantRegistry::new();
+        let mut gw = RevealGateway::new();
+        for content in [revoked_content, other_content] {
+            reg.issue(
+                content,
+                owner,
+                Some(viewer),
+                key_id,
+                ViewPolicy::NamedGrantee,
+                0,
+            )
+            .unwrap();
+        }
+        let sealed = ThreeRecipe::Sealed(full.clone().seal());
+        let mut open_for = |content: ContentId| {
+            let mut r = req(
+                sealed.clone(),
+                Some(full.clone()),
+                packed.clone(),
+                viewer,
+                owner,
+                key_id,
+                None,
+            );
+            r.content_id = content;
+            gw.open(&reg, &owner, r, 100).unwrap()
+        };
+        let revoked_session = open_for(revoked_content);
+        let other_session = open_for(other_content);
+        let public_session = gw
+            .open_prechecked(
+                req(
+                    ThreeRecipe::Public(full.clone()),
+                    None,
+                    packed.clone(),
+                    viewer,
+                    owner,
+                    key_id,
+                    None,
+                ),
+                false,
+                100,
+            )
+            .unwrap();
+        assert_eq!(gw.session_count(), 3);
+
+        // The stale answer a racing frame call would still be holding.
+        let stale_true = true;
+        assert_eq!(gw.drop_sessions_for_content(&revoked_content), 1);
+        assert!(matches!(
+            gw.emit_frames(revoked_session, 0, 1, 101, stale_true),
+            Err(RevealGatewayError::UnknownSession(_))
+        ));
+        assert!(gw.emit_frames(other_session, 0, 1, 101, true).is_ok());
+        assert!(gw.emit_frames(public_session, 0, 1, 101, false).is_ok());
+        assert_eq!(gw.drop_sessions_for_content(&revoked_content), 0);
+    }
+
+    /// Closing removes the session; unknown ids refuse rather than serving
+    /// nothing.
+    #[test]
+    fn close_and_unknown_session() {
+        let (full, packed) = sample();
+        let mut gw = RevealGateway::new();
+        let id = gw
+            .open_prechecked(
+                req(
+                    ThreeRecipe::Public(full),
+                    None,
+                    packed,
+                    addr(1),
+                    addr(2),
+                    [7u8; 32],
+                    None,
+                ),
+                false,
+                100,
+            )
+            .unwrap();
+        assert!(gw.close(id));
+        assert_eq!(
+            gw.emit_frames(id, 0, 1, 100, true).unwrap_err(),
+            RevealGatewayError::UnknownSession(id)
+        );
+        assert_eq!(
+            gw.emit_frames(999, 0, 1, 100, true).unwrap_err(),
+            RevealGatewayError::UnknownSession(999)
+        );
+    }
+}

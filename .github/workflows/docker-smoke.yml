@@ -1,0 +1,153 @@
+name: Docker Smoke
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'ops/Dockerfile'
+      - 'config/mainnet.toml'
+      - 'ops/docker-compose.yml'
+      - 'ops/docker-compose.ci.yml'
+      - 'xtask/tools/**'
+      - 'src/**'
+      - '.github/workflows/docker-smoke.yml'  # a change to this workflow triggers smoke+trivy
+  pull_request:
+    branches: [ main, fix/architecture-tip-adlari ]
+  workflow_dispatch:
+
+# Minimal permissions - this workflow only reads (build+scan+smoke).
+concurrency:
+  group: docker-smoke-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  docker-smoke:
+    runs-on: ubuntu-latest
+    # security-events: write is required for Trivy IMAGE findings to be uploaded
+    # to the Security tab as SARIF. The workflow default is `contents: read`.
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The smoke runs are Rust tools (xtask/tools), so the pinned toolchain
+      # is installed the same way ci.yml installs it.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build mainnet image
+        # `docker buildx build -f ops/Dockerfile` failed on the runner with
+        # 'open Dockerfile' (buildx -f resolution). docker compose build calls the same
+# context/dockerfile and works the way verified in the devnet smoke test; the
+# image is produced as budlum-core:devnet (which is what trivy points at).
+        #
+        # Build ALL nodes with a SINGLE command: when the smoke-rpc tool later ran
+# compose up it built node2-4 without PROTOC and gave 'Could not find protoc'.
+# They are all produced here (build.rs finds protoc via protoc_executable);
+# the smoke-rpc tool uses the images from cache.
+        run: docker compose -f ops/docker-compose.yml build
+      - name: Identity evidence - the scanned image is the one just built HERE
+        run: |
+          docker image inspect budlum-core:devnet --format 'scanned_image_id={{.Id}} size={{.Size}}bytes'
+      # Three steps: first produce SARIF (exit code 0 -> the step does not fail),
+# then upload to the Security tab, and run the gate last. If a single step gave
+# both SARIF and exit code 1, the step would die on a finding and the upload
+# would never run; the findings most critical to see would not land in the
+# Security tab. The same pattern as the Trivy fs scan in ci.yml.
+      - name: Trivy IMAGE scan - produce SARIF (reporting, not a gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: budlum-core:devnet
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: "0"
+          # Unfixed advisories are reported too: hiding them keeps a known
+          # hole out of the Security tab and out of the gate.
+          ignore-unfixed: false
+      - name: Trivy IMAGE SARIF yukle (Security sekmesi)
+        if: always()
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+      # The SARIF step above reports every advisory, fixed or not, so the
+      # Security tab shows the whole picture. This gate blocks only on
+      # advisories with a fixed version: measured on 233c9b6 with unfixed
+      # advisories included, the bookworm-slim base carried 69 CRITICAL/HIGH
+      # findings (perl-base, util-linux, curl, zlib1g) and not one of them had
+      # a fix in Debian stable. A gate that cannot be satisfied by any change
+      # in this tree is not a gate; it is the first step towards `|| true`.
+      # The fixable ones still turn the job red.
+      - name: Trivy IMAGE gate (smoke image; fixable CRITICAL/HIGH = fail)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: budlum-core:devnet
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+      # Both scripts print the node or container log themselves when they
+      # fail; the old `|| docker logs budlum-mainnet-smoke-$$` here named a
+      # container that never existed and read nothing.
+      - name: Run RPC smoke (devnet)
+        run: |
+          SMOKE_NETWORK=devnet SMOKE_RPC_PORT=18546 cargo run --release --manifest-path xtask/tools/Cargo.toml -- smoke-rpc
+      - name: Run Docker smoke (mainnet refuses, devnet boots)
+        run: |
+          cargo run --release --manifest-path xtask/tools/Cargo.toml -- docker-smoke-mainnet
+
+  devnet-multinode-smoke:
+    name: Devnet Multi-Node Smoke (4x PoS mesh + metrics + operator-RPC izolasyon)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The smoke runs are Rust tools (xtask/tools), so the pinned toolchain
+      # is installed the same way ci.yml installs it.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: 4-node compose smoke (mesh/liveness/metrics/RPC-izolasyon)
+        run: |
+          # The smoke script owns the verdict and the `exit 1` below preserves
+          # it. The two `docker compose` calls in the failure branch are
+          # DIAGNOSTICS printed on the way out, and `|| true` let both of them
+          # come back empty without saying so - which is how a red multi-node
+          # run ends up with no container state and no logs attached to it.
+          if ! cargo run --release --manifest-path xtask/tools/Cargo.toml -- devnet-multinode-smoke; then
+            echo "::error::devnet multi-node smoke failed; container state and logs follow."
+            if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke ps; then
+              echo "::error::\`docker compose ps\` also failed - the failure diagnosis has no container state."
+            fi
+            if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke logs --tail=150; then
+              echo "::error::\`docker compose logs\` also failed - the failure diagnosis has no node logs."
+            fi
+            exit 1
+          fi
+      - name: Teardown (always)
+        if: always()
+        # Teardown runs under `if: always()`, so it must not overwrite the
+        # smoke verdict with a cleanup failure - but a teardown that fails
+        # leaves containers and volumes behind on a shared runner, and `|| true`
+        # made that state invisible. It is reported as a warning and the step
+        # still exits clean.
+        run: |
+          set -uo pipefail
+          if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke down -v --remove-orphans; then
+            echo "::warning::teardown failed - containers or volumes from this run may still exist on the runner. The job verdict is unchanged (it belongs to the smoke step)."
+          fi

@@ -1,0 +1,193 @@
+name: Diverse Double Compiling
+
+# You cannot say a binary came from its own source by trusting the compiler.
+#
+#
+# `determinism.yml` already verifies that compiling twice yields the same genesis
+# hash. That says the **output is deterministic** and it is valuable; but if the
+# same compiler runs twice and that compiler adds something absent from the
+# source, both runs produce the same surplus and the comparison passes.
+# A self-reproducing compiler backdoor is invisible in exactly this way.
+#
+# The observation is this: the problem is not trust but **the absence of
+# independent verification**. The same source is built with two different
+# compilers; if both produce the same bytes, both must have added the same
+# surplus independently. This job sets that up.
+#
+# DELIBERATE-TOOLCHAIN-DIVERGENCE
+#
+# This job deliberately diverges from the pin in `rust-toolchain.toml`; the
+# `docker-toolchain` gate sees this marker and does not inspect this file. Divergence is the point
+# of the job: building the same source with a second compiler. Matching the pin
+# would mean running the same compiler twice, and `determinism.yml` already does that.
+#
+# What is compared is not the binary but **the canonical summary of the binary's
+# behaviour**. Rust binaries are not bit-for-bit reproducible today: path
+# prefixes, incremental build metadata and absolute paths in panic messages
+# produce different bytes across two runs. Those differences do not change
+# behaviour, and comparing them would make the job always red, measuring nothing.
+# Instead the values the chain agrees on are compared: the genesis hash, the
+# canonical program hash and state root samples. Those are exactly the places
+# a backdoor could hide.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Once a week: two full builds are expensive, and backdoor classes do not
+    # change on every commit.
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ddc-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile-with:
+    name: Stage 1 (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The canonical compiler: the version the repository pins.
+          - label: pinned
+            toolchain: "1.97.1"
+          # The independent compiler: a different version, hence a different binary
+          # and a different build history. For it to carry the same backdoor, both would
+          # have to have been compromised in the same way.
+          - label: independent
+            toolchain: "1.98.0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install "${{ matrix.toolchain }}" --profile minimal
+          rustup default "${{ matrix.toolchain }}"
+          rustc --version
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cargo build --release 2>&1 | tail -5
+
+      - name: Canonical digests
+        id: digests
+        run: |
+          set -euo pipefail
+          # Genesis: the chain's first agreed value. If something absent from the
+          # source gets in here, the two compilers diverge.
+          cargo test --release -- genesis_hash_deterministic --nocapture 2>&1 | tee /tmp/genesis.txt
+          GENESIS=$(grep "GENESIS_HASH=" /tmp/genesis.txt | tail -1 | cut -d= -f2)
+          test -n "${GENESIS}"
+
+          # The canonical program hash: the identity of the zkVM program. If a
+          # compiler changes the generated code this value shifts.
+          # No `|| true`. If the gate does not run this job goes red: something
+          # unmeasurable cannot be counted green, and a silently skipped stage empties
+          # the comparison.
+          (cd xtask/gates && cargo run --release --quiet -- regeneration) > /tmp/proghash.txt 2>&1
+          PROGRAM=$(grep -oE "program-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
+          test -n "${PROGRAM}"
+          # The matmul guest is the largest canonical program; its hash is the
+          # most sensitive to code-generation drift, so it is compared across
+          # compilers just like the storage-challenge token above.
+          MATMUL=$(grep -oE "matmul-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
+          test -n "${MATMUL}"
+          # The syscall-context check is the canonical program attesting the
+          # AIR's syscall context bindings; its hash is compared across
+          # compilers like the other tokens.
+          SYSCALL=$(grep -oE "syscall-hash [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
+          test -n "${SYSCALL}"
+          # The canonical-set digest ties the whole canonical program set to
+          # one value; the regeneration gate and the ZKVM verifier must agree
+          # on it, so it is compared across compilers like the other tokens.
+          SET=$(grep -oE "canonical-set [0-9a-f]+" /tmp/proghash.txt | tail -1 | awk '{print $2}')
+          test -n "${SET}"
+
+          # The relay gate ships the same consensus as a signed status report.
+          # The report signature itself covers the wall clock (freshness is its
+          # product), so it cannot be equal across two runs by design; what the
+          # two compilers must agree on is every deterministic part of the
+          # relay outcome: the canonical-set token, the status word and the
+          # program hash (regeneration is a dependency of relay).
+          (cd xtask/gates && cargo run --release --quiet -- relay) > /tmp/relay.txt 2>&1
+          RELAYCANON=$(grep -oE "relay-canonical-set [0-9a-f]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
+          RELAYSTATUS=$(grep -oE "relay-status [a-z]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
+          RELAYPROG=$(grep -oE "relay-program-hash [0-9a-f]+" /tmp/relay.txt | tail -1 | awk '{print $2}')
+          test -n "${RELAYCANON}"
+          test -n "${RELAYSTATUS}"
+          test -n "${RELAYPROG}"
+          RELAYTOK="${RELAYCANON}-${RELAYSTATUS}-${RELAYPROG}"
+
+          # The tree-pin gate attests the whole budzero source tree; the pins
+          # are committed with the tree, so both compilers must see the same
+          # tree hash state. The gate prints the pinned-file count on success.
+          (cd xtask/gates && cargo run --release --quiet -- tree-pin) > /tmp/treepin.txt 2>&1
+          TREEPIN_OK=$(grep -oE "all [0-9]+ files match their pins" /tmp/treepin.txt | tail -1)
+          test -n "${TREEPIN_OK}"
+
+          {
+            echo "genesis=${GENESIS}"
+            echo "program=${PROGRAM}"
+            echo "matmul=${MATMUL}"
+            echo "syscall=${SYSCALL}"
+            echo "set=${SET}"
+            echo "relay=${RELAYTOK}"
+            echo "treepin=${TREEPIN_OK}"
+          } >> "$GITHUB_OUTPUT"
+
+          printf 'genesis=%s\nprogram=%s\nmatmul=%s\nsyscall=%s\nset=%s\nrelay=%s\ntreepin=%s\n' "${GENESIS}" "${PROGRAM}" "${MATMUL}" "${SYSCALL}" "${SET}" "${RELAYTOK}" "${TREEPIN_OK}" > "digests-${{ matrix.label }}.txt"
+          cat "digests-${{ matrix.label }}.txt"
+
+      - name: Upload digests
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ddc-digests-${{ matrix.label }}
+          path: digests-${{ matrix.label }}.txt
+          retention-days: 7
+
+  compare:
+    name: Stage 2 compare (bit-for-bit on canonical values)
+    runs-on: ubuntu-latest
+    needs: compile-with
+    timeout-minutes: 10
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: ddc-digests-*
+          merge-multiple: true
+
+      - name: Compare
+        run: |
+          set -euo pipefail
+          test -f digests-pinned.txt
+          test -f digests-independent.txt
+          echo "--- pinned"
+          cat digests-pinned.txt
+          echo "--- independent"
+          cat digests-independent.txt
+
+          # A value that cannot be used is not compared and **not silently
+          # passed**: something unmeasurable cannot be counted green.
+          if ! diff -u digests-pinned.txt digests-independent.txt; then
+            echo "FAIL: two independent compilers produced different canonical values"
+            echo "from the same source. Either the build picked up something"
+            echo "process-dependent, or one added something absent from the source. Both are investigated."
+            exit 1
+          fi
+          echo "OK: two independent compilers produced the same canonical values."

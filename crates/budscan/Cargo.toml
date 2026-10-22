@@ -1,0 +1,57 @@
+[package]
+name = "budscan"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+description = "Budscan - Budlum's decentralised browser core: the name rule, evidence verification, content fetchers and search."
+publish = false
+
+# budscan is its own workspace. The reason is the dependency graph of the root
+# manifest: budlum-core carries libp2p, tokio and jsonrpsee, and a browser core
+# needs none of them. A separate workspace brings this crate's dependency
+# surface down to four crates and keeps it readable what the code sitting on a
+# browser's trust boundary actually calls.
+[workspace]
+
+[lib]
+name = "budscan"
+path = "src/lib.rs"
+
+[[bin]]
+name = "budscan"
+path = "src/bin/budscan.rs"
+
+[dependencies]
+# Content addressing: SHA-256 for the B.U.D. `ContentId` and the IPFS sha2-256
+# multihash,
+# SHA-384 for the Arweave `data_root`. Both come from the same crate.
+sha2 = "0.10"
+# The ENS namehash (EIP-137) is Keccak-256, not SHA3-256.
+sha3 = "0.10"
+hex = "0.4"
+# `evidence.rs` derives Serialize/Deserialize on the evidence records. A
+# serialiser (serde_json and friends) is NOT A DEPENDENCY here: the caller
+# picks the format. budscan only defines the data model; it does not write JSON
+# itself.
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Tests only: the serde round-trip verification of the risk report. The
+# production dependency surface does not change (budscan does not write its own
+# JSON).
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
+[profile.release]
+overflow-checks = true
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true

@@ -1,0 +1,120 @@
+name: Fuzz Nightly
+
+# Long fuzz runs. Every night at 03:17 UTC each target is fuzzed for 4 hours;
+# each target runs in its own matrix job (the GitHub job ceiling is 6 hours, so
+# 5x4h in a single job is impossible and the matrix is mandatory).
+# The corpus is cached on every run and restored on the next (a growing corpus =
+# deepening coverage). If a crash is found it is uploaded as an artifact and the
+# job FAILS.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-nightly-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-deep:
+    name: Fuzz Deep - ${{ matrix.target }} (4h)
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - block_deserialize
+          - consensus_validate
+          - fuzz_blockchain_serialize
+          - snapshot_deserialize
+          - transaction_deserialize
+          - consensus_state_transition
+          - relayer_escrow
+          - zk_verifier
+          # The heavy half of the pair. `budl_compile` runs in the PR gate, while
+# this one runs the bytecode produced by the compiler on the VM: an accepted
+# program can spin up to the gas limit, so it belongs to the four-hour
+# schedule rather than the 60-second fast budget.
+          - budl_compile_then_run
+          # Neither of these two was listed here or in ci.yml. A comment in ci.yml
+# described them as "nightly/manual" and this matrix did not include them, so
+# they never ran. The surface they inspect is not small either: both take input
+# from an untrusted relayer, and the RLP decoder and the MPT proof verifier are
+# the part of the bridge fed from outside.
+          #
+          - evm_rlp_decode
+          # BPQS WOTS chain-walk refusal safety (crates/bpqs). Runs the
+          # quick gate too; here it gets the deep budget.
+          - bpqs_wots_reject
+          - evm_mpt_verify
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # DELIBERATE-TOOLCHAIN-DIVERGENCE
+      # cargo-fuzz needs a nightly compiler, so this job cannot use the stable pin.
+      - name: Install Rust (nightly - cargo-fuzz gereksinimi)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: nightly
+      - name: Override the rust-toolchain.toml pin (nightly is required)
+        run: rustup override set nightly
+      # Install protoc from the runner's package index rather than
+      # arduino/setup-protoc. That action resolves the release through an
+      # unauthenticated GitHub API call and the nightly matrix runs eight jobs
+      # at once from one runner IP, which exhausted the anonymous rate limit:
+      # "API rate limit exceeded for 68.220.60.145" made the zk_verifier job
+      # fail before it fuzzed anything. Every other workflow in this repo
+      # already installs protoc this way, so this also removes the last
+      # inconsistency.
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+          shared-key: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+      - name: Corpus cache (per target, rolling)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            fuzz/corpus/${{ matrix.target }}
+            fuzz/artifacts/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz 4 hours - ${{ matrix.target }}
+        # cargo-fuzz runs from the repository root (see the fuzz-quick note in ci.yml).
+        run: |
+          set -euo pipefail
+          cargo fuzz run "${{ matrix.target }}" -- \
+            -max_total_time=14400 \
+            -timeout=25 \
+            -print_final_stats=1
+      # A four-hour fuzz run that finds a crash and then loses the input has
+      # produced nothing: the crash is only actionable as a file. Under
+      # `continue-on-error: true` plus `if-no-files-found: ignore` a failed
+      # upload was indistinguishable from a clean exit, on the one step whose
+      # entire purpose is preserving evidence that took four CPU-hours to
+      # produce and may not reappear on the next seed.
+      #
+      # The job is already red here (`if: failure()`), so removing the flag
+      # does not change any verdict - it only stops a broken uploader from
+      # being invisible. `warn` rather than `error` for the missing-file case:
+      # the step also runs when the job died before fuzzing at all (a build
+      # break, a toolchain failure), and in that state there is legitimately
+      # no artifact and no second finding to report.
+      - name: Crash artifact (varsa)
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-nightly-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: warn
+          retention-days: 30

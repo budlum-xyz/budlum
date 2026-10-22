@@ -1,0 +1,64 @@
+# Budlum Core systemd service
+# Install:
+#   sudo cp ops/budlum-core.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now budlum-core
+# Logs:
+#   journalctl -u budlum-core -f
+
+[Unit]
+Description=Budlum Core Node
+Documentation=https://github.com/rade/budlum-core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=budlum
+Group=budlum
+WorkingDirectory=/var/lib/budlum
+
+# Change these flags per deployment:
+#   --network=mainnet|testnet|devnet
+#   --consensus=pow|pos|poa
+#   --p2p-identity-file /var/lib/budlum/secrets/node-id.key
+# The public RPC stays on loopback: the node speaks plain HTTP and every call
+# carries the API key, so a TLS-terminating reverse proxy on this host is what
+# faces the network, with its address in `trusted_proxies`.
+ExecStart=/usr/local/bin/budlum-core \
+    --network=mainnet \
+    --consensus=pos \
+    --port=4001 \
+    --rpc-public-listener=127.0.0.1:8545 \
+    --rpc-operator-listener=127.0.0.1:8546 \
+    --metrics-port=9090 \
+    --db-path=/var/lib/budlum/data \
+    --snapshot-dir=/var/lib/budlum/snapshots \
+    --p2p-identity-file=/var/lib/budlum/secrets/node-id.key \
+    --banned-peer-db=/var/lib/budlum/data/banned-peers.json
+
+# Harden security
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/budlum
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# No core dumps: a dump of a validator process can hold key material.
+LimitCORE=0
+
+# Restart policy
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=60s
+
+# Environment
+Environment=RUST_LOG=info
+# The node reads the RPC key from the variable named here. The file holds one
+# line: BUDLUM_RPC_API_KEY=<key>. Make it readable by root only (mode 0600).
+Environment=BUDLUM_RPC_API_KEY_ENV=BUDLUM_RPC_API_KEY
+EnvironmentFile=/etc/budlum/rpc.env
+
+[Install]
+WantedBy=multi-user.target

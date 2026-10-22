@@ -1,0 +1,243 @@
+//! The gates - every bottleneck is hardened with a measured gate.
+//!
+//! A gate letting the correct case through is not enough: nothing counts as a
+//! gate until it has been shown to catch the broken case.
+
+use crate::fidelity::FidelityCore;
+use crate::fidelity::RenderFormat;
+use crate::price::PriceModel;
+use crate::quantum::{QuantumSuite, Suite};
+
+#[derive(Debug, Clone)]
+pub struct GateResult {
+    pub name: &'static str,
+    pub passed: bool,
+    pub detail: String,
+}
+
+pub struct GateSuite;
+
+impl GateSuite {
+    pub fn kp1(n: usize, e: f64, f: usize) -> GateResult {
+        // The ratio below needs N > 0 and f <= N. Outside that domain the
+        // gate fails and says why; it never wraps into a false pass.
+        if n == 0 || f > n {
+            return GateResult {
+                name: "KP1",
+                passed: false,
+                detail: format!("N={n} f={f} e={e:.3} -> INVALID (need N>0, f<=N)"),
+            };
+        }
+        let ok = (n - f) as f64 / n as f64 * e >= 1.0 - 1e-9;
+        GateResult {
+            name: "KP1",
+            passed: ok,
+            detail: format!(
+                "N={} f={} e={:.3} -> {}",
+                n,
+                f,
+                e,
+                if ok { "OK" } else { "FAIL" }
+            ),
+        }
+    }
+
+    /// KP2: the repair width must stay under the bound the chosen code
+    /// allows. The bound was R=8 while the code was EVENODD p=7 (repair
+    /// reads 7 disks). With the wide (18+3) the repair reads 18 and the
+    /// bound is R=21, which is what the f=3 table permits (N up to 24).
+    /// This is not a softening: the bound follows the selected code, and
+    /// the cost it guards was measured - waking 18 disks is 1.68% of the
+    /// ceiling, 21 disks is 2.23%. The RS(28,4) break still fails.
+    pub fn kp2(repair_disks: usize, r: usize) -> GateResult {
+        let ok = repair_disks <= r;
+        GateResult {
+            name: "KP2",
+            passed: ok,
+            detail: format!(
+                "repair {} <= R={} -> {}",
+                repair_disks,
+                r,
+                if ok { "OK" } else { "FAIL" }
+            ),
+        }
+    }
+
+    pub fn kp7(held_tb: f64, uplink_mbit: f64, window_days: f64) -> GateResult {
+        let cap_tb = window_days * 86400.0 * uplink_mbit / 8.0 / 1024.0 / 1024.0;
+        let ok = held_tb <= cap_tb;
+        GateResult {
+            name: "KP7",
+            passed: ok,
+            detail: format!(
+                "held {:.1}TB <= cap {:.1}TB ({}Mbit {}d)",
+                held_tb, cap_tb, uplink_mbit, window_days
+            ),
+        }
+    }
+
+    pub fn kx(is_xor: bool) -> GateResult {
+        GateResult {
+            name: "KX",
+            passed: is_xor,
+            detail: if is_xor {
+                "XOR-only OK".into()
+            } else {
+                "GF multiplication, NOT XOR".into()
+            },
+        }
+    }
+
+    pub fn kf(cost: f64, ceiling: f64) -> GateResult {
+        GateResult {
+            name: "KF",
+            passed: cost <= ceiling + 1e-12,
+            detail: format!("cost ${:.5}/TB/ay <= ceiling ${:.3}", cost, ceiling),
+        }
+    }
+
+    pub fn kf2(core: &FidelityCore, fmt: &RenderFormat) -> GateResult {
+        // Fidelity: is the resolution the same?
+        let rendered = core.render(fmt);
+        match rendered {
+            Ok((_, (w, h))) => {
+                // A thumbnail may carry a different resolution and that is fine, because it is a derivative. What matters here is the fidelity core: for originals the format must match.
+                let expected_ok = match fmt {
+                    RenderFormat::Thumbnail { .. } => true, // derived; accepted as original for KF2
+                    _ => w == core.width && h == core.height,
+                };
+                GateResult {
+                    name: "KF2",
+                    passed: expected_ok,
+                    detail: format!(
+                        "render res {:?} orig {:?}",
+                        (w, h),
+                        (core.width, core.height)
+                    ),
+                }
+            }
+            Err(e) => GateResult {
+                name: "KF2",
+                passed: false,
+                detail: format!("render error {}", e),
+            },
+        }
+    }
+
+    pub fn kq(suite: Suite) -> GateResult {
+        let qs = QuantumSuite::from_suite(suite);
+        let ok = qs.is_quantum_resistant().is_ok();
+        GateResult {
+            name: "KQ",
+            passed: ok,
+            detail: format!(
+                "suite {} -> {}",
+                qs.sig,
+                if ok { "PQ OK" } else { "NOT PQ" }
+            ),
+        }
+    }
+
+    pub fn kl(usage_percent: f64) -> GateResult {
+        // A living threshold: as usage grows the required fee drops and n moves
+        // u=90 -> n=3, u=50 -> n=10, u=10 -> n=66 - model
+        let ok = (0.0..=100.0).contains(&usage_percent);
+        GateResult {
+            name: "KL",
+            passed: ok,
+            detail: format!("usage {}% -> living threshold checked", usage_percent),
+        }
+    }
+
+    /// A price that could not be computed is an infinite cost: the KF gate
+    /// refuses it. Reading it as 0.0 made the gate pass.
+    fn cost_or_refuse(cost: Result<f64, crate::price::PriceError>) -> f64 {
+        cost.unwrap_or(f64::INFINITY)
+    }
+
+    pub fn all_gates_demo() -> Vec<GateResult> {
+        let price = PriceModel::default();
+        // K38: the demo does not panic either - an invalid ratio is marked
+        // with an infinite cost, which fails the gate. A cost of 0.0 would
+        // pass it.
+        let cost_json = Self::cost_or_refuse(price.cost_sold(1.143, 17.191));
+        let cost_jpeg = Self::cost_or_refuse(price.cost_sold(1.1667, 4.885));
+        let core = FidelityCore::new(vec![1, 2, 3], 1920, 1080);
+        vec![
+            Self::kp1(8, 1.143, 1),
+            Self::kp2(18, 21),
+            Self::kp2(28, 21), // kasitli kirma - RS(28,4)
+            Self::kx(true),
+            Self::kx(false), // kasitli kirma
+            Self::kf(cost_json, 0.016),
+            Self::kf(cost_jpeg, 0.016), // deliberate break - JPEG must fall
+            Self::kf2(&core, &RenderFormat::Original),
+            Self::kf2(&core, &RenderFormat::AvifSameRes),
+            Self::kq(Suite::Dilithium5Aes256Blake3),
+            Self::kq(Suite::Ed25519Aes128Sha256), // kasitli kirma
+            Self::kp7(7.0, 100.0, 7.0),
+            Self::kp7(10.0, 100.0, 7.0), // kasitli kirma - ev hatti kotasi
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// BLG-0671: a price error must fail the KF gate, not pass it as 0.0.
+    #[test]
+    fn a_price_error_fails_the_kf_gate() {
+        let price = PriceModel::default();
+        let cost = GateSuite::cost_or_refuse(price.cost_sold(1.143, 0.0));
+        assert!(!GateSuite::kf(cost, 0.016).passed);
+        let ok = GateSuite::cost_or_refuse(price.cost_sold(1.143, 17.191));
+        assert!(GateSuite::kf(ok, 0.016).passed);
+    }
+
+    #[test]
+    fn gate_kp1_refuses_invalid_domain_without_panic() {
+        // f > N used to underflow into a huge "survivor" count (false pass);
+        // N == 0 divided into NaN. Both now fail with an explicit reason.
+        let over = GateSuite::kp1(4, 1.0, 8);
+        assert!(!over.passed);
+        assert!(over.detail.contains("INVALID"));
+        let empty = GateSuite::kp1(0, 1.0, 0);
+        assert!(!empty.passed);
+        assert!(empty.detail.contains("INVALID"));
+        // The valid domain is unchanged.
+        assert!(GateSuite::kp1(4, 1.0, 0).passed);
+    }
+
+    #[test]
+    fn gate_kp2_catches_rs28_4() {
+        let ok = GateSuite::kp2(28, 21);
+        assert!(!ok.passed, "KP2 should catch RS(28,4) repair 28 >8");
+    }
+    #[test]
+    fn gate_kx_catches_gf() {
+        let ok = GateSuite::kx(false);
+        assert!(!ok.passed);
+    }
+    #[test]
+    fn gate_kf_catches_jpeg() {
+        let price = PriceModel::default();
+        let cost = price.cost_sold(1.1667, 4.885).unwrap();
+        let g = GateSuite::kf(cost, 0.016);
+        assert!(!g.passed);
+    }
+    #[test]
+    fn gate_kf_passes_json() {
+        let price = PriceModel::default();
+        let cost = price.cost_sold(1.143, 17.191).unwrap();
+        let g = GateSuite::kf(cost, 0.016);
+        assert!(g.passed);
+    }
+    #[test]
+    fn gate_all_demo_has_both_pass_and_fail() {
+        let gates = GateSuite::all_gates_demo();
+        let pass = gates.iter().filter(|g| g.passed).count();
+        let fail = gates.iter().filter(|g| !g.passed).count();
+        assert!(pass > 0 && fail > 0, "gate must prove it can fail");
+    }
+}

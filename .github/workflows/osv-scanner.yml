@@ -1,0 +1,141 @@
+# OSV-Scanner, the scan that closes vulnerability sources outside RustSec
+#
+# WHY cargo-audit/cargo-deny ARE NOT ENOUGH: both read only the RustSec advisory
+# database. OSV.dev is an aggregator (RustSec + GHSA + NVD + CVE) and also sees
+# records that have no RustSec counterpart.
+#
+# This was proven concretely: the first scan run while adding this workflow
+# caught CVE-2026-32314 / GHSA-vxx9-2994-q338 - a remotely triggerable panic
+# (DoS) in yamux that requires NO authentication, CVSS 8.7. On the same tree
+# `cargo audit` said "0 vulnerabilities found", because this record has no
+# RustSec counterpart (rustsec/advisory-db/crates/yamux -> 404). In a chain node's
+# P2P multiplexer this is a class cargo-audit structurally cannot see.
+#
+# Gate policy: a finding = FAIL (NO `continue-on-error`). Exceptions live in
+# .quality/osv-scanner.toml and budzero/osv-scanner.toml, each written with
+# evidence of why it is UNREACHABLE in the code (VEX logic). A reachable finding
+# is not ignored, the dependency is upgraded.
+#
+# The tool is version + sha256 pinned (the gitleaks/hadolint/actionlint/typos pattern).
+
+name: OSV Scanner
+
+on:
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+  push:
+    branches: [main]
+  schedule:
+    # Weekly: a new advisory can be published without the code changing.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osv-scanner-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  osv-scan:
+    name: OSV Scanner (OSV.dev = RustSec + GHSA + NVD)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install osv-scanner v2.4.0 (version + sha256 pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/osv-scanner \
+            https://github.com/google/osv-scanner/releases/download/v2.4.0/osv-scanner_linux_amd64
+          echo "15314940c10d26af9c6649f150b8a47c1262e8fc7e17b1d1029b0e479e8ed8a0  /tmp/osv-scanner" | sha256sum -c -
+          sudo install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      # Vacuous-gate protection: "No issues found" can show a clean tree or a scan
+      # that never ran / could not reach the network. The canary produces a
+      # synthetic lockfile containing a known vulnerable version and proves the
+      # scanner CATCHES it; if it cannot, the gate is untrustworthy.
+      - name: Canary - evidence that the OSV alarm works
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/osv-canary
+          cat > /tmp/osv-canary/Cargo.lock <<'CANARY'
+          version = 3
+
+          [[package]]
+          name = "canary-app"
+          version = "0.1.0"
+          dependencies = ["yamux"]
+
+          [[package]]
+          name = "yamux"
+          version = "0.12.1"
+          source = "registry+https://github.com/rust-lang/crates.io-index"
+          CANARY
+          if osv-scanner scan source --lockfile=/tmp/osv-canary/Cargo.lock > /tmp/osv-canary/out.txt 2>&1; then
+            echo "ERROR: OSV failed to catch the canary (yamux 0.12.1 / GHSA-vxx9-2994-q338) -> the scan is untrustworthy (vacuous gate)!"
+            exit 1
+          fi
+          # A scanner failure (network, database) also exits non-zero. Only a
+          # report that names the known advisory counts as a catch.
+          if ! grep -q "GHSA-vxx9-2994-q338" /tmp/osv-canary/out.txt; then
+            echo "ERROR: OSV failed for a reason other than the canary finding."
+            tail -30 /tmp/osv-canary/out.txt
+            exit 1
+          fi
+          echo "Canary caught -> the OSV alarm works."
+
+      # fuzz/Cargo.lock ve crates/wallet-core/Cargo.lock buraya sonradan eklendi.
+      # The repository has four lockfiles and the scan read two of them. The fuzz
+      # lock carries the same 23 git packages as the root lock plus its own
+      # carries; wallet-core carries BIP39 and SLIP-0010 key derivation,
+      # so one of the two unscanned trees was the tree that produces keys directly.
+      # libfuzzer chain. The fuzz runner executes on the CI machine and on developer
+      # machines, and the wallet code sees the user's seed; neither is "just a test".
+      # is not.
+      #
+      # crates/budscan/Cargo.lock was added for the same reason, and the "was every
+      # lockfile scanned" step below caught exactly this: because budscan is its own
+      # workspace it does not enter the root lock, and before being added to the
+      # list by hand it was out of scope. The gate worked.
+      - name: Scan - every lockfile in the repository (a finding = fail)
+        run: |
+          set -euo pipefail
+          osv-scanner scan source \
+            --config=.quality/osv-scanner.toml \
+            --lockfile=Cargo.lock \
+            --lockfile=budzero/Cargo.lock \
+            --lockfile=fuzz/Cargo.lock \
+            --lockfile=crates/wallet-core/Cargo.lock \
+            --lockfile=crates/note-packing/Cargo.lock \
+            --lockfile=crates/bpqs/Cargo.lock \
+            --lockfile=xtask/gates/Cargo.lock \
+            --lockfile=xtask/tools/Cargo.lock \
+            --lockfile=crates/ai-inference/Cargo.lock \
+            --lockfile=crates/budscan/Cargo.lock \
+            --lockfile=bud/Cargo.lock
+
+      # So the list above never shrinks: every Cargo.lock in the repository must
+      # be scanned. If a new sub-crate is added and its lock silently stays out
+      # of scope, this step goes red.
+      - name: Was every lockfile scanned
+        run: |
+          set -euo pipefail
+          missing=0
+          while IFS= read -r lock; do
+            rel="${lock#./}"
+            if ! grep -q -- "--lockfile=${rel}" .github/workflows/osv-scanner.yml; then
+              echo "TARANMIYOR: ${rel}"
+              missing=1
+            fi
+          done < <(find . -name Cargo.lock -not -path './target/*' -not -path '*/target/*')
+          if [ "$missing" -ne 0 ]; then
+            echo "The lockfiles above are outside the OSV scan."
+            exit 1
+          fi
+          echo "Every Cargo.lock in the repository is in the OSV scan."

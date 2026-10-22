@@ -1,0 +1,847 @@
+# Security Hardening, extra inspections
+#
+# Missing inspections:
+#   - cargo machete (unused dependencies)
+#   - cargo mutants (mutation testing)
+#   - cargo-supply-chain (publisher visibility)
+#   - ThreadSanitizer (data race detection)
+#   - RUSTFLAGS overflow-checks verification
+#
+# This workflow runs weekly (heavy/slow inspections).
+# It is not triggered on PRs - only schedule + workflow_dispatch.
+
+name: Security Hardening
+
+on:
+  schedule:
+    - cron: "30 5 * * 1"   # weekly, Monday 05:30 UTC
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Commit or ref the mutants job diffs against (default: a week ago)"
+        required: false
+        default: ""
+
+concurrency:
+  group: security-hardening-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  machete:
+    name: cargo machete (unused deps, REPORT - the gate is in extra-tooling)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # The version was unpinned. extra-tooling.yml pins the same tool to 0.8.0;
+      # the same version and the same sha256 are used here too, otherwise two
+      # workflows would run different tools under the same name.
+      - name: Install cargo-machete (version + sha256 pinned)
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /tmp/machete.tar.gz \
+            https://github.com/bnjbvr/cargo-machete/releases/download/v0.8.0/cargo-machete-v0.8.0-x86_64-unknown-linux-musl.tar.gz
+          echo "020f6608f9be1562d1fb601e5808e541ccb8806e7e4dfde27d48bc22254a002c  /tmp/machete.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/machete.tar.gz -C /tmp
+          install -m755 "$(find /tmp -name cargo-machete -type f | head -1)" /usr/local/bin/cargo-machete
+          cargo-machete --version
+      # REPORT, NOT A GATE - and the name says so, because `|| true` plus a
+      # gate-sounding job name is how a repository ends up believing it has a
+      # check it does not have. The ENFORCING copy of this tool lives in
+      # extra-tooling.yml ("Dead Deps (machete + shear)"): it has a canary, it
+      # discovers every manifest in the tree, and it fails. This job exists for
+      # the `--with-metadata` view (which resolves the metadata-ignored
+      # entries), and its verdict belongs to that other workflow.
+      # Still a REPORT on unused dependencies - that verdict belongs to
+      # extra-tooling.yml's "Dead Deps" job, which has the canary and the tree
+      # walk. But `|| true` (and its twin `; true`) also swallowed the state
+      # where machete itself fell over: a tool that cannot parse a manifest
+      # exits non-zero and prints nothing, and this step rendered that exactly
+      # like a clean tree. cargo-machete exits 1 when it FINDS something (a
+      # finding, not a failure) and 2 on an internal error, so the two are now
+      # told apart instead of both being erased.
+      - name: cargo machete (root) - report
+        run: |
+          set -uo pipefail
+          set +e
+          cargo machete --with-metadata > /tmp/machete-root.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/machete-root.log
+          if [ "$status" -gt 1 ]; then
+            echo "::error::cargo machete (root) exited $status - that is a tool failure, not a report of unused dependencies."
+            exit 1
+          fi
+          echo "machete (root) report exit: $status (0 = nothing found, 1 = findings; the gate lives in extra-tooling.yml)"
+      - name: cargo machete (budzero) - report
+        run: |
+          set -uo pipefail
+          cd budzero
+          set +e
+          cargo machete --with-metadata > /tmp/machete-budzero.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/machete-budzero.log
+          if [ "$status" -gt 1 ]; then
+            echo "::error::cargo machete (budzero) exited $status - that is a tool failure, not a report of unused dependencies."
+            exit 1
+          fi
+          echo "machete (budzero) report exit: $status (0 = nothing found, 1 = findings; the gate lives in extra-tooling.yml)"
+
+  # BLOCKS. The previous form carried both `continue-on-error: true` and `|| true`,
+  # and the tool never ran at all:
+  #
+  #   error: unexpected argument '--test-timeout' found
+  #
+  # In cargo-mutants 27.1.0 the flag is `--timeout`. The command died within
+  # seconds on an argument error, `|| true` swallowed the exit code,
+  # `continue-on-error` covered the rest, and the job reported GREEN.
+  # A two-minute "mutation testing" job actually consisted of installing the
+  # tool. This is the most expensive form of softening: it hides not a gate
+  # failing, but a gate never running at all.
+  #
+  # What it measures is also what no other gate measures. Every other gate
+  # inspects what the code does; this inspects whether the tests NOTICE a
+  # change. A green test suite can also consist of tests that assert nothing.
+  #
+  mutants:
+    name: cargo mutants (mutation testing) ${{ matrix.shard }}/24
+    runs-on: ubuntu-latest
+    # Measured 2026-09-24, run 36063084319 shard 0/8: with `--timeout 900`
+    # the baseline passed for the first time ("ok Unmutated baseline in 72s
+    # build + 290s test") and 39 mutants were selected. Each mutant costs its
+    # own build plus a full test run (~6 min), so a 60-minute job ceiling did
+    # not cover the shard's share: the job was cut at 58.5 minutes. Before
+    # being cut it had already reported surviving mutants, which is the whole
+    # point of the run, so the measurement has to be allowed to finish.
+    #
+    # Second measurement, same run, shard 6/8: 39 mutants at ~350 s each
+    # (65 s build + 286 s test) means ~227 minutes per shard with 8 shards;
+    # raising the ceiling alone cannot fix that. The shard count is now 24:
+    # 312 mutants / 24 = 13 mutants x 350 s = ~76 minutes, under the ceiling.
+    # Shards need no coordination - each independently discovers the same
+    # mutant set and tests its own slice.
+    #
+    # Third measurement, run 39490423359 (87245eb6): the library suite had
+    # grown well past the 286 s above. The ordinary Budlum Core job now
+    # measures 3,781 tests in 649 s, mutant test phases measured 451-899 s,
+    # and nine shards were killed inside the 900 s per-run budget with 3,780
+    # tests done and exactly one - the differential VM oracle - still
+    # running: red shards that measured nothing. The per-run budget is now
+    # 1800 s and this ceiling 240 minutes. Neither softens a verdict - a
+    # TIMEOUT is never "caught" - they only let a slower suite finish saying
+    # what it was already trying to say.
+    timeout-minutes: 240
+    strategy:
+      # The point of the run is the LIST of survivors; cancelling seven shards
+      # because one found something hides the rest of that list.
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    env:
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The diff below reaches back a week of history; the default
+          # depth of one has no second commit to diff against.
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: cargo install cargo-mutants
+        run: cargo install cargo-mutants --locked
+      # Canary: a crate is written with a test that deliberately asserts nothing
+      # and cargo-mutants is expected to report a surviving mutant. If it does
+      # not, a clean report does not say "the tests are solid", at most "the tool
+      # did not run". This job stayed green for months in exactly that state, so
+      # the canary here is not a formality.
+      - name: mutants canary (does the tool really find survivors)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/mutants-canary/src
+          cat > /tmp/mutants-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "mutants-canary"
+          version = "0.0.0"
+          edition = "2021"
+          EOF
+          # The test calls the function and says nothing about the result.
+          # `cargo test` is green; it stays green however the body changes, which
+          # is exactly what mutation testing exists to find.
+          cat > /tmp/mutants-canary/src/lib.rs <<'EOF'
+          pub fn double(x: i32) -> i32 {
+              x * 2
+          }
+
+          #[cfg(test)]
+          mod tests {
+              #[test]
+              fn calls_it_and_asserts_nothing() {
+                  let _ = super::double(21);
+              }
+          }
+          EOF
+          cd /tmp/mutants-canary
+          cargo test --quiet
+          # Capture the output into a file first: under `set -euo pipefail`, if a
+          # program in a pipeline exits non-zero, grep never runs.
+          set +e
+          cargo mutants --in-place --timeout 60 > /tmp/mutants-canary.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "CANARY FAILED: no surviving mutant was reported under a test that" >&2
+            echo "no surviving mutant was reported, so the tool either is not running or" >&2
+            echo "is not measuring anything." >&2
+            tail -30 /tmp/mutants-canary.log >&2
+            exit 1
+          fi
+          if grep -qi "MISSED\|missed" /tmp/mutants-canary.log; then
+            echo "canary OK: the tool found the mutant surviving under the empty test."
+          else
+            echo "CANARY FAILED: the tool failed but the reason is not a surviving mutant." >&2
+            tail -30 /tmp/mutants-canary.log >&2
+            exit 1
+          fi
+      # `--in-diff`: mutating the whole tree on every run takes hours and yields
+      # findings about code nobody changed. This workflow runs on a schedule
+      # and by hand, never on a pull request, so `github.base_ref` is always
+      # empty here; the earlier `origin/${BASE_REF}...` form resolved to
+      # `origin/main...main`, an empty diff, and `--in-diff` selected no
+      # mutants. The job was green while measuring nothing, the same vacuity
+      # the canary above guards against in the tool itself.
+      #
+      # The diff is now the week since the previous scheduled run (the cron
+      # is weekly), or since a caller-provided ref on manual dispatch. An
+      # empty diff is a pass with an explicit statement, never a silent one,
+      # and a non-empty diff that selects no mutant is reported as such by
+      # cargo-mutants itself.
+      #
+      # No workflow expression is expanded inside `run:`; the values pass
+      # through environment variables and the shell reads them as quoted data.
+      - name: Extract the diff (the week since the last scheduled run)
+        env:
+          SINCE: ${{ github.event.inputs.since || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "$SINCE" ]; then
+            base="$SINCE"
+          else
+            base="$(git rev-list -n 1 --before='7 days ago' HEAD)"
+          fi
+          if [ -z "$base" ]; then
+            echo "no commit older than a week on this branch; diffing the whole history"
+            base="$(git rev-list --max-parents=0 HEAD | tail -n 1)"
+          fi
+          echo "diff base: $base"
+          git diff "$base"...HEAD -- 'src/**/*.rs' > /tmp/pr.diff
+          wc -l /tmp/pr.diff
+      - name: cargo mutants (code touched in the last week)
+        run: |
+          set -euo pipefail
+          if [ ! -s /tmp/pr.diff ]; then
+            echo "no Rust change under src/ in the last week: nothing to mutate, and this line is the record of it."
+            exit 0
+          fi
+          # Sharded across the matrix. The 2026-09-21 scheduled run selected
+          # 2705 mutants from a week that contained a consolidation merge, ran
+          # for 59 minutes and was KILLED by `timeout-minutes: 60` with no
+          # verdict at all - the most expensive possible way to learn nothing.
+          # Shards need no coordination: each independently discovers the same
+          # mutant set and tests the subset `k/8`, so every mutant is still
+          # tested exactly once and the wall clock is roughly an eighth.
+          # `--baseline=skip` is NOT used: each shard proves its own tree is
+          # green before trusting a "caught" verdict.
+          # `--timeout` applies to the baseline as well as to each mutant,
+          # and because `--in-place` is used cargo-mutants refuses the
+          # multiplier form (`--timeout-multiplier`); its own book says so.
+          # 300 seconds was cargo-mutants' default and it is not enough for
+          # this tree. Measured, two independent runs, two different shards,
+          # the same line:
+          #   36027822255 shard 6/8 -> TIMEOUT Unmutated baseline in 73s build + 300s test
+          #   36032403742 shard 4/8 -> TIMEOUT Unmutated baseline in 76s build + 300s test
+          # followed by "cargo test failed in an unmutated tree, so no mutants
+          # were tested": the job went red while measuring nothing at all,
+          # which is the most expensive possible way to learn nothing.
+          #
+          # 900 seconds does not soften the gate: a TIMEOUT is never counted
+          # as "caught", so a longer budget cannot hide a surviving mutant.
+          # What did soften the gate was a baseline that never ran.
+          # `--baseline=skip` is still NOT used: every shard proves its own
+          # tree is green before any verdict is trusted.
+          #
+          # 900 stopped being enough once the suite grew (see the third
+          # measurement on the job): run 39490423359 killed nine baselines at
+          # 900 s with one test outstanding, so the budget is 1800 s now.
+          #
+          # `--bins` joins `--lib`: the diff can touch `src/bin/bud.rs`, and
+          # under `--lib` alone no test that could catch a mutant there ever
+          # ran - run 39490423359 reported seven such survivors that were not
+          # evidence about the tests at all, only about the flag. Binary unit
+          # tests belong to the same claim library tests make.
+          cargo mutants --in-place --timeout 1800 --in-diff /tmp/pr.diff \
+            --shard "${SHARD}/24" -- --lib --bins
+
+  supply-chain:
+    name: cargo-supply-chain (publisher visibility)
+    runs-on: ubuntu-latest
+    # Querying `publishers` one by one exceeded 15 minutes; `update` fetches in
+    # bulk so the time drops, but with a cold cache the first fetch takes long.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # Version pinned. An unpinned install made the parse script below the
+      # victim of whichever output shape the newest release emitted; the parser
+      # still tolerates the list shape, but the pin stops the JSON from being
+      # rewritten underneath a review.
+      - name: cargo install cargo-supply-chain (version pinned)
+        run: cargo install cargo-supply-chain --version 0.3.8 --locked
+      # Every run of `publishers` asked crates.io per crate at more than about
+      # 2 seconds each, and with 566 dependencies that exceeded the 15-minute
+      # timeout: the job was cancelled and produced no output. `update` fetches
+      # the same data in one batch and later commands read from the cache.
+      - name: Fetch publisher data in bulk
+        run: cargo supply-chain update --cache-max-age 1w
+      - name: cargo supply-chain publishers
+        run: cargo supply-chain publishers
+      - name: cargo supply-chain crates
+        run: cargo supply-chain crates
+      # This job had no threshold, so it could not fail, and it carried `|| true`.
+      # The threshold is this: the tree must not reach a dependency with NO
+      # PUBLISHER. An ownerless crate on crates.io is one nobody can take over and
+      # nobody can patch; for a chain that is not a version lag but a hole that
+      # will never close.
+      #
+      # Existence is inspected, not a count: "how many publishers" is not a
+      # threshold because the right number is unknown. "Zero publishers" is always wrong.
+      - name: The ownerless dependency gate
+        run: |
+          set -euo pipefail
+          cargo supply-chain json --diffable > /tmp/supply-chain.json
+          # The parser and its canaries are a Rust gate (xtask/gates,
+          # ownerless_dependencies.rs), not a script written from a heredoc.
+          # The self-test feeds it a synthetic ownerless crate in each JSON
+          # shape the tool has emitted, an unknown shape and an empty
+          # inspection (all must fail) and an owned tree (must pass), so a
+          # green verdict cannot come from a parser that inspects nothing.
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ownerless-dependencies --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ownerless-dependencies /tmp/supply-chain.json
+
+  # BLOCKS. For a chain a data race is not a flaky test: if two nodes reach
+  # different states depending on the outcome of a race, that is a fork.
+  #
+  # The previous shape carried both `continue-on-error: true` and `|| true`, so
+  # so it could not fail under any condition, and it had no canary: "no data
+  # race" could not be told apart from "the binary never ran". Both were removed and a canary added.
+  tsan:
+    name: ThreadSanitizer (data race detection)
+    runs-on: ubuntu-latest
+    # Measured 2026-09-24, run 36057795640: once the probe was fixed the job
+    # really ran for the first time. The probe took under a second, the canary
+    # 19 seconds, but `RUSTFLAGS -Zsanitizer=thread` ran from 20:53:30 to
+    # 21:37:52 (44 min 22 s) and hit the 45-minute job ceiling: the sanitizer
+    # rebuilds the whole dependency tree and the compiler cache was cold on
+    # that run. The ceiling is now 120 minutes. This is not a softening; it is
+    # letting the measurement finish. A run that ends with zero findings says
+    # far more than a run that never ends.
+    #
+    # Second measurement, run 39490423359 (87245eb6): the suite has since
+    # grown to 3,781 tests and 649 s uninstrumented. Under TSan it completed
+    # 3,237, then produced no completed test for the last 32 minutes before
+    # the 120-minute ceiling cancelled it with the two chaos-v2 load tests
+    # still outstanding - no race found, but also no verdict. The ceiling is
+    # now the hosted maximum of 360 minutes for the same reason as above.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust (nightly for TSan)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          # Date-pinned, like the Miri and ASan jobs. A floating `nightly` is
+          # the reason this job re-broke on 2026-09-21 without a single line
+          # of this repository changing: a sanitizer job whose compiler moves
+          # under it reports the toolchain's weather, not this tree's races.
+          toolchain: nightly-2026-07-19
+          # `-Zbuild-std` rebuilds the standard library from source; without
+          # this component the canary stops at "Cargo.lock does not exist,
+          # unable to build with the standard library" before TSan ever runs
+          # (that is what the 2026-08-31 scheduled run died on).
+          components: rust-src
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # A cache key of its OWN, not the shared `budlum-core` one. Sanitizer
+          # builds are ABI-incompatible with ordinary ones, so restoring
+          # artefacts produced by a non-sanitizer job is a second, independent
+          # source of exactly the "mixing `-Zsanitizer`" error this job died
+          # on. The ASan job already keys itself separately; this one did not.
+          shared-key: tsan
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # Canary: a deliberately racing program is written and TSan is expected to
+      # catch it. If it does not, the tool is not working and a clean report says
+      # nothing. Without the canary a green job would say not that the scan ran,
+      # but at most that it did not fail.
+      # `-Zsanitizer` is a TARGET MODIFIER. From rustc 1.91 on, the compiler
+      # refuses to link a crate built with it against one built without it:
+      #
+      #   error: mixing `-Zsanitizer` will cause an ABI mismatch in crate `cfg_if`
+      #
+      # which is what killed the 2026-09-21 scheduled run (35591669754) without
+      # a single line of this tree changing - the job floated on `nightly`, and
+      # the toolchain moved under it. Two fixes, and both are needed:
+      #
+      #   1. the toolchain is now date-pinned (see above), like Miri and ASan;
+      #   2. `-Cunsafe-allow-abi-mismatch=sanitizer` is added IF the pinned
+      #      compiler knows the flag. Build scripts and proc-macros are
+      #      compiled for the host and deliberately do not carry `-Zsanitizer`,
+      #      so under `-Zbuild-std` the mismatch is structural, not a defect in
+      #      this code; the flag is the documented escape from the upstream
+      #      sanitizer tutorial.
+      #
+      # The support probe is not decoration: hardcoding a flag an older pinned
+      # nightly does not recognise would turn "unknown codegen option" into the
+      # next silent red, which is the same failure wearing a different hat. The
+      # detection is not weakened either way - the canary below still has to
+      # SEE the race or the step fails.
+      - name: Does the pinned compiler need (and know) the ABI-mismatch escape
+        run: |
+          set -euo pipefail
+          # A FEATURE PROBE, not a measurement: the question is strictly "does
+          # this compiler accept this flag", and the answer is the exit code.
+          # The stderr is kept rather than discarded, because "rustc is not on
+          # PATH" and "the flag is unknown" are different answers and only the
+          # second one may be treated as a no.
+          # The output must NOT be /dev/null. rustc creates its temporary
+          # files next to the output path, so `-o /dev/null` makes it try to
+          # mkdir inside /dev, which fails with "couldn't create a temp dir:
+          # Permission denied" - an answer about the runner's filesystem, not
+          # about the flag. The probe then reported the toolchain as unusable
+          # and the job died before the sanitizer ever ran (2026-09-24: the
+          # canary and the TSan step were both skipped, so the "does the tool
+          # really catch a race" proof was never produced).
+          probe_dir=$(mktemp -d)
+          set +e
+          echo 'fn main(){}' \
+            | rustc +nightly-2026-07-19 -Cunsafe-allow-abi-mismatch=sanitizer \
+                --emit=metadata -o "${probe_dir}/probe.rmeta" - \
+                > /tmp/abi-probe.log 2>&1
+          probe_status=$?
+          set -e
+          rm -rf "${probe_dir}"
+          if [ "$probe_status" -ne 0 ] && ! grep -qiE "unknown|unstable|unrecognized|invalid" /tmp/abi-probe.log; then
+            echo "::error::the ABI-escape probe failed for a reason that is not an unknown flag (exit $probe_status) - the pinned toolchain itself is not usable here."
+            cat /tmp/abi-probe.log >&2
+            exit 1
+          fi
+          if [ "$probe_status" -eq 0 ]; then
+            echo "TSAN_ABI_FLAG=-Cunsafe-allow-abi-mismatch=sanitizer" >> "$GITHUB_ENV"
+            echo "the pinned nightly knows -Cunsafe-allow-abi-mismatch; using it."
+          else
+            echo "TSAN_ABI_FLAG=" >> "$GITHUB_ENV"
+            echo "the pinned nightly has no -Cunsafe-allow-abi-mismatch: it predates the target-modifier check, so nothing to escape from."
+          fi
+      - name: TSan canary (does the tool really catch it)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tsan-canary/src
+          cat > /tmp/tsan-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "tsan-canary"
+          version = "0.0.0"
+          edition = "2021"
+          EOF
+          cat > /tmp/tsan-canary/src/main.rs <<'EOF'
+          // Two threads write to the same address without synchronization. If TSan
+          // does not see this the scan is not trustworthy.
+          fn main() {
+              let mut value = 0i64;
+              let ptr = std::ptr::addr_of_mut!(value) as usize;
+              let a = std::thread::spawn(move || {
+                  let p = ptr as *mut i64;
+                  for _ in 0..10_000 { unsafe { *p += 1 } }
+              });
+              let b = std::thread::spawn(move || {
+                  let p = ptr as *mut i64;
+                  for _ in 0..10_000 { unsafe { *p += 1 } }
+              });
+              a.join().unwrap();
+              b.join().unwrap();
+              println!("{value}");
+          }
+          EOF
+          cd /tmp/tsan-canary
+          export RUSTFLAGS="-Zsanitizer=thread $TSAN_ABI_FLAG"
+          # The canary runs WITH the suppression list. A list that also
+          # silenced a deliberate race would turn this job into decoration,
+          # so the proof and the filter are exercised together or not at all.
+          export TSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/.github/tsan-suppressions.txt print_suppressions=1"
+          # Capture the output into a file first: under `set -euo pipefail` a
+          # non-zero exit anywhere in the pipeline decides the condition, and
+          # TSan exits non-zero precisely when it finds the race. The pipeline
+          # form made a successful catch read as a failed canary.
+          set +e
+          cargo +nightly-2026-07-19 run -Zbuild-std --target x86_64-unknown-linux-gnu \
+            > /tmp/tsan-canary.log 2>&1
+          set -e
+          if grep -q "WARNING: ThreadSanitizer" /tmp/tsan-canary.log; then
+            echo "canary OK: TSan caught the deliberately written race."
+          else
+            echo "CANARY FAILED: TSan could not catch a data race, so even a clean report" >&2
+            echo "from this job proves nothing." >&2
+            tail -20 /tmp/tsan-canary.log >&2
+            exit 1
+          fi
+
+      # Second canary, and it exists because of a review finding on PR #81: a
+      # `race:` rule is a substring test against every frame of BOTH stacks, so
+      # a rule naming sled's public API could silence a race in OUR memory
+      # whose other access merely passed through a sled entry point. The first
+      # canary cannot catch that - its race has no sled frame anywhere.
+      #
+      # This one has exactly that shape. One thread writes the racing address
+      # from inside the closure `Tree::update_and_fetch` calls, the other
+      # writes it directly and never touches sled, so the two accesses share no
+      # sled-created happens-before edge while one of the two stacks carries
+      # `sled::tree::` frames. If the suppression list ever swallows this, the
+      # job fails here instead of going green over a hidden race.
+      - name: TSan sled-frame canary (can the list swallow OUR race?)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tsan-sled-canary/src
+          cat > /tmp/tsan-sled-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "tsan-sled-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          sled = "0.34.7"
+          EOF
+          cat > /tmp/tsan-sled-canary/src/main.rs <<'EOF'
+          // The racing memory is ours; only the stack is sled's.
+          fn main() {
+              let db = sled::Config::new()
+                  .temporary(true)
+                  .open()
+                  .expect("the canary needs a store to borrow a stack frame from");
+              let mut value = 0i64;
+              let ptr = std::ptr::addr_of_mut!(value) as usize;
+
+              // Thread A: the write happens INSIDE a closure sled invokes, so
+              // `sled::tree::Tree::update_and_fetch` sits in this stack.
+              let inside = {
+                  let db = db.clone();
+                  std::thread::spawn(move || {
+                      for i in 0..20_000u32 {
+                          let _ = db.update_and_fetch(b"canary", |_old| {
+                              let p = ptr as *mut i64;
+                              unsafe { *p += 1 }
+                              Some(i.to_le_bytes().to_vec())
+                          });
+                      }
+                  })
+              };
+              // Thread B: the same address, no sled on this side at all.
+              let outside = std::thread::spawn(move || {
+                  let p = ptr as *mut i64;
+                  for _ in 0..20_000 { unsafe { *p += 1 } }
+              });
+              inside.join().expect("join");
+              outside.join().expect("join");
+              println!("{value}");
+          }
+          EOF
+          cd /tmp/tsan-sled-canary
+          export RUSTFLAGS="-Zsanitizer=thread $TSAN_ABI_FLAG"
+          export TSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/.github/tsan-suppressions.txt print_suppressions=1"
+          set +e
+          cargo +nightly-2026-07-19 run -Zbuild-std --target x86_64-unknown-linux-gnu \
+            > /tmp/tsan-sled-canary.log 2>&1
+          set -e
+          if grep -q "WARNING: ThreadSanitizer" /tmp/tsan-sled-canary.log; then
+            echo "sled-frame canary OK: a race in our own memory is still reported"
+            echo "even though one of its stacks goes through sled."
+          else
+            echo "::error::SLED-FRAME CANARY FAILED: ThreadSanitizer reported nothing for a race" >&2
+            echo "in our own memory whose other stack passes through sled. The suppression list" >&2
+            echo "is masking application races - narrow it (see .github/tsan-suppressions.txt)." >&2
+            tail -40 /tmp/tsan-sled-canary.log >&2
+            exit 1
+          fi
+
+      - name: RUSTFLAGS -Zsanitizer=thread
+        run: |
+          set -euo pipefail
+          # Same target-modifier reasoning as the canary above; `RUSTDOCFLAGS`
+          # is set too because doctests are compiled by rustdoc and inherit
+          # neither `RUSTFLAGS` nor, without this, the sanitizer ABI.
+          export RUSTFLAGS="-Zsanitizer=thread $TSAN_ABI_FLAG"
+          export RUSTDOCFLAGS="$RUSTFLAGS"
+          # Suppression list: `.github/tsan-suppressions.txt` carries the
+          # measurement that justifies every line in it. `print_suppressions=1`
+          # makes each run state how many reports the list swallowed, so the
+          # filter cannot quietly grow into a blindfold: if that number ever
+          # reaches zero the list is dead weight and gets deleted, and if it
+          # jumps the cause is read before the number is accepted.
+          export TSAN_OPTIONS="suppressions=${GITHUB_WORKSPACE}/.github/tsan-suppressions.txt print_suppressions=1"
+          set +e
+          cargo +nightly-2026-07-19 test --lib -Zbuild-std \
+            --target x86_64-unknown-linux-gnu -- --test-threads=1 \
+            2>&1 | tee /tmp/tsan-run.log
+          status=${PIPESTATUS[0]}
+          set -e
+          echo "--- suppression accounting"
+          # Two numbers, both read from the run that just happened: what the
+          # list swallowed, and what survived it. The second one is the gate.
+          # `awk` is used rather than `grep -c`, because `grep` exits non-zero
+          # when a pattern is absent and the `|| true` that would paper over
+          # that is exactly the softening the `security-scans-can-fail` gate
+          # refuses to see in this job. `awk` reports zero as a number and
+          # exits zero, so nothing here can swallow a failure.
+          # ThreadSanitizer prints "ThreadSanitizer: Matched N suppressions";
+          # take N, not the number of times the line appeared. Measured
+          # 2026-09-25 (job 108022518404): N was 578 while the line itself
+          # appeared once, and the first version of this counter reported 1.
+          matched=$(awk '/ThreadSanitizer: Matched [0-9]+ suppressions/{for(i=1;i<=NF;i++) if($i=="Matched") {print $(i+1); exit}}' /tmp/tsan-run.log)
+          matched=${matched:-0}
+          surviving=$(awk '/WARNING: ThreadSanitizer/{n++} END{print n+0}' /tmp/tsan-run.log)
+          echo "suppressed by the list: ${matched}"
+          echo "unsuppressed ThreadSanitizer warnings: ${surviving}"
+
+          # Per-rule table. One total cannot say WHICH rule is carrying the
+          # noise, and the review finding on PR #81 is about a rule that is
+          # wider than the noise it was written for. `print_suppressions=1`
+          # prints "  <count> <rule>" under the Matched line; those counts are
+          # the only evidence that a line in the file is still earning its
+          # place.
+          echo "--- per-rule hits (from print_suppressions=1)"
+          awk '/^[[:space:]]*[0-9]+[[:space:]]+race:/{print $1, $2}' /tmp/tsan-run.log \
+            | sort | uniq > /tmp/tsan-rule-hits.txt
+          cat /tmp/tsan-rule-hits.txt
+          baseline="${GITHUB_WORKSPACE}/.github/tsan-suppressions-baseline.txt"
+          dead=0
+          while read -r rule; do
+            case "${rule}" in ''|\#*) continue ;; esac
+            hits=$(awk -v r="${rule}" '$2==r{n+=$1} END{print n+0}' /tmp/tsan-rule-hits.txt)
+            ceiling=$(awk -v r="${rule}" '$1==r{print $2; exit}' "${baseline}")
+            echo "${rule}: ${hits} (reviewed ceiling ${ceiling:-<none>})"
+            if [ -z "${ceiling}" ]; then
+              echo "::error::suppression rule '${rule}' has no reviewed ceiling in .github/tsan-suppressions-baseline.txt. Rules are not added quietly: measure the rule, write its count into the baseline, and let that commit be reviewed." >&2
+              dead=1
+              continue
+            fi
+            if [ "${hits}" -eq 0 ]; then
+              echo "::error::suppression rule '${rule}' matched nothing in this run. A rule that silences nothing can only ever silence something new: delete the line from .github/tsan-suppressions.txt and its baseline line." >&2
+              dead=1
+            fi
+            if [ "${hits}" -gt "${ceiling}" ]; then
+              echo "::error::suppression rule '${rule}' swallowed ${hits} reports, above its reviewed ceiling of ${ceiling}. Growth under a kept rule is still unread noise: read the reports in this job's log; if the growth is genuine, raise the ceiling in its own reviewed commit." >&2
+              dead=1
+            fi
+          done < "${GITHUB_WORKSPACE}/.github/tsan-suppressions.txt"
+          # The baseline and the list are one statement, read in both
+          # directions: a ceiling whose rule is gone is a review that lost
+          # its subject, and stale paperwork is how a re-added rule sneaks
+          # past the "no ceiling" check above.
+          while read -r brule bceiling; do
+            case "${brule}" in ''|\#*) continue ;; esac
+            if ! grep -qx "${brule}" "${GITHUB_WORKSPACE}/.github/tsan-suppressions.txt"; then
+              echo "::error::.github/tsan-suppressions-baseline.txt lists '${brule}' (ceiling ${bceiling}) but the suppression list does not carry it. Delete the baseline line, or re-add the rule - the two files must agree." >&2
+              dead=1
+            fi
+          done < "${baseline}"
+
+          # There is deliberately NO aggregate cap here any more. A total
+          # cannot prove that no new race was swallowed: a new report
+          # matching one retained rule can replace disappearing old reports
+          # and keep the total flat, green, and wrong. The per-rule ceilings
+          # above are the review; the matched total below is a log line,
+          # nothing more.
+          if [ "${dead}" -ne 0 ]; then
+            exit 1
+          fi
+          if [ "${surviving}" -ne 0 ]; then
+            echo "::error::${surviving} data race report(s) survived the suppression list; these are not the known sled shutdown races." >&2
+            exit 1
+          fi
+          exit "${status}"
+
+  # BLOCKS. TSan reports the race it sees, loom proves the one it does not see.
+  #
+  # The two do not measure the same thing and neither replaces the other. TSan
+  # inspects the schedule the machine happened to pick, so a green run says "the
+  # schedules tried were clean". A lock inversion needs two threads arriving at
+  # the wrong moment in the wrong order, which is the schedule a loaded runner
+  # is least likely to produce.
+  #
+  # loom runs the model: EVERY interleaving the memory model allows, exhaustively.
+  # It detects deadlock not by waiting but as a state with no runnable thread
+  # left. When it passes, the ordering is proven for the model rather than
+  # observed once.
+  #
+  # PoSEngine holds four locks and three call sites take two of them at once:
+  # seen_blocks -> checkpoints -> slashing_evidence. What is proven is that this
+  # chain is acyclic.
+  loom:
+    name: loom (consensus lock order, exhaustive model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # Canary: a model that deliberately takes locks in reverse order is written
+      # and loom is expected to find the deadlock. If it does not, the real tests
+      # being green would say not that the ordering is correct, but at most that
+      # loom did not run. When `--cfg loom` is forgotten the tests silently do not
+      # compile and nothing runs; the canary catches exactly that state.
+      - name: loom canary (does the tool really find the deadlock)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/loom-canary/src
+          cat > /tmp/loom-canary/Cargo.toml <<'EOF'
+          [package]
+          name = "loom-canary"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          loom = "0.7"
+          EOF
+          cat > /tmp/loom-canary/src/main.rs <<'EOF'
+          // Two threads take the same two locks in REVERSE order. If loom does not
+          // find it, the real lock-order tests prove nothing.
+          use loom::sync::Mutex;
+          use loom::thread;
+          use std::sync::Arc;
+
+          fn main() {
+              loom::model(|| {
+                  let a = Arc::new(Mutex::new(0));
+                  let b = Arc::new(Mutex::new(0));
+
+                  let t1 = {
+                      let (a, b) = (Arc::clone(&a), Arc::clone(&b));
+                      thread::spawn(move || {
+                          let _x = a.lock().unwrap();
+                          let _y = b.lock().unwrap();
+                      })
+                  };
+                  let t2 = {
+                      let (a, b) = (Arc::clone(&a), Arc::clone(&b));
+                      thread::spawn(move || {
+                          let _y = b.lock().unwrap();
+                          let _x = a.lock().unwrap();
+                      })
+                  };
+                  t1.join().unwrap();
+                  t2.join().unwrap();
+              });
+          }
+          EOF
+          cd /tmp/loom-canary
+          # This command is EXPECTED TO FAIL: the model deadlocks.
+          # We capture the output into a file first, because under `set -euo pipefail`
+          # if a program in a pipeline exits non-zero grep never runs and the canary
+          # measures its own shell.
+          set +e
+          RUSTFLAGS="--cfg loom" cargo run --release > /tmp/loom-canary.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "CANARY FAILED: loom did not report a deliberately inverted lock order" >&2
+            echo "as a deadlock, so the real tests are running empty." >&2
+            tail -30 /tmp/loom-canary.log >&2
+            exit 1
+          fi
+          if grep -qi "deadlock" /tmp/loom-canary.log; then
+            echo "canary OK: loom found the deliberately inverted ordering as a deadlock."
+          else
+            echo "CANARY FAILED: loom failed but the reason is not a deadlock." >&2
+            tail -30 /tmp/loom-canary.log >&2
+            exit 1
+          fi
+      # The model compiles against loom in a harness crate whose only dependency
+      # is loom itself. The previous form set `--cfg loom` through RUSTFLAGS on
+      # the whole `cargo test --lib` build, which recompiles every transitive
+      # dependency with the loom cfg; the smol-ecosystem crates in the tree
+      # (event-listener, event-listener-strategy, concurrent-queue, parking)
+      # gate their sync shims behind `#[cfg(loom)]` with a target-scoped
+      # optional `loom` dependency that cargo does not resolve from RUSTFLAGS,
+      # so the build broke with "cannot find module or crate `loom`" inside a
+      # dependency. The harness keeps the cfg scoped to the model, and the
+      # model file is the same file the normal test tree compiles (the
+      # inventory test inside it stays in the ordinary profile too), so the
+      # loom run cannot drift from what CI otherwise verifies.
+      - name: The loom model (every interleaving)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/loom-model/src
+          cat > /tmp/loom-model/Cargo.toml <<'EOF'
+          [package]
+          name = "loom-model"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          loom = "0.7"
+          EOF
+          cat > /tmp/loom-model/src/main.rs <<EOF
+          //! Harness that compiles the real model file from the checkout, so the
+          //! loom run cannot drift from the file the ordinary test tree builds.
+          #[path = "$GITHUB_WORKSPACE/src/tests/consensus_lock_order_loom.rs"]
+          mod consensus_lock_order_loom;
+
+          fn main() {}
+          EOF
+          cd /tmp/loom-model
+          RUSTFLAGS="--cfg loom" cargo test --release -- --nocapture 2>&1 | tee /tmp/loom-model.log
+          # A model run that executes zero tests is not a pass.
+          if ! grep -Eq '^running [1-9][0-9]* tests?$' /tmp/loom-model.log; then
+            echo "::error::the loom model ran zero tests"
+            exit 1
+          fi

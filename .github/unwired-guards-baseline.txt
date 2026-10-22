@@ -1,0 +1,83 @@
+3
+# Guards no production path reaches.
+#
+# Every `pub fn` named check/verify/validate/require/enforce/assert/reject/
+# refuse/deny/guard is a refusal by its own naming. Three of them are
+# reachable only from tests, which means they protect the tests.
+#
+# The number may only go down. Wiring one up, or moving it into a module that
+# honestly declares `WIRING: unwired`, lowers it; lower this file in the same
+# pull request or the gain is given back silently.
+#
+# Not a hard zero on purpose. Some of what remains should not be wired at all:
+# `verify_answer_challenge_zk_proof` returns `Err` unconditionally on purpose,
+# because a Merkle proof not bound to its deal and challenge context is
+# replayable across storage deals and networks, and callers are meant to use
+# `answer_challenge`, which rebuilds that context from registry state. Calling
+# it would satisfy this gate and weaken the chain. A number that can only fall
+# gets paid down; a number driven to zero by wiring refusals that exist to
+# stay unwired is worse than the number it replaced.
+#
+# The three, and why each one is still here rather than wired:
+#
+#   src/ai/execution/verify.rs   verify_execution_proof_structural
+#   src/ai_inference/verify.rs          verify_inference_stark
+#       All three verify a STARK over an execution trace, and all three are
+#       blocked on the same gate: `MainnetActivation` ships with
+#       `verify_merkle_enabled: false` and `verify_inference_enabled: false`,
+#       pending external audit of the zkVM opcodes. Wiring them before that
+#       audit would put an unaudited proof system on the acceptance path,
+#       which is the opposite of what the gate is for. They move when the
+#       audit lands, not before.
+#
+#   src/domain/storage_deal.rs   verify_answer_challenge_zk_proof
+#       Returns `Err` unconditionally, on purpose. A Merkle proof not bound to
+#       its deal and challenge context is replayable across storage deals and
+#       networks; callers are meant to use `answer_challenge`, which rebuilds
+#       that context from registry state. Calling this would satisfy the gate
+#       and weaken the chain.
+#
+# Two call sites closed since this file was last written, and the number is
+# still five because the five listed below are different guards.
+#
+#   src/cross_domain/evm/adapter.rs  verify_deposit
+#       Wired into `ChainAdapter::verify_observation`, the check the relayer
+#       worker runs over every observation before it signs. The EVM override
+#       decodes the `DepositProofPackage` the observation carries and runs
+#       the full verifier with the adapter's own bridge address, topic and
+#       confirmation floor; a bare Merkle path is refused on that chain. The
+#       question this note used to ask, who assembles the package, has its
+#       answer: the adapter's RPC side, and until one exists the offline
+#       adapter refuses to produce an observation at all.
+#
+#   src/storage/qr_reemit.rs   verify_stream_id
+#       Called by `RevealSession::open` against a fold recomputed from the
+#       emitted frames. It left the count when that call landed: this gate
+#       measures call sites, so wiring removes a guard immediately. What it
+#       does not measure is whether the calling module is itself entered by a
+#       binary, and `RevealSession` is only re-exported from
+#       `src/storage/mod.rs`. That question is written here rather than hidden
+#       in the number.
+#
+#   src/storage/transformed.rs   verify_hash
+#       Called by `three_pipe::encode_plain` before the body moves into the A1
+#       pack, refusing a payload whose bytes no longer match the digest the
+#       transform pinned. Same accounting.
+#
+# The stale declarations were deleted rather than kept. A `WIRING: unwired` note
+# that contradicts the caller graph is worse than no note: it tells the next
+# reader not to look.
+#
+#   src/ai_inference/mod.rs             validate_inference_grant
+#       Wired into `build_ai_request`, which now takes the grant as a
+#       required argument. Two doc comments already claimed the check was
+#       performed; nothing performed it.
+#
+#   src/core/block.rs            verify_signature_with_pubkey
+#       Wired into the PoA validation path, which was doing the same two
+#       checks inline and could have drifted from them.
+#
+#   src/budlumxyz/mod.rs         verify_app
+#       Deleted. A back-compat alias for `attest_app_as_developer`, named as
+#       though it were a third-party audit when it only records a developer's
+#       own claim. The production path always called the honest name.

@@ -1,0 +1,402 @@
+pub mod merkle_tree;
+pub mod poa;
+pub mod pos;
+pub mod pow;
+pub mod qc;
+pub mod split_resolver;
+use crate::core::block::Block;
+pub use poa::PoAEngine;
+pub use pos::PoSEngine;
+pub use pow::{PoWConfig, PoWEngine};
+use std::error::Error;
+use std::fmt;
+#[derive(Debug)]
+pub struct ConsensusError(pub String);
+impl fmt::Display for ConsensusError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Consensus error: {}", self.0)
+    }
+}
+impl Error for ConsensusError {}
+pub const MAX_FUTURE_BLOCK_TIME_MS: u128 = 15 * 1000;
+pub const MAX_PAST_BLOCK_TIME_MS: u128 = 2 * 60 * 60 * 1000;
+pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
+/// How many leader-election rounds one slot may run (P01-F01, P01-F02).
+///
+/// A slot with no elected leader used to stall forever: the VRF seed had no
+/// retry term, so every retry tick drew the same (empty) result. A round term
+/// in the seed re-rolls the election, and the round threshold multiplier
+/// widens eligibility geometrically, so a slot fills after a bounded number
+/// of rounds even with a minority of the validators online.
+pub const MAX_LEADER_ROUNDS: u64 = 16;
+/// Wall-clock spacing between leader rounds of one slot (P01-F01, P01-F02).
+///
+/// Claiming round `r` costs `r` timeouts: validation requires the block
+/// timestamp to sit at least `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
+/// after its parent. Without that floor every validator would jump straight
+/// to the widest threshold in round `MAX_LEADER_ROUNDS` and the round term
+/// would buy nothing but forks. The floor also removes the "stay 1 s ahead of
+/// the parent" steering channel (P01-F20): a later round can no longer be
+/// claimed on the minimum step.
+pub const ROUND_TIMEOUT_MS: u128 = 3 * 1000;
+/// Consensus block-size ceiling, measured over the **JSON** encoding.
+///
+/// Distinct from `network::protocol::MAX_BLOCK_SIZE` (1 MiB) on purpose, and
+/// the two are not interchangeable despite the shared name:
+///
+/// | constant | value | measured over | rejects at |
+/// | :-- | :-- | :-- | :-- |
+/// | `consensus::MAX_BLOCK_SIZE` | 1_000_000 | `serde_json::to_vec` | block validation |
+/// | `protocol::MAX_BLOCK_SIZE` | 1_048_576 | `prost` `encoded_len` | gossip ingest |
+///
+/// The transport bound is the looser of the two *and* it measures the more
+/// compact encoding, so the consensus check is always the binding one. A block
+/// that clears gossip can still be refused by validation; the reverse cannot
+/// happen. That ordering is the safe one - the network never accepts something
+/// consensus would reject - but it is a property of the current numbers, not
+/// of the design, and nothing was recording it.
+///
+/// If either value moves, keep `protocol::MAX_BLOCK_SIZE` (protobuf) at or
+/// above this one (JSON), or gossip starts admitting blocks every validator
+/// then refuses.
+pub const MAX_BLOCK_SIZE: usize = 1_000_000;
+/// Largest single slashing-evidence entry a block may carry.
+///
+/// Enforced where evidence is admitted (`submit_slashing_evidence`), where it
+/// is inlined into a block, and where the consensus engine hands its pool
+/// over, so an entry that is accepted is always small enough to be included in
+/// some future block. The block builder also reserves this much room for
+/// evidence before it spends the rest of the budget on transactions, so a
+/// saturated mempool cannot starve a queued double-sign proof out of every
+/// block.
+pub const MAX_SLASHING_EVIDENCE_BYTES: usize = 65_536;
+pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 5000;
+pub const MAX_REORG_DEPTH: usize = 100;
+use crate::core::account::AccountState;
+
+pub trait ConsensusEngine: Send + Sync {
+    fn preview_block(
+        &self,
+        _block: &mut Block,
+        _state: &AccountState,
+    ) -> Result<(), ConsensusError> {
+        Ok(())
+    }
+    /// Chain-aware preview for consensus engines whose proposer selection is
+    /// Derived from canonical history. Production block construction calls
+    /// This method so preview and remote validation consume the same prefix.
+    fn preview_block_with_chain(
+        &self,
+        block: &mut Block,
+        state: &AccountState,
+        _chain: &[Block],
+    ) -> Result<(), ConsensusError> {
+        self.preview_block(block, state)
+    }
+    fn prepare_block(&self, block: &mut Block, state: &AccountState) -> Result<(), ConsensusError>;
+    fn prepare_block_with_chain(
+        &self,
+        block: &mut Block,
+        state: &AccountState,
+        _chain: &[Block],
+    ) -> Result<(), ConsensusError> {
+        self.prepare_block(block, state)
+    }
+    fn validate_block(
+        &self,
+        block: &Block,
+        chain: &[Block],
+        state: &AccountState,
+    ) -> Result<(), ConsensusError>;
+
+    /// The kind of chain this engine produces blocks for.
+    ///
+    /// `AccountState::execution_domain` is stamped from this at every point
+    /// a state is built or replaced, and it is what the identity write gate
+    /// consults. The default is `PoS`, which is the Budlum mainnet fact and keeps
+    /// the master registry closed: an engine that does not declare itself
+    /// does not open a gated write. `PoAEngine` overrides; nothing else may.
+    fn domain_kind(&self) -> crate::domain::ConsensusKind {
+        crate::domain::ConsensusKind::PoS
+    }
+    fn record_block(
+        &self,
+        _block: &Block,
+        _storage: Option<&crate::storage::db::Storage>,
+    ) -> Result<(), ConsensusError> {
+        Ok(())
+    }
+
+    /// Look at a block received from the network, before the chain accepts or
+    /// rejects it, for proof of producer misbehaviour. It must not change
+    /// chain state and must not write checkpoints: the block may never
+    /// commit. The default is a no-op; `PoSEngine` turns a signed rival block
+    /// into double-sign evidence (BLG-0011).
+    fn observe_received_block(&self, _block: &Block) -> Result<(), ConsensusError> {
+        Ok(())
+    }
+
+    /// (security audit §3) chain-aware variant of `record_block`.
+    /// Called from `blockchain.rs` AFTER a block has been durably
+    /// Committed and the chain is in its post-commit state. The
+    /// Default implementation is a no-op; engines that need access to
+    /// The full chain (e.g. `PoWEngine` for difficulty adjustment)
+    /// Override it. Validation (`validate_block`) MUST remain pure -
+    /// Any state mutation triggered by a block landing on the chain
+    /// Belongs here, not in validation.
+    fn record_block_with_chain(
+        &self,
+        _block: &Block,
+        _chain: &[Block],
+        _storage: Option<&crate::storage::db::Storage>,
+    ) {
+    }
+
+    /// The chain reports the height finalised by quorum certificates
+    /// (P01-F04).
+    ///
+    /// A checkpoint written at local commit time is not a finality claim: two
+    /// nodes commit different blocks at an epoch boundary and then reject each
+    /// other's chains forever. Checkpoints are therefore held pending until
+    /// the height they name is finalised, and this method is how the chain
+    /// hands that finality to the engine. The default is a no-op.
+    fn note_finalized_height(
+        &self,
+        _height: u64,
+        _chain: &[Block],
+        _storage: Option<&crate::storage::db::Storage>,
+    ) {
+    }
+    fn load_state(&self, _storage: &crate::storage::db::Storage) -> Result<(), ConsensusError> {
+        Ok(())
+    }
+    fn drain_slashing_evidence(
+        &self,
+    ) -> Result<Vec<crate::consensus::pos::SlashingEvidence>, ConsensusError> {
+        Ok(Vec::new())
+    }
+    fn prune_slashing_evidence(&self, _min_height: u64) -> Result<usize, ConsensusError> {
+        Ok(0)
+    }
+    fn consensus_type(&self) -> &'static str;
+    fn info(&self) -> String;
+    fn signer(&self) -> Option<&dyn crate::crypto::signer::ConsensusSigner> {
+        None
+    }
+    fn bls_secret_key(&self) -> Option<bls12_381::Scalar> {
+        None
+    }
+    fn bls_public_key(&self) -> Option<Vec<u8>> {
+        None
+    }
+    fn validate_timestamp(
+        &self,
+        block: &Block,
+        prev_block: Option<&Block>,
+    ) -> Result<(), ConsensusError> {
+        // Reject blocks with timestamps too far in the future.
+        // This prevents block producers from corrupting time-dependent logic
+        // (vesting, BNS expiry, bridge lock expiry, AI deadlines).
+        // Uses existing MAX_FUTURE_BLOCK_TIME_MS constant (15 seconds).
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        if block.timestamp > now_ms.saturating_add(MAX_FUTURE_BLOCK_TIME_MS) {
+            return Err(ConsensusError(format!(
+                "Block timestamp too far in the future. Now: {}, Block: {}, Max drift: {} ms",
+                now_ms, block.timestamp, MAX_FUTURE_BLOCK_TIME_MS
+            )));
+        }
+
+        if let Some(prev) = prev_block {
+            if block.timestamp <= prev.timestamp {
+                return Err(ConsensusError(format!(
+                    "Block timestamp not monotonic. Prev: {}, Current: {}",
+                    prev.timestamp, block.timestamp
+                )));
+            }
+            let interval = block.timestamp - prev.timestamp;
+            if interval < MIN_BLOCK_INTERVAL_MS {
+                return Err(ConsensusError(format!(
+                    "Block produced too fast. Min interval: {MIN_BLOCK_INTERVAL_MS} ms, Got: {interval} ms"
+                )));
+            }
+        }
+        Ok(())
+    }
+    fn validate_block_size(&self, block: &Block) -> Result<(), ConsensusError> {
+        if block.transactions.len() > MAX_TRANSACTIONS_PER_BLOCK {
+            return Err(ConsensusError(format!(
+                "Too many transactions. Max: {}, Got: {}",
+                MAX_TRANSACTIONS_PER_BLOCK,
+                block.transactions.len()
+            )));
+        }
+        // A silent empty serialization would let an oversized block pass
+        // This size check. Surface the error instead of defaulting to empty.
+        let serialized = serde_json::to_vec(block).map_err(|e| {
+            ConsensusError(format!("Failed to serialize block for size check: {e}"))
+        })?;
+        if serialized.len() > MAX_BLOCK_SIZE {
+            return Err(ConsensusError(format!(
+                "Block too large. Max: {} bytes, Got: {} bytes",
+                MAX_BLOCK_SIZE,
+                serialized.len()
+            )));
+        }
+        Ok(())
+    }
+    fn select_best_chain<'a>(&self, chains: &[&'a [Block]]) -> Option<&'a [Block]> {
+        if chains.is_empty() {
+            return None;
+        }
+        chains.iter().max_by_key(|c| c.len()).copied()
+    }
+    /// Test-only depth probe (P01-F21: `try_reorg` enforces the depth limit
+    /// on the live path; nothing production-side calls this).
+    #[cfg(test)]
+    fn can_reorg(&self, current_chain: &[Block], new_chain: &[Block]) -> bool {
+        if new_chain.len() <= current_chain.len() {
+            return false;
+        }
+        // Depth is measured from the slice position, not from `Block::index`:
+        // the slices handed in here are not required to start at height zero,
+        // and `len - index - 1` underflows on a suffix.
+        let ancestor_pos = current_chain
+            .iter()
+            .rposition(|b| new_chain.iter().any(|nb| nb.hash == b.hash));
+        // No shared block means the candidate replaces the whole slice: that
+        // is a reorg of depth `len`, not a reorg of depth zero. Left as
+        // `None`, this path skipped the depth check and admitted any longer
+        // chain with no ancestor at all.
+        let reorg_depth =
+            ancestor_pos.map_or(current_chain.len(), |pos| current_chain.len() - pos - 1);
+        if reorg_depth > MAX_REORG_DEPTH {
+            tracing::warn!(
+                "Rejecting deep reorg: {} blocks (max: {})",
+                reorg_depth,
+                MAX_REORG_DEPTH
+            );
+            return false;
+        }
+        true
+    }
+    fn full_validate(
+        &self,
+        block: &Block,
+        chain: &[Block],
+        state: &AccountState,
+    ) -> Result<(), ConsensusError> {
+        if block.index == 0 {
+            return self.validate_block(block, chain, state);
+        }
+        let prev_block = chain.last();
+        self.validate_timestamp(block, prev_block)?;
+        self.validate_block_size(block)?;
+        self.validate_block(block, chain, state)?;
+        Ok(())
+    }
+
+    fn fork_choice_score(&self, chain: &[Block]) -> u128 {
+        chain.len() as u128
+    }
+
+    fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
+        self.fork_choice_score(candidate) > self.fork_choice_score(current)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_constants() {
+        assert_eq!(MAX_FUTURE_BLOCK_TIME_MS, 15_000);
+        assert_eq!(MIN_BLOCK_INTERVAL_MS, 1000);
+        assert_eq!(MAX_REORG_DEPTH, 100);
+        // One definition, two gates. `try_reorg` refuses a deep reorg at the
+        // state machine and `is_better_chain` refuses it at fork choice; they
+        // used to hold separate `= 100` literals with nothing connecting them,
+        // so raising one silently left the other enforcing the old depth, a
+        // chain accepted by one gate and refused by the other.
+        assert_eq!(
+            crate::chain::blockchain::MAX_REORG_DEPTH,
+            MAX_REORG_DEPTH,
+            "the chain layer must re-export this constant, not redeclare it"
+        );
+    }
+
+    /// `can_reorg` used `len - Block::index - 1`, which only holds when the
+    /// slice starts at height zero. A suffix (the shape a sync round hands
+    /// over) underflowed in debug builds and produced a wrapped depth in
+    /// release builds. Depth now comes from the slice position.
+    #[test]
+    fn can_reorg_measures_depth_from_slice_position() {
+        fn block(height: u64, prev: &str) -> Block {
+            let mut b = Block::new_with_chain_id(height, prev.to_string(), vec![], 1);
+            b.hash = b.calculate_hash();
+            b
+        }
+        let engine = crate::consensus::pow::PoWEngine::new(0);
+
+        // Current chain is a suffix starting at height 1000.
+        let mut current = vec![block(1000, "root")];
+        for h in 1001..1003 {
+            let prev = current.last().unwrap().hash.clone();
+            current.push(block(h, &prev));
+        }
+        // New chain forks from the first suffix block and is longer.
+        let mut new_chain = vec![current[0].clone()];
+        for h in 1001..1005 {
+            let prev = new_chain.last().unwrap().hash.clone();
+            new_chain.push(block(h, &format!("{prev}-fork")));
+        }
+        // Depth from the ancestor is 2, well under MAX_REORG_DEPTH.
+        assert!(engine.can_reorg(&current, &new_chain));
+
+        // A fork deeper than MAX_REORG_DEPTH is still refused on a suffix.
+        let mut deep_current = vec![block(1000, "root")];
+        for h in 1001..(1001 + MAX_REORG_DEPTH as u64 + 1) {
+            let prev = deep_current.last().unwrap().hash.clone();
+            deep_current.push(block(h, &prev));
+        }
+        let mut deep_new = vec![deep_current[0].clone()];
+        for h in 1001..(1001 + MAX_REORG_DEPTH as u64 + 2) {
+            let prev = deep_new.last().unwrap().hash.clone();
+            deep_new.push(block(h, &format!("{prev}-fork")));
+        }
+        assert!(!engine.can_reorg(&deep_current, &deep_new));
+    }
+
+    /// A longer candidate that shares no block with the current slice is a
+    /// reorg of the whole slice. Under the cap it is admitted; over the cap
+    /// it is refused, the same as a fork from a known ancestor. This used to
+    /// skip the depth check when no ancestor was found.
+    #[test]
+    fn can_reorg_treats_no_ancestor_as_a_whole_slice_reorg() {
+        fn block(height: u64, prev: &str) -> Block {
+            let mut b = Block::new_with_chain_id(height, prev.to_string(), vec![], 1);
+            b.hash = b.calculate_hash();
+            b
+        }
+        let engine = crate::consensus::pow::PoWEngine::new(0);
+        let build = |len: usize, tag: &str| {
+            let mut chain = vec![block(1000, tag)];
+            for h in 1001..(1000 + len as u64) {
+                let prev = chain.last().unwrap().hash.clone();
+                chain.push(block(h, &prev));
+            }
+            chain
+        };
+        let short_current = build(3, "root-a");
+        let short_new = build(4, "root-b");
+        assert!(engine.can_reorg(&short_current, &short_new));
+
+        let deep_current = build(MAX_REORG_DEPTH + 1, "root-a");
+        let deep_new = build(MAX_REORG_DEPTH + 2, "root-b");
+        assert!(
+            !engine.can_reorg(&deep_current, &deep_new),
+            "a candidate with no shared block replaces the whole slice"
+        );
+    }
+}

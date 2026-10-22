@@ -1,0 +1,720 @@
+//! `StorageProvider` trait and deterministic mock implementation.
+//!
+//! This is the off-chain/on-chain boundary described in
+//! `docs/BUD_STORAGE_ROADMAP.md`: provider implementations move bytes and
+//! Proofs off-chain, while consensus code keeps the on-chain deal/challenge
+//! Accounting in `domain::storage_deal`.
+//!
+//! WIRING: `storage::emit::qr_feed_preview` constructs an
+//! `InMemoryStorageProvider` and runs the put a publish would run, so the
+//! receipt it reports and the `refuse_durable_derivative` refusal it reports
+//! are measurements of this code, not a description of intent. That is the
+//! whole extent of it. No node startup selects a provider, the trait still
+//! describes what an off-chain implementation must do, and
+//! `InMemoryStorageProvider` exists so the trait has a deterministic reference
+//! behaviour to measure against.
+//!
+//! Selecting a provider at startup is a deployment decision rather than a
+//! consensus one, and taking it would put an off-chain dependency on a path
+//! that currently has none. The emit path is deliberately on the near side of
+//! that line: it borrows a provider for one call and drops it.
+
+use crate::core::hash::hash_fields_bytes;
+use crate::domain::storage_deal::{ChallengeOutcome, RetrievalChallenge};
+use crate::storage::three_gate::refuse_durable_derivative;
+use crate::storage::{ContentId, ContentManifest};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+pub type DealId = [u8; 32];
+pub type ChallengeId = [u8; 32];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutReceipt {
+    pub content_id: ContentId,
+    pub bytes_written: u64,
+    pub provider_commitment: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageProof {
+    pub deal_id: DealId,
+    pub challenge_id: ChallengeId,
+    pub range_hash: ContentId,
+    pub merkle_path: Vec<[u8; 32]>,
+    pub proof_bytes: Vec<u8>,
+}
+
+/// What a settled challenge came to on the provider's side.
+///
+/// A provider only ever reports [`ChallengeOutcome::Answered`]: a proof that
+/// does not match is refused by [`StorageProvider::settle`] before anything is
+/// reported, and the two penalty outcomes are recorded by the on-chain
+/// registry (`Mismatched` when a wrong hash reaches it, `Missed` by its
+/// deadline sweep), never by the operator that is being challenged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderChallengeResult {
+    pub challenge_id: ChallengeId,
+    pub deal_id: DealId,
+    pub outcome: ChallengeOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StorageProviderError {
+    EmptyPayload,
+    MissingContent(ContentId),
+    MissingChallenge(ChallengeId),
+    InvalidRange {
+        start: u64,
+        end: u64,
+        len: u64,
+    },
+    ProofChallengeMismatch,
+    ProofRangeMismatch,
+    /// The bytes are not one of the manifest's shards, so no receipt can bind
+    /// them to it.
+    NotAShard {
+        manifest_id: ContentId,
+        content_id: ContentId,
+    },
+    /// The answer came after the challenge's deadline. The chain refuses the
+    /// same answer, so the provider does not pretend it settled.
+    DeadlineElapsed {
+        deadline_epoch: u64,
+        now_epoch: u64,
+    },
+    /// A1..A5 transport derivative (QR-video container, carousel drop, optical
+    /// frame, raw frame concat). These are renderings of bytes that already
+    /// carry a commitment: serving one out of a body slot would hand a reader
+    /// pixels-of-pixels under a `ContentId` that matches nothing. The durable
+    /// form is the packed payload, so the provider refuses and the caller
+    /// stores that instead.
+    DurableDerivative(crate::storage::three_gate::ThreeBlobKind),
+}
+
+pub trait StorageProvider {
+    /// Store `bytes` as one shard of `manifest`.
+    ///
+    /// The receipt attests a `(manifest, content)` pair, so the pair is
+    /// checked: `bytes` must hash to a shard the manifest lists.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the
+    /// refused conditions.
+    fn put(
+        &mut self,
+        manifest: &ContentManifest,
+        bytes: &[u8],
+    ) -> Result<PutReceipt, StorageProviderError>;
+
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the
+    /// refused conditions.
+    fn get(
+        &self,
+        content_id: &ContentId,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>, StorageProviderError>;
+
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the
+    /// refused conditions.
+    fn prove(
+        &self,
+        deal_id: DealId,
+        challenge: &RetrievalChallenge,
+    ) -> Result<StorageProof, StorageProviderError>;
+
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the
+    /// refused conditions.
+    fn challenge(
+        &mut self,
+        deal_id: DealId,
+        challenge: RetrievalChallenge,
+    ) -> Result<ChallengeId, StorageProviderError>;
+
+    /// Check `proof` against the challenge and close it when it holds.
+    ///
+    /// `now_epoch` is the operator's current epoch: an answer past
+    /// `deadline_epoch` is refused, as the chain would refuse it. A provider
+    /// tells a valid answer from a refusal and nothing more; the
+    /// `Mismatched` and `Missed` outcomes are the on-chain registry's, which
+    /// holds the bonds and the deadline sweep.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `StorageProviderError` from the step that failed; its variants name the
+    /// refused conditions.
+    fn settle(
+        &mut self,
+        challenge_id: ChallengeId,
+        proof: StorageProof,
+        now_epoch: u64,
+    ) -> Result<ProviderChallengeResult, StorageProviderError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct InMemoryStorageProvider {
+    chunks: BTreeMap<ContentId, Vec<u8>>,
+    challenges: BTreeMap<ChallengeId, (DealId, RetrievalChallenge)>,
+    /// Identity this provider answers challenges as.
+    ///
+    /// Challenge answers are bound to it, so two operators holding the same
+    /// bytes produce different answers and neither can respond on the other's
+    /// behalf. `Default` leaves it zeroed, which is fine for a single-provider
+    /// test but means every default-constructed provider shares an identity,
+    /// use [`Self::with_operator`] wherever more than one exists.
+    operator: [u8; 32],
+}
+
+impl InMemoryStorageProvider {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Provider that answers as `operator`.
+    pub fn with_operator(operator: [u8; 32]) -> Self {
+        Self {
+            operator,
+            ..Default::default()
+        }
+    }
+
+    /// The identity this provider's challenge answers are bound to.
+    pub const fn operator(&self) -> &[u8; 32] {
+        &self.operator
+    }
+
+    pub fn contains(&self, content_id: &ContentId) -> bool {
+        self.chunks.contains_key(content_id)
+    }
+
+    /// Close a challenge that can never settle again and hand back the
+    /// refusal that says why. The only path in `settle` that changes the map
+    /// on failure, kept apart so the rule "refuse first, then remove" stays
+    /// visible in `settle` itself.
+    fn drop_challenge(
+        &mut self,
+        challenge_id: ChallengeId,
+        why: StorageProviderError,
+    ) -> StorageProviderError {
+        self.challenges.remove(&challenge_id);
+        why
+    }
+}
+
+impl StorageProvider for InMemoryStorageProvider {
+    fn put(
+        &mut self,
+        manifest: &ContentManifest,
+        bytes: &[u8],
+    ) -> Result<PutReceipt, StorageProviderError> {
+        if bytes.is_empty() {
+            return Err(StorageProviderError::EmptyPayload);
+        }
+        if let Err(kind) = refuse_durable_derivative(bytes) {
+            return Err(StorageProviderError::DurableDerivative(kind));
+        }
+        let content_id = ContentId::of(bytes);
+        // The receipt below binds `manifest_id` to `content_id`. Without this
+        // check any bytes earned a receipt against any manifest, and the
+        // attestation said nothing.
+        if manifest.shard(&content_id).is_none() {
+            return Err(StorageProviderError::NotAShard {
+                manifest_id: manifest.manifest_id,
+                content_id,
+            });
+        }
+        self.chunks.insert(content_id, bytes.to_vec());
+        let provider_commitment = hash_fields_bytes(&[
+            b"BDLM_STORAGE_PROVIDER_PUT_V1",
+            manifest.manifest_id.as_bytes(),
+            content_id.as_bytes(),
+            &(bytes.len() as u64).to_le_bytes(),
+        ]);
+        Ok(PutReceipt {
+            content_id,
+            bytes_written: bytes.len() as u64,
+            provider_commitment,
+        })
+    }
+
+    fn get(
+        &self,
+        content_id: &ContentId,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>, StorageProviderError> {
+        let bytes = self
+            .chunks
+            .get(content_id)
+            .ok_or(StorageProviderError::MissingContent(*content_id))?;
+        if range.start > range.end || range.end > bytes.len() as u64 {
+            return Err(StorageProviderError::InvalidRange {
+                start: range.start,
+                end: range.end,
+                len: bytes.len() as u64,
+            });
+        }
+        Ok(bytes[range.start as usize..range.end as usize].to_vec())
+    }
+
+    fn prove(
+        &self,
+        deal_id: DealId,
+        challenge: &RetrievalChallenge,
+    ) -> Result<StorageProof, StorageProviderError> {
+        let bytes = self
+            .chunks
+            .get(&challenge.shard_id)
+            .ok_or(StorageProviderError::MissingContent(challenge.shard_id))?;
+        if challenge.byte_start > challenge.byte_end || challenge.byte_end > bytes.len() as u64 {
+            return Err(StorageProviderError::InvalidRange {
+                start: challenge.byte_start,
+                end: challenge.byte_end,
+                len: bytes.len() as u64,
+            });
+        }
+        let challenge_id = provider_challenge_id(deal_id, challenge);
+        // Bound to this deal, not just to the bytes. A plain content hash is
+        // identical for every operator holding a replica of the same shard,
+        // so one of them could answer for all of them, the outsourcing and
+        // Sybil cases in docs/BUD_STORAGE_ROADMAP.md Gap 2.
+        let range_hash = ContentId::of_subrange_for_deal(
+            bytes,
+            challenge.byte_start,
+            challenge.byte_end,
+            &self.operator,
+            challenge.deal_id,
+            challenge.shard_id.as_bytes(),
+        );
+        Ok(StorageProof {
+            deal_id,
+            challenge_id,
+            range_hash,
+            merkle_path: Vec::new(),
+            proof_bytes: hash_fields_bytes(&[
+                b"BDLM_STORAGE_PROVIDER_PROOF_V1",
+                &deal_id,
+                &challenge_id,
+                range_hash.as_bytes(),
+            ])
+            .to_vec(),
+        })
+    }
+
+    fn challenge(
+        &mut self,
+        deal_id: DealId,
+        challenge: RetrievalChallenge,
+    ) -> Result<ChallengeId, StorageProviderError> {
+        let challenge_id = provider_challenge_id(deal_id, &challenge);
+        self.challenges.insert(challenge_id, (deal_id, challenge));
+        Ok(challenge_id)
+    }
+
+    fn settle(
+        &mut self,
+        challenge_id: ChallengeId,
+        proof: StorageProof,
+        now_epoch: u64,
+    ) -> Result<ProviderChallengeResult, StorageProviderError> {
+        // The challenge is dropped only once the answer is known to be good.
+        //
+        // This used to `remove` first. All three refusals below then returned
+        // with the challenge already gone, so an operator that sent a
+        // malformed proof, or whose chunk was momentarily unavailable, lost
+        // the ability to answer at all: the retry found no challenge, and the
+        // deadline ran out into `finalize_missed_challenge`, which takes the
+        // bond. A wrong answer is supposed to cost the bond on its merits, not
+        // by deleting the operator's second chance.
+        let (deal_id, challenge) = self
+            .challenges
+            .get(&challenge_id)
+            .ok_or(StorageProviderError::MissingChallenge(challenge_id))?;
+        let (deal_id, challenge) = (*deal_id, challenge.clone());
+        // Past the deadline nothing settles, whatever the proof says: the
+        // chain's `answer_challenge` refuses the same answer and its sweep
+        // records the challenge as missed. The entry is dropped because no
+        // later answer can revive it. Every refusal is decided before the
+        // one `remove` at the end, so no failing path leaves the map changed
+        // except this one, which is the decision itself.
+        if now_epoch > challenge.deadline_epoch {
+            let elapsed = StorageProviderError::DeadlineElapsed {
+                deadline_epoch: challenge.deadline_epoch,
+                now_epoch,
+            };
+            return Err(self.drop_challenge(challenge_id, elapsed));
+        }
+        if proof.deal_id != deal_id || proof.challenge_id != challenge_id {
+            return Err(StorageProviderError::ProofChallengeMismatch);
+        }
+        let bytes = self
+            .chunks
+            .get(&challenge.shard_id)
+            .ok_or(StorageProviderError::MissingContent(challenge.shard_id))?;
+        let expected = ContentId::of_subrange_for_deal(
+            bytes,
+            challenge.byte_start,
+            challenge.byte_end,
+            &self.operator,
+            challenge.deal_id,
+            challenge.shard_id.as_bytes(),
+        );
+        if proof.range_hash != expected {
+            return Err(StorageProviderError::ProofRangeMismatch);
+        }
+        // Past every refusal: the answer stands, so the challenge is closed.
+        self.challenges.remove(&challenge_id);
+        Ok(ProviderChallengeResult {
+            challenge_id,
+            deal_id,
+            outcome: ChallengeOutcome::Answered,
+        })
+    }
+}
+
+pub fn provider_challenge_id(deal_id: DealId, challenge: &RetrievalChallenge) -> ChallengeId {
+    hash_fields_bytes(&[
+        b"BDLM_STORAGE_PROVIDER_CHALLENGE_V1",
+        &deal_id,
+        &challenge.challenge_id.to_le_bytes(),
+        &challenge.deal_id.to_le_bytes(),
+        challenge.shard_id.as_bytes(),
+        &challenge.byte_start.to_le_bytes(),
+        &challenge.byte_end.to_le_bytes(),
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::address::Address;
+    use crate::storage::ShardRef;
+
+    fn manifest_and_bytes() -> (ContentManifest, Vec<u8>) {
+        let bytes = b"abcdefghijklmnopqrstuvwxyz".to_vec();
+        let shard = ShardRef::from_bytes(0, &bytes);
+        let manifest = ContentManifest::from_shards(vec![shard])
+            .unwrap()
+            .with_owner(Address::from([1u8; 32]));
+        (manifest, bytes)
+    }
+
+    fn deal_id(byte: u8) -> DealId {
+        [byte; 32]
+    }
+
+    /// The put receipt hashes the length as a fixed u64, so it is the same on
+    /// 32 and 64 bit targets (P26-F12).
+    #[test]
+    fn put_receipt_commitment_uses_fixed_width_length() {
+        let (manifest, bytes) = manifest_and_bytes();
+        let mut provider = InMemoryStorageProvider::new();
+        let receipt = provider.put(&manifest, &bytes).unwrap();
+        let expected = hash_fields_bytes(&[
+            b"BDLM_STORAGE_PROVIDER_PUT_V1",
+            manifest.manifest_id.as_bytes(),
+            receipt.content_id.as_bytes(),
+            &(bytes.len() as u64).to_le_bytes(),
+        ]);
+        assert_eq!(receipt.provider_commitment, expected);
+    }
+
+    /// Every transport shape the pipe can emit is refused from a body slot,
+    /// and the packed container that they are all derived from is accepted.
+    #[test]
+    fn a_provider_put_refuses_a_transport_derivative() {
+        use crate::storage::qr_codec::{CodecKind, FrameMux, RawFrameConcat};
+        use crate::storage::three_gate::ThreeBlobKind;
+        use crate::storage::three_pipe::{encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
+
+        let (_, body) = manifest_and_bytes();
+        let enc = encode_qr_video(&body, PIPE_DEFAULT_BLOCK_LEN, None).unwrap();
+        // The manifest a publish pins: the packed container is its one shard.
+        let manifest =
+            ContentManifest::from_shards(vec![ShardRef::from_bytes(0, &enc.pipe.packed)])
+                .unwrap()
+                .with_owner(Address::from([1u8; 32]));
+        let concat = RawFrameConcat
+            .mux(CodecKind::RawFrames, &enc.pipe.frames)
+            .unwrap();
+
+        let refused = [
+            (enc.video_blob.clone(), ThreeBlobKind::QrVideo),
+            (enc.pipe.frames[0].clone(), ThreeBlobKind::OpticalFrame),
+            (concat, ThreeBlobKind::RawConcat),
+        ];
+        let mut provider = InMemoryStorageProvider::new();
+        for (blob, kind) in &refused {
+            let err = provider.put(&manifest, blob).unwrap_err();
+            assert_eq!(err, StorageProviderError::DurableDerivative(*kind));
+        }
+        // Nothing was stored by a refused put: the only body is the packed form.
+        provider.put(&manifest, &enc.pipe.packed).unwrap();
+        let id = ContentId::of(&enc.pipe.packed);
+        assert_eq!(
+            provider.get(&id, 0..enc.pipe.packed.len() as u64).unwrap(),
+            enc.pipe.packed
+        );
+        for (blob, _) in &refused {
+            let missing = provider.get(&ContentId::of(blob), 0..1).unwrap_err();
+            assert!(matches!(missing, StorageProviderError::MissingContent(_)));
+        }
+    }
+
+    fn challenge(shard_id: ContentId) -> RetrievalChallenge {
+        RetrievalChallenge {
+            challenge_id: 7,
+            deal_id: 9,
+            shard_id,
+            byte_start: 2,
+            byte_end: 8,
+            challenge_epoch: 1,
+            deadline_epoch: 2,
+            opener: Address::from([2u8; 32]),
+            opener_bond: 1,
+        }
+    }
+
+    #[test]
+    fn storage_provider_put_get_roundtrip() {
+        let (manifest, bytes) = manifest_and_bytes();
+        let mut provider = InMemoryStorageProvider::new();
+        let receipt = provider.put(&manifest, &bytes).unwrap();
+        assert!(provider.contains(&receipt.content_id));
+        assert_eq!(receipt.bytes_written, bytes.len() as u64);
+        assert_eq!(provider.get(&receipt.content_id, 0..3).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn storage_provider_rejects_invalid_range() {
+        let (manifest, bytes) = manifest_and_bytes();
+        let mut provider = InMemoryStorageProvider::new();
+        let receipt = provider.put(&manifest, &bytes).unwrap();
+        let err = provider.get(&receipt.content_id, 99..100).unwrap_err();
+        assert!(matches!(err, StorageProviderError::InvalidRange { .. }));
+    }
+
+    #[test]
+    fn storage_provider_prove_settle_roundtrip() {
+        let (manifest, bytes) = manifest_and_bytes();
+        let mut provider = InMemoryStorageProvider::new();
+        let receipt = provider.put(&manifest, &bytes).unwrap();
+        let challenge = challenge(receipt.content_id);
+        let deal_id = deal_id(3);
+        let challenge_id = provider.challenge(deal_id, challenge.clone()).unwrap();
+        let proof = provider.prove(deal_id, &challenge).unwrap();
+        assert_eq!(proof.challenge_id, challenge_id);
+        let result = provider.settle(challenge_id, proof, 1).unwrap();
+        assert_eq!(result.outcome, ChallengeOutcome::Answered);
+    }
+
+    /// The finding: `put` handed out a receipt binding any bytes to any
+    /// manifest. Bytes that are not a shard of the manifest are refused, and
+    /// nothing is stored for them.
+    #[test]
+    fn a_put_of_bytes_the_manifest_does_not_list_is_refused() {
+        let (manifest, _bytes) = manifest_and_bytes();
+        let other = b"not one of the manifest's shards".to_vec();
+        let mut provider = InMemoryStorageProvider::new();
+        let err = provider.put(&manifest, &other).unwrap_err();
+        assert_eq!(
+            err,
+            StorageProviderError::NotAShard {
+                manifest_id: manifest.manifest_id,
+                content_id: ContentId::of(&other),
+            }
+        );
+        assert!(!provider.contains(&ContentId::of(&other)));
+    }
+
+    /// An answer after `deadline_epoch` does not settle, exactly as the
+    /// chain would refuse it, and the dead challenge is gone afterwards.
+    #[test]
+    fn an_answer_past_the_deadline_is_refused() {
+        let (manifest, bytes) = manifest_and_bytes();
+        let mut provider = InMemoryStorageProvider::new();
+        let receipt = provider.put(&manifest, &bytes).unwrap();
+        let challenge = challenge(receipt.content_id);
+        let deal_id = deal_id(5);
+        let challenge_id = provider.challenge(deal_id, challenge.clone()).unwrap();
+        let proof = provider.prove(deal_id, &challenge).unwrap();
+        let late = challenge.deadline_epoch + 1;
+        let err = provider
+            .settle(challenge_id, proof.clone(), late)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            StorageProviderError::DeadlineElapsed {
+                deadline_epoch: challenge.deadline_epoch,
+                now_epoch: late,
+            }
+        );
+        // On the deadline itself the answer still counts, but the late
+        // refusal above already dropped this challenge.
+        assert_eq!(
+            provider
+                .settle(challenge_id, proof, challenge.deadline_epoch)
+                .unwrap_err(),
+            StorageProviderError::MissingChallenge(challenge_id)
+        );
+    }
+
+    #[test]
+    fn storage_provider_rejects_forged_proof_range_hash() {
+        let (manifest, bytes) = manifest_and_bytes();
+        let mut provider = InMemoryStorageProvider::new();
+        let receipt = provider.put(&manifest, &bytes).unwrap();
+        let challenge = challenge(receipt.content_id);
+        let deal_id = deal_id(4);
+        let challenge_id = provider.challenge(deal_id, challenge.clone()).unwrap();
+        let mut proof = provider.prove(deal_id, &challenge).unwrap();
+        proof.range_hash = ContentId::of(b"forged");
+        let err = provider.settle(challenge_id, proof, 1).unwrap_err();
+        assert_eq!(err, StorageProviderError::ProofRangeMismatch);
+    }
+
+    /// The finding this binding exists for: a plain content hash is the same
+    /// for every operator holding the same bytes, so any of them can answer a
+    /// challenge addressed to another. Two operators, one shard, one copy
+    /// between them, N payments.
+    #[test]
+    fn two_operators_holding_the_same_bytes_produce_different_answers() {
+        let bytes = b"the same shard, stored twice";
+        let shard = ContentId::of(bytes);
+
+        let plain_a = ContentId::of_subrange(bytes, 0, 8);
+        let plain_b = ContentId::of_subrange(bytes, 0, 8);
+        assert_eq!(
+            plain_a, plain_b,
+            "the unbound hash is identical - this is the gap"
+        );
+
+        let bound_a = ContentId::of_subrange_for_deal(bytes, 0, 8, &[1u8; 32], 7, shard.as_bytes());
+        let bound_b = ContentId::of_subrange_for_deal(bytes, 0, 8, &[2u8; 32], 7, shard.as_bytes());
+        assert_ne!(
+            bound_a, bound_b,
+            "two operators must not be able to answer for each other"
+        );
+    }
+
+    /// The same operator on two different deals for the same shard must also
+    /// be distinguishable, otherwise one answer covers both payments.
+    #[test]
+    fn one_operator_two_deals_produce_different_answers() {
+        let bytes = b"one shard, two deals";
+        let shard = ContentId::of(bytes);
+        let a = ContentId::of_subrange_for_deal(bytes, 0, 8, &[1u8; 32], 1, shard.as_bytes());
+        let b = ContentId::of_subrange_for_deal(bytes, 0, 8, &[1u8; 32], 2, shard.as_bytes());
+        assert_ne!(a, b, "deal_id must be part of the binding");
+    }
+
+    /// And the bytes still matter: the binding must not swallow the content.
+    #[test]
+    fn binding_does_not_replace_the_content_hash() {
+        let shard = ContentId::of(b"anything");
+        let a = ContentId::of_subrange_for_deal(
+            b"first content",
+            0,
+            5,
+            &[1u8; 32],
+            1,
+            shard.as_bytes(),
+        );
+        let b = ContentId::of_subrange_for_deal(
+            b"other content",
+            0,
+            5,
+            &[1u8; 32],
+            1,
+            shard.as_bytes(),
+        );
+        assert_ne!(a, b, "different bytes must still give different answers");
+
+        // Same everything = same answer, so an honest operator can reproduce
+        // its own proof.
+        let c = ContentId::of_subrange_for_deal(
+            b"first content",
+            0,
+            5,
+            &[1u8; 32],
+            1,
+            shard.as_bytes(),
+        );
+        assert_eq!(a, c, "the answer must be deterministic");
+    }
+
+    /// End to end: a proof produced by one provider must not settle a
+    /// challenge held by another, even with identical stored bytes.
+    #[test]
+    fn a_proof_from_another_operator_does_not_settle() {
+        let data = b"shard bytes that both operators hold";
+        let manifest = ContentManifest::from_bytes_sliced(data, 64).unwrap();
+        let shard = manifest.shards[0].shard_id;
+
+        let mut honest = InMemoryStorageProvider::with_operator([1u8; 32]);
+        let mut freeloader = InMemoryStorageProvider::with_operator([2u8; 32]);
+        honest.put(&manifest, data).unwrap();
+        freeloader.put(&manifest, data).unwrap();
+
+        let ch = RetrievalChallenge {
+            challenge_id: 1,
+            deal_id: 42,
+            shard_id: shard,
+            byte_start: 0,
+            byte_end: 8,
+            challenge_epoch: 1,
+            deadline_epoch: 2,
+            opener: crate::core::address::Address::from([9u8; 32]),
+            opener_bond: 64,
+        };
+
+        let cid = honest.challenge(deal_id(42), ch.clone()).unwrap();
+        // The freeloader has the bytes and produces a proof for the same deal.
+        let stolen = freeloader.prove(deal_id(42), &ch).unwrap();
+        assert_eq!(stolen.challenge_id, cid, "same deal, same challenge id");
+
+        let err = honest
+            .settle(cid, stolen, 1)
+            .expect_err("an answer computed by another operator must not settle");
+        assert!(
+            matches!(err, StorageProviderError::ProofRangeMismatch),
+            "wrong error: {err:?}"
+        );
+    }
+
+    /// The honest path must keep working - the gate cannot pass by rejecting
+    /// everything.
+    #[test]
+    fn the_holder_of_the_deal_still_settles() {
+        let data = b"shard bytes held by exactly one operator";
+        let manifest = ContentManifest::from_bytes_sliced(data, 64).unwrap();
+        let shard = manifest.shards[0].shard_id;
+
+        let mut provider = InMemoryStorageProvider::with_operator([1u8; 32]);
+        provider.put(&manifest, data).unwrap();
+
+        let ch = RetrievalChallenge {
+            challenge_id: 1,
+            deal_id: 42,
+            shard_id: shard,
+            byte_start: 0,
+            byte_end: 8,
+            challenge_epoch: 1,
+            deadline_epoch: 2,
+            opener: crate::core::address::Address::from([9u8; 32]),
+            opener_bond: 64,
+        };
+        let cid = provider.challenge(deal_id(42), ch.clone()).unwrap();
+        let proof = provider.prove(deal_id(42), &ch).unwrap();
+        let result = provider
+            .settle(cid, proof, 1)
+            .expect("the operator that holds the deal must be able to answer");
+        assert_eq!(result.outcome, ChallengeOutcome::Answered);
+    }
+}

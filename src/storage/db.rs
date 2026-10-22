@@ -1,0 +1,2805 @@
+use crate::core::account::Account;
+use crate::core::address::Address;
+use crate::core::block::Block;
+use crate::core::transaction::Transaction;
+use crate::cross_domain::message::CrossDomainMessage;
+use crate::cross_domain::BridgeState;
+use crate::domain::{ConsensusDomain, DomainCommitment};
+use crate::settlement::GlobalBlockHeader;
+use crate::storage::traits::{BlockchainStorage, DurableCommitBatch, SeenBlockMap};
+use serde::{de::DeserializeOwned, Serialize};
+use sled::Db;
+use std::str::from_utf8;
+use tracing::info;
+
+/// On-disk `ConsensusDomain` shape used appended
+/// `pow_parameters`. Bincode is positional, so serde defaults alone cannot
+/// Recover an older record that ends before the new field.
+#[derive(serde::Deserialize)]
+struct LegacyConsensusDomainV1 {
+    id: crate::domain::DomainId,
+    kind: crate::domain::ConsensusKind,
+    status: crate::domain::DomainStatus,
+    domain_chain_id: u64,
+    operator: Option<Address>,
+    operator_bond: u64,
+    config_hash: crate::domain::Hash32,
+    validator_set_hash: crate::domain::Hash32,
+    finality_adapter: String,
+    min_confirmations: u64,
+    bridge_enabled: bool,
+    block_hash_scheme: crate::domain::types::RootScheme,
+    state_root_scheme: crate::domain::types::RootScheme,
+    tx_root_scheme: crate::domain::types::RootScheme,
+    last_committed_height: u64,
+    last_committed_hash: crate::domain::Hash32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DatabaseBackupV1 {
+    format_version: u32,
+    entries_hash: [u8; 32],
+    entries: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+fn decode_database_backup(bytes: &[u8]) -> std::io::Result<DatabaseBackupV1> {
+    let backup: DatabaseBackupV1 = decode(bytes)?;
+    if backup.format_version != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unsupported backup format {}", backup.format_version),
+        ));
+    }
+    let payload = encode(&backup.entries)?;
+    let observed = crate::core::hash::calculate_hash_bytes(&payload);
+    if observed != backup.entries_hash {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup checksum mismatch",
+        ));
+    }
+    Ok(backup)
+}
+
+impl From<LegacyConsensusDomainV1> for ConsensusDomain {
+    fn from(domain: LegacyConsensusDomainV1) -> Self {
+        Self {
+            id: domain.id,
+            kind: domain.kind,
+            status: domain.status,
+            domain_chain_id: domain.domain_chain_id,
+            operator: domain.operator,
+            operator_bond: domain.operator_bond,
+            config_hash: domain.config_hash,
+            validator_set_hash: domain.validator_set_hash,
+            finality_adapter: domain.finality_adapter,
+            min_confirmations: domain.min_confirmations,
+            bridge_enabled: domain.bridge_enabled,
+            block_hash_scheme: domain.block_hash_scheme,
+            state_root_scheme: domain.state_root_scheme,
+            tx_root_scheme: domain.tx_root_scheme,
+            last_committed_height: domain.last_committed_height,
+            last_committed_hash: domain.last_committed_hash,
+            pow_parameters: None,
+            // The migrated legacy record had no such field, so which programs
+            // this domain permits is unknown. An unknown
+            // Allow = no allowance: the list is left empty, and the domain cannot
+            // be advanced by zk until a program list is given.
+            zk_program_allowlist: Vec::new(),
+            plugin_code_hash: None,
+        }
+    }
+}
+
+fn encode<T: Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
+    bincode::serialize(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// Decode a stored value.
+///
+/// bincode only. This used to fall back to `serde_json::from_slice` when the
+/// bincode decode failed, which gave one stored type two accepted wire
+/// formats while [`encode`] only ever writes one of them. Nothing in the tree
+/// writes JSON here, so the fallback could only ever succeed on bytes this
+/// node did not write: a corrupted page that happens to parse as JSON, or a
+/// value placed by something else with access to the database directory.
+///
+/// A second accepted parser on a path that has a single producer is a
+/// type-confusion surface with no upside. A decode failure now stays a decode
+/// failure, which is the honest answer for bytes we did not write.
+fn decode<T: DeserializeOwned>(value: &[u8]) -> std::io::Result<T> {
+    bincode::deserialize(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+#[derive(Debug)]
+pub struct Storage {
+    db: Db,
+    /// BLG-0190 (P09-F11): a test-only knob that makes the storage-economics
+    /// persist fail for real, so the accounting paths' `?` propagation can
+    /// be EXERCISED instead of grepped. Never set outside `cfg(test)`; no
+    /// production behaviour reads it.
+    #[cfg(test)]
+    fail_economics_writes: std::sync::atomic::AtomicBool,
+}
+
+impl Clone for Storage {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            #[cfg(test)]
+            fail_economics_writes: std::sync::atomic::AtomicBool::new(
+                self.fail_economics_writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
+        }
+    }
+}
+
+/// Sled's file-lock release is not synchronous with `Db::drop`: the flusher
+/// Thread can still hold the lock briefly after the last handle is gone, and
+/// `sled::open` reports that contention as an `io::Error` with `kind: Other`
+/// (sled wraps the `WouldBlock` detail into its message text). Reopening the
+/// Same path immediately after a drop therefore races with the release and
+/// Flakes under CI load (observed in the `tur13_5` restore test, 2026-07-18).
+/// A small bounded retry absorbs the race; non-contention errors and
+/// Persistent contention keep the exact same failure surface as before.
+fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<Db> {
+    const MAX_ATTEMPTS: u32 = 40;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match sled::open(path.as_ref()) {
+            Ok(db) => return Ok(db),
+            Err(e) => {
+                // `sled::open` returns `sled::Error`; normalize through the
+                // Existing `From<sled::Error> for io::Error` conversion (the
+                // Same one `?` applies at the call sites) before matching.
+                let io_err = std::io::Error::from(e);
+                let is_lock_contention = io_err.kind() == std::io::ErrorKind::Other
+                    && io_err.to_string().contains("could not acquire lock");
+                if !is_lock_contention || attempt == MAX_ATTEMPTS {
+                    return Err(io_err);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+    }
+    unreachable!("retry loop returns on success, on final attempt, or on non-lock errors")
+}
+
+/// Version tag stored next to the storage registry row. Bump it when the row shape changes.
+const STORAGE_REGISTRY_ROW_VERSION: u32 = 1;
+
+impl Storage {
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn new(path: &str) -> std::io::Result<Self> {
+        let db = sled_open_with_retry(path)?;
+        let storage = Self {
+            db,
+            #[cfg(test)]
+            fail_economics_writes: std::sync::atomic::AtomicBool::new(false),
+        };
+        storage.apply_migrations()?;
+        storage.recover_interrupted_commit()?;
+        Ok(storage)
+    }
+
+    /// Approximate on-disk size of the sled database, for the
+    /// `storage_db_size_bytes` gauge.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    ///
+    /// Sled's own `size_on_disk` walks the file set; it can fail under lock
+    /// contention. Callers treat `Err` as "leave the last scrape".
+    pub fn size_on_disk(&self) -> std::io::Result<u64> {
+        self.db.size_on_disk().map_err(std::io::Error::from)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn apply_migrations(&self) -> std::io::Result<()> {
+        const CURRENT_SCHEMA_VERSION: u64 = 1;
+        let current = self.schema_version()?;
+        // An older binary must not open a newer database: it would decode
+        // rows it does not know, and positional bincode rows decode wrongly
+        // without an error.
+        if current > CURRENT_SCHEMA_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "database schema version {current} is newer than this binary supports \
+                     ({CURRENT_SCHEMA_VERSION}); refusing to open"
+                ),
+            ));
+        }
+        if current < CURRENT_SCHEMA_VERSION {
+            self.db.insert(
+                b"SCHEMA_VERSION",
+                CURRENT_SCHEMA_VERSION.to_string().as_bytes(),
+            )?;
+            self.db.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Read the on-disk schema version.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    ///
+    /// A stored value that does not parse used to become `0` through
+    /// `unwrap_or(0)`, and `0` is exactly the value that means "fresh
+    /// database, run every migration". So a single corrupted byte in this key
+    /// did not surface as an error - it silently re-ran `apply_migrations`
+    /// against a populated database.
+    ///
+    /// A missing key still means `0`, because that genuinely is a fresh
+    /// database. A key that is present but unreadable is a different fact and
+    /// now refuses to boot.
+    pub fn schema_version(&self) -> std::io::Result<u64> {
+        if let Some(val) = self.db.get(b"SCHEMA_VERSION")? {
+            let s = from_utf8(&val)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            s.parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "SCHEMA_VERSION is present but unreadable ({s:?}): {e}. \
+                         Refusing to boot: treating this as 0 would re-run every \
+                         migration against a populated database."
+                    ),
+                )
+            })
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Create an atomic, self-contained database backup.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    ///
+    /// The temporary file is written beside the destination and renamed only
+    /// After all bytes are durable, so a crash never presents a partial file as
+    /// A usable backup.
+    /// Reads every row twice and accepts the result only when both passes
+    /// agree and no durable commit is in flight. sled offers no point in time
+    /// iterator, so a commit landing mid-scan would otherwise be copied
+    /// half way (P26-F13).
+    fn read_consistent_entries(&self) -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let read = || -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            let mut rows = Vec::new();
+            for item in self.db.iter() {
+                let (key, value) = item?;
+                rows.push((key.to_vec(), value.to_vec()));
+            }
+            Ok(rows)
+        };
+        let first = read()?;
+        if first.iter().any(|(key, _)| key == b"IN_PROGRESS_HEIGHT") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "a durable commit is in progress; snapshot refused",
+            ));
+        }
+        let second = read()?;
+        if first != second {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "the database changed during the snapshot scan; retry",
+            ));
+        }
+        Ok(first)
+    }
+
+    pub fn create_snapshot<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
+        use std::io::Write;
+
+        self.db.flush()?;
+        let snapshot = self.read_consistent_entries()?;
+        let entries_payload = encode(&snapshot)?;
+        let backup = DatabaseBackupV1 {
+            format_version: 1,
+            entries_hash: crate::core::hash::calculate_hash_bytes(&entries_payload),
+            entries: snapshot,
+        };
+        let bytes = encode(&backup)?;
+        let path = path.as_ref();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut partial = path.as_os_str().to_owned();
+        partial.push(".partial");
+        let partial = std::path::PathBuf::from(partial);
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&partial)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&partial, path)?;
+        if let Err(error) = Self::verify_snapshot(path) {
+            let _ = std::fs::remove_file(path);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Validate backup framing and key uniqueness without modifying a database.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn verify_snapshot<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<usize> {
+        let bytes = std::fs::read(path)?;
+        let backup = decode_database_backup(&bytes)?;
+        let entries = backup.entries;
+        if entries.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "backup contains no database entries",
+            ));
+        }
+        let mut keys: std::collections::HashSet<&[u8]> =
+            std::collections::HashSet::with_capacity(entries.len());
+        for (key, _) in &entries {
+            if !keys.insert(key.as_slice()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "backup contains duplicate database keys",
+                ));
+            }
+        }
+        if !keys.iter().any(|key| *key == b"SCHEMA_VERSION") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "backup has no schema version",
+            ));
+        }
+        Ok(entries.len())
+    }
+
+    /// Restore an offline backup into a new, empty sled directory and run the
+    /// Normal migration/integrity checks before reporting success.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn restore_snapshot<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
+        snapshot_path: P,
+        target_db_path: Q,
+    ) -> std::io::Result<()> {
+        let snapshot_path = snapshot_path.as_ref();
+        let target_db_path = target_db_path.as_ref();
+        if target_db_path.exists()
+            && std::fs::read_dir(target_db_path)?
+                .next()
+                .transpose()?
+                .is_some()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("restore target {} is not empty", target_db_path.display()),
+            ));
+        }
+
+        let bytes = std::fs::read(snapshot_path)?;
+        let backup = decode_database_backup(&bytes)?;
+        let entries = backup.entries;
+        if entries.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "backup contains no database entries",
+            ));
+        }
+        if let Some(parent) = target_db_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        {
+            let db = sled_open_with_retry(target_db_path)?;
+            for chunk in entries.chunks(10_000) {
+                let mut batch = sled::Batch::default();
+                for (key, value) in chunk {
+                    batch.insert(key.as_slice(), value.as_slice());
+                }
+                db.apply_batch(batch)?;
+            }
+            db.flush()?;
+
+            // Run migration/recovery/integrity through this SAME sled handle
+            // Instead of dropping it and reopening the path: sled's lock
+            // Release is asynchronous with `Db::drop`, so a back-to-back
+            // Reopen races with it and flakes (tur13_5, 2026-07-18). The
+            // Semantics are unchanged - the checks run on the freshly
+            // Restored data exactly as `Storage::new` would run them.
+            let restored = Self {
+                db,
+                #[cfg(test)]
+                fail_economics_writes: std::sync::atomic::AtomicBool::new(false),
+            };
+            restored.apply_migrations()?;
+            restored.recover_interrupted_commit()?;
+            let errors = restored.check_integrity().map_err(std::io::Error::other)?;
+            if !errors.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("restored database failed integrity check: {errors:?}"),
+                ));
+            }
+        }
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn insert_block(&self, block: &Block) -> std::io::Result<()> {
+        let key = block.hash.clone();
+        let val = encode(block)?;
+        let height_key = format!("HEIGHT:{}", block.index);
+        let mut batch = sled::Batch::default();
+        batch.insert(key.as_bytes(), val.as_slice());
+        batch.insert(height_key.as_bytes(), block.hash.as_bytes());
+        self.db.apply_batch(batch)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn commit_block(&self, block: &Block, state_root: &str) -> std::io::Result<()> {
+        let mut batch = sled::Batch::default();
+
+        let block_bytes = encode(block)?;
+        batch.insert(block.hash.as_bytes(), block_bytes.as_slice());
+
+        let height_key = format!("HEIGHT:{}", block.index);
+        batch.insert(height_key.as_bytes(), block.hash.as_bytes());
+
+        batch.insert(b"LAST", block.hash.as_bytes());
+
+        let state_key = format!("STATE_ROOT:{}", block.index);
+        batch.insert(state_key.as_bytes(), state_root.as_bytes());
+
+        batch.insert(b"CANONICAL_HEIGHT", block.index.to_string().as_bytes());
+
+        for tx in &block.transactions {
+            let tx_idx_key = format!("TX_IDX:{}", tx.hash);
+            batch.insert(tx_idx_key.as_bytes(), block.index.to_string().as_bytes());
+        }
+
+        self.db.apply_batch(batch)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn recover_interrupted_commit(&self) -> std::io::Result<()> {
+        if let Some(height_bytes) = self.db.get(b"IN_PROGRESS_HEIGHT")? {
+            let height_str = from_utf8(&height_bytes)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            // A present but unreadable marker is not "height 0": 0 is the
+            // value that rolls back genesis and deletes `LAST`,
+            // `CANONICAL_HEIGHT` and the bridge state, so a corrupt marker
+            // has to stop the open instead of being read as that.
+            let height: u64 = height_str.parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("IN_PROGRESS_HEIGHT holds {height_str:?}, not a height: {e}"),
+                )
+            })?;
+            tracing::warn!(
+                "Interrupted commit detected at height {height}. Initiating rollback..."
+            );
+
+            let mut batch = sled::Batch::default();
+
+            // 1. If we wrote block H, clean up transaction indices and the block itself
+            if let Some(block) = self.get_block_by_height(height)? {
+                for tx in &block.transactions {
+                    let tx_idx_key = format!("TX_IDX:{}", tx.hash);
+                    batch.remove(tx_idx_key.as_bytes());
+                }
+                batch.remove(block.hash.as_bytes());
+            }
+
+            // 2. Remove block indexes at height H
+            let height_key = format!("HEIGHT:{height}");
+            batch.remove(height_key.as_bytes());
+            batch.remove(format!("STATE_ROOT:{height}").as_bytes());
+            batch.remove(format!("FINALITY_CERT:{height}").as_bytes());
+            batch.remove(format!("QC_BLOB:{height}").as_bytes());
+
+            // 3. Revert CANONICAL_HEIGHT and LAST hash to H-1
+            if height > 0 {
+                let prev_height = height - 1;
+                let prev_height_key = format!("HEIGHT:{prev_height}");
+                if let Some(prev_hash_bytes) = self.db.get(prev_height_key.as_bytes())? {
+                    batch.insert(b"LAST", &prev_hash_bytes);
+                } else {
+                    batch.remove(b"LAST");
+                }
+                batch.insert(b"CANONICAL_HEIGHT", prev_height.to_string().as_bytes());
+            } else {
+                batch.remove(b"LAST");
+                batch.remove(b"CANONICAL_HEIGHT");
+            }
+
+            // 4.: Roll bridge state back to the previous durable tip.
+            // Durable commits store BRIDGE_STATE_AT:{h}. On interrupt at H we
+            // Must not leave a newer BRIDGE_STATE than the restored tip (H-1).
+            batch.remove(format!("BRIDGE_STATE_AT:{height}").as_bytes());
+            if height > 0 {
+                let prev = height - 1;
+                let prev_key = format!("BRIDGE_STATE_AT:{prev}");
+                if let Some(prev_bridge) = self.db.get(prev_key.as_bytes())? {
+                    batch.insert(b"BRIDGE_STATE", prev_bridge);
+                } else {
+                    batch.remove(b"BRIDGE_STATE");
+                }
+            } else {
+                batch.remove(b"BRIDGE_STATE");
+            }
+
+            // 5. Remove the IN_PROGRESS_HEIGHT marker
+            batch.remove(b"IN_PROGRESS_HEIGHT");
+
+            // Apply rollback batch atomically
+            self.db.apply_batch(batch)?;
+            self.db.flush()?;
+            tracing::info!("Rollback for height {height} completed successfully.");
+        }
+        Ok(())
+    }
+
+    /// Whether a durable commit at `height` needs the `IN_PROGRESS_HEIGHT`
+    /// marker.
+    ///
+    /// The marker lets recovery delete a half written new height. The batch is
+    /// atomic, so a commit that replaces a height that already holds a block
+    /// leaves either the old rows or the new ones. A marker there would make
+    /// recovery delete the old, committed block, drop the tip to `height - 1`
+    /// and leave the account rows of `height` behind.
+    fn needs_progress_marker(&self, height: u64) -> std::io::Result<bool> {
+        let height_key = format!("HEIGHT:{height}");
+        Ok(self.db.get(height_key.as_bytes())?.is_none())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn commit_durable_batch(&self, batch: &DurableCommitBatch) -> std::io::Result<()> {
+        // Write IN_PROGRESS_HEIGHT marker and flush it
+        if self.needs_progress_marker(batch.block.index)? {
+            self.db.insert(
+                b"IN_PROGRESS_HEIGHT",
+                batch.block.index.to_string().as_bytes(),
+            )?;
+            self.db.flush()?;
+        }
+
+        let mut b = sled::Batch::default();
+
+        // 1. Block
+        let block_bytes = encode(&batch.block)?;
+        b.insert(batch.block.hash.as_bytes(), block_bytes.as_slice());
+
+        // 2. Height mapping
+        let height_key = format!("HEIGHT:{}", batch.block.index);
+        b.insert(height_key.as_bytes(), batch.block.hash.as_bytes());
+
+        // 3. LAST tip hash
+        b.insert(b"LAST", batch.block.hash.as_bytes());
+
+        // 4. State root
+        let state_key = format!("STATE_ROOT:{}", batch.block.index);
+        b.insert(state_key.as_bytes(), batch.state_root.as_bytes());
+
+        // 5. Canonical height
+        b.insert(
+            b"CANONICAL_HEIGHT",
+            batch.block.index.to_string().as_bytes(),
+        );
+
+        // 6. Transaction indexes
+        for tx in &batch.block.transactions {
+            let tx_idx_key = format!("TX_IDX:{}", tx.hash);
+            b.insert(
+                tx_idx_key.as_bytes(),
+                batch.block.index.to_string().as_bytes(),
+            );
+        }
+
+        // 7. Finality Certificate
+        if let Some(ref cert) = batch.finality_cert {
+            let cert_key = format!("FINALITY_CERT:{}", batch.block.index);
+            let cert_val = encode(cert)?;
+            b.insert(cert_key.as_bytes(), cert_val.as_slice());
+        }
+
+        // 8. Global headers
+        for header in &batch.global_headers {
+            let key = format!("GLOBAL_HEADER:{}", header.global_height);
+            let hash_key = format!("GLOBAL_HEADER_HASH:{}", header.calculate_hash());
+            let val = encode(header)?;
+            b.insert(key.as_bytes(), val.as_slice());
+            b.insert(
+                hash_key.as_bytes(),
+                header.global_height.to_string().as_bytes(),
+            );
+            b.insert(
+                b"LAST_GLOBAL_HEIGHT",
+                header.global_height.to_string().as_bytes(),
+            );
+        }
+
+        // 9. Bridge state. Every durable height gets a snapshot: a commit
+        // that carries no new bridge state carries the live one forward, so
+        // that a rollback from the next height finds the state that was
+        // valid here. Without it, an interrupted commit at H+1 read the
+        // missing `BRIDGE_STATE_AT:H` as "no bridge state" and deleted the
+        // live `BRIDGE_STATE` that a commit at H had never touched.
+        let at = format!("BRIDGE_STATE_AT:{}", batch.block.index);
+        if let Some(ref bridge_state) = batch.bridge_state {
+            let val = encode(bridge_state)?;
+            b.insert(b"BRIDGE_STATE", val.as_slice());
+            b.insert(at.as_bytes(), val.as_slice());
+        } else if let Some(live) = self.db.get(b"BRIDGE_STATE")? {
+            b.insert(at.as_bytes(), live);
+        }
+
+        // 10. Accounts
+        for (pubkey, account) in &batch.accounts {
+            let key = format!("ACCT:{pubkey}");
+            let val = encode(account)?;
+            b.insert(key.as_bytes(), val.as_slice());
+        }
+
+        // 11. Remove IN_PROGRESS_HEIGHT marker
+        b.remove(b"IN_PROGRESS_HEIGHT");
+
+        // Apply batch atomically and flush
+        self.db.apply_batch(b)?;
+        self.db.flush()?;
+
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn get_block(&self, hash: &str) -> std::io::Result<Option<Block>> {
+        if let Some(val) = self.db.get(hash)? {
+            let block: Block = decode(&val)?;
+            Ok(Some(block))
+        } else {
+            Ok(None)
+        }
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn get_block_by_height(&self, height: u64) -> std::io::Result<Option<Block>> {
+        let height_key = format!("HEIGHT:{height}");
+        if let Some(hash_bytes) = self.db.get(height_key.as_bytes())? {
+            let hash = from_utf8(&hash_bytes)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+                .to_string();
+            self.get_block(&hash)
+        } else {
+            Ok(None)
+        }
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn get_canonical_height(&self) -> std::io::Result<u64> {
+        if let Some(val) = self.db.get("CANONICAL_HEIGHT")? {
+            let s = from_utf8(&val)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            // Missing means 0; present and unparsable is a different fact and
+            // is reported, the same rule `schema_version` follows.
+            s.parse().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("CANONICAL_HEIGHT holds {s:?}, not a height: {e}"),
+                )
+            })
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn delete_block(&self, height: u64) -> std::io::Result<()> {
+        let key = format!("HEIGHT:{height}");
+        if let Some(hash_val) = self.db.get(key.as_bytes())? {
+            let mut batch = sled::Batch::default();
+            // The index rows of this block go with it. A row that already
+            // points at another height was rewritten by a later block and
+            // stays.
+            let hash = from_utf8(&hash_val)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            if let Some(block) = self.get_block(hash)? {
+                for tx in &block.transactions {
+                    if self.get_tx_block_height(&tx.hash)? == Some(height) {
+                        batch.remove(format!("TX_IDX:{}", tx.hash).as_bytes());
+                    }
+                }
+            }
+            batch.remove(&hash_val);
+            batch.remove(key.as_bytes());
+            batch.remove(format!("STATE_ROOT:{height}").as_bytes());
+            batch.remove(format!("FINALITY_CERT:{height}").as_bytes());
+            batch.remove(format!("QC_BLOB:{height}").as_bytes());
+            self.db.apply_batch(batch)?;
+            self.db.flush()?;
+        }
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_qc_blob(
+        &self,
+        height: u64,
+        blob: &crate::consensus::qc::QcBlob,
+    ) -> std::io::Result<()> {
+        let key = format!("QC_BLOB:{height}");
+        let val = encode(blob)?;
+        self.db.insert(key.as_bytes(), val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn get_qc_blob(
+        &self,
+        height: u64,
+    ) -> std::io::Result<Option<crate::consensus::qc::QcBlob>> {
+        let key = format!("QC_BLOB:{height}");
+        if let Some(val) = self.db.get(key.as_bytes())? {
+            let blob = decode(&val)?;
+            Ok(Some(blob))
+        } else {
+            Ok(None)
+        }
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn delete_qc_blob(&self, height: u64) -> std::io::Result<()> {
+        let key = format!("QC_BLOB:{height}");
+        self.db.remove(key.as_bytes())?;
+        self.db.flush()?;
+        Ok(())
+    }
+    /// Persist the validator set for `epoch`.
+    ///
+    /// `Blockchain::validator_snapshots` keeps the last 100 epochs in memory
+    /// And was never written anywhere. After a restart every historical epoch
+    /// Falls through `validator_snapshot_for_epoch` and
+    /// `require_validator_snapshot` refuses the whole check, a node that
+    /// Restarts can no longer verify any past-epoch certificate or fault
+    /// Proof until it has observed 100 fresh epochs.
+    ///
+    /// Same shape as `save_qc_blob`: keyed by epoch, flushed on write.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the snapshot cannot be encoded,
+    /// Written or flushed.
+    pub fn save_validator_snapshot(
+        &self,
+        epoch: u64,
+        snapshot: &crate::chain::finality::ValidatorSetSnapshot,
+    ) -> std::io::Result<()> {
+        let key = format!("VALIDATOR_SNAPSHOT:{epoch}");
+        let val = encode(snapshot)?;
+        self.db.insert(key.as_bytes(), val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// Every persisted validator snapshot, oldest epoch first.
+    ///
+    /// The caller re-applies its own retention bound, so a database holding
+    /// More than the in-memory limit does not silently grow the live map.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the scan fails or a stored
+    /// Snapshot cannot be decoded. Keys whose epoch suffix does not parse are
+    /// Skipped rather than failing the whole load.
+    pub fn load_validator_snapshots(
+        &self,
+    ) -> std::io::Result<Vec<(u64, crate::chain::finality::ValidatorSetSnapshot)>> {
+        let mut out: Vec<(u64, crate::chain::finality::ValidatorSetSnapshot)> = Vec::new();
+        for item in self.db.scan_prefix(b"VALIDATOR_SNAPSHOT:") {
+            let (key, val) = item?;
+            let key = String::from_utf8_lossy(&key).to_string();
+            let Some(epoch) = key
+                .rsplit(':')
+                .next()
+                .and_then(|raw| raw.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let snapshot = decode::<crate::chain::finality::ValidatorSetSnapshot>(&val)?;
+            out.push((epoch, snapshot));
+        }
+        out.sort_by_key(|(epoch, _)| *epoch);
+        Ok(out)
+    }
+
+    /// Drop a snapshot the caller has evicted from its retention window.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the removal cannot be flushed.
+    pub fn delete_validator_snapshot(&self, epoch: u64) -> std::io::Result<()> {
+        let key = format!("VALIDATOR_SNAPSHOT:{epoch}");
+        self.db.remove(key.as_bytes())?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    pub fn save_finality_cert(
+        &self,
+        height: u64,
+        cert: &crate::chain::finality::FinalityCert,
+    ) -> std::io::Result<()> {
+        let key = format!("FINALITY_CERT:{height}");
+        let val = encode(cert)?;
+        self.db.insert(key.as_bytes(), val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn get_finality_cert(
+        &self,
+        height: u64,
+    ) -> std::io::Result<Option<crate::chain::finality::FinalityCert>> {
+        let key = format!("FINALITY_CERT:{height}");
+        if let Some(val) = self.db.get(key.as_bytes())? {
+            let cert = decode(&val)?;
+            Ok(Some(cert))
+        } else {
+            Ok(None)
+        }
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn delete_finality_cert(&self, height: u64) -> std::io::Result<()> {
+        let key = format!("FINALITY_CERT:{height}");
+        self.db.remove(key.as_bytes())?;
+        self.db.flush()?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_canonical_height(&self, height: u64) -> std::io::Result<()> {
+        self.db
+            .insert("CANONICAL_HEIGHT", height.to_string().as_bytes())?;
+        self.db.flush()?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_state_root(&self, height: u64, state_root: &str) -> std::io::Result<()> {
+        let key = format!("STATE_ROOT:{height}");
+        self.db.insert(key.as_bytes(), state_root.as_bytes())?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_consensus_domain(&self, domain: &ConsensusDomain) -> std::io::Result<()> {
+        let key = format!("DOMAIN:{}", domain.id);
+        let val = encode(domain)?;
+        self.db.insert(key.as_bytes(), val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_consensus_domains(&self) -> std::io::Result<Vec<ConsensusDomain>> {
+        let mut domains: Vec<ConsensusDomain> = Vec::new();
+        for item in self.db.scan_prefix(b"DOMAIN:") {
+            let (_key, val) = item?;
+            let domain = decode::<ConsensusDomain>(&val).or_else(|_| {
+                bincode::deserialize::<LegacyConsensusDomainV1>(&val)
+                    .map(ConsensusDomain::from)
+                    .map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                    })
+            })?;
+            domains.push(domain);
+        }
+        domains.sort_by_key(|domain| domain.id);
+        Ok(domains)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_domain_commitment(&self, commitment: &DomainCommitment) -> std::io::Result<()> {
+        let key = format!(
+            "DOMAIN_COMMITMENT:{}:{}:{}",
+            commitment.domain_id, commitment.domain_height, commitment.sequence
+        );
+        let val = encode(commitment)?;
+        self.db.insert(key.as_bytes(), val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_domain_commitment_batch(
+        &self,
+        commitment: &DomainCommitment,
+        domains: &[ConsensusDomain],
+    ) -> std::io::Result<()> {
+        let commitment_key = format!(
+            "DOMAIN_COMMITMENT:{}:{}:{}",
+            commitment.domain_id, commitment.domain_height, commitment.sequence
+        );
+        let commitment_val = encode(commitment)?;
+        let mut batch = sled::Batch::default();
+        batch.insert(commitment_key.as_bytes(), commitment_val.as_slice());
+
+        for domain in domains {
+            let domain_key = format!("DOMAIN:{}", domain.id);
+            let domain_val = encode(domain)?;
+            batch.insert(domain_key.as_bytes(), domain_val.as_slice());
+        }
+
+        self.db.apply_batch(batch)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_domain_commitments(&self) -> std::io::Result<Vec<DomainCommitment>> {
+        let mut commitments: Vec<DomainCommitment> = Vec::new();
+        for item in self.db.scan_prefix(b"DOMAIN_COMMITMENT:") {
+            let (_key, val) = item?;
+            commitments.push(decode(&val)?);
+        }
+        commitments.sort_by_key(|commitment| {
+            (
+                commitment.domain_id,
+                commitment.domain_height,
+                commitment.sequence,
+            )
+        });
+        Ok(commitments)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_global_header(&self, header: &GlobalBlockHeader) -> std::io::Result<()> {
+        let key = format!("GLOBAL_HEADER:{}", header.global_height);
+        let hash_key = format!("GLOBAL_HEADER_HASH:{}", header.calculate_hash());
+        let val = encode(header)?;
+
+        let mut batch = sled::Batch::default();
+        batch.insert(key.as_bytes(), val.as_slice());
+        batch.insert(
+            hash_key.as_bytes(),
+            header.global_height.to_string().as_bytes(),
+        );
+        batch.insert(
+            b"LAST_GLOBAL_HEIGHT",
+            header.global_height.to_string().as_bytes(),
+        );
+        self.db.apply_batch(batch)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn get_global_header(&self, height: u64) -> std::io::Result<Option<GlobalBlockHeader>> {
+        let key = format!("GLOBAL_HEADER:{height}");
+        if let Some(val) = self.db.get(key.as_bytes())? {
+            Ok(Some(decode(&val)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_global_headers(&self) -> std::io::Result<Vec<GlobalBlockHeader>> {
+        let mut headers: Vec<GlobalBlockHeader> = Vec::new();
+        for item in self.db.scan_prefix(b"GLOBAL_HEADER:") {
+            let (_key, val) = item?;
+            headers.push(decode(&val)?);
+        }
+        headers.sort_by_key(|header| header.global_height);
+        Ok(headers)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_bridge_state(&self, bridge_state: &BridgeState) -> std::io::Result<()> {
+        let val = encode(bridge_state)?;
+        self.db.insert(b"BRIDGE_STATE", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
+        if let Some(val) = self.db.get(b"BRIDGE_STATE")? {
+            // One shape only. Two shorter shapes used to be accepted here
+            // and filled in with empty maps: one without the settled queue,
+            // one without the replay heights as well. Both maps feed a
+            // committed root (`bridge_state_root`, `replay_nonce_root`), so
+            // a node that loaded a shorter row committed roots its peers
+            // could not reproduce. A row this shape does not decode is
+            // reported, not repaired.
+            let decoded = decode::<BridgeState>(&val).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "BRIDGE_STATE row does not decode as the current BridgeState shape; \
+                         a row from an older build cannot be loaded without changing the \
+                         committed bridge and replay roots, so it is refused: {error}"
+                    ),
+                )
+            })?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_universal_relayer(
+        &self,
+        relayer: &crate::cross_domain::relayer::UniversalRelayer,
+    ) -> std::io::Result<()> {
+        let val = encode(relayer)?;
+        self.db.insert(b"UNIVERSAL_RELAYER", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_universal_relayer(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::relayer::UniversalRelayer>> {
+        if let Some(val) = self.db.get(b"UNIVERSAL_RELAYER")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_external_intake(
+        &self,
+        intake: &crate::cross_domain::external::IntakeState,
+    ) -> std::io::Result<()> {
+        let val = encode(intake)?;
+        self.db.insert(b"EXTERNAL_INTAKE", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_external_intake(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::external::IntakeState>> {
+        if let Some(val) = self.db.get(b"EXTERNAL_INTAKE")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_quarantine_ledger(
+        &self,
+        ledger: &crate::registry::QuarantineLedger,
+    ) -> std::io::Result<()> {
+        let val = encode(ledger)?;
+        self.db.insert(b"QUARANTINE_LEDGER", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_quarantine_ledger(
+        &self,
+    ) -> std::io::Result<Option<crate::registry::QuarantineLedger>> {
+        if let Some(val) = self.db.get(b"QUARANTINE_LEDGER")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_storage_registry(
+        &self,
+        registry: &crate::domain::storage_deal::StorageRegistry,
+    ) -> std::io::Result<()> {
+        let val = encode(registry)?;
+        self.db.insert(
+            b"STORAGE_REGISTRY_VERSION",
+            STORAGE_REGISTRY_ROW_VERSION.to_le_bytes().to_vec(),
+        )?;
+        self.db.insert(b"STORAGE_REGISTRY", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_storage_registry(
+        &self,
+    ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
+        if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
+            let version = self.db.get(b"STORAGE_REGISTRY_VERSION")?;
+            let expected_version = STORAGE_REGISTRY_ROW_VERSION.to_le_bytes();
+            if version.as_deref() != Some(expected_version.as_slice()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "STORAGE_REGISTRY row has no matching version tag; a row from another build \
+                     is refused",
+                ));
+            }
+            // One shape only. A row written before the settled-ticket queue
+            // used to be padded with an empty queue and accepted; the queue
+            // is part of the registry root and decides when a ticket row is
+            // dropped, so the padded node split from its peers at the first
+            // retention cutoff. Such a row is reported, not repaired.
+            let decoded =
+                decode::<crate::domain::storage_deal::StorageRegistry>(&val).map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "STORAGE_REGISTRY row does not decode as the current StorageRegistry \
+                             shape; a row from an older build cannot be loaded without changing \
+                             the committed registry root, so it is refused: {error}"
+                        ),
+                    )
+                })?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_proof_claim_registry(
+        &self,
+        registry: &crate::prover::ProofClaimRegistry,
+    ) -> std::io::Result<()> {
+        let val = encode(registry)?;
+        self.db.insert(b"PROOF_CLAIM_REGISTRY", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_proof_claim_registry(
+        &self,
+    ) -> std::io::Result<Option<crate::prover::ProofClaimRegistry>> {
+        if let Some(val) = self.db.get(b"PROOF_CLAIM_REGISTRY")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    /// BLG-0190 (P09-F11): arm/disarm the test-only persist failure.
+    #[cfg(test)]
+    pub(crate) fn set_fail_economics_writes(&self, on: bool) {
+        self.fail_economics_writes
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn save_storage_economics_state(
+        &self,
+        snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
+    ) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_economics_writes
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(std::io::Error::other(
+                "injected storage-economics persist failure (BLG-0190)",
+            ));
+        }
+        let val = encode(snapshot)?;
+        self.db.insert(b"STORAGE_ECONOMICS_STATE", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_storage_economics_state(
+        &self,
+    ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>> {
+        if let Some(val) = self.db.get(b"STORAGE_ECONOMICS_STATE")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_cross_domain_message(&self, message: &CrossDomainMessage) -> std::io::Result<()> {
+        let key = format!("XDOMAIN_MSG:{}", hex::encode(message.message_id));
+        let val = encode(message)?;
+        self.db.insert(key.as_bytes(), val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_cross_domain_messages(&self) -> std::io::Result<Vec<CrossDomainMessage>> {
+        let mut messages: Vec<CrossDomainMessage> = Vec::new();
+        for item in self.db.scan_prefix(b"XDOMAIN_MSG:") {
+            let (_key, val) = item?;
+            messages.push(decode(&val)?);
+        }
+        Ok(messages)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn get_state_root(&self, height: u64) -> std::io::Result<Option<String>> {
+        let key = format!("STATE_ROOT:{height}");
+        if let Some(val) = self.db.get(key.as_bytes())? {
+            let root = from_utf8(&val)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+                .to_string();
+            Ok(Some(root))
+        } else {
+            Ok(None)
+        }
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_last_hash(&self, hash: &str) -> std::io::Result<()> {
+        self.db.insert("LAST", hash.as_bytes())?;
+        self.db.flush()?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn get_last_hash(&self) -> std::io::Result<Option<String>> {
+        if let Some(val) = self.db.get("LAST")? {
+            let hash = from_utf8(&val)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+                .to_string();
+            Ok(Some(hash))
+        } else {
+            Ok(None)
+        }
+    }
+    /// One step of a walk from the tip toward genesis.
+    ///
+    /// The record found under `key` must carry that hash, and its height must
+    /// be exactly one below the block the walk came from. The height rule
+    /// makes a `previous_hash` cycle impossible: heights fall at every step,
+    /// so the walk ends.
+    fn check_walk_step(key: &str, block: &Block, child_index: Option<u64>) -> std::io::Result<()> {
+        if block.hash != key {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("record under {key} carries hash {}", block.hash),
+            ));
+        }
+        if let Some(child_index) = child_index {
+            if block.index.checked_add(1) != Some(child_index) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "block {child_index} points at a parent at height {}, not one below",
+                        block.index
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_chain(&self) -> std::io::Result<Vec<Block>> {
+        let mut chain: Vec<Block> = Vec::new();
+        if let Some(mut current_hash) = self.get_last_hash()? {
+            // A read error is not the end of the chain. `while let Ok(Some)`
+            // ended the walk on `Err` the same way as on `Ok(None)`, so one
+            // unreadable record brought the node up on a silently short chain.
+            while let Some(block) = self.get_block(&current_hash)? {
+                Self::check_walk_step(&current_hash, &block, chain.last().map(|b| b.index))?;
+                chain.push(block.clone());
+                if block.previous_hash == "0".repeat(64) {
+                    break;
+                }
+                current_hash = block.previous_hash;
+            }
+            // The walk ends at a missing parent. On a pruned node the heights
+            // below the oldest kept block are gone too, so that is the end of
+            // the kept chain. A height index that still names a parent whose
+            // block is gone is damage, and it is not reported as a short chain.
+            if let Some(oldest) = chain.last() {
+                if oldest.index > 0 && oldest.previous_hash != "0".repeat(64) {
+                    let parent_key = format!("HEIGHT:{}", oldest.index - 1);
+                    if self.db.get(parent_key.as_bytes())?.is_some() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "block {} is indexed but its record is missing",
+                                oldest.index - 1
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+    pub const fn db(&self) -> &Db {
+        &self.db
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_tx_index(&self, tx_hash: &str, block_height: u64) -> std::io::Result<()> {
+        let key = format!("TX_IDX:{tx_hash}");
+        self.db
+            .insert(key.as_bytes(), block_height.to_string().as_bytes())?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn get_tx_block_height(&self, tx_hash: &str) -> std::io::Result<Option<u64>> {
+        let key = format!("TX_IDX:{tx_hash}");
+        if let Some(val) = self.db.get(key.as_bytes())? {
+            let s = from_utf8(&val)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            // A value that is not a height is damage, not "no entry": reporting
+            // None would hide the corrupt row from every caller.
+            s.parse().map(Some).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("tx index row {tx_hash} is not a height: {e}"),
+                )
+            })
+        } else {
+            Ok(None)
+        }
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn delete_tx_index(&self, tx_hash: &str) -> std::io::Result<()> {
+        let key = format!("TX_IDX:{tx_hash}");
+        self.db.remove(key.as_bytes())?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_account(&self, pubkey: &Address, account: &Account) -> std::io::Result<()> {
+        let key = format!("ACCT:{pubkey}");
+        let val = encode(account)?;
+        self.db.insert(key.as_bytes(), val)?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_all_accounts(
+        &self,
+    ) -> std::io::Result<std::collections::HashMap<Address, Account>> {
+        let mut accounts = std::collections::HashMap::new();
+        for item in self.db.scan_prefix(b"ACCT:") {
+            let (key, val) = item?;
+            let key_str = from_utf8(&key)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let pubkey_str = key_str.strip_prefix("ACCT:").unwrap_or(key_str);
+            let pubkey = Address::from_hex(pubkey_str)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            let account: Account = decode(&val)?;
+            accounts.insert(pubkey, account);
+        }
+        Ok(accounts)
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_mempool_tx(&self, tx: &Transaction) -> std::io::Result<()> {
+        let key = format!("MEMPOOL:{}", tx.hash);
+        let val = encode(tx)?;
+        self.db.insert(key.as_bytes(), val)?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn remove_mempool_tx(&self, tx_hash: &str) -> std::io::Result<()> {
+        let key = format!("MEMPOOL:{tx_hash}");
+        self.db.remove(key.as_bytes())?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_mempool_txs(&self) -> std::io::Result<Vec<Transaction>> {
+        let mut txs = Vec::new();
+        let mut removed_corrupt = false;
+        for item in self.db.scan_prefix(b"MEMPOOL:") {
+            let (key, val) = item?;
+            match decode::<Transaction>(&val) {
+                Ok(tx) => txs.push(tx),
+                Err(error) => {
+                    tracing::warn!(
+                        key = %String::from_utf8_lossy(&key),
+                        error = %error,
+                        "Dropping corrupt persisted mempool transaction"
+                    );
+                    self.db.remove(&key)?;
+                    removed_corrupt = true;
+                }
+            }
+        }
+        if removed_corrupt {
+            self.db.flush()?;
+        }
+        Ok(txs)
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_checkpoint(
+        &self,
+        checkpoint: &crate::consensus::pos::Checkpoint,
+    ) -> std::io::Result<()> {
+        let key = format!("CP:{}", checkpoint.block_index);
+        let val = encode(checkpoint)?;
+        self.db.insert(key.as_bytes(), val)?;
+        // Checkpoints gate `is_before_checkpoint`, which decides whether a
+        // block may still be reorged. sled only fsyncs on its own schedule
+        // (~500ms by default), so without this a crash can lose the most
+        // recent checkpoint and let the node accept a reorg it had already
+        // ruled out. Consensus-visible state is flushed on write here, as the
+        // finality-cert and QC-blob paths already do.
+        self.db.flush()?;
+        Ok(())
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_checkpoints(&self) -> std::io::Result<Vec<crate::consensus::pos::Checkpoint>> {
+        let mut cps = Vec::new();
+        for item in self.db.scan_prefix(b"CP:") {
+            let (_key, val) = item?;
+            let cp: crate::consensus::pos::Checkpoint = decode(&val)?;
+            cps.push(cp);
+        }
+        cps.sort_by_key(|c| c.block_index);
+        Ok(cps)
+    }
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_seen_block(
+        &self,
+        header: &crate::core::block::BlockHeader,
+        sig: &[u8],
+    ) -> std::io::Result<()> {
+        // A header with no producer has no key the loader can read back:
+        // `load_all_seen_blocks` parses the middle segment as an address and
+        // a literal "unknown" there stopped the whole scan. Refused here.
+        let producer = header.producer.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "seen block at height {} has no producer; nothing to record it under",
+                    header.index
+                ),
+            )
+        })?;
+        let key = format!("SEEN:{}:{}", producer, header.index);
+        let val = encode(&(header, sig))?;
+        self.db.insert(key.as_bytes(), val)?;
+        Ok(())
+    }
+    /// Removes the persisted seen-block records below `min_slot`. The memory
+    /// map is pruned the same way. Without this, the records grow without
+    /// bound and every start loads all of them.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn prune_seen_blocks_below(&self, min_slot: u64) -> std::io::Result<usize> {
+        let mut removed = 0usize;
+        for item in self.db.scan_prefix(b"SEEN:") {
+            let (key, _) = item?;
+            let slot = from_utf8(&key)
+                .ok()
+                .and_then(|k| k.rsplit(':').next())
+                .and_then(|s| s.parse::<u64>().ok());
+            if slot.is_some_and(|s| s < min_slot) {
+                self.db.remove(&key)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_all_seen_blocks(&self) -> std::io::Result<SeenBlockMap> {
+        let mut seen = std::collections::HashMap::new();
+        let mut removed_corrupt = false;
+        for item in self.db.scan_prefix(b"SEEN:") {
+            let (key, val) = item?;
+            let key_str = from_utf8(&key).unwrap_or("");
+            let parts: Vec<&str> = key_str
+                .strip_prefix("SEEN:")
+                .unwrap_or(key_str)
+                .split(':')
+                .collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            // One unreadable record must not stop the load. A failed load
+            // leaves the node with no checkpoints and no seen blocks, which
+            // turns off checkpoint enforcement and double-sign detection.
+            let parsed: Result<_, String> = (|| {
+                let producer = Address::from_hex(parts[0]).map_err(|e| e.to_string())?;
+                let index: u64 = parts[1].parse().map_err(|e| format!("bad height: {e}"))?;
+                let data: (crate::core::block::BlockHeader, Vec<u8>) =
+                    decode(&val).map_err(|e| e.to_string())?;
+                Ok(((producer, index), data))
+            })();
+            match parsed {
+                Ok((entry_key, data)) => {
+                    seen.insert(entry_key, data);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        key = %key_str,
+                        error = %error,
+                        "Dropping corrupt persisted seen-block record"
+                    );
+                    self.db.remove(&key)?;
+                    removed_corrupt = true;
+                }
+            }
+        }
+        if removed_corrupt {
+            self.db.flush()?;
+        }
+        Ok(seen)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn flush_batch(&self) -> std::io::Result<usize> {
+        Ok(self.db.flush()?)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
+    pub fn check_integrity(&self) -> Result<Vec<String>, String> {
+        let mut errors = Vec::new();
+        let height = self.get_canonical_height().map_err(|e| e.to_string())?;
+
+        info!("Starting integrity audit up to height {height}");
+
+        let mut prev_hash = "0".repeat(64);
+        // A pruned node has deleted a prefix of the chain. Heights before the
+        // first stored block are that prefix and are not damage; a gap after
+        // it still is.
+        let mut seen_block = false;
+        for i in 0..=height {
+            let block_res = self.get_block_by_height(i);
+            match block_res {
+                Ok(None) if !seen_block => {
+                    continue;
+                }
+                Ok(Some(block)) => {
+                    if !seen_block {
+                        seen_block = true;
+                        prev_hash.clone_from(&block.previous_hash);
+                    }
+                    let calc_hash = block.calculate_hash();
+                    if block.hash != calc_hash {
+                        errors.push(format!(
+                            "Block {}: hash mismatch (stored: {}, calc: {})",
+                            i, block.hash, calc_hash
+                        ));
+                    }
+
+                    if i > 0 && block.previous_hash != prev_hash {
+                        errors.push(format!(
+                            "Block {}: linkage error (expected prev: {}, got: {})",
+                            i, prev_hash, block.previous_hash
+                        ));
+                    }
+
+                    prev_hash = block.hash.clone();
+                }
+                Ok(None) => {
+                    errors.push(format!("Block {i}: missing in index"));
+                }
+                Err(e) => {
+                    errors.push(format!("Block {i}: read error: {e}"));
+                }
+            }
+        }
+
+        Ok(errors)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `String` from the step that failed; its variants name the refused conditions.
+    pub fn repair_index(&self) -> Result<(), String> {
+        tracing::info!("Starting database index repair...");
+        let last_hash = match self.get_last_hash() {
+            Ok(Some(h)) => h,
+            _ => return Err("Cannot repair: No tip found in DB".into()),
+        };
+
+        let mut current_hash = last_hash;
+        let mut count = 0;
+        let mut child_index: Option<u64> = None;
+        loop {
+            let block = self
+                .get_block(&current_hash)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Cannot repair: block {current_hash} is missing"))?;
+            Self::check_walk_step(&current_hash, &block, child_index)
+                .map_err(|e| format!("Cannot repair: {e}"))?;
+            child_index = Some(block.index);
+            let height_key = format!("HEIGHT:{}", block.index);
+            self.db
+                .insert(height_key.as_bytes(), block.hash.as_bytes())
+                .map_err(|e| e.to_string())?;
+
+            let state_key = format!("STATE_ROOT:{}", block.index);
+            self.db
+                .insert(state_key.as_bytes(), block.state_root.as_bytes())
+                .map_err(|e| e.to_string())?;
+
+            for tx in &block.transactions {
+                let tx_idx_key = format!("TX_IDX:{}", tx.hash);
+                self.db
+                    .insert(tx_idx_key.as_bytes(), block.index.to_string().as_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+
+            if block.index == 0 {
+                self.db
+                    .insert(b"CANONICAL_HEIGHT", b"0")
+                    .map_err(|e| e.to_string())?;
+            } else {
+                let current_canonical = self.get_canonical_height().unwrap_or(0);
+                if block.index > current_canonical {
+                    self.save_canonical_height(block.index)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+
+            count += 1;
+            if block.previous_hash == "0".repeat(64) || block.previous_hash.is_empty() {
+                break;
+            }
+            current_hash = block.previous_hash;
+        }
+        tracing::info!("Repair complete. Re-indexed {count} blocks");
+        Ok(())
+    }
+
+    fn content_key(cid: &crate::storage::content_id::ContentId) -> String {
+        format!("CONTENT:{}", hex::encode(cid.0))
+    }
+
+    /// Store raw content bytes by their canonical `ContentId`.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn put_content(
+        &self,
+        cid: &crate::storage::content_id::ContentId,
+        bytes: &[u8],
+    ) -> std::io::Result<()> {
+        let expected = crate::storage::content_id::ContentId::of(bytes);
+        if &expected != cid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "content bytes do not match ContentId",
+            ));
+        }
+        self.db.insert(Self::content_key(cid).as_bytes(), bytes)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// Retrieve raw content bytes by `ContentId`.
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn get_content(
+        &self,
+        cid: &crate::storage::content_id::ContentId,
+    ) -> std::io::Result<Vec<u8>> {
+        let bytes = self
+            .db
+            .get(Self::content_key(cid).as_bytes())?
+            .map(|value| value.to_vec())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("content {cid} not found"),
+                )
+            })?;
+        // The row is addressed by its hash; a row that no longer hashes to its
+        // key is damage and must not be served as that content.
+        if &crate::storage::content_id::ContentId::of(&bytes) != cid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("content {cid} does not match its stored bytes"),
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+impl BlockchainStorage for Storage {
+    fn insert_block(&self, block: &Block) -> std::io::Result<()> {
+        Self::insert_block(self, block)
+    }
+
+    fn commit_block(&self, block: &Block, state_root: &str) -> std::io::Result<()> {
+        Self::commit_block(self, block, state_root)
+    }
+
+    fn get_block(&self, hash: &str) -> std::io::Result<Option<Block>> {
+        Self::get_block(self, hash)
+    }
+
+    fn get_block_by_height(&self, height: u64) -> std::io::Result<Option<Block>> {
+        Self::get_block_by_height(self, height)
+    }
+
+    fn get_canonical_height(&self) -> std::io::Result<u64> {
+        Self::get_canonical_height(self)
+    }
+
+    fn save_canonical_height(&self, height: u64) -> std::io::Result<()> {
+        Self::save_canonical_height(self, height)
+    }
+
+    fn save_state_root(&self, height: u64, state_root: &str) -> std::io::Result<()> {
+        Self::save_state_root(self, height, state_root)
+    }
+
+    fn get_state_root(&self, height: u64) -> std::io::Result<Option<String>> {
+        Self::get_state_root(self, height)
+    }
+
+    fn save_last_hash(&self, hash: &str) -> std::io::Result<()> {
+        Self::save_last_hash(self, hash)
+    }
+
+    fn get_last_hash(&self) -> std::io::Result<Option<String>> {
+        Self::get_last_hash(self)
+    }
+
+    fn load_chain(&self) -> std::io::Result<Vec<Block>> {
+        Self::load_chain(self)
+    }
+
+    fn delete_block(&self, height: u64) -> std::io::Result<()> {
+        Self::delete_block(self, height)
+    }
+
+    fn save_qc_blob(
+        &self,
+        height: u64,
+        blob: &crate::consensus::qc::QcBlob,
+    ) -> std::io::Result<()> {
+        Self::save_qc_blob(self, height, blob)
+    }
+
+    fn get_qc_blob(&self, height: u64) -> std::io::Result<Option<crate::consensus::qc::QcBlob>> {
+        Self::get_qc_blob(self, height)
+    }
+
+    fn delete_qc_blob(&self, height: u64) -> std::io::Result<()> {
+        Self::delete_qc_blob(self, height)
+    }
+
+    fn save_finality_cert(
+        &self,
+        height: u64,
+        cert: &crate::chain::finality::FinalityCert,
+    ) -> std::io::Result<()> {
+        Self::save_finality_cert(self, height, cert)
+    }
+
+    fn get_finality_cert(
+        &self,
+        height: u64,
+    ) -> std::io::Result<Option<crate::chain::finality::FinalityCert>> {
+        Self::get_finality_cert(self, height)
+    }
+
+    fn delete_finality_cert(&self, height: u64) -> std::io::Result<()> {
+        Self::delete_finality_cert(self, height)
+    }
+
+    fn save_consensus_domain(&self, domain: &ConsensusDomain) -> std::io::Result<()> {
+        Self::save_consensus_domain(self, domain)
+    }
+
+    fn load_consensus_domains(&self) -> std::io::Result<Vec<ConsensusDomain>> {
+        Self::load_consensus_domains(self)
+    }
+
+    fn save_domain_commitment(&self, commitment: &DomainCommitment) -> std::io::Result<()> {
+        Self::save_domain_commitment(self, commitment)
+    }
+
+    fn save_domain_commitment_batch(
+        &self,
+        commitment: &DomainCommitment,
+        domains: &[ConsensusDomain],
+    ) -> std::io::Result<()> {
+        Self::save_domain_commitment_batch(self, commitment, domains)
+    }
+
+    fn load_domain_commitments(&self) -> std::io::Result<Vec<DomainCommitment>> {
+        Self::load_domain_commitments(self)
+    }
+
+    fn save_global_header(&self, header: &GlobalBlockHeader) -> std::io::Result<()> {
+        Self::save_global_header(self, header)
+    }
+
+    fn get_global_header(&self, height: u64) -> std::io::Result<Option<GlobalBlockHeader>> {
+        Self::get_global_header(self, height)
+    }
+
+    fn load_global_headers(&self) -> std::io::Result<Vec<GlobalBlockHeader>> {
+        Self::load_global_headers(self)
+    }
+
+    fn save_bridge_state(&self, bridge_state: &BridgeState) -> std::io::Result<()> {
+        Self::save_bridge_state(self, bridge_state)
+    }
+
+    fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
+        Self::load_bridge_state(self)
+    }
+
+    fn save_universal_relayer(
+        &self,
+        relayer: &crate::cross_domain::relayer::UniversalRelayer,
+    ) -> std::io::Result<()> {
+        Self::save_universal_relayer(self, relayer)
+    }
+
+    fn load_universal_relayer(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::relayer::UniversalRelayer>> {
+        Self::load_universal_relayer(self)
+    }
+
+    fn save_proof_claim_registry(
+        &self,
+        registry: &crate::prover::ProofClaimRegistry,
+    ) -> std::io::Result<()> {
+        Self::save_proof_claim_registry(self, registry)
+    }
+
+    fn load_proof_claim_registry(
+        &self,
+    ) -> std::io::Result<Option<crate::prover::ProofClaimRegistry>> {
+        Self::load_proof_claim_registry(self)
+    }
+
+    fn save_quarantine_ledger(
+        &self,
+        ledger: &crate::registry::QuarantineLedger,
+    ) -> std::io::Result<()> {
+        Self::save_quarantine_ledger(self, ledger)
+    }
+
+    fn save_external_intake(
+        &self,
+        intake: &crate::cross_domain::external::IntakeState,
+    ) -> std::io::Result<()> {
+        Self::save_external_intake(self, intake)
+    }
+
+    fn load_external_intake(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::external::IntakeState>> {
+        Self::load_external_intake(self)
+    }
+
+    fn load_quarantine_ledger(&self) -> std::io::Result<Option<crate::registry::QuarantineLedger>> {
+        Self::load_quarantine_ledger(self)
+    }
+
+    fn save_storage_economics_state(
+        &self,
+        snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
+    ) -> std::io::Result<()> {
+        Self::save_storage_economics_state(self, snapshot)
+    }
+
+    fn load_storage_economics_state(
+        &self,
+    ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>> {
+        Self::load_storage_economics_state(self)
+    }
+
+    fn save_cross_domain_message(&self, message: &CrossDomainMessage) -> std::io::Result<()> {
+        Self::save_cross_domain_message(self, message)
+    }
+
+    fn load_cross_domain_messages(&self) -> std::io::Result<Vec<CrossDomainMessage>> {
+        Self::load_cross_domain_messages(self)
+    }
+
+    fn save_tx_index(&self, tx_hash: &str, block_height: u64) -> std::io::Result<()> {
+        Self::save_tx_index(self, tx_hash, block_height)
+    }
+
+    fn get_tx_block_height(&self, tx_hash: &str) -> std::io::Result<Option<u64>> {
+        Self::get_tx_block_height(self, tx_hash)
+    }
+
+    fn delete_tx_index(&self, tx_hash: &str) -> std::io::Result<()> {
+        Self::delete_tx_index(self, tx_hash)
+    }
+
+    fn save_account(&self, pubkey: &Address, account: &Account) -> std::io::Result<()> {
+        Self::save_account(self, pubkey, account)
+    }
+
+    fn load_all_accounts(&self) -> std::io::Result<std::collections::HashMap<Address, Account>> {
+        Self::load_all_accounts(self)
+    }
+
+    fn save_mempool_tx(&self, tx: &Transaction) -> std::io::Result<()> {
+        Self::save_mempool_tx(self, tx)
+    }
+
+    fn remove_mempool_tx(&self, tx_hash: &str) -> std::io::Result<()> {
+        Self::remove_mempool_tx(self, tx_hash)
+    }
+
+    fn load_mempool_txs(&self) -> std::io::Result<Vec<Transaction>> {
+        Self::load_mempool_txs(self)
+    }
+
+    fn save_checkpoint(
+        &self,
+        checkpoint: &crate::consensus::pos::Checkpoint,
+    ) -> std::io::Result<()> {
+        Self::save_checkpoint(self, checkpoint)
+    }
+
+    fn load_checkpoints(&self) -> std::io::Result<Vec<crate::consensus::pos::Checkpoint>> {
+        Self::load_checkpoints(self)
+    }
+
+    fn save_seen_block(
+        &self,
+        header: &crate::core::block::BlockHeader,
+        sig: &[u8],
+    ) -> std::io::Result<()> {
+        Self::save_seen_block(self, header, sig)
+    }
+
+    fn load_all_seen_blocks(&self) -> std::io::Result<SeenBlockMap> {
+        Self::load_all_seen_blocks(self)
+    }
+
+    fn flush_batch(&self) -> std::io::Result<usize> {
+        Self::flush_batch(self)
+    }
+
+    fn commit_durable_batch(&self, batch: &DurableCommitBatch) -> std::io::Result<()> {
+        Self::commit_durable_batch(self, batch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::account::Account;
+    use crate::core::address::Address;
+    use crate::core::block::Block;
+    use tempfile::tempdir;
+
+    #[test]
+    fn storage_registry_row_needs_its_version_tag() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let registry = crate::domain::storage_deal::StorageRegistry::default();
+        storage.save_storage_registry(&registry).unwrap();
+        assert!(storage.load_storage_registry().unwrap().is_some());
+        storage.db().remove(b"STORAGE_REGISTRY_VERSION").unwrap();
+        let err = storage.load_storage_registry().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn get_content_refuses_a_row_that_no_longer_hashes_to_its_key() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let cid = crate::storage::content_id::ContentId::of(b"hello");
+        storage.put_content(&cid, b"hello").unwrap();
+        assert_eq!(storage.get_content(&cid).unwrap(), b"hello");
+        storage
+            .db()
+            .insert(Storage::content_key(&cid).as_bytes(), b"tampered")
+            .unwrap();
+        let err = storage.get_content(&cid).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn snapshot_is_refused_while_a_commit_is_in_flight() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().join("db").to_str().unwrap()).unwrap();
+        let out = dir.path().join("backup.bin");
+        storage.create_snapshot(&out).expect("quiet db snapshots");
+        storage.db().insert(b"IN_PROGRESS_HEIGHT", b"5").unwrap();
+        let err = storage
+            .create_snapshot(dir.path().join("b2.bin"))
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn corrupt_tx_index_row_is_an_error_not_a_miss() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        storage.save_tx_index("abc", 7).unwrap();
+        assert_eq!(storage.get_tx_block_height("abc").unwrap(), Some(7));
+        assert_eq!(storage.get_tx_block_height("missing").unwrap(), None);
+        storage.db().insert(b"TX_IDX:bad", b"not-a-number").unwrap();
+        let err = storage.get_tx_block_height("bad").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_durable_commit_batch_and_recovery() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+
+        // 1. Create a storage instance
+        let storage = Storage::new(path).unwrap();
+
+        // 2. Form a block and some accounts
+        let mut block = Block::new(1, "0".repeat(64), vec![]);
+        block.hash = block.calculate_hash();
+
+        let addr = Address::from_hex(&"01".repeat(32)).unwrap();
+        let account = Account::with_balance(addr, 500);
+
+        let batch = DurableCommitBatch {
+            block: block.clone(),
+            state_root: "dummy_state_root".to_string(),
+            finality_cert: None,
+            global_headers: vec![],
+            bridge_state: None,
+            accounts: vec![(addr, account)],
+        };
+
+        // 3. Commit it!
+        storage.commit_durable_batch(&batch).unwrap();
+
+        // 4. Verify successfully written
+        let loaded_block = storage.get_block_by_height(1).unwrap().unwrap();
+        assert_eq!(loaded_block.hash, block.hash);
+
+        let accounts = storage.load_all_accounts().unwrap();
+        assert_eq!(accounts.get(&addr).unwrap().balance, 500);
+
+        // 5a. Durable tip-1 bridge snapshot (as commit_durable_batch would write).
+        use crate::cross_domain::{AssetId, BridgeState};
+        let mut bridge_h1 = BridgeState::new();
+        let asset = AssetId([0x11u8; 32]);
+        bridge_h1.register_asset(asset, 1).unwrap();
+        let bridge_h1_root = bridge_h1.root();
+        let bridge_h1_bytes = encode(&bridge_h1).unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE", bridge_h1_bytes.as_slice())
+            .unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE_AT:1", bridge_h1_bytes.as_slice())
+            .unwrap();
+
+        // 5b. Simulate interrupted commit at height 2 with poisoned bridge state.
+        storage.db.insert(b"IN_PROGRESS_HEIGHT", b"2").unwrap();
+        let mut block2 = Block::new(2, block.hash.clone(), vec![]);
+        block2.hash = block2.calculate_hash();
+        storage
+            .db
+            .insert(block2.hash.as_bytes(), encode(&block2).unwrap())
+            .unwrap();
+        storage
+            .db
+            .insert(b"HEIGHT:2", block2.hash.as_bytes())
+            .unwrap();
+        storage.db.insert(b"STATE_ROOT:2", b"half_state").unwrap();
+        storage.db.insert(b"LAST", block2.hash.as_bytes()).unwrap();
+        storage.db.insert(b"CANONICAL_HEIGHT", b"2").unwrap();
+        let mut bridge_poison = BridgeState::new();
+        let poison_asset = AssetId([0xFFu8; 32]);
+        bridge_poison.register_asset(poison_asset, 9).unwrap();
+        let poison_root = bridge_poison.root();
+        assert_ne!(bridge_h1_root, poison_root);
+        let poison_bytes = encode(&bridge_poison).unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE", poison_bytes.as_slice())
+            .unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE_AT:2", poison_bytes.as_slice())
+            .unwrap();
+        storage.db.flush().unwrap();
+
+        // Drop the first storage handle to release the file lock
+        drop(storage);
+
+        // 6. Instantiate a new storage on the same path, which triggers recovery
+        let storage2 = Storage::new(path).unwrap();
+
+        // 7. Verify recovery successfully rolled back height 2 and restored tip to height 1
+        assert!(storage2.db.get(b"IN_PROGRESS_HEIGHT").unwrap().is_none());
+        assert!(storage2.get_block_by_height(2).unwrap().is_none());
+        assert_eq!(storage2.get_canonical_height().unwrap(), 1);
+        assert_eq!(storage2.get_last_hash().unwrap().unwrap(), block.hash);
+        // Live BRIDGE_STATE must match tip-1 snapshot, not poison.
+        let restored = storage2
+            .load_bridge_state()
+            .unwrap()
+            .expect("bridge state restored");
+        assert_eq!(
+            restored.root(),
+            bridge_h1_root,
+            "bridge must roll back to tip-1 after interrupted H=2"
+        );
+        assert!(storage2.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_none());
+    }
+
+    /// A commit that carries no bridge state still leaves a snapshot at its
+    /// height, so a rollback from the next height restores the live state
+    /// instead of deleting it. Measured before the fix: commit H=1 with
+    /// bridge state, commit H=2 with `None`, interrupt at H=3, and the
+    /// recovery removed `BRIDGE_STATE` outright.
+    #[test]
+    fn a_commit_without_bridge_state_carries_the_live_snapshot_forward() {
+        use crate::cross_domain::{AssetId, BridgeState};
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let storage = Storage::new(path).unwrap();
+
+        let mut block1 = Block::new(1, "0".repeat(64), vec![]);
+        block1.hash = block1.calculate_hash();
+        let mut bridge = BridgeState::new();
+        bridge.register_asset(AssetId([0x22u8; 32]), 1).unwrap();
+        let root = bridge.root();
+        storage
+            .commit_durable_batch(&DurableCommitBatch {
+                block: block1.clone(),
+                state_root: "s1".into(),
+                finality_cert: None,
+                global_headers: vec![],
+                bridge_state: Some(bridge),
+                accounts: vec![],
+            })
+            .unwrap();
+
+        let mut block2 = Block::new(2, block1.hash.clone(), vec![]);
+        block2.hash = block2.calculate_hash();
+        storage
+            .commit_durable_batch(&DurableCommitBatch {
+                block: block2.clone(),
+                state_root: "s2".into(),
+                finality_cert: None,
+                global_headers: vec![],
+                bridge_state: None,
+                accounts: vec![],
+            })
+            .unwrap();
+        assert!(
+            storage.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_some(),
+            "height 2 carries the live snapshot forward"
+        );
+
+        // Interrupt at height 3 with nothing else written.
+        storage.db.insert(b"IN_PROGRESS_HEIGHT", b"3").unwrap();
+        storage.db.flush().unwrap();
+        drop(storage);
+
+        let storage2 = Storage::new(path).unwrap();
+        let restored = storage2
+            .load_bridge_state()
+            .unwrap()
+            .expect("the bridge state valid at height 2 survives the rollback");
+        assert_eq!(restored.root(), root);
+        assert_eq!(storage2.get_canonical_height().unwrap(), 2);
+    }
+
+    /// Present-but-unreadable height markers are errors, not height 0.
+    #[test]
+    fn corrupt_height_markers_are_reported_not_read_as_zero() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let storage = Storage::new(path).unwrap();
+        storage.db.insert(b"CANONICAL_HEIGHT", b"forty").unwrap();
+        assert!(storage.get_canonical_height().is_err());
+        storage.db.insert(b"CANONICAL_HEIGHT", b"40").unwrap();
+        assert_eq!(storage.get_canonical_height().unwrap(), 40);
+
+        storage.db.insert(b"IN_PROGRESS_HEIGHT", b"x").unwrap();
+        storage.db.flush().unwrap();
+        drop(storage);
+        assert!(
+            Storage::new(path).is_err(),
+            "a corrupt in-progress marker must stop the open, not roll back genesis"
+        );
+    }
+
+    #[test]
+    fn backup_restore_roundtrip_is_integrity_checked_and_non_destructive() {
+        let source_dir = tempdir().unwrap();
+        let backup_dir = tempdir().unwrap();
+        let restore_parent = tempdir().unwrap();
+        let source = Storage::new(source_dir.path().to_str().unwrap()).unwrap();
+        let genesis = Block::genesis();
+        source.commit_block(&genesis, &genesis.state_root).unwrap();
+
+        let backup = backup_dir.path().join("node.backup");
+        source.create_snapshot(&backup).unwrap();
+        assert!(backup.exists());
+        assert!(!backup.with_extension("backup.partial").exists());
+        drop(source);
+
+        let restored_path = restore_parent.path().join("restored.db");
+        Storage::restore_snapshot(&backup, &restored_path).unwrap();
+        let restored = Storage::new(restored_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            restored.get_block_by_height(0).unwrap().unwrap().hash,
+            genesis.hash
+        );
+        assert!(restored.check_integrity().unwrap().is_empty());
+        drop(restored);
+
+        let error = Storage::restore_snapshot(&backup, &restored_path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    }
+
+    #[test]
+    fn load_mempool_txs_drops_corrupt_entries_without_aborting_startup() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        storage
+            .db
+            .insert(b"MEMPOOL:corrupt", b"not-a-transaction")
+            .unwrap();
+        storage.db.flush().unwrap();
+
+        let restored = storage.load_mempool_txs().unwrap();
+        assert!(restored.is_empty());
+        assert!(storage.db.get(b"MEMPOOL:corrupt").unwrap().is_none());
+    }
+
+    /// BLG-0023: one bad SEEN record failed the whole load, so the node ran
+    /// with no checkpoints and no double-sign memory.
+    #[test]
+    fn load_all_seen_blocks_skips_corrupt_records() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let producer = Address::from([7u8; 32]);
+        let mut header = crate::core::block::BlockHeader::from_block(&Block::genesis());
+        header.index = 5;
+        header.producer = Some(producer);
+        storage.save_seen_block(&header, b"sig").unwrap();
+        let bad_value_key = format!("SEEN:{producer}:6");
+        storage
+            .db
+            .insert(bad_value_key.as_bytes(), b"not-a-header")
+            .unwrap();
+        storage.db.insert(b"SEEN:not-hex:7", b"junk").unwrap();
+        let bad_height_key = format!("SEEN:{producer}:abc");
+        storage
+            .db
+            .insert(bad_height_key.as_bytes(), b"junk")
+            .unwrap();
+
+        let seen = storage.load_all_seen_blocks().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen.contains_key(&(producer, 5)));
+        assert!(storage.db.get(bad_value_key.as_bytes()).unwrap().is_none());
+        assert!(storage.db.get(b"SEEN:not-hex:7").unwrap().is_none());
+    }
+
+    #[test]
+    fn content_store_roundtrip_and_rejects_wrong_cid() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let bytes = b"B.U.D. local blob";
+        let cid = crate::storage::content_id::ContentId::of(bytes);
+
+        storage.put_content(&cid, bytes).unwrap();
+        assert_eq!(storage.get_content(&cid).unwrap(), bytes);
+
+        let wrong = crate::storage::content_id::ContentId([0xFF; 32]);
+        let error = storage.put_content(&wrong, bytes).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn sled_open_with_retry_waits_for_lock_release() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("contended.db");
+        let holder = sled::open(&path).unwrap();
+        // Release the lock shortly after the first open attempt fails; the
+        // Retry loop must observe the release and succeed instead of giving up
+        // After a single attempt (the old restore path failed this race).
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            drop(holder);
+        });
+        let db = super::sled_open_with_retry(&path).unwrap();
+        releaser.join().unwrap();
+        drop(db);
+    }
+
+    #[test]
+    fn sled_open_with_retry_reports_persistent_contention() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("held.db");
+        let _holder = sled::open(&path).unwrap();
+        // With the lock held for the whole call, the helper must exhaust its
+        // Retries and surface sled's lock error rather than panicking or
+        // Blocking forever.
+        let err = super::sled_open_with_retry(&path).unwrap_err();
+        assert!(err.to_string().contains("could not acquire lock"));
+    }
+
+    fn commit_chain(storage: &Storage, len: u64) -> Vec<Block> {
+        let mut blocks: Vec<Block> = Vec::new();
+        for i in 0..len {
+            let prev = blocks
+                .last()
+                .map_or_else(|| "0".repeat(64), |b| b.hash.clone());
+            let mut b = Block::new(i, prev, vec![]);
+            b.hash = b.calculate_hash();
+            storage.commit_block(&b, "root").unwrap();
+            blocks.push(b);
+        }
+        blocks
+    }
+
+    #[test]
+    fn repair_index_fails_on_gap() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let blocks = commit_chain(&storage, 3);
+        storage.db.remove(blocks[1].hash.as_bytes()).unwrap();
+
+        let err = storage.repair_index().unwrap_err();
+        assert!(
+            err.contains(&blocks[1].hash),
+            "error names the missing hash"
+        );
+    }
+
+    #[test]
+    fn repair_index_ok_on_intact_chain() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let blocks = commit_chain(&storage, 3);
+        storage.db.remove(b"HEIGHT:1").unwrap();
+
+        storage.repair_index().unwrap();
+        let b1 = storage.get_block_by_height(1).unwrap().unwrap();
+        assert_eq!(b1.hash, blocks[1].hash);
+    }
+
+    /// Chain of `len` blocks where block 1 carries one transaction.
+    fn commit_chain_with_tx(storage: &Storage, len: u64) -> (Vec<Block>, String) {
+        let from = Address::from_hex(&"01".repeat(32)).unwrap();
+        let to = Address::from_hex(&"02".repeat(32)).unwrap();
+        let tx = crate::core::transaction::Transaction::new(from, to, 5, vec![]);
+        let tx_hash = tx.hash.clone();
+        let mut blocks: Vec<Block> = Vec::new();
+        for i in 0..len {
+            let prev = blocks
+                .last()
+                .map_or_else(|| "0".repeat(64), |b| b.hash.clone());
+            let txs = if i == 1 { vec![tx.clone()] } else { vec![] };
+            let mut b = Block::new(i, prev, txs);
+            b.hash = b.calculate_hash();
+            storage.commit_block(&b, "root").unwrap();
+            blocks.push(b);
+        }
+        (blocks, tx_hash)
+    }
+
+    /// P26-F07: a commit over a height that already holds a block writes no
+    /// recovery marker, so recovery can never delete the committed block.
+    #[test]
+    fn a_recommit_of_a_committed_height_needs_no_progress_marker() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        assert!(storage.needs_progress_marker(1).unwrap());
+
+        let mut block = Block::new(1, "0".repeat(64), vec![]);
+        block.hash = block.calculate_hash();
+        let batch = DurableCommitBatch {
+            block,
+            state_root: "root".to_string(),
+            finality_cert: None,
+            global_headers: vec![],
+            bridge_state: None,
+            accounts: vec![],
+        };
+        storage.commit_durable_batch(&batch).unwrap();
+        assert!(!storage.needs_progress_marker(1).unwrap());
+
+        storage.commit_durable_batch(&batch).unwrap();
+        assert!(storage.db.get(b"IN_PROGRESS_HEIGHT").unwrap().is_none());
+        assert_eq!(storage.get_canonical_height().unwrap(), 1);
+        assert!(storage.get_block_by_height(1).unwrap().is_some());
+    }
+
+    /// P26-F06: a `previous_hash` cycle ends the walk with an error instead of
+    /// looping on the boot path.
+    #[test]
+    fn a_previous_hash_cycle_is_an_error_not_a_loop() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let looped = "ab".repeat(32);
+        let mut block = Block::new(1, looped.clone(), vec![]);
+        block.hash = looped;
+        storage.commit_block(&block, "root").unwrap();
+
+        assert!(storage.load_chain().is_err());
+        assert!(storage.repair_index().is_err());
+    }
+
+    /// P26-F06: a record stored under a key other than its own hash is refused.
+    #[test]
+    fn a_record_under_the_wrong_hash_is_refused() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let blocks = commit_chain(&storage, 2);
+        let wrong = "cd".repeat(32);
+        storage
+            .db
+            .insert(wrong.as_bytes(), encode(&blocks[1]).unwrap())
+            .unwrap();
+        storage.db.insert(b"LAST", wrong.as_bytes()).unwrap();
+
+        assert!(storage.load_chain().is_err());
+    }
+
+    /// P26-F02: `delete_block` left the `TX_IDX` row pointing at a deleted block.
+    #[test]
+    fn delete_block_removes_its_tx_index_rows() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let (_blocks, tx_hash) = commit_chain_with_tx(&storage, 3);
+        assert_eq!(storage.get_tx_block_height(&tx_hash).unwrap(), Some(1));
+
+        storage.delete_block(1).unwrap();
+        assert_eq!(storage.get_tx_block_height(&tx_hash).unwrap(), None);
+    }
+
+    /// P26-F02: a pruned prefix is not reported as damage by the audit.
+    #[test]
+    fn check_integrity_accepts_a_pruned_prefix_but_not_a_gap() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        commit_chain(&storage, 5);
+        storage.delete_block(0).unwrap();
+        storage.delete_block(1).unwrap();
+        assert!(storage.check_integrity().unwrap().is_empty());
+
+        storage.delete_block(3).unwrap();
+        assert!(!storage.check_integrity().unwrap().is_empty());
+    }
+
+    /// P26-F02: a dangling height index is an error, not a short chain.
+    #[test]
+    fn load_chain_reports_a_missing_indexed_parent() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let blocks = commit_chain(&storage, 4);
+        storage.delete_block(0).unwrap();
+        assert_eq!(storage.load_chain().unwrap().len(), 3);
+
+        storage.db.remove(blocks[1].hash.as_bytes()).unwrap();
+        assert!(storage.load_chain().is_err());
+    }
+}
+
+#[cfg(test)]
+mod storage_decode_locks {
+    /// The decoder must accept exactly one wire format.
+    ///
+    /// `decode` used to try bincode and then fall back to
+    /// `serde_json::from_slice`, while `encode` only ever writes bincode. That
+    /// gave one stored type two accepted parsers on a path with a single
+    /// producer: the fallback could only succeed on bytes this node did not
+    /// write.
+    #[test]
+    fn json_is_no_longer_accepted_where_only_bincode_is_written() {
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        struct Stored {
+            a: u64,
+            b: String,
+        }
+
+        let value = Stored {
+            a: 7,
+            b: "seven".to_string(),
+        };
+
+        // What `encode` writes still round-trips.
+        let bin = super::encode(&value).expect("bincode encode");
+        let back: Stored = super::decode(&bin).expect("bincode decode");
+        assert_eq!(back, value);
+
+        // JSON for the same type must now be rejected rather than silently
+        // decoded into a second representation of the same record.
+        let json = serde_json::to_vec(&value).expect("json encode");
+        assert!(
+            super::decode::<Stored>(&json).is_err(),
+            "JSON must not decode on a path where only bincode is written"
+        );
+    }
+
+    /// What removing the fallback does and does not buy.
+    ///
+    /// It removes a *second* parser from a single-producer path. It does not
+    /// make bincode strict: bincode 1.x reads a `u64` as eight raw bytes and
+    /// does not require the input to be fully consumed by default, so
+    /// arbitrary bytes can still decode into a structurally valid value.
+    /// Measured on this very input:
+    ///
+    ///     decode::<Stored>(b"{\"a\":\"not-a-number\"}")
+    ///       -> Ok(Stored { a: 8029392818728411771 })
+    ///
+    /// So integrity on this path rests on the checksum in
+    /// `decode_database_backup` and on the database file itself, not on the
+    /// decoder rejecting nonsense. Pinned here so nobody reads the fallback
+    /// removal as "corrupt input is now caught".
+    #[test]
+    fn removing_the_fallback_does_not_make_bincode_strict() {
+        #[derive(serde::Serialize, serde::Deserialize, Debug)]
+        struct Stored {
+            a: u64,
+        }
+        // Eight or more bytes decode into *some* u64 regardless of meaning.
+        let loose = super::decode::<Stored>(b"{\"a\":\"not-a-number\"}");
+        assert!(
+            loose.is_ok(),
+            "bincode is not strict here; if this starts failing the decoder \
+             changed and the comment above needs revisiting"
+        );
+        // Too short to hold a u64 - this genuinely fails.
+        assert!(super::decode::<Stored>(b"\xff\xff\xff").is_err());
+    }
+
+    /// P26-F05: a database written by a newer schema is refused, not opened.
+    #[test]
+    fn a_newer_schema_version_refuses_to_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+        let storage = super::Storage::new(path).expect("storage opens");
+        storage
+            .db
+            .insert(b"SCHEMA_VERSION", b"2".to_vec())
+            .expect("write newer version");
+        storage.db.flush().expect("flush");
+        drop(storage);
+
+        let err = super::Storage::new(path).expect_err("a newer schema must not open");
+        assert!(err.to_string().contains("newer than this binary"), "{err}");
+    }
+
+    /// A present-but-unreadable schema version must not read as zero.
+    ///
+    /// `unwrap_or(0)` turned a corrupted byte into "fresh database", which is
+    /// the one value that makes `apply_migrations` re-run every migration
+    /// against populated data.
+    #[test]
+    fn a_corrupt_schema_version_refuses_to_boot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage =
+            super::Storage::new(dir.path().to_str().expect("utf-8 path")).expect("storage opens");
+
+        // `Storage::new` runs migrations, so an opened database already
+        // carries the current version. What matters is that it reads back as
+        // a number rather than being invented.
+        let opened = storage.schema_version().expect("opened version reads");
+
+        // Same-module test: reach the sled handle directly to plant the
+        // corruption a failing disk would produce.
+        storage
+            .db
+            .insert(b"SCHEMA_VERSION", b"not-a-number".to_vec())
+            .expect("write corrupt version");
+        let err = storage
+            .schema_version()
+            .expect_err("a corrupt schema version must be an error, not 0");
+        let msg = err.to_string();
+        assert!(msg.contains("SCHEMA_VERSION"), "msg: {msg}");
+        assert!(msg.contains("Refusing to boot"), "msg: {msg}");
+
+        // And a readable version is still just read, not defaulted.
+        assert!(opened >= 1, "an opened database reports its real version");
+    }
+}

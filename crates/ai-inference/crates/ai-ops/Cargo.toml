@@ -1,0 +1,22 @@
+[package]
+name = "ai-ops"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The AI inference layer operator CLI skeleton (register/bond/serve/tune/status)"
+
+[[bin]]
+name = "ai-ops"
+path = "src/main.rs"
+
+[dependencies]
+ai-core = { path = "../ai-core" }
+ai-data = { path = "../ai-data" }
+ai-integrations = { path = "../ai-integrations" }
+ai-serve = { path = "../ai-serve" }
+ai-tune = { path = "../ai-tune" }
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

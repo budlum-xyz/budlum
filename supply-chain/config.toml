@@ -1,0 +1,114 @@
+
+# cargo-vet config file
+
+[cargo-vet]
+version = "0.10"
+
+[imports.bytecode-alliance]
+url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
+
+[imports.embark-studios]
+url = "https://raw.githubusercontent.com/EmbarkStudios/rust-ecosystem/main/audits.toml"
+
+[imports.google]
+url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
+
+[imports.isrg]
+url = "https://raw.githubusercontent.com/divviup/libprio-rs/main/supply-chain/audits.toml"
+
+[imports.mozilla]
+url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
+
+[imports.zcash]
+url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
+
+# --- the git sourced libp2p tree: audit it as its crates.io counterpart ---
+#
+# libp2p is taken from the rust-libp2p tree rather than crates.io (Cargo.toml:32).
+# cargo-vet cannot know on its own which crates.io package a git dependency
+# corresponds to, so it cannot bind the audit records (including the
+# mozilla/google/isrg imports) to those packages and says "There are some issues
+# with your policy.audit-as-crates-io entries", RUNNING NO SCAN AT ALL.
+#
+# This was a case the gate caught correctly: `cargo vet check` printed neither an
+# unvetted dependency count nor "Vetting Succeeded!", and the gate refused to treat
+# the output as clean. What was missing was not the gate but the mapping below.
+#
+# `audit-as-crates-io = true` means "count this git checkout as the crates.io
+# package of the same name"; the existing audits become reusable. It adds no new
+# trust assumption: the versions are pinned in Cargo.lock and the commit they came
+# from is visible in the report.
+
+[policy."libp2p"]
+audit-as-crates-io = true
+
+[policy."libp2p-allow-block-list"]
+audit-as-crates-io = true
+
+# libp2p-connection-limits: the git checkout says 0.7.0 while crates.io has
+# published up to 0.6.0. cargo-vet handles this precisely for a git
+# dependency: the base audit covers the published 0.6.0 and a delta audit
+# covers `0.6.0 -> 0.7.0@git:<rev>` (both recorded in audits.toml), so the
+# package stays under enforcement instead of being counted as first party.
+[policy."libp2p-connection-limits"]
+audit-as-crates-io = true
+
+[policy."libp2p-core"]
+audit-as-crates-io = true
+
+[policy."libp2p-dns"]
+audit-as-crates-io = true
+
+[policy."libp2p-gossipsub"]
+audit-as-crates-io = true
+
+[policy."libp2p-identify"]
+audit-as-crates-io = true
+
+[policy."libp2p-kad"]
+audit-as-crates-io = true
+
+[policy."libp2p-mdns"]
+audit-as-crates-io = true
+
+[policy."libp2p-metrics"]
+audit-as-crates-io = true
+
+[policy."libp2p-noise"]
+audit-as-crates-io = true
+
+[policy."libp2p-ping"]
+audit-as-crates-io = true
+
+[policy."libp2p-quic"]
+audit-as-crates-io = true
+
+[policy."libp2p-request-response"]
+audit-as-crates-io = true
+
+[policy."libp2p-swarm"]
+audit-as-crates-io = true
+
+[policy."libp2p-swarm-derive"]
+audit-as-crates-io = true
+
+[policy."libp2p-tcp"]
+audit-as-crates-io = true
+
+[policy."libp2p-tls"]
+audit-as-crates-io = true
+
+[policy."libp2p-upnp"]
+audit-as-crates-io = true
+
+[policy."libp2p-yamux"]
+audit-as-crates-io = true
+
+[policy."multistream-select"]
+audit-as-crates-io = true
+
+[policy."prost-codec"]
+audit-as-crates-io = true
+
+[policy."rw-stream-sink"]
+audit-as-crates-io = true

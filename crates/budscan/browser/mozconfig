@@ -1,0 +1,77 @@
+# BUDSCAN BUILD CONFIGURATION
+#
+# This file is handed to the build after the Mozilla source has been fetched
+# and the patches applied. Every line here is a decision; if the reason is not
+# written next to it, the line does not belong here.
+#
+# The directory-layout table in the README declares this file. A declared file
+# missing from the tree means the reader believes something exists that does
+# not, and that is worse than a missing file.
+
+ac_add_options --enable-application=browser
+
+# -- FEATURES THAT DO NOT EXIST ---------------------------------------
+#
+# These are off because each one is a path along which the browser sends data
+# out. A verification browser doing that would be doing the very thing it
+# tells others to avoid.
+
+ac_add_options --disable-crashreporter
+ac_add_options --disable-default-browser-agent
+ac_add_options --disable-debug
+ac_add_options --disable-tests
+
+mk_add_options MOZ_CRASHREPORTER=0
+mk_add_options MOZ_DATA_REPORTING=0
+mk_add_options MOZ_SERVICES_HEALTHREPORT=0
+mk_add_options MOZ_TELEMETRY_REPORTING=0
+
+# -- HARDENING --------------------------------------------------------
+
+ac_add_options --enable-hardening
+ac_add_options --enable-stl-hardening
+
+# Reading an uninitialised variable reads zero. That makes an information leak
+# unusable: the value read is no longer the remains of an earlier allocation.
+export CFLAGS="-ftrivial-auto-var-init=zero -fwrapv $CFLAGS"
+export CXXFLAGS="-ftrivial-auto-var-init=zero -fwrapv $CXXFLAGS"
+
+# -- BUILD ------------------------------------------------------------
+
+ac_add_options --enable-optimize
+ac_add_options --enable-release
+ac_add_options --enable-rust-simd
+ac_add_options --disable-cargo-incremental
+ac_add_options --enable-bootstrap
+
+ac_add_options --enable-replace-malloc
+ac_add_options --enable-jemalloc
+
+# -- BRANDING ---------------------------------------------------------
+#
+# The application name and the branding directory are budscan. No other
+# browser's brand name appears in this tree; the `budscan-patchset` gate
+# measures that in CI.
+
+ac_add_options --with-app-name=budscan
+ac_add_options --with-app-basename=Budscan
+ac_add_options --with-branding=browser/branding/budscan
+
+ac_add_options --with-l10n-base=$PWD/budscan/browser/l10n
+
+# -- UPDATES ----------------------------------------------------------
+#
+# The update channel is signed. `MOZ_REQUIRE_SIGNING` is not left empty: being
+# able to load an unsigned add-on would mean unverified code running in a
+# privileged context inside a browser that claims to verify.
+
+ac_add_options --enable-updater
+ac_add_options --enable-update-channel=release
+ac_add_options --disable-maintenance-service
+ac_add_options --enable-nss-mar
+
+export MAR_CHANNEL_ID=budscan-release
+export ACCEPTED_MAR_CHANNEL_IDS=budscan-release
+
+export MOZ_REQUIRE_SIGNING=1
+export MOZILLA_OFFICIAL=1

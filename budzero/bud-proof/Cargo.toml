@@ -1,0 +1,48 @@
+[package]
+name = "bud-proof"
+version = "0.1.0"
+edition = "2021"
+# Inherit the root [workspace.package] value for the cargo-deny license gate
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bud-vm = { path = "../bud-vm", features = ["experimental"] }
+bud-isa = { path = "../bud-isa", features = ["experimental"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+
+p3-air = "=0.7.0"
+p3-matrix = "=0.7.0"
+p3-field = "=0.7.0"
+p3-commit = "=0.7.0"
+p3-challenger = "=0.7.0"
+p3-symmetric = "=0.7.0"
+p3-keccak = "=0.7.0"
+p3-fri = "=0.7.0"
+p3-util = "=0.7.0"
+p3-goldilocks = "=0.7.0"
+p3-merkle-tree = "=0.7.0"
+p3-dft = "=0.7.0"
+postcard = { version = "1.0", features = ["alloc"] }
+tracing = "0.1"
+p3-maybe-rayon = "=0.7.0"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+
+[[bench]]
+name = "proof_baseline"
+harness = false
+
+[[bench]]
+name = "canonical_programs"
+harness = false
+
+[dev-dependencies]
+# For the compiled branching test (tests/compiled_branching.rs): it drives the proof
+# pipeline with the compiler's real output rather than a hand-built instruction
+# sequence (the other prover tests build their arrays by hand).
+bud-compiler = { path = "../bud-compiler" }
+tiny-keccak = { version = "2.0", features = ["keccak"] }

@@ -1,0 +1,1476 @@
+use bud_isa::{Instruction, Opcode};
+use bud_proof::adapter::{ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
+use bud_proof::DefaultAdapter as Prover;
+use bud_vm::Vm;
+use clap::{Parser, Subcommand};
+use std::fs;
+use tiny_keccak::{Hasher, Keccak};
+use tracing::{debug, info};
+use tracing_subscriber::EnvFilter;
+
+const _: () = assert!(
+    bud_compiler::MIN_VM_MEMORY_BYTES as u64 <= bud_vm::MAX_MEMORY_BYTES,
+    "MIN_VM_MEMORY_BYTES must not exceed bud_vm::MAX_MEMORY_BYTES, the proof address space"
+);
+
+/// Which opcode activation state the CLI executes and verifies under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ActivationArg {
+    /// The staged opcodes (`VerifyMerkle`, `VerifyInference`) stay closed:
+    /// the VM refuses them and the verifier refuses a proof whose program
+    /// contains one.
+    Default,
+    /// Every staged opcode is open. For a network that has activated them,
+    /// and for testing; never the production setting while they are closed.
+    Full,
+}
+
+impl ActivationArg {
+    fn state(self) -> bud_isa::MainnetActivation {
+        match self {
+            ActivationArg::Default => bud_isa::MainnetActivation::default(),
+            ActivationArg::Full => bud_isa::MainnetActivation::full(),
+        }
+    }
+
+    /// The activation state a signed relay report may be made under.
+    ///
+    /// The signed payload does not record the activation state. A report made
+    /// under `full` would be byte-compatible with one made under the closed
+    /// default, so a reader could not tell that a program the production
+    /// verifier refuses had been accepted. Only the closed state is allowed.
+    fn relay_state(self) -> Result<bud_isa::MainnetActivation, String> {
+        match self {
+            ActivationArg::Default => Ok(self.state()),
+            ActivationArg::Full => Err(
+                "relay refuses --activation full: the signed report does not record the \
+                 activation state, so it could not be told from a report made under the \
+                 closed default"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+#[derive(Parser)]
+#[command(
+    author,
+    version,
+    about = "BudZKVM Command Line Interface",
+    long_about = "A production-grade, high-performance toolchain for compiling, executing, proving, and verifying BudZKVM smart contracts."
+)]
+struct Cli {
+    #[arg(
+        long,
+        default_value_t = 45262,
+        help = "The unique chain identifier for execution context (Budlum: mainnet 45260, testnet 45261, devnet 45262; 0 is refused)"
+    )]
+    chain_id: u64,
+
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = ActivationArg::Default,
+        help = "Opcode activation state for execution and verification: `default` keeps VerifyMerkle and VerifyInference closed (the VM refuses them; proofs whose program contains one are refused), `full` opens them"
+    )]
+    activation: ActivationArg,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    #[command(
+        about = "Compile, execute, prove, verify, and commit state transitions for a BudL program"
+    )]
+    Run {
+        #[arg(short, long, help = "Path to the .bud source contract file")]
+        program: String,
+        #[arg(short, long, help = "Optional sender account ID")]
+        sender: Option<u64>,
+        #[arg(short, long, help = "Optional transaction nonce")]
+        nonce: Option<u64>,
+        #[arg(short, long, help = "Optional block height")]
+        block_height: Option<u64>,
+        #[arg(short, long, help = "Arguments to pass to the main function")]
+        args: Vec<u64>,
+        #[arg(long, help = "Output execution result in JSON format")]
+        json: bool,
+        #[arg(long, help = "File path to write the generated STARK proof envelope")]
+        proof_out: Option<String>,
+        #[arg(
+            long,
+            help = "File path to write the generated execution public inputs JSON"
+        )]
+        public_inputs_out: Option<String>,
+        #[arg(long, help = "Path to load state from (defaults to state.json)")]
+        state_in: Option<String>,
+        #[arg(
+            long,
+            help = "Path to write the updated state to (defaults to state_in)"
+        )]
+        state_out: Option<String>,
+    },
+    #[command(about = "Compile and generate a STARK proof for a program without committing state")]
+    Prove {
+        #[arg(short, long, help = "Path to the .bud source contract file")]
+        program: String,
+        #[arg(short, long, help = "Optional sender account ID")]
+        sender: Option<u64>,
+        #[arg(short, long, help = "Optional transaction nonce")]
+        nonce: Option<u64>,
+        #[arg(short, long, help = "Optional block height")]
+        block_height: Option<u64>,
+        #[arg(short, long, help = "Arguments to pass to the main function")]
+        args: Vec<u64>,
+        #[arg(long, help = "File path to write the generated STARK proof envelope")]
+        proof_out: String,
+        #[arg(
+            long,
+            help = "File path to write the generated execution public inputs JSON"
+        )]
+        public_inputs_out: Option<String>,
+    },
+    #[command(
+        about = "Execute, prove, verify, and commit state for a batch of programs sequentially"
+    )]
+    Batch {
+        #[arg(short, long, help = "List of paths to .bud source files in the batch")]
+        programs: Vec<String>,
+        #[arg(short, long, help = "Optional sender account ID")]
+        sender: Option<u64>,
+        #[arg(short, long, help = "Optional starting transaction nonce")]
+        nonce: Option<u64>,
+        #[arg(short, long, help = "Optional block height")]
+        block_height: Option<u64>,
+        #[arg(short, long, help = "Arguments to pass to each main function")]
+        args: Vec<u64>,
+    },
+    #[command(about = "Compile a BudL program to VM bytecode file (.budc)")]
+    Deploy {
+        #[arg(short, long, help = "Path to the .bud source contract file")]
+        program: String,
+        #[arg(
+            short,
+            long,
+            help = "Optional output file path (defaults to <program>.budc)"
+        )]
+        output: Option<String>,
+    },
+    #[command(about = "Load compiled bytecode, execute, prove, and commit state transitions")]
+    Call {
+        #[arg(short, long, help = "Path to the compiled .budc bytecode file")]
+        bytecode: String,
+        #[arg(short, long, help = "Optional sender account ID")]
+        sender: Option<u64>,
+        #[arg(short, long, help = "Optional transaction nonce")]
+        nonce: Option<u64>,
+        #[arg(short, long, help = "Arguments to pass to the main function")]
+        args: Vec<u64>,
+    },
+    #[command(
+        about = "Verify a generated STARK proof envelope against public inputs and program bytecode"
+    )]
+    Verify {
+        // Short flags are assigned explicitly: clap derives `-p` for both
+        // `proof_file` and `public_inputs_file`, and its duplicate-short
+        // assertion aborts the process before any argument is parsed, so
+        // `verify` (including `verify --help`) always panicked.
+        #[arg(short = 'f', long, help = "Path to the STARK proof envelope JSON file")]
+        proof_file: String,
+        #[arg(
+            short = 'i',
+            long,
+            help = "Path to the execution public inputs JSON file"
+        )]
+        public_inputs_file: String,
+        #[arg(
+            short = 'b',
+            long,
+            help = "Path to the compiled program bytecode (.budc or hex bytes)"
+        )]
+        bytecode_file: String,
+    },
+    #[command(about = "Verify a proof and write the keccak-signed canonical relay report")]
+    Relay {
+        #[arg(long, help = "Path to the STARK proof envelope JSON file")]
+        proof_file: String,
+        #[arg(long, help = "Path to the execution public inputs JSON file")]
+        public_inputs_file: String,
+        #[arg(
+            long,
+            help = "Path to the compiled program bytecode (.budc or hex bytes)"
+        )]
+        bytecode_file: String,
+        #[arg(
+            long,
+            default_value = "relay_report.json",
+            help = "File path to write the signed relay report to"
+        )]
+        output: String,
+        #[arg(
+            long,
+            help = "Exit non-zero when the report carries an alarm; the file is still written"
+        )]
+        strict: bool,
+        #[arg(
+            long,
+            value_name = "SECONDS",
+            help = "Pin the report timestamp to this unix time; a re-run with the same inputs and timestamp reproduces the signature byte-for-byte"
+        )]
+        verified_at: Option<u64>,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Also write the exact canonical payload the signature covers, so a monitor can re-hash it without re-implementing the layout"
+        )]
+        payload_out: Option<String>,
+        #[arg(
+            long,
+            help = "Re-run the canonical transfer program and check the proof-bound inputs against the re-execution before signing (K1)"
+        )]
+        reexecute: bool,
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Read spent nullifiers (one decimal per line) and refuse a spent transfer nullifier via the spent-set relay path (S1)"
+        )]
+        spent_set: Option<String>,
+    },
+    #[command(about = "Run hardcoded smoke test of BudZKVM execution engine")]
+    Test,
+}
+
+fn compute_keccak256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Keccak::v256();
+    hasher.update(data);
+    let mut res = [0u8; 32];
+    hasher.finalize(&mut res);
+    res
+}
+
+struct ExecutionConfig {
+    bytecode: Vec<u64>,
+    sender: Option<u64>,
+    nonce: Option<u64>,
+    block_height: Option<u64>,
+    args: Vec<u64>,
+    chain_id: u64,
+    state_in_file: Option<String>,
+    commit_state: bool,
+    activation: bud_isa::MainnetActivation,
+}
+
+struct ExecutionOutput {
+    pre_root: [u8; 32],
+    post_root: [u8; 32],
+    receipt: bud_vm::ExecutionReceipt,
+    pi: ExecutionPublicInputs,
+    envelope: ProofEnvelope,
+    state: bud_state::State,
+    vm: Vm,
+}
+
+/// Chain id 0 binds a proof to no network at all.
+fn check_chain_id(chain_id: u64) -> Result<(), String> {
+    if chain_id == 0 {
+        return Err("chain id 0 is not a network id".to_string());
+    }
+    Ok(())
+}
+
+fn run_pipeline(config: ExecutionConfig) -> Result<ExecutionOutput, Box<dyn std::error::Error>> {
+    use bud_state::StateBackend;
+    check_chain_id(config.chain_id)?;
+
+    debug!("Starting pipeline");
+
+    let state_file = config
+        .state_in_file
+        .unwrap_or_else(|| "state.json".to_string());
+    let mut state =
+        bud_state::State::load(&state_file).map_err(|e| format!("Failed to load state: {e}"))?;
+    let pre_root = state.root();
+
+    // HIGH (2026-08-17): Vm::new leaves mainnet_mode=false; gated
+    // opcode'lar (VerifyMerkle/VerifyInference) non-mainnet decoder'da
+    // runs. The CLI default must be mainnet safe: mainnet_mode=true.
+    //
+    // Only `--activation full` opens them: then the VM decodes without the
+    // gate, and the proof it just produced is verified under the same state.
+    let mainnet_mode = config.activation == bud_isa::MainnetActivation::default();
+    let mut vm = Vm::with_mainnet_mode(bud_compiler::MIN_VM_MEMORY_BYTES, 1_000_000, mainnet_mode);
+    if let Some(s) = config.sender {
+        vm.context.sender = s;
+        // Security review (MEDIUM): creating an automatically funded account for
+        // an unregistered sender reflects the sender value the runner controls into
+        // the network structure and behaves as if a transaction had been issued from
+        // an "unowned" account. Fail-closed: if the sender is not in the state the
+        // transaction is refused.
+        let acc = state.get_account(s).ok_or_else(|| {
+            format!("sender account {s} does not exist in {state_file}; refusing to fund a new account implicitly")
+        })?;
+        vm.context.nonce = acc.nonce;
+    }
+    if let Some(n) = config.nonce {
+        vm.context.nonce = n;
+    }
+    if let Some(bh) = config.block_height {
+        vm.context.block_height = bh;
+    }
+
+    // Registers 1..=31 carry inputs. An extra argument used to be dropped
+    // silently, so the program was run and proven with fewer inputs than given.
+    if config.args.len() > 31 {
+        return Err(format!(
+            "{} arguments given, at most 31 fit the input registers",
+            config.args.len()
+        )
+        .into());
+    }
+    for (i, val) in config.args.iter().enumerate() {
+        vm.registers[i + 1] = *val;
+    }
+
+    let receipt = vm.run_receipt(&config.bytecode);
+    if !receipt.success {
+        return Err(format!("Execution failed deterministically: {:?}", receipt.error).into());
+    }
+
+    debug!(
+        gas_used = receipt.gas_used,
+        trace_len = receipt.trace_len,
+        "VM execution complete"
+    );
+
+    // Apply state updates in memory if committing.
+    //
+    // A storage-writing contract lowers `storage::field = expr` to
+    // `Opcode::SWrite`, and the VM applies those writes only to its
+    // transient state, never to bud-state. Committing a `final_state_root`
+    // that omits those writes would let a storage-backed contract prove and
+    // commit while the persisted state excludes its transition, breaking
+    // state integrity and enabling replay of one-time logic (HIGH,
+    // security review). Until storage persistence lands in bud-state,
+    // refuse to commit a run whose storage writes are non-empty.
+    if config.commit_state {
+        if receipt.state_writes_digest != [0u8; 32] {
+            return Err(
+                "Storage writes are not yet persisted into bud-state; refusing to commit an incorrect final_state_root"
+                    .into(),
+            );
+        }
+        state.begin_transaction();
+        if let Some(s) = config.sender {
+            let mut acc = state
+                .get_account(s)
+                .ok_or("Sender account not found in state")?;
+            // The persisted nonce follows the nonce the proof binds
+            // (`--nonce` overrides the account's), not a blind +1.
+            acc.nonce = vm
+                .context
+                .nonce
+                .checked_add(1)
+                .ok_or("transaction nonce overflow")?;
+            state.set_account(s, acc);
+        }
+    }
+
+    let post_root = if config.commit_state {
+        state.root()
+    } else {
+        pre_root
+    };
+
+    // Construct ExecutionPublicInputs
+    let bytecode_bytes: Vec<u8> = config
+        .bytecode
+        .iter()
+        .flat_map(|&b| b.to_le_bytes().to_vec())
+        .collect();
+    let prog_hash = compute_keccak256(&bytecode_bytes);
+
+    // The AIR binds an additive u32-limb accumulator, not a hash of the event
+    // list. Hashing here produced proofs that always failed verification with
+    // OodEvaluationMismatch, which made `prove` and `run` unusable.
+    let event_digest = bud_proof::event_digest_from_events(&receipt.events);
+
+    // `initial_state_root` is the AIR's commitment to the state the program
+    // started from, not the state tree root. It carries the memory image in
+    // bytes 0..8 and the register file in bytes 8..16, both folded from what
+    // the trace actually read. Passing `pre_root` here produced a value the
+    // AIR compares against a fold it computes itself, so any run that seeded
+    // memory or registers was unprovable and any run that seeded neither
+    // happened to work because both sides were zero.
+    let initial_state_root = bud_proof::initial_state_root_of(
+        bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(&vm.trace)),
+        bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+            &vm.trace,
+        )),
+    );
+
+    let pi = ExecutionPublicInputs {
+        chain_id: config.chain_id,
+        program_hash: prog_hash,
+        initial_state_root,
+        // The AIR ties the final root to the storage-writes fold (2a), so
+        // the proof's final root is the write digest - the commit refusal
+        // above already keeps storage writes out of committed runs, and
+        // `post_root` (the bud-state tree root) still rides in the run
+        // output for display. Passing `post_root` here claimed a
+        // post-state commitment the proof never made.
+        final_state_root: receipt.state_writes_digest,
+        sender: vm.context.sender,
+        nonce: vm.context.nonce,
+        block_height: vm.context.block_height,
+        gas_limit: vm.gas_limit,
+        gas_used: vm.gas_used,
+        exit_code: 0,
+        trace_len: vm.trace.len() as u64,
+        event_digest,
+        // The storage write digest comes from the VM, not from a hardcoded zero.
+        //
+        // This used to read `[0u8; 32]`. For programs that never touch storage
+        // that was the right answer and nothing broke; a program containing a
+        // single `storage::x = 5;` produced a proof and then failed **in its own
+        // verifier**, because the AIR binds this field to the real SWrite chain
+        // (HIGH CWE-345) while the public input stayed zero. The flaw
+        // stayed invisible: the schema did not feed the `storage` fields into the
+        // environment at all, so a program that used storage could not compile.
+        state_writes_digest: receipt.state_writes_digest,
+    };
+
+    // Prove and Verify
+    info!("Generating STARK proof...");
+    let envelope = Prover::prove(&vm.trace, &pi, &config.bytecode)
+        .map_err(|e| format!("Failed to generate proof: {:?}", e))?;
+    info!(proof_bytes = envelope.proof_bytes.len(), "Proof generated");
+
+    info!("Verifying proof...");
+    let ok = bud_proof::Plonky3Adapter::verify_with_activation(
+        &envelope,
+        &pi,
+        &config.bytecode,
+        config.activation,
+    )
+    .is_ok();
+
+    if !ok {
+        if config.commit_state {
+            state.rollback();
+        }
+        return Err("Verification of generated proof failed!".into());
+    } else {
+        if config.commit_state {
+            state
+                .commit()
+                .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+        }
+    }
+
+    Ok(ExecutionOutput {
+        pre_root,
+        post_root,
+        receipt,
+        pi,
+        envelope,
+        state,
+        vm,
+    })
+}
+
+/// The boot attestation: both canonical check programs are re-derived from
+/// the pinned operand values and compared against the pin table. Prints what
+/// was attested; any drift refuses the run before a proof is touched.
+fn attest_canonical_programs(
+) -> Result<Vec<bud_proof::canonical_boot::CanonicalCheckProgram>, Box<dyn std::error::Error>> {
+    let programs = bud_proof::canonical_boot::check_canonical_programs()
+        .map_err(|e| format!("canonical boot attestation refused: {e}"))?;
+    for p in &programs {
+        println!(
+            "canonical program {}: v{} {} ops, hash {}",
+            p.name, p.schema_version, p.ops, p.hash_hex
+        );
+    }
+    Ok(programs)
+}
+
+/// Read the three files a verification is made of: the proof envelope, the
+/// public inputs it claims, and the program bytes.
+///
+/// Shared by `verify` and `relay`. Two loaders would let a relay report
+/// describe a proof the verifier never looked at, which is precisely the
+/// drift the signed report exists to make visible.
+fn load_verifier_inputs(
+    proof_file: &str,
+    public_inputs_file: &str,
+    bytecode_file: &str,
+) -> Result<(ProofEnvelope, ExecutionPublicInputs, Vec<u64>), Box<dyn std::error::Error>> {
+    let env_data =
+        fs::read_to_string(proof_file).map_err(|e| format!("Failed to read proof file: {e}"))?;
+    let envelope: ProofEnvelope = ProofEnvelope::from_json_bounded(&env_data)
+        .map_err(|e| format!("Failed to parse proof envelope: {e:?}"))?;
+
+    let pi_data = fs::read_to_string(public_inputs_file)
+        .map_err(|e| format!("Failed to read public inputs file: {e}"))?;
+    let expected_inputs: ExecutionPublicInputs = serde_json::from_str(&pi_data)
+        .map_err(|e| format!("Failed to parse public inputs: {e}"))?;
+
+    let bytes = fs::read(bytecode_file).map_err(|e| format!("Failed to read bytecode: {e}"))?;
+    if bytes.len() % 8 != 0 {
+        return Err("Invalid bytecode: file size must be a multiple of 8 bytes".into());
+    }
+    let program: Vec<u64> = bytes
+        .chunks_exact(8)
+        .map(|chunk| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(chunk);
+            u64::from_le_bytes(b)
+        })
+        .collect();
+    Ok((envelope, expected_inputs, program))
+}
+
+/// Everything one relay run needs. A bundle, not six positional arguments:
+/// the CLI fills it from parsed flags and the checks below read it in a
+/// fixed order.
+struct RelayRequest<'a> {
+    proof_file: &'a str,
+    public_inputs_file: &'a str,
+    bytecode_file: &'a str,
+    output: &'a str,
+    strict: bool,
+    verified_at: Option<u64>,
+    payload_out: Option<&'a str>,
+    reexecute: bool,
+    spent_set: Option<&'a str>,
+    activation: bud_isa::MainnetActivation,
+}
+
+/// In-memory spent-set oracle for the relay's double-spend check (S1): the
+/// nullifiers spent by previous transfers. A CLI run seeds it from a file,
+/// one decimal nullifier per line.
+struct InMemorySpentSet {
+    spent: std::collections::BTreeSet<u64>,
+}
+
+impl InMemorySpentSet {
+    fn from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let text = fs::read_to_string(path)
+            .map_err(|e| format!("cannot read the spent-set file {path}: {e}"))?;
+        let mut spent = std::collections::BTreeSet::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let value: u64 = line
+                .parse()
+                .map_err(|e| format!("spent-set line {line:?} is not a u64: {e}"))?;
+            spent.insert(value);
+        }
+        Ok(Self { spent })
+    }
+}
+
+impl bud_proof::relayer::SpentSet for InMemorySpentSet {
+    fn is_spent(&self, nullifier: u64) -> Result<bool, String> {
+        Ok(self.spent.contains(&nullifier))
+    }
+}
+
+/// The node-side ledger a relay consults: the chained alarm log (K3) and the
+/// derived quarantine ledger (K4). A fresh instance per CLI run records the
+/// alarms the relay just produced and quarantines the offending program, so a
+/// later pass refuses it without a gossip round.
+struct NodeLedger {
+    alarms: bud_proof::alarm_log::AlarmLog,
+    quarantine: bud_proof::quarantine::QuarantineLedger,
+}
+
+/// Map a relay alarm code to the ledger alarm kind it corresponds to.
+fn alarm_kind_of(code: bud_proof::relayer::AlarmCode) -> bud_proof::alarm_log::AlarmKind {
+    use bud_proof::alarm_log::AlarmKind;
+    match code {
+        bud_proof::relayer::AlarmCode::NonCanonicalProgram => AlarmKind::NonCanonicalProgram,
+        bud_proof::relayer::AlarmCode::InvalidProof => AlarmKind::InvalidProof,
+        bud_proof::relayer::AlarmCode::PublicInputsMismatch => AlarmKind::PublicInputsMismatch,
+        bud_proof::relayer::AlarmCode::InvalidEnvelope => AlarmKind::InvalidEnvelope,
+        bud_proof::relayer::AlarmCode::DeserializationError => AlarmKind::DeserializationError,
+        bud_proof::relayer::AlarmCode::TransferViolation => AlarmKind::TransferViolation,
+    }
+}
+
+/// The alarm kinds that also quarantine the offending program (K4).
+fn quarantine_reason_of(
+    kind: bud_proof::alarm_log::AlarmKind,
+) -> Option<bud_proof::quarantine::QuarantineReason> {
+    use bud_proof::quarantine::QuarantineReason;
+    match kind {
+        bud_proof::alarm_log::AlarmKind::NonCanonicalProgram => {
+            Some(QuarantineReason::NonCanonicalProgram)
+        }
+        bud_proof::alarm_log::AlarmKind::TransferViolation => {
+            Some(QuarantineReason::TransferViolation)
+        }
+        _ => None,
+    }
+}
+
+/// Record the relay's alarm into the node ledger and quarantine the offending
+/// program, then check the chained log still verifies.
+fn record_relay_outcome(
+    ledger: &mut NodeLedger,
+    report: &bud_proof::relayer::CanonicalRelayReport,
+    program_hash: [u8; 32],
+) -> Result<(), String> {
+    if report.status != bud_proof::relayer::RelayStatus::Alarm {
+        return Ok(());
+    }
+    let Some(bud_proof::relayer::AlarmDetail { code, detail }) = &report.alarm else {
+        return Ok(());
+    };
+    let kind = alarm_kind_of(*code);
+    ledger.alarms.record(report.report_sig, kind, detail);
+    if let Some(reason) = quarantine_reason_of(kind) {
+        ledger.quarantine.ban(program_hash, reason);
+    }
+    if !ledger.alarms.verify_integrity() {
+        return Err("the chained alarm log does not verify after a record".to_string());
+    }
+    Ok(())
+}
+
+/// The quarantine ledger lives next to the relay report it belongs to.
+fn quarantine_path_for(output: &str) -> String {
+    format!("{output}.quarantine")
+}
+
+/// Read the persisted ledger; a missing file is an empty ledger, an
+/// unreadable or malformed one is an error so a ban is never dropped.
+fn load_quarantine(path: &str) -> Result<bud_proof::quarantine::QuarantineLedger, String> {
+    if !std::path::Path::new(path).exists() {
+        return Ok(bud_proof::quarantine::QuarantineLedger::new());
+    }
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("Failed to read quarantine ledger: {e}"))?;
+    bud_proof::quarantine::QuarantineLedger::from_text(&text)
+}
+
+/// Write the ledger through a temp file and a rename. An empty ledger writes
+/// nothing, so clean runs leave no file behind.
+fn save_quarantine(
+    path: &str,
+    ledger: &bud_proof::quarantine::QuarantineLedger,
+) -> Result<(), String> {
+    if ledger.is_empty() {
+        return Ok(());
+    }
+    let temp = format!("{path}.tmp");
+    fs::write(&temp, ledger.to_text())
+        .map_err(|e| format!("Failed to write quarantine ledger: {e}"))?;
+    fs::rename(&temp, path).map_err(|e| format!("Failed to replace quarantine ledger: {e}"))
+}
+
+/// The system clock, or the caller-pinned timestamp. Naming the clock error
+/// type keeps the stamp-failure path explicit for the relay.
+fn clock_stamp(preferred: Option<u64>) -> Result<u64, bud_proof::relayer::ClockError> {
+    match preferred {
+        Some(t) => Ok(t),
+        None => bud_proof::relayer::now_unix(),
+    }
+}
+
+/// Verify with the canonical-program requirement and publish the signed
+/// report, returning the token line for the caller to print.
+///
+/// The file is re-read and the signature recomputed on the parsed copy: the
+/// relay's product is the file, so the file is what has to verify. The
+/// pretty JSON is compared byte-for-byte to the writer's serialization, and
+/// the proof fingerprint is re-derived from the envelope that was loaded -
+/// a report can never describe a proof the verifier did not look at.
+fn write_signed_relay_report(req: &RelayRequest<'_>) -> Result<String, Box<dyn std::error::Error>> {
+    use bud_proof::relayer::{
+        verify_and_report_at, verify_and_report_with_reexecution_at,
+        verify_and_report_with_spentset_at, AlarmCode, AlarmDetail, CanonicalRelayReport,
+        ProofFingerprint, RelayStatus, RELAY_SCHEMA_VERSION,
+    };
+    let (envelope, expected_inputs, program) =
+        load_verifier_inputs(req.proof_file, req.public_inputs_file, req.bytecode_file)?;
+    // The ban ledger survives between runs: a program banned earlier is
+    // refused before any verification work.
+    let quarantine_path = quarantine_path_for(req.output);
+    let quarantine = load_quarantine(&quarantine_path)?;
+    if quarantine.is_banned(&expected_inputs.program_hash) {
+        return Err("program is quarantined by an earlier relay run; refusing it".into());
+    }
+    let at = clock_stamp(req.verified_at)
+        .map_err(|e| format!("cannot read the system clock to stamp the report: {e}"))?;
+
+    // The relay path: the spent-set check (S1) when a spent file is given, the
+    // re-execution check (K1) when asked, and the bare verify otherwise.
+    let report = match &req.spent_set {
+        Some(spent_set) => {
+            let oracle = InMemorySpentSet::from_file(spent_set)?;
+            verify_and_report_with_spentset_at(
+                &envelope,
+                &expected_inputs,
+                &program,
+                req.activation,
+                &oracle,
+                at,
+            )
+        }
+        None if req.reexecute => verify_and_report_with_reexecution_at(
+            &envelope,
+            &expected_inputs,
+            &program,
+            req.activation,
+            at,
+        ),
+        None => verify_and_report_at(&envelope, &expected_inputs, &program, req.activation, at),
+    };
+
+    // Record the outcome into the node-side ledger (K3/K4) so the alarm chain
+    // and the derived ban are observable on every relay run.
+    let mut ledger = NodeLedger {
+        alarms: bud_proof::alarm_log::AlarmLog::new(),
+        quarantine,
+    };
+    record_relay_outcome(&mut ledger, &report, expected_inputs.program_hash)?;
+    save_quarantine(&quarantine_path, &ledger.quarantine)?;
+    if !ledger.alarms.is_empty() {
+        let entries: Vec<&bud_proof::alarm_log::AlarmEntry> = ledger.alarms.iter().collect();
+        info!(
+            entries = entries.len(),
+            anchor = hex::encode(ledger.alarms.window_anchor()),
+            "alarm log advanced"
+        );
+        for entry in entries {
+            info!(
+                seq = entry.seq,
+                kind = entry.kind.as_str(),
+                byte = entry.kind.as_byte(),
+                "alarm recorded"
+            );
+        }
+        let quarantined: Option<&bud_proof::quarantine::QuarantineEntry> =
+            ledger.quarantine.entry(&expected_inputs.program_hash);
+        if let Some(entry) = quarantined {
+            info!(
+                reason = entry.reason.as_str(),
+                byte = entry.reason.as_byte(),
+                "program quarantined"
+            );
+        }
+    }
+
+    let path = std::path::Path::new(req.output);
+    report.write_report(path)?;
+
+    let text = fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read back the relay report: {e}"))?;
+    let parsed: CanonicalRelayReport =
+        serde_json::from_str(&text).map_err(|e| format!("Relay report does not parse: {e}"))?;
+    if parsed.schema_version != RELAY_SCHEMA_VERSION {
+        return Err(format!(
+            "Relay report schema {} does not match the writer's schema {RELAY_SCHEMA_VERSION}",
+            parsed.schema_version
+        )
+        .into());
+    }
+    let canonical_json = report
+        .report_json()
+        .map_err(|e| format!("the relay JSON cannot be regenerated: {e}"))?;
+    if text != canonical_json {
+        return Err(
+            "the relay report file is not the canonical JSON of the verified report".into(),
+        );
+    }
+    if !parsed.verify_report_sig() {
+        return Err("Relay report signature does not match its canonical payload".into());
+    }
+    let expected_fingerprint = ProofFingerprint {
+        proof_format_version: envelope.proof_format_version,
+        backend: envelope.backend.clone(),
+        p3_version: envelope.p3_version.clone(),
+        fri_params_id: envelope.fri_params_id.clone(),
+        degree_bits: envelope.degree_bits,
+        public_inputs_hash: envelope.public_inputs_hash,
+        proof_bytes_len: envelope.proof_bytes.len(),
+    };
+    if parsed.proof != expected_fingerprint {
+        return Err(
+            "the relay report's proof fingerprint does not describe the envelope that was verified"
+                .into(),
+        );
+    }
+    if let Some(payload_path) = req.payload_out {
+        fs::write(payload_path, parsed.canonical_payload())
+            .map_err(|e| format!("cannot write the signed payload to {payload_path}: {e}"))?;
+    }
+    if req.strict && parsed.status == RelayStatus::Alarm {
+        let reason = match &parsed.alarm {
+            Some(AlarmDetail { code, detail }) => format!(
+                "{}: {detail}",
+                match code {
+                    AlarmCode::NonCanonicalProgram => "non-canonical program",
+                    AlarmCode::InvalidProof => "invalid proof",
+                    AlarmCode::PublicInputsMismatch => "public inputs mismatch",
+                    AlarmCode::InvalidEnvelope => "invalid envelope",
+                    AlarmCode::DeserializationError => "deserialization error",
+                    AlarmCode::TransferViolation => "transfer violation",
+                }
+            ),
+            None => String::from("no alarm code recorded"),
+        };
+        return Err(format!("relay report carries an alarm: {reason}").into());
+    }
+    Ok(parsed.relay_token_line())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let cli = Cli::parse();
+
+    attest_canonical_programs()?;
+
+    match &cli.command {
+        Commands::Run {
+            program,
+            sender,
+            nonce,
+            block_height,
+            args,
+            json,
+            proof_out,
+            public_inputs_out,
+            state_in,
+            state_out,
+        } => {
+            let content = fs::read_to_string(program)
+                .map_err(|e| format!("Failed to read program file: {e}"))?;
+
+            #[cfg(feature = "experimental")]
+            let profile = bud_isa::IsaProfile::Experimental;
+            #[cfg(not(feature = "experimental"))]
+            let profile = bud_isa::IsaProfile::Production;
+
+            let bytecode = bud_compiler::compile(&content, profile)
+                .map_err(|e| format!("Compilation failed: {e}"))?;
+
+            let out = run_pipeline(ExecutionConfig {
+                bytecode,
+                sender: *sender,
+                nonce: *nonce,
+                block_height: *block_height,
+                args: args.clone(),
+                chain_id: cli.chain_id,
+                state_in_file: state_in.clone(),
+                commit_state: true,
+                activation: cli.activation.state(),
+            })?;
+
+            // ATOMIC STATE SAVE
+            let save_file = state_out
+                .clone()
+                .unwrap_or_else(|| state_in.clone().unwrap_or_else(|| "state.json".to_string()));
+            out.state
+                .save_to(&save_file)
+                .map_err(|e| format!("Failed to save state: {e}"))?;
+
+            if *json {
+                let json_out = serde_json::json!({
+                    "pre_state_root": hex::encode(out.pre_root),
+                    "post_state_root": hex::encode(out.post_root),
+                    "success": true,
+                    "gas_used": out.receipt.gas_used,
+                    "events": out.receipt.events,
+                });
+                println!("{}", serde_json::to_string_pretty(&json_out)?);
+            } else {
+                println!("Pre-state Root: {:?}", hex::encode(out.pre_root));
+                println!("Post-state Root: {:?}", hex::encode(out.post_root));
+                println!("Execution Trace Steps: {}", out.vm.trace.len());
+                println!("Proof generated and verified successfully!");
+            }
+
+            if let Some(path) = proof_out {
+                let data = serde_json::to_string_pretty(&out.envelope)
+                    .map_err(|e| format!("Failed to serialize envelope: {e}"))?;
+                fs::write(path, data).map_err(|e| format!("Failed to write proof file: {e}"))?;
+                println!("Proof envelope written to {}", path);
+            }
+
+            if let Some(path) = public_inputs_out {
+                let data = serde_json::to_string_pretty(&out.pi)
+                    .map_err(|e| format!("Failed to serialize public inputs: {e}"))?;
+                fs::write(path, data)
+                    .map_err(|e| format!("Failed to write public inputs file: {e}"))?;
+                println!("Public inputs written to {}", path);
+            }
+        }
+        Commands::Prove {
+            program,
+            sender,
+            nonce,
+            block_height,
+            args,
+            proof_out,
+            public_inputs_out,
+        } => {
+            let content = fs::read_to_string(program)
+                .map_err(|e| format!("Failed to read program file: {e}"))?;
+            #[cfg(feature = "experimental")]
+            let profile = bud_isa::IsaProfile::Experimental;
+            #[cfg(not(feature = "experimental"))]
+            let profile = bud_isa::IsaProfile::Production;
+
+            let bytecode = bud_compiler::compile(&content, profile)
+                .map_err(|e| format!("Compilation failed: {e}"))?;
+
+            let out = run_pipeline(ExecutionConfig {
+                bytecode,
+                sender: *sender,
+                nonce: *nonce,
+                block_height: *block_height,
+                args: args.clone(),
+                chain_id: cli.chain_id,
+                state_in_file: None,
+                commit_state: false,
+                activation: cli.activation.state(),
+            })?;
+
+            let data = serde_json::to_string_pretty(&out.envelope)
+                .map_err(|e| format!("Failed to serialize envelope: {e}"))?;
+            fs::write(proof_out, data).map_err(|e| format!("Failed to write proof file: {e}"))?;
+            println!("Proof written to: {}", proof_out);
+
+            if let Some(path) = public_inputs_out {
+                let data = serde_json::to_string_pretty(&out.pi)
+                    .map_err(|e| format!("Failed to serialize public inputs: {e}"))?;
+                fs::write(path, data)
+                    .map_err(|e| format!("Failed to write public inputs file: {e}"))?;
+                println!("Public inputs written to: {}", path);
+            }
+        }
+        Commands::Batch {
+            programs,
+            sender,
+            nonce,
+            block_height,
+            args,
+        } => {
+            println!("Processing batch of {} programs...", programs.len());
+            let state_file = "state.json".to_string();
+            for (index, p) in programs.iter().enumerate() {
+                let content =
+                    fs::read_to_string(p).map_err(|e| format!("Failed to read file {p}: {e}"))?;
+
+                #[cfg(feature = "experimental")]
+                let profile = bud_isa::IsaProfile::Experimental;
+                #[cfg(not(feature = "experimental"))]
+                let profile = bud_isa::IsaProfile::Production;
+
+                let bytecode = bud_compiler::compile(&content, profile)
+                    .map_err(|e| format!("Compilation of {p} failed: {e}"))?;
+
+                let step_nonce = match nonce {
+                    Some(n) => Some(
+                        n.checked_add(index as u64)
+                            .ok_or("transaction nonce overflow")?,
+                    ),
+                    None => None,
+                };
+
+                let out = run_pipeline(ExecutionConfig {
+                    bytecode,
+                    sender: *sender,
+                    nonce: step_nonce,
+                    block_height: *block_height,
+                    args: args.clone(),
+                    chain_id: cli.chain_id,
+                    state_in_file: Some(state_file.clone()),
+                    commit_state: true,
+                    activation: cli.activation.state(),
+                })?;
+
+                out.state.save_atomic().map_err(|e| {
+                    format!("Failed to save state at batch step {}: {}", index + 1, e)
+                })?;
+
+                println!(
+                    "Step {} [{}]: Executed, proved, verified, and state committed successfully. Post-state Root: {:?}",
+                    index + 1,
+                    p,
+                    hex::encode(out.post_root)
+                );
+            }
+        }
+        Commands::Deploy { program, output } => {
+            let content =
+                fs::read_to_string(program).map_err(|e| format!("Failed to read file: {e}"))?;
+            #[cfg(feature = "experimental")]
+            let profile = bud_isa::IsaProfile::Experimental;
+            #[cfg(not(feature = "experimental"))]
+            let profile = bud_isa::IsaProfile::Production;
+
+            let bytecode = bud_compiler::compile(&content, profile)
+                .map_err(|e| format!("Compilation failed: {e}"))?;
+
+            let out_name = output.clone().unwrap_or_else(|| format!("{program}.budc"));
+            let bytes: Vec<u8> = bytecode
+                .iter()
+                .flat_map(|&val| val.to_le_bytes().to_vec())
+                .collect();
+            fs::write(&out_name, bytes).map_err(|e| format!("Failed to write output file: {e}"))?;
+            println!("Deployed contract to {}", out_name);
+        }
+        Commands::Call {
+            bytecode,
+            sender,
+            nonce,
+            args,
+        } => {
+            let bytes = fs::read(bytecode).map_err(|e| format!("Failed to read bytecode: {e}"))?;
+            if bytes.len() % 8 != 0 {
+                return Err("Invalid bytecode: file size must be a multiple of 8 bytes".into());
+            }
+            let mut prog = Vec::new();
+            for chunk in bytes.as_chunks::<8>().0 {
+                prog.push(u64::from_le_bytes(*chunk));
+            }
+
+            let out = run_pipeline(ExecutionConfig {
+                bytecode: prog,
+                sender: *sender,
+                nonce: *nonce,
+                block_height: None,
+                args: args.clone(),
+                chain_id: cli.chain_id,
+                state_in_file: None,
+                commit_state: true,
+                activation: cli.activation.state(),
+            })?;
+
+            out.state
+                .save()
+                .map_err(|e| format!("Failed to save state: {e}"))?;
+            println!(
+                "Call success! Post-state Root: {:?}",
+                hex::encode(out.post_root)
+            );
+        }
+        Commands::Verify {
+            proof_file,
+            public_inputs_file,
+            bytecode_file,
+        } => {
+            let (envelope, expected_inputs, program) =
+                load_verifier_inputs(proof_file, public_inputs_file, bytecode_file)?;
+
+            match bud_proof::Plonky3Adapter::verify_with_activation(
+                &envelope,
+                &expected_inputs,
+                &program,
+                cli.activation.state(),
+            ) {
+                Ok(_) => {
+                    println!("Result: VALID");
+                }
+                Err(e) => {
+                    return Err(format!("Result: INVALID ({:?})", e).into());
+                }
+            }
+        }
+        Commands::Relay {
+            proof_file,
+            public_inputs_file,
+            bytecode_file,
+            output,
+            strict,
+            verified_at,
+            payload_out,
+            reexecute,
+            spent_set,
+        } => {
+            let req = RelayRequest {
+                proof_file,
+                public_inputs_file,
+                bytecode_file,
+                output,
+                strict: *strict,
+                verified_at: *verified_at,
+                payload_out: payload_out.as_deref(),
+                reexecute: *reexecute,
+                spent_set: spent_set.as_deref(),
+                activation: cli.activation.relay_state()?,
+            };
+            let line = write_signed_relay_report(&req)?;
+            println!("{line}");
+            info!(path = %output, "relay report written");
+        }
+        Commands::Test => {
+            let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
+            let prog = vec![
+                Instruction {
+                    opcode: Opcode::Add,
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                    imm: 0,
+                }
+                .encode(),
+                Instruction {
+                    opcode: Opcode::Halt,
+                    rd: 0,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: 0,
+                }
+                .encode(),
+            ];
+            vm.registers[2] = 10;
+            vm.registers[3] = 20;
+            let receipt = vm.run_receipt(&prog);
+            if receipt.success {
+                println!("Register 1: {}", vm.registers[1]);
+            } else {
+                println!("Test execution failed!");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_alarm_is_recorded_and_the_program_is_banned() {
+        use bud_proof::relayer::{
+            AlarmCode, AlarmDetail, CanonicalRelayReport, ProofFingerprint, RelayStatus,
+        };
+        let report = CanonicalRelayReport {
+            schema_version: 1,
+            status: RelayStatus::Alarm,
+            verified_at_unix: 0,
+            program_hash: [7u8; 32],
+            is_canonical: false,
+            canonical_set_digest: [0u8; 32],
+            proof: ProofFingerprint {
+                proof_format_version: 1,
+                backend: String::new(),
+                p3_version: String::new(),
+                fri_params_id: String::new(),
+                degree_bits: 0,
+                public_inputs_hash: [0u8; 32],
+                proof_bytes_len: 0,
+            },
+            alarm: Some(AlarmDetail {
+                code: AlarmCode::InvalidProof,
+                detail: "bad".to_string(),
+            }),
+            report_sig: [1u8; 32],
+        };
+        let mut ledger = NodeLedger {
+            alarms: bud_proof::alarm_log::AlarmLog::new(),
+            quarantine: bud_proof::quarantine::QuarantineLedger::new(),
+        };
+        assert!(record_relay_outcome(&mut ledger, &report, [7u8; 32]).is_ok());
+        assert!(!ledger.alarms.is_empty());
+    }
+
+    #[test]
+    fn quarantine_ledger_survives_a_save_and_load() {
+        let path = std::env::temp_dir().join(format!("budcli-quarantine-{}", std::process::id()));
+        let path = path.to_string_lossy().to_string();
+        let _ = fs::remove_file(&path);
+        assert!(load_quarantine(&path).unwrap().is_empty());
+        let mut ledger = bud_proof::quarantine::QuarantineLedger::new();
+        ledger.ban(
+            [3u8; 32],
+            bud_proof::quarantine::QuarantineReason::InvalidProof,
+        );
+        save_quarantine(&path, &ledger).unwrap();
+        let loaded = load_quarantine(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        assert!(loaded.is_banned(&[3u8; 32]));
+    }
+
+    #[test]
+    fn chain_id_zero_is_refused() {
+        assert!(check_chain_id(0).is_err());
+        assert!(check_chain_id(45262).is_ok());
+    }
+
+    /// The VM the CLI constructs must be **in mainnet mode**.
+    ///
+    /// `Vm::new` leaves the default at `mainnet_mode: false`, and in that mode
+    /// `decode_instruction` decodes the gated opcodes (VerifyMerkle,
+    /// VerifyInference). If the CLI does not carry a mainnet-safe default, a
+    /// gated opcode passes in a local run and is refused on chain - one
+    /// bytecode carrying two different meanings.
+    ///
+    /// The test **really runs** `run_pipeline` and looks at the mode of the VM
+    /// it returns. The first version instead called
+    /// `Vm::with_mainnet_mode(.., true)` and measured the result; that test
+    /// verified `with_mainnet_mode` itself, not the CLI - measured by mutation:
+    /// when the call inside the pipeline was turned back into `Vm::new`, the
+    /// test stayed green.
+    #[test]
+    fn the_cli_builds_its_vm_in_mainnet_mode() {
+        let default_vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
+        assert!(
+            !default_vm.mainnet_mode,
+            "Vm::new now arrives in mainnet mode; the CLI no longer needs to set the \
+             flag itself; the reason the CLI chooses it was the assumption this test rests on"
+        );
+
+        let path = std::env::temp_dir().join(format!(
+            "budcli-mode-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        let output = run_pipeline(ExecutionConfig {
+            bytecode: vec![bud_isa::Instruction {
+                opcode: bud_isa::Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode()],
+            sender: None,
+            nonce: None,
+            block_height: None,
+            args: Vec::new(),
+            chain_id: 1,
+            state_in_file: Some(path.to_string_lossy().into_owned()),
+            commit_state: false,
+            activation: bud_isa::MainnetActivation::default(),
+        })
+        .expect("an empty Halt program had to run");
+
+        assert!(
+            output.vm.mainnet_mode,
+            "the CLI pipeline does not build its VM in mainnet mode; gated opcodes \
+             would run locally and be refused on chain"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn relay_refuses_the_open_activation_state() {
+        assert_eq!(
+            ActivationArg::Default.relay_state().unwrap(),
+            bud_isa::MainnetActivation::default()
+        );
+        let err = ActivationArg::Full
+            .relay_state()
+            .expect_err("a signed report under the open state must be refused");
+        assert!(err.contains("does not record"), "{err}");
+    }
+
+    /// The relay's argument set has to parse, and `--output` has to default:
+    /// a monitor that forgets the path must still land on a known file.
+    /// The activation flag defaults to the closed state and has to be asked
+    /// for by name to open the staged opcodes; it is accepted after the
+    /// subcommand as well.
+    #[test]
+    fn activation_flag_defaults_to_closed_and_must_be_asked_for() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec![
+                "bud-cli", "verify", "-f", "p.json", "-i", "i.json", "-b", "b.budc",
+            ];
+            args.extend_from_slice(extra);
+            Cli::try_parse_from(args).expect("verify must parse")
+        };
+        assert_eq!(parse(&[]).activation, ActivationArg::Default);
+        assert_eq!(
+            parse(&["--activation", "default"]).activation,
+            ActivationArg::Default
+        );
+        assert_eq!(
+            parse(&["--activation", "full"]).activation,
+            ActivationArg::Full
+        );
+        assert_eq!(
+            ActivationArg::Default.state(),
+            bud_isa::MainnetActivation::default()
+        );
+        assert_eq!(
+            ActivationArg::Full.state(),
+            bud_isa::MainnetActivation::full()
+        );
+        assert!(
+            Cli::try_parse_from(["bud-cli", "--activation", "bogus", "test"]).is_err(),
+            "an unknown activation state is refused"
+        );
+    }
+
+    #[test]
+    fn relay_subcommand_parses_with_its_default_output() {
+        let cli = Cli::try_parse_from([
+            "bud-cli",
+            "relay",
+            "--proof-file",
+            "p.json",
+            "--public-inputs-file",
+            "i.json",
+            "--bytecode-file",
+            "b.budc",
+        ])
+        .expect("the relay subcommand must parse");
+        match cli.command {
+            Commands::Relay { output, strict, .. } => {
+                assert_eq!(output, "relay_report.json");
+                assert!(
+                    !strict,
+                    "strict is opt-in: an alarm is published by default"
+                );
+            }
+            other => {
+                let _ = other;
+                panic!("expected the relay subcommand");
+            }
+        }
+    }
+
+    /// The new relay flags have to reach the request: a pinned timestamp and
+    /// a payload path are the monitor's audit pair.
+    #[test]
+    fn relay_parses_a_pinned_timestamp_and_payload_path() {
+        let cli = Cli::try_parse_from([
+            "bud-cli",
+            "relay",
+            "--proof-file",
+            "p.json",
+            "--public-inputs-file",
+            "i.json",
+            "--bytecode-file",
+            "b.budc",
+            "--verified-at",
+            "42",
+            "--payload-out",
+            "sig.bin",
+        ])
+        .expect("the relay flags must parse");
+        match cli.command {
+            Commands::Relay {
+                verified_at,
+                payload_out,
+                ..
+            } => {
+                assert_eq!(verified_at, Some(42));
+                assert_eq!(payload_out.as_deref(), Some("sig.bin"));
+            }
+            other => {
+                let _ = other;
+                panic!("expected the relay subcommand");
+            }
+        }
+    }
+
+    /// The boot attestation accepts the checked-out tree; it is the same call
+    /// that refuses a run when a canonical pin drifts.
+    #[test]
+    fn boot_attestation_accepts_the_canonical_tree() {
+        let got = attest_canonical_programs().expect("the tree must attest at boot");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].name, "private-transfer-check");
+    }
+
+    /// A missing proof file is refused **before** any report is written: a
+    /// published file describing nothing is worse to a monitor than a failed
+    /// command.
+    #[test]
+    fn relay_refuses_a_missing_proof_file_before_writing() {
+        let out = std::env::temp_dir().join(format!(
+            "budcli-relay-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        let out = out.to_string_lossy().into_owned();
+        let req = RelayRequest {
+            proof_file: "/nonexistent/proof.json",
+            public_inputs_file: "/nonexistent/inputs.json",
+            bytecode_file: "/nonexistent/program.budc",
+            output: &out,
+            strict: true,
+            verified_at: Some(1_700_000_000),
+            payload_out: None,
+            reexecute: false,
+            spent_set: None,
+            activation: bud_isa::MainnetActivation::default(),
+        };
+        let r = write_signed_relay_report(&req);
+        assert!(r.is_err(), "a missing proof file had to be refused");
+        assert!(
+            !std::path::Path::new(&out).exists(),
+            "a report was written for input that was never read"
+        );
+    }
+
+    /// A transaction for a sender absent from the state must be **refused**.
+    ///
+    /// Creating the missing account implicitly reflects the sender value the runner
+    /// gave into the network state and behaves as if a transaction had been issued
+    /// from an unowned account. It must be fail-closed.
+    #[test]
+    fn an_unregistered_sender_is_refused() {
+        // `State::load` opens a non-existent path as empty state (measured,
+        // `bud-state/src/lib.rs:158`), so no file needs to be created - what
+        // matters is that the account is ABSENT from the state.
+        let path = std::env::temp_dir().join(format!(
+            "budcli-missing-{}-{}.json",
+            std::process::id(),
+            line!()
+        ));
+        assert!(
+            !path.exists(),
+            "the test file already exists: {}",
+            path.display()
+        );
+
+        let config = ExecutionConfig {
+            bytecode: vec![bud_isa::Instruction {
+                opcode: bud_isa::Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode()],
+            // The state is empty, so this account does not exist.
+            sender: Some(0xDEAD_BEEF),
+            nonce: None,
+            block_height: None,
+            args: Vec::new(),
+            chain_id: 1,
+            state_in_file: Some(path.to_string_lossy().into_owned()),
+            commit_state: false,
+            activation: bud_isa::MainnetActivation::default(),
+        };
+
+        let result = run_pipeline(config);
+        let error = match result {
+            Ok(_) => {
+                panic!("an unregistered sender was accepted; an implicit account is being created")
+            }
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            error.contains("does not exist"),
+            "refused but for another reason: {error}"
+        );
+    }
+}

@@ -1,0 +1,104 @@
+[package]
+name = "bud-core"
+version = "0.2.0"
+edition = "2021"
+description = "B.U.D. 1.0/2.0/3.0 (Broad Universal Database) - Rust skeleton, no unsafe, a 128KB block holding 27 tx, ML-DSA-87 final"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+authors = ["Budlum Security <security@budlum.xyz>"]
+
+[lib]
+name = "bud_core"
+path = "src/lib.rs"
+
+[features]
+# B.U.D. Edition -- versions 1.0/2.0/3.0.
+#
+# AN IMPORTANT DISTINCTION: choosing a version is a RUNTIME decision, NOT a
+# compile-time one. The `bud_format_edition::Edition` enum (Bud1/Bud2/Bud3)
+# carries the choice, and one node serves every edition from the same binary.
+# Therefore:
+#   bud1 = BYO (your own server or device). There is NO separate module, so
+#          the feature is empty and is used in no `cfg` gate. It is only a
+#          statement of intent.
+#   bud2 = .bud container storage (DEFAULT). The core always compiles, and
+#          this feature is used in no `cfg` gate either.
+#   bud3 = recipe-as-a-single-object. This one is REALLY a gate: it pulls the
+#          QR/fountain/recipe modules into the build through
+#          `#[cfg(feature = "bud3")]` (see lib.rs).
+# bud1/bud2 were left empty because removing them would break downstream
+# `--features bud2` calls; their status is written here so nobody assumes they
+# behave like gates.
+default = ["bud2"]
+bud1 = []
+bud2 = []
+bud3 = ["bud2"]
+
+# --------------------------------------------------------------------------
+# The lint gate.
+#
+# This crate (ALL of B.U.D. 1.0/2.0/3.0, 103 modules) was compiled by no CI
+# job at all: no step in ci.yml looks at `bud/Cargo.toml`. Measured:
+# `cargo clippy --features bud3 --all-targets -- -D warnings` -> 91 violations,
+# with real bugs among them (the detailed rationale sits on the relevant
+# lines):
+#   - bud_format_exepdf.rs: both branches of an if were identical, so the
+#     "content-aware" chunking claim was false and the measurement was
+#     computed and thrown away
+#   - bud_format_logfield.rs: vec![Vec::with_capacity(n); 7] -> the capacity
+#     was silently lost in 6 of the 7 columns
+#   - lib.rs: a duplicated `#[cfg(feature = "bud3")]` left two 3.0 modules
+#     outside the gate (3.0 code was arriving in a bud2 build)
+# The gate was written here so the same class of bug cannot come back
+# silently.
+[lints.rust]
+unsafe_code = "forbid"
+# `cfg(kani)` is set by the kani driver, not by a Cargo feature.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[lints.clippy]
+# The panic boundary: `unwrap`/`expect` are forbidden on the production path.
+#
+# This workspace was outside the gate in the main repo. Measured: 25
+# production violations (huffman 8, columnar 9, fixed-width reads 6, float
+# sorting 2). None of them was "bad code" - each rested on correct reasoning
+# ("this slice is always 4 bytes", "we validated the key set above"). The
+# reasoning was right; it had no carrier. Add one condition in between and the
+# panic would come back, with no gate to say so.
+#
+# The repair patterns follow the three shapes in ARCHITECTURE section 52:
+# fixed-width read -> `copy_from_slice`, validated assumption -> collect the
+# value once without panicking, float sorting -> `total_cmp`.
+unwrap_used = "deny"
+expect_used = "deny"
+# In index-heavy maths (erasure/Shamir/MSR/fountain: GF(2^8), the Cauchy
+# matrix, square-matrix elimination) the array indices are deliberate: `i`/`j`
+# walk several arrays at once, turning that into an iterator makes the line
+# unreadable and raises the risk of an index-alignment bug. All 18 violations
+# are in that class; we open the lint with a rationale rather than making it
+# invisible.
+needless_range_loop = "allow"
+# Decoder/encoder signatures are wide (codec + parameters + capacity + gate).
+# 3 violations; splitting the signature breaks the call sites for no gain.
+too_many_arguments = "allow"
+# The columnar/Huffman structures return nested Vecs; adding a type alias does
+# not improve readability. 4 violations.
+type_complexity = "allow"
+
+[dependencies]
+sha3 = "0.10"
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+ml-dsa = { version = "0.1", features = ["getrandom"] }
+zstd = "0.13"
+# The Shamir split draws its polynomial coefficients from the OS random
+# source; it used to be a dev-only dependency for the MSR tests.
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+
+[profile.dev]
+panic = "abort"
+[profile.release]
+overflow-checks = true
+panic = "abort"

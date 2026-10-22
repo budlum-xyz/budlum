@@ -1,0 +1,5174 @@
+use crate::chain::blockchain::Blockchain;
+use crate::chain::finality::{FinalityCert, Precommit, Prevote};
+use crate::consensus::qc::{QcBlob, QcFaultProof};
+use crate::core::address::Address;
+use crate::core::block::Block;
+use crate::core::transaction::Transaction;
+use crate::storage::merkle_trie::AccountProofBundle;
+use tokio::sync::{mpsc, oneshot};
+
+/// Direction filter for agent payment queries.
+#[derive(Debug)]
+pub enum AiPaymentDirection {
+    From,
+    To,
+}
+
+/// The storage repair picture at one caller-supplied margin.
+///
+/// Two lists, kept apart on purpose. An object in `repairable` still has at
+/// least `k` shards and can be rebuilt, so the response is to open a
+/// replacement deal. An object in `unrecoverable` has fewer than `k` and
+/// cannot be rebuilt from what survives; opening a deal for it restores
+/// nothing and burns an operator bond. Folding the two together would let the
+/// second hide inside the first and read as "a repair is coming".
+#[derive(Debug, Default, Clone)]
+pub struct StorageRepairBand {
+    /// The margin the caller asked about.
+    pub margin: u32,
+    /// `(manifest_id, live_shards, k)` where `k <= live < k + margin`.
+    pub repairable: Vec<(crate::storage::ContentId, u32, u32)>,
+    /// `(manifest_id, live_shards, k)` where `live < k`.
+    pub unrecoverable: Vec<(crate::storage::ContentId, u32, u32)>,
+}
+
+#[derive(Debug)]
+pub enum ChainCommand {
+    GetHeight(oneshot::Sender<u64>),
+    GetFinalizedHeight(oneshot::Sender<u64>),
+    GetBlock(u64, oneshot::Sender<Option<Block>>),
+    /// A contiguous run of local blocks, `[from, from + count)`.
+    ///
+    /// The peer-driven reorg path needs the whole shared prefix in one step.
+    /// Asking for it one height at a time cost one round trip per block, which
+    /// is why a per-batch cap was placed on the fork height in the first
+    /// place; with a single read the only real bounds are the suffix length
+    /// and the fork depth, both already checked by the caller.
+    GetBlocksRange(u64, usize, oneshot::Sender<Vec<Block>>),
+    GetBlockByHash(String, oneshot::Sender<Option<Block>>),
+    GetBalance(Address, oneshot::Sender<u64>),
+    GetNonce(Address, oneshot::Sender<u64>),
+    /// Account inclusion/absence proof against the proof-bearing state root.
+    ///
+    /// Distinct from [`Self::GetBalance`]: that answers what the node says a
+    /// balance is, this answers what the node can *prove* about it.
+    GetAccountProof(
+        Address,
+        oneshot::Sender<Option<crate::storage::merkle_trie::AccountProofBundle>>,
+    ),
+    AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
+    ProduceBlock(Address, oneshot::Sender<Option<(Block, Vec<[u8; 32]>)>>),
+    ValidateAndAddBlock(Block, oneshot::Sender<Result<Vec<[u8; 32]>, String>>),
+    GetTransactionByHash(String, oneshot::Sender<Option<Transaction>>),
+    GetTxReceipt(String, oneshot::Sender<Option<serde_json::Value>>),
+    TxPrecheck(Transaction, oneshot::Sender<serde_json::Value>),
+    GetChainId(oneshot::Sender<u64>),
+    GetBaseFee(oneshot::Sender<u64>),
+    GetValidatorSetHash(oneshot::Sender<String>),
+    GetMempoolSize(oneshot::Sender<usize>),
+    /// Whether the mempool still holds the transaction with this hash.
+    MempoolContains(String, oneshot::Sender<bool>),
+    HandleFinalityCert(FinalityCert, oneshot::Sender<Result<(), String>>),
+    HandlePrevote(Prevote, oneshot::Sender<Result<(), String>>),
+    HandlePrecommit(
+        Precommit,
+        oneshot::Sender<Result<Option<FinalityCert>, String>>,
+    ),
+    ImportQcBlob(QcBlob, oneshot::Sender<Result<(), String>>),
+    HandleQcFaultProof(QcFaultProof, oneshot::Sender<Result<(), String>>),
+    SubmitSlashingEvidence(
+        crate::consensus::pos::SlashingEvidence,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    SubmitRegistrySlashingReport(
+        crate::registry::SlashingReport,
+        oneshot::Sender<Result<Option<crate::registry::SlashOutcome>, String>>,
+    ),
+    GetRegistryMember(
+        crate::core::address::Address,
+        crate::registry::RoleId,
+        oneshot::Sender<Option<crate::registry::Registration>>,
+    ),
+    GetRegistryActiveMembers(
+        crate::registry::RoleId,
+        oneshot::Sender<Vec<crate::registry::Registration>>,
+    ),
+    GetSlashingHistory(oneshot::Sender<Vec<crate::registry::permissionless::SlashingRecord>>),
+    DrainSlashingEvidence(oneshot::Sender<Vec<crate::consensus::pos::SlashingEvidence>>),
+    CleanupMempool(oneshot::Sender<usize>),
+    TryReorg(Vec<Block>, oneshot::Sender<Result<bool, String>>),
+    GetChainInfo(oneshot::Sender<String>),
+    GetLocator(oneshot::Sender<Vec<String>>),
+    FindCommonHeight(Vec<String>, oneshot::Sender<Option<u64>>),
+    GetQcBlob(u64, oneshot::Sender<Option<crate::consensus::qc::QcBlob>>),
+    GetFinalityCert(
+        u64,
+        oneshot::Sender<Option<crate::chain::finality::FinalityCert>>,
+    ),
+    GetValidatorAddress(oneshot::Sender<Option<Address>>),
+    GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
+    GetStateRoot(u64, oneshot::Sender<Option<String>>),
+    AddBalance(Address, u64, oneshot::Sender<Result<(), String>>),
+    FundDevelopmentAccount(Address, oneshot::Sender<Result<(), String>>),
+    GetStateSnapshotData(
+        u64,
+        oneshot::Sender<Option<crate::chain::snapshot::StateSnapshot>>,
+    ),
+    ApplySnapshot(
+        crate::chain::snapshot::StateSnapshot,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    GetSettlementInfo(oneshot::Sender<serde_json::Value>),
+    GetGlobalHeader(
+        u64,
+        oneshot::Sender<Option<crate::settlement::GlobalBlockHeader>>,
+    ),
+    GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
+    GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
+    RegisterConsensusDomain(
+        crate::domain::ConsensusDomain,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    RegisterSovereignTemplate(
+        Box<crate::domain::SovereignDomainTemplate>,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    ValidateSovereignAuditExport(
+        Box<crate::domain::sovereign::AuditExportBundle>,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    // BLG-0199 (P10-F09): the raw, unverified-commitment path is test-only to
+    // the last hop. Production RPC answers `bud_submitDomainCommitment` with a
+    // refusal, and there is no longer any command route from the actor into
+    // `Blockchain::accept_domain_commitment` in a release build - a path that
+    // merely "returns Err in prod today" still compiles the unsafe body in
+    // every future build. Test suites keep their harness entry below.
+    #[cfg(test)]
+    SubmitDomainCommitment(
+        crate::domain::DomainCommitment,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    VerifyVerifiedDomainCommitment(
+        crate::domain::VerifiedDomainCommitment,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    SubmitVerifiedDomainCommitment(
+        crate::domain::VerifiedDomainCommitment,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    BuildStateUpdateTransaction(
+        crate::domain::DomainCommitment,
+        oneshot::Sender<Result<Transaction, String>>,
+    ),
+    SubmitCrossDomainMessage(
+        crate::cross_domain::CrossDomainMessage,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    SubmitRelayedCrossDomainMessage(
+        crate::cross_domain::CrossDomainMessage,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    BondRelayer(
+        crate::core::address::Address,
+        u64,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    RegisterExternalDomain(
+        Box<crate::cross_domain::external::RegistrationRequest>,
+        oneshot::Sender<Result<crate::cross_domain::external::DomainKey, String>>,
+    ),
+    SubmitExternalEvidence(
+        Box<crate::cross_domain::external::RawConsensusEvidence>,
+        oneshot::Sender<Result<Option<crate::cross_domain::external::FinalityAttestation>, String>>,
+    ),
+    GetExternalDomainProfile(
+        crate::cross_domain::external::DomainKey,
+        oneshot::Sender<
+            Option<(
+                crate::cross_domain::external::DomainProfile,
+                crate::cross_domain::external::IntakeEntry,
+                crate::cross_domain::external::AdapterDescriptor,
+            )>,
+        >,
+    ),
+    GetExternalDomainProfiles(
+        oneshot::Sender<Vec<(crate::cross_domain::external::DomainProfile, String)>>,
+    ),
+    GetExternalIntakeDigest(oneshot::Sender<Result<[u8; 32], String>>),
+    ReadmitExternalDomain(
+        crate::cross_domain::external::DomainKey,
+        String,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    ScheduleExternalFork {
+        key: crate::cross_domain::external::DomainKey,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    SlashExternalProver {
+        key: crate::cross_domain::external::DomainKey,
+        prover: crate::core::address::Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: crate::core::address::Address,
+        response: oneshot::Sender<Result<(u128, u128), String>>,
+    },
+    SetExternalQuorumPolicy(
+        crate::cross_domain::external::DomainKey,
+        crate::cross_domain::external::QuorumPolicy,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    BondExternalProver(
+        crate::cross_domain::external::DomainKey,
+        crate::core::address::Address,
+        u128,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    GetExternalQuorumRound(
+        crate::cross_domain::external::DomainKey,
+        u64,
+        oneshot::Sender<Option<crate::cross_domain::external::QuorumRound>>,
+    ),
+    GetExternalQuorumRounds(
+        crate::cross_domain::external::DomainKey,
+        oneshot::Sender<(
+            Option<crate::cross_domain::external::QuorumPolicy>,
+            Vec<crate::cross_domain::external::QuorumRound>,
+        )>,
+    ),
+    GetExternalDomainRegistration(
+        crate::cross_domain::external::DomainKey,
+        oneshot::Sender<Option<(crate::cross_domain::external::DomainRegistration, u64)>>,
+    ),
+    BondProver(
+        crate::core::address::Address,
+        u64,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    BondStorageOperator(
+        crate::core::address::Address,
+        u64,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    /// Begin unbonding an independently-debited role bond (`RELAYER`,
+    /// `PROVER`, `STORAGE_OPERATOR`). Returns the release epoch.
+    BeginRoleBondUnbonding(
+        crate::core::address::Address,
+        crate::registry::RoleId,
+        oneshot::Sender<Result<u64, String>>,
+    ),
+    /// Withdraw a matured role bond back into the account balance. Returns the
+    /// Withdrawn amount.
+    WithdrawRoleBond(
+        crate::core::address::Address,
+        crate::registry::RoleId,
+        oneshot::Sender<Result<u64, String>>,
+    ),
+    SubmitZkProof(
+        crate::prover::ZkProofSubmission,
+        oneshot::Sender<Result<crate::prover::ProofAcceptance, String>>,
+    ),
+    SubmitRelayProof {
+        message_id: crate::cross_domain::message::MessageId,
+        relayer: crate::core::address::Address,
+        proof: crate::cross_domain::event_tree::MerkleProof,
+        source_domain: crate::domain::types::DomainId,
+        response: oneshot::Sender<Result<crate::cross_domain::message::CrossDomainMessage, String>>,
+    },
+    GetAiModel(
+        crate::ai::types::AiModelId,
+        oneshot::Sender<Option<crate::ai::types::AiModelSpec>>,
+    ),
+    GetAiOutcome(
+        crate::ai::types::AiRequestId,
+        oneshot::Sender<Option<crate::ai::types::AiInferenceOutcome>>,
+    ),
+    GetAiRequest(
+        crate::ai::types::AiRequestId,
+        oneshot::Sender<Option<crate::ai::types::AiInferenceRequest>>,
+    ),
+    GetAiFeeReclaimStatus(
+        crate::ai::types::AiRequestId,
+        oneshot::Sender<Result<(crate::core::address::Address, u64), String>>,
+    ),
+    GetAiEquivocationStatus(
+        crate::ai::types::AiRequestId,
+        crate::core::address::Address,
+        oneshot::Sender<bool>,
+    ),
+    GetAiCancelStatus(crate::ai::types::AiRequestId, oneshot::Sender<bool>),
+    /// Get comprehensive dispute status for a (request, verifier) pair.
+    GetAiDisputeStatus(
+        crate::ai::types::AiRequestId,
+        crate::core::address::Address,
+        oneshot::Sender<crate::ai::types::AiDisputeStatusInfo>,
+    ),
+    /// Get verifier stake info.
+    GetAiVerifierStake(
+        crate::core::address::Address,
+        oneshot::Sender<crate::ai::types::AiVerifierStakeInfo>,
+    ),
+    /// Get callback events for a callback address.
+    GetAiCallbackQueue(
+        crate::core::address::Address,
+        oneshot::Sender<Vec<crate::ai::types::AiCallbackEvent>>,
+    ),
+    /// Get execution proof for a (request, verifier) pair.
+    GetAiExecutionProof {
+        request_id: crate::ai::types::AiRequestId,
+        verifier: crate::core::address::Address,
+        response: oneshot::Sender<Option<crate::ai::types::AiExecutionProof>>,
+    },
+    /// Get QoS metrics for a verifier.
+    GetAiVerifierQos {
+        verifier: crate::core::address::Address,
+        response: oneshot::Sender<Option<crate::ai::types::AiVerifierQos>>,
+    },
+    /// Get all verifiers ordered by reliability score (descending).
+    GetAiVerifiersByReliability(oneshot::Sender<Vec<crate::ai::types::AiVerifierQos>>),
+    /// Get agent payment by ID.
+    GetAiAgentPayment {
+        payment_id: [u8; 32],
+        response: oneshot::Sender<Option<crate::ai::types::AiAgentPayment>>,
+    },
+    /// Get payments from/to an agent.
+    GetAiAgentPayments {
+        agent: crate::core::address::Address,
+        direction: AiPaymentDirection,
+        response: oneshot::Sender<Vec<crate::ai::types::AiAgentPayment>>,
+    },
+    /// Get verifier whitelist.
+    GetAiVerifierWhitelist(oneshot::Sender<Vec<crate::core::address::Address>>),
+    GetAiAgentReputation {
+        agent: crate::core::address::Address,
+        response: oneshot::Sender<Option<crate::ai::types::AiAgentReputation>>,
+    },
+    // BLG-0201 (P10-F11): fixed-point permyriad score, not an `f64` - the
+    // actor boundary does not carry floats (Z8).
+    GetAiAgentRanking(oneshot::Sender<Vec<(crate::core::address::Address, u64)>>),
+    GetPruneStatus(oneshot::Sender<serde_json::Value>),
+    RequestPrune(Option<u64>, oneshot::Sender<Result<u64, String>>),
+    BuildGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
+    GetDomainHeight(
+        crate::domain::DomainId,
+        oneshot::Sender<Result<u64, String>>,
+    ),
+    RegisterBridgeAsset {
+        asset_id: crate::cross_domain::AssetId,
+        domain: crate::domain::DomainId,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    LockBridgeTransfer {
+        source_domain: crate::domain::DomainId,
+        target_domain: crate::domain::DomainId,
+        source_height: u64,
+        event_index: u32,
+        asset_id: crate::cross_domain::AssetId,
+        owner: crate::core::address::Address,
+        recipient: crate::core::address::Address,
+        amount: u64,
+        expiry_height: u64,
+        response: oneshot::Sender<
+            Result<
+                (
+                    crate::cross_domain::BridgeTransfer,
+                    crate::cross_domain::DomainEvent,
+                ),
+                String,
+            >,
+        >,
+    },
+    MintBridgeTransferFromVerifiedEvent {
+        source_domain: crate::domain::DomainId,
+        source_height: u64,
+        sequence: u64,
+        expected_block_hash: Option<crate::domain::Hash32>,
+        event: crate::cross_domain::DomainEvent,
+        proof: crate::cross_domain::MerkleProof,
+        relayer: crate::core::address::Address,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    BurnBridgeTransfer {
+        message_id: crate::cross_domain::MessageId,
+        domain: crate::domain::DomainId,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    BurnBridgeTransferWithEvent {
+        message_id: crate::cross_domain::MessageId,
+        domain: crate::domain::DomainId,
+        domain_height: u64,
+        event_index: u32,
+        expiry_height: u64,
+        recipient_eth: [u8; 20],
+        response: oneshot::Sender<Result<crate::cross_domain::DomainEvent, String>>,
+    },
+    UnlockBridgeTransfer {
+        message_id: crate::cross_domain::MessageId,
+        source_domain: crate::domain::DomainId,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    UnlockBridgeTransferFromVerifiedEvent {
+        target_domain: crate::domain::DomainId,
+        target_height: u64,
+        sequence: u64,
+        expected_block_hash: Option<crate::domain::Hash32>,
+        event: crate::cross_domain::DomainEvent,
+        proof: crate::cross_domain::MerkleProof,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    SealGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
+    FlushStorage(oneshot::Sender<Result<usize, String>>),
+    /// B.U.D.: Open a storage deal with proper escrow locking.
+    OpenStorageDeal {
+        domain_id: u32,
+        manifest: crate::storage::ContentManifest,
+        shard_id: crate::storage::ContentId,
+        operator: crate::core::address::Address,
+        payer: crate::core::address::Address,
+        replica_index: u8,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        response: oneshot::Sender<Result<u64, String>>,
+    },
+    AcceptStorageReallocation {
+        ticket_id: u64,
+        replacement_operator: crate::core::address::Address,
+        payer: crate::core::address::Address,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+        response: oneshot::Sender<Result<u64, String>>,
+    },
+    RegisterStorageManifest {
+        manifest: crate::storage::ContentManifest,
+        response: oneshot::Sender<Result<crate::storage::ContentId, String>>,
+    },
+    /// View-key permission book (Classic private body or Three encrypted recipe).
+    IssueViewGrant {
+        content_id: crate::storage::ContentId,
+        auth: crate::storage::GrantAuthorization,
+        grantee: Option<crate::core::address::Address>,
+        key_id: [u8; 32],
+        policy: crate::storage::ViewPolicy,
+        opened_epoch: u64,
+        response: oneshot::Sender<Result<u64, String>>,
+    },
+    RevokeViewGrant {
+        grant_id: u64,
+        auth: crate::storage::GrantAuthorization,
+        at_epoch: u64,
+        response: oneshot::Sender<Result<crate::storage::ViewGrant, String>>,
+    },
+    SocialDelete {
+        content_id: crate::storage::ContentId,
+        auth: crate::storage::GrantAuthorization,
+        at_epoch: u64,
+        response: oneshot::Sender<Result<crate::storage::DeleteOutcome, String>>,
+    },
+    /// Every grant row of one content, with how many of them are live. A read
+    /// command: it moves nothing and cannot be refused by the mainnet guard.
+    GetViewGrants {
+        content_id: crate::storage::ContentId,
+        response: oneshot::Sender<(Vec<crate::storage::ViewGrant>, usize)>,
+    },
+    MayViewContent {
+        content_id: crate::storage::ContentId,
+        viewer: crate::core::address::Address,
+        key_id: [u8; 32],
+        owner: crate::core::address::Address,
+        response: oneshot::Sender<bool>,
+    },
+    /// Classic/2.0 confidential body commit (not Three).
+    RegisterConfidentialCommit {
+        commit: crate::storage::ConfidentialBodyCommit,
+        auth: crate::storage::GrantAuthorization,
+        response: oneshot::Sender<Result<[u8; 32], String>>,
+    },
+    GetConfidentialCommit {
+        content_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::storage::ConfidentialBodyCommit>>,
+    },
+    /// Who the chain believes speaks for a confidential object.
+    GetConfidentialOwner {
+        content_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::core::address::Address>>,
+    },
+    OpenStorageChallenge {
+        request: crate::domain::storage_deal::RetrievalChallengeRequest,
+        response: oneshot::Sender<Result<u64, String>>,
+    },
+    /// Derive a coding audit for a manifest against chain entropy.
+    ///
+    /// A retrieval challenge asks whether the operator still holds the bytes.
+    /// It cannot ask whether those bytes are valid parity, because the chain
+    /// never sees shard contents, so an operator can pass every retrieval
+    /// challenge while storing garbage under a parity shard's `ContentId` and
+    /// nobody finds out until the repair that needs it.
+    ///
+    /// `derive_coding_audit` and `verify_coding_audit` were written for that
+    /// and no chain path reached either.
+    DeriveCodingAudit {
+        manifest_id: crate::storage::ContentId,
+        challenge_id: u64,
+        response: oneshot::Sender<Result<crate::domain::storage_deal::CodingAudit, String>>,
+    },
+    /// Check an answered coding audit against the generator.
+    AnswerCodingAudit {
+        audit: crate::domain::storage_deal::CodingAudit,
+        data_column: Vec<u8>,
+        parity_byte: u8,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    AnswerStorageChallenge {
+        response_data: crate::domain::storage_deal::RetrievalResponse,
+        response: oneshot::Sender<Result<crate::domain::storage_deal::ChallengeResult, String>>,
+    },
+    GetStorageManifest {
+        manifest_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::storage::ContentManifest>>,
+    },
+    GetStorageDealsByManifest {
+        manifest_id: crate::storage::ContentId,
+        response: oneshot::Sender<Vec<crate::domain::storage_deal::StorageDeal>>,
+    },
+    GetStorageDealsByShard {
+        manifest_id: crate::storage::ContentId,
+        shard_id: crate::storage::ContentId,
+        response: oneshot::Sender<Vec<crate::domain::storage_deal::StorageDeal>>,
+    },
+    GetStorageOutcome {
+        challenge_id: u64,
+        response: oneshot::Sender<Option<crate::domain::storage_deal::ChallengeResult>>,
+    },
+    /// B.U.D.: Objects in the repair band at a caller-supplied margin, plus
+    /// the objects already past saving.
+    ///
+    /// The margin is the caller's, not the sweep's. The maintenance pass judges
+    /// every object by its own scheme's margin, which is the right rule for a
+    /// sweep and the wrong one for an operator asking "what is within two
+    /// shards of trouble for me?". That question needs one margin applied
+    /// uniformly, which is what `objects_needing_repair` answers.
+    GetStorageRepairBand {
+        margin: u32,
+        response: oneshot::Sender<StorageRepairBand>,
+    },
+    /// B.U.D.: Issue retrieval challenges for active storage
+    /// Deals whose challenge_interval has elapsed.
+    IssueStorageChallenges(u64, oneshot::Sender<Result<u32, String>>),
+    /// B.U.D.: Finalize missed challenges and slash operators.
+    FinalizeMissedStorageChallenges(u64, oneshot::Sender<Result<(u32, u64), String>>),
+    /// B.U.D.: Submit a verified storage proof hash for
+    /// Accumulation into pending_storage_root.
+    SubmitStorageProof(crate::domain::Hash32, oneshot::Sender<Result<(), String>>),
+    /// B.U.D.: Query all active storage deals.
+    GetStorageDeals(oneshot::Sender<Vec<crate::domain::storage_deal::StorageDeal>>),
+    /// B.U.D.: Query storage economics event log.
+    GetStorageEconomicsEvents(
+        oneshot::Sender<Vec<crate::chain::blockchain::StorageEconomicsEvent>>,
+    ),
+    /// B.U.D.: Query storage economics accounting summary.
+    GetStorageEconomicsSummary(oneshot::Sender<serde_json::Value>),
+    /// Permissionless per-operator accounting view for storage clients.
+    GetStorageOperatorEconomics {
+        operator: Address,
+        response: oneshot::Sender<serde_json::Value>,
+    },
+    /// B.U.D.: Query all storage challenges.
+    GetStorageChallenges(oneshot::Sender<Vec<crate::domain::storage_deal::RetrievalChallenge>>),
+    SignPrevote {
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        voter_id: Address,
+        response: oneshot::Sender<Result<Prevote, String>>,
+    },
+    SignPrecommit {
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        voter_id: Address,
+        response: oneshot::Sender<Result<Precommit, String>>,
+    },
+    BnsResolve {
+        name: String,
+        response: oneshot::Sender<Option<Address>>,
+    },
+    BnsResolveFull {
+        name: String,
+        response: oneshot::Sender<Option<crate::bns::types::BnsResolved>>,
+    },
+    BnsResolveContent {
+        name: String,
+        response: oneshot::Sender<Option<crate::storage::content_id::ContentId>>,
+    },
+    BnsResolveSubdomain {
+        parent: String,
+        label: String,
+        response: oneshot::Sender<Option<Address>>,
+    },
+    IdentityResolve {
+        subject: Address,
+        response: oneshot::Sender<Option<(crate::registry::IdentityRecord, u64)>>,
+    },
+    IdentityCredential {
+        credential_id: [u8; 32],
+        response:
+            oneshot::Sender<Option<(crate::registry::CredentialCommitment, Result<(), String>)>>,
+    },
+    IdentityVerifyPresentation {
+        receipt: crate::registry::PresentationReceipt,
+        requester: Address,
+        document: String,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    BnsSetStorage {
+        name: String,
+        owner: Address,
+        storage_root: [u8; 32],
+        storage_domain_id: u32,
+        response: oneshot::Sender<Result<(), String>>,
+    },
+    BnsCalculateCost {
+        name: String,
+        duration: u64,
+        response: oneshot::Sender<u64>,
+    },
+    NftGet {
+        id: u64,
+        response: oneshot::Sender<Option<crate::socialfi::types::Nft>>,
+    },
+    NftGetByOwner {
+        owner: Address,
+        response: oneshot::Sender<Vec<crate::socialfi::types::Nft>>,
+    },
+    NftGetFeed {
+        limit: usize,
+        response: oneshot::Sender<Vec<crate::socialfi::types::Nft>>,
+    },
+    MarketGetOffers {
+        response: oneshot::Sender<Vec<crate::pollen::DataOffer>>,
+    },
+    PollenGetDataAssets {
+        response: oneshot::Sender<Vec<crate::pollen::DataAsset>>,
+    },
+    /// Which Pollen asset sells the bytes behind a manifest, if any.
+    ///
+    /// The RPC layer needs this before it hands out a shard list: shard ids
+    /// are what a reader fetches bytes with, so publishing them for content
+    /// someone is selling is publishing the content itself to anyone who
+    /// skips the payment path.
+    PollenAssetForContent {
+        manifest_id: crate::storage::ContentId,
+        response: oneshot::Sender<Option<crate::pollen::AssetId>>,
+    },
+    PollenGetAccessGrants {
+        response: oneshot::Sender<Vec<crate::pollen::AccessGrant>>,
+    },
+    PollenGetSaleAuthorizations {
+        response: oneshot::Sender<Vec<crate::pollen::SaleAuthorization>>,
+    },
+    PollenGetPurchaseReceipts {
+        response: oneshot::Sender<Vec<crate::pollen::PollenPurchaseReceipt>>,
+    },
+    PollenGetEncryptionPolicies {
+        response: oneshot::Sender<Vec<crate::pollen::EncryptionPolicy>>,
+    },
+    HubGetApps {
+        response: oneshot::Sender<Vec<crate::budlumxyz::types::AppRecord>>,
+    },
+}
+
+#[derive(Clone)]
+pub struct ChainHandle {
+    tx: mpsc::Sender<ChainCommand>,
+}
+
+impl ChainHandle {
+    pub fn new(tx: mpsc::Sender<ChainCommand>) -> Self {
+        Self { tx }
+    }
+
+    pub async fn get_height(&self) -> u64 {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetHeight(tx)).await;
+        rx.await.unwrap_or(0)
+    }
+
+    /// Height of the last block covered by a finality certificate.
+    ///
+    /// Unlike [`Self::get_height`] this never moves backwards on a reorg, so
+    /// it is the only safe cursor for anything with an external side effect.
+    pub async fn get_finalized_height(&self) -> u64 {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetFinalizedHeight(tx)).await;
+        rx.await.unwrap_or(0)
+    }
+
+    pub async fn get_block(&self, height: u64) -> Option<Block> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetBlock(height, tx)).await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Read `count` contiguous local blocks starting at `from`, in one
+    /// round trip. Returns fewer than `count` when the chain is shorter.
+    pub async fn get_blocks_range(&self, from: u64, count: usize) -> Vec<Block> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetBlocksRange(from, count, tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_block_by_hash(&self, hash: String) -> Option<Block> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetBlockByHash(hash, tx)).await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_balance(&self, addr: &Address) -> u64 {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetBalance(*addr, tx)).await;
+        rx.await.unwrap_or(0)
+    }
+
+    pub async fn get_nonce(&self, addr: &Address) -> u64 {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetNonce(*addr, tx)).await;
+        rx.await.unwrap_or(0)
+    }
+
+    /// Ask the chain for a proof about one account.
+    ///
+    /// `None` means the node could not answer, which is not the same as the
+    /// account being absent: absence is itself a proof and comes back as
+    /// `Some` with `present: false`.
+    pub async fn get_account_proof(&self, addr: &Address) -> Option<AccountProofBundle> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetAccountProof(*addr, tx)).await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn add_transaction(&self, tx: Transaction) -> Result<(), String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::AddTransaction(tx, res_tx)).await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn produce_block(&self, producer: Address) -> Option<(Block, Vec<[u8; 32]>)> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self.tx.send(ChainCommand::ProduceBlock(producer, tx)).await {
+            tracing::error!(error = %e, "Failed to send ProduceBlock command to chain actor");
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn validate_and_add_block(&self, block: Block) -> Result<Vec<[u8; 32]>, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        if let Err(e) = self
+            .tx
+            .send(ChainCommand::ValidateAndAddBlock(block, res_tx))
+            .await
+        {
+            return Err(format!("Actor dropped: {e}"));
+        }
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn get_transaction_by_hash(&self, hash: String) -> Option<Transaction> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetTransactionByHash(hash, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_tx_receipt(&self, hash: String) -> Option<serde_json::Value> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetTxReceipt(hash, tx)).await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn tx_precheck(&self, tx_obj: Transaction) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::TxPrecheck(tx_obj, tx)).await;
+        rx.await.unwrap_or_else(|_| {
+            serde_json::json!({
+                "accepted": false,
+                "reasons": ["actor_dropped"]
+            })
+        })
+    }
+
+    pub async fn get_chain_id(&self) -> u64 {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetChainId(tx)).await;
+        rx.await.unwrap_or(0)
+    }
+
+    pub async fn get_validator_address(&self) -> Option<Address> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetValidatorAddress(tx)).await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_aggregator_state(&self) -> crate::chain::finality::AggregatorState {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetAggregatorState(tx)).await;
+        rx.await
+            .unwrap_or_else(|_| crate::chain::finality::AggregatorState::inactive())
+    }
+
+    pub async fn get_base_fee(&self) -> u64 {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetBaseFee(tx)).await;
+        rx.await.unwrap_or(1)
+    }
+
+    pub async fn get_validator_set_hash(&self) -> String {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetValidatorSetHash(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_mempool_size(&self) -> usize {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetMempoolSize(tx)).await;
+        rx.await.unwrap_or(0)
+    }
+
+    /// Whether the mempool still holds `hash`.
+    ///
+    /// `add_transaction` confirms admission, not execution: the pool can
+    /// expire or evict the transaction afterwards. A submitter that must see
+    /// its transaction through to a block asks this to tell "still queued"
+    /// from "lost". An unreachable actor reads as `false`, the direction in
+    /// which the caller resubmits rather than waits forever.
+    pub async fn mempool_contains(&self, hash: String) -> bool {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::MempoolContains(hash, tx)).await;
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn handle_finality_cert(&self, cert: FinalityCert) -> Result<(), String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::HandleFinalityCert(cert, res_tx))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn handle_prevote(&self, vote: Prevote) -> Result<(), String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::HandlePrevote(vote, res_tx))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn handle_precommit(&self, vote: Precommit) -> Result<Option<FinalityCert>, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::HandlePrecommit(vote, res_tx))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn sign_prevote(
+        &self,
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        voter_id: Address,
+    ) -> Result<Prevote, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SignPrevote {
+                epoch,
+                checkpoint_height,
+                checkpoint_hash,
+                voter_id,
+                response: res_tx,
+            })
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn sign_precommit(
+        &self,
+        epoch: u64,
+        checkpoint_height: u64,
+        checkpoint_hash: String,
+        voter_id: Address,
+    ) -> Result<Precommit, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SignPrecommit {
+                epoch,
+                checkpoint_height,
+                checkpoint_hash,
+                voter_id,
+                response: res_tx,
+            })
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn cleanup_mempool(&self) -> usize {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::CleanupMempool(tx)).await;
+        rx.await.unwrap_or(0)
+    }
+
+    pub async fn import_qc_blob(&self, blob: QcBlob) -> Result<(), String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::ImportQcBlob(blob, res_tx)).await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn handle_qc_fault_proof(&self, proof: QcFaultProof) -> Result<(), String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::HandleQcFaultProof(proof, res_tx))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn submit_slashing_evidence(
+        &self,
+        evidence: crate::consensus::pos::SlashingEvidence,
+    ) -> Result<(), String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitSlashingEvidence(evidence, res_tx))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn drain_slashing_evidence(&self) -> Vec<crate::consensus::pos::SlashingEvidence> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::DrainSlashingEvidence(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn submit_registry_slashing_report(
+        &self,
+        report: crate::registry::SlashingReport,
+    ) -> Result<Option<crate::registry::SlashOutcome>, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitRegistrySlashingReport(report, res_tx))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn get_registry_member(
+        &self,
+        account: crate::core::address::Address,
+        role: crate::registry::RoleId,
+    ) -> Option<crate::registry::Registration> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetRegistryMember(account, role, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_registry_active_members(
+        &self,
+        role: crate::registry::RoleId,
+    ) -> Vec<crate::registry::Registration> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetRegistryActiveMembers(role, tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_slashing_history(
+        &self,
+    ) -> Vec<crate::registry::permissionless::SlashingRecord> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetSlashingHistory(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn try_reorg(&self, fork: Vec<Block>) -> Result<bool, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::TryReorg(fork, res_tx)).await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn get_chain_info(&self) -> String {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetChainInfo(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn open_storage_deal(
+        &self,
+        domain_id: u32,
+        manifest: crate::storage::ContentManifest,
+        shard_id: crate::storage::ContentId,
+        operator: crate::core::address::Address,
+        payer: crate::core::address::Address,
+        replica_index: u8,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::OpenStorageDeal {
+                domain_id,
+                manifest,
+                shard_id,
+                operator,
+                payer,
+                replica_index,
+                start_epoch,
+                end_epoch,
+                economics,
+                domain_params,
+                merkle_proof,
+                storage_root,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_storage_reallocation(
+        &self,
+        ticket_id: u64,
+        replacement_operator: crate::core::address::Address,
+        payer: crate::core::address::Address,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::AcceptStorageReallocation {
+                ticket_id,
+                replacement_operator,
+                payer,
+                start_epoch,
+                end_epoch,
+                economics,
+                domain_params,
+                merkle_proof,
+                storage_root,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn register_storage_manifest(
+        &self,
+        manifest: crate::storage::ContentManifest,
+    ) -> Result<crate::storage::ContentId, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterStorageManifest {
+                manifest,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn issue_view_grant(
+        &self,
+        content_id: crate::storage::ContentId,
+        auth: crate::storage::GrantAuthorization,
+        grantee: Option<crate::core::address::Address>,
+        key_id: [u8; 32],
+        policy: crate::storage::ViewPolicy,
+        opened_epoch: u64,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::IssueViewGrant {
+                content_id,
+                auth,
+                grantee,
+                key_id,
+                policy,
+                opened_epoch,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn revoke_view_grant(
+        &self,
+        grant_id: u64,
+        auth: crate::storage::GrantAuthorization,
+        at_epoch: u64,
+    ) -> Result<crate::storage::ViewGrant, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RevokeViewGrant {
+                grant_id,
+                auth,
+                at_epoch,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn social_delete(
+        &self,
+        content_id: crate::storage::ContentId,
+        auth: crate::storage::GrantAuthorization,
+        at_epoch: u64,
+    ) -> Result<crate::storage::DeleteOutcome, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SocialDelete {
+                content_id,
+                auth,
+                at_epoch,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Grant rows of one content and how many of them are live.
+    pub async fn view_grants(
+        &self,
+        content_id: crate::storage::ContentId,
+    ) -> Result<(Vec<crate::storage::ViewGrant>, usize), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetViewGrants {
+                content_id,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    pub async fn may_view_content(
+        &self,
+        content_id: crate::storage::ContentId,
+        viewer: crate::core::address::Address,
+        key_id: [u8; 32],
+        owner: crate::core::address::Address,
+    ) -> Result<bool, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::MayViewContent {
+                content_id,
+                viewer,
+                key_id,
+                owner,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    pub async fn register_confidential_commit(
+        &self,
+        commit: crate::storage::ConfidentialBodyCommit,
+        auth: crate::storage::GrantAuthorization,
+    ) -> Result<[u8; 32], String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterConfidentialCommit {
+                commit,
+                auth,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Who speaks for `content_id`: the manifest owner or the address that
+    /// registered the confidential commit. Read-only, and the reason it exists is
+    /// that a grant signature is checked against this address; a wallet has to be
+    /// able to see what the chain will compare before it spends a key on signing.
+    pub async fn confidential_owner(
+        &self,
+        content_id: crate::storage::ContentId,
+    ) -> Result<Option<crate::core::address::Address>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetConfidentialOwner {
+                content_id,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    pub async fn get_confidential_commit(
+        &self,
+        content_id: crate::storage::ContentId,
+    ) -> Result<Option<crate::storage::ConfidentialBodyCommit>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetConfidentialCommit {
+                content_id,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    /// Derive the coding audit for `manifest_id` at `challenge_id`.
+    ///
+    /// The column and parity index come from chain entropy, never from the
+    /// caller: an opener who picks the column picks one the operator has, and
+    /// an operator who knows the column in advance stores only that column.
+    pub async fn derive_coding_audit(
+        &self,
+        manifest_id: crate::storage::ContentId,
+        challenge_id: u64,
+    ) -> Result<crate::domain::storage_deal::CodingAudit, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::DeriveCodingAudit {
+                manifest_id,
+                challenge_id,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Check an answered coding audit.
+    ///
+    /// A pass means the Reed-Solomon relationship holds at that one column
+    /// and nothing wider. An operator who miscomputed a fraction `f` of
+    /// columns fails a uniformly random one with probability `f`.
+    pub async fn answer_coding_audit(
+        &self,
+        audit: crate::domain::storage_deal::CodingAudit,
+        data_column: Vec<u8>,
+        parity_byte: u8,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::AnswerCodingAudit {
+                audit,
+                data_column,
+                parity_byte,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn open_storage_challenge(
+        &self,
+        request: crate::domain::storage_deal::RetrievalChallengeRequest,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::OpenStorageChallenge {
+                request,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn answer_storage_challenge(
+        &self,
+        response_data: crate::domain::storage_deal::RetrievalResponse,
+    ) -> Result<crate::domain::storage_deal::ChallengeResult, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::AnswerStorageChallenge {
+                response_data,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn get_storage_manifest(
+        &self,
+        manifest_id: crate::storage::ContentId,
+    ) -> Option<crate::storage::ContentManifest> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageManifest {
+                manifest_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_storage_deals_by_manifest(
+        &self,
+        manifest_id: crate::storage::ContentId,
+    ) -> Vec<crate::domain::storage_deal::StorageDeal> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageDealsByManifest {
+                manifest_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_storage_deals_by_shard(
+        &self,
+        manifest_id: crate::storage::ContentId,
+        shard_id: crate::storage::ContentId,
+    ) -> Vec<crate::domain::storage_deal::StorageDeal> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageDealsByShard {
+                manifest_id,
+                shard_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Objects within `margin` shards of unrecoverable, and those already past
+    /// it, measured at the caller's margin.
+    pub async fn get_storage_repair_band(&self, margin: u32) -> StorageRepairBand {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageRepairBand {
+                margin,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_storage_outcome(
+        &self,
+        challenge_id: u64,
+    ) -> Option<crate::domain::storage_deal::ChallengeResult> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageOutcome {
+                challenge_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_locator(&self) -> Vec<String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetLocator(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn find_common_height(&self, locator: Vec<String>) -> Option<u64> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::FindCommonHeight(locator, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_qc_blob(&self, height: u64) -> Option<crate::consensus::qc::QcBlob> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetQcBlob(height, tx)).await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_finality_cert(
+        &self,
+        height: u64,
+    ) -> Option<crate::chain::finality::FinalityCert> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetFinalityCert(height, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_state_root(&self, height: u64) -> Option<String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetStateRoot(height, tx)).await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Credit an account outside consensus, on a development chain only.
+    ///
+    /// # Errors
+    ///
+    /// Refuses on mainnet. The old signature returned `()` and logged, so a
+    /// caller could not tell a credit from a no-op; a faucet that silently
+    /// does nothing is as misleading as one that silently works.
+    pub async fn credit_development_account(
+        &self,
+        address: &Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self
+            .tx
+            .send(ChainCommand::AddBalance(*address, amount, tx))
+            .await
+        {
+            return Err(format!("chain actor is gone: {e}"));
+        }
+        rx.await
+            .map_err(|e| format!("credit response channel closed: {e}"))?
+    }
+
+    /// Top an account up to `GENESIS_BALANCE`, on a development chain only.
+    ///
+    /// Was `init_genesis_account`, which named a moment in the chain's life
+    /// that the body never checked.
+    ///
+    /// # Errors
+    ///
+    /// Refuses on mainnet.
+    pub async fn fund_development_account(&self, address: &Address) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self
+            .tx
+            .send(ChainCommand::FundDevelopmentAccount(*address, tx))
+            .await
+        {
+            return Err(format!("chain actor is gone: {e}"));
+        }
+        rx.await
+            .map_err(|e| format!("faucet response channel closed: {e}"))?
+    }
+
+    pub async fn get_state_snapshot_data(
+        &self,
+        height: u64,
+    ) -> Option<crate::chain::snapshot::StateSnapshot> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStateSnapshotData(height, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn apply_snapshot(
+        &self,
+        snapshot: crate::chain::snapshot::StateSnapshot,
+    ) -> Result<(), String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ApplySnapshot(snapshot, res_tx))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn get_settlement_info(&self) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetSettlementInfo(tx)).await;
+        rx.await.unwrap_or_else(|_| {
+            serde_json::json!({
+                "error": "actor_dropped"
+            })
+        })
+    }
+
+    pub async fn get_global_header(
+        &self,
+        height: u64,
+    ) -> Option<crate::settlement::GlobalBlockHeader> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetGlobalHeader(height, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_domain_commitments(&self) -> Vec<crate::domain::DomainCommitment> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetDomainCommitments(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_domain_height(
+        &self,
+        domain_id: crate::domain::DomainId,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetDomainHeight(domain_id, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn build_global_header(
+        &self,
+        _dummy: Option<()>,
+    ) -> Result<crate::settlement::GlobalBlockHeader, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::BuildGlobalHeader(tx)).await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn get_consensus_domains(&self) -> Vec<crate::domain::ConsensusDomain> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetConsensusDomains(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn register_consensus_domain(
+        &self,
+        domain: crate::domain::ConsensusDomain,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterConsensusDomain(domain, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Register a sovereign domain template.
+    ///
+    /// The template is bound to the consensus domain it names: the domain has
+    /// to be registered and the kind and operator have to match.
+    pub async fn register_sovereign_template(
+        &self,
+        template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterSovereignTemplate(
+                Box::new(template),
+                tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Verify an audit export against the registered template.
+    pub async fn validate_sovereign_audit_export(
+        &self,
+        bundle: crate::domain::sovereign::AuditExportBundle,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ValidateSovereignAuditExport(
+                Box::new(bundle),
+                tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    #[cfg(test)]
+    pub async fn submit_domain_commitment(
+        &self,
+        commitment: crate::domain::DomainCommitment,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitDomainCommitment(commitment, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn verify_verified_domain_commitment(
+        &self,
+        payload: crate::domain::VerifiedDomainCommitment,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::VerifyVerifiedDomainCommitment(payload, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn submit_verified_domain_commitment(
+        &self,
+        payload: crate::domain::VerifiedDomainCommitment,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitVerifiedDomainCommitment(payload, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn build_state_update_transaction(
+        &self,
+        commitment: crate::domain::DomainCommitment,
+    ) -> Result<Transaction, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BuildStateUpdateTransaction(commitment, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn submit_cross_domain_message(
+        &self,
+        message: crate::cross_domain::CrossDomainMessage,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitCrossDomainMessage(message, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Registers an external domain through the actor. The BLS verifier is
+    /// installed inside the actor (`IntakeState::production_bls`), never
+    /// carried over the channel: crypto configuration is the node's, not the
+    /// caller's.
+    pub async fn register_external_domain(
+        &self,
+        registration: crate::cross_domain::external::RegistrationRequest,
+    ) -> Result<crate::cross_domain::external::DomainKey, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterExternalDomain(
+                Box::new(registration),
+                tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Submits external-finality evidence through the actor.
+    pub async fn submit_external_evidence(
+        &self,
+        evidence: crate::cross_domain::external::RawConsensusEvidence,
+    ) -> Result<Option<crate::cross_domain::external::FinalityAttestation>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitExternalEvidence(Box::new(evidence), tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Reads one external domain's public profile with its intake entry and
+    /// registered descriptor.
+    pub async fn get_external_domain_profile(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+    ) -> Option<(
+        crate::cross_domain::external::DomainProfile,
+        crate::cross_domain::external::IntakeEntry,
+        crate::cross_domain::external::AdapterDescriptor,
+    )> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalDomainProfile(key, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Reads every external domain's profile with its summary line.
+    pub async fn get_external_domain_profiles(
+        &self,
+    ) -> Vec<(crate::cross_domain::external::DomainProfile, String)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalDomainProfiles(tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// The deterministic digest of the whole external-intake state, for
+    /// cross-node comparison.
+    pub async fn get_external_intake_digest(&self) -> Result<[u8; 32], String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalIntakeDigest(tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Re-runs admission for a faulted external domain.
+    pub async fn readmit_external_domain(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        reason: String,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ReadmitExternalDomain(key, reason, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Schedules an evidence-format fork for an external domain.
+    pub async fn schedule_external_fork(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        old_version: u32,
+        new_version: u32,
+        fork_height: u64,
+        grace_heights: u64,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ScheduleExternalFork {
+                key,
+                old_version,
+                new_version,
+                fork_height,
+                grace_heights,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Slashes the prover behind an accepted external attestation.
+    pub async fn slash_external_prover(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        prover: crate::core::address::Address,
+        evidence_digest: [u8; 32],
+        value_atoms: u128,
+        challenger: crate::core::address::Address,
+    ) -> Result<(u128, u128), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SlashExternalProver {
+                key,
+                prover,
+                evidence_digest,
+                value_atoms,
+                challenger,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Installs a multi-prover quorum policy for a registered external
+    /// domain. Evidence for that domain then goes through rounds: nothing
+    /// commits until enough bonded provers carry the same claim.
+    pub async fn set_external_quorum_policy(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        policy: crate::cross_domain::external::QuorumPolicy,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SetExternalQuorumPolicy(key, policy, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Bonds an additional prover to a registered external domain.
+    pub async fn bond_external_prover(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        prover: crate::core::address::Address,
+        bond_atoms: u128,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BondExternalProver(
+                key, prover, bond_atoms, tx,
+            ))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// The quorum round for one external height of one domain, if retained.
+    pub async fn external_quorum_round(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+        height: u64,
+    ) -> Option<crate::cross_domain::external::QuorumRound> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalQuorumRound(key, height, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Every retained quorum round of one domain, with its policy.
+    pub async fn external_quorum_rounds(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+    ) -> (
+        Option<crate::cross_domain::external::QuorumPolicy>,
+        Vec<crate::cross_domain::external::QuorumRound>,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalQuorumRounds(key, tx))
+            .await;
+        rx.await.unwrap_or((None, Vec::new()))
+    }
+
+    /// The full registration record of one external domain, with the
+    /// registry clock beside it.
+    pub async fn external_domain_registration(
+        &self,
+        key: crate::cross_domain::external::DomainKey,
+    ) -> Option<(crate::cross_domain::external::DomainRegistration, u64)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetExternalDomainRegistration(key, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// Relayer-gated cross-domain message submission (RPC / p2p entry points).
+    pub async fn submit_relayed_cross_domain_message(
+        &self,
+        message: crate::cross_domain::CrossDomainMessage,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitRelayedCrossDomainMessage(message, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Bond stake to register as a relayer.
+    pub async fn bond_relayer(
+        &self,
+        address: crate::core::address::Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BondRelayer(address, amount, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Bond stake to register as a prover (optional; for reward eligibility).
+    pub async fn bond_prover(
+        &self,
+        address: crate::core::address::Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BondProver(address, amount, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Bond stake for STORAGE_OPERATOR (permissionless).
+    pub async fn bond_storage_operator(
+        &self,
+        address: crate::core::address::Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BondStorageOperator(address, amount, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Begin unbonding a `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
+    ///
+    /// These three bonds debit the account balance at bond time and had no exit
+    /// Path at all, so the debit was one-way. Returns the release epoch, which
+    /// Follows the `unbonding_epochs` governance parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry error as a string when the role carries no
+    /// Independently debited bond, the account is not registered for it, or
+    /// The bond is not `Active`. Also errors if the chain actor has stopped.
+    pub async fn begin_role_bond_unbonding(
+        &self,
+        address: crate::core::address::Address,
+        role: crate::registry::RoleId,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BeginRoleBondUnbonding(address, role, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Withdraw a matured `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry error as a string when the bond is still inside
+    /// Its unbonding window, was already withdrawn, or belongs to a role this
+    /// Path does not own. Also errors if the chain actor has stopped.
+    pub async fn withdraw_role_bond(
+        &self,
+        address: crate::core::address::Address,
+        role: crate::registry::RoleId,
+    ) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::WithdrawRoleBond(address, role, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Submit a ZK proof (permissionless; chain ↔ BudZKVM bridge).
+    pub async fn submit_zk_proof(
+        &self,
+        submission: crate::prover::ZkProofSubmission,
+    ) -> Result<crate::prover::ProofAcceptance, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitZkProof(submission, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn submit_relay_proof(
+        &self,
+        message_id: crate::cross_domain::message::MessageId,
+        relayer: crate::core::address::Address,
+        proof: crate::cross_domain::event_tree::MerkleProof,
+        source_domain: crate::domain::types::DomainId,
+    ) -> Result<crate::cross_domain::message::CrossDomainMessage, String> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self
+            .tx
+            .send(ChainCommand::SubmitRelayProof {
+                message_id,
+                relayer,
+                proof,
+                source_domain,
+                response: tx,
+            })
+            .await
+        {
+            return Err(format!("Actor dropped: {e}"));
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn get_ai_model(
+        &self,
+        id: crate::ai::types::AiModelId,
+    ) -> Option<crate::ai::types::AiModelSpec> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiModel(id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_ai_outcome(
+        &self,
+        id: crate::ai::types::AiRequestId,
+    ) -> Option<crate::ai::types::AiInferenceOutcome> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiOutcome(id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_ai_request(
+        &self,
+        id: crate::ai::types::AiRequestId,
+    ) -> Option<crate::ai::types::AiInferenceRequest> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiRequest(id, tx))
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_ai_fee_reclaim_status(
+        &self,
+        id: crate::ai::types::AiRequestId,
+    ) -> Result<(crate::core::address::Address, u64), String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiFeeReclaimStatus(id, tx))
+            .await
+            .is_err()
+        {
+            return Err("ChainActor disconnected".into());
+        }
+        rx.await
+            .map_err(|_| "ChainActor response dropped".to_string())?
+    }
+
+    pub async fn get_ai_equivocation_status(
+        &self,
+        request_id: crate::ai::types::AiRequestId,
+        verifier: crate::core::address::Address,
+    ) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiEquivocationStatus(
+                request_id, verifier, tx,
+            ))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn get_ai_cancel_status(&self, request_id: crate::ai::types::AiRequestId) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiCancelStatus(request_id, tx))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    /// Get comprehensive dispute status.
+    pub async fn get_ai_dispute_status(
+        &self,
+        request_id: crate::ai::types::AiRequestId,
+        verifier: crate::core::address::Address,
+    ) -> crate::ai::types::AiDisputeStatusInfo {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiDisputeStatus(request_id, verifier, tx))
+            .await
+            .is_err()
+        {
+            return crate::ai::types::AiDisputeStatusInfo {
+                has_equivocated: false,
+                is_disputable: false,
+                detected_block: None,
+                dispute_window_remaining: None,
+                is_staked: false,
+                stake_amount: 0,
+            };
+        }
+        rx.await.unwrap_or(crate::ai::types::AiDisputeStatusInfo {
+            has_equivocated: false,
+            is_disputable: false,
+            detected_block: None,
+            dispute_window_remaining: None,
+            is_staked: false,
+            stake_amount: 0,
+        })
+    }
+
+    /// Get verifier stake info.
+    pub async fn get_ai_verifier_stake(
+        &self,
+        verifier: crate::core::address::Address,
+    ) -> crate::ai::types::AiVerifierStakeInfo {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiVerifierStake(verifier, tx))
+            .await
+            .is_err()
+        {
+            return crate::ai::types::AiVerifierStakeInfo {
+                verifier,
+                is_staked: false,
+                stake_amount: 0,
+                total_equivocations: 0,
+            };
+        }
+        rx.await.unwrap_or(crate::ai::types::AiVerifierStakeInfo {
+            verifier,
+            is_staked: false,
+            stake_amount: 0,
+            total_equivocations: 0,
+        })
+    }
+
+    /// Get callback events for a callback address.
+    pub async fn get_ai_callback_queue(
+        &self,
+        callback_address: crate::core::address::Address,
+    ) -> Vec<crate::ai::types::AiCallbackEvent> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiCallbackQueue(callback_address, tx))
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Get execution proof for a (request, verifier) pair.
+    /// Returns None if no proof exists - results without proofs are
+    /// "trust-based"; results with proofs are "trustless" (ZKVM-verified).
+    pub async fn get_ai_execution_proof(
+        &self,
+        request_id: crate::ai::types::AiRequestId,
+        verifier: crate::core::address::Address,
+    ) -> Option<crate::ai::types::AiExecutionProof> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiExecutionProof {
+                request_id,
+                verifier,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    /// Get QoS metrics for a verifier.
+    pub async fn get_ai_verifier_qos(
+        &self,
+        verifier: crate::core::address::Address,
+    ) -> Option<crate::ai::types::AiVerifierQos> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiVerifierQos {
+                verifier,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    /// Get all verifiers ordered by reliability score.
+    pub async fn get_ai_verifiers_by_reliability(&self) -> Vec<crate::ai::types::AiVerifierQos> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiVerifiersByReliability(tx))
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Get agent payment by ID.
+    pub async fn get_ai_agent_payment(
+        &self,
+        payment_id: [u8; 32],
+    ) -> Option<crate::ai::types::AiAgentPayment> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiAgentPayment {
+                payment_id,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    /// Get payments for an agent.
+    pub async fn get_ai_agent_payments(
+        &self,
+        agent: crate::core::address::Address,
+        direction: AiPaymentDirection,
+    ) -> Vec<crate::ai::types::AiAgentPayment> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiAgentPayments {
+                agent,
+                direction,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Get verifier whitelist.
+    pub async fn get_ai_verifier_whitelist(&self) -> Vec<crate::core::address::Address> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiVerifierWhitelist(tx))
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_ai_agent_reputation(
+        &self,
+        agent: crate::core::address::Address,
+    ) -> Option<crate::ai::types::AiAgentReputation> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiAgentReputation {
+                agent,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()?
+    }
+
+    pub async fn get_ai_agent_ranking(&self) -> Vec<(crate::core::address::Address, u64)> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiAgentRanking(tx))
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_prune_status(&self) -> Result<serde_json::Value, String> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self.tx.send(ChainCommand::GetPruneStatus(tx)).await {
+            return Err(format!("Actor dropped: {e}"));
+        }
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    pub async fn request_prune(&self, min_blocks_to_keep: Option<u64>) -> Result<u64, String> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(e) = self
+            .tx
+            .send(ChainCommand::RequestPrune(min_blocks_to_keep, tx))
+            .await
+        {
+            return Err(format!("Actor dropped: {e}"));
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn register_bridge_asset(
+        &self,
+        asset_id: crate::cross_domain::AssetId,
+        domain: crate::domain::DomainId,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RegisterBridgeAsset {
+                asset_id,
+                domain,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn lock_bridge_transfer(
+        &self,
+        source_domain: crate::domain::DomainId,
+        target_domain: crate::domain::DomainId,
+        source_height: u64,
+        event_index: u32,
+        asset_id: crate::cross_domain::AssetId,
+        owner: crate::core::address::Address,
+        recipient: crate::core::address::Address,
+        amount: u64,
+        expiry_height: u64,
+    ) -> Result<
+        (
+            crate::cross_domain::BridgeTransfer,
+            crate::cross_domain::DomainEvent,
+        ),
+        String,
+    > {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::LockBridgeTransfer {
+                source_domain,
+                target_domain,
+                source_height,
+                event_index,
+                asset_id,
+                owner,
+                recipient,
+                amount,
+                expiry_height,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn mint_bridge_transfer_from_verified_event(
+        &self,
+        source_domain: crate::domain::DomainId,
+        source_height: u64,
+        sequence: u64,
+        expected_block_hash: Option<crate::domain::Hash32>,
+        event: crate::cross_domain::DomainEvent,
+        proof: crate::cross_domain::MerkleProof,
+        relayer: crate::core::address::Address,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::MintBridgeTransferFromVerifiedEvent {
+                source_domain,
+                source_height,
+                sequence,
+                expected_block_hash,
+                event,
+                proof,
+                relayer,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn burn_bridge_transfer(
+        &self,
+        message_id: crate::cross_domain::MessageId,
+        domain: crate::domain::DomainId,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BurnBridgeTransfer {
+                message_id,
+                domain,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn burn_bridge_transfer_with_event(
+        &self,
+        message_id: crate::cross_domain::MessageId,
+        domain: crate::domain::DomainId,
+        domain_height: u64,
+        event_index: u32,
+        expiry_height: u64,
+        recipient_eth: [u8; 20],
+    ) -> Result<crate::cross_domain::DomainEvent, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BurnBridgeTransferWithEvent {
+                message_id,
+                domain,
+                domain_height,
+                event_index,
+                expiry_height,
+                recipient_eth,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn unlock_bridge_transfer(
+        &self,
+        message_id: crate::cross_domain::MessageId,
+        source_domain: crate::domain::DomainId,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::UnlockBridgeTransfer {
+                message_id,
+                source_domain,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn unlock_bridge_transfer_from_verified_event(
+        &self,
+        target_domain: crate::domain::DomainId,
+        target_height: u64,
+        sequence: u64,
+        expected_block_hash: Option<crate::domain::Hash32>,
+        event: crate::cross_domain::DomainEvent,
+        proof: crate::cross_domain::MerkleProof,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::UnlockBridgeTransferFromVerifiedEvent {
+                target_domain,
+                target_height,
+                sequence,
+                expected_block_hash,
+                event,
+                proof,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn seal_global_header(&self) -> Result<crate::settlement::GlobalBlockHeader, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::SealGlobalHeader(tx)).await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn flush_storage(&self) -> Result<usize, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::FlushStorage(tx)).await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    // ─── B.U.D.: Storage operations public API ─────
+
+    /// Issue retrieval challenges for active deals at the given epoch.
+    pub async fn issue_storage_challenges(&self, epoch: u64) -> Result<u32, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::IssueStorageChallenges(epoch, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Finalize missed challenges and slash operators.
+    pub async fn finalize_missed_storage_challenges(
+        &self,
+        epoch: u64,
+    ) -> Result<(u32, u64), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::FinalizeMissedStorageChallenges(epoch, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Submit a verified storage proof hash.
+    pub async fn submit_storage_proof(
+        &self,
+        proof_hash: crate::domain::Hash32,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::SubmitStorageProof(proof_hash, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Query all storage deals.
+    pub async fn get_storage_deals(
+        &self,
+    ) -> Result<Vec<crate::domain::storage_deal::StorageDeal>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetStorageDeals(tx)).await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    /// Query all storage challenges.
+    pub async fn get_storage_challenges(
+        &self,
+    ) -> Result<Vec<crate::domain::storage_deal::RetrievalChallenge>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetStorageChallenges(tx)).await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    /// Query storage economics events for reporting/gossip adapters.
+    pub async fn get_storage_economics_events(
+        &self,
+    ) -> Result<Vec<crate::chain::blockchain::StorageEconomicsEvent>, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageEconomicsEvents(tx))
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    /// Query aggregate storage economics accounting.
+    pub async fn get_storage_economics_summary(&self) -> Result<serde_json::Value, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageEconomicsSummary(tx))
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    /// Query a single operator's accrued rewards, slash events, and active
+    /// Deal count without relying on an off-chain indexer.
+    pub async fn get_storage_operator_economics(
+        &self,
+        operator: Address,
+    ) -> Result<serde_json::Value, String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetStorageOperatorEconomics {
+                operator,
+                response: tx,
+            })
+            .await;
+        rx.await.map_err(|_| "Actor dropped".to_string())
+    }
+
+    pub async fn bns_resolve(&self, name: String) -> Option<Address> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsResolve { name, response: tx })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn bns_resolve_full(&self, name: String) -> Option<crate::bns::types::BnsResolved> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsResolveFull { name, response: tx })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn bns_resolve_content(
+        &self,
+        name: String,
+    ) -> Option<crate::storage::content_id::ContentId> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsResolveContent { name, response: tx })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn bns_resolve_subdomain(&self, parent: String, label: String) -> Option<Address> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsResolveSubdomain {
+                parent,
+                label,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn identity_resolve(
+        &self,
+        subject: Address,
+    ) -> Option<(crate::registry::IdentityRecord, u64)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::IdentityResolve {
+                subject,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn identity_credential(
+        &self,
+        credential_id: [u8; 32],
+    ) -> Option<(crate::registry::CredentialCommitment, Result<(), String>)> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::IdentityCredential {
+                credential_id,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn identity_verify_presentation(
+        &self,
+        receipt: crate::registry::PresentationReceipt,
+        requester: Address,
+        document: String,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::IdentityVerifyPresentation {
+                receipt,
+                requester,
+                document,
+                response: tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err("chain actor closed".to_string());
+        }
+        rx.await.map_err(|_| "chain actor closed".to_string())?
+    }
+
+    pub async fn bns_set_storage(
+        &self,
+        name: String,
+        owner: Address,
+        storage_root: [u8; 32],
+        storage_domain_id: u32,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsSetStorage {
+                name,
+                owner,
+                storage_root,
+                storage_domain_id,
+                response: tx,
+            })
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn bns_calculate_cost(&self, name: String, duration: u64) -> u64 {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::BnsCalculateCost {
+                name,
+                duration,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or(0)
+    }
+
+    pub async fn nft_get(&self, id: u64) -> Option<crate::socialfi::types::Nft> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::NftGet { id, response: tx })
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn nft_get_by_owner(&self, owner: Address) -> Vec<crate::socialfi::types::Nft> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::NftGetByOwner {
+                owner,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn nft_get_feed(&self, limit: usize) -> Vec<crate::socialfi::types::Nft> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::NftGetFeed {
+                limit,
+                response: tx,
+            })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn market_get_offers(&self) -> Vec<crate::pollen::DataOffer> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::MarketGetOffers { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    /// Which Pollen asset sells this content, if any. `None` means the
+    /// content is not listed and reading it needs no grant.
+    pub async fn pollen_asset_for_content(
+        &self,
+        manifest_id: crate::storage::ContentId,
+    ) -> Option<crate::pollen::AssetId> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenAssetForContent {
+                manifest_id,
+                response: tx,
+            })
+            .await;
+        // A failed round trip reads as "listed" rather than "free": the
+        // actor being unreachable is not evidence that content is public,
+        // and defaulting the other way would open the paywall whenever the
+        // chain task is busy.
+        rx.await
+            .unwrap_or_else(|_| Some(crate::pollen::AssetId::zero()))
+    }
+
+    pub async fn pollen_get_data_assets(&self) -> Vec<crate::pollen::DataAsset> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenGetDataAssets { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn pollen_get_access_grants(&self) -> Vec<crate::pollen::AccessGrant> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenGetAccessGrants { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn pollen_get_sale_authorizations(&self) -> Vec<crate::pollen::SaleAuthorization> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenGetSaleAuthorizations { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn pollen_get_encryption_policies(&self) -> Vec<crate::pollen::EncryptionPolicy> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenGetEncryptionPolicies { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn pollen_get_purchase_receipts(&self) -> Vec<crate::pollen::PollenPurchaseReceipt> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenGetPurchaseReceipts { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn budlumxyz_get_apps(&self) -> Vec<crate::budlumxyz::types::AppRecord> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::HubGetApps { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+}
+/// The proof-bearing trie, built at most once per chain height.
+///
+/// Building it costs O(depth * accounts): measured at 5000 accounts, 222 ms.
+/// Rebuilding per request turned `bud_getAccountProof` into a work
+/// multiplier - ten proofs cost 2.23 s, all of it spent rebuilding the same
+/// tree. That is a remote caller choosing how much node CPU to spend.
+///
+/// Built lazily rather than at the end of every block, because a node nobody
+/// asks for proofs should not pay for them at all: the cost belongs to the
+/// feature being used, not to running a node. The first request after a new
+/// block pays; every later request at that height is a tree walk.
+///
+/// `leaves` is what makes the cache honest. Balances change outside blocks
+/// (faucet, bond debit and refund) and an equal length reorg swaps state at
+/// the same chain length, so the chain length cannot tag the trie. The trie
+/// keeps the exact (address, balance, nonce) list it was built from. A hit
+/// needs the live accounts to match that list, so a stale trie is never used.
+/// The compare is one pass over the accounts and is far cheaper than a build.
+struct ProofTrieCache {
+    leaves: Vec<([u8; 32], u64, u64)>,
+    trie: crate::storage::merkle_trie::MerkleTrie,
+}
+
+pub struct ChainActor {
+    blockchain: Blockchain,
+    rx: mpsc::Receiver<ChainCommand>,
+    proof_trie: Option<ProofTrieCache>,
+}
+
+impl ChainActor {
+    pub fn new(blockchain: Blockchain) -> (Self, ChainHandle) {
+        let (tx, rx) = mpsc::channel(1000);
+        (
+            Self {
+                blockchain,
+                rx,
+                proof_trie: None,
+            },
+            ChainHandle { tx },
+        )
+    }
+
+    /// Proof for one account, reusing the trie when the accounts did not change.
+    ///
+    /// The cache is keyed by the account contents and rebuilt when they do not
+    /// match, so a proof is always drawn against the state the node holds. A
+    /// stale trie would produce a proof that verifies against its own root and
+    /// describes state that no longer exists - worse than no proof, because it
+    /// is a correct-looking answer to the wrong question.
+    fn account_proof(&mut self, addr: &Address) -> crate::storage::merkle_trie::AccountProofBundle {
+        let accounts = &self.blockchain.state.accounts;
+        let fresh = self.proof_trie.as_ref().is_some_and(|cached| {
+            cached.leaves.len() == accounts.len()
+                && cached
+                    .leaves
+                    .iter()
+                    .zip(accounts.iter())
+                    .all(|(l, (a, acct))| l.0 == a.0 && l.1 == acct.balance && l.2 == acct.nonce)
+        });
+        if !fresh {
+            let leaves: Vec<([u8; 32], u64, u64)> = accounts
+                .iter()
+                .map(|(a, acct)| (a.0, acct.balance, acct.nonce))
+                .collect();
+            let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
+            for (a, balance, nonce) in &leaves {
+                trie.insert(a, *balance, *nonce);
+            }
+            self.proof_trie = Some(ProofTrieCache { leaves, trie });
+        }
+        match self.proof_trie.as_ref() {
+            Some(cached) => crate::storage::merkle_trie::prove_from_trie(&cached.trie, &addr.0),
+            // Unreachable: the branch above assigns it. Written as a fallback
+            // rather than an unwrap so a future edit that breaks the
+            // invariant costs one rebuild instead of stopping the node.
+            None => crate::storage::merkle_trie::prove_account(
+                self.blockchain
+                    .state
+                    .accounts
+                    .iter()
+                    .map(|(a, acct)| (a.0, acct.balance, acct.nonce)),
+                &addr.0,
+            ),
+        }
+    }
+
+    /// Height the AI read queries judge deadlines at. It is the height the
+    /// executor uses for the same checks, not an epoch guess that is only
+    /// right on a chain with 100 blocks per epoch.
+    fn ai_query_height(&self) -> u64 {
+        self.blockchain.state.current_block_height
+    }
+
+    fn storage_economics_disabled_on_mainnet(&self) -> bool {
+        self.blockchain.chain_id
+            == crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value()
+    }
+
+    fn mainnet_storage_disabled_error() -> String {
+        "B.U.D. storage economics are disabled on mainnet until transaction-only accounting is wired".into()
+    }
+
+    /// View grants are state-root bearing (`view_grants.root()` folds into
+    /// the storage registry root): mutating them between blocks diverges the
+    /// local root from every peer that did not see the RPC call. The refusal
+    /// is chain-independent until grant changes ride a block transaction.
+    fn view_grant_rpc_mutation_error() -> String {
+        "view grants are state-root bearing and cannot be mutated over RPC; grant changes must ride a block transaction".into()
+    }
+
+    fn social_delete_rpc_mutation_error() -> String {
+        "social delete changes state-root bearing rows and cannot be applied over RPC; it must ride a block transaction".into()
+    }
+
+    fn run_storage_maintenance(&mut self, block_height: u64) {
+        if self.storage_economics_disabled_on_mainnet() {
+            return;
+        }
+        let current_epoch = block_height
+            / crate::core::chain_config::epoch_len_for_chain_id(self.blockchain.chain_id);
+        match self
+            .blockchain
+            .accrue_storage_operator_rewards(current_epoch)
+        {
+            Ok((rewarded, reward_total)) if rewarded > 0 => tracing::info!("B.U.D. storage maintenance accrued rewards for {rewarded} deals at epoch {current_epoch} (amount={reward_total})"),
+            Ok(_) => {}
+            Err(error) => tracing::warn!("B.U.D. reward accrual failed at height {block_height}: {error}"),
+        }
+
+        match self.blockchain.issue_storage_challenges(current_epoch) {
+            Ok(issued) if issued > 0 => tracing::info!("B.U.D. storage maintenance issued {issued} retrieval challenges at epoch {current_epoch}"),
+            Ok(_) => {}
+            Err(error) => tracing::warn!("B.U.D. storage challenge issuance failed at epoch {current_epoch}: {error}"),
+        }
+
+        match self.blockchain.finalize_missed_storage_challenges(current_epoch) {
+            Ok((finalized, slashed)) if finalized > 0 => tracing::info!("B.U.D. storage maintenance finalized {finalized} missed challenges at epoch {current_epoch} (slashed_bond={slashed})"),
+            Ok(_) => {}
+            Err(error) => tracing::warn!("B.U.D. missed-challenge finalization failed at height {block_height}: {error}"),
+        }
+
+        // The settle counterpart to the slash above. Without it, maintenance
+        // Only ever took bonds: a deal served to term stayed `Active` forever
+        // And its bond stayed debited.
+        match self.blockchain.finalize_expired_storage_deals(current_epoch) {
+            Ok((expired, returned)) if expired > 0 => tracing::info!("B.U.D. storage maintenance expired {expired} matured deals at epoch {current_epoch} (returned_bond={returned})"),
+            Ok(_) => {}
+            Err(error) => tracing::warn!("B.U.D. expired-deal finalization failed at height {block_height}: {error}"),
+        }
+
+        // The repair band. `objects_needing_repair` has existed since erasure
+        // coding landed and nothing called it, which meant the real repair
+        // window was unbounded: an object could sit one shard above `k` for as
+        // long as it liked and no maintenance pass would notice. The sweep now
+        // reads it, per object, against that object's own scheme.
+        let repair_band = self
+            .blockchain
+            .state
+            .storage_registry
+            .objects_below_own_repair_margin();
+        for (manifest_id, live, k, margin) in &repair_band {
+            tracing::warn!(
+                "B.U.D. object {} is in the repair band at epoch {current_epoch}: {live} shards live, k={k}, margin={margin}",
+                hex::encode(manifest_id.0)
+            );
+            // F-16: a repair band that only logs is not a repair. A live
+            // deal must not get an expiry ticket: accepting that ticket
+            // would open a second Active deal on the same
+            // (manifest, shard, replica_index) and pay two operators for
+            // one slot. Tickets are only for shards that currently have
+            // zero active replicas, keyed off a historic deal if one
+            // exists. A shard the registry never placed cannot be
+            // ticketed with the current type; that gap is logged.
+            let Some(manifest) = self
+                .blockchain
+                .state
+                .storage_registry
+                .get_manifest(manifest_id)
+                .cloned()
+            else {
+                continue;
+            };
+            for shard in &manifest.shards {
+                if self
+                    .blockchain
+                    .state
+                    .storage_registry
+                    .active_replica_count(manifest_id, &shard.shard_id)
+                    > 0
+                {
+                    continue;
+                }
+                let historic: Vec<u64> = self
+                    .blockchain
+                    .state
+                    .storage_registry
+                    .deals_for_shard(manifest_id, &shard.shard_id)
+                    .into_iter()
+                    .filter(|deal| !deal.is_active())
+                    .map(|deal| deal.deal_id)
+                    .collect();
+                if let Some(deal_id) = historic.last().copied() {
+                    if let Some(ticket_id) = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .open_expiry_reallocation(deal_id, current_epoch)
+                    {
+                        tracing::info!(
+                            "B.U.D. opened repair ticket {ticket_id} for missing shard {} (historic deal {deal_id}) on {}",
+                            hex::encode(shard.shard_id.0),
+                            hex::encode(manifest_id.0)
+                        );
+                    }
+                } else {
+                    // Bootstrap path: the shard is on the manifest and has never
+                    // held a deal. domain_id comes from any sibling deal on the
+                    // same object when one exists; otherwise the storage domain
+                    // this node is configured for (0 on a fresh registry).
+                    let domain_id = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .deals_for_manifest(manifest_id)
+                        .first()
+                        .map_or(0, |d| d.domain_id);
+                    if let Some(ticket_id) = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .open_never_placed_ticket(
+                            domain_id,
+                            *manifest_id,
+                            shard.shard_id,
+                            0,
+                            current_epoch,
+                        )
+                    {
+                        tracing::info!(
+                            "B.U.D. opened never-placed ticket {ticket_id} for shard {} on {}",
+                            hex::encode(shard.shard_id.0),
+                            hex::encode(manifest_id.0)
+                        );
+                    }
+                }
+            }
+        }
+
+        // F-15: schedule one coding audit per erasure-coded manifest each
+        // epoch. The column is derived from chain entropy; the operator
+        // still has to answer. An unanswered audit is visible, which is
+        // the part that was missing.
+        let last_hash = self.blockchain.last_block().hash.as_bytes().to_vec();
+        let mut scheduled = 0u32;
+        let manifests: Vec<_> = self
+            .blockchain
+            .state
+            .storage_registry
+            .manifests
+            .values()
+            .cloned()
+            .collect();
+        for manifest in manifests {
+            if manifest.erasure.parity_count() == 0 {
+                continue;
+            }
+            let entropy = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_MAINTENANCE_CODING_AUDIT_V1",
+                &self.blockchain.chain_id.to_le_bytes(),
+                &last_hash,
+                &current_epoch.to_le_bytes(),
+                manifest.manifest_id.as_bytes(),
+            ]);
+            match crate::domain::storage_deal::StorageRegistry::derive_coding_audit(
+                &entropy,
+                &manifest,
+                current_epoch,
+            ) {
+                Ok(audit) => {
+                    scheduled += 1;
+                    tracing::info!(
+                        "B.U.D. coding audit scheduled for {} parity={} column={}",
+                        hex::encode(audit.manifest_id.0),
+                        audit.parity_index,
+                        audit.column
+                    );
+                }
+                Err(error) => tracing::debug!("coding audit not scheduled: {error}"),
+            }
+        }
+        if scheduled > 0 {
+            tracing::info!(
+                "B.U.D. storage maintenance scheduled {scheduled} coding audits at epoch {current_epoch}"
+            );
+        }
+
+        // Objects already past saving are logged separately and loudly. Left
+        // inside the band above they would read as "a repair is coming", and
+        // no repair is coming: below `k` there is nothing to rebuild from.
+        let unrecoverable = self
+            .blockchain
+            .state
+            .storage_registry
+            .unrecoverable_objects();
+        for (manifest_id, live, k) in &unrecoverable {
+            tracing::error!(
+                "B.U.D. object {} is UNRECOVERABLE at epoch {current_epoch}: {live} shards live, k={k}; no repair can restore it",
+                hex::encode(manifest_id.0)
+            );
+        }
+
+        // The placement advice. Every pending repair ticket records the holder
+        // the rendezvous placement chose for that shard. Whoever accepts the
+        // ticket still gets it; what is written is a measurement, not a rule,
+        // and `placements_that_diverged` makes the divergence visible.
+        //
+        // The entropy comes from the last block's hash: every node finds the
+        // same answer, and the choice cannot be predicted an epoch ahead.
+        let placement_candidates: Vec<crate::storage::assignment::ShardCandidate> = self
+            .blockchain
+            .state
+            .get_active_validators()
+            .into_iter()
+            .map(|validator| crate::storage::assignment::ShardCandidate {
+                address: validator.address,
+                stake: validator.stake,
+            })
+            .collect();
+        let annotated = if placement_candidates.is_empty() {
+            0
+        } else {
+            let entropy = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_MAINTENANCE_PLACEMENT_V1",
+                &self.blockchain.chain_id.to_le_bytes(),
+                self.blockchain.last_block().hash.as_bytes(),
+                &current_epoch.to_le_bytes(),
+            ]);
+            self.blockchain
+                .state
+                .storage_registry
+                .annotate_expected_holders(&entropy, &placement_candidates)
+        };
+        if annotated > 0 {
+            tracing::info!(
+                "B.U.D. storage maintenance wrote {annotated} placement advisories at epoch {current_epoch}"
+            );
+        }
+        for (ticket_id, expected, actual) in self
+            .blockchain
+            .state
+            .storage_registry
+            .placements_that_diverged()
+        {
+            tracing::info!(
+                "B.U.D. repair ticket {ticket_id} was taken by {} while placement chose {}",
+                hex::encode(actual.0),
+                hex::encode(expected.0)
+            );
+        }
+
+        // The demand band. If an object that received a regime discount starts
+        // being read heavily, its target rises again; the scan below
+        // re-measures that every epoch. `under_replicated_shards` now takes an
+        // epoch, so the discount is not fixed but bound to proven reads.
+        let demand_gap = self
+            .blockchain
+            .state
+            .storage_registry
+            .under_replicated_shards(current_epoch);
+        for (manifest_id, shard_id, active) in &demand_gap {
+            let target = self
+                .blockchain
+                .state
+                .storage_registry
+                .required_replicas_with_demand(manifest_id, current_epoch);
+            tracing::warn!(
+                "B.U.D. shard {} of {} is below its demand-adjusted target at epoch {current_epoch}: {active} active, target={target}",
+                hex::encode(shard_id.0),
+                hex::encode(manifest_id.0)
+            );
+        }
+
+        // The action the demand band was missing. Each shard under its target
+        // gets a replacement ticket for every replica slot that is actually
+        // free, which is the same repair the zero-replica path performs; the
+        // guard is per slot, not per shard, because "the shard has an active
+        // deal" and "this slot has one" are different statements and only the
+        // second one means paying two operators for one slot. Tickets are
+        // registry state, so the count below feeds the persist decision.
+        let repair_tickets = self
+            .blockchain
+            .state
+            .storage_registry
+            .open_repair_tickets_for_free_slots(current_epoch);
+        if repair_tickets > 0 {
+            tracing::warn!(
+                "B.U.D. storage maintenance opened {repair_tickets} repair tickets for free replica slots at epoch {current_epoch}"
+            );
+        }
+
+        let under_replicated = self
+            .blockchain
+            .state
+            .storage_registry
+            .mark_overdue_reallocations_under_replicated(current_epoch);
+        // The delete half of the ticket lifecycle. A ticket whose replacement
+        // deal opened long enough ago is a record, not an obligation; the map
+        // had no delete path and grew by one row per slash or expiry forever.
+        let swept = self
+            .blockchain
+            .state
+            .storage_registry
+            .sweep_settled_reallocations(current_epoch);
+        if swept > 0 {
+            tracing::info!("B.U.D. storage maintenance dropped {swept} settled reallocation tickets at epoch {current_epoch}");
+        }
+        if under_replicated > 0 {
+            tracing::warn!("B.U.D. storage maintenance marked {under_replicated} reallocation tickets under-replicated at epoch {current_epoch}");
+        }
+        // An advisory written into a pending ticket is registry state too: a
+        // tick that only annotated used to skip the write, and a crash before
+        // the next persisting tick dropped every advisory of this epoch.
+        let registry_changed = annotated > 0
+            || under_replicated > 0
+            || swept > 0
+            || repair_tickets > 0
+            || !repair_band.is_empty();
+        if registry_changed {
+            if let Err(error) = self.blockchain.persist_storage_registry() {
+                tracing::error!("Failed to persist storage reallocation status: {error}");
+            }
+        }
+    }
+
+    /// AI registry maintenance: expired requests, results, refunded fee
+    /// records and dispute window records are evicted here.
+    ///
+    /// The eviction itself lives in
+    /// `Blockchain::apply_ai_registry_maintenance`, which the startup replay,
+    /// the reorg rebuilds and `rebuild_state` also run, so a restarted node
+    /// reconstructs exactly the state its live peers carry (P10-F02).
+    fn run_ai_maintenance(&mut self, block_height: u64) {
+        let (pruned, expired) = crate::chain::blockchain::Blockchain::apply_ai_registry_maintenance(
+            &mut self.blockchain.state,
+            block_height,
+        );
+        if pruned > 0 || expired > 0 {
+            tracing::info!(%pruned, %expired, "AI registry maintenance at height {block_height}");
+        }
+    }
+
+    pub async fn run(mut self) {
+        while let Some(cmd) = self.rx.recv().await {
+            match cmd {
+                ChainCommand::GetHeight(tx) => {
+                    let height = self.blockchain.chain.len().saturating_sub(1) as u64;
+                    let _ = tx.send(height);
+                }
+                ChainCommand::GetFinalizedHeight(tx) => {
+                    let _ = tx.send(self.blockchain.finalized_height);
+                }
+                ChainCommand::GetBlock(height, tx) => {
+                    let block = self.blockchain.chain.get(height as usize).cloned();
+                    let _ = tx.send(block);
+                }
+                ChainCommand::GetBlocksRange(from, count, tx) => {
+                    let start = usize::try_from(from).unwrap_or(usize::MAX);
+                    let blocks = self
+                        .blockchain
+                        .chain
+                        .iter()
+                        .skip(start)
+                        .take(count)
+                        .cloned()
+                        .collect();
+                    let _ = tx.send(blocks);
+                }
+                ChainCommand::GetBlockByHash(hash, tx) => {
+                    let block = self
+                        .blockchain
+                        .chain
+                        .iter()
+                        .find(|b| b.hash == hash)
+                        .cloned();
+                    let _ = tx.send(block);
+                }
+                ChainCommand::GetBalance(addr, tx) => {
+                    let balance = self.blockchain.state.get_balance(&addr);
+                    let _ = tx.send(balance);
+                }
+                ChainCommand::GetNonce(addr, tx) => {
+                    let nonce = self.blockchain.state.get_nonce(&addr);
+                    let _ = tx.send(nonce);
+                }
+                ChainCommand::GetAccountProof(addr, tx) => {
+                    let bundle = self.account_proof(&addr);
+                    let _ = tx.send(Some(bundle));
+                }
+                ChainCommand::AddTransaction(tx_obj, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .add_transaction(tx_obj)
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::ProduceBlock(producer, tx) => {
+                    let result = self.blockchain.produce_block(producer);
+                    if let Some((ref b, ref cids)) = result {
+                        self.run_storage_maintenance(b.index);
+                        self.run_ai_maintenance(b.index);
+                        if crate::chain::finality::is_checkpoint_height_for_chain(
+                            b.index,
+                            self.blockchain.chain_id,
+                        ) {
+                            self.blockchain.start_prevote_task(b.index, b.hash.clone());
+                        }
+                        if !cids.is_empty() {
+                            tracing::info!(count = cids.len(), "NftBurn detected during production - notifying node for physical pruning");
+                        }
+                    }
+                    let _ = tx.send(result);
+                }
+                ChainCommand::ValidateAndAddBlock(block, res_tx) => {
+                    let height = block.index;
+                    let res = self.blockchain.validate_and_add_block(block);
+                    if let Ok(ref cids) = res {
+                        self.run_storage_maintenance(height);
+                        self.run_ai_maintenance(height);
+                        if crate::chain::finality::is_checkpoint_height_for_chain(
+                            height,
+                            self.blockchain.chain_id,
+                        ) {
+                            let checkpoint_hash = self
+                                .blockchain
+                                .chain
+                                .get(height as usize)
+                                .map(|checkpoint| checkpoint.hash.clone());
+                            if let Some(checkpoint_hash) = checkpoint_hash {
+                                self.blockchain.start_prevote_task(height, checkpoint_hash);
+                            }
+                        }
+                        if !cids.is_empty() {
+                            tracing::info!(
+                                count = cids.len(),
+                                "NftBurn detected - notifying node for physical pruning"
+                            );
+                        }
+                    }
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::GetTransactionByHash(hash, tx) => {
+                    let tx_obj = self.blockchain.get_transaction_by_hash(&hash);
+                    let _ = tx.send(tx_obj);
+                }
+                ChainCommand::GetTxReceipt(hash, tx) => {
+                    let receipt = self.blockchain.get_transaction_receipt(&hash);
+                    let _ = tx.send(receipt);
+                }
+                ChainCommand::TxPrecheck(tx_obj, tx) => {
+                    let _ = tx.send(self.blockchain.tx_precheck(&tx_obj));
+                }
+                ChainCommand::GetChainId(tx) => {
+                    let _ = tx.send(self.blockchain.chain_id);
+                }
+                ChainCommand::GetBaseFee(tx) => {
+                    let _ = tx.send(self.blockchain.state.base_fee);
+                }
+                ChainCommand::GetValidatorSetHash(tx) => {
+                    let _ = tx.send(self.blockchain.get_validator_set_hash());
+                }
+                ChainCommand::GetMempoolSize(tx) => {
+                    let _ = tx.send(self.blockchain.mempool.len());
+                }
+                ChainCommand::MempoolContains(hash, tx) => {
+                    let _ = tx.send(self.blockchain.mempool.get(&hash).is_some());
+                }
+                ChainCommand::GetValidatorAddress(tx) => {
+                    let addr = self
+                        .blockchain
+                        .consensus()
+                        .signer()
+                        .map(crate::crypto::signer::ConsensusSigner::address);
+                    let _ = tx.send(addr);
+                }
+                ChainCommand::GetAggregatorState(tx) => {
+                    let state = self.blockchain.get_aggregator_state();
+                    let _ = tx.send(state);
+                }
+                ChainCommand::HandleFinalityCert(cert, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .handle_finality_cert(cert)
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::HandlePrevote(vote, res_tx) => {
+                    let result = self.blockchain.handle_prevote(vote);
+                    let _ = res_tx.send(result);
+                }
+                ChainCommand::HandlePrecommit(vote, res_tx) => {
+                    let result = self.blockchain.handle_precommit(vote);
+                    let _ = res_tx.send(result);
+                }
+                ChainCommand::SignPrevote {
+                    epoch,
+                    checkpoint_height,
+                    checkpoint_hash,
+                    voter_id,
+                    response,
+                } => {
+                    let result = self.blockchain.sign_prevote(
+                        epoch,
+                        checkpoint_height,
+                        &checkpoint_hash,
+                        &voter_id,
+                    );
+                    let _ = response.send(result);
+                }
+                ChainCommand::SignPrecommit {
+                    epoch,
+                    checkpoint_height,
+                    checkpoint_hash,
+                    voter_id,
+                    response,
+                } => {
+                    let result = self.blockchain.sign_precommit(
+                        epoch,
+                        checkpoint_height,
+                        &checkpoint_hash,
+                        &voter_id,
+                    );
+                    let _ = response.send(result);
+                }
+                ChainCommand::ImportQcBlob(blob, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .import_qc_blob(blob)
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::HandleQcFaultProof(proof, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .handle_qc_fault_proof(proof)
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::SubmitSlashingEvidence(evidence, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.submit_slashing_evidence(evidence));
+                }
+                ChainCommand::SubmitRegistrySlashingReport(report, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.submit_registry_slashing_report(report));
+                }
+                ChainCommand::GetRegistryMember(account, role, res_tx) => {
+                    let _ =
+                        res_tx.send(self.blockchain.state.registry.get(&account, role).cloned());
+                }
+                ChainCommand::GetRegistryActiveMembers(role, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .registry
+                            .active_members(role)
+                            .into_iter()
+                            .cloned()
+                            .collect(),
+                    );
+                }
+                ChainCommand::GetSlashingHistory(res_tx) => {
+                    let _ = res_tx.send(self.blockchain.state.registry.slashing_history().to_vec());
+                }
+                ChainCommand::DrainSlashingEvidence(tx) => {
+                    let _ = tx.send(self.blockchain.drain_local_slashing_evidence());
+                }
+                ChainCommand::CleanupMempool(tx) => {
+                    let removed = self.blockchain.mempool.cleanup_expired();
+                    let _ = tx.send(removed);
+                }
+                ChainCommand::TryReorg(fork, res_tx) => {
+                    let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.to_string());
+                    // BLG-0195 (P10-F05): after a successful reorg the old tip's
+                    // finality round is dead (0186 invalidated it), but nobody
+                    // restarted voting - the node just sat there and the post-
+                    // fork chain finalized nothing until the NEXT checkpoint
+                    // block happened to arrive through AddBlock. Resume the
+                    // prevote task on the new tip when it is itself a
+                    // checkpoint height, mirroring ValidateAndAddBlock.
+                    if matches!(outcome, Ok(true)) {
+                        let tip = self.blockchain.chain.last().cloned();
+                        if let Some(tip) = tip {
+                            if crate::chain::finality::is_checkpoint_height_for_chain(
+                                tip.index,
+                                self.blockchain.chain_id,
+                            ) {
+                                self.blockchain
+                                    .start_prevote_task(tip.index, tip.hash.clone());
+                            }
+                        }
+                    }
+                    let _ = res_tx.send(outcome);
+                }
+                ChainCommand::GetChainInfo(tx) => {
+                    let info = format!(
+                        "Height: {}, BaseFee: {}, Mempool: {}",
+                        self.blockchain.chain.len(),
+                        self.blockchain.state.base_fee,
+                        self.blockchain.mempool.len()
+                    );
+                    let _ = tx.send(info);
+                }
+                ChainCommand::GetLocator(tx) => {
+                    let mut locator = Vec::new();
+                    let mut step = 1;
+                    let mut current = self.blockchain.chain.len().saturating_sub(1);
+                    while current > 0 && locator.len() < 10 {
+                        locator.push(self.blockchain.chain[current].hash.clone());
+                        current = current.saturating_sub(step);
+                        step *= 2;
+                    }
+                    if locator.is_empty() && !self.blockchain.chain.is_empty() {
+                        locator.push(self.blockchain.chain[0].hash.clone());
+                    }
+                    let _ = tx.send(locator);
+                }
+                ChainCommand::FindCommonHeight(locator, tx) => {
+                    let common = locator.iter().find_map(|hash| {
+                        self.blockchain
+                            .chain
+                            .iter()
+                            .position(|b| &b.hash == hash)
+                            .map(|p| p as u64)
+                    });
+                    let _ = tx.send(common);
+                }
+                ChainCommand::GetQcBlob(height, tx) => {
+                    let res = self.blockchain.get_qc_blob(height);
+                    let _ = tx.send(res);
+                }
+                ChainCommand::GetFinalityCert(height, tx) => {
+                    let res = self
+                        .blockchain
+                        .storage
+                        .as_ref()
+                        .and_then(|s| s.get_finality_cert(height).unwrap_or(None));
+                    let _ = tx.send(res);
+                }
+                ChainCommand::GetStateRoot(height, tx) => {
+                    let res = self.blockchain.get_state_root(height);
+                    let _ = tx.send(res);
+                }
+                ChainCommand::AddBalance(addr, amount, tx) => {
+                    let res = self.blockchain.credit_development_account(&addr, amount);
+                    let _ = tx.send(res);
+                }
+                ChainCommand::FundDevelopmentAccount(addr, tx) => {
+                    let res = self.blockchain.fund_development_account(&addr);
+                    let _ = tx.send(res);
+                }
+                ChainCommand::GetStateSnapshotData(height, tx) => {
+                    let res = self.blockchain.get_state_snapshot(height);
+                    let _ = tx.send(res);
+                }
+                ChainCommand::ApplySnapshot(snapshot, res_tx) => {
+                    let res = self.blockchain.apply_state_snapshot(snapshot);
+                    let _ = res_tx.send(res.map_err(|e: String| e.to_string()));
+                }
+                ChainCommand::GetSettlementInfo(tx) => {
+                    let header = self.blockchain.build_global_header(None);
+                    let info = serde_json::json!({
+                        "globalHeight": self.blockchain.global_headers.len(),
+                        "latestGlobalHash": self.blockchain.global_headers.last().map(super::super::settlement::global_block::GlobalBlockHeader::calculate_hash),
+                        "pendingGlobalHash": header.calculate_hash(),
+                        "domainRegistryRoot": hex::encode(header.domain_registry_root),
+                        "domainCommitmentRoot": hex::encode(header.domain_commitment_root),
+                        "bridgeStateRoot": hex::encode(header.bridge_state_root),
+                        "replayNonceRoot": hex::encode(header.replay_nonce_root),
+                        "domainCommitmentCount": self.blockchain.domain_commitment_registry.len(),
+                    });
+                    let _ = tx.send(info);
+                }
+                ChainCommand::GetGlobalHeader(height, tx) => {
+                    let header = self.blockchain.global_headers.get(height as usize).cloned();
+                    let _ = tx.send(header);
+                }
+                ChainCommand::GetDomainCommitments(tx) => {
+                    let commitments = self
+                        .blockchain
+                        .domain_commitment_registry
+                        .commitments_for_global_block();
+                    let _ = tx.send(commitments);
+                }
+                ChainCommand::GetConsensusDomains(tx) => {
+                    let _ = tx.send(self.blockchain.domain_registry.domains());
+                }
+                ChainCommand::RegisterConsensusDomain(domain, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.register_consensus_domain(domain));
+                }
+                ChainCommand::RegisterSovereignTemplate(template, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.register_sovereign_template(*template));
+                }
+                ChainCommand::ValidateSovereignAuditExport(bundle, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .validate_sovereign_audit_export(bundle.as_ref()),
+                    );
+                }
+                #[cfg(test)]
+                ChainCommand::SubmitDomainCommitment(commitment, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.submit_domain_commitment(commitment));
+                }
+                ChainCommand::VerifyVerifiedDomainCommitment(payload, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .verify_domain_commitment_finality(&payload.commitment, &payload.proof),
+                    );
+                }
+                ChainCommand::SubmitVerifiedDomainCommitment(payload, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .submit_verified_domain_commitment(payload.commitment, payload.proof),
+                    );
+                }
+                ChainCommand::BuildStateUpdateTransaction(commitment, res_tx) => {
+                    let _ =
+                        res_tx.send(self.blockchain.build_state_update_transaction(&commitment));
+                }
+                ChainCommand::SubmitCrossDomainMessage(message, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.submit_cross_domain_message(message));
+                }
+                ChainCommand::SubmitRelayedCrossDomainMessage(message, res_tx) => {
+                    let _ =
+                        res_tx.send(self.blockchain.submit_relayed_cross_domain_message(message));
+                }
+                ChainCommand::BondRelayer(address, amount, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .bond_relayer(&address, amount)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::RegisterExternalDomain(registration, res_tx) => {
+                    let request = *registration;
+                    let bls = matches!(
+                        request.spec,
+                        crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+                    )
+                    .then(crate::cross_domain::external::IntakeState::production_bls);
+                    let _ = res_tx.send(self.blockchain.register_external_domain(request, bls));
+                }
+                ChainCommand::SubmitExternalEvidence(evidence, res_tx) => {
+                    let needs_bls = self
+                        .blockchain
+                        .external_intake
+                        .entries
+                        .get(&crate::cross_domain::external::DomainKey::from_parts(
+                            &evidence.adapter,
+                            &evidence.network,
+                        ))
+                        .is_some_and(|entry| {
+                            matches!(
+                                entry.spec,
+                                crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
+                            )
+                        });
+                    let bls =
+                        needs_bls.then(crate::cross_domain::external::IntakeState::production_bls);
+                    let _ = res_tx.send(self.blockchain.submit_external_evidence(&evidence, bls));
+                }
+                ChainCommand::GetExternalDomainProfile(key, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_domain_profile(&key));
+                }
+                ChainCommand::GetExternalDomainProfiles(res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_domain_profiles());
+                }
+                ChainCommand::GetExternalIntakeDigest(res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_intake.state_digest());
+                }
+                ChainCommand::ReadmitExternalDomain(key, reason, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.readmit_external_domain(&key, &reason));
+                }
+                ChainCommand::ScheduleExternalFork {
+                    key,
+                    old_version,
+                    new_version,
+                    fork_height,
+                    grace_heights,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.schedule_external_fork(
+                        &key,
+                        old_version,
+                        new_version,
+                        fork_height,
+                        grace_heights,
+                    ));
+                }
+                ChainCommand::SlashExternalProver {
+                    key,
+                    prover,
+                    evidence_digest,
+                    value_atoms,
+                    challenger,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.slash_external_prover(
+                        &key,
+                        prover,
+                        evidence_digest,
+                        value_atoms,
+                        challenger,
+                    ));
+                }
+                ChainCommand::SetExternalQuorumPolicy(key, policy, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.set_external_quorum_policy(&key, policy));
+                }
+                ChainCommand::BondExternalProver(key, prover, bond_atoms, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .bond_external_prover(&key, prover, bond_atoms),
+                    );
+                }
+                ChainCommand::GetExternalQuorumRound(key, height, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_quorum_round(&key, height));
+                }
+                ChainCommand::GetExternalQuorumRounds(key, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_quorum_rounds(&key));
+                }
+                ChainCommand::GetExternalDomainRegistration(key, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.external_domain_registration(&key));
+                }
+                ChainCommand::BondProver(address, amount, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .bond_prover(&address, amount)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::BondStorageOperator(address, amount, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .bond_storage_operator(&address, amount)
+                            .map(|_| ())
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::BeginRoleBondUnbonding(address, role, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .begin_role_bond_unbonding(&address, role),
+                    );
+                }
+                ChainCommand::WithdrawRoleBond(address, role, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.state.withdraw_role_bond(&address, role));
+                }
+                ChainCommand::SubmitZkProof(submission, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .submit_zk_proof(submission)
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::SubmitRelayProof {
+                    message_id,
+                    relayer,
+                    proof,
+                    source_domain,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.submit_relay_proof(
+                        message_id,
+                        relayer,
+                        &proof,
+                        source_domain,
+                    ));
+                }
+                ChainCommand::GetAiModel(id, res_tx) => {
+                    let res = self.blockchain.state.ai_registry.models.get(&id).cloned();
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::GetAiOutcome(id, res_tx) => {
+                    let res = self.blockchain.state.ai_registry.outcomes.get(&id).cloned();
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::GetAiRequest(id, res_tx) => {
+                    let res = self.blockchain.state.ai_registry.requests.get(&id).cloned();
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::GetAiFeeReclaimStatus(id, res_tx) => {
+                    let current_block = self.ai_query_height();
+                    let res = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .check_reclaimable(&id, current_block);
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::GetAiEquivocationStatus(request_id, verifier, res_tx) => {
+                    let has_equivocated = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .has_equivocated(&request_id, &verifier);
+                    let _ = res_tx.send(has_equivocated);
+                }
+                ChainCommand::GetAiCancelStatus(request_id, res_tx) => {
+                    let is_cancelled = self.blockchain.state.ai_registry.is_cancelled(&request_id);
+                    let _ = res_tx.send(is_cancelled);
+                }
+                ChainCommand::GetAiDisputeStatus(request_id, verifier, res_tx) => {
+                    let current_block = self.ai_query_height();
+                    let status = self.blockchain.state.ai_registry.get_dispute_status(
+                        &request_id,
+                        &verifier,
+                        current_block,
+                    );
+                    let _ = res_tx.send(status);
+                }
+                ChainCommand::GetAiVerifierStake(verifier, res_tx) => {
+                    let info = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_verifier_stake_info(&verifier);
+                    let _ = res_tx.send(info);
+                }
+                ChainCommand::GetAiCallbackQueue(callback_address, res_tx) => {
+                    let events = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_callback_queue(&callback_address);
+                    let _ = res_tx.send(events);
+                }
+                ChainCommand::GetAiExecutionProof {
+                    request_id,
+                    verifier,
+                    response: res_tx,
+                } => {
+                    let proof = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_execution_proof(&request_id, &verifier)
+                        .cloned();
+                    let _ = res_tx.send(proof);
+                }
+                ChainCommand::GetAiVerifierQos {
+                    verifier,
+                    response: res_tx,
+                } => {
+                    let qos = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_verifier_qos(&verifier)
+                        .cloned();
+                    let _ = res_tx.send(qos);
+                }
+                ChainCommand::GetAiVerifiersByReliability(res_tx) => {
+                    let ranking = self.blockchain.state.ai_registry.verifiers_by_reliability();
+                    let _ = res_tx.send(ranking);
+                }
+                ChainCommand::GetAiAgentPayment {
+                    payment_id,
+                    response: res_tx,
+                } => {
+                    let payment = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_agent_payment(&payment_id)
+                        .cloned();
+                    let _ = res_tx.send(payment);
+                }
+                ChainCommand::GetAiAgentPayments {
+                    agent,
+                    direction,
+                    response: res_tx,
+                } => {
+                    let payments = match direction {
+                        AiPaymentDirection::From => self
+                            .blockchain
+                            .state
+                            .ai_registry
+                            .payments_from_agent(&agent),
+                        AiPaymentDirection::To => {
+                            self.blockchain.state.ai_registry.payments_to_agent(&agent)
+                        }
+                    }
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                    let _ = res_tx.send(payments);
+                }
+                ChainCommand::GetAiVerifierWhitelist(res_tx) => {
+                    let whitelist: Vec<_> = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_whitelisted_verifiers()
+                        .iter()
+                        .cloned()
+                        .collect();
+                    let _ = res_tx.send(whitelist);
+                }
+                ChainCommand::GetAiAgentReputation { agent, response } => {
+                    let rep = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .get_agent_reputation(&agent)
+                        .cloned();
+                    let _ = response.send(rep);
+                }
+                ChainCommand::GetAiAgentRanking(res_tx) => {
+                    let ranking = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .agents_by_trust_score_permille();
+                    let _ = res_tx.send(ranking);
+                }
+                ChainCommand::GetPruneStatus(res_tx) => {
+                    let height = self.blockchain.chain.len() as u64;
+                    let finalized = self.blockchain.finalized_height;
+                    let mobile_mode = self
+                        .blockchain
+                        .pruning_manager
+                        .as_ref()
+                        .is_some_and(|pm| pm.min_blocks_to_keep < 1000);
+                    let res = serde_json::json!({
+                        "current_height": height,
+                        "finalized_height": finalized,
+                        "mobile_mode": mobile_mode,
+                        "snapshot_dir": self.blockchain.pruning_manager.as_ref().map(|pm| pm.snapshot_dir.clone()),
+                    });
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::RequestPrune(min_blocks, res_tx) => {
+                    let height = self.blockchain.chain.len() as u64;
+                    let finalized = self.blockchain.finalized_height;
+                    let mut pruned_count = 0;
+                    if let Some(ref pm) = self.blockchain.pruning_manager {
+                        let keep = min_blocks.unwrap_or(pm.min_blocks_to_keep);
+                        // The snapshot bound has to be the newest snapshot
+                        // that actually exists. Passing the tip height here
+                        // (the old code) made the bound a no-op, so an
+                        // operator prune deleted blocks the next restart
+                        // needed to reach its snapshot: lasting data loss,
+                        // node unable to boot (P10-F03).
+                        let prunable = pm.get_prunable_blocks_with_retention(
+                            height,
+                            pm.latest_snapshot_height(),
+                            finalized,
+                            keep,
+                        );
+                        if let Some(ref store) = self.blockchain.storage {
+                            for h in &prunable {
+                                if store.delete_block(*h).is_ok() {
+                                    pruned_count += 1;
+                                }
+                            }
+                        }
+                    }
+                    let _ = res_tx.send(Ok(pruned_count));
+                }
+                ChainCommand::BuildGlobalHeader(res_tx) => {
+                    let header = self.blockchain.build_global_header(None);
+                    let _ = res_tx.send(Ok(header));
+                }
+                ChainCommand::GetDomainHeight(domain_id, res_tx) => {
+                    let res = self
+                        .blockchain
+                        .domain_registry
+                        .get(domain_id)
+                        .map(|d| d.last_committed_height)
+                        .ok_or_else(|| format!("Domain {domain_id} not found"));
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::RegisterBridgeAsset {
+                    asset_id,
+                    domain,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.register_bridge_asset(asset_id, domain));
+                }
+                ChainCommand::LockBridgeTransfer {
+                    source_domain,
+                    target_domain,
+                    source_height,
+                    event_index,
+                    asset_id,
+                    owner,
+                    recipient,
+                    amount,
+                    expiry_height,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.lock_bridge_transfer(
+                        source_domain,
+                        target_domain,
+                        source_height,
+                        event_index,
+                        asset_id,
+                        owner,
+                        recipient,
+                        amount,
+                        expiry_height,
+                    ));
+                }
+                ChainCommand::MintBridgeTransferFromVerifiedEvent {
+                    source_domain,
+                    source_height,
+                    sequence,
+                    expected_block_hash,
+                    event,
+                    proof,
+                    relayer,
+                    response,
+                } => {
+                    let _ =
+                        response.send(self.blockchain.mint_bridge_transfer_from_verified_event(
+                            source_domain,
+                            source_height,
+                            sequence,
+                            expected_block_hash,
+                            event,
+                            &proof,
+                            relayer,
+                        ));
+                }
+                ChainCommand::BurnBridgeTransfer {
+                    message_id,
+                    domain,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.burn_bridge_transfer(message_id, domain));
+                }
+                ChainCommand::BurnBridgeTransferWithEvent {
+                    message_id,
+                    domain,
+                    domain_height,
+                    event_index,
+                    expiry_height,
+                    recipient_eth,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.burn_bridge_transfer_with_event(
+                        message_id,
+                        domain,
+                        domain_height,
+                        event_index,
+                        expiry_height,
+                        recipient_eth,
+                    ));
+                }
+                ChainCommand::UnlockBridgeTransfer {
+                    message_id,
+                    source_domain,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .unlock_bridge_transfer(message_id, source_domain),
+                    );
+                }
+                ChainCommand::UnlockBridgeTransferFromVerifiedEvent {
+                    target_domain,
+                    target_height,
+                    sequence,
+                    expected_block_hash,
+                    event,
+                    proof,
+                    response,
+                } => {
+                    let _ =
+                        response.send(self.blockchain.unlock_bridge_transfer_from_verified_event(
+                            target_domain,
+                            target_height,
+                            sequence,
+                            expected_block_hash,
+                            event,
+                            &proof,
+                        ));
+                }
+                ChainCommand::SealGlobalHeader(res_tx) => {
+                    let _ = res_tx.send(self.blockchain.seal_global_header(None));
+                }
+                ChainCommand::FlushStorage(res_tx) => {
+                    let res = self.blockchain.storage.as_ref().map_or(Ok(0), |storage| {
+                        storage.flush_batch().map_err(|e| e.to_string())
+                    });
+                    let _ = res_tx.send(res);
+                }
+                // ─── B.U.D.: Storage operations ─────
+                ChainCommand::OpenStorageDeal {
+                    domain_id,
+                    manifest,
+                    shard_id,
+                    operator,
+                    payer,
+                    replica_index,
+                    start_epoch,
+                    end_epoch,
+                    economics,
+                    domain_params,
+                    merkle_proof,
+                    storage_root,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let _ = response.send(self.blockchain.open_storage_deal_with_escrow(
+                        domain_id,
+                        &manifest,
+                        shard_id,
+                        operator,
+                        payer,
+                        replica_index,
+                        start_epoch,
+                        end_epoch,
+                        economics,
+                        &domain_params,
+                        merkle_proof,
+                        storage_root,
+                    ));
+                }
+                ChainCommand::AcceptStorageReallocation {
+                    ticket_id,
+                    replacement_operator,
+                    payer,
+                    start_epoch,
+                    end_epoch,
+                    economics,
+                    domain_params,
+                    merkle_proof,
+                    storage_root,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let _ = response.send(self.blockchain.accept_storage_reallocation_with_escrow(
+                        ticket_id,
+                        replacement_operator,
+                        payer,
+                        start_epoch,
+                        end_epoch,
+                        economics,
+                        &domain_params,
+                        merkle_proof,
+                        storage_root,
+                    ));
+                }
+                ChainCommand::RegisterStorageManifest { manifest, response } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    // The manifest arrives from an RPC caller with its
+                    // `manifest_id` already filled in, and that id is the key
+                    // every deal, challenge and repair indexes by. Nothing
+                    // recomputed it, so a caller could register content under
+                    // any id it chose. Derive it from the contents and refuse
+                    // the mismatch.
+                    if let Err(e) = manifest.validate_untrusted() {
+                        let _ = response.send(Err(format!("invalid manifest: {e}")));
+                        continue;
+                    }
+                    // Paid content may not register as plaintext.
+                    //
+                    // `check_content_may_be_public` was written for this
+                    // moment and its doc comment says "called on the
+                    // declaration path", but nothing called it: the refusal
+                    // existed and never ran. Registration is the only place
+                    // it can run, because the damage is done at registration
+                    // rather than at read time. A plaintext `ContentId` is
+                    // the hash of the bytes, so anyone holding a candidate
+                    // file can confirm it is the listed asset, and anyone
+                    // holding most of one can brute force the rest. Once
+                    // that id is on chain the leak is already available, and
+                    // unlisting the asset afterwards does not take it back.
+                    if matches!(
+                        manifest.encryption,
+                        crate::storage::ContentEncryption::Plaintext
+                    ) {
+                        if let Err(e) = self
+                            .blockchain
+                            .state
+                            .marketplace
+                            .check_content_may_be_public(&manifest.manifest_id)
+                        {
+                            let _ = response.send(Err(format!(
+                                "refusing to register paid content as plaintext: {e}"
+                            )));
+                            continue;
+                        }
+                    }
+                    let manifest_id = manifest.manifest_id;
+                    self.blockchain
+                        .state
+                        .storage_registry
+                        .register_manifest(&manifest);
+                    let persist = self
+                        .blockchain
+                        .storage
+                        .as_ref()
+                        .map(|store| {
+                            store.save_storage_registry(&self.blockchain.state.storage_registry)
+                        })
+                        .transpose()
+                        .map_err(|e| e.to_string());
+                    let _ = response.send(persist.map(|_| manifest_id));
+                }
+                ChainCommand::IssueViewGrant { response, .. } => {
+                    // View grants are folded into the storage state root, so
+                    // issuing one between blocks rewrites the local node's
+                    // root alone: a peer that never saw this RPC call computes
+                    // a different root and rejects honest blocks (P30-F01).
+                    // Until grants ride a block transaction, the RPC mutation
+                    // path is refused on every chain, not only on mainnet.
+                    let _ = response.send(Err(Self::view_grant_rpc_mutation_error()));
+                    continue;
+                }
+                ChainCommand::RevokeViewGrant { response, .. } => {
+                    // Same invariant as IssueViewGrant: the grant book is
+                    // state-root bearing and may only change inside a block.
+                    let _ = response.send(Err(Self::view_grant_rpc_mutation_error()));
+                    continue;
+                }
+                ChainCommand::SocialDelete { response, .. } => {
+                    // A delete rewrites the grant book and the rows keyed by the
+                    // content, all state-root bearing. Applied between blocks it
+                    // changes this node's root alone, so it is refused on every
+                    // chain until it rides a block transaction.
+                    let _ = response.send(Err(Self::social_delete_rpc_mutation_error()));
+                    continue;
+                }
+                ChainCommand::GetViewGrants {
+                    content_id,
+                    response,
+                } => {
+                    let registry = &self.blockchain.state.storage_registry;
+                    let rows = registry.view_grants_for(&content_id);
+                    let live = registry.live_view_grant_count(&content_id);
+                    let _ = response.send((rows, live));
+                }
+                ChainCommand::MayViewContent {
+                    content_id,
+                    viewer,
+                    key_id,
+                    owner,
+                    response,
+                } => {
+                    let ok = self.blockchain.state.storage_registry.may_view(
+                        &content_id,
+                        &viewer,
+                        &key_id,
+                        &owner,
+                    );
+                    let _ = response.send(ok);
+                }
+                ChainCommand::RegisterConfidentialCommit {
+                    commit,
+                    auth,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let _ = (commit, auth);
+                    let _ = response.send(Err(
+                        "Out-of-block confidential commit registration is disabled to preserve state-root consensus"
+                            .to_string(),
+                    ));
+                }
+                ChainCommand::GetConfidentialOwner {
+                    content_id,
+                    response,
+                } => {
+                    let _ =
+                        response.send(self.blockchain.state.storage_registry.owner_of(&content_id));
+                }
+                ChainCommand::GetConfidentialCommit {
+                    content_id,
+                    response,
+                } => {
+                    let c = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .get_confidential_commit(&content_id)
+                        .cloned();
+                    let _ = response.send(c);
+                }
+                ChainCommand::OpenStorageChallenge { request, response } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let current_epoch = self.blockchain.last_block().index
+                        / crate::core::chain_config::epoch_len_for_chain_id(
+                            self.blockchain.chain_id,
+                        );
+                    if let Err(e) =
+                        crate::domain::storage_deal::StorageRegistry::validate_challenge_window(
+                            request.challenge_epoch,
+                            request.deadline_epoch,
+                            current_epoch,
+                        )
+                    {
+                        let _ = response.send(Err(e.to_string()));
+                        continue;
+                    }
+                    let opener = request
+                        .opener
+                        .unwrap_or(crate::core::address::Address::zero());
+                    let entropy = crate::core::hash::hash_fields_bytes(&[
+                        b"BDLM_RPC_STORAGE_CHALLENGE_ENTROPY_V1",
+                        &self.blockchain.chain_id.to_le_bytes(),
+                        self.blockchain.last_block().hash.as_bytes(),
+                        opener.as_bytes(),
+                        request.opener_signature.as_deref().unwrap_or(&[]),
+                    ]);
+                    // Take the bond before opening the challenge. Without this
+                    // the number in the request was validated and then ignored,
+                    // so an empty account could open challenges that cost the
+                    // operator a 16 MiB read each.
+                    let res = self
+                        .blockchain
+                        .debit_opener_bond(&opener, request.opener_bond)
+                        .and_then(|()| {
+                            self.blockchain
+                                .state
+                                .storage_registry
+                                .open_challenge_with_entropy(&request, opener, &entropy)
+                                .map_err(|e| {
+                                    // The challenge was refused, so the bond
+                                    // must not stay debited.
+                                    let _ = self
+                                        .blockchain
+                                        .refund_opener_bond(&opener, request.opener_bond);
+                                    e.to_string()
+                                })
+                        })
+                        .and_then(|challenge_id| {
+                            self.blockchain
+                                .storage
+                                .as_ref()
+                                .map(|store| {
+                                    store.save_storage_registry(
+                                        &self.blockchain.state.storage_registry,
+                                    )
+                                })
+                                .transpose()
+                                .map_err(|e| e.to_string())?;
+                            Ok(challenge_id)
+                        });
+                    let _ = response.send(res);
+                }
+                ChainCommand::DeriveCodingAudit {
+                    manifest_id,
+                    challenge_id,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    // Same entropy shape as the retrieval challenge above, and
+                    // for the same reason: the column has to be unpredictable
+                    // to both sides. An opener who picks it picks one the
+                    // operator has; an operator who learns it in advance
+                    // stores that column and discards the rest.
+                    //
+                    // The last block hash is the chain's own contribution, so
+                    // neither party fixes it alone.
+                    let entropy = crate::core::hash::hash_fields_bytes(&[
+                        b"BDLM_RPC_CODING_AUDIT_ENTROPY_V1",
+                        &self.blockchain.chain_id.to_le_bytes(),
+                        self.blockchain.last_block().hash.as_bytes(),
+                        manifest_id.as_bytes(),
+                        &challenge_id.to_le_bytes(),
+                    ]);
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .get_manifest(&manifest_id)
+                        .ok_or_else(|| {
+                            format!(
+                                "no manifest {} in this registry, so there is no code word to \
+                                 audit",
+                                hex::encode(manifest_id.as_bytes())
+                            )
+                        })
+                        .and_then(|manifest| {
+                            crate::domain::storage_deal::StorageRegistry::derive_coding_audit(
+                                &entropy,
+                                manifest,
+                                challenge_id,
+                            )
+                            .map_err(|e| e.to_string())
+                        });
+                    let _ = response.send(res);
+                }
+                ChainCommand::AnswerCodingAudit {
+                    audit,
+                    data_column,
+                    parity_byte,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .verify_coding_audit(&audit, &data_column, parity_byte)
+                        .map_err(|e| e.to_string());
+                    let _ = response.send(res);
+                }
+                ChainCommand::AnswerStorageChallenge {
+                    response_data,
+                    response,
+                } => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .answer_challenge_with_chain_id(
+                            self.blockchain.chain_id,
+                            response_data.challenge_id,
+                            response_data._range_hash,
+                            response_data.responder,
+                            response_data.response_epoch,
+                            response_data.proof_bytes.as_deref(),
+                        )
+                        .map_err(|e| e.to_string())
+                        .and_then(|challenge_result| {
+                            // A `Mismatched` answer is a recorded slash, and a
+                            // recorded slash that never burns is not a slash.
+                            // Routed through the same accounting helper as a
+                            // missed deadline so the two cost the same.
+                            if challenge_result.outcome
+                                == crate::domain::storage_deal::ChallengeOutcome::Mismatched
+                            {
+                                self.blockchain
+                                    .apply_storage_bond_slash(
+                                        response_data.response_epoch,
+                                        challenge_result.deal_id,
+                                        response_data.responder,
+                                        challenge_result.slashed_bond,
+                                        "storage challenge answered with an unverifiable proof",
+                                    )
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            self.blockchain
+                                .storage
+                                .as_ref()
+                                .map(|store| {
+                                    store.save_storage_registry(
+                                        &self.blockchain.state.storage_registry,
+                                    )
+                                })
+                                .transpose()
+                                .map_err(|e| e.to_string())?;
+                            Ok(challenge_result)
+                        });
+                    let _ = response.send(res);
+                }
+                ChainCommand::GetStorageManifest {
+                    manifest_id,
+                    response,
+                } => {
+                    let manifest = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .get_manifest(&manifest_id)
+                        .cloned();
+                    let _ = response.send(manifest);
+                }
+                ChainCommand::GetStorageDealsByManifest {
+                    manifest_id,
+                    response,
+                } => {
+                    let deals = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .deals_for_manifest(&manifest_id)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(deals);
+                }
+                ChainCommand::GetStorageDealsByShard {
+                    manifest_id,
+                    shard_id,
+                    response,
+                } => {
+                    let deals = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .deals_for_shard(&manifest_id, &shard_id)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(deals);
+                }
+                ChainCommand::GetStorageOutcome {
+                    challenge_id,
+                    response,
+                } => {
+                    let outcome = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .get_result(challenge_id)
+                        .cloned();
+                    let _ = response.send(outcome);
+                }
+                ChainCommand::GetStorageRepairBand { margin, response } => {
+                    let registry = &self.blockchain.state.storage_registry;
+                    let band = StorageRepairBand {
+                        margin,
+                        // `k <= live < k + margin`: still reconstructible, but
+                        // the headroom is gone.
+                        repairable: registry.objects_needing_repair(margin),
+                        // Below `k`. A repair deal opened here rebuilds nothing
+                        // and only burns an operator bond, so it is reported
+                        // apart rather than folded into the band above.
+                        unrecoverable: registry.unrecoverable_objects(),
+                    };
+                    let _ = response.send(band);
+                }
+                ChainCommand::IssueStorageChallenges(epoch, res_tx) => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = res_tx.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self.blockchain.issue_storage_challenges(epoch);
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::FinalizeMissedStorageChallenges(epoch, res_tx) => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = res_tx.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let res = self.blockchain.finalize_missed_storage_challenges(epoch);
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::SubmitStorageProof(proof_hash, res_tx) => {
+                    if self.storage_economics_disabled_on_mainnet() {
+                        let _ = res_tx.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    self.blockchain.accumulate_storage_proof(proof_hash);
+                    let _ = res_tx.send(Ok(()));
+                }
+                ChainCommand::GetStorageDeals(res_tx) => {
+                    let deals = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .all_deals()
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    let _ = res_tx.send(deals);
+                }
+                ChainCommand::GetStorageEconomicsEvents(res_tx) => {
+                    let events = self.blockchain.storage_economics_events().to_vec();
+                    let _ = res_tx.send(events);
+                }
+                ChainCommand::GetStorageEconomicsSummary(res_tx) => {
+                    let operator_rewards: Vec<_> = self
+                        .blockchain
+                        .storage_operator_rewards
+                        .iter()
+                        .map(|(operator, amount)| {
+                            serde_json::json!({
+                                "operator": operator.to_string(),
+                                "amount": amount,
+                            })
+                        })
+                        .collect();
+                    let reallocation_tickets = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .all_reallocation_tickets();
+                    let pending_reallocations = reallocation_tickets
+                        .iter()
+                        .filter(|ticket| {
+                            ticket.status
+                                == crate::domain::storage_deal::ReallocationStatus::Pending
+                        })
+                        .count();
+                    let under_replicated_tickets = reallocation_tickets
+                        .iter()
+                        .filter(|ticket| {
+                            ticket.status
+                                == crate::domain::storage_deal::ReallocationStatus::UnderReplicated
+                        })
+                        .count();
+                    let active_replacements = reallocation_tickets
+                        .iter()
+                        .filter(|ticket| {
+                            ticket.status
+                                == crate::domain::storage_deal::ReallocationStatus::ActiveReplacement
+                        })
+                        .count();
+                    // A ticket's cause is the part of the incident an operator acts
+                    // on, and status alone cannot show it: a never-placed shard needs
+                    // a first deal opened, a failed one needs a holder replaced.
+                    let never_placed_tickets = reallocation_tickets
+                        .iter()
+                        .filter(|ticket| {
+                            ticket.cause
+                                == crate::domain::storage_deal::ReallocationCause::NeverPlaced
+                        })
+                        .count();
+                    let stats_epoch = self.blockchain.last_block().index
+                        / crate::core::chain_config::epoch_len_for_chain_id(
+                            self.blockchain.chain_id,
+                        );
+                    let under_replicated_shards = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .under_replicated_shards(stats_epoch)
+                        .len();
+                    let _ = res_tx.send(serde_json::json!({
+                        "slashedBondTotal": self.blockchain.storage_slashed_bond_total,
+                        "burnedBondTotal": self.blockchain.storage_burned_bond_total,
+                        "operatorRewards": operator_rewards,
+                        "eventCount": self.blockchain.storage_economics_events().len(),
+                        "replicationTarget": crate::domain::storage_deal::STORAGE_REPLICATION_TARGET,
+                        "pendingReallocations": pending_reallocations,
+                        "underReplicatedTickets": under_replicated_tickets,
+                        "activeReplacements": active_replacements,
+                        "underReplicatedShards": under_replicated_shards,
+                        "neverPlacedTickets": never_placed_tickets,
+                    }));
+                }
+                ChainCommand::GetStorageOperatorEconomics { operator, response } => {
+                    let slash_events: Vec<_> = self
+                        .blockchain
+                        .storage_economics_events()
+                        .iter()
+                        .filter(|event| {
+                            event.operator == operator
+                                && event.kind
+                                    == crate::chain::blockchain::StorageEconomicsEventKind::OperatorBondSlashed
+                        })
+                        .map(|event| {
+                            serde_json::json!({
+                                "epoch": event.epoch,
+                                "dealId": event.deal_id,
+                                "amount": event.amount,
+                                "balanceEffect": event.balance_effect,
+                            })
+                        })
+                        .collect();
+                    let active_deal_count = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .all_deals()
+                        .iter()
+                        .filter(|deal| deal.operator == operator && deal.is_active())
+                        .count();
+                    let accrued_rewards = self
+                        .blockchain
+                        .storage_operator_rewards
+                        .get(&operator)
+                        .copied()
+                        .unwrap_or(0);
+                    let slash_total = slash_events.iter().fold(0u64, |total, event| {
+                        total.saturating_add(event["amount"].as_u64().unwrap_or(0))
+                    });
+                    let _ = response.send(serde_json::json!({
+                        "operator": format!("0x{}", operator.to_hex()),
+                        "accruedRewards": accrued_rewards,
+                        "activeDealCount": active_deal_count,
+                        "slashedBondTotal": slash_total,
+                        "slashHistory": slash_events,
+                        "slashedBondDisposition": "burn_from_operator_liquid_balance_best_effort",
+                    }));
+                }
+                ChainCommand::GetStorageChallenges(res_tx) => {
+                    let challenges = self
+                        .blockchain
+                        .state
+                        .storage_registry
+                        .all_challenges()
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                    let _ = res_tx.send(challenges);
+                }
+                ChainCommand::BnsResolve { name, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .resolve(&name, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsResolveFull { name, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .resolve_full(&name, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsResolveContent { name, response } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .resolve_content(&name, self.blockchain.state.epoch_index),
+                    );
+                }
+                ChainCommand::BnsResolveSubdomain {
+                    parent,
+                    label,
+                    response,
+                } => {
+                    let _ = response.send(self.blockchain.state.bns_registry.resolve_subdomain(
+                        &parent,
+                        &label,
+                        self.blockchain.state.epoch_index,
+                    ));
+                }
+                ChainCommand::IdentityResolve { subject, response } => {
+                    // The epoch travels with the record so liveness is
+                    // answered at the height the read happened on, not at
+                    // whatever `now` the RPC layer later believes in.
+                    let record = self
+                        .blockchain
+                        .state
+                        .identity
+                        .record(&subject)
+                        .cloned()
+                        .map(|record| (record, self.blockchain.state.epoch_index));
+                    let _ = response.send(record);
+                }
+                ChainCommand::IdentityCredential {
+                    credential_id,
+                    response,
+                } => {
+                    let answer = self
+                        .blockchain
+                        .state
+                        .identity
+                        .credential(&credential_id)
+                        .cloned()
+                        .map(|credential| {
+                            let verdict = self
+                                .blockchain
+                                .state
+                                .identity
+                                .is_credential_valid(
+                                    &credential_id,
+                                    self.blockchain.state.epoch_index,
+                                )
+                                .map_err(|e| e.to_string());
+                            (credential, verdict)
+                        });
+                    let _ = response.send(answer);
+                }
+                ChainCommand::IdentityVerifyPresentation {
+                    receipt,
+                    requester,
+                    document,
+                    response,
+                } => {
+                    let _ = response.send(
+                        crate::registry::check_receipt(
+                            &self.blockchain.state.identity,
+                            &receipt,
+                            &requester,
+                            &document,
+                        )
+                        .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::BnsSetStorage {
+                    name,
+                    owner,
+                    storage_root,
+                    storage_domain_id,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .set_storage(
+                                &name,
+                                owner,
+                                storage_root,
+                                storage_domain_id,
+                                self.blockchain.state.epoch_index,
+                            )
+                            .map_err(|e| e.to_string()),
+                    );
+                }
+                ChainCommand::BnsCalculateCost {
+                    name,
+                    duration,
+                    response,
+                } => {
+                    let _ = response.send(
+                        self.blockchain
+                            .state
+                            .bns_registry
+                            .calculate_cost(&name, duration),
+                    );
+                }
+                ChainCommand::NftGet { id, response } => {
+                    let _ = response.send(self.blockchain.state.nft_registry.get_nft(id).cloned());
+                }
+                ChainCommand::NftGetByOwner { owner, response } => {
+                    let nft_ids = self
+                        .blockchain
+                        .state
+                        .nft_registry
+                        .ownership
+                        .get(&owner)
+                        .cloned()
+                        .unwrap_or_default();
+                    let nfts: Vec<_> = nft_ids
+                        .iter()
+                        .filter_map(|id| self.blockchain.state.nft_registry.get_nft(*id))
+                        .cloned()
+                        .collect();
+                    let _ = response.send(nfts);
+                }
+                ChainCommand::NftGetFeed { limit, response } => {
+                    let nfts: Vec<_> = self
+                        .blockchain
+                        .state
+                        .nft_registry
+                        .nfts
+                        .values()
+                        .rev()
+                        .take(limit)
+                        .cloned()
+                        .collect();
+                    let _ = response.send(nfts);
+                }
+                ChainCommand::MarketGetOffers { response } => {
+                    let offers: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .offers
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(offers);
+                }
+                ChainCommand::PollenAssetForContent {
+                    manifest_id,
+                    response,
+                } => {
+                    let asset = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .protected_content
+                        .asset_for(&manifest_id);
+                    let _ = response.send(asset);
+                }
+                ChainCommand::PollenGetDataAssets { response } => {
+                    let assets: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .data_assets
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(assets);
+                }
+                ChainCommand::PollenGetAccessGrants { response } => {
+                    let grants: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .access_grants
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(grants);
+                }
+                ChainCommand::PollenGetSaleAuthorizations { response } => {
+                    let authorizations: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .sale_authorizations
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(authorizations);
+                }
+                ChainCommand::PollenGetEncryptionPolicies { response } => {
+                    let policies: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .encryption_policies
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(policies);
+                }
+                ChainCommand::PollenGetPurchaseReceipts { response } => {
+                    let receipts: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .purchase_receipts
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(receipts);
+                }
+                ChainCommand::HubGetApps { response } => {
+                    let apps: Vec<_> = self
+                        .blockchain
+                        .state
+                        .budlumxyz
+                        .apps
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(apps);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod proof_cache_tests {
+    use super::*;
+    use crate::consensus::pow::PoWEngine;
+    use std::sync::Arc;
+
+    #[test]
+    fn account_proof_follows_balance_change_at_equal_chain_length() {
+        let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let (mut actor, _handle) = ChainActor::new(bc);
+        let who = Address([7u8; 32]);
+        actor.blockchain.state.add_balance(&who, 100);
+        let before = actor.account_proof(&who);
+        assert_eq!(before.balance, 100);
+        // No block is added: the chain length stays the same.
+        actor.blockchain.state.add_balance(&who, 50);
+        let after = actor.account_proof(&who);
+        assert_eq!(after.balance, 150);
+        assert_ne!(before.root, after.root);
+    }
+
+    #[test]
+    fn ai_query_height_is_the_state_height_not_an_epoch_guess() {
+        let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let (mut actor, _handle) = ChainActor::new(bc);
+        actor.blockchain.state.epoch_index = 0;
+        actor.blockchain.state.current_block_height = 37;
+        assert_eq!(actor.ai_query_height(), 37);
+    }
+}

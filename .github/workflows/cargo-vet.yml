@@ -1,0 +1,107 @@
+# cargo-vet, supply-chain trust auditing (a ratchet gate)
+#
+# WHY A SEPARATE GATE: cargo-audit/cargo-deny/OSV answer "does this dependency
+# have a KNOWN vulnerability?", and all of them wait for an advisory to be published.
+# cargo-vet asks a different question: "has anyone read this code?" It ties the
+# source to a trustworthy audit record (Mozilla, Google, Bytecode Alliance, ISRG,
+# Embark, Zcash imports). When a dependency is compromised and a malicious version
+# is published the advisory appears days or months later; the absence of an audit
+# record is visible from the first minute. For a chain's crypto/FFI surface
+# this gap must be closed.
+#
+# IMPORTANT, this is not "wiring an existing tool into CI", it is RUNNING THE TOOL
+# FOR THE FIRST TIME: supply-chain/config.toml sat in the repository but was
+# written with invented keys absent from the cargo-vet schema
+# (`audit-compatible-output`, `[default-criteria] safe-to-run`) and the tool fell
+# over with a parse error. No workflow called it either. The file's existence gave
+# the impression of auditing; in reality not a single dependency had been audited.
+#
+# GATE POLICY, a ratchet rather than all-green: the first real measurement was 437
+# unaudited dependencies (~6.7M lines of backlog). Had `cargo vet check` been made
+# mandatory on day 1 the gate would stay permanently red and be loosened at the
+# first squeeze. The pattern the repo's other gates already use applies: the count
+# MUST NOT RISE, lowering it is free. From today on, adding an unaudited new dependency breaks CI.
+
+name: Cargo Vet
+
+on:
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 5 * * 2" # weekly: the imported audit sources are refreshed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cargo-vet-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vet:
+    name: Cargo Vet (supply-chain trust, ratchet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+
+      - name: Install cargo-vet (--locked, fixed version)
+        run: |
+          set -euo pipefail
+          cargo install --locked --version 0.10.2 cargo-vet
+          cargo vet --version
+
+      # Vacuous-gate protection: is the ratchet counter really reading cargo-vet
+      # output, or silently returning 0 on every run? The canary verifies the parse
+      # with synthetic outputs; if it is broken the job breaks here.
+      - name: Canary - evidence that the ratchet counter works
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- cargo-vet --self-test
+
+      - name: The ratchet gate (the unaudited dependency count must not rise)
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- cargo-vet
+
+      # Informational: it makes visible in the PR summary which crates carry the
+      # audit debt, so paying it down can be targeted.
+      - name: Audit debt summary (informational)
+        if: always()
+        run: |
+          set -uo pipefail
+          # The verdict belongs to the ratchet gate above; this step only
+          # publishes WHICH crates carry the debt. But `2>/dev/null || echo`
+          # discarded the error body and the exit code together, so a
+          # cargo-vet that cannot even load the store rendered as an empty
+          # debt list - the best-looking output this step can produce, from a
+          # command that did not run. The status is captured instead, and the
+          # step reports its own tooling failure without touching the verdict.
+          set +e
+          cargo vet suggest > /tmp/vet-suggest.log 2>&1
+          status=$?
+          set -e
+          {
+            echo "### cargo-vet audit debt"
+            echo '```'
+            tail -40 /tmp/vet-suggest.log
+            echo '```'
+            echo "(cargo vet suggest exit: $status)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ] && [ ! -s /tmp/vet-suggest.log ]; then
+            echo "::error::cargo vet suggest exited $status and wrote nothing - the debt summary summarised a command that never ran."
+            exit 1
+          fi
