@@ -1,4 +1,4 @@
-//! Participation registries for Budlum's Evrensel Mutabakat Katmanı.
+//! Participation registries for Budlum's Universal Settlement Layer.
 //!
 //! This module encodes the master-context split between two deliberately
 //! Separate membership models:

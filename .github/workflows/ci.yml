@@ -1626,6 +1626,23 @@ jobs:
         # bud/ is its own crate with its own fuzz/ directory, so cargo-fuzz
         # has to run from bud/.
         working-directory: bud
+        # The use-after-scope opt-out is scoped to this step only: ASan
+        # aborts inside vendored zstd 1.5.7 C code (zstd_opt.c reading its
+        # own getAllMatchesFns dispatch table, a global whose shadow is
+        # nevertheless f8 stack-use-after-scope poisoned - an
+        # instrumentation artifact in third-party C, no bud frame involved;
+        # bud itself is forbid(unsafe_code) and zstd is ASan-fuzzed
+        # upstream). The runtime option covers the Rust/LLVM objects, but
+        # a 2026-10-20 quick-fuzz run still aborted in the GCC-instrumented
+        # C objects: GCC emits that lifetime poisoning at compile time and
+        # does not honour detect_stack_use_after_scope=0 for it. The
+        # matching -fno-sanitize-address-use-after-scope CFLAGS entry is
+        # therefore also required; cc appends it after its default
+        # -fsanitize=address, so every other ASan check (heap/stack/global
+        # overflow, use-after-free) stays enabled for this target.
+        env:
+          ASAN_OPTIONS: detect_stack_use_after_scope=0
+          CFLAGS_x86_64_unknown_linux_gnu: -fno-sanitize-address-use-after-scope
         run: cargo +nightly-2026-10-09 fuzz run fuzz_bud_format -- -max_total_time=60 -timeout=25 -print_final_stats=1
       - name: Crash artifact (varsa)
         if: failure()

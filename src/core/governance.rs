@@ -429,6 +429,11 @@ pub struct GovernanceState {
     /// The next proposal costs `2^count` times base fee; old epochs are pruned.
     #[serde(default, with = "proposer_epoch_count_as_seq")]
     pub proposer_epoch_count: std::collections::BTreeMap<(Address, u64), u64>,
+    /// Governance domain unfreezes drained inside committed block execution so
+    /// replay, reorg, and rebuild commit the identical state root and re-apply
+    /// them to `ConsensusDomainRegistry` and `QuarantineLedger`.
+    #[serde(default)]
+    pub applied_domain_unfreezes: Vec<crate::core::account::PendingDomainUnfreeze>,
 }
 
 mod proposer_epoch_count_as_seq {
@@ -479,6 +484,7 @@ impl GovernanceState {
             || self.next_proposal_id != 0
             || !self.proposer_epoch_count.is_empty()
             || self.constitution.has_non_default_updates()
+            || !self.applied_domain_unfreezes.is_empty()
     }
 
     pub fn root(&self) -> [u8; 32] {
@@ -495,6 +501,13 @@ impl GovernanceState {
             bincode::serialize(&self.proposer_epoch_count)
                 .unwrap_or_else(|_| GOVERNANCE_SERIALIZE_FAILED.to_vec()),
         );
+        if !self.applied_domain_unfreezes.is_empty() {
+            hasher.update(b"applied_domain_unfreeze_v1");
+            hasher.update(
+                bincode::serialize(&self.applied_domain_unfreezes)
+                    .unwrap_or_else(|_| GOVERNANCE_SERIALIZE_FAILED.to_vec()),
+            );
+        }
         hasher.finalize().into()
     }
 

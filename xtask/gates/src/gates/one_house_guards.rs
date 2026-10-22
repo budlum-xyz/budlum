@@ -90,12 +90,17 @@ const FAMILIES: &[Family] = &[
     Family {
         name: "bridge-unlock",
         why: "every path that unlocks a burned bridge transfer must run the same \
-              domain check, the same fee split and the same refund",
+              domain check, the same recorded burn debit check and the same refund",
         siblings: &[
             Sibling {
                 name: "executor-bridge-unlock",
                 file: "src/execution/executor.rs",
                 start: "MessageKind::BridgeBurn => {",
+            },
+            Sibling {
+                name: "blockchain-verified-unlock",
+                file: "src/chain/blockchain.rs",
+                start: "pub fn unlock_bridge_transfer_from_verified_event(",
             },
             Sibling {
                 name: "blockchain-relay-unlock",
@@ -113,8 +118,8 @@ const FAMILIES: &[Family] = &[
                 needles: &[".unlock("],
             },
             Guard {
-                name: "fee split",
-                needles: &["split_bridge_fee("],
+                name: "recorded burn debit",
+                needles: &["transfer.burned_amount"],
             },
             Guard {
                 name: "overflow-checked refund",

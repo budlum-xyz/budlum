@@ -45,7 +45,7 @@
 //!
 //! # The six development fixtures, and why they must never hold value
 //!
-//! [`dev_fixture_device_signers`] returns six deterministic device signers.
+//! `dev_fixture_device_signers` returns six deterministic device signers.
 //! Their private keys are derived from seeds visible in this file, which means
 //! **they are public knowledge**: any signature any of them makes can be
 //! forged by anyone who has ever cloned this repository. They exist so that
@@ -343,7 +343,7 @@ pub fn verify_quorum(
         });
     }
     // BLG-0073 (P03-F16): the presented identity set must be the whole
-    // committee — no more, no less. Without this rule a caller could present
+    // committee - no more, no less. Without this rule a caller could present
     // one real identity twice under two device ids.
     if identities.len() != policy.device_count as usize {
         return Err(QuorumError::IdentitySetSizeMismatch {
@@ -353,7 +353,7 @@ pub fn verify_quorum(
     }
     // BLG-0073: two device ids sharing one verifying key are one device.
     for (i, a) in identities.iter().enumerate() {
-        for b in &identities[i + 1..] {
+        for b in identities.iter().skip(i + 1) {
             if a.verifying_key == b.verifying_key {
                 return Err(QuorumError::DuplicateVerifyingKey {
                     device_id: a.device_id,

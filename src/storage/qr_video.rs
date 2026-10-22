@@ -34,6 +34,9 @@ pub const MAX_VIDEO_FRAMES: u32 = 50_000;
 
 /// Largest PNG one frame of a BDLV blob may carry. An honest frame is a few hundred pixels
 /// square, so this leaves room while a hostile length field cannot ask for more.
+///
+/// Convenience: pub so a frame producer can refuse past the same
+/// PNG size bound the blob reader enforces in this module.
 pub const MAX_FRAME_PNG_BYTES: usize = 4 * 1024 * 1024;
 
 /// Errors.

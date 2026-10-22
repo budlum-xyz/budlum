@@ -65,6 +65,8 @@ pub enum ProofProvenance {
     Unverified,
 }
 
+type InvalidVoteSample = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
 /// Opaque, condition-specific proof payload.
 ///
 /// Kept as an enum of the offences we understand today, each carrying the
@@ -110,6 +112,8 @@ pub enum SlashingProof {
         epoch: u64,
         count: u64,
         threshold: u64,
+        #[serde(default)]
+        samples: Vec<InvalidVoteSample>,
     },
 }
 
@@ -260,7 +264,7 @@ impl std::error::Error for EvidenceError {}
 impl SlashingReport {
     /// Builds an [`ProofProvenance::Unverified`] report - the only thing a
     /// public constructor may certify. Consensus-verified reports come from
-    /// [`SlashingReport::new_verified`] or a cryptographic self-proof
+    /// `SlashingReport::new_verified` or a cryptographic self-proof
     /// ([`SlashingReport::promote_self_proven`]), never from a claim
     /// (BLG-0100/P04-F18, CWE-347).
     pub fn new(
@@ -279,6 +283,10 @@ impl SlashingReport {
     }
 
     /// The consensus layer's constructor. Not `pub` on purpose.
+    ///
+    /// Convenience: crate-visible so the report constructors share the
+    /// one construction path that requires a verified report; reports
+    /// from outside arrive through the public constructors beside it.
     pub(crate) fn new_verified(
         offender: Address,
         role: RoleId,
@@ -312,14 +320,22 @@ impl SlashingReport {
     /// trusted sender. Runs [`SlashingReport::verify_double_sign`] first -
     /// nothing promotes without opening the signatures.
     ///
+    /// WIRING: kept fail-closed until self-proving equivocation proofs carry
+    /// full height-bound headers rather than bare digests; RPC submission
+    /// leaves external reports `Unverified` for consensus-side verification.
+    ///
     /// # Errors
     ///
     /// [`EvidenceError`] from the verification; the report stays
     /// [`ProofProvenance::Unverified`] and the caller must refuse it.
     pub fn promote_self_proven(&mut self) -> Result<(), EvidenceError> {
         self.verify_double_sign()?;
-        self.provenance = ProofProvenance::ConsensusVerified;
-        Ok(())
+        // A pair of signatures over two bare 32-byte digests is not an
+        // equivocation proof: the proof's `height` is not part of either signed
+        // message, so two ordinary blocks this validator produced at DIFFERENT
+        // heights verify here equally well. Only consensus holds both headers
+        // at the claimed height and may certify `ConsensusVerified`.
+        Err(EvidenceError::Unverified)
     }
 
     /// Convenience: a consensus-verified double-sign against the validator
@@ -364,6 +380,29 @@ impl SlashingReport {
                 epoch,
                 count,
                 threshold,
+                samples: Vec::new(),
+            },
+            reporter,
+        )
+    }
+
+    pub(crate) fn consensus_invalid_signature_spam_with_samples(
+        offender: Address,
+        role: RoleId,
+        epoch: u64,
+        count: u64,
+        threshold: u64,
+        samples: Vec<InvalidVoteSample>,
+        reporter: Option<Address>,
+    ) -> Self {
+        Self::new_verified(
+            offender,
+            role,
+            SlashingProof::InvalidSignatureSpam {
+                epoch,
+                count,
+                threshold,
+                samples,
             },
             reporter,
         )
@@ -1114,6 +1153,35 @@ mod tests {
         assert_eq!(r.provenance(), ProofProvenance::Unverified);
         // And demote answers a claim that rode in through serde.
         r.demote_to_unverified();
+        assert_eq!(r.provenance(), ProofProvenance::Unverified);
+    }
+
+    #[test]
+    fn double_sign_over_bare_hashes_cannot_self_promote_without_consensus() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk_bytes = sk.verifying_key().to_bytes();
+        let offender = Address::from(pk_bytes);
+        let h1 = hex::encode([0x11u8; 32]);
+        let h2 = hex::encode([0x22u8; 32]);
+        let s1 = sk.sign(&[0x11u8; 32]).to_bytes().to_vec();
+        let s2 = sk.sign(&[0x22u8; 32]).to_bytes().to_vec();
+        let proof = SlashingProof::DoubleSign {
+            height: 42,
+            kind: DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: h1,
+            block_hash_2: h2,
+            signature_1: s1,
+            signature_2: s2,
+        };
+        let mut r = SlashingReport::new(
+            offender,
+            roles::VALIDATOR,
+            proof,
+            Some(Address::from([9u8; 32])),
+        );
+        assert_eq!(r.promote_self_proven(), Err(EvidenceError::Unverified));
         assert_eq!(r.provenance(), ProofProvenance::Unverified);
     }
 }

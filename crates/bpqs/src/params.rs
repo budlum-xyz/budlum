@@ -43,6 +43,10 @@ pub trait BpqsParams:
 ///
 /// LEN1 = 2·32 = 64; LEN2 = floor(log16(64·15)) + 1 = floor(2.47) + 1 = 3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// WIRING: exposed for downstream instantiation at the NIST level-5
+/// budget; nothing in-tree signs with it in production today, so the
+/// parameter math is pinned by this module's tests and the KAT rows.
 pub struct ParamsL5;
 
 impl BpqsParams for ParamsL5 {
@@ -60,6 +64,10 @@ impl BpqsParams for ParamsL5 {
 ///
 /// LEN1 = 2·24 = 48; LEN2 = floor(log16(48·15)) + 1 = floor(2.37) + 1 = 3.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// WIRING: exposed for downstream instantiation at the NIST level-3
+/// budget; nothing in-tree signs with it in production today, so the
+/// parameter math is pinned by this module's tests and the KAT rows.
 pub struct ParamsL3;
 
 impl BpqsParams for ParamsL3 {
@@ -79,6 +87,10 @@ impl BpqsParams for ParamsL3 {
 /// acceptance-bar review notes its presence is test-only.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// Convenience: pub for the test harnesses that mint committee keys
+/// with it across this crate's modules; never a signing parameter,
+/// as the note above records.
 pub struct ParamsTestFast;
 
 impl BpqsParams for ParamsTestFast {

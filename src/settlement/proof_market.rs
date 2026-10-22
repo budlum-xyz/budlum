@@ -578,6 +578,10 @@ impl ProofReceipt {
     }
 
     /// BLG-0066: revoked receipts can never be paid and must be clearable.
+    ///
+    /// WIRING: the pruning question for revoked receipts, exposed for
+    /// the epoch-close sweep that clears them once the proof market's
+    /// transaction door (see `fund_escrow`) lands.
     pub fn is_revoked(&self) -> bool {
         matches!(self.status, ReceiptStatus::Revoked { .. })
     }
@@ -634,6 +638,11 @@ impl ProofMarketState {
 
     /// BLG-0064: credit a creator's escrow. The caller debits the account
     /// balance in the same transaction; the market only holds the claim.
+    ///
+    /// WIRING: unwired - the proof market has no transaction door yet, so
+    /// no executor path debits a creator today. The door that opens the
+    /// market must credit escrow here in the same transaction as the
+    /// debit, before `add_task`, which refuses an unfunded reward.
     pub fn fund_escrow(&mut self, creator: Address, amount: u64) -> Result<(), String> {
         let entry = self.escrowed.entry(creator).or_insert(0);
         *entry = entry
@@ -644,6 +653,10 @@ impl ProofMarketState {
 
     /// BLG-0064: the escrow a creator holds.
     #[must_use]
+    ///
+    /// WIRING: unwired, with the rest of the proof-market surface -
+    /// the transaction door that funds escrow (see `fund_escrow`) is
+    /// also the door that reads a creator's balance back.
     pub fn escrow_balance(&self, creator: &Address) -> u64 {
         self.escrowed.get(creator).copied().unwrap_or(0)
     }
@@ -813,7 +826,7 @@ impl ProofMarketState {
             keep
         });
         // BLG-0062: an expired task's fields must not open a fresh task.
-        // BLG-0064: and its escrow goes back to the creator — the job never
+        // BLG-0064: and its escrow goes back to the creator - the job never
         // happened, so the money must not stay locked in the market.
         for (id, creator, reward) in retired {
             self.retired_task_ids.insert(id);
@@ -907,6 +920,16 @@ impl ProofMarketState {
         }
         for id in &self.retired_task_ids {
             fields.push(id.to_vec());
+        }
+        // The escrow is settlement state: `fund_escrow` credits it, `add_task`
+        // spends it, and `prune_expired` refunds it. `is_empty` already treats
+        // a held balance as state that must reach the root, so leaving it out
+        // of this fold let two markets holding different creator balances hash
+        // to one root.
+        fields.push((self.escrowed.len() as u64).to_le_bytes().to_vec());
+        for (creator, balance) in &self.escrowed {
+            fields.push(creator.as_bytes().to_vec());
+            fields.push(balance.to_le_bytes().to_vec());
         }
         for receipt in &self.pending_receipts {
             fields.push(receipt.task_id.to_vec());
@@ -1664,5 +1687,25 @@ mod tests {
         let (expired, _) = market.close_epoch(6);
         assert_eq!(expired, 1);
         assert_eq!(market.escrow_balance(&creator), 500);
+    }
+
+    #[test]
+    fn escrow_balances_are_committed_in_proof_market_root() {
+        let mut a = ProofMarketState::new();
+        let mut b = ProofMarketState::new();
+        let mut c = ProofMarketState::new();
+        a.fund_escrow(test_address(1), 500).unwrap();
+        b.fund_escrow(test_address(1), 750).unwrap();
+        c.fund_escrow(test_address(2), 500).unwrap();
+        assert_ne!(
+            a.root(),
+            b.root(),
+            "different balances for one creator must produce distinct roots"
+        );
+        assert_ne!(
+            a.root(),
+            c.root(),
+            "identical balances under different creators must produce distinct roots"
+        );
     }
 }

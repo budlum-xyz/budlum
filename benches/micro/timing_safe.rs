@@ -126,11 +126,11 @@ fn clock_granularity_ns() -> u64 {
     best
 }
 
-fn measure_min_per_batch<F: Fn(&[u8], &[u8]) -> bool>(
+fn measure_min_per_batch<T: ?Sized, F: Fn(&T, &T) -> bool>(
     f: F,
-    first: &[u8],
-    last: &[u8],
-    valid: &[u8],
+    first: &T,
+    last: &T,
+    valid: &T,
     batches: usize,
     iters: usize,
 ) -> (Vec<f64>, Vec<f64>) {
@@ -317,24 +317,19 @@ fn main() -> ExitCode {
     );
     let t_control = welch_t(&ctl_a, &ctl_b);
 
-    // 2) The real measurement (the constant-time implementation)
-    let ct = |a: &[u8], b: &[u8]| -> bool {
-        constant_time_eq_str(
-            std::str::from_utf8(a).expect("ascii key"),
-            std::str::from_utf8(b).expect("ascii key"),
-        )
-    };
-    let ct_len_safe = |a: &[u8], b: &[u8]| -> bool {
-        match (std::str::from_utf8(a), std::str::from_utf8(b)) {
-            (Ok(x), Ok(y)) => constant_time_eq_str(x, y),
-            _ => false,
-        }
-    };
+    // 2) The real measurement (the constant-time implementation). The
+    // classes are measured as `&str` end to end: the production contract
+    // already takes validated `&str`, and converting `&[u8]` inside the
+    // timed closure measured UTF-8 validation instead - whose chunked SIMD
+    // scan costs differently for a 63-byte candidate than for a 64-byte one,
+    // a harness artefact several times larger than the leeway this gate
+    // allows. Every class below is built from the `secret` String, so the
+    // `&str` values exist before the clock starts.
     let (ct_a, ct_b) = measure_min_per_batch(
-        ct,
-        diff_first.as_bytes(),
-        diff_last.as_bytes(),
-        secret.as_bytes(),
+        constant_time_eq_str,
+        diff_first.as_str(),
+        diff_last.as_str(),
+        secret.as_str(),
         batches,
         iters,
     );
@@ -471,17 +466,19 @@ fn main() -> ExitCode {
     for (name, left, right) in [
         (
             "first vs middle byte",
-            diff_first.as_bytes(),
-            diff_mid.as_bytes(),
+            diff_first.as_str(),
+            diff_mid.as_str(),
         ),
-        (
-            "same length vs short key",
-            diff_last.as_bytes(),
-            short_key.as_bytes(),
-        ),
+        ("same length vs short key", diff_last.as_str(), short_key),
     ] {
-        let (x, y) =
-            measure_min_per_batch(ct_len_safe, left, right, secret.as_bytes(), batches, iters);
+        let (x, y) = measure_min_per_batch(
+            constant_time_eq_str,
+            left,
+            right,
+            secret.as_str(),
+            batches,
+            iters,
+        );
         let t = welch_t(&x, &y);
         let delta = (mean(&x) - mean(&y)).abs();
         let ratio = delta / control_delta;

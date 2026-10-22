@@ -314,7 +314,9 @@ impl Executor {
                     // User-approved decision: staking may succeed before the
                     // Validator finishes its key ceremony, but such validators
                     // Must remain bonded/inactive and must not enter quorum.
-                    state.add_validator(tx.from, stake_amount);
+                    // The floor-aware add keeps a below-floor bond out of the
+                    // registry; plain `add_validator` auto-registers.
+                    state.add_validator_with_floor(tx.from, stake_amount, min_stake);
                     if let Some(v) = state.get_validator_mut(&tx.from) {
                         v.active = v.stake >= min_stake && v.is_consensus_ready();
                         if !v.active {
@@ -459,17 +461,23 @@ impl Executor {
                 );
             }
             TransactionType::Unstake => {
-                let (current_stake, penalised) = state
+                // Only a live jail blocks the exit. `Validator::slashed` is
+                // never cleared anywhere in the state machine, so refusing on
+                // it turned the configured proportional slash into a 100%
+                // confiscation: the un-slashed remainder of the bond could
+                // never leave the registry. The remaining stake is still at
+                // risk while it unbonds - `AccountState::slash_from_report`
+                // cuts the unbonding queue by the same ratio - so the exit
+                // cannot unwind the penalty, and `upsert_stake` still refuses
+                // to grow a `Slashed` registry entry back.
+                let (current_stake, jailed) = state
                     .get_validator(&tx.from)
-                    .map(|v| (v.stake, v.slashed || v.jailed))
+                    .map(|v| (v.stake, v.jailed && v.jail_until > state.epoch_index))
                     .ok_or_else(|| BudlumError::validation("not_validator", "Not a validator"))?;
-                // A slashed or jailed validator must stay in the registry
-                // until its penalty is settled. A full exit would remove the
-                // entry, and a later report would find nothing to cut.
-                if penalised {
+                if jailed {
                     return Err(BudlumError::validation(
-                        "validator_penalised",
-                        "Slashed or jailed validators cannot unstake",
+                        "validator_jailed",
+                        "Jailed validators cannot unstake",
                     ));
                 }
                 if current_stake < tx.amount {
@@ -1373,34 +1381,21 @@ impl Executor {
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_unlock_failed", e.0)
                                     })?;
-                                // Refund owner (1% relayer fee deducted, same as submit_relay_proof)
-                                let params = *state.registry.params();
-                                let (final_amount, fee) =
-                                    crate::cross_domain::bridge::split_bridge_fee(
-                                        transfer.amount,
-                                        params.bridge_relayer_fee_ppm,
-                                        params.bridge_relayer_min_fee,
-                                    )
-                                    .map_err(|e| {
-                                        BudlumError::validation("bridge_fee_below_minimum", e.0)
-                                    })?;
-                                // The unlock side takes the same money-typed
-                                // split as the mint side, so the fee cannot
-                                // be narrowed here: it is Bud before it
-                                // reaches a balance, and crosses as u64 in
-                                // plain sight.
+                                // Credit the exact units recorded when the burn debited
+                                // the holder, never a fresh split from live fee params.
+                                if transfer.burned_amount == 0 {
+                                    return Err(BudlumError::validation(
+                                        "bridge_unlock_failed",
+                                        "Bridge burn recorded no debit for this transfer",
+                                    ));
+                                }
+                                let final_amount =
+                                    crate::core::money::Bud::new(transfer.burned_amount);
                                 state
                                     .try_add_balance(&transfer.owner, final_amount.get())
                                     .map_err(|e| {
                                         BudlumError::validation("bridge_unlock_overflow", &e)
                                     })?;
-                                // Fix: Credit relayer fee
-                                // To tx.from on unlock. Use try_add_balance for overflow safety.
-                                if !fee.is_zero() {
-                                    state.try_add_balance(&tx.from, fee.get()).map_err(|e| {
-                                        BudlumError::validation("bridge_unlock_fee_overflow", &e)
-                                    })?;
-                                }
                             }
                             _ => {}
                         }
@@ -1891,10 +1886,44 @@ impl Executor {
                     &asset.manifest_id,
                     &asset.metadata_commitment,
                 );
-                state
+                // Positive ownership: the content id must already be registered
+                // to the sender. A conditional gate ("if it is registered, it
+                // must be mine") left the unregistered case open, and content
+                // ids are public: any funded account could name an id it does
+                // not own, bind it to its own asset - bindings are append-only
+                // - and the retraction below deleted the plaintext manifest
+                // behind it. The real owner could then never register that id
+                // again (`register_manifest` refuses content bound to another
+                // owner) and the gateway refused to serve it, so the seizure
+                // was permanent and permissionless.
+                match state.storage_registry.owner_of(&asset.manifest_id) {
+                    Some(recorded_owner) if recorded_owner == tx.from => {}
+                    Some(_) => {
+                        return Err(BudlumError::validation(
+                            "pollen_asset_manifest_not_owned",
+                            "DataAsset content is owned by another account",
+                        ));
+                    }
+                    None => {
+                        return Err(BudlumError::validation(
+                            "pollen_asset_manifest_unregistered",
+                            "DataAsset content id has no unambiguous registered owner; register the manifest first",
+                        ));
+                    }
+                }
+                let asset_manifest_id = asset.manifest_id;
+                let asset_owner = asset.owner;
+                let asset_id = state
                     .marketplace
                     .register_data_asset(asset)
                     .map_err(|e| BudlumError::validation("pollen_asset_register_failed", e))?;
+                state
+                    .marketplace
+                    .bind_content_to_asset(asset_manifest_id, asset_id, asset_owner)
+                    .map_err(|e| BudlumError::validation("pollen_asset_bind_failed", e))?;
+                state
+                    .storage_registry
+                    .retract_plaintext_manifest_for_owner(&asset_manifest_id, &tx.from);
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -2203,17 +2232,23 @@ impl Executor {
                 // field; `Transaction::verify` has already verified that this key derives
                 // the `from` address, so the signature here is also bound to
                 // the sending account.
+                let auth_msg = crate::privacy::PrivateTransferSubmit::authorization_message(
+                    tx.chain_id,
+                    tx.from.as_bytes(),
+                    tx.nonce,
+                    &sub.public_digest,
+                );
                 let authorized = match tx.signature_version {
                     crate::core::transaction::SIGNATURE_VERSION_V5 => {
                         crate::crypto::primitives::verify_ml_dsa_87_signature(
-                            &sub.public_digest,
+                            &auth_msg,
                             &sub.authorization_sig,
                             &tx.signer_public_key,
                         )
                         .is_ok()
                     }
                     _ => crate::crypto::primitives::verify_signature(
-                        &sub.public_digest,
+                        &auth_msg,
                         &sub.authorization_sig,
                         tx.from.as_bytes(),
                     )
@@ -2522,9 +2557,10 @@ impl Executor {
                 }
                 // Only the full STARK path (registered guest program plus the
                 // claimed public inputs re-derived from the request) marks the
-                // proof verified. A structural-only attach stores evidence but
-                // stays out of `fully_verified_proofs`, so it can never release
-                // a `require_proof` escrow.
+                // proof verified. `fully_verified_proofs` gates both registry
+                // finalization (`require_execution_proof`) and `require_proof`
+                // agent-payment escrow release; a structural-only attach stores
+                // evidence and nothing else.
                 let fully_verified = stark_girisi.is_some() && report.stark_ok == Some(true);
                 state
                     .ai_registry
@@ -2968,8 +3004,13 @@ mod tests {
         let mut state = AccountState::new();
         state.add_balance(&who, 10);
         state.add_validator(who, 1_000);
+        // The gate reads the jail's *remaining* term, not the bare flag: a
+        // jail whose term has run out is not a life sentence for the bond
+        // (that was the permanent-freeze finding). Arm a live term here.
+        let live_until = state.epoch_index.saturating_add(1);
         if let Some(validator) = state.get_validator_mut(&who) {
             validator.jailed = true;
+            validator.jail_until = live_until;
         }
         let mut tx = Transaction::new_with_chain_id(
             who,
@@ -2985,6 +3026,19 @@ mod tests {
         assert!(Executor::apply_transaction(&mut state, &tx).is_err());
         assert_eq!(state.get_validator(&who).map(|v| v.stake), Some(1_000));
         assert!(state.unbonding_queue.is_empty());
+
+        // Once the term has elapsed the exit opens again, and the remaining
+        // bond is still slashable while it unbonds.
+        let expired = state.epoch_index;
+        if let Some(validator) = state.get_validator_mut(&who) {
+            validator.jail_until = expired;
+        }
+        assert!(
+            Executor::apply_transaction(&mut state, &tx).is_ok(),
+            "an expired jail must not freeze the bond forever"
+        );
+        assert_eq!(state.get_validator(&who).map(|v| v.stake), Some(0));
+        assert!(!state.unbonding_queue.is_empty());
     }
 
     #[test]

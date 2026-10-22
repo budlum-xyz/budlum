@@ -121,6 +121,9 @@ fn render_from_recipe(
 pub const MAX_GENERATION_CACHE_ENTRIES: usize = 64;
 
 /// The most bytes the generation cache holds in total.
+///
+/// Convenience: pub so the gateway's callers can budget against
+/// the same byte cap the generation cache enforces here.
 pub const MAX_GENERATION_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 /// A bounded cache so the recipe is not run over and over.

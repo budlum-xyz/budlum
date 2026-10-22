@@ -69,12 +69,6 @@ const BUDGETS: &[Budget] = &[
         reason: "`prove` does not return a `Result` in this trait, so a shape violation the prover itself constructed has nowhere to go; the verifier-side counterpart of this check is a returned error, which is where adversary-supplied input arrives",
     },
     Budget {
-        file: "budzero/bud-compiler/src/codegen.rs",
-        lint: "dead_code",
-        count: 1,
-        reason: "a field kept for the generated-code layout that nothing reads yet; listed so the difference between not-read-yet and silently-ignored stays visible",
-    },
-    Budget {
         file: "budzero/bud-proof/src/bud_stark/prover.rs",
         lint: "clippy::multiple_bound_locations",
         count: 2,
@@ -279,12 +273,6 @@ const BUDGETS: &[Budget] = &[
         reason: "consensus or storage entry points whose arguments are all required and none of which groups into a meaningful struct; the fourth is `accept_storage_reallocation_with_escrow`, whose ticket/operator/payer/epoch-window/economics/proof arguments each come from a different authority and bundling them would hide which fields a caller must supply",
     },
     Budget {
-        file: "src/chain/blockchain.rs",
-        lint: "dead_code",
-        count: 2,
-        reason: "fields or helpers read only under a feature or by a subset of tests; kept beside their siblings rather than deleted and rewritten",
-    },
-    Budget {
         file: "src/chain/chain_actor.rs",
         lint: "clippy::too_many_arguments",
         count: 4,
@@ -405,18 +393,6 @@ const BUDGETS: &[Budget] = &[
         reason: "fields or helpers read only under a feature or by a subset of tests; kept beside their siblings rather than deleted and rewritten",
     },
     Budget {
-        file: "src/tests/finality_adversarial.rs",
-        lint: "clippy::needless_range_loop",
-        count: 1,
-        reason: "test code indexing two slices in step, where the index is the point",
-    },
-    Budget {
-        file: "src/tests/finality_live_path.rs",
-        lint: "clippy::needless_range_loop",
-        count: 1,
-        reason: "test code indexing two slices in step, where the index is the point",
-    },
-    Budget {
         file: "src/ai_inference/inference.rs",
         lint: "clippy::too_many_arguments",
         count: 1,
@@ -463,12 +439,6 @@ const BUDGETS: &[Budget] = &[
         lint: "clippy::too_many_arguments",
         count: 1,
         reason: "the node-local emission driver mirrors assemble_anchor's seven-argument shape and adds only the two knobs it uniquely owns (the log path and the mode gate); bundling them into a params struct would hide from the seam wiring which values the consensus caller must supply",
-    },
-    Budget {
-        file: "bud/src/bud_format_realcorpus.rs",
-        lint: "dead_code",
-        count: 1,
-        reason: "a test-corpus helper that only some feature combinations call; the file is a measurement fixture and holds no consensus or key-custody code",
     },
     Budget {
         file: "crates/ai-inference/crates/ai-ops/src/logparse.rs",

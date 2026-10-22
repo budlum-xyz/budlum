@@ -578,6 +578,7 @@ mod tests {
 
         for (i, sk) in sks.iter().enumerate().take(signers) {
             let vote = Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: snapshot.epoch,
                 checkpoint_height: header.index,
                 checkpoint_hash: checkpoint_hash.clone(),
@@ -594,6 +595,7 @@ mod tests {
         let mut agg_sig = G1Projective::identity();
         for (i, sk) in sks.iter().enumerate().take(signers) {
             let pc = Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: snapshot.epoch,
                 checkpoint_height: header.index,
                 checkpoint_hash: checkpoint_hash.clone(),

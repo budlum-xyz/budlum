@@ -305,7 +305,14 @@ impl QuorumRounds {
                 }
             }
             None => {
-                let open = self.rounds.keys().filter(|k| k.domain == domain).count();
+                // Only rounds still awaiting a decision occupy a cap slot;
+                // decided (`AgreedClaim`, `AgreedRefusal`) or `Disputed` rounds
+                // have closed voting and must not starve future heights (CWE-400).
+                let open = self
+                    .rounds
+                    .iter()
+                    .filter(|(k, r)| k.domain == domain && matches!(r.state, RoundState::Open))
+                    .count();
                 if open >= MAX_OPEN_ROUNDS_PER_DOMAIN {
                     return Err(RoundError::TooManyOpenRounds {
                         max: MAX_OPEN_ROUNDS_PER_DOMAIN,
@@ -449,6 +456,9 @@ impl QuorumRounds {
 /// quorum module insists on: a refusal about the *claim* participates, a
 /// failure about the *prover or transport* does not.
 /// The most rounds one domain may have open at once (BLG-0152/P07-F07).
+///
+/// Convenience: pub so the intake side can refuse against the same
+/// per-domain round cap the quorum enforces in this module.
 pub const MAX_OPEN_ROUNDS_PER_DOMAIN: usize = 64;
 
 /// Whether an adapter refusal says nothing about a claim - the bytes could
@@ -853,5 +863,18 @@ mod tests {
             .submit(key(), &other, &fresh, 100)
             .expect("new bytes open a new round after a refusal");
         assert!(matches!(state, RoundState::Open));
+    }
+
+    #[test]
+    fn decided_rounds_release_the_per_domain_open_round_cap() {
+        let mut rounds = QuorumRounds::default();
+        rounds.set_policy(key(), policy(1));
+        for h in 1..=(MAX_OPEN_ROUNDS_PER_DOMAIN as u64 + 10) {
+            let att = Ok(attestation([0xAB; 32], h));
+            let state = rounds
+                .submit(key(), &evidence(1, h), &att, 100)
+                .unwrap_or_else(|e| panic!("decided height {h} must not trip open cap: {e:?}"));
+            assert!(matches!(state, RoundState::AgreedClaim { .. }));
+        }
     }
 }

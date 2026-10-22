@@ -13,12 +13,18 @@ pub mod vault;
 pub use vault::{execute_vault_tx, VaultError, VaultRegistry, VaultTx};
 
 /// Most NFTs one owner can hold.
+///
+/// Convenience: pub so minting callers can refuse past the same
+/// bound the NFT registry enforces in this module.
 pub const MAX_NFTS_PER_OWNER: usize = 100_000;
 /// Longest tag in bytes.
 pub const MAX_TAG_BYTES: usize = 64;
 /// Most tags one NFT can carry.
 pub const MAX_TAGS_PER_NFT: usize = 16;
 /// Longest author name in bytes.
+///
+/// Convenience: pub so minting callers can refuse past the same
+/// bound the NFT registry validates in this module.
 pub const MAX_AUTHOR_NAME_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

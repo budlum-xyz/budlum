@@ -37,6 +37,14 @@ pub enum ChainCommand {
     GetHeight(oneshot::Sender<u64>),
     GetFinalizedHeight(oneshot::Sender<u64>),
     GetBlock(u64, oneshot::Sender<Option<Block>>),
+    /// A contiguous run of local blocks, `[from, from + count)`.
+    ///
+    /// The peer-driven reorg path needs the whole shared prefix in one step.
+    /// Asking for it one height at a time cost one round trip per block, which
+    /// is why a per-batch cap was placed on the fork height in the first
+    /// place; with a single read the only real bounds are the suffix length
+    /// and the fork depth, both already checked by the caller.
+    GetBlocksRange(u64, usize, oneshot::Sender<Vec<Block>>),
     GetBlockByHash(String, oneshot::Sender<Option<Block>>),
     GetBalance(Address, oneshot::Sender<u64>),
     GetNonce(Address, oneshot::Sender<u64>),
@@ -138,6 +146,10 @@ pub enum ChainCommand {
     #[cfg(test)]
     SubmitDomainCommitment(
         crate::domain::DomainCommitment,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    VerifyVerifiedDomainCommitment(
+        crate::domain::VerifiedDomainCommitment,
         oneshot::Sender<Result<(), String>>,
     ),
     SubmitVerifiedDomainCommitment(
@@ -706,6 +718,17 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetBlock(height, tx)).await;
         rx.await.unwrap_or(None)
+    }
+
+    /// Read `count` contiguous local blocks starting at `from`, in one
+    /// round trip. Returns fewer than `count` when the chain is shorter.
+    pub async fn get_blocks_range(&self, from: u64, count: usize) -> Vec<Block> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetBlocksRange(from, count, tx))
+            .await;
+        rx.await.unwrap_or_default()
     }
 
     pub async fn get_block_by_hash(&self, hash: String) -> Option<Block> {
@@ -1654,6 +1677,19 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::SubmitDomainCommitment(commitment, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn verify_verified_domain_commitment(
+        &self,
+        payload: crate::domain::VerifiedDomainCommitment,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::VerifyVerifiedDomainCommitment(payload, tx))
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -3404,6 +3440,18 @@ impl ChainActor {
                     let block = self.blockchain.chain.get(height as usize).cloned();
                     let _ = tx.send(block);
                 }
+                ChainCommand::GetBlocksRange(from, count, tx) => {
+                    let start = usize::try_from(from).unwrap_or(usize::MAX);
+                    let blocks = self
+                        .blockchain
+                        .chain
+                        .iter()
+                        .skip(start)
+                        .take(count)
+                        .cloned()
+                        .collect();
+                    let _ = tx.send(blocks);
+                }
                 ChainCommand::GetBlockByHash(hash, tx) => {
                     let block = self
                         .blockchain
@@ -3736,6 +3784,12 @@ impl ChainActor {
                 #[cfg(test)]
                 ChainCommand::SubmitDomainCommitment(commitment, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_domain_commitment(commitment));
+                }
+                ChainCommand::VerifyVerifiedDomainCommitment(payload, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .verify_domain_commitment_finality(&payload.commitment, &payload.proof),
+                    );
                 }
                 ChainCommand::SubmitVerifiedDomainCommitment(payload, res_tx) => {
                     let _ = res_tx.send(
@@ -4401,12 +4455,11 @@ impl ChainActor {
                         let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
                         continue;
                     }
-                    let res = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .register_confidential_commit(commit, &auth);
-                    let _ = response.send(res);
+                    let _ = (commit, auth);
+                    let _ = response.send(Err(
+                        "Out-of-block confidential commit registration is disabled to preserve state-root consensus"
+                            .to_string(),
+                    ));
                 }
                 ChainCommand::GetConfidentialOwner {
                     content_id,

@@ -15,7 +15,7 @@
 //!
 //! The grant is checked before a session opens: [`RevealGateway::open`]
 //! re-derives it from a registry (in-process gateways);
-//! [`RevealGateway::open_prechecked`] trusts a decision the chain actor
+//! [`RevealGateway::prepare_prechecked`] trusts a decision the chain actor
 //! already made. Both funnel into the same meter-and-budget construction, so
 //! a sealed recipe with no live grant is refused either way.
 
@@ -164,6 +164,10 @@ struct GatewaySession {
 
 /// A session whose emitter is built but not yet in the table.
 #[derive(Debug)]
+///
+/// Convenience: pub because it is the session between
+/// `prepare_prechecked` and `open_prepared`, held by the caller
+/// across the two phases of the reveal door.
 pub struct PreparedReveal {
     handle: RevealHandle,
     grant: Option<GrantScope>,

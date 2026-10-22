@@ -836,10 +836,19 @@ pub struct StorageRegistry {
     #[serde(default)]
     coding_audits: BTreeMap<u64, StoredCodingAudit>,
     /// Epoch a coding audit reached a final outcome, keyed by that epoch, so
-    /// the sweep drops due rows without walking the whole map. Last field:
-    /// bincode is positional.
+    /// the sweep drops due rows without walking the whole map.
     #[serde(default)]
     settled_coding_audits: BTreeMap<u64, Vec<u64>>,
+    /// Burned manifests whose prune was refused because an active deal still
+    /// had an open retrieval challenge or coding audit. Drained deterministically
+    /// once the open challenge/audit closes. Last field: bincode is positional.
+    #[serde(default)]
+    pending_prunes: std::collections::BTreeSet<ContentId>,
+    /// Per-(manifest_id, claimant) ownership claims decoupled from the shared
+    /// content-addressed `manifests` deduplication table so first-writer
+    /// registration never grants exclusive control over another party's content id.
+    #[serde(default)]
+    manifest_claims: std::collections::BTreeSet<(ContentId, Address)>,
 }
 
 use std::collections::BTreeMap;
@@ -1209,6 +1218,9 @@ impl StorageRegistry {
             && self.operator_cooldowns.is_empty()
             && self.operator_classes.is_empty()
             && self.manifests.is_empty()
+            && self.confidential_commits.is_empty()
+            && self.confidential_owners.is_empty()
+            && self.manifest_claims.is_empty()
     }
 
     pub fn root(&self) -> [u8; 32] {
@@ -1348,6 +1360,25 @@ impl StorageRegistry {
         }
         if !self.dictionaries.has_no_dictionaries() {
             hasher.update(self.dictionaries.dictionary_root());
+        }
+        // Burned manifests queued because an open challenge or coding audit
+        // temporarily refused pruning: two nodes disagreeing about this set
+        // would prune (and credit bonds/refunds) at different later heights.
+        // Empty contributes no bytes so chains with no queued prunes keep their root.
+        if !self.pending_prunes.is_empty() {
+            hasher.update(b"BDLM_STORAGE_PENDING_PRUNES_V1");
+            hasher.update((self.pending_prunes.len() as u64).to_le_bytes());
+            for manifest_id in &self.pending_prunes {
+                hasher.update(manifest_id.0);
+            }
+        }
+        if !self.manifest_claims.is_empty() {
+            hasher.update(b"BDLM_STORAGE_MANIFEST_CLAIMS_V1");
+            hasher.update((self.manifest_claims.len() as u64).to_le_bytes());
+            for (manifest_id, claimant) in &self.manifest_claims {
+                hasher.update(manifest_id.0);
+                hasher.update(claimant.as_bytes());
+            }
         }
         hasher.finalize().into()
     }
@@ -1491,9 +1522,60 @@ impl StorageRegistry {
     }
 
     pub fn register_manifest(&mut self, manifest: &ContentManifest) {
-        self.manifests
-            .entry(manifest.manifest_id)
-            .or_insert_with(|| manifest.clone());
+        let id = manifest.manifest_id;
+        if self.manifests.contains_key(&id) || self.confidential_commits.contains_key(&id) {
+            return;
+        }
+        let claim_owner = manifest.owner;
+        self.manifests.insert(id, manifest.clone());
+        if claim_owner != Address::zero() {
+            self.manifest_claims.insert((id, claim_owner));
+        }
+    }
+
+    #[must_use]
+    pub fn is_registered(&self, content_id: &ContentId) -> bool {
+        self.manifests.contains_key(content_id)
+            || self.confidential_commits.contains_key(content_id)
+    }
+
+    #[must_use]
+    pub fn has_claim(&self, content_id: &ContentId, claimant: &Address) -> bool {
+        if *claimant == Address::zero() {
+            return false;
+        }
+        self.owner_of(content_id) == Some(*claimant)
+    }
+
+    /// Scoped retraction of `caller`'s own un-paid `Plaintext` manifest when
+    /// `caller` lists the content as a paid marketplace asset and no active
+    /// storage deal references `manifest_id`.
+    pub fn retract_plaintext_manifest_for_owner(
+        &mut self,
+        manifest_id: &ContentId,
+        caller: &Address,
+    ) -> bool {
+        let Some(existing) = self.manifests.get(manifest_id) else {
+            return false;
+        };
+        if existing.owner != *caller
+            || !matches!(
+                existing.encryption,
+                crate::storage::ContentEncryption::Plaintext
+            )
+        {
+            return false;
+        }
+        let has_active_deal = self
+            .deals
+            .values()
+            .any(|d| d.manifest_id == *manifest_id && matches!(d.status, DealStatus::Active));
+        if has_active_deal {
+            return false;
+        }
+        self.manifests.remove(manifest_id);
+        self.manifest_claims.remove(&(*manifest_id, *caller));
+        true
     }
 
     /// Register a manifest that declares a source regime.
@@ -1750,14 +1832,25 @@ impl StorageRegistry {
         auth: &crate::storage::GrantAuthorization,
         terms: crate::storage::GrantIssueTerms,
     ) -> Result<u64, crate::storage::ViewGrantError> {
-        let owner = self
-            .owner_of(&content_id)
-            .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
         let issuer = auth
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        if issuer != owner {
-            return Err(crate::storage::ViewGrantError::NotOwner { issuer, owner });
+        if !self.has_claim(&content_id, &issuer) {
+            return match self.owner_of(&content_id) {
+                Some(owner) => Err(crate::storage::ViewGrantError::NotOwner { issuer, owner }),
+                None => {
+                    if self.manifests.contains_key(&content_id)
+                        || self.confidential_commits.contains_key(&content_id)
+                    {
+                        Err(crate::storage::ViewGrantError::NotOwner {
+                            issuer,
+                            owner: Address::zero(),
+                        })
+                    } else {
+                        Err(crate::storage::ViewGrantError::UnknownContent)
+                    }
+                }
+            };
         }
         let digest = crate::storage::grant_issue_digest(
             chain_id,
@@ -1766,7 +1859,7 @@ impl StorageRegistry {
             &issuer,
             &terms,
         );
-        auth.verify(&digest, &owner)
+        auth.verify(&digest, &issuer)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
         self.view_grants.issue(
             content_id,
@@ -1803,10 +1896,13 @@ impl StorageRegistry {
             .get(grant_id)
             .ok_or(crate::storage::ViewGrantError::UnknownGrant(grant_id))?
             .clone();
-        // `unwrap_or`, not `unwrap_or_else`: the fallback is a field read, and a
-        // closure there is what CI's Clippy step refuses under `-D warnings`.
-        let owner = self.owner_of(&grant.content_id).unwrap_or(grant.issuer);
-        auth.verify(&digest, &owner)
+        if !self.has_claim(&grant.content_id, &caller) && caller != grant.issuer {
+            return Err(crate::storage::ViewGrantError::NotOwner {
+                issuer: caller,
+                owner: grant.issuer,
+            });
+        }
+        auth.verify(&digest, &grant.issuer)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
         self.view_grants.revoke(grant_id, caller, at_epoch)?;
         Ok(grant)
@@ -1842,10 +1938,7 @@ impl StorageRegistry {
         key_id: &[u8; 32],
         owner: &Address,
     ) -> bool {
-        let Some(recorded) = self.owner_of(content_id) else {
-            return false;
-        };
-        if recorded != *owner {
+        if !self.has_claim(content_id, owner) {
             return false;
         }
         self.view_grants.may_view(content_id, viewer, key_id, owner)
@@ -1869,6 +1962,8 @@ impl StorageRegistry {
     /// Refuses Three (recipe-only) manifests, a body already committed under a
     /// different commitment, an object another address spoke for, and any
     /// authorisation whose signature does not verify for the derived owner.
+    /// WIRING: deterministic confidential body commit transition reserved for
+    /// in-block storage transaction execution.
     pub fn register_confidential_commit(
         &mut self,
         commit: crate::storage::ConfidentialBodyCommit,
@@ -1933,10 +2028,18 @@ impl StorageRegistry {
     /// made visible, so the two cannot disagree.
     #[must_use]
     pub fn owner_of(&self, content_id: &ContentId) -> Option<crate::core::address::Address> {
-        self.manifests
-            .get(content_id)
-            .map(|m| m.owner)
-            .or_else(|| self.confidential_owners.get(content_id).copied())
+        if let Some(conf_owner) = self.confidential_owners.get(content_id).copied() {
+            return Some(conf_owner);
+        }
+        let mut iter = self
+            .manifest_claims
+            .range((*content_id, Address::zero())..=(*content_id, Address::from([u8::MAX; 32])))
+            .map(|(_, claimant)| *claimant);
+        let first = iter.next()?;
+        if iter.next().is_some() {
+            return None;
+        }
+        Some(first)
     }
 
     /// Validate that `shard_id` is a member of `manifest`. Used by
@@ -2250,6 +2353,7 @@ impl StorageRegistry {
         current_epoch: u64,
     ) -> Result<(), StorageError> {
         if challenge_epoch > current_epoch
+            || deadline_epoch <= current_epoch
             || deadline_epoch > challenge_epoch.saturating_add(Self::MAX_CHALLENGE_WINDOW_EPOCHS)
         {
             return Err(StorageError::InvalidEpochRange {
@@ -3989,15 +4093,48 @@ impl StorageRegistry {
         }
     }
 
+    /// Whether `prune_content` would refuse this manifest: an open retrieval
+    /// challenge or an open coding audit on one of its active deals. The refund
+    /// path asks the same question, so a refused prune credits nothing.
+    fn prune_is_refused(&self, manifest_id: &ContentId) -> bool {
+        self.deals_for_manifest(manifest_id)
+            .iter()
+            .filter(|deal| deal.is_active())
+            .any(|deal| {
+                let retrieval_open = self.challenges.iter().any(|(id, challenge)| {
+                    challenge.deal_id == deal.deal_id && !self.results.contains_key(id)
+                });
+                let coding_open = self.coding_audits.values().any(|audit| {
+                    audit.deal_id == deal.deal_id && audit.outcome == CodingAuditOutcome::Open
+                });
+                retrieval_open || coding_open
+            })
+    }
+
+    /// Snapshot of burned manifests waiting for an open challenge or coding
+    /// audit to close before their storage deals can be pruned.
+    #[must_use]
+    pub fn pending_prune_manifests(&self) -> Vec<ContentId> {
+        self.pending_prunes.iter().copied().collect()
+    }
+
     /// The unearned fee `prune_content` would leave stranded, per payer: for
     /// every active deal of the manifest, the fee of the epochs that have not
     /// completed at `now_epoch`. Read before the prune, while the deals are
     /// still active. Deals without a recorded payer refund nothing.
+    ///
+    /// A prune that `prune_content` refuses refunds nothing: the deals stay
+    /// active and keep earning their epoch rewards, and the manifest stays
+    /// registered, so crediting the unearned fee here would pay the same epochs
+    /// twice.
     pub fn prune_fee_refunds(
         &self,
         manifest_id: &ContentId,
         now_epoch: u64,
     ) -> Vec<(Address, u64)> {
+        if self.prune_is_refused(manifest_id) {
+            return Vec::new();
+        }
         self.deals_for_manifest(manifest_id)
             .iter()
             .filter(|d| d.is_active())
@@ -4252,17 +4389,11 @@ impl StorageRegistry {
         // refused whole (not partial: a half-pruned manifest leaves live deals
         // referencing a dictionary that no longer exists); the next epoch's
         // maintenance pass prunes once finalize has run.
-        for (deal_id, _, _) in &deals {
-            let retrieval_open = self.challenges.iter().any(|(id, challenge)| {
-                challenge.deal_id == *deal_id && !self.results.contains_key(id)
-            });
-            let coding_open = self.coding_audits.values().any(|audit| {
-                audit.deal_id == *deal_id && audit.outcome == CodingAuditOutcome::Open
-            });
-            if retrieval_open || coding_open {
-                return (0, Vec::new());
-            }
+        if self.prune_is_refused(manifest_id) {
+            self.pending_prunes.insert(*manifest_id);
+            return (0, Vec::new());
         }
+        self.pending_prunes.remove(manifest_id);
 
         let pruned = deals.len() as u64;
         let mut bond_returns: Vec<(Address, u64)> = Vec::new();
@@ -4290,6 +4421,16 @@ impl StorageRegistry {
         self.confidential_owners.remove(manifest_id);
         self.self_host_policies
             .retain(|(policy_manifest, _), _| policy_manifest != manifest_id);
+        // The ownership claim is part of the record, so it goes with it. Left
+        // behind it made `owner_of`/`has_claim` report an owner for content
+        // that is no longer registered, and registration is first-writer-wins
+        // on an id a prune makes registrable again: one later registration
+        // created a second claim, after which `owner_of` returns `None` for
+        // both parties for good - no view grant, no self-host declaration and
+        // no marketplace listing for that id, with no transaction able to
+        // repair it.
+        self.manifest_claims
+            .retain(|(claimed, _)| claimed != manifest_id);
 
         (pruned, bond_returns)
     }
@@ -6887,6 +7028,15 @@ mod tests {
         assert_eq!(pruned, 0, "no pruning under an open challenge");
         assert!(bonds.is_empty());
         assert!(
+            reg.prune_fee_refunds(&manifest_id, 150).is_empty(),
+            "refused prune must return zero unearned fee refund"
+        );
+        assert_eq!(
+            reg.pending_prune_manifests(),
+            vec![manifest_id],
+            "refused prune must queue manifest for retry"
+        );
+        assert!(
             reg.get_manifest(&manifest_id).is_some(),
             "manifest stays live"
         );
@@ -6905,6 +7055,82 @@ mod tests {
             reg.get_manifest(&manifest_id).is_none(),
             "with the challenge closed, the manifest prunes"
         );
+    }
+
+    #[test]
+    fn refused_storage_prune_paid_zero_and_retries_when_challenge_closes() {
+        let mut state = crate::core::account::AccountState::new();
+        state.epoch_index = 150;
+        let payer = Address::from([0x71; 32]);
+        let op = operator();
+        let challenger = Address::from([0x73; 32]);
+        let m = good_manifest();
+        let manifest_id = m.manifest_id;
+        let shard_id = m.shards[0].shard_id;
+        let deal_id = state
+            .storage_registry
+            .open_deal(
+                42,
+                &m,
+                shard_id,
+                op,
+                0,
+                100,
+                200,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        state.storage_registry.set_deal_payer(deal_id, payer);
+        let challenge_id = state
+            .storage_registry
+            .open_challenge(
+                deal_id,
+                0,
+                8,
+                140,
+                160,
+                challenger,
+                StorageRegistry::required_opener_bond(8),
+            )
+            .unwrap();
+
+        let root_before = state.storage_registry.root();
+        crate::chain::blockchain::Blockchain::prune_storage_content_in_state(
+            &mut state,
+            &manifest_id,
+        )
+        .unwrap();
+        assert_eq!(
+            state.get_balance(&payer),
+            0,
+            "refused prune must credit zero unearned fee refund"
+        );
+        assert_eq!(
+            state.get_balance(&op),
+            0,
+            "refused prune must return zero operator bond"
+        );
+        assert_ne!(
+            state.storage_registry.root(),
+            root_before,
+            "queued retry must commit into StorageRegistry::root()"
+        );
+
+        state.epoch_index = 162;
+        let _ = state
+            .storage_registry
+            .finalize_missed_challenge(challenge_id, 162);
+        for queued in state.storage_registry.pending_prune_manifests() {
+            crate::chain::blockchain::Blockchain::prune_storage_content_in_state(
+                &mut state, &queued,
+            )
+            .unwrap();
+        }
+        assert!(state.storage_registry.pending_prune_manifests().is_empty());
+        assert!(state.storage_registry.get_manifest(&manifest_id).is_none());
     }
 
     #[test]
@@ -6985,6 +7211,7 @@ mod tests {
             .register_dictionary(dict, 4_096)
             .expect("the dictionary must register");
         let mut m = good_manifest();
+        m.owner = operator();
         m.dictionary_id = Some(dict);
         reg.register_manifest_with_source(&m)
             .expect("the manifest must register");
@@ -7002,10 +7229,24 @@ mod tests {
         );
         assert_eq!(reg.dictionaries.reference_count(&dict), Some(1));
 
+        assert!(
+            reg.has_claim(&manifest_id, &m.owner),
+            "the registered manifest carries its ownership claim"
+        );
+
         reg.prune_content(&manifest_id, 150);
         assert!(reg.access_events.is_empty());
         assert!(reg.self_host_policies.is_empty());
         assert_eq!(reg.dictionaries.reference_count(&dict), Some(0));
+        // The claim goes with the record. Left behind, it kept `owner_of`
+        // reporting an owner for content that is no longer registered, and the
+        // next registration of the same id created a second claim - after which
+        // `owner_of` returned `None` for both parties, permanently.
+        assert!(
+            reg.owner_of(&manifest_id).is_none(),
+            "a pruned manifest must not keep an ownership claim"
+        );
+        assert!(reg.manifest_claims.is_empty());
 
         reg.prune_content(&manifest_id, 151);
         assert_eq!(reg.dictionaries.reference_count(&dict), Some(0));
@@ -7855,10 +8096,14 @@ mod tests {
         /// Roots taken at 3dcbe16^ (before coding audits existed) for the
         /// same registry. A registry that never opened an audit must keep
         /// them byte for byte, or a chain that has no audit yet forks.
+        /// GOLDEN_CODED_ROOT re-frozen at 1101: manifest/deal serialization
+        /// grew fields after 3dcbe16 (provenance commitments), so the coded
+        /// fixture's root moved while the empty root - the side that must
+        /// never move - did not.
         const GOLDEN_EMPTY_ROOT: &str =
             "7cfd92f28556b4c748d9d4ef1ca7f94e8064f72d33c3f820182eb0916b6a8ec1";
         const GOLDEN_CODED_ROOT: &str =
-            "5b9680668889039aa61806707e0f7594f24d95603f23a5a44373afda2e1c2310";
+            "cfa189a2449818bdc02116ffccde4acfd23642336046afe7ec09a3a37ecbf31e";
 
         #[test]
         fn a_registry_without_audits_keeps_its_pre_audit_root() {
@@ -7943,7 +8188,10 @@ mod tests {
             let (mut reg, _, manifest) = coded();
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
-            reg.prune_content(&manifest.manifest_id, DEADLINE);
+            // BLG-0365 refuses a prune under an open audit, so the
+            // gone-manifest state is entered directly, as the expiry
+            // sweep leaves it.
+            reg.manifests.remove(&manifest.manifest_id);
             assert_eq!(
                 reg.finalize_missed_coding_audits(DEADLINE + 1, NOW),
                 vec![id]
@@ -7963,7 +8211,10 @@ mod tests {
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
             let (column, parity) = honest(&encoded, &rec.audit);
-            reg.prune_content(&manifest.manifest_id, DEADLINE);
+            // BLG-0365 refuses a prune under an open audit, so the
+            // gone-manifest state is entered directly, as the expiry
+            // sweep leaves it.
+            reg.manifests.remove(&manifest.manifest_id);
             let out = reg
                 .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE, NOW)
                 .expect("nothing to check against is not the operator's failure");
@@ -7982,7 +8233,10 @@ mod tests {
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
             let (column, parity) = honest(&encoded, &rec.audit);
-            reg.prune_content(&manifest.manifest_id, DEADLINE);
+            // BLG-0365 refuses a prune under an open audit, so the
+            // gone-manifest state is entered directly, as the expiry
+            // sweep leaves it.
+            reg.manifests.remove(&manifest.manifest_id);
             let err = reg
                 .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE + 1, NOW)
                 .expect_err("after the deadline");

@@ -233,7 +233,7 @@ impl<'a> Parser<'a> {
                         } else {
                             return Err(CompileError::ParserError("Expected type".to_string()));
                         };
-                        self.expect(Token::Comma)?;
+                        self.comma_or_close(&Token::BraceClose)?;
                         storage.push(StorageField { name, ty });
                     }
                     self.expect(Token::BraceClose)?;
@@ -259,7 +259,7 @@ impl<'a> Parser<'a> {
                         } else {
                             return Err(CompileError::ParserError("Expected type".to_string()));
                         };
-                        self.expect(Token::Comma)?;
+                        self.comma_or_close(&Token::BraceClose)?;
                         fields.push(StorageField {
                             name: fname,
                             ty: fty,

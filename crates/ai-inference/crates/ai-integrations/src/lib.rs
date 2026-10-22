@@ -15,6 +15,9 @@ pub mod rest;
 pub mod ws;
 
 /// The most items one batched message may carry.
+///
+/// Convenience: pub so a sender can size a batch against the same
+/// limit the parser in this crate refuses past.
 pub const MAX_BATCH_ITEMS: usize = 10_000;
 
 /// The batched message parsing helper: it turns an incoming JSON value into a

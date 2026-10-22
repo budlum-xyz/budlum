@@ -10,6 +10,9 @@ use tiny_keccak::{Hasher, Keccak};
 pub type Hash = [u8; 32];
 
 /// Largest state file `State::load` reads.
+///
+/// Convenience: pub so a writer of state files can refuse past the
+/// same cap `State::load` enforces in this module.
 pub const MAX_STATE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 // The privacy layer note/UTXO model - separate from the account model

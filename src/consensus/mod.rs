@@ -60,6 +60,16 @@ pub const ROUND_TIMEOUT_MS: u128 = 3 * 1000;
 /// above this one (JSON), or gossip starts admitting blocks every validator
 /// then refuses.
 pub const MAX_BLOCK_SIZE: usize = 1_000_000;
+/// Largest single slashing-evidence entry a block may carry.
+///
+/// Enforced where evidence is admitted (`submit_slashing_evidence`), where it
+/// is inlined into a block, and where the consensus engine hands its pool
+/// over, so an entry that is accepted is always small enough to be included in
+/// some future block. The block builder also reserves this much room for
+/// evidence before it spends the rest of the budget on transactions, so a
+/// saturated mempool cannot starve a queued double-sign proof out of every
+/// block.
+pub const MAX_SLASHING_EVIDENCE_BYTES: usize = 65_536;
 pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 5000;
 pub const MAX_REORG_DEPTH: usize = 100;
 use crate::core::account::AccountState;

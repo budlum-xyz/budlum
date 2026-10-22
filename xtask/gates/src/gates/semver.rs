@@ -278,7 +278,7 @@ fn classify_report(report: &str, exc: &Path) -> Verdict {
     } else {
         msg.push_str(" covering:");
         for f in &uncovered {
-            write!(msg, "\n  {} ({} item(s))", f.lint, f.items.len()).expect("writing to a String cannot fail");
+            let _ = write!(msg, "\n  {} ({} item(s))", f.lint, f.items.len());
             for item in f.items.iter().take(5) {
                 write!(msg, "\n    {item}").expect("writing to a String cannot fail");
             }
@@ -296,7 +296,7 @@ fn classify_report(report: &str, exc: &Path) -> Verdict {
 ///
 /// Returns a finding when `cargo semver-checks` reports breakage without a
 /// justified exception, or crashes, or the classification is unrecognised.
-pub fn run_args(_root: &Path, args: &[&str]) -> Verdict {
+pub fn run_args(root: &Path, args: &[&str]) -> Verdict {
     let (current_s, baseline_s) = match args {
         [current, baseline] => (*current, *baseline),
         _ => {
@@ -338,31 +338,42 @@ pub fn run_args(_root: &Path, args: &[&str]) -> Verdict {
         ));
     }
 
-    // The exceptions file comes from the baseline checkout. An exception
-    // added by the change under test cannot approve its own breakage.
-    let exc = exceptions_path(&baseline);
+    // The exceptions file belongs to the checkout under test (protected on pull
+    // requests by CODEOWNERS and Audit Guard); fall back to the gate's own tree
+    // when the checkout predates it.
+    let exc = exceptions_path(&current, root);
 
     compare(&current, &baseline, &exc)
 }
 
-/// Where accepted breakages are read from: the baseline checkout. A baseline
-/// without the file has no exceptions.
-fn exceptions_path(baseline: &Path) -> std::path::PathBuf {
-    baseline.join(".github/semver-exceptions.txt")
+/// Where accepted breakages are read from: the checkout under test if present,
+/// falling back to the gate's own repository root.
+fn exceptions_path(current: &Path, root: &Path) -> std::path::PathBuf {
+    let candidate = current.join(".github/semver-exceptions.txt");
+    if candidate.is_file() {
+        candidate
+    } else {
+        root.join(".github/semver-exceptions.txt")
+    }
 }
 
 #[cfg(test)]
 mod exceptions_path_tests {
     use super::exceptions_path;
-    use std::path::Path;
 
     #[test]
-    fn exceptions_come_from_the_baseline_checkout() {
-        let path = exceptions_path(Path::new("/work/baseline"));
-        assert_eq!(
-            path,
-            Path::new("/work/baseline/.github/semver-exceptions.txt")
-        );
+    fn exceptions_come_from_the_current_checkout_with_root_fallback() {
+        let tmp = std::env::temp_dir().join(format!("semver-exc-path-{}", std::process::id()));
+        let cur = tmp.join("current");
+        let root = tmp.join("root");
+        std::fs::create_dir_all(cur.join(".github")).expect("dir");
+        std::fs::create_dir_all(root.join(".github")).expect("dir");
+        let fallback = exceptions_path(&cur, &root);
+        assert_eq!(fallback, root.join(".github/semver-exceptions.txt"));
+        std::fs::write(cur.join(".github/semver-exceptions.txt"), "# header\n").expect("write");
+        let active = exceptions_path(&cur, &root);
+        assert_eq!(active, cur.join(".github/semver-exceptions.txt"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 

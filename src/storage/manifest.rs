@@ -71,6 +71,9 @@ pub const MIN_AEAD_CIPHERTEXT_BYTES: u64 = 16;
 
 /// Most shards one manifest may list. The check runs before any per-shard work, so a hostile
 /// manifest cannot make validation allocate or loop without bound.
+///
+/// Convenience: pub so an upload caller can refuse past the same
+/// shard-count bound manifest validation enforces here.
 pub const MAX_MANIFEST_SHARDS: usize = 65_536;
 
 /// How the bytes behind a manifest were protected before they left the
@@ -634,6 +637,20 @@ impl ContentManifest {
         self
     }
 
+    /// Test-only until a dictionary mint path exists: nothing on the live
+    /// upload path attaches a dictionary, so there is no production caller
+    /// to keep honest yet. Mirrors the edition builder above.
+    #[cfg(test)]
+    /// Attach (or clear) the dictionary commitment. Recomputes the id: a
+    /// manifest whose provenance changed under a stale id is exactly the
+    /// squatted-registration shape `verify_id` refuses.
+    #[must_use]
+    pub fn with_dictionary_id(mut self, dictionary_id: Option<ContentId>) -> Self {
+        self.dictionary_id = dictionary_id;
+        self.recompute_id();
+        self
+    }
+
     fn recompute_id(&mut self) {
         self.manifest_id = manifest_id_from_parts(
             &self.shards,
@@ -1146,6 +1163,24 @@ mod tests {
         assert_eq!(
             hex::encode(m.manifest_id.0),
             "eb4912748b11896901a5ab57022cb8e117554dfb67233933fd3ea2e9fc076ca1"
+        );
+    }
+
+    /// Same vector as the browser copy (`crates/budscan/src/fetch.rs`,
+    /// `a_dictionary_bound_manifest_id_matches_the_chain_vector`).
+    ///
+    /// The single-shard vector above is dictionary-free, so it cannot see a
+    /// missing `BDLM_DICTIONARY` label on the browser side - and that is
+    /// exactly what drifted: every dictionary-bound manifest hashed
+    /// differently there and failed its own integrity check.
+    #[test]
+    fn manifest_id_of_a_dictionary_bound_manifest_matches_the_browser_vector() {
+        let m = ContentManifest::from_bytes_sliced(b"hello", 1024)
+            .unwrap()
+            .with_dictionary_id(Some(ContentId([0x11; 32])));
+        assert_eq!(
+            hex::encode(m.manifest_id.0),
+            "44a313a2852858e91df89880151350a22a8c236a3c0f1fc7c916c2dfb8f5c257"
         );
     }
 

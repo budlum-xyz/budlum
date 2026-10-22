@@ -45,6 +45,10 @@ impl BnsRegistry {
 
     /// A full name: dot separated valid labels (no empty label, so no leading,
     /// trailing or doubled dot).
+    ///
+    /// Convenience: the full-name rule over `is_valid_label`, pub so
+    /// registration and resolution ask one definition; the label rule
+    /// is the half on the in-tree path today.
     pub fn is_valid_name(name: &str) -> bool {
         name.split('.').all(Self::is_valid_label)
     }

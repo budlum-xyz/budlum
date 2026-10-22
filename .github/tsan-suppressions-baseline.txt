@@ -34,6 +34,12 @@
 #   race:sled::arc        349
 #   race:sled::ivec         0  -> rule deleted as dead (it silenced nothing)
 #
+# Re-measured 2026-10-21, Security Hardening run 39644993179, job
+# 119378581909 (3792 lib tests passed, 0 unsuppressed warnings):
+#
+#   race:sled::pagecache  671
+#   race:sled::arc        480
+#
 # Headroom policy: ceiling = 2 x measured count.
-race:sled::pagecache 630
+race:sled::pagecache 1350
 race:sled::arc 700

@@ -62,6 +62,12 @@ pub struct SlotDisclosure {
 impl SlotDisclosure {
     /// The commitment this disclosure claims to open - computed, never
     /// stored, so there is no field to lie through.
+    ///
+    /// WIRING: exposed for the wallet/verifier side of the identity door
+    /// named in the module header, which recomputes the claimed commitment
+    /// from the disclosed preimage before checking it against a
+    /// credential; in-tree that check is still pinned by this module's
+    /// tests.
     #[must_use]
     pub fn recompute_commitment(&self, schema: &str) -> [u8; 32] {
         field_commitment(

@@ -378,9 +378,12 @@ mod tests {
 
     #[test]
     fn independent_path_refuses_a_stream_id_the_bytes_do_not_give() {
-        // Frames bound to an arbitrary stream id decode alone and match
-        // expectations built from the same id; only the independent path
-        // recomputes the id from the rebuilt bytes.
+        // Frames bound to an arbitrary stream id once decoded alone and
+        // matched expectations built from the same id; the primary receive
+        // path now recomputes the commitment from the rebuilt bytes at
+        // finish, so the forgery already dies at decode - and the
+        // independent path refuses the same frames for the same reason
+        // (pinned directly in `qr_verify_indep`).
         let content = b"forged-stream-id".repeat(12);
         let enc = encode_qr_video(&content, 64, None).unwrap();
         let sc = [7u8; 32];
@@ -398,10 +401,10 @@ mod tests {
             kind: Some(PayloadKind::ContentBytes),
         };
         let blob = video.to_bytes();
-        assert!(decode_qr_video(&blob).is_ok());
+        assert!(decode_qr_video(&blob).is_err());
         assert!(matches!(
             verify_qr_video(&blob, &exp, LIMIT),
-            Err(VerifyError::Independent(IndepError::StreamCommitment))
+            Err(VerifyError::Decode(_))
         ));
     }
 }

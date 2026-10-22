@@ -789,7 +789,8 @@ mod type_tests {
         let src = "pub a: IntCounterVec,\npub b: HistogramVec,\npub c: Gauge,\npub d: u64,\n";
         let kinds: Vec<String> = parse_metrics(src).into_iter().map(|m| m.kind).collect();
         assert_eq!(kinds, vec!["IntCounterVec", "HistogramVec", "Gauge"]);
-        let leaked = "#[cfg(test)]\nmod t {\n    fn f(a: [u8; 4]) { hidden.x.inc(); }\n}\nfn prod() {}\n";
+        let leaked =
+            "#[cfg(test)]\nmod t {\n    fn f(a: [u8; 4]) { hidden.x.inc(); }\n}\nfn prod() {}\n";
         assert!(!strip_cfg_test(leaked).contains("hidden"));
     }
 }

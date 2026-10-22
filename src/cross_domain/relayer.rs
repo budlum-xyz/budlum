@@ -190,6 +190,10 @@ pub struct UniversalRelayer {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+///
+/// Convenience: pub because the pending queue is persisted state
+/// the chain saves and restores with the relayer; the queue itself
+/// stays private to `UniversalRelayer`.
 pub struct PendingRelay {
     pub message_id: MessageId,
     pub source_domain: DomainId,

@@ -50,6 +50,10 @@ impl QuarantineReason {
 
     /// Inverse of [`Self::as_byte`]; `None` for an unknown byte.
     #[must_use]
+    ///
+    /// Convenience: the decoding half of the byte form, kept beside
+    /// `as_byte` so the pair cannot drift; a stored-record reader is the
+    /// caller, and the round-trip is pinned by this module's tests.
     pub const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::NonCanonicalProgram),

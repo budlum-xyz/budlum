@@ -1453,17 +1453,9 @@ impl Wallet {
         }
         let digest = privacy_transfer::public_digest(&nullifiers, &output_commitments);
         // BLG-0275 (P17-F09): the signature covers the binding message, not
-        // the bare digest; the binding data travels on the intent so the
-        // verifier reconstructs it from public fields.
-        let auth_msg = privacy_transfer::authorization_message(
-            chain_id,
-            &wallet_address,
-            sender_nonce,
-            &digest,
-        );
-        let authorization_sig = self.sign(&auth_msg);
-
-        Ok(PrivateTransferIntent {
+        // the bare digest; construct the intent first and sign the exact helper
+        // relayers and verifiers call so producer and verifier cannot diverge.
+        let mut intent = PrivateTransferIntent {
             output_commitments,
             nullifiers,
             sum_in,
@@ -1474,8 +1466,12 @@ impl Wallet {
             chain_id,
             sender: wallet_address,
             sender_nonce,
-            authorization_sig,
-        })
+            authorization_sig: [0u8; ML_DSA_87_SIGNATURE_LEN],
+        };
+        let auth_msg = privacy_transfer::intent_authorization_message(&intent);
+        intent.authorization_sig = self.sign(&auth_msg);
+
+        Ok(intent)
     }
 
     /// The smallest blinding counter this wallet will still hand out.
@@ -1486,6 +1482,10 @@ impl Wallet {
     /// [`Self::resume_blinding_counter`], or the first restored note reuses a
     /// blinding the old wallet already spent.
     #[must_use]
+    ///
+    /// WIRING: exposed for the host wallet application, which alone owns
+    /// persistence across sessions; this crate is the library and the
+    /// embedding app is the caller, as the note above records.
     pub fn next_blinding_counter(&self) -> u64 {
         self.next_blinding_counter
     }
@@ -1493,6 +1493,9 @@ impl Wallet {
     /// Restore the blinding counter saved from an earlier session. It only
     /// moves forward: a value below the current one is ignored, so a stale
     /// save cannot reopen counters that were already used.
+    ///
+    /// WIRING: exposed for the host wallet application restoring a
+    /// session, the other half of `next_blinding_counter` above.
     pub fn resume_blinding_counter(&mut self, next: u64) {
         if next > self.next_blinding_counter {
             self.next_blinding_counter = next;

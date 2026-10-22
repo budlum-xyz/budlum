@@ -103,7 +103,7 @@ const ALLOWED_FILES: &[&str] = &[
 /// so that a localisation gains files without the gate having to be edited,
 /// and it is deliberately narrow - only the Turkish locale of the browser,
 /// never a source tree.
-const ALLOWED_DIRS: &[&str] = &["browser/l10n/tr-TR/"];
+const ALLOWED_DIRS: &[&str] = &["crates/budscan/browser/l10n/tr-TR/"];
 
 /// The one Turkish word that may appear anywhere: the label on the link to the
 /// Turkish README. Scrubbed before both scans.
@@ -977,7 +977,7 @@ fn exemption_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
         clean,
         tmp,
         "l10n",
-        "browser/l10n/tr-TR/app.ftl",
+        "crates/budscan/browser/l10n/tr-TR/app.ftl",
         "badge-verified =\n    .value = doğrulandı; kanit dogrulama\n",
     )? {
         let _ = fs::remove_dir_all(tmp);
@@ -993,7 +993,7 @@ fn exemption_canaries(clean: &Path, tmp: &Path) -> Result<usize, String> {
         clean,
         tmp,
         "l10nspill",
-        "browser/l10n/en-US/app.ftl",
+        "crates/budscan/browser/l10n/en-US/app.ftl",
         "badge-verified =\n    .value = doğrulandı; kanit dogrulama\n",
     )? {
         let _ = fs::remove_dir_all(tmp);

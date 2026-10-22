@@ -467,23 +467,30 @@ fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
 ///
 /// `minting-paths-are-counted` proves the ceiling by listing every
 /// `try_add_balance` call in production code and requiring a written reason
-/// why each one moves money instead of creating it. It read
-/// `src/chain/blockchain.rs` and `src/core/account.rs`. The executor also
+/// why each one moves money instead of creating it. It once read only
+/// `src/chain/blockchain.rs` and `src/core/account.rs`; the executor also
 /// credits a bridge mint, so a mint that bypassed the ceiling there was
-/// invisible to the gate. The gate's source list must name the executor.
+/// invisible to the gate. The gate now scans the whole `src` tree, and its
+/// justification list must still name the executor explicitly - a tree-wide
+/// scan without the executor's written accounting would read the file
+/// without ever asking what its credits are.
 #[test]
 fn minting_gate_reads_the_executor() {
     let gate = include_str!("../../xtask/gates/src/gates/minting_paths_are_counted.rs");
-    let sources_at = gate
-        .find("const SOURCES: &[&str] = &[")
-        .expect("the gate must keep its SOURCES list");
-    let sources_end = gate[sources_at..]
-        .find("];")
-        .map(|end| sources_at + end)
-        .expect("SOURCES list must close");
-    let sources = &gate[sources_at..sources_end];
     assert!(
-        sources.contains("src/execution/executor.rs"),
-        "minting-paths-are-counted must read src/execution/executor.rs; it credits bridge mints"
+        gate.contains("const SCAN_ROOT: &str = \"src\""),
+        "minting-paths-are-counted must scan the whole src tree, the executor included"
+    );
+    let list_at = gate
+        .find("const TRANSFER_JUSTIFICATIONS")
+        .expect("the gate must keep its justification list");
+    let list_end = gate[list_at..]
+        .find("\n];")
+        .map(|end| list_at + end)
+        .expect("justification list must close");
+    let list = &gate[list_at..list_end];
+    assert!(
+        list.contains("src/execution/executor.rs"),
+        "minting-paths-are-counted must account for src/execution/executor.rs; it credits bridge mints"
     );
 }

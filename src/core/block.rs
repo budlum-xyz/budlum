@@ -32,6 +32,8 @@ pub struct BlockHeader {
     pub state_root: String,
     pub tx_root: String,
     pub slashing_evidence: Option<Vec<SlashingEvidence>>,
+    #[serde(default)]
+    pub slashing_reports: Option<Vec<crate::registry::evidence::SlashingReport>>,
     pub nonce: u64,
     pub epoch: u64,
     pub slot: u64,
@@ -64,6 +66,7 @@ struct BlockPreimage<'a> {
     nonce: u64,
     producer: Option<&'a Address>,
     slashing_evidence: Option<&'a Vec<SlashingEvidence>>,
+    slashing_reports: Option<&'a Vec<crate::registry::evidence::SlashingReport>>,
     chain_id: u64,
     state_root: &'a str,
     epoch: u64,
@@ -115,6 +118,10 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
     // activation height, a persisted format version, and verification
     // routed through the preimage of the block's own format, recorded
     // in the same commit as the new tag.
+    let report_bytes = p
+        .slashing_reports
+        .map(|r| bincode::serialize(r).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec()));
+
     let storage_root_bytes = presence_tagged(p.storage_root);
     let mut fields: Vec<&[u8]> = vec![
         b"BDLM_BLOCK_V4",
@@ -137,6 +144,9 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
     if let Some(shards_root) = &p.shards_root {
         fields.push(shards_root.as_slice());
     }
+    if let Some(ref rb) = report_bytes {
+        fields.push(rb.as_slice());
+    }
     hash_fields_bytes(&fields)
 }
 
@@ -152,6 +162,7 @@ impl BlockHeader {
             state_root: block.state_root.clone(),
             tx_root: block.tx_root.clone(),
             slashing_evidence: block.slashing_evidence.clone(),
+            slashing_reports: block.slashing_reports.clone(),
             nonce: block.nonce,
             epoch: block.epoch,
             slot: block.slot,
@@ -176,6 +187,7 @@ impl BlockHeader {
             nonce: self.nonce,
             producer: self.producer.as_ref(),
             slashing_evidence: self.slashing_evidence.as_ref(),
+            slashing_reports: self.slashing_reports.as_ref(),
             chain_id: self.chain_id,
             state_root: &self.state_root,
             epoch: self.epoch,
@@ -224,6 +236,8 @@ pub struct Block {
     pub producer_public_key: Vec<u8>,
     pub chain_id: u64,
     pub slashing_evidence: Option<Vec<SlashingEvidence>>,
+    #[serde(default)]
+    pub slashing_reports: Option<Vec<crate::registry::evidence::SlashingReport>>,
     pub state_root: String,
     pub tx_root: String,
     pub epoch: u64,
@@ -268,6 +282,7 @@ impl Block {
             producer_public_key: Vec::new(),
             chain_id,
             slashing_evidence: None,
+            slashing_reports: None,
             state_root: String::new(),
             tx_root: String::new(),
             epoch: 0,
@@ -389,6 +404,7 @@ impl Block {
             nonce: self.nonce,
             producer: self.producer.as_ref(),
             slashing_evidence: self.slashing_evidence.as_ref(),
+            slashing_reports: self.slashing_reports.as_ref(),
             chain_id: self.chain_id,
             state_root: &self.state_root,
             epoch: self.epoch,

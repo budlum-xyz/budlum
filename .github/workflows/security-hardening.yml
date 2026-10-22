@@ -135,7 +135,17 @@ jobs:
     # 312 mutants / 24 = 13 mutants x 350 s = ~76 minutes, under the ceiling.
     # Shards need no coordination - each independently discovers the same
     # mutant set and tests its own slice.
-    timeout-minutes: 120
+    #
+    # Third measurement, run 39490423359 (87245eb6): the library suite had
+    # grown well past the 286 s above. The ordinary Budlum Core job now
+    # measures 3,781 tests in 649 s, mutant test phases measured 451-899 s,
+    # and nine shards were killed inside the 900 s per-run budget with 3,780
+    # tests done and exactly one - the differential VM oracle - still
+    # running: red shards that measured nothing. The per-run budget is now
+    # 1800 s and this ceiling 240 minutes. Neither softens a verdict - a
+    # TIMEOUT is never "caught" - they only let a slower suite finish saying
+    # what it was already trying to say.
+    timeout-minutes: 240
     strategy:
       # The point of the run is the LIST of survivors; cancelling seven shards
       # because one found something hides the rest of that list.
@@ -281,8 +291,18 @@ jobs:
           # What did soften the gate was a baseline that never ran.
           # `--baseline=skip` is still NOT used: every shard proves its own
           # tree is green before any verdict is trusted.
-          cargo mutants --in-place --timeout 900 --in-diff /tmp/pr.diff \
-            --shard "${SHARD}/24" -- --lib
+          #
+          # 900 stopped being enough once the suite grew (see the third
+          # measurement on the job): run 39490423359 killed nine baselines at
+          # 900 s with one test outstanding, so the budget is 1800 s now.
+          #
+          # `--bins` joins `--lib`: the diff can touch `src/bin/bud.rs`, and
+          # under `--lib` alone no test that could catch a mutant there ever
+          # ran - run 39490423359 reported seven such survivors that were not
+          # evidence about the tests at all, only about the flag. Binary unit
+          # tests belong to the same claim library tests make.
+          cargo mutants --in-place --timeout 1800 --in-diff /tmp/pr.diff \
+            --shard "${SHARD}/24" -- --lib --bins
 
   supply-chain:
     name: cargo-supply-chain (publisher visibility)
@@ -308,7 +328,7 @@ jobs:
       # still tolerates the list shape, but the pin stops the JSON from being
       # rewritten underneath a review.
       - name: cargo install cargo-supply-chain (version pinned)
-        run: cargo install cargo-supply-chain --version 0.3.7 --locked
+        run: cargo install cargo-supply-chain --version 0.3.8 --locked
       # Every run of `publishers` asked crates.io per crate at more than about
       # 2 seconds each, and with 566 dependencies that exceeded the 15-minute
       # timeout: the job was cancelled and produced no output. `update` fetches
@@ -357,7 +377,14 @@ jobs:
     # that run. The ceiling is now 120 minutes. This is not a softening; it is
     # letting the measurement finish. A run that ends with zero findings says
     # far more than a run that never ends.
-    timeout-minutes: 120
+    #
+    # Second measurement, run 39490423359 (87245eb6): the suite has since
+    # grown to 3,781 tests and 649 s uninstrumented. Under TSan it completed
+    # 3,237, then produced no completed test for the last 32 minutes before
+    # the 120-minute ceiling cancelled it with the two chaos-v2 load tests
+    # still outstanding - no race found, but also no verdict. The ceiling is
+    # now the hosted maximum of 360 minutes for the same reason as above.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

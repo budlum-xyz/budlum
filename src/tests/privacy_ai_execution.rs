@@ -38,7 +38,13 @@ fn private_transfer_submit_spend_and_create() {
     state.note_registry.insert_note(c_in).unwrap();
 
     let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
-    let sig = kp.sign(&digest).to_vec();
+    let auth_msg = PrivateTransferSubmit::authorization_message(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        from.as_bytes(),
+        0,
+        &digest,
+    );
+    let sig = kp.sign(&auth_msg).to_vec();
     let sub = PrivateTransferSubmit {
         spent_commitments: vec![c_in],
         nullifiers: vec![n1],
@@ -77,12 +83,18 @@ fn private_transfer_double_spend_fails() {
     let c_out = hash_from_field(7);
     state.note_registry.insert_note(c_in).unwrap();
     let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
+    let auth_msg = PrivateTransferSubmit::authorization_message(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        from.as_bytes(),
+        0,
+        &digest,
+    );
     let sub = PrivateTransferSubmit {
         spent_commitments: vec![c_in],
         nullifiers: vec![n1],
         output_commitments: vec![c_out],
         nullifier_proofs: vec![budlum_note_packing::hash_from_field(0xA11CE)],
-        authorization_sig: kp.sign(&digest).to_vec(),
+        authorization_sig: kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
     };
     let mut tx = Transaction::new_with_chain_id(
@@ -102,12 +114,18 @@ fn private_transfer_double_spend_fails() {
     let c_out2 = hash_from_field(5);
     state.note_registry.insert_note(c2).unwrap();
     let digest2 = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out2]);
+    let auth_msg2 = PrivateTransferSubmit::authorization_message(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        from.as_bytes(),
+        1,
+        &digest2,
+    );
     let sub2 = PrivateTransferSubmit {
         spent_commitments: vec![c2],
         nullifiers: vec![n1],
         output_commitments: vec![c_out2],
         nullifier_proofs: vec![budlum_note_packing::hash_from_field(0xA11CE)],
-        authorization_sig: kp.sign(&digest2).to_vec(),
+        authorization_sig: kp.sign(&auth_msg2).to_vec(),
         public_digest: digest2,
     };
     let mut tx2 = Transaction::new_with_chain_id(
@@ -241,12 +259,19 @@ fn transfer_fixture(
     let c_out = hash_from_field(23);
     state.note_registry.insert_note(c_in).unwrap();
     let digest = PrivateTransferSubmit::compute_public_digest(&[n1], &[c_out]);
+    let from = Address::from(kp.public_key_bytes());
+    let auth_msg = PrivateTransferSubmit::authorization_message(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        from.as_bytes(),
+        0,
+        &digest,
+    );
     let sub = PrivateTransferSubmit {
         spent_commitments: vec![c_in],
         nullifiers: vec![n1],
         output_commitments: vec![c_out],
         nullifier_proofs: vec![proof],
-        authorization_sig: kp.sign(&digest).to_vec(),
+        authorization_sig: kp.sign(&auth_msg).to_vec(),
         public_digest: digest,
     };
     (sub, c_in, c_out)
@@ -344,4 +369,48 @@ fn private_transfer_spending_an_unregistered_commitment_is_refused() {
     assert!(Executor::apply_transaction(&mut state, &tx).is_err());
     assert!(!state.note_registry.contains_commitment(&c_in));
     assert!(!state.note_registry.contains_commitment(&c_out));
+}
+
+#[test]
+fn private_transfer_replayed_under_another_nonce_or_bare_digest_is_refused() {
+    let kp = KeyPair::generate().unwrap();
+    let from = Address::from(kp.public_key_bytes());
+    let mut state = funded_state(from, 1_000_000);
+    let (mut bare_sub, c_in, _) = transfer_fixture(&kp, &mut state);
+    // Signing only the bare `public_digest` (V1 preimage) must be rejected now
+    // that the executor enforces `authorization_message(chain_id, sender, nonce, digest)`.
+    bare_sub.authorization_sig = kp.sign(&bare_sub.public_digest).to_vec();
+    let bare_tx = signed_tx(
+        &kp,
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        TransactionType::PrivateTransferSubmit(bare_sub.clone()),
+    );
+    let err = Executor::apply_transaction(&mut state, &bare_tx)
+        .expect_err("bare public_digest signature must be rejected");
+    assert!(err.contains("authorization_sig invalid"), "got: {err}");
+
+    // Replaying an intent signed for nonce 0 at nonce 1 must also be rejected.
+    state.get_or_create(&from).nonce = 1;
+    let valid_nonce_zero = PrivateTransferSubmit::authorization_message(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        from.as_bytes(),
+        0,
+        &bare_sub.public_digest,
+    );
+    bare_sub.authorization_sig = kp.sign(&valid_nonce_zero).to_vec();
+    let mut replayed_tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        100,
+        1,
+        vec![],
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        TransactionType::PrivateTransferSubmit(bare_sub),
+    );
+    replayed_tx.sign(&kp);
+    let err = Executor::apply_transaction(&mut state, &replayed_tx)
+        .expect_err("nonce-0 authorization replayed at nonce 1 must be rejected");
+    assert!(err.contains("authorization_sig invalid"), "got: {err}");
+    assert!(state.note_registry.contains_commitment(&c_in));
 }

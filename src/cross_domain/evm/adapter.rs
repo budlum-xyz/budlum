@@ -66,6 +66,11 @@ pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 /// topic and a confirmation count. There is no key material here to leak
 /// into a log line.
 #[derive(Debug)]
+///
+/// WIRING: the EVM deposit adapter for the relayer's adapter
+/// registry; no production relayer registers an EVM adapter yet
+/// (a lock test holds that line), so deposit verification is
+/// pinned by this module's tests.
 pub struct EvmChainAdapter {
     /// The Ethereum bridge contract address (the deposit event emitter).
     pub bridge_address: Vec<u8>,
@@ -93,6 +98,10 @@ impl EvmChainAdapter {
     /// attestations (form B), the deposit's header chain must touch this
     /// anchor or the deposit refuses.
     #[must_use]
+    ///
+    /// WIRING: the operator configuration for the interim finality rule
+    /// above; it is set when an operator actually registers this
+    /// adapter, which no production relayer does yet.
     pub fn with_trusted_checkpoint(mut self, number: u64, hash: [u8; 32]) -> Self {
         self.trusted_checkpoint = Some((number, hash));
         self

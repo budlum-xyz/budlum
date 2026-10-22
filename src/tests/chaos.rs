@@ -609,6 +609,7 @@ mod chaos_tests {
             use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
             let pos_proof = FinalityProof::PoS {
                 cert: FinalityCert {
+                    chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                     epoch: i,
                     checkpoint_height: i,
                     checkpoint_hash: format!("pos_hash_{i}"),
@@ -1101,12 +1102,18 @@ mod chaos_tests {
         let mut tx = Transaction::new_with_fee(alice, bob, 100, 1, 0, vec![]);
         tx.sign(&alice_kp);
 
+        // The executor deliberately does not compare nonces (BLG-0296): the
+        // ingest gate owns that invariant and `validate_and_add_block` runs
+        // it before every application. A caller bypassing the gate owns the
+        // nonce, so the honest replay check goes through the same door block
+        // application uses: validate, then apply.
+        chain_a.state.validate_transaction(&tx).unwrap();
         Executor::apply_transaction(&mut chain_a.state, &tx).unwrap();
         let alice_after = chain_a.state.get_balance(&alice);
         let bob_after = chain_a.state.get_balance(&bob);
         assert_eq!(bob_after, 100);
         assert!(
-            Executor::apply_transaction(&mut chain_a.state, &tx).is_err(),
+            chain_a.state.validate_transaction(&tx).is_err(),
             "replaying an applied transaction must be refused"
         );
         assert_eq!(chain_a.state.get_balance(&alice), alice_after);

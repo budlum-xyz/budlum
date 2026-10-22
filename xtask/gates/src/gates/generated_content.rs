@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-fn code_of(root: &Path) -> Result<String, String> {
+fn raw_of(root: &Path) -> Result<String, String> {
     let f = root.join("src/storage/generated.rs");
     if !f.is_file() {
         return Err(format!(
@@ -16,10 +16,29 @@ fn code_of(root: &Path) -> Result<String, String> {
             f.display()
         ));
     }
-    let text = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+    std::fs::read_to_string(&f).map_err(|e| e.to_string())
+}
+
+fn code_of(root: &Path) -> Result<String, String> {
+    let text = raw_of(root)?;
     // Comments and string literals are blanked: `meter.charge` or `IdMismatch`
     // in prose must not satisfy a check.
     Ok(super::rust_literals::scrub(&text))
+}
+
+/// The edition commitment tag is a byte-string literal, so it cannot be
+/// looked for in the scrubbed view (`scrub` blanks every literal, which made
+/// this check unsatisfiable: even the canary's clean module was refused).
+/// Look in the raw source instead, with comments removed so that naming the
+/// tag in prose still does not count as binding it.
+fn has_commitment_tag(raw: &str) -> bool {
+    let no_block = super::rust_literals::strip_block_comments(raw);
+    no_block.lines().any(|line| {
+        line.split("//")
+            .next()
+            .unwrap_or("")
+            .contains("b\"BUD_EDITION_3\"")
+    })
 }
 
 /// A float is `f32`/`f64` (types, `as` casts) or a `N.Nf` literal, with
@@ -158,7 +177,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             "BudStorageEdition::admits_body / check_source missing.\n               edition Three must refuse Stored/Hybrid/Derived at the type boundary.",
         ));
     }
-    if !code.contains("BUD_EDITION_3") {
+    if !has_commitment_tag(&raw_of(root)?) {
         return Err(String::from(
             "Three edition commitment tag BUD_EDITION_3 missing.\n               Without a bound tag, edition can be rewritten under a stable id.",
         ));
@@ -214,6 +233,16 @@ pub fn self_test() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_commitment_tag_is_the_byte_literal_not_a_mention() {
+        assert!(has_commitment_tag(
+            "fn t() -> Vec<u8> { b\"BUD_EDITION_3\".to_vec() }\n"
+        ));
+        assert!(!has_commitment_tag("// b\"BUD_EDITION_3\"\nfn t() {}\n"));
+        assert!(!has_commitment_tag("/* b\"BUD_EDITION_3\" */\nfn t() {}\n"));
+        assert!(!has_commitment_tag("fn t() {}\n"));
+    }
 
     #[test]
     fn id_check_may_sit_after_an_inner_block() {

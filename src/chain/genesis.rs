@@ -28,6 +28,9 @@ pub const GENESIS_TIMESTAMP: u128 = 0;
 /// bridge-enabled PoW domain (P25-F01). 2^64 hashes per header is out of reach
 /// for a self-mined forgery; the cumulative minimum scales with the
 /// confirmation depth.
+///
+/// Convenience: pub so the bridge finality side can read the same
+/// mainnet floor the genesis parameters in this file are built with.
 pub const MAINNET_BRIDGE_POW_MIN_DIFFICULTY_BITS: u32 = 64;
 
 const LAUNCHED_PQ_SCHEME: &str = "ml-dsa-65";
@@ -370,6 +373,9 @@ impl GenesisConfig {
     /// # Errors
     ///
     /// Names the total that would be minted and the supply it exceeds.
+    ///
+    /// Convenience: pub so ceremony tooling can run the whole-issuance
+    /// check on its own; in-tree `validate_consensus_ceremony` calls it.
     pub fn validate_total_issuance(&self) -> Result<(), String> {
         let allocations: u128 = self.allocations.iter().map(|(_, a)| u128::from(*a)).sum();
         let distribution = self
@@ -609,6 +615,16 @@ impl GenesisConfig {
                     ));
                 }
             }
+            if !self.poa_authorities.is_empty() {
+                let declared: std::collections::BTreeSet<Address> =
+                    self.poa_authorities.iter().copied().collect();
+                if declared != unique {
+                    return Err(format!(
+                        "Mainnet PoA domain {} authorities disagree with top-level poa_authorities",
+                        domain.id
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -633,6 +649,7 @@ impl GenesisConfig {
             producer_public_key: Vec::new(),
             chain_id: self.chain_id,
             slashing_evidence: None,
+            slashing_reports: None,
             state_root: genesis_state.calculate_state_root(),
             tx_root: "0".repeat(64),
             epoch: 0,
@@ -701,14 +718,26 @@ impl GenesisConfig {
                 entry.slashed = false;
             }
         }
-        // P01-F07 (BLG-0012): a PoA domain was permissioned only once it had an
-        // admin, and nothing in production ever gave it one - so any funded
-        // account could stake its way into the leader set. A genesis that
-        // lists authorities now declares the gate: the first one is the
-        // domain's admin (the trust root, as governance would appoint) and
-        // every listed authority is admitted for the longest KYC horizon, so
-        // the set the chain starts from is the set it keeps admitting.
-        if let Some((admin, rest)) = self.poa_authorities.split_first() {
+        // P01-F07 (BLG-0012): seed the PoA onboarding trust root from the
+        // ceremony-declared bootstrap PoA domain authorities when top-level
+        // `poa_authorities` is empty, keeping `poa_authorities` as an explicit
+        // override for custom chains that declare no bootstrap PoA domain.
+        let declared: Vec<Address> = if self.poa_authorities.is_empty() {
+            self.bootstrap_domains
+                .iter()
+                .find(|domain| domain.kind == "poa")
+                .map(|domain| {
+                    domain
+                        .poa_authorities
+                        .iter()
+                        .filter_map(|authority| Address::from_hex(authority).ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            self.poa_authorities.clone()
+        };
+        if let Some((admin, rest)) = declared.split_first() {
             const GENESIS_POA_DOMAIN: crate::domain::types::DomainId = 0;
             const GENESIS_KYC_COMMITMENT: [u8; 32] = [0x01; 32];
             state.poa_onboarding.add_admin(GENESIS_POA_DOMAIN, *admin);
@@ -1432,6 +1461,7 @@ mod tests {
                 epoch: 0,
                 checkpoint_height: 1,
                 checkpoint_hash: hex::encode(commitment.domain_block_hash),
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 agg_sig_bls: vec![],
                 bitmap: vec![],
                 set_hash: snapshot.set_hash.clone(),
@@ -1539,6 +1569,32 @@ mod tests {
             original.build_genesis_block().hash,
             decoded.build_genesis_block().hash
         );
+    }
+
+    #[test]
+    fn mainnet_genesis_seeds_permissioned_poa_onboarding_gate() {
+        let from_json = load_genesis_json("config/mainnet-genesis.json");
+        let state = from_json.build_state();
+        assert!(
+            state.poa_is_permissioned(0),
+            "mainnet genesis must seed the PoA onboarding gate from bootstrap_domains"
+        );
+        let expected: std::collections::BTreeSet<Address> = from_json
+            .bootstrap_domains
+            .iter()
+            .find(|d| d.kind == "poa")
+            .unwrap()
+            .poa_authorities
+            .iter()
+            .map(|a| Address::from_hex(a).unwrap())
+            .collect();
+        let admitted: std::collections::BTreeSet<Address> =
+            state.poa_admitted_addresses(0).into_iter().collect();
+        assert_eq!(admitted, expected);
+
+        let mut mismatch = from_json;
+        mismatch.poa_authorities = vec![Address::from([0x22; 32])];
+        assert!(mismatch.validate_mainnet_poa_authorities().is_err());
     }
 }
 

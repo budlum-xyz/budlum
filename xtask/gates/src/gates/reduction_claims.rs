@@ -58,7 +58,8 @@ fn one_unit_paragraph(text: &str) -> Option<String> {
         let obj = lower.contains("% of files") || lower.contains("% of objects");
         let by_bytes = lower.contains("% of bytes") || lower.contains("% of volume");
         let has_obj = obj || lower.contains("share of files") || lower.contains("share of objects");
-        let has_bytes = by_bytes || lower.contains("share of bytes") || lower.contains("share of volume");
+        let has_bytes =
+            by_bytes || lower.contains("share of bytes") || lower.contains("share of volume");
         ((obj && !has_bytes) || (by_bytes && !has_obj))
             .then(|| para.lines().next().unwrap_or("").to_string())
     })

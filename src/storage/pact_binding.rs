@@ -100,6 +100,9 @@ pub struct PactRegistry {
 }
 
 /// Most pacts one registry may hold. The root hashes every pact, so the count bounds that work.
+///
+/// Convenience: pub so a pact caller can refuse past the same
+/// bound the registry enforces in this module.
 pub const MAX_PACTS: usize = 1024;
 
 impl Default for PactRegistry {
