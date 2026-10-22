@@ -310,6 +310,9 @@ impl std::error::Error for ProofError {}
 /// same way, so the boundary is deterministic. Write-per-save stays too - the
 /// submission path runs outside block execution, and a crash that lost a
 /// save would reopen the exact conflict the record exists to close.
+///
+/// Convenience: pub so a claim submitter can refuse past the same
+/// bound the claim registry enforces in this module.
 pub const MAX_PROOF_CLAIMS: usize = 100_000;
 
 /// Registry of accepted proof claims implementing the "first valid wins" policy.

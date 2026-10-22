@@ -1237,7 +1237,8 @@ impl Storage {
     ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
         if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
             let version = self.db.get(b"STORAGE_REGISTRY_VERSION")?;
-            if version.as_deref() != Some(&STORAGE_REGISTRY_ROW_VERSION.to_le_bytes()[..]) {
+            let expected_version = STORAGE_REGISTRY_ROW_VERSION.to_le_bytes();
+            if version.as_deref() != Some(expected_version.as_slice()) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "STORAGE_REGISTRY row has no matching version tag; a row from another build \

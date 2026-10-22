@@ -271,6 +271,9 @@ pub struct IntakeState {
 /// (BLG-0153/P07-F08 - the same high-water-mark rule as the EVM relay's
 /// policy clock).
 #[must_use]
+///
+/// Convenience: crate-visible so the intake policy reads one clock
+/// definition; the policy refresh in this file is its caller today.
 pub(crate) fn live_policy_clock(stored_now: u64, last_accepted_height: Option<u64>) -> u64 {
     last_accepted_height.map_or(stored_now, |tip| tip.max(stored_now))
 }
@@ -671,18 +674,15 @@ impl IntakeState {
                 reason: "the threshold is not a strict majority of the seats",
             });
         }
-        let bonded = self.registry.domain(key).map_or(0, |reg| reg.provers.len());
-        if policy.agreement_threshold > bonded {
-            return Err(IntakeError::InvalidQuorumPolicy {
-                reason: "fewer provers are bonded than the threshold needs",
-            });
-        }
         // The intake commits winning claims to the attestation book, and the
         // quorum module's own docs name the rule: `AcceptMostCommon` is
         // "never for a state root that will be committed to". A policy that
         // shrugs at disputes is not protection, it is the appearance of it.
         // `QuorumRounds::set_policy` is `pub(super)` (BLG-0163/P07-F18), so
-        // this refusal cannot be bypassed from outside the module.
+        // this refusal cannot be bypassed from outside the module. It is
+        // categorical - refused whatever the bonded seats are - so it is
+        // named before the state-dependent feasibility check below, which
+        // would otherwise shadow it behind "fewer provers are bonded".
         if matches!(policy.dispute, DisputeBehavior::AcceptMostCommon)
             || matches!(
                 policy.low_participants,
@@ -690,6 +690,12 @@ impl IntakeState {
             )
         {
             return Err(IntakeError::PermissiveQuorumPolicy);
+        }
+        let bonded = self.registry.domain(key).map_or(0, |reg| reg.provers.len());
+        if policy.agreement_threshold > bonded {
+            return Err(IntakeError::InvalidQuorumPolicy {
+                reason: "fewer provers are bonded than the threshold needs",
+            });
         }
         self.quorum.set_policy(*key, policy);
         Ok(())

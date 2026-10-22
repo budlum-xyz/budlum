@@ -43,7 +43,7 @@ const SEED: [u8; 32] = [0xA5; 32];
 const MSG: &[u8] = b"bpqs-backend-differential-payload";
 
 fn roundtrip<H: BpqsHash, P: BpqsParams>() {
-    let mut signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
+    let mut signer = BpqsSigner::<P, H>::fresh_device(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen {}: {e}", P::NAME));
     let sig = signer
         .sign_at_height(1, MSG)
@@ -53,7 +53,7 @@ fn roundtrip<H: BpqsHash, P: BpqsParams>() {
 }
 
 fn tamper_refuses<H: BpqsHash, P: BpqsParams>() {
-    let mut signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
+    let mut signer = BpqsSigner::<P, H>::fresh_device(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     let sig = signer
         .sign_at_height(2, MSG)
@@ -94,12 +94,12 @@ fn tamper_refuses<H: BpqsHash, P: BpqsParams>() {
 /// determinism is pinned across independent signers minting their first
 /// signature of the epoch.
 fn randomizer_bound_and_deterministic<H: BpqsHash, P: BpqsParams>() {
-    let mut signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
+    let mut signer = BpqsSigner::<P, H>::fresh_device(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     let a = signer
         .sign_at_height(1, MSG)
         .unwrap_or_else(|e| panic!("a: {e}"));
-    let mut twin = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
+    let mut twin = BpqsSigner::<P, H>::fresh_device(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     let a2 = twin
         .sign_at_height(1, MSG)
@@ -110,7 +110,7 @@ fn randomizer_bound_and_deterministic<H: BpqsHash, P: BpqsParams>() {
         "{}: identical tuple must sign byte-identically",
         P::NAME
     );
-    let mut other = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
+    let mut other = BpqsSigner::<P, H>::fresh_device(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     let b = other
         .sign_at_height(1, b"bpqs-backend-differential-payload-2")
@@ -131,7 +131,7 @@ fn randomizer_bound_and_deterministic<H: BpqsHash, P: BpqsParams>() {
 }
 
 fn epoch_replay_refuses<H: BpqsHash, P: BpqsParams>() {
-    let mut signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
+    let mut signer = BpqsSigner::<P, H>::fresh_device(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     // Epoch window is 3, so heights 0..2 are epoch 0 and height 3 is epoch
     // 1: verifying the epoch-0 signature at height 3 must refuse.
@@ -146,7 +146,7 @@ fn epoch_replay_refuses<H: BpqsHash, P: BpqsParams>() {
 }
 
 fn quota_refuses<H: BpqsHash, P: BpqsParams>() {
-    let mut signer = BpqsSigner::<P, H>::ceremonial_keygen(SEED, EpochWindow(3))
+    let mut signer = BpqsSigner::<P, H>::fresh_device(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("keygen: {e}"));
     for count in 0..P::Q_MAX {
         signer
@@ -269,25 +269,25 @@ fn to_hex(bytes: &[u8]) -> alloc::string::String {
 const KAT_ROWS: [KatRow; 3] = [
     KatRow {
         backend: "sha3-256",
-        root_hex: "998c0b4320fb17a32726ade9770b4b148e206d16a345ed2601dc1bfdfe4a317f",
-        sig_digest_hex: "e2c41b1e1ffdb74d19fcfd70a6c53c8e8d40f47153d406c7036c4ff125aefea3",
+        root_hex: "1023b0e0a0e245836313896ffce20769b19afb4563bb66b656fe6d9087416aad",
+        sig_digest_hex: "7e03cd0bdb981acfe9e3eb42560508a24a9d30f881bc517603cb75d6ec8088ce",
     },
     KatRow {
         backend: "shake256",
-        root_hex: "a1f1f4296ebd4e91a907ea070045b44689d0e28f94e0d4d543e01706cca32434",
-        sig_digest_hex: "2684d048e716e9aa1ca393ee55697eaae1bd82c15ea67b250c0a4b92dffec22d",
+        root_hex: "a6835b7dd45ca360bd8f691bfbd8243c7533b1d00ee0219466f60f6995bda868",
+        sig_digest_hex: "c1c9f6c932c3aa9eb1aef82714bcd6167d94be63af964bc26af43fe614f61bc8",
     },
     KatRow {
         backend: "poseidon2-goldilocks-16",
-        root_hex: "fe3a689123f38a5f39d8aadb4e415f5102c539829f0212c95af5a95b98655497",
-        sig_digest_hex: "eec36121946c210cda9ddc3309364a57c80dfb903127f6cf91d3c7bb7fc2c013",
+        root_hex: "e04fe8c8fda7460170d01d250ffaea2933a9c6bbd303b42fc8fdb8c45389b611",
+        sig_digest_hex: "10b944e971fa0a9b8ac15dcec4469fd6f38dcb59740a8e731506df802ca6ba65",
     },
 ];
 
 fn kat_compute<H: BpqsHash>() -> ([u8; 32], [u8; 32]) {
     let public = keygen_root::<H, ParamsTestFast>(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("kat keygen_root: {e}"));
-    let mut signer = BpqsSigner::<ParamsTestFast, H>::ceremonial_keygen(SEED, EpochWindow(3))
+    let mut signer = BpqsSigner::<ParamsTestFast, H>::fresh_device(SEED, EpochWindow(3))
         .unwrap_or_else(|e| panic!("kat keygen: {e}"));
     let sig = signer
         .sign_at_height(3, MSG)
@@ -330,9 +330,11 @@ fn kat_file_writer() {
         kat_compute::<Shake256Hash>(),
         kat_compute::<Poseidon2GoldilocksHash>(),
     ];
-    std::println!("# Budlum-BPQS known-answer vectors v1 (milestone M2, 2026-09-22)");
+    std::println!("# Budlum-BPQS known-answer vectors v1 (milestone M2, 2026-09-22;");
+    std::println!("#       regenerated 2026-10-19 for the step-bound chains below)");
     std::println!("# construction: epoch-chained Winternitz (one-time per epoch, q_max=1,");
-    std::println!("#       PRF-derived 16B randomizer, MESSAGE_BIND_V1, 2026-09-22 wire)");
+    std::println!("#       PRF-derived 16B randomizer, MESSAGE_BIND_V1, chain steps bound");
+    std::println!("#       to their absolute position (P02-F19))");
     std::println!("# row: ParamsTestFast lane (N=32, LEN=67, T_LOG2=4) - identical hash");
     std::println!("#      discipline to the canonical L5/L3 rows, ceremony depth pruned.");
     std::println!("# pins: root_seed=0xA5*32, window=3, msg='bpqs-backend-differential-payload',");

@@ -112,6 +112,16 @@ fn is_panic_point(line: &str) -> bool {
 #[must_use]
 pub fn scan(rel: &str, source: &str) -> Vec<PanicPoint> {
     let lines: Vec<&str> = source.lines().collect();
+    // Brace counting runs over literal-scrubbed lines: a `}` inside a
+    // string is not structure, and a gate whose tests feed it
+    // brace-bearing fixtures (chain-id fixtures, say) would otherwise
+    // watch its own `#[cfg(test)]` module "end" mid-file and report the
+    // rest of the tests as production panic points. The panic-pattern
+    // match stays on the source line: the expect shape needs its string
+    // literal, which the scrub blanks, and scrubbing it made 27 recorded
+    // points vanish instead of the 7 that were miscounted.
+    let scrubbed = crate::gates::rust_literals::scrub(source);
+    let code: Vec<&str> = scrubbed.lines().collect();
     let mut out: Vec<PanicPoint> = Vec::new();
     let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut i = 0usize;
@@ -119,14 +129,19 @@ pub fn scan(rel: &str, source: &str) -> Vec<PanicPoint> {
         let line = lines[i];
         let trimmed = line.trim_start();
 
-        // Skip a `#[cfg(test)]` item entirely.
-        if trimmed.starts_with("#[cfg(test)]") {
-            i = skip_item(&lines, i);
+        // Skip a `#[cfg(test)]` item entirely. The platform-gated spelling
+        // `#[cfg(all(test, unix))]` is the same item with an extra leg, and
+        // missing it reported a symlink test's fixture setup as gate code.
+        if trimmed.starts_with("#[cfg(test)]")
+            || trimmed.starts_with("#[cfg(all(test")
+            || trimmed.starts_with("#[cfg(any(test")
+        {
+            i = skip_item(&code, i);
             continue;
         }
         // Skip a canary function entirely.
         if is_canary_signature(trimmed) {
-            i = skip_item(&lines, i);
+            i = skip_item(&code, i);
             continue;
         }
         if is_panic_point(line) {
@@ -420,7 +435,30 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
-    Ok(String::from("gates-do-not-panic: 9 canaries"))
+    // 10. The platform-gated spelling of the test attribute is still a test
+    //     module: `#[cfg(all(test, unix))]` must be skipped like
+    //     `#[cfg(test)]`, or a unix-only symlink test reads as gate code.
+    let src = "#[cfg(all(test, unix))]\nmod tests {\n    fn t() { a().unwrap(); }\n}\n";
+    if !scan("g.rs", src).is_empty() {
+        return Err(String::from(
+            "canary 10: a panic under cfg(all(test, unix)) was reported",
+        ));
+    }
+
+    // 11. A brace-bearing fixture string inside a test module does not end
+    //     the module early: brace depth is counted over scrubbed code, so
+    //     the `}` inside the literal below is not structure, and the unwrap
+    //     after it stays inside the skipped tests.
+    let src = "#[cfg(test)]\nmod tests {\n    fn f() { let s = \"fn p() { } }\"; }\n    fn t() { a().unwrap(); }\n}\n";
+    if !scan("g.rs", src).is_empty() {
+        return Err(String::from(
+            "canary 11: a brace inside a test fixture string ended the \
+             cfg(test) skip early and the rest of the tests were read as \
+             production code",
+        ));
+    }
+
+    Ok(String::from("gates-do-not-panic: 11 canaries"))
 }
 
 #[cfg(test)]

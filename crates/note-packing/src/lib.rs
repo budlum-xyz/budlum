@@ -84,6 +84,10 @@ pub const fn hash_from_field(fe: u64) -> NoteHash {
 /// them as the same note is how a double spend gets through. [`is_packed`]
 /// answers whether a given hash is one this module could have produced.
 #[must_use]
+///
+/// WIRING: exposed for the note-hash consumers this crate was
+/// extracted for, which unpack a packed hash on their side of the
+/// seam; in-tree the round-trip tests pin the packing.
 pub fn field_from_hash(h: &NoteHash) -> u64 {
     let mut b = [0u8; FIELD_BYTES];
     b.copy_from_slice(&h[..FIELD_BYTES]);
@@ -116,6 +120,10 @@ pub fn field_of_packed_hash(h: &NoteHash) -> Option<u64> {
 /// False means the upper bytes are non-zero, so [`field_from_hash`] would
 /// silently discard them.
 #[must_use]
+///
+/// WIRING: exposed for the same consumers as `field_from_hash`, to
+/// ask whether a foreign hash is one this packing could have made
+/// before trusting its low eight bytes.
 pub fn is_packed(h: &NoteHash) -> bool {
     let mut i = FIELD_BYTES;
     while i < 32 {
@@ -132,6 +140,9 @@ pub fn is_packed(h: &NoteHash) -> bool {
 /// The VM should never emit a non-canonical one. This exists so a caller can
 /// assert that rather than assume it.
 #[must_use]
+///
+/// WIRING: exposed for the same consumers as `field_from_hash`, to
+/// ask whether a value is canonical before it is packed or compared.
 pub const fn is_canonical_field(fe: u64) -> bool {
     fe < GOLDILOCKS_P
 }

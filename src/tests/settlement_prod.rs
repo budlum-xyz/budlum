@@ -145,6 +145,7 @@ mod settlement_prod_tests {
 
         let checkpoint_hash = hex::encode(commitment.domain_block_hash);
         let mut cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: commitment.domain_height,
             checkpoint_hash: checkpoint_hash.clone(),
@@ -1261,6 +1262,7 @@ mod settlement_prod_tests {
             round: 0,
             commit_hash: c.domain_block_hash,
             cert: FinalityCert {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: 1,
                 checkpoint_height: c.domain_height,
                 checkpoint_hash: hex::encode(c.domain_block_hash),
@@ -2302,7 +2304,7 @@ mod zk_finality_real_proof {
         assert_ne!(merkle_root(&[]), [0u8; 32]);
     }
 
-    // BLG-0082 (P03-F25): live and replay share one fold — `build_global_header`
+    // BLG-0082 (P03-F25): live and replay share one fold - `build_global_header`
     // is the single function, and two builds over the same state agree.
     #[test]
     fn live_and_replay_share_the_global_header_fold() {

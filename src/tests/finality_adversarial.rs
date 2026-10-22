@@ -102,6 +102,7 @@ fn make_snapshot_with_keys(n: usize, stake_each: u64) -> (ValidatorSetSnapshot, 
 /// Produces a prevote with a real BLS signature.
 fn signed_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Address) -> Prevote {
     let mut v = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: height,
         checkpoint_hash: hash.to_string(),
@@ -115,8 +116,57 @@ fn signed_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Addre
 
 /// Produces a precommit with a real BLS signature (signed over `hash`).
 fn signed_precommit(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Address) -> Precommit {
-    let msg = checkpoint_signing_message(epoch, height, hash);
+    let msg = checkpoint_signing_message(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        epoch,
+        height,
+        hash,
+    );
     Precommit {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+        epoch,
+        checkpoint_height: height,
+        checkpoint_hash: hash.to_string(),
+        voter_id: voter,
+        sig_bls: sign_bls(sk, &msg),
+        auth_sig: Vec::new(),
+    }
+}
+
+/// Produces a prevote signed under an explicit chain id.
+fn signed_prevote_with_chain(
+    sk: &Scalar,
+    chain_id: u64,
+    epoch: u64,
+    height: u64,
+    hash: &str,
+    voter: Address,
+) -> Prevote {
+    let mut v = Prevote {
+        chain_id,
+        epoch,
+        checkpoint_height: height,
+        checkpoint_hash: hash.to_string(),
+        voter_id: voter,
+        sig_bls: vec![],
+        auth_sig: Vec::new(),
+    };
+    v.sig_bls = sign_bls(sk, &v.signing_message());
+    v
+}
+
+/// Produces a precommit signed under an explicit chain id.
+fn signed_precommit_with_chain(
+    sk: &Scalar,
+    chain_id: u64,
+    epoch: u64,
+    height: u64,
+    hash: &str,
+    voter: Address,
+) -> Precommit {
+    let msg = checkpoint_signing_message(chain_id, epoch, height, hash);
+    Precommit {
+        chain_id,
         epoch,
         checkpoint_height: height,
         checkpoint_hash: hash.to_string(),
@@ -241,8 +291,14 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
     assert!(agg.prevote_quorum_reached);
 
     // Validator 3 sends a precommit with an INVALID signature (signed over the wrong message).
-    let wrong_msg = checkpoint_signing_message(epoch, height, "WRONG_HASH");
+    let wrong_msg = checkpoint_signing_message(
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        epoch,
+        height,
+        "WRONG_HASH",
+    );
     let bad_pc = Precommit {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: height,
         checkpoint_hash: hash.to_string(),
@@ -416,11 +472,20 @@ fn finality_honest_quorum_survives_byzantine_noise() {
     // Let the byzantine noise try again in the precommit phase -> refused again.
     for (sk, v) in sks.iter().zip(snap.validators.iter()).skip(5).take(2) {
         let noise = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
             checkpoint_height: height,
             checkpoint_hash: byz_hash.to_string(),
             voter_id: v.address,
-            sig_bls: sign_bls(sk, &checkpoint_signing_message(epoch, height, byz_hash)),
+            sig_bls: sign_bls(
+                sk,
+                &checkpoint_signing_message(
+                    crate::core::transaction::DEFAULT_CHAIN_ID,
+                    epoch,
+                    height,
+                    byz_hash,
+                ),
+            ),
             auth_sig: Vec::new(),
         };
         assert!(
@@ -503,6 +568,7 @@ fn equivocation_generates_slashing_evidence() {
 
     // The equivocator signs the CANONICAL hash first (counts), then a CONFLICTING one.
     let mut pv1 = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: cp,
         checkpoint_hash: block.hash.clone(),
@@ -515,6 +581,7 @@ fn equivocation_generates_slashing_evidence() {
     bc.handle_prevote(pv1).expect("canonical prevote accepted");
 
     let mut pv2 = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: cp,
         checkpoint_hash: "CONFLICTING_HASH".to_string(),
@@ -524,8 +591,18 @@ fn equivocation_generates_slashing_evidence() {
     };
     pv2.sig_bls = sign_bls(&equiv_bls, &pv2.signing_message());
     pv2.auth_sig = sign_bls(&equiv_bls, &pv2.auth_signing_message());
-    // The conflicting vote does not count (hash mismatch) but produces evidence and triggers a slash.
+    let root_before_gossip = bc.state.calculate_state_root();
+    // The conflicting vote does not count (hash mismatch); it queues evidence for the next block
+    // without mutating committed AccountState on P2P gossip.
     let _ = bc.handle_prevote(pv2);
+    assert_eq!(
+        bc.state.calculate_state_root(),
+        root_before_gossip,
+        "gossip equivocation must not mutate state_root outside block execution"
+    );
+    let _ = bc
+        .produce_block(honest)
+        .expect("commit block carrying slashing report");
 
     // After the slash: the equivocator is jailed (Slashed) and 50% of the stake is cut.
     let after = bc
@@ -588,6 +665,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
     let mut pv1 = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: cp,
         checkpoint_hash: block.hash.clone(),
@@ -600,6 +678,7 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     bc.handle_prevote(pv1).expect("canonical prevote accepted");
 
     let mut pv2 = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: cp,
         checkpoint_hash: "CONFLICTING_HASH".to_string(),
@@ -610,6 +689,9 @@ fn equivocation_slashing_record_survives_snapshot_roundtrip() {
     pv2.sig_bls = sign_bls(&equiv_bls, &pv2.signing_message());
     pv2.auth_sig = sign_bls(&equiv_bls, &pv2.auth_signing_message());
     let _ = bc.handle_prevote(pv2);
+    let _ = bc
+        .produce_block(honest)
+        .expect("commit block carrying slashing report");
 
     // The slash was applied AND written to the persistent history.
     let history_before = bc.state.registry.slashing_history_for(&equivocator);
@@ -703,15 +785,18 @@ fn repeated_invalid_signatures_trigger_slash() {
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
     // Threshold-1 invalid signatures: no slash yet. BLG-0083 (P04-F01): the
-    // spam is self-authenticated under the spammer's key - only a vote the
-    // validator's own key vouches for can count against the validator.
-    for _ in 0..(threshold - 1) {
+    // spam is self-authenticated under the spammer's key - only distinct votes
+    // the validator's own key vouches for can count against the validator.
+    for i in 0..(threshold - 1) {
+        let mut bad_sig = vec![0u8; 48];
+        bad_sig[0] = i as u8;
         let mut bad = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
             checkpoint_height: cp,
             checkpoint_hash: block.hash.clone(),
             voter_id: spammer,
-            sig_bls: vec![0u8; 48], // invalid
+            sig_bls: bad_sig, // invalid
             auth_sig: Vec::new(),
         };
         bad.auth_sig = crate::chain::finality::sign_bls(&spammer_bls, &bad.auth_signing_message());
@@ -726,16 +811,22 @@ fn repeated_invalid_signatures_trigger_slash() {
 
     // An invalid signature past the threshold -> slash (BLG-0083: the spam
     // authenticates itself under the spammer's key).
+    let mut final_bad_sig = vec![0u8; 48];
+    final_bad_sig[0] = threshold as u8;
     let mut bad = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: cp,
         checkpoint_hash: block.hash.clone(),
         voter_id: spammer,
-        sig_bls: vec![0u8; 48],
+        sig_bls: final_bad_sig,
         auth_sig: Vec::new(),
     };
     bad.auth_sig = crate::chain::finality::sign_bls(&spammer_bls, &bad.auth_signing_message());
     let _ = bc.handle_prevote(bad);
+    let _ = bc
+        .produce_block(honest)
+        .expect("commit block carrying spam report");
 
     let after = bc.state.registry.get(&spammer, roles::VALIDATOR).unwrap();
     assert!(
@@ -808,13 +899,16 @@ fn invalid_signatures_below_threshold_do_not_slash() {
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
     // Threshold-1 invalid signatures: NO slash.
-    for _ in 0..(threshold - 1) {
+    for i in 0..(threshold - 1) {
+        let mut bad_sig = vec![0u8; 48];
+        bad_sig[0] = i as u8;
         let mut bad = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch,
             checkpoint_height: cp,
             checkpoint_hash: block.hash.clone(),
             voter_id: spammer,
-            sig_bls: vec![0u8; 48],
+            sig_bls: bad_sig,
             auth_sig: Vec::new(),
         };
         // Authenticated, so the vote may incriminate its own sender (BLG-0083):
@@ -831,7 +925,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
     assert_eq!(reg.stake, 10_000);
     assert!(bc.state.registry.slashing_history_for(&spammer).is_empty());
     assert_eq!(
-        bc.state.invalid_votes.invalid_count(&spammer),
+        bc.local_invalid_votes.invalid_count(&spammer),
         threshold - 1
     );
 }
@@ -869,6 +963,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     // any name in a message, so the tick is only reachable through the
     // voter's own authenticated signature (self-incrimination).
     let spoofed = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: cp,
         checkpoint_hash: block.hash.clone(),
@@ -881,7 +976,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
         .expect_err("unauthenticated garbage must be rejected");
     assert!(err.contains("Unauthenticated"));
     assert_eq!(
-        bc.state.invalid_votes.invalid_count(&honest),
+        bc.local_invalid_votes.invalid_count(&honest),
         0,
         "a spoofed vote must not tick the named validator"
     );
@@ -892,6 +987,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     hsk[0] = 33;
     let honest_sk = Scalar::from_bytes_wide(&hsk);
     let mut bad = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: cp,
         checkpoint_hash: block.hash.clone(),
@@ -904,10 +1000,479 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
         .handle_prevote(bad)
         .expect_err("authenticated garbage must be rejected");
     assert!(err.contains("Invalid prevote signature"));
-    assert_eq!(bc.state.invalid_votes.invalid_count(&honest), 1);
+    assert_eq!(bc.local_invalid_votes.invalid_count(&honest), 1);
     assert_eq!(
         bc.finality_aggregator.as_ref().unwrap().prevotes.len(),
         0,
         "an invalid vote must not enter the aggregate"
+    );
+}
+
+#[test]
+fn gossip_equivocation_orders_converge_and_forged_reports_fail_block_validation() {
+    use crate::chain::finality::sign_bls;
+    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+
+    let mut esk = [0u8; 64];
+    esk[0] = 55;
+    let equiv_bls = Scalar::from_bytes_wide(&esk);
+    let equiv_pk = G2Affine::from(G2Projective::generator() * equiv_bls)
+        .to_compressed()
+        .to_vec();
+    let equivocator = test_addr_from_byte(21u8);
+    let honest = test_addr_from_byte(22u8);
+
+    let mut hsk = [0u8; 64];
+    hsk[0] = 66;
+    let honest_bls = Scalar::from_bytes_wide(&hsk);
+    let honest_pk = G2Affine::from(G2Projective::generator() * honest_bls)
+        .to_compressed()
+        .to_vec();
+
+    let mut node_a = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    node_a.state.add_balance(&equivocator, 10_000);
+    node_a.state.add_balance(&honest, 10_000);
+    node_a.state.add_validator(equivocator, 10_000);
+    node_a.state.add_validator(honest, 10_000);
+    install_consensus_keys(&mut node_a, equivocator, &equiv_bls, equiv_pk);
+    install_consensus_keys(&mut node_a, honest, &honest_bls, honest_pk);
+
+    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    for _ in 1..=cp {
+        let _ = node_a.produce_block(honest).unwrap();
+    }
+    let mut node_b = node_a.clone();
+    let tip_hash = node_a.chain.last().unwrap().hash.clone();
+    node_a.start_prevote_task(cp, tip_hash.clone());
+    node_b.start_prevote_task(cp, tip_hash.clone());
+    let epoch = node_a.finality_aggregator.as_ref().unwrap().epoch;
+
+    let mut pv1 = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+        epoch,
+        checkpoint_height: cp,
+        checkpoint_hash: tip_hash,
+        voter_id: equivocator,
+        sig_bls: Vec::new(),
+        auth_sig: Vec::new(),
+    };
+    pv1.sig_bls = sign_bls(&equiv_bls, &pv1.signing_message());
+    pv1.auth_sig = sign_bls(&equiv_bls, &pv1.auth_signing_message());
+
+    let mut pv2 = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+        epoch,
+        checkpoint_height: cp,
+        checkpoint_hash: "CONFLICTING_FORK_HASH".to_string(),
+        voter_id: equivocator,
+        sig_bls: Vec::new(),
+        auth_sig: Vec::new(),
+    };
+    pv2.sig_bls = sign_bls(&equiv_bls, &pv2.signing_message());
+    pv2.auth_sig = sign_bls(&equiv_bls, &pv2.auth_signing_message());
+
+    // Asymmetric P2P gossip: Node A observes both conflicting votes (equivocation),
+    // whereas Node B only receives the canonical prevote. Neither mutates state_root out-of-block.
+    let root_before = node_a.state.calculate_state_root();
+    node_a.handle_prevote(pv1.clone()).unwrap();
+    let _ = node_a.handle_prevote(pv2);
+    node_b.handle_prevote(pv1).unwrap();
+    assert_eq!(node_a.state.calculate_state_root(), root_before);
+    assert_eq!(node_b.state.calculate_state_root(), root_before);
+
+    // Block produced by Node A carries self-verifying slashing report; Node B converges identically.
+    let (slash_block, _) = node_a.produce_block(honest).unwrap();
+    let mut forged = slash_block.clone();
+    if let Some(ref mut reports) = forged.slashing_reports {
+        if let crate::registry::evidence::SlashingProof::DoubleSign {
+            ref mut signature_2,
+            ..
+        } = reports[0].proof
+        {
+            signature_2[0] ^= 0xFF;
+        }
+    }
+    forged.hash = forged.calculate_hash();
+    let err = node_b
+        .validate_and_add_block(forged)
+        .expect_err("forged slashing signature in block must be rejected");
+    assert!(err.contains("failed verification"), "unexpected err: {err}");
+
+    node_b.validate_and_add_block(slash_block).unwrap();
+    assert_eq!(
+        node_a.state.calculate_state_root(),
+        node_b.state.calculate_state_root()
+    );
+}
+
+#[test]
+fn forged_or_duplicated_invalid_signature_spam_reports_fail_block_validation() {
+    use crate::registry::params::RegistryParams;
+
+    let mut hsk = [0u8; 64];
+    hsk[0] = 41;
+    let honest_bls = Scalar::from_bytes_wide(&hsk);
+    let honest_pk = G2Affine::from(G2Projective::generator() * honest_bls)
+        .to_compressed()
+        .to_vec();
+    let honest = test_addr_from_byte(21u8);
+    let producer = test_addr_from_byte(22u8);
+
+    let mut node_a = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    node_a.state.add_balance(&honest, 50_000);
+    node_a.state.add_balance(&producer, 50_000);
+    node_a.state.add_validator(honest, 10_000);
+    node_a.state.add_validator(producer, 10_000);
+    install_consensus_keys(&mut node_a, honest, &honest_bls, honest_pk);
+    node_a.state.registry.set_params(RegistryParams {
+        max_invalid_votes_per_epoch: 3,
+        ..RegistryParams::default()
+    });
+    let mut node_b = node_a.clone();
+    let (template, _) = node_a.produce_block(producer).unwrap();
+
+    // Case 1: honest gossiped vote lifted with unrelated garbage signature fails binding check.
+    let mut honest_vote = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+        epoch: 0,
+        checkpoint_height: 10,
+        checkpoint_hash: "ab".repeat(32),
+        voter_id: honest,
+        sig_bls: Vec::new(),
+        auth_sig: Vec::new(),
+    };
+    honest_vote.sig_bls = sign_bls(&honest_bls, &honest_vote.signing_message());
+    honest_vote.auth_sig = sign_bls(&honest_bls, &honest_vote.auth_signing_message());
+
+    let forged_samples: Vec<_> = (0..3u8)
+        .map(|i| {
+            let mut garbage = vec![0u8; 48];
+            garbage[0] = i;
+            (
+                honest_vote.auth_signing_message(),
+                honest_vote.auth_sig.clone(),
+                honest_vote.signing_message(),
+                garbage,
+            )
+        })
+        .collect();
+    let mut forged_block = template.clone();
+    forged_block.slashing_reports = Some(vec![
+        crate::registry::evidence::SlashingReport::consensus_invalid_signature_spam_with_samples(
+            honest,
+            roles::VALIDATOR,
+            0,
+            3,
+            3,
+            forged_samples,
+            None,
+        ),
+    ]);
+    forged_block.hash = forged_block.calculate_hash();
+    let err = node_b
+        .validate_and_add_block(forged_block)
+        .expect_err("honest vote auth_sig lifted with garbage sig_bls must be rejected");
+    assert!(err.contains("does not bind"), "got: {err}");
+
+    // Case 2: one genuine invalid vote repeated `threshold` times fails duplicate check.
+    let mut one_bad = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+        epoch: 0,
+        checkpoint_height: 10,
+        checkpoint_hash: "cd".repeat(32),
+        voter_id: honest,
+        sig_bls: vec![7u8; 48],
+        auth_sig: Vec::new(),
+    };
+    one_bad.auth_sig = sign_bls(&honest_bls, &one_bad.auth_signing_message());
+    let sample = (
+        one_bad.auth_signing_message(),
+        one_bad.auth_sig.clone(),
+        one_bad.signing_message(),
+        one_bad.sig_bls.clone(),
+    );
+    let mut dup_block = template;
+    dup_block.slashing_reports = Some(vec![
+        crate::registry::evidence::SlashingReport::consensus_invalid_signature_spam_with_samples(
+            honest,
+            roles::VALIDATOR,
+            0,
+            3,
+            3,
+            vec![sample.clone(), sample.clone(), sample],
+            None,
+        ),
+    ]);
+    dup_block.hash = dup_block.calculate_hash();
+    let dup_err = node_b
+        .validate_and_add_block(dup_block)
+        .expect_err("duplicate spam samples must be rejected");
+    assert!(dup_err.contains("duplicate"), "got: {dup_err}");
+}
+
+#[test]
+fn block_header_double_sign_without_full_headers_is_rejected_in_slashing_reports() {
+    let mut node_a = Blockchain::new(
+        std::sync::Arc::new(crate::consensus::PoWEngine::new(0)),
+        None,
+        45262,
+        None,
+    );
+    let kp = crate::crypto::primitives::KeyPair::from_seed(&[0x33; 32]).unwrap();
+    let victim = Address::from(kp.public_key_bytes());
+    let producer = Address::from([0xAA; 32]);
+    node_a.state.add_balance(&victim, 50_000);
+    node_a.state.add_balance(&producer, 50_000);
+    node_a.state.add_validator(victim, 10_000);
+    node_a.state.add_validator(producer, 10_000);
+    let mut node_b = node_a.clone();
+
+    let h1 = [0x11u8; 32];
+    let h2 = [0x22u8; 32];
+    let sig1 = kp.sign(&h1).to_vec();
+    let sig2 = kp.sign(&h2).to_vec();
+    let report = crate::registry::evidence::SlashingReport::consensus_double_sign(
+        victim,
+        crate::registry::evidence::SlashingProof::DoubleSign {
+            height: 1,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: hex::encode(h1),
+            block_hash_2: hex::encode(h2),
+            signature_1: sig1,
+            signature_2: sig2,
+        },
+        None,
+    );
+
+    let (mut malicious_block, _) = node_a.produce_block(producer).expect("build template");
+    malicious_block.slashing_reports = Some(vec![report]);
+    malicious_block.hash = malicious_block.calculate_hash();
+    let err = node_b
+        .validate_and_add_block(malicious_block)
+        .expect_err("bare BlockHeader double-sign in slashing_reports must be rejected");
+    assert!(err.contains("slashing_evidence"), "got: {err}");
+    assert_eq!(node_b.state.validators[&victim].stake, 10_000);
+    assert!(node_b.state.validators[&victim].active);
+}
+
+#[test]
+fn oversized_checkpoint_hash_is_refused_and_oversized_pending_report_is_dropped() {
+    let mut node = Blockchain::new(
+        std::sync::Arc::new(crate::consensus::PoWEngine::new(0)),
+        None,
+        45262,
+        None,
+    );
+    let voter = Address::from([0x44; 32]);
+    let producer = Address::from([0xBB; 32]);
+    node.state.add_balance(&producer, 50_000);
+    node.state.add_validator(producer, 10_000);
+    let prevote_err = node
+        .handle_prevote(Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: "a".repeat(129),
+            voter_id: voter,
+            sig_bls: vec![0; 48],
+            auth_sig: vec![0; 48],
+        })
+        .expect_err("oversized prevote checkpoint_hash must be refused");
+    assert!(
+        prevote_err.contains("checkpoint_hash"),
+        "got: {prevote_err}"
+    );
+
+    let precommit_err = node
+        .handle_precommit(Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: "b".repeat(129),
+            voter_id: voter,
+            sig_bls: vec![0; 48],
+            auth_sig: vec![0; 48],
+        })
+        .expect_err("oversized precommit checkpoint_hash must be refused");
+    assert!(
+        precommit_err.contains("checkpoint_hash"),
+        "got: {precommit_err}"
+    );
+
+    // Seed an oversized report (> 65,536 bytes) directly into the local queue:
+    // block production must drop the un-embeddable entry rather than wedging.
+    node.pending_registry_slashing_reports.push(
+        crate::registry::evidence::SlashingReport::consensus_invalid_signature_spam_with_samples(
+            voter,
+            roles::VALIDATOR,
+            0,
+            1,
+            1,
+            vec![(vec![0x55; 70_000], vec![0; 48], vec![1; 32], vec![0; 48])],
+            None,
+        ),
+    );
+    let (built, _) = node
+        .produce_block(producer)
+        .expect("block production self-heals when dropping oversized queued report");
+    assert!(built.slashing_reports.is_none());
+    assert!(node.pending_registry_slashing_reports.is_empty());
+}
+
+// 1.8 - Chain binding of votes and certificates
+//
+// A vote's preimage commits to the chain id it was minted for, so a vote signed
+// on chain A never verifies on chain B. These tests pin the second half of that
+// property: the ingest paths must refuse the vote by its chain id *before* it
+// can be recorded as equivocation evidence, so an operator running the same
+// validator keys on two networks cannot be slashed by replaying their honest
+// votes from the other one.
+
+/// The chain id the tests below treat as "the other network".
+const OTHER_CHAIN_ID: u64 = 45262 + 1;
+
+#[test]
+fn votes_signed_for_another_chain_are_refused_at_ingest() {
+    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+
+    let (bls_sk, bls_pk) = make_test_key(41);
+    let voter = test_addr_from_byte(7u8);
+
+    let consensus = Arc::new(PoWEngine::new(0));
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
+    assert_eq!(bc.chain_id, 45262);
+    bc.state.add_balance(&voter, 10_000);
+    bc.state.add_validator(voter, 10_000);
+    install_consensus_keys(&mut bc, voter, &bls_sk, bls_pk);
+
+    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    for _ in 1..cp {
+        let _ = bc.produce_block(voter).unwrap();
+    }
+    let (block, _) = bc.produce_block(voter).unwrap();
+    bc.start_prevote_task(block.index, block.hash.clone());
+    let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
+
+    // Correctly signed, but for another chain: the preimage carries the other
+    // chain id, so it would verify nowhere on this one.
+    let mut foreign_prevote =
+        signed_prevote_with_chain(&bls_sk, OTHER_CHAIN_ID, epoch, cp, &block.hash, voter);
+    foreign_prevote.auth_sig = sign_bls(&bls_sk, &foreign_prevote.auth_signing_message());
+    let err = bc
+        .handle_prevote(foreign_prevote)
+        .expect_err("a vote for another chain must be refused");
+    assert!(err.contains("signed for chain"), "unexpected error: {err}");
+    assert_eq!(
+        bc.finality_aggregator.as_ref().unwrap().prevotes.len(),
+        0,
+        "a foreign vote must not enter the aggregate"
+    );
+
+    let mut foreign_precommit =
+        signed_precommit_with_chain(&bls_sk, OTHER_CHAIN_ID, epoch, cp, &block.hash, voter);
+    foreign_precommit.auth_sig = sign_bls(&bls_sk, &foreign_precommit.auth_signing_message());
+    let err = bc
+        .handle_precommit(foreign_precommit)
+        .expect_err("a precommit for another chain must be refused");
+    assert!(err.contains("signed for chain"), "unexpected error: {err}");
+
+    // The same vote minted for THIS chain still lands, so the gate above is
+    // the chain id and not the vote shape.
+    let mut honest = signed_prevote_with_chain(&bls_sk, bc.chain_id, epoch, cp, &block.hash, voter);
+    honest.auth_sig = sign_bls(&bls_sk, &honest.auth_signing_message());
+    bc.handle_prevote(honest).expect("a local vote must land");
+    assert_eq!(bc.finality_aggregator.as_ref().unwrap().prevotes.len(), 1);
+}
+
+#[test]
+fn a_cross_chain_vote_pair_is_not_equivocation() {
+    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+
+    let (bls_sk, bls_pk) = make_test_key(43);
+    let voter = test_addr_from_byte(9u8);
+
+    let consensus = Arc::new(PoWEngine::new(0));
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
+    bc.state.add_balance(&voter, 10_000);
+    bc.state.add_validator(voter, 10_000);
+    install_consensus_keys(&mut bc, voter, &bls_sk, bls_pk);
+
+    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    for _ in 1..cp {
+        let _ = bc.produce_block(voter).unwrap();
+    }
+    let (block, _) = bc.produce_block(voter).unwrap();
+    bc.start_prevote_task(block.index, block.hash.clone());
+    let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
+
+    // Vote 1: this chain, this checkpoint. Counts.
+    let mut local = signed_prevote_with_chain(&bls_sk, bc.chain_id, epoch, cp, &block.hash, voter);
+    local.auth_sig = sign_bls(&bls_sk, &local.auth_signing_message());
+    bc.handle_prevote(local).expect("local vote lands");
+
+    // Vote 2: the SAME voter and height, a DIFFERENT hash, but minted for the
+    // other chain. An honest operator running both networks produces exactly
+    // this pair; it must be refused as foreign, never booked as a double-sign.
+    let mut foreign =
+        signed_prevote_with_chain(&bls_sk, OTHER_CHAIN_ID, epoch, cp, &block.hash, voter);
+    foreign.checkpoint_hash = "another-chain-checkpoint".to_string();
+    foreign.sig_bls = sign_bls(&bls_sk, &foreign.signing_message());
+    foreign.auth_sig = sign_bls(&bls_sk, &foreign.auth_signing_message());
+    let err = bc
+        .handle_prevote(foreign)
+        .expect_err("foreign vote must be refused");
+    assert!(err.contains("signed for chain"), "unexpected error: {err}");
+
+    let evidence = bc
+        .finality_aggregator
+        .as_mut()
+        .expect("aggregator running")
+        .take_detected_equivocations();
+    assert!(
+        evidence.is_empty(),
+        "a cross-chain pair is two honest votes, not equivocation; got {evidence:?}"
+    );
+    assert_eq!(
+        bc.local_invalid_votes.invalid_count(&voter),
+        0,
+        "a foreign vote must not tick the honest voter either"
+    );
+}
+
+#[test]
+fn a_finality_cert_from_another_chain_is_refused() {
+    use crate::core::chain_config::FINALITY_CHECKPOINT_INTERVAL;
+
+    let voter = test_addr_from_byte(11u8);
+    let consensus = Arc::new(PoWEngine::new(0));
+    let mut bc = Blockchain::new(consensus, None, 45262, None);
+    bc.state.add_balance(&voter, 10_000);
+    bc.state.add_validator(voter, 10_000);
+
+    let cp = FINALITY_CHECKPOINT_INTERVAL;
+    for _ in 1..cp {
+        let _ = bc.produce_block(voter).unwrap();
+    }
+    let (block, _) = bc.produce_block(voter).unwrap();
+
+    // The certificate is refused on its chain id before any aggregate BLS work,
+    // so the signature contents do not have to be valid for this test.
+    let cert = crate::chain::finality::FinalityCert {
+        epoch: 1,
+        checkpoint_height: block.index,
+        checkpoint_hash: block.hash.clone(),
+        chain_id: OTHER_CHAIN_ID,
+        agg_sig_bls: vec![0u8; 48],
+        bitmap: vec![1],
+        set_hash: String::new(),
+    };
+    let err = bc
+        .handle_finality_cert(cert)
+        .expect_err("a certificate for another chain must be refused");
+    assert!(err.contains("for chain"), "unexpected error: {err}");
+    assert_eq!(
+        bc.finalized_height, 0,
+        "a foreign certificate must not advance finality"
     );
 }

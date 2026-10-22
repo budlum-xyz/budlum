@@ -147,6 +147,10 @@ impl std::error::Error for PayloadError {}
 /// # Errors
 ///
 /// [`PayloadError::TooLarge`] when `content` exceeds [`MAX_PAYLOAD_CONTENT`].
+///
+/// WIRING: exposed for the QR sender side that frames a payload
+/// for the carousel; in-tree the receive side and the round-trip
+/// tests are what run today.
 pub fn pack_payload(kind: PayloadKind, content: &[u8]) -> Result<Vec<u8>, PayloadError> {
     pack_payload_opts(kind, content, true)
 }

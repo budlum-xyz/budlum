@@ -62,6 +62,10 @@ pub(crate) fn frame_bytes(domain: &[u8], parts: &[&[u8]]) -> Vec<u8> {
 
 /// SHA3-256 reference backend (NIST FIPS 202). M1's only backend; since M2
 /// this is cross-check 1 for the differential battery.
+///
+/// WIRING: exposed for the differential audit battery and for whoever
+/// instantiates the scheme behind the `BpqsHash` seam; the canonical
+/// in-tree backend is Poseidon2 and this stays as its cross-check.
 pub struct Sha3_256Hash;
 
 impl BpqsHash for Sha3_256Hash {

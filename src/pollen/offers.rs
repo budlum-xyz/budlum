@@ -195,10 +195,19 @@ impl PollenPurchaseReceipt {
 }
 
 /// Most offers the registry holds. Closed offers are pruned first when full.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
 pub const MAX_OFFERS: usize = 100_000;
 /// Most data assets the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
 pub const MAX_DATA_ASSETS: usize = 100_000;
 /// Most access grants the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
 pub const MAX_ACCESS_GRANTS: usize = 100_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -735,6 +744,13 @@ impl MarketplaceRegistry {
             ),
             _ => Ok(()),
         }
+    }
+
+    /// Owner of the paid `DataAsset` bound to `manifest_id`, if any.
+    #[must_use]
+    pub fn bound_asset_owner(&self, manifest_id: &ContentId) -> Option<Address> {
+        let asset_id = self.protected_content.asset_for(manifest_id)?;
+        self.data_assets.get(&asset_id).map(|a| a.owner)
     }
 
     /// Put stored content behind an asset's paywall.

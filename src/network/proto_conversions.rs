@@ -1647,6 +1647,15 @@ impl From<&BlockHeader> for pb::ProtoBlockHeader {
             validator_set_hash: header.validator_set_hash.clone(),
             storage_root: header.storage_root.map(Vec::from).unwrap_or_default(),
             shards_root: header.shards_root.map(Vec::from).unwrap_or_default(),
+            slashing_reports: header
+                .slashing_reports
+                .as_ref()
+                .map(|rs| {
+                    rs.iter()
+                        .filter_map(|r| bincode::serialize(r).ok())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -1675,6 +1684,23 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
         } else {
             Some(evidence)
         };
+        let mut reports = Vec::new();
+        if proto.slashing_reports.len() > 64 {
+            return Err("Too many slashing reports in block header".into());
+        }
+        for raw in proto.slashing_reports {
+            if raw.len() > 65_536 {
+                return Err("Slashing report entry exceeds size limit".into());
+            }
+            let r: crate::registry::evidence::SlashingReport =
+                bincode::deserialize(&raw).map_err(|e| format!("Invalid slashing report: {e}"))?;
+            reports.push(r);
+        }
+        let slashing_reports = if reports.is_empty() {
+            None
+        } else {
+            Some(reports)
+        };
         Ok(BlockHeader {
             index: proto.index,
             timestamp,
@@ -1685,6 +1711,7 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
             state_root: proto.state_root,
             tx_root: proto.tx_root,
             slashing_evidence,
+            slashing_reports,
             nonce: proto.nonce,
             epoch: proto.epoch,
             slot: proto.slot,
@@ -1730,6 +1757,15 @@ impl From<&Block> for pb::ProtoBlock {
             storage_root: block.storage_root.map(Vec::from).unwrap_or_default(),
             shards_root: block.shards_root.map(Vec::from).unwrap_or_default(),
             producer_public_key: block.producer_public_key.clone(),
+            slashing_reports: block
+                .slashing_reports
+                .as_ref()
+                .map(|rs| {
+                    rs.iter()
+                        .filter_map(|r| bincode::serialize(r).ok())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -1764,6 +1800,23 @@ impl TryFrom<pb::ProtoBlock> for Block {
         } else {
             Some(evidence)
         };
+        let mut reports = Vec::new();
+        if proto.slashing_reports.len() > 64 {
+            return Err("Too many slashing reports in block".into());
+        }
+        for raw in proto.slashing_reports {
+            if raw.len() > 65_536 {
+                return Err("Slashing report entry exceeds size limit".into());
+            }
+            let r: crate::registry::evidence::SlashingReport =
+                bincode::deserialize(&raw).map_err(|e| format!("Invalid slashing report: {e}"))?;
+            reports.push(r);
+        }
+        let slashing_reports = if reports.is_empty() {
+            None
+        } else {
+            Some(reports)
+        };
 
         let mut transactions = Vec::new();
         for t in proto.transactions {
@@ -1782,6 +1835,7 @@ impl TryFrom<pb::ProtoBlock> for Block {
             producer_public_key: proto.producer_public_key,
             chain_id: proto.chain_id,
             slashing_evidence,
+            slashing_reports,
             state_root: proto.state_root,
             tx_root: proto.tx_root,
             epoch: proto.epoch,

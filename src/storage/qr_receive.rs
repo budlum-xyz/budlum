@@ -226,6 +226,10 @@ impl ProgressiveReceiver {
     /// digest is unkeyed, so one forged drop shown before the honest one
     /// poisons a recovery. After [`ReceiveError::StreamMismatch`] the caller
     /// resets and feeds the stream again instead of rebuilding the receiver.
+    ///
+    /// WIRING: exposed for the receive loop that owns a receiver
+    /// across scans and restarts it after a stream mismatch; that loop
+    /// lives with the wallet-side scanner, so tests pin the reset here.
     pub fn reset(&mut self) {
         self.decoder = CarouselDecoder::new();
         self.seen.clear();

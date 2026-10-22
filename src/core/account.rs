@@ -15,6 +15,7 @@ use crate::cross_domain::BridgeState;
 use crate::domain::storage_deal::StorageRegistry;
 use crate::registry::role::{roles, RoleId};
 use crate::storage::db::Storage;
+#[cfg(not(miri))]
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -44,6 +45,10 @@ pub struct PendingDomainUnfreeze {
 /// applied by `Blockchain::apply_pending_poa_compliance` where the domain
 /// kind can be read from the domain record (never from the transaction).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Convenience: pub because the pending lists on `AccountState`
+/// carry it across module lines; the chain drains them in
+/// `Blockchain::apply_pending_poa_compliance`.
 pub struct PendingPoaCompliance {
     pub domain_id: u32,
     /// The admin the request stands on (audit trail; verified at apply).
@@ -718,6 +723,20 @@ impl AccountState {
         self.keys_dirty = true;
     }
 
+    /// Adds a validator like [`Self::add_validator`], but registry
+    /// membership waits for the network onboarding floor: a below-floor
+    /// bond is recorded as a bonded validator, not as a registered one.
+    /// The `Stake` transaction path uses this so the floor is not bypassed
+    /// by `add_validator`'s unconditional auto-registration (which made
+    /// the executor's own `sync_validator_registration_with_floor` call a
+    /// no-op: by the time it ran, the registration already existed).
+    pub fn add_validator_with_floor(&mut self, address: Address, stake: u64, floor: u64) {
+        let validator = Validator::new(address, stake);
+        self.validators.insert(address, validator);
+        self.sync_validator_registration_with_floor(&address, floor);
+        self.keys_dirty = true;
+    }
+
     /// Adds a validator only when none is known for `address`. Start-up
     /// code uses this so a restart keeps the stored stake, slash and jail
     /// state. Returns true when a validator was added.
@@ -732,6 +751,9 @@ impl AccountState {
     /// Keep the on-chain validator's bonded stake in lock-step with
     /// Its `PermissionlessRegistry` membership. Called from `add_validator`
     /// And from the `Stake` / `Unstake` transaction paths.
+    ///
+    /// Convenience: pub as the seam the stake paths name; its callers
+    /// today are `add_validator` and the stake/unstake paths in this file.
     pub fn sync_validator_registration(&mut self, address: &Address) {
         let stake = self.validators.get(address).map_or(0, |v| v.stake);
         self.registry.upsert_stake(
@@ -933,7 +955,13 @@ impl AccountState {
     fn ensure_withdrawable_role(role: crate::registry::role::RoleId) -> Result<(), String> {
         use crate::registry::role::roles;
         match role {
-            roles::RELAYER | roles::PROVER | roles::STORAGE_OPERATOR => Ok(()),
+            roles::RELAYER
+            | roles::PROVER
+            | roles::STORAGE_OPERATOR
+            | roles::VERIFIER
+            | roles::AI_VERIFIER
+            | roles::ATTESTER
+            | roles::CONTENT_VALIDATOR => Ok(()),
             roles::VALIDATOR => Err(
                 "validator stake unwinds through Unstake and the unbonding queue, not this path"
                     .to_string(),
@@ -2097,6 +2125,57 @@ impl AccountState {
         }
     }
 
+    /// Deterministically drain governance-queued PoA compliance requests inside
+    /// block execution (`apply_block_effects`), BEFORE `calculate_state_root`.
+    ///
+    /// Authority is verified purely against `self.poa_onboarding` so block
+    /// producers, validators, startup replay, reorg rebuilds and snapshot
+    /// rebuilds all derive the exact same `poa_compliance` state root.
+    pub fn drain_pending_poa_compliance(&mut self, height: u64) -> usize {
+        let freezes = std::mem::take(&mut self.pending_poa_freezes);
+        let unfreezes = std::mem::take(&mut self.pending_poa_unfreezes);
+        let mut applied = 0;
+        for req in freezes {
+            if self
+                .poa_onboarding
+                .registry()
+                .is_admin(req.domain_id, &req.admin)
+                && self
+                    .poa_compliance
+                    .freeze_suspicious(
+                        crate::registry::ComplianceDomainKind::PoA,
+                        req.admin,
+                        req.target,
+                        req.reason_hash,
+                        height,
+                    )
+                    .is_ok()
+            {
+                applied += 1;
+            }
+        }
+        for req in unfreezes {
+            if self
+                .poa_onboarding
+                .registry()
+                .is_admin(req.domain_id, &req.admin)
+                && self
+                    .poa_compliance
+                    .unfreeze(
+                        crate::registry::ComplianceDomainKind::PoA,
+                        req.admin,
+                        req.target,
+                        req.reason_hash,
+                        height,
+                    )
+                    .is_ok()
+            {
+                applied += 1;
+            }
+        }
+        applied
+    }
+
     /// Apply a single registry parameter update if it parses and passes bounds.
     fn apply_registry_parameter_update(&mut self, key: &str, value: &str) -> Result<(), String> {
         let mut params = *self.registry.params();
@@ -2381,6 +2460,10 @@ impl AccountState {
     /// Total $BUD escrowed as external-domain prover bonds (BLG-0155). A
     /// bond is not a burn: it must keep counting against the fixed cap or
     /// every bond would open fake minting headroom.
+    ///
+    /// Convenience: the named total `total_bud_committed` folds into
+    /// the supply cap, pub so supply reporting can read the escrowed
+    /// part on its own.
     pub fn total_external_bonded_supply(&self) -> u128 {
         self.external_bond_escrow
             .values()
@@ -2425,12 +2508,15 @@ impl AccountState {
                 "release of {amount} exceeds the {held} escrowed for this bond"
             ));
         }
+        // Credit before debiting the escrow: the credit is the only
+        // fallible step left, and taking the escrow first would leave the
+        // bond nowhere if it refused.
+        self.try_add_balance(owner, amount)?;
         if held == amount {
             self.external_bond_escrow.remove(owner);
         } else if let Some(v) = self.external_bond_escrow.get_mut(owner) {
             *v = held - amount;
         }
-        self.try_add_balance(owner, amount)?;
         Ok(())
     }
 
@@ -2459,15 +2545,23 @@ impl AccountState {
                 "slash of {taken} exceeds the {held} escrowed for this prover"
             ));
         }
+        // Credit before debiting the escrow: the credit is the only
+        // fallible step left, and taking the escrow first would leave the
+        // penalty nowhere if it refused.
+        if reward > 0 {
+            self.try_add_balance(challenger, reward)?;
+        }
         if held == taken {
             self.external_bond_escrow.remove(prover);
         } else if let Some(v) = self.external_bond_escrow.get_mut(prover) {
             *v = held - taken;
         }
-        if reward > 0 {
-            self.try_add_balance(challenger, reward)?;
-        }
-        Ok(taken - reward)
+        // The remainder is destroyed, and destroyed supply is recorded:
+        // leaving it out of `burned_total` would reopen the same amount
+        // as minting headroom under the cap.
+        let burned = taken - reward;
+        self.burned_total = self.burned_total.saturating_add(burned);
+        Ok(burned)
     }
 
     /// Remaining headroom under the fixed 100M cap.
@@ -2485,6 +2579,8 @@ impl AccountState {
     /// (capped at the available balance).: If balance < amount, the
     /// Difference is silently clipped and a warning is logged. Callers that
     /// Require exact-burn semantics should check `get_balance` first.
+    /// WIRING: direct balance-burn primitive used by supply-destruction accounting tests
+    /// and reserved for explicit balance-backed burn transactions.
     pub fn burn_from(&mut self, address: &Address, amount: u64) -> u64 {
         if amount == 0 {
             return 0;
@@ -2671,26 +2767,58 @@ impl AccountState {
         } else if self.keys_dirty || self.cached_tree.is_empty() {
             self.cached_keys = self.accounts.keys().cloned().collect();
 
-            self.cached_leaves = self
-                .accounts
-                .par_iter()
-                .map(|(pubkey, account)| {
-                    let mut h = Sha256::new();
-                    h.update([0x00]);
-                    h.update(pubkey.0);
-                    h.update(account.balance.to_le_bytes());
-                    h.update(account.nonce.to_le_bytes());
-                    h.finalize().into()
-                })
-                .collect();
+            #[cfg(not(miri))]
+            {
+                self.cached_leaves = self
+                    .accounts
+                    .par_iter()
+                    .map(|(pubkey, account)| {
+                        let mut h = Sha256::new();
+                        h.update([0x00]);
+                        h.update(pubkey.0);
+                        h.update(account.balance.to_le_bytes());
+                        h.update(account.nonce.to_le_bytes());
+                        h.finalize().into()
+                    })
+                    .collect();
+            }
+            #[cfg(miri)]
+            {
+                self.cached_leaves = self
+                    .accounts
+                    .iter()
+                    .map(|(pubkey, account)| {
+                        let mut h = Sha256::new();
+                        h.update([0x00]);
+                        h.update(pubkey.0);
+                        h.update(account.balance.to_le_bytes());
+                        h.update(account.nonce.to_le_bytes());
+                        h.finalize().into()
+                    })
+                    .collect();
+            }
 
             self.cached_tree = Vec::new();
             let mut level = self.cached_leaves.clone();
             self.cached_tree.push(level.clone());
 
             while level.len() > 1 {
+                #[cfg(not(miri))]
                 let next_level: Vec<[u8; 32]> = level
                     .par_chunks(2)
+                    .map(|chunk| {
+                        let left = &chunk[0];
+                        let right = if chunk.len() > 1 { &chunk[1] } else { left };
+                        let mut h = Sha256::new();
+                        h.update([0x01]);
+                        h.update(left);
+                        h.update(right);
+                        h.finalize().into()
+                    })
+                    .collect();
+                #[cfg(miri)]
+                let next_level: Vec<[u8; 32]> = level
+                    .chunks(2)
                     .map(|chunk| {
                         let left = &chunk[0];
                         let right = if chunk.len() > 1 { &chunk[1] } else { left };

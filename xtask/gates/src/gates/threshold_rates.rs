@@ -345,7 +345,8 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     // The disagreement test must name the two answers it expects.
-    if !super::rust_literals::has_live_test(&src, "operators_with_different_hardware_may_disagree") {
+    if !super::rust_literals::has_live_test(&src, "operators_with_different_hardware_may_disagree")
+    {
         return Err(String::from(
             "FAIL: no test shows two operators reaching different answers for one \
              object",

@@ -442,6 +442,9 @@ impl SealedGeneratedSpec {
 
 /// Commitment over the sealed public fields + recipe commitment.
 #[must_use]
+///
+/// Convenience: pub so the registration side recomputes the same
+/// sealed-spec commitment this module folds into the source bytes.
 pub fn sealed_generated_commitment(sealed: &SealedGeneratedSpec) -> [u8; 32] {
     hash_fields_bytes(&[
         b"BDLM_SEALED_GENERATED_V1",

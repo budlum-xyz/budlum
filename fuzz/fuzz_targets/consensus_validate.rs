@@ -75,6 +75,7 @@ fuzz_target!(|data: &[u8]| {
         vrf_proof: data.get(241..273).unwrap_or_default().to_vec(),
         validator_set_hash: hex32(take_32(data, 305)),
         slashing_evidence: None,
+        slashing_reports: None,
         storage_root,
         shards_root: None,
     };

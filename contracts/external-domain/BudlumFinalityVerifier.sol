@@ -221,6 +221,12 @@ contract BudlumFinalityVerifier {
     /// rewritten when a window opens); the fraud verdict must outlive it.
     mapping(bytes32 => bool) public fraudulent;
 
+    /// Claims a fraud proof has disproved, keyed by `(height, stateRoot)`.
+    /// Keying fraud by digest alone lets a submitter re-present the exact
+    /// same disproved `(height, stateRoot)` under a fresh `epoch` or signature
+    /// blob and settle it in a second window (CWE-294).
+    mapping(uint64 => mapping(bytes32 => bool)) public fraudulentRoot;
+
     /// Which regime this deployment detected at construction. Stored so a
     /// reader can tell whether the verifier is cryptographic or optimistic
     /// without reading the bytecode.
@@ -340,6 +346,9 @@ contract BudlumFinalityVerifier {
         if (fraudulent[digest]) {
             revert AlreadyFraudulent(digest);
         }
+        if (fraudulentRoot[a.height][a.stateRoot]) {
+            revert AlreadyFraudulent(digest);
+        }
         if (challenges[digest].openedAt != 0) {
             // A digest gets one window: re-verifying would overwrite the
             // challenge record, reset `openedAt`, and postpone `settle`
@@ -358,8 +367,12 @@ contract BudlumFinalityVerifier {
             revert UntrustedKey("ML-DSA pubkey is not the pinned key");
         }
 
+        // Only a conflicting FINALIZED root bars new attestations at `a.height`.
+        // Allowing an unverified optimistic claim to lock `rootAtHeight` let
+        // any first caller squat every height and permanently censor honest
+        // attestations with `ConflictingRoot` (CWE-284).
         bytes32 held = rootAtHeight[a.height];
-        if (held != bytes32(0) && held != a.stateRoot) {
+        if (held != bytes32(0) && held != a.stateRoot && heightFinal[a.height]) {
             revert ConflictingRoot(a.height, held, a.stateRoot);
         }
 
@@ -408,7 +421,9 @@ contract BudlumFinalityVerifier {
             height: a.height,
             stateRoot: a.stateRoot
         });
-        rootAtHeight[a.height] = a.stateRoot;
+        // Do NOT claim `rootAtHeight[a.height]` on an unverified optimistic
+        // submission: only `verify` (when both cryptographic halves pass) or
+        // `settle` (once the challenge window closes unrefuted) claims it.
         emit AttestationOptimistic(digest, a.height, reason);
     }
 
@@ -441,6 +456,7 @@ contract BudlumFinalityVerifier {
         c.challenger = msg.sender;
         c.resolved = true;
         fraudulent[digest] = true;
+        fraudulentRoot[c.height][c.stateRoot] = true;
         accepted[digest] = false;
         if (!heightFinal[c.height] && rootAtHeight[c.height] == c.stateRoot) {
             rootAtHeight[c.height] = bytes32(0);
@@ -460,17 +476,21 @@ contract BudlumFinalityVerifier {
         if (c.resolved) {
             revert ChallengeResolved(digest);
         }
+        if (fraudulent[digest] || fraudulentRoot[c.height][c.stateRoot]) {
+            revert AlreadyFraudulent(digest);
+        }
         uint256 elapsed = block.number - uint256(c.openedAt);
         if (elapsed < challengeWindow) {
             revert ChallengeWindowOpen(digest, challengeWindow - elapsed);
         }
-        // The claim may have been cleared by a fraud proof on a sibling digest
-        // and taken by another root. Never settle against a different root.
-        if (rootAtHeight[c.height] != c.stateRoot) {
-            revert ConflictingRoot(c.height, rootAtHeight[c.height], c.stateRoot);
+        // Reject settlement if another root already finalized this height.
+        bytes32 held = rootAtHeight[c.height];
+        if (held != bytes32(0) && held != c.stateRoot) {
+            revert ConflictingRoot(c.height, held, c.stateRoot);
         }
         c.resolved = true;
         accepted[digest] = true;
+        rootAtHeight[c.height] = c.stateRoot;
         heightFinal[c.height] = true;
         emit ChallengeProven(digest, c.challenger, false);
     }
