@@ -308,6 +308,11 @@ pub struct StorageDeal {
     pub deal_start_epoch: u64,
     pub deal_end_epoch: u64,
     pub status: DealStatus,
+    /// Account that escrowed the fee at open. The unearned part of the fee
+    /// goes back to it when the content is pruned. `None` for deals written
+    /// before the field existed, which refund nothing.
+    #[serde(default)]
+    pub payer: Option<Address>,
 }
 
 impl StorageDeal {
@@ -392,6 +397,45 @@ pub struct CodingAudit {
     /// word because Reed-Solomon works symbol-wise across equal-length
     /// shards.
     pub column: u64,
+}
+
+/// How a stored coding audit ended.
+///
+/// `Open` is the only state that can still change. The other four are final:
+/// a decided audit is never decided a second time, so an operator cannot
+/// answer again to repair a `Failed` and a `Missed` cannot be argued away.
+/// `Void` closes an audit nobody could answer (the deal is no longer `Active`
+/// or the manifest is gone) with no cooldown.
+///
+/// WIRING: read by ADIM 4b (open and finalize in `apply_block_effects` at
+/// epoch start) and 4c (`StorageTx::AnswerCodingAudit`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodingAuditOutcome {
+    Open,
+    Passed,
+    Failed,
+    Missed,
+    Void,
+}
+
+/// A coding audit the registry opened, with the operator it asked and the
+/// epoch by which that operator must answer.
+///
+/// Verification only ever uses this stored copy. A caller who could supply
+/// its own [`CodingAudit`] would choose the column, and the audit would test
+/// what the operator is known to hold.
+///
+/// WIRING: created by ADIM 4b (open in `apply_block_effects` at epoch start)
+/// and read by ADIM 4c (`StorageTx::AnswerCodingAudit`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredCodingAudit {
+    pub(crate) audit_id: u64,
+    pub(crate) audit: CodingAudit,
+    pub(crate) deal_id: u64,
+    pub(crate) operator: Address,
+    pub(crate) opened_epoch: u64,
+    pub(crate) deadline_epoch: u64,
+    pub(crate) outcome: CodingAuditOutcome,
 }
 
 pub struct StorageChallengeRangeInput<'a> {
@@ -544,6 +588,28 @@ pub const REALLOCATION_ACCEPTANCE_EPOCHS: u64 = 4;
 /// wait for a taker (`Pending`, `UnderReplicated`) are never swept: they are
 /// the obligation itself, not a record of one.
 const REALLOCATION_RECORD_RETENTION_EPOCHS: u64 = 16 * REALLOCATION_ACCEPTANCE_EPOCHS;
+
+/// Number of epochs a final coding audit stays in the registry. The sweep
+/// uses this window and takes no other.
+///
+/// WIRING: used by `sweep_settled_coding_audits`, called by ADIM 4b at epoch
+/// start.
+pub const CODING_AUDIT_RECORD_RETENTION_EPOCHS: u64 = REALLOCATION_RECORD_RETENTION_EPOCHS;
+
+/// Number of epochs an audited operator has to answer a coding audit opened
+/// at an epoch boundary. It is as long as [`RENEWAL_WINDOW_EPOCHS`], for the
+/// same reason: an operator that is online answers well inside it, and a
+/// short outage does not turn into a cooldown.
+///
+/// WIRING: used by `open_epoch_coding_audits`, called by ADIM 4b in
+/// `apply_block_effects`.
+pub const CODING_AUDIT_ANSWER_WINDOW_EPOCHS: u64 = 4;
+
+/// Most coding audits the chain opens at one epoch boundary.
+///
+/// WIRING: used by `open_epoch_coding_audits`, called by ADIM 4b in
+/// `apply_block_effects`.
+pub const CODING_AUDIT_OPENS_PER_EPOCH: usize = 1;
 
 /// How long before a deal matures its operator may renew it unopposed.
 ///
@@ -702,12 +768,18 @@ pub struct StorageRegistry {
     /// deal path read it, so a phone could take the only copy of something its
     /// owner had already declared too important for a phone.
     ///
-    /// Keyed by content, because the declaration is about the content rather
-    /// than about the device: the same phone may self-host a holiday photo and
-    /// be refused a legal document.
+    /// Keyed by manifest and shard, because the declaration is about the
+    /// content rather than about the device: the same phone may self-host a
+    /// holiday photo and be refused a legal document. The manifest is part of
+    /// the key because write authority is checked against one manifest, and a
+    /// second manifest can carry the same shard.
+    ///
+    /// The map was keyed by shard alone and is empty on every live chain, so
+    /// the key change needs no migration.
     #[serde(default)]
     #[serde(with = "crate::core::map_keys")]
-    pub self_host_policies: BTreeMap<ContentId, crate::storage::MobileSelfContentPolicy>,
+    pub self_host_policies:
+        BTreeMap<(ContentId, ContentId), crate::storage::MobileSelfContentPolicy>,
     /// When each operator that missed a challenge may take storage work
     /// again, as a unix timestamp.
     ///
@@ -745,13 +817,38 @@ pub struct StorageRegistry {
     /// Epoch a ticket reached `ActiveReplacement`, keyed by that epoch, so
     /// the sweep drops due rows without walking the whole map.
     ///
-    /// Last field on purpose: the registry row is bincode, which is
+    /// New fields go at the end: the registry row is bincode, which is
     /// positional, so a new field anywhere else would make every stored
     /// registry unreadable. `#[serde(default)]` keeps JSON snapshots taken
-    /// before the field loadable; the bincode side is covered by
-    /// `LegacyStorageRegistryV1` in `storage/db.rs`.
+    /// before the field loadable. A bincode row from an older build is
+    /// refused by `load_storage_registry`, not padded.
     #[serde(default)]
     settled_tickets: BTreeMap<u64, Vec<u64>>,
+    /// Next id for a stored coding audit.
+    ///
+    /// Placed after `settled_tickets` and before `coding_audits`: both are
+    /// new, and bincode is positional.
+    #[serde(default)]
+    next_coding_audit_id: u64,
+    /// Coding audits the registry opened, by id. Each carries the operator it
+    /// asked, its deadline and its outcome, so "who was audited and what
+    /// happened" is state every node agrees on instead of a log line.
+    #[serde(default)]
+    coding_audits: BTreeMap<u64, StoredCodingAudit>,
+    /// Epoch a coding audit reached a final outcome, keyed by that epoch, so
+    /// the sweep drops due rows without walking the whole map.
+    #[serde(default)]
+    settled_coding_audits: BTreeMap<u64, Vec<u64>>,
+    /// Burned manifests whose prune was refused because an active deal still
+    /// had an open retrieval challenge or coding audit. Drained deterministically
+    /// once the open challenge/audit closes. Last field: bincode is positional.
+    #[serde(default)]
+    pending_prunes: std::collections::BTreeSet<ContentId>,
+    /// Per-(manifest_id, claimant) ownership claims decoupled from the shared
+    /// content-addressed `manifests` deduplication table so first-writer
+    /// registration never grants exclusive control over another party's content id.
+    #[serde(default)]
+    manifest_claims: std::collections::BTreeSet<(ContentId, Address)>,
 }
 
 use std::collections::BTreeMap;
@@ -783,6 +880,8 @@ pub enum StorageError {
     },
     /// Opener bond is 0 (would let anyone spam challenges for free).
     ZeroOpenerBond,
+    /// A registry id counter reached `u64::MAX`; no further id can be issued.
+    IdSpaceExhausted,
     /// Opener bond does not cover the I/O the operator must spend to answer.
     ///
     /// The bond is refunded when the operator answers correctly, so an
@@ -863,6 +962,26 @@ pub enum StorageError {
     NoParityToAudit {
         manifest_id: ContentId,
     },
+    /// Nobody holds the parity shard an audit selected.
+    ///
+    /// No deal for that shard is `Active`, so there is no operator to ask.
+    /// Not the same as an operator failing: no audit is opened.
+    NoActiveParityDeal {
+        manifest_id: ContentId,
+        parity_index: u32,
+    },
+    /// Caller referenced a coding audit that does not exist.
+    UnknownCodingAudit(u64),
+    /// The coding audit already has an outcome. Answers are accepted once.
+    CodingAuditNotOpen(u64),
+    /// Someone other than the audited operator tried to answer.
+    CodingAuditWrongResponder {
+        audit_id: u64,
+    },
+    /// The selected deal already has an `Open` coding audit.
+    CodingAuditAlreadyOpen {
+        deal_id: u64,
+    },
     /// The audit's answer did not satisfy the coding relationship.
     ///
     /// Column `column` of parity shard `parity_index` is not what the
@@ -880,6 +999,13 @@ pub enum StorageError {
     /// B.U.D.: the provided merkle proof failed format validation
     /// Or STARK verification. The proof must be a valid ProofEnvelope.
     InvalidMerkleProof(String),
+    /// The replica index is not below [`STORAGE_REPLICATION_TARGET`]. No
+    /// object has more replica slots than that, so a larger index names a
+    /// slot that does not exist.
+    ReplicaIndexOutOfRange {
+        replica_index: u8,
+        max: u8,
+    },
     /// Too many concurrent open challenges for a single deal.
     TooManyOpenChallenges {
         deal_id: u64,
@@ -950,6 +1076,7 @@ impl std::fmt::Display for StorageError {
                  is not what a primary copy means"
             ),
             Self::ZeroOpenerBond => write!(f, "opener_bond must be > 0"),
+            Self::IdSpaceExhausted => write!(f, "registry id counter is exhausted"),
             Self::OpenerBondBelowRangeCost {
                 range_len,
                 required,
@@ -1000,6 +1127,24 @@ impl std::fmt::Display for StorageError {
                 "manifest {manifest_id} has no parity shards, so there is no \
                  coding relationship to audit"
             ),
+            Self::NoActiveParityDeal {
+                manifest_id,
+                parity_index,
+            } => write!(
+                f,
+                "no active deal holds parity shard {parity_index} of manifest {manifest_id}"
+            ),
+            Self::UnknownCodingAudit(id) => write!(f, "unknown coding audit {id}"),
+            Self::CodingAuditNotOpen(id) => {
+                write!(f, "coding audit {id} already has an outcome")
+            }
+            Self::CodingAuditWrongResponder { audit_id } => write!(
+                f,
+                "coding audit {audit_id} was not addressed to this responder"
+            ),
+            Self::CodingAuditAlreadyOpen { deal_id } => {
+                write!(f, "deal {deal_id} already has an open coding audit")
+            }
             Self::ParityColumnMismatch {
                 manifest_id,
                 parity_index,
@@ -1015,6 +1160,9 @@ impl std::fmt::Display for StorageError {
             ),
             Self::InvalidMerkleProof(ref reason) => {
                 write!(f, "invalid merkle proof - {reason}")
+            }
+            Self::ReplicaIndexOutOfRange { replica_index, max } => {
+                write!(f, "replica index {replica_index} is not below {max}")
             }
             Self::TooManyOpenChallenges { deal_id, max } => {
                 write!(f, "too many open challenges for deal {deal_id} (max {max})")
@@ -1064,9 +1212,15 @@ impl StorageRegistry {
             && self.results.is_empty()
             && self.reallocations.is_empty()
             && self.settled_tickets.is_empty()
+            && self.next_coding_audit_id == 0
+            && self.coding_audits.is_empty()
+            && self.settled_coding_audits.is_empty()
             && self.operator_cooldowns.is_empty()
             && self.operator_classes.is_empty()
             && self.manifests.is_empty()
+            && self.confidential_commits.is_empty()
+            && self.confidential_owners.is_empty()
+            && self.manifest_claims.is_empty()
     }
 
     pub fn root(&self) -> [u8; 32] {
@@ -1155,9 +1309,76 @@ impl StorageRegistry {
         if self.view_grants.issued() > 0 {
             hasher.update(self.view_grants.root());
         }
-        for (content_id, policy) in &self.self_host_policies {
+        for ((manifest_id, content_id), policy) in &self.self_host_policies {
+            hasher.update(manifest_id.0);
             hasher.update(content_id.0);
             hasher.update(bincode::serialize(policy).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
+        }
+        // Stored coding audits decide who sits in a cooldown and when, so a
+        // node that disagrees about one accepts different blocks. Empty
+        // contributes no bytes: a chain that never opened an audit keeps the
+        // root it had. The counter is folded only after the first id was
+        // handed out, for the same reason.
+        if self.next_coding_audit_id > 0 {
+            hasher.update(self.next_coding_audit_id.to_le_bytes());
+        }
+        for stored in self.coding_audits.values() {
+            hasher.update(bincode::serialize(stored).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec()));
+        }
+        // The retention queue decides which final audits the next sweep
+        // drops, so it is folded for the reason the settled-ticket queue is.
+        // Empty contributes no bytes.
+        if !self.settled_coding_audits.is_empty() {
+            hasher.update(b"BDLM_STORAGE_CODING_AUDIT_QUEUE_V1");
+        }
+        for (epoch, audit_ids) in &self.settled_coding_audits {
+            hasher.update(epoch.to_le_bytes());
+            // The length keeps the encoding injective: without it
+            // `{5: [7, 9, 11]}` and `{5: [7], 9: [11]}` hash the same bytes.
+            hasher.update((audit_ids.len() as u64).to_le_bytes());
+            for audit_id in audit_ids {
+                hasher.update(audit_id.to_le_bytes());
+            }
+        }
+        // Proven reads drive the replica demand and so the repair tickets, and
+        // the dictionary reference counts decide when a dictionary may be
+        // deleted. Two nodes that disagreed about either showed equal roots
+        // until the tickets diverged. Empty contributes no bytes, so a chain
+        // with no read evidence and no dictionary keeps the root it had.
+        if !self.access_events.is_empty() {
+            hasher.update(b"BDLM_STORAGE_ACCESS_EVENTS_V1");
+            hasher.update((self.access_events.len() as u64).to_le_bytes());
+        }
+        for (manifest_id, events) in &self.access_events {
+            hasher.update(manifest_id.0);
+            // The length keeps the encoding injective across manifests.
+            hasher.update((events.len() as u64).to_le_bytes());
+            for event in events {
+                hasher.update(event.epoch.to_le_bytes());
+                hasher.update(event.count.to_le_bytes());
+            }
+        }
+        if !self.dictionaries.has_no_dictionaries() {
+            hasher.update(self.dictionaries.dictionary_root());
+        }
+        // Burned manifests queued because an open challenge or coding audit
+        // temporarily refused pruning: two nodes disagreeing about this set
+        // would prune (and credit bonds/refunds) at different later heights.
+        // Empty contributes no bytes so chains with no queued prunes keep their root.
+        if !self.pending_prunes.is_empty() {
+            hasher.update(b"BDLM_STORAGE_PENDING_PRUNES_V1");
+            hasher.update((self.pending_prunes.len() as u64).to_le_bytes());
+            for manifest_id in &self.pending_prunes {
+                hasher.update(manifest_id.0);
+            }
+        }
+        if !self.manifest_claims.is_empty() {
+            hasher.update(b"BDLM_STORAGE_MANIFEST_CLAIMS_V1");
+            hasher.update((self.manifest_claims.len() as u64).to_le_bytes());
+            for (manifest_id, claimant) in &self.manifest_claims {
+                hasher.update(manifest_id.0);
+                hasher.update(claimant.as_bytes());
+            }
         }
         hasher.finalize().into()
     }
@@ -1180,6 +1401,7 @@ impl StorageRegistry {
     /// profile disagree, carrying the reason so the caller can show it.
     pub fn declare_self_host_policy(
         &mut self,
+        manifest_id: ContentId,
         policy: crate::storage::MobileSelfContentPolicy,
         profile: &crate::storage::MobileSelfProfile,
     ) -> Result<(), StorageError> {
@@ -1189,7 +1411,8 @@ impl StorageRegistry {
                 reason,
             }
         })?;
-        self.self_host_policies.insert(policy.content_id, policy);
+        self.self_host_policies
+            .insert((manifest_id, policy.content_id), policy);
         Ok(())
     }
 
@@ -1211,7 +1434,7 @@ impl StorageRegistry {
         manifest_id: &ContentId,
         content_id: &ContentId,
     ) -> Result<(), StorageError> {
-        let Some(policy) = self.self_host_policies.get(content_id) else {
+        let Some(policy) = self.self_host_policies.get(&(*manifest_id, *content_id)) else {
             return Ok(());
         };
         if !policy.self_host_allowed {
@@ -1280,9 +1503,9 @@ impl StorageRegistry {
     /// Claiming `AlwaysOn` to reach a primary replica means accepting a
     /// primary's obligations, and the bond answers for them.
     ///
-    /// F-17: `ChainHandle::set_storage_operator_class` is the production
-    /// declaration path. The class is still self-reported; `open_deal`
-    /// holds the operator to whatever it claimed.
+    /// The in-block path is `StorageTx::DeclareOperatorClass`. The class is
+    /// still self-reported; `open_deal` holds the operator to whatever it
+    /// claimed.
     pub fn set_operator_class(&mut self, operator: Address, class: OperatorClass) {
         self.operator_classes.insert(operator, class);
     }
@@ -1299,9 +1522,60 @@ impl StorageRegistry {
     }
 
     pub fn register_manifest(&mut self, manifest: &ContentManifest) {
-        self.manifests
-            .entry(manifest.manifest_id)
-            .or_insert_with(|| manifest.clone());
+        let id = manifest.manifest_id;
+        if self.manifests.contains_key(&id) || self.confidential_commits.contains_key(&id) {
+            return;
+        }
+        let claim_owner = manifest.owner;
+        self.manifests.insert(id, manifest.clone());
+        if claim_owner != Address::zero() {
+            self.manifest_claims.insert((id, claim_owner));
+        }
+    }
+
+    #[must_use]
+    pub fn is_registered(&self, content_id: &ContentId) -> bool {
+        self.manifests.contains_key(content_id)
+            || self.confidential_commits.contains_key(content_id)
+    }
+
+    #[must_use]
+    pub fn has_claim(&self, content_id: &ContentId, claimant: &Address) -> bool {
+        if *claimant == Address::zero() {
+            return false;
+        }
+        self.owner_of(content_id) == Some(*claimant)
+    }
+
+    /// Scoped retraction of `caller`'s own un-paid `Plaintext` manifest when
+    /// `caller` lists the content as a paid marketplace asset and no active
+    /// storage deal references `manifest_id`.
+    pub fn retract_plaintext_manifest_for_owner(
+        &mut self,
+        manifest_id: &ContentId,
+        caller: &Address,
+    ) -> bool {
+        let Some(existing) = self.manifests.get(manifest_id) else {
+            return false;
+        };
+        if existing.owner != *caller
+            || !matches!(
+                existing.encryption,
+                crate::storage::ContentEncryption::Plaintext
+            )
+        {
+            return false;
+        }
+        let has_active_deal = self
+            .deals
+            .values()
+            .any(|d| d.manifest_id == *manifest_id && matches!(d.status, DealStatus::Active));
+        if has_active_deal {
+            return false;
+        }
+        self.manifests.remove(manifest_id);
+        self.manifest_claims.remove(&(*manifest_id, *caller));
+        true
     }
 
     /// Register a manifest that declares a source regime.
@@ -1402,9 +1676,11 @@ impl StorageRegistry {
                         reason: "SealedGenerated output_len must be non-zero".into(),
                     });
                 }
-                // Public digest must match the sealed fields (no seed).
-                let expect = crate::storage::generated::sealed_generated_commitment(sealed);
-                let _ = expect; // commitment is part of source_commitment_bytes via id
+                // The seed is off chain so the recipe cannot run, but the
+                // public fields still meet the ceilings a public recipe meets.
+                sealed
+                    .check_public_bounds()
+                    .map_err(|reason| StorageError::InvalidManifest { reason })?;
             }
             crate::storage::generated::ContentSource::Hybrid { .. } => {
                 return Err(StorageError::InvalidManifest {
@@ -1551,34 +1827,48 @@ impl StorageRegistry {
     /// own.
     pub fn issue_view_grant(
         &mut self,
+        chain_id: u64,
         content_id: ContentId,
         auth: &crate::storage::GrantAuthorization,
-        grantee: Option<Address>,
-        key_id: [u8; 32],
-        policy: crate::storage::ViewPolicy,
-        opened_epoch: u64,
+        terms: crate::storage::GrantIssueTerms,
     ) -> Result<u64, crate::storage::ViewGrantError> {
-        let owner = self
-            .owner_of(&content_id)
-            .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
         let issuer = auth
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        if issuer != owner {
-            return Err(crate::storage::ViewGrantError::NotOwner { issuer, owner });
+        if !self.has_claim(&content_id, &issuer) {
+            return match self.owner_of(&content_id) {
+                Some(owner) => Err(crate::storage::ViewGrantError::NotOwner { issuer, owner }),
+                None => {
+                    if self.manifests.contains_key(&content_id)
+                        || self.confidential_commits.contains_key(&content_id)
+                    {
+                        Err(crate::storage::ViewGrantError::NotOwner {
+                            issuer,
+                            owner: Address::zero(),
+                        })
+                    } else {
+                        Err(crate::storage::ViewGrantError::UnknownContent)
+                    }
+                }
+            };
         }
         let digest = crate::storage::grant_issue_digest(
+            chain_id,
+            self.view_grants.issued(),
             &content_id,
             &issuer,
-            grantee.as_ref(),
-            &key_id,
-            policy,
-            opened_epoch,
+            &terms,
         );
-        auth.verify(&digest, &owner)
+        auth.verify(&digest, &issuer)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        self.view_grants
-            .issue(content_id, issuer, grantee, key_id, policy, opened_epoch)
+        self.view_grants.issue(
+            content_id,
+            issuer,
+            terms.grantee,
+            terms.key_id,
+            terms.policy,
+            terms.opened_epoch,
+        )
     }
 
     /// Revoke one grant. Returns the row that was revoked, because whatever has
@@ -1592,6 +1882,7 @@ impl StorageRegistry {
     /// the owner, or an unreadable authorisation.
     pub fn revoke_view_grant(
         &mut self,
+        chain_id: u64,
         grant_id: u64,
         auth: &crate::storage::GrantAuthorization,
         at_epoch: u64,
@@ -1599,16 +1890,19 @@ impl StorageRegistry {
         let caller = auth
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        let digest = crate::storage::grant_revoke_digest(grant_id, &caller, at_epoch);
+        let digest = crate::storage::grant_revoke_digest(chain_id, grant_id, &caller, at_epoch);
         let grant = self
             .view_grants
             .get(grant_id)
             .ok_or(crate::storage::ViewGrantError::UnknownGrant(grant_id))?
             .clone();
-        // `unwrap_or`, not `unwrap_or_else`: the fallback is a field read, and a
-        // closure there is what CI's Clippy step refuses under `-D warnings`.
-        let owner = self.owner_of(&grant.content_id).unwrap_or(grant.issuer);
-        auth.verify(&digest, &owner)
+        if !self.has_claim(&grant.content_id, &caller) && caller != grant.issuer {
+            return Err(crate::storage::ViewGrantError::NotOwner {
+                issuer: caller,
+                owner: grant.issuer,
+            });
+        }
+        auth.verify(&digest, &grant.issuer)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
         self.view_grants.revoke(grant_id, caller, at_epoch)?;
         Ok(grant)
@@ -1644,10 +1938,7 @@ impl StorageRegistry {
         key_id: &[u8; 32],
         owner: &Address,
     ) -> bool {
-        let Some(recorded) = self.owner_of(content_id) else {
-            return false;
-        };
-        if recorded != *owner {
+        if !self.has_claim(content_id, owner) {
             return false;
         }
         self.view_grants.may_view(content_id, viewer, key_id, owner)
@@ -1671,6 +1962,8 @@ impl StorageRegistry {
     /// Refuses Three (recipe-only) manifests, a body already committed under a
     /// different commitment, an object another address spoke for, and any
     /// authorisation whose signature does not verify for the derived owner.
+    /// WIRING: deterministic confidential body commit transition reserved for
+    /// in-block storage transaction execution.
     pub fn register_confidential_commit(
         &mut self,
         commit: crate::storage::ConfidentialBodyCommit,
@@ -1735,10 +2028,18 @@ impl StorageRegistry {
     /// made visible, so the two cannot disagree.
     #[must_use]
     pub fn owner_of(&self, content_id: &ContentId) -> Option<crate::core::address::Address> {
-        self.manifests
-            .get(content_id)
-            .map(|m| m.owner)
-            .or_else(|| self.confidential_owners.get(content_id).copied())
+        if let Some(conf_owner) = self.confidential_owners.get(content_id).copied() {
+            return Some(conf_owner);
+        }
+        let mut iter = self
+            .manifest_claims
+            .range((*content_id, Address::zero())..=(*content_id, Address::from([u8::MAX; 32])))
+            .map(|(_, claimant)| *claimant);
+        let first = iter.next()?;
+        if iter.next().is_some() {
+            return None;
+        }
+        Some(first)
     }
 
     /// Validate that `shard_id` is a member of `manifest`. Used by
@@ -1799,6 +2100,12 @@ impl StorageRegistry {
                 end: end_epoch,
             });
         }
+        if replica_index >= STORAGE_REPLICATION_TARGET {
+            return Err(StorageError::ReplicaIndexOutOfRange {
+                replica_index,
+                max: STORAGE_REPLICATION_TARGET,
+            });
+        }
         if u128::from(economics.operator_bond) < u128::from(domain_params.min_operator_bond) {
             return Err(StorageError::InsufficientBond {
                 required: domain_params.min_operator_bond,
@@ -1833,13 +2140,8 @@ impl StorageRegistry {
         // is about. An always-on operator taking a replica is the case the
         // owner was trying to get more of.
         //
-        // Honest about the half that is still missing: `check` is wired here,
-        // but `declare_self_host_policy` has no transaction behind it yet, so
-        // `self_host_policies` is empty on a live chain and this call returns
-        // `Ok(())` every time. What it buys today is that the check runs on
-        // the placement path, so the day a declaration can reach the chain it
-        // is already being read. Wiring the declaration needs a transaction
-        // type, which is a consensus-surface decision.
+        // The policy reaches the chain through `StorageTx::DeclareSelfHostPolicy`,
+        // so this check reads what owners declared in block.
         if self.operator_class(&operator) == OperatorClass::Mobile {
             self.check_self_host_allowed(&manifest.manifest_id, &shard_id)?;
         }
@@ -1899,10 +2201,14 @@ impl StorageRegistry {
                     "held_bytes refused the source (hybrid prefix longer than listed size)",
                 ),
             })?;
-        self.register_manifest(manifest);
-
+        // Take the next id before any write, so a full counter leaves no
+        // partial state behind.
         let deal_id = self.next_deal_id;
-        self.next_deal_id += 1;
+        let next_deal_id = deal_id
+            .checked_add(1)
+            .ok_or(StorageError::IdSpaceExhausted)?;
+        self.register_manifest(manifest);
+        self.next_deal_id = next_deal_id;
 
         let deal = StorageDeal {
             deal_id,
@@ -1919,6 +2225,7 @@ impl StorageRegistry {
             merkle_proof,
             storage_root,
             merkle_depth: 64,
+            payer: None,
         };
 
         self.deals.insert(deal_id, deal);
@@ -1945,6 +2252,7 @@ impl StorageRegistry {
     /// is not the owner, or an unreadable authorisation.
     pub fn social_delete(
         &mut self,
+        chain_id: u64,
         content_id: ContentId,
         auth: &crate::storage::GrantAuthorization,
         at_epoch: u64,
@@ -1961,7 +2269,13 @@ impl StorageRegistry {
                 owner,
             });
         }
-        let digest = crate::storage::social_delete_digest(&content_id, &caller, at_epoch);
+        let digest = crate::storage::social_delete_digest(
+            chain_id,
+            self.view_grants.issued(),
+            &content_id,
+            &caller,
+            at_epoch,
+        );
         auth.verify(&digest, &owner)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
         let mut hook = crate::storage::three_hooks::NopThreeHook;
@@ -2024,6 +2338,31 @@ impl StorageRegistry {
     /// Manifest can receive at most one retrieval challenge every four
     /// Canonical epochs, including challenges opened through distinct deals.
     pub(crate) const MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS: u64 = 4;
+
+    /// Longest answer window a caller may ask for, in epochs.
+    pub const MAX_CHALLENGE_WINDOW_EPOCHS: u64 = 1024;
+
+    /// A challenge opened over RPC must start at the current epoch or
+    /// earlier (a far-future `challenge_epoch` would push the per operator
+    /// rate limit minimum out for good) and must close within
+    /// `MAX_CHALLENGE_WINDOW_EPOCHS` (a huge `deadline_epoch` would never
+    /// finalize as missed).
+    pub fn validate_challenge_window(
+        challenge_epoch: u64,
+        deadline_epoch: u64,
+        current_epoch: u64,
+    ) -> Result<(), StorageError> {
+        if challenge_epoch > current_epoch
+            || deadline_epoch <= current_epoch
+            || deadline_epoch > challenge_epoch.saturating_add(Self::MAX_CHALLENGE_WINDOW_EPOCHS)
+        {
+            return Err(StorageError::InvalidEpochRange {
+                start: challenge_epoch,
+                end: deadline_epoch,
+            });
+        }
+        Ok(())
+    }
 
     pub fn open_challenge_with_entropy(
         &mut self,
@@ -2206,6 +2545,354 @@ impl StorageRegistry {
         }
     }
 
+    /// Open a stored coding audit against one operator of one parity shard.
+    ///
+    /// The registry derives the audit from `entropy` ([`Self::derive_coding_audit`]),
+    /// finds the `Active` deals that hold the selected parity shard (shard
+    /// index `k + parity_index`), keeps those that run past `deadline_epoch`
+    /// and have no `Open` audit, and, when several remain, picks one by the
+    /// same entropy. The caller chooses neither the column
+    /// nor the operator. The audit, its operator and `deadline_epoch` are
+    /// stored, and only that stored copy is used to check the answer.
+    ///
+    /// Known accepted gap (S2): the audit is not bound to a column commitment
+    /// in the manifest, so it detects operators that do not answer or answer
+    /// with a column that breaks the code. It does not detect an operator
+    /// that serves a consistent column of the wrong object.
+    ///
+    /// Returns the new audit id.
+    ///
+    /// WIRING: called by ADIM 4b (open in `apply_block_effects` at epoch
+    /// start, with entropy from the including block).
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownManifest`], [`StorageError::NoParityToAudit`]
+    /// for a replicated object, [`StorageError::InvalidEpochRange`] when the
+    /// deadline is not after `epoch`, [`StorageError::NoActiveParityDeal`]
+    /// when no active deal that runs past `deadline_epoch` holds the
+    /// selected parity shard, and [`StorageError::CodingAuditAlreadyOpen`]
+    /// when every such deal already has an `Open` audit.
+    pub fn open_coding_audit(
+        &mut self,
+        entropy: &Hash32,
+        manifest_id: ContentId,
+        epoch: u64,
+        deadline_epoch: u64,
+    ) -> Result<u64, StorageError> {
+        if epoch >= deadline_epoch {
+            return Err(StorageError::InvalidEpochRange {
+                start: epoch,
+                end: deadline_epoch,
+            });
+        }
+        let manifest = self
+            .manifests
+            .get(&manifest_id)
+            .ok_or(StorageError::UnknownManifest(manifest_id))?;
+        let audit_id = self.next_coding_audit_id;
+        let audit = Self::derive_coding_audit(entropy, manifest, audit_id)?;
+        let parity_position = u64::from(manifest.erasure.k) + u64::from(audit.parity_index);
+        let parity_shard = manifest
+            .shards
+            .iter()
+            .find(|shard| {
+                shard.kind == crate::storage::ShardKind::Parity
+                    && u64::from(shard.index) == parity_position
+            })
+            .ok_or(StorageError::NoParityToAudit { manifest_id })?;
+        // A holder qualifies when its deal is `Active`, still runs past the
+        // deadline (a deal that ends inside the window would let the audit
+        // end as `Void` with no cooldown), and has no `Open` audit. Filter
+        // first, then pick, so a busy holder never blocks a free one.
+        let eligible: Vec<u64> = self
+            .deals_by_shard
+            .get(&(manifest_id, parity_shard.shard_id))
+            .map(|ids| {
+                ids.iter()
+                    .copied()
+                    .filter(|id| {
+                        self.deals.get(id).is_some_and(|deal| {
+                            deal.is_active() && deal.deal_end_epoch > deadline_epoch
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(&first) = eligible.first() else {
+            return Err(StorageError::NoActiveParityDeal {
+                manifest_id,
+                parity_index: audit.parity_index,
+            });
+        };
+        // One open audit per deal bounds the map by the number of deals, and
+        // the root scan with it. A closed audit frees the deal.
+        let holders: Vec<u64> = eligible
+            .into_iter()
+            .filter(|id| {
+                !self.coding_audits.values().any(|stored| {
+                    stored.deal_id == *id && stored.outcome == CodingAuditOutcome::Open
+                })
+            })
+            .collect();
+        if holders.is_empty() {
+            return Err(StorageError::CodingAuditAlreadyOpen { deal_id: first });
+        }
+        let pick = hash_fields_bytes(&[
+            b"BDLM_STORAGE_CODING_AUDIT_HOLDER_V1",
+            entropy,
+            manifest_id.as_bytes(),
+            &audit_id.to_le_bytes(),
+        ]);
+        let mut pick_bytes = [0u8; 8];
+        pick_bytes.copy_from_slice(&pick[..8]);
+        let chosen = holders[(u64::from_le_bytes(pick_bytes) % holders.len() as u64) as usize];
+        let operator = self
+            .deals
+            .get(&chosen)
+            .map(|deal| deal.operator)
+            .ok_or(StorageError::UnknownDeal(chosen))?;
+        self.next_coding_audit_id = audit_id.saturating_add(1);
+        self.coding_audits.insert(
+            audit_id,
+            StoredCodingAudit {
+                audit_id,
+                audit,
+                deal_id: chosen,
+                operator,
+                opened_epoch: epoch,
+                deadline_epoch,
+                outcome: CodingAuditOutcome::Open,
+            },
+        );
+        Ok(audit_id)
+    }
+
+    /// Record the audited operator's answer to a stored coding audit.
+    ///
+    /// `data_column` is byte `column` of each data shard in shard order and
+    /// `parity_byte` is the same column of the audited parity shard. The
+    /// check runs against the STORED audit, never against a caller copy.
+    ///
+    /// An audit whose deal is no longer `Active`, or whose manifest is gone,
+    /// ends as `Void` with no cooldown. A wrong answer ends as `Failed`: the
+    /// operator enters the six hour cooldown
+    /// ([`Self::begin_operator_cooldown`], with `now_secs`). The deal stays
+    /// `Active` and no bond moves (owner decision B2 A). A right answer ends
+    /// as `Passed`.
+    ///
+    /// Only `Open` audits take an answer, once, from the audited operator,
+    /// at or before the deadline epoch. A refused answer changes nothing.
+    ///
+    /// WIRING: called by ADIM 4c (`StorageTx::AnswerCodingAudit`).
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::UnknownCodingAudit`], [`StorageError::CodingAuditNotOpen`],
+    /// [`StorageError::CodingAuditWrongResponder`],
+    /// [`StorageError::InvalidEpochRange`] after the deadline, and the
+    /// non-mismatch errors of [`Self::verify_coding_audit`] (an audit that
+    /// cannot be checked is not the operator's failure and stays `Open`).
+    pub fn answer_coding_audit(
+        &mut self,
+        audit_id: u64,
+        responder: Address,
+        data_column: &[u8],
+        parity_byte: u8,
+        epoch: u64,
+        now_secs: u64,
+    ) -> Result<CodingAuditOutcome, StorageError> {
+        let stored = self
+            .coding_audits
+            .get(&audit_id)
+            .ok_or(StorageError::UnknownCodingAudit(audit_id))?;
+        if stored.outcome != CodingAuditOutcome::Open {
+            return Err(StorageError::CodingAuditNotOpen(audit_id));
+        }
+        if stored.operator != responder {
+            return Err(StorageError::CodingAuditWrongResponder { audit_id });
+        }
+        if epoch > stored.deadline_epoch {
+            return Err(StorageError::InvalidEpochRange {
+                start: epoch,
+                end: stored.deadline_epoch,
+            });
+        }
+        if !self.coding_audit_is_answerable(stored) {
+            self.settle_coding_audit(audit_id, CodingAuditOutcome::Void, epoch);
+            return Ok(CodingAuditOutcome::Void);
+        }
+        let operator = stored.operator;
+        let outcome = match self.verify_coding_audit(&stored.audit, data_column, parity_byte) {
+            Ok(()) => CodingAuditOutcome::Passed,
+            Err(StorageError::ParityColumnMismatch { .. }) => CodingAuditOutcome::Failed,
+            Err(other) => return Err(other),
+        };
+        if outcome == CodingAuditOutcome::Failed {
+            self.begin_operator_cooldown(operator, now_secs);
+        }
+        self.settle_coding_audit(audit_id, outcome, epoch);
+        Ok(outcome)
+    }
+
+    /// An audit can be checked only while the deal that holds the shard is
+    /// `Active` and the manifest is still registered. Otherwise the operator
+    /// has nothing to answer with and nothing to be judged against.
+    fn coding_audit_is_answerable(&self, stored: &StoredCodingAudit) -> bool {
+        self.manifests.contains_key(&stored.audit.manifest_id)
+            && self
+                .deals
+                .get(&stored.deal_id)
+                .is_some_and(StorageDeal::is_active)
+    }
+
+    /// Give an audit its final outcome and queue it for the retention sweep
+    /// under `epoch`.
+    fn settle_coding_audit(&mut self, audit_id: u64, outcome: CodingAuditOutcome, epoch: u64) {
+        if let Some(stored) = self.coding_audits.get_mut(&audit_id) {
+            stored.outcome = outcome;
+            self.settled_coding_audits
+                .entry(epoch)
+                .or_default()
+                .push(audit_id);
+        }
+    }
+
+    /// Close every `Open` coding audit whose deadline epoch is before
+    /// `epoch`. An answerable one becomes `Missed` and its operator enters
+    /// the six hour cooldown. One whose deal is no longer `Active`, or whose
+    /// manifest is gone, becomes `Void` and starts no cooldown: the operator
+    /// could not have answered. Deals and bonds are not touched (owner
+    /// decision B2 A).
+    ///
+    /// Returns the ids closed, in id order.
+    ///
+    /// WIRING: called by ADIM 4b (open and finalize in `apply_block_effects`
+    /// at the start of each epoch).
+    pub fn finalize_missed_coding_audits(&mut self, epoch: u64, now_secs: u64) -> Vec<u64> {
+        let due: Vec<(u64, Address, bool)> = self
+            .coding_audits
+            .values()
+            .filter(|stored| {
+                stored.outcome == CodingAuditOutcome::Open && stored.deadline_epoch < epoch
+            })
+            .map(|stored| {
+                (
+                    stored.audit_id,
+                    stored.operator,
+                    self.coding_audit_is_answerable(stored),
+                )
+            })
+            .collect();
+        for (audit_id, operator, answerable) in &due {
+            if *answerable {
+                self.settle_coding_audit(*audit_id, CodingAuditOutcome::Missed, epoch);
+                self.begin_operator_cooldown(*operator, now_secs);
+            } else {
+                self.settle_coding_audit(*audit_id, CodingAuditOutcome::Void, epoch);
+            }
+        }
+        due.into_iter().map(|(audit_id, _, _)| audit_id).collect()
+    }
+
+    /// Drop the final coding audits settled
+    /// `CODING_AUDIT_RECORD_RETENTION_EPOCHS` or more epochs ago. The window
+    /// is fixed: it decides which rows reach the root, so no caller may
+    /// choose it.
+    ///
+    /// Runs from the same epoch step as the other sweeps, so every node drops
+    /// the same rows at the same epoch. The queue is a hint and the outcome
+    /// is the fact: an audit that is somehow `Open` stays.
+    ///
+    /// Returns how many audits were dropped.
+    ///
+    /// WIRING: called by ADIM 4b at the start of each epoch.
+    pub fn sweep_settled_coding_audits(&mut self, now_epoch: u64) -> usize {
+        self.sweep_coding_audits_older_than(now_epoch, CODING_AUDIT_RECORD_RETENTION_EPOCHS)
+    }
+
+    /// The stored coding audit with this id, while the registry holds it.
+    ///
+    /// WIRING: read by `StorageTx::AnswerCodingAudit` (storage_tx.rs) to bound
+    /// the answer by the audited manifest before the registry checks it.
+    #[must_use]
+    pub fn coding_audit(&self, audit_id: u64) -> Option<&StoredCodingAudit> {
+        self.coding_audits.get(&audit_id)
+    }
+
+    /// Open the coding audits of one epoch boundary.
+    ///
+    /// The walk starts at the manifest id `entropy` names and goes once round
+    /// the manifest map in key order. Every node visits the same manifests in
+    /// the same order, and the same manifest is not first at every epoch. A
+    /// manifest with no parity or with an `Open` audit is skipped. An open the
+    /// registry refuses (no eligible holder, every holder busy) is skipped too
+    /// and writes nothing. At most [`CODING_AUDIT_OPENS_PER_EPOCH`] audits
+    /// open, each with [`CODING_AUDIT_ANSWER_WINDOW_EPOCHS`] epochs to answer.
+    ///
+    /// Returns the ids opened, in order.
+    ///
+    /// WIRING: called by ADIM 4b in `apply_block_effects` when the epoch
+    /// advances.
+    pub fn open_epoch_coding_audits(&mut self, entropy: &Hash32, epoch: u64) -> Vec<u64> {
+        let mut opened = Vec::new();
+        let Some(deadline_epoch) = epoch.checked_add(CODING_AUDIT_ANSWER_WINDOW_EPOCHS) else {
+            return opened;
+        };
+        let audited: std::collections::BTreeSet<ContentId> = self
+            .coding_audits
+            .values()
+            .filter(|stored| stored.outcome == CodingAuditOutcome::Open)
+            .map(|stored| stored.audit.manifest_id)
+            .collect();
+        let start = ContentId(*entropy);
+        let candidates: Vec<ContentId> = self
+            .manifests
+            .range(start..)
+            .chain(self.manifests.range(..start))
+            .filter(|(id, m)| m.erasure.n > m.erasure.k && !audited.contains(*id))
+            .map(|(id, _)| *id)
+            .collect();
+        for manifest_id in candidates {
+            if opened.len() >= CODING_AUDIT_OPENS_PER_EPOCH {
+                break;
+            }
+            if let Ok(audit_id) =
+                self.open_coding_audit(entropy, manifest_id, epoch, deadline_epoch)
+            {
+                opened.push(audit_id);
+            }
+        }
+        opened
+    }
+
+    fn sweep_coding_audits_older_than(&mut self, now_epoch: u64, retention_epochs: u64) -> usize {
+        let Some(cutoff) = now_epoch.checked_sub(retention_epochs) else {
+            return 0;
+        };
+        let due: Vec<u64> = self
+            .settled_coding_audits
+            .range(..=cutoff)
+            .map(|(&epoch, _)| epoch)
+            .collect();
+        let mut dropped = 0;
+        for epoch in due {
+            let Some(audit_ids) = self.settled_coding_audits.remove(&epoch) else {
+                continue;
+            };
+            for audit_id in audit_ids {
+                let settled = self
+                    .coding_audits
+                    .get(&audit_id)
+                    .is_some_and(|stored| stored.outcome != CodingAuditOutcome::Open);
+                if settled && self.coding_audits.remove(&audit_id).is_some() {
+                    dropped += 1;
+                }
+            }
+        }
+        dropped
+    }
+
     pub fn derive_challenge_range(
         input: StorageChallengeRangeInput<'_>,
     ) -> Result<(u64, u64), StorageError> {
@@ -2340,11 +3027,14 @@ impl StorageRegistry {
             .challenges
             .values()
             .filter(|c| {
+                // A challenge on a deal that left `Active` can never be
+                // resolved (answer and missed paths refuse it), so it must
+                // not hold a slot against the operator's new work.
                 !self.results.contains_key(&c.challenge_id)
                     && self
                         .deals
                         .get(&c.deal_id)
-                        .is_some_and(|d| d.operator == operator)
+                        .is_some_and(|d| d.operator == operator && d.is_active())
             })
             .count();
         if operator_open >= Self::MAX_OPEN_CHALLENGES_PER_OPERATOR {
@@ -2355,7 +3045,9 @@ impl StorageRegistry {
         }
 
         let challenge_id = self.next_challenge_id;
-        self.next_challenge_id += 1;
+        self.next_challenge_id = challenge_id
+            .checked_add(1)
+            .ok_or(StorageError::IdSpaceExhausted)?;
         let challenge = RetrievalChallenge {
             challenge_id,
             deal_id,
@@ -2699,7 +3391,7 @@ impl StorageRegistry {
 
         // Bind every replay-relevant registry field. Roots alone are not enough:
         // The same shard proof must not answer another deal, replica, range,
-        // Challenge, deadline, responder, epoch, domain, or L1 network.
+        // Challenge, deadline, responder, epoch, domain, or chain network.
         let context_digest = context.digest(storage_root, range_hash);
 
         let mut sender_bytes = [0u8; 8];
@@ -3393,6 +4085,74 @@ impl StorageRegistry {
             .collect()
     }
 
+    /// Record who escrowed the fee of `deal_id`. Called once, right after the
+    /// deal opens.
+    pub fn set_deal_payer(&mut self, deal_id: u64, payer: Address) {
+        if let Some(deal) = self.deals.get_mut(&deal_id) {
+            deal.payer = Some(payer);
+        }
+    }
+
+    /// Whether `prune_content` would refuse this manifest: an open retrieval
+    /// challenge or an open coding audit on one of its active deals. The refund
+    /// path asks the same question, so a refused prune credits nothing.
+    fn prune_is_refused(&self, manifest_id: &ContentId) -> bool {
+        self.deals_for_manifest(manifest_id)
+            .iter()
+            .filter(|deal| deal.is_active())
+            .any(|deal| {
+                let retrieval_open = self.challenges.iter().any(|(id, challenge)| {
+                    challenge.deal_id == deal.deal_id && !self.results.contains_key(id)
+                });
+                let coding_open = self.coding_audits.values().any(|audit| {
+                    audit.deal_id == deal.deal_id && audit.outcome == CodingAuditOutcome::Open
+                });
+                retrieval_open || coding_open
+            })
+    }
+
+    /// Snapshot of burned manifests waiting for an open challenge or coding
+    /// audit to close before their storage deals can be pruned.
+    #[must_use]
+    pub fn pending_prune_manifests(&self) -> Vec<ContentId> {
+        self.pending_prunes.iter().copied().collect()
+    }
+
+    /// The unearned fee `prune_content` would leave stranded, per payer: for
+    /// every active deal of the manifest, the fee of the epochs that have not
+    /// completed at `now_epoch`. Read before the prune, while the deals are
+    /// still active. Deals without a recorded payer refund nothing.
+    ///
+    /// A prune that `prune_content` refuses refunds nothing: the deals stay
+    /// active and keep earning their epoch rewards, and the manifest stays
+    /// registered, so crediting the unearned fee here would pay the same epochs
+    /// twice.
+    pub fn prune_fee_refunds(
+        &self,
+        manifest_id: &ContentId,
+        now_epoch: u64,
+    ) -> Vec<(Address, u64)> {
+        if self.prune_is_refused(manifest_id) {
+            return Vec::new();
+        }
+        self.deals_for_manifest(manifest_id)
+            .iter()
+            .filter(|d| d.is_active())
+            .filter_map(|d| {
+                let payer = d.payer?;
+                let elapsed = now_epoch.saturating_sub(d.deal_start_epoch);
+                let remaining = d.duration_epochs().saturating_sub(elapsed);
+                let refund = d.total_fee(remaining);
+                (refund > 0).then_some((payer, refund))
+            })
+            .collect()
+    }
+
+    /// Every deal in id order, without collecting.
+    pub fn deals_iter(&self) -> impl Iterator<Item = &StorageDeal> {
+        self.deals.values()
+    }
+
     pub fn all_deals(&self) -> Vec<&StorageDeal> {
         self.deals.values().collect()
     }
@@ -3597,25 +4357,82 @@ impl StorageRegistry {
     /// Left as-is (audit trail).
     ///
     /// Returns the number of active deals that were expired by this prune.
-    pub fn prune_content(&mut self, manifest_id: &ContentId, _now_epoch: u64) -> u64 {
-        let deal_ids: Vec<u64> = self
+    /// Prune everything belonging to a destroyed object.
+    ///
+    /// Returns the number of active deals expired plus the bond each of them
+    /// still held, as `(operator, bond)` pairs. The bond was debited at
+    /// `open_deal` and the maturity sweep (`finalize_expired_storage_deals`)
+    /// only settles `Active` deals, so a prune that flipped them straight to
+    /// `Expired` made the bond - and the operator's whole stake for serving
+    /// the object until its owner burned it - vanish from circulation
+    /// (P23-F01). The caller credits the returns; the content is gone by
+    /// definition here, so the strand guard `expire_deal` applies does not.
+    /// Fees for the partial epoch in progress are not settled: accrual is
+    /// per completed epoch, the same rule a slashed deal follows.
+    pub fn prune_content(
+        &mut self,
+        manifest_id: &ContentId,
+        now_epoch: u64,
+    ) -> (u64, Vec<(Address, u64)>) {
+        let deals: Vec<(u64, Address, u64)> = self
             .deals_for_manifest(manifest_id)
             .iter()
             .filter(|d| d.is_active())
-            .map(|d| d.deal_id)
+            .map(|d| (d.deal_id, d.operator, d.economics.operator_bond))
             .collect();
 
-        let pruned = deal_ids.len() as u64;
-        for deal_id in deal_ids {
+        // BLG-0365 (P24-F06): an open retrieval challenge is a live question
+        // about these exact bytes. Pruning under it would expire the deal,
+        // `finalize_missed_challenge` would then refuse with DealNotActive,
+        // and the challenge would never close - the opener's bond stuck, the
+        // slash that the challenge was raised for never applied. The prune is
+        // refused whole (not partial: a half-pruned manifest leaves live deals
+        // referencing a dictionary that no longer exists); the next epoch's
+        // maintenance pass prunes once finalize has run.
+        if self.prune_is_refused(manifest_id) {
+            self.pending_prunes.insert(*manifest_id);
+            return (0, Vec::new());
+        }
+        self.pending_prunes.remove(manifest_id);
+
+        let pruned = deals.len() as u64;
+        let mut bond_returns: Vec<(Address, u64)> = Vec::new();
+        for (deal_id, operator, bond) in deals {
             if let Some(deal) = self.deals.get_mut(&deal_id) {
                 deal.status = DealStatus::Expired;
+                bond_returns.push((operator, bond));
             }
         }
 
-        // Remove the manifest entry so it can no longer be referenced.
-        self.manifests.remove(manifest_id);
+        // Remove the manifest entry so it can no longer be referenced. The
+        // dictionary it held is released once, and only when the manifest was
+        // really registered, so a repeated prune cannot drop a reference that
+        // belongs to another object.
+        if let Some(manifest) = self.manifests.remove(manifest_id) {
+            if let Some(dict_id) = manifest.dictionary_id {
+                self.dictionaries.release_dictionary(&dict_id, now_epoch);
+            }
+        }
+        // Everything keyed by the manifest goes with it. Left behind, the read
+        // log would keep feeding the replica demand of an object that no
+        // longer exists, and the other rows would stay in the state root.
+        self.access_events.remove(manifest_id);
+        self.confidential_commits.remove(manifest_id);
+        self.confidential_owners.remove(manifest_id);
+        self.self_host_policies
+            .retain(|(policy_manifest, _), _| policy_manifest != manifest_id);
+        // The ownership claim is part of the record, so it goes with it. Left
+        // behind it made `owner_of`/`has_claim` report an owner for content
+        // that is no longer registered, and registration is first-writer-wins
+        // on an id a prune makes registrable again: one later registration
+        // created a second claim, after which `owner_of` returns `None` for
+        // both parties for good - no view grant, no self-host declaration and
+        // no marketplace listing for that id, with no transaction able to
+        // repair it.
+        self.manifest_claims
+            .retain(|(claimed, _)| claimed != manifest_id);
 
-        pruned
+        (pruned, bond_returns)
     }
 }
 
@@ -3623,25 +4440,40 @@ impl StorageRegistry {
 /// Audit logs and the (future) `GlobalBlockHeader.storage_root` aggregation
 /// (vision §8.4).
 pub fn storage_deal_leaf_hash(deal: &StorageDeal) -> Hash32 {
-    hash_fields_bytes(&[
+    let status = [match deal.status {
+        DealStatus::Active => 0,
+        DealStatus::Slashed => 1,
+        DealStatus::Expired => 2,
+    }];
+    let deal_id = deal.deal_id.to_le_bytes();
+    let domain_id = deal.domain_id.to_le_bytes();
+    let bond = deal.economics.operator_bond.to_le_bytes();
+    let fee_rate = deal.economics.fee_per_byte_epoch.to_le_bytes();
+    let shard_bytes = deal.shard_bytes.to_le_bytes();
+    let replica = [deal.replica_index];
+    let start = deal.deal_start_epoch.to_le_bytes();
+    let end = deal.deal_end_epoch.to_le_bytes();
+    let mut fields: Vec<&[u8]> = vec![
         b"BDLM_STORAGE_DEAL_V1",
-        &deal.deal_id.to_le_bytes(),
-        &deal.domain_id.to_le_bytes(),
+        &deal_id,
+        &domain_id,
         &deal.manifest_id.0,
         &deal.shard_id.0,
         deal.operator.as_bytes(),
-        &deal.economics.operator_bond.to_le_bytes(),
-        &deal.economics.fee_per_byte_epoch.to_le_bytes(),
-        &deal.shard_bytes.to_le_bytes(),
-        &[deal.replica_index],
-        &deal.deal_start_epoch.to_le_bytes(),
-        &deal.deal_end_epoch.to_le_bytes(),
-        &[match deal.status {
-            DealStatus::Active => 0,
-            DealStatus::Slashed => 1,
-            DealStatus::Expired => 2,
-        }],
-    ])
+        &bond,
+        &fee_rate,
+        &shard_bytes,
+        &replica,
+        &start,
+        &end,
+        &status,
+    ];
+    // The payer is committed only when set, so a deal without one keeps the
+    // leaf it always had.
+    if let Some(payer) = deal.payer.as_ref() {
+        fields.push(payer.as_bytes());
+    }
+    hash_fields_bytes(&fields)
 }
 
 #[cfg(test)]
@@ -3734,12 +4566,15 @@ mod tests {
         };
         let err = reg
             .issue_view_grant(
+                1,
                 content,
                 &unsigned,
-                None,
-                key,
-                crate::storage::ViewPolicy::PublicKeyId,
-                1,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy: crate::storage::ViewPolicy::PublicKeyId,
+                    opened_epoch: 1,
+                },
             )
             .expect_err("a stranger cannot hand out grants");
         assert!(
@@ -3828,24 +4663,31 @@ mod tests {
 
         let key = [5u8; 32];
         let digest = crate::storage::grant_issue_digest(
+            1,
+            0,
             &content,
             &owner,
-            None,
-            &key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
+            &crate::storage::GrantIssueTerms {
+                grantee: None,
+                key_id: key,
+                policy: crate::storage::ViewPolicy::PublicKeyId,
+                opened_epoch: 1,
+            },
         );
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
             signature: kp.sign(&digest).to_vec(),
         };
         reg.issue_view_grant(
+            1,
             content,
             &auth,
-            None,
-            key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
+            crate::storage::GrantIssueTerms {
+                grantee: None,
+                key_id: key,
+                policy: crate::storage::ViewPolicy::PublicKeyId,
+                opened_epoch: 1,
+            },
         )
         .expect("the owner's own signed grant must be accepted");
         assert!(reg.may_view(&content, &bob, &key, &owner));
@@ -3858,12 +4700,15 @@ mod tests {
         // the digest, so it verifies as nothing.
         let err = reg
             .issue_view_grant(
+                1,
                 other,
                 &auth,
-                None,
-                key,
-                crate::storage::ViewPolicy::PublicKeyId,
-                1,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy: crate::storage::ViewPolicy::PublicKeyId,
+                    opened_epoch: 1,
+                },
             )
             .expect_err("a grant signature is bound to the object it names");
         assert!(matches!(
@@ -3876,12 +4721,15 @@ mod tests {
         // in the digest too.
         let err = reg
             .issue_view_grant(
+                1,
                 content,
                 &auth,
-                Some(bob),
-                key,
-                crate::storage::ViewPolicy::OwnerOnly,
-                1,
+                crate::storage::GrantIssueTerms {
+                    grantee: Some(bob),
+                    key_id: key,
+                    policy: crate::storage::ViewPolicy::OwnerOnly,
+                    opened_epoch: 1,
+                },
             )
             .expect_err("a grant signature is bound to the policy it names");
         assert!(matches!(
@@ -3911,12 +4759,16 @@ mod tests {
         reg.register_manifest(&m);
         let key = [5u8; 32];
         let digest = crate::storage::grant_issue_digest(
+            1,
+            0,
             &m.manifest_id,
             &owner,
-            None,
-            &key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
+            &crate::storage::GrantIssueTerms {
+                grantee: None,
+                key_id: key,
+                policy: crate::storage::ViewPolicy::PublicKeyId,
+                opened_epoch: 1,
+            },
         );
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
@@ -3924,15 +4776,102 @@ mod tests {
         };
         let before = reg.root();
         reg.issue_view_grant(
+            1,
             m.manifest_id,
             &auth,
-            None,
-            key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
+            crate::storage::GrantIssueTerms {
+                grantee: None,
+                key_id: key,
+                policy: crate::storage::ViewPolicy::PublicKeyId,
+                opened_epoch: 1,
+            },
         )
         .expect("the owner's signed grant");
         assert_ne!(before, reg.root(), "a live grant must reach the state root");
+    }
+
+    /// P28-F16: a captured issue authorisation cannot be replayed after the
+    /// grant is revoked, and a signature made for another chain is refused.
+    #[cfg(feature = "wallet-ml-dsa")]
+    #[test]
+    fn a_captured_grant_authorisation_cannot_be_replayed() {
+        use crate::crypto::primitives::WalletKeyPair;
+
+        let mut reg = StorageRegistry::new();
+        let kp = WalletKeyPair::generate();
+        let owner = kp.address();
+        let mut m = good_manifest();
+        m.owner = owner;
+        reg.register_manifest(&m);
+        let key = [6u8; 32];
+        let policy = crate::storage::ViewPolicy::PublicKeyId;
+        let sign = |chain: u64, nonce: u64| {
+            let d = crate::storage::grant_issue_digest(
+                chain,
+                nonce,
+                &m.manifest_id,
+                &owner,
+                &crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy,
+                    opened_epoch: 1,
+                },
+            );
+            crate::storage::GrantAuthorization {
+                owner_key: kp.public_key_bytes(),
+                signature: kp.sign(&d).to_vec(),
+            }
+        };
+        let other_chain = sign(2, 0);
+        assert!(reg
+            .issue_view_grant(
+                1,
+                m.manifest_id,
+                &other_chain,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy,
+                    opened_epoch: 1
+                }
+            )
+            .is_err());
+        let auth = sign(1, 0);
+        let grant = reg
+            .issue_view_grant(
+                1,
+                m.manifest_id,
+                &auth,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy,
+                    opened_epoch: 1,
+                },
+            )
+            .expect("first use");
+        let revoke_d = crate::storage::grant_revoke_digest(1, grant, &owner, 4);
+        let revoke = crate::storage::GrantAuthorization {
+            owner_key: kp.public_key_bytes(),
+            signature: kp.sign(&revoke_d).to_vec(),
+        };
+        reg.revoke_view_grant(1, grant, &revoke, 4).expect("revoke");
+        assert!(
+            reg.issue_view_grant(
+                1,
+                m.manifest_id,
+                &auth,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy,
+                    opened_epoch: 1
+                }
+            )
+            .is_err(),
+            "the captured authorisation must not restore a revoked grant"
+        );
     }
 
     #[cfg(feature = "wallet-ml-dsa")]
@@ -3948,12 +4887,16 @@ mod tests {
         reg.register_manifest(&m);
         let key = [6u8; 32];
         let issue_digest = crate::storage::grant_issue_digest(
+            1,
+            0,
             &m.manifest_id,
             &owner,
-            None,
-            &key,
-            crate::storage::ViewPolicy::PublicKeyId,
-            1,
+            &crate::storage::GrantIssueTerms {
+                grantee: None,
+                key_id: key,
+                policy: crate::storage::ViewPolicy::PublicKeyId,
+                opened_epoch: 1,
+            },
         );
         let issue = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
@@ -3961,19 +4904,22 @@ mod tests {
         };
         let grant = reg
             .issue_view_grant(
+                1,
                 m.manifest_id,
                 &issue,
-                None,
-                key,
-                crate::storage::ViewPolicy::PublicKeyId,
-                1,
+                crate::storage::GrantIssueTerms {
+                    grantee: None,
+                    key_id: key,
+                    policy: crate::storage::ViewPolicy::PublicKeyId,
+                    opened_epoch: 1,
+                },
             )
             .expect("signed issuance");
         assert!(reg.may_view(&m.manifest_id, &Address::from([2u8; 32]), &key, &owner));
 
         // Revoking with the issuance signature still attached is not revoking.
         let err = reg
-            .revoke_view_grant(grant, &issue, 4)
+            .revoke_view_grant(1, grant, &issue, 4)
             .expect_err("a revocation needs its own signature");
         assert!(matches!(
             err,
@@ -3986,12 +4932,12 @@ mod tests {
             "a refused revocation must leave the grant standing"
         );
 
-        let revoke_digest = crate::storage::grant_revoke_digest(grant, &owner, 4);
+        let revoke_digest = crate::storage::grant_revoke_digest(1, grant, &owner, 4);
         let revoke = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
             signature: kp.sign(&revoke_digest).to_vec(),
         };
-        reg.revoke_view_grant(grant, &revoke, 4)
+        reg.revoke_view_grant(1, grant, &revoke, 4)
             .expect("the owner's signed revocation");
         assert!(
             !reg.may_view(&m.manifest_id, &Address::from([2u8; 32]), &key, &owner),
@@ -4568,6 +5514,31 @@ mod tests {
         assert_ne!(before, reg.root(), "the cooldown must reach the root");
     }
 
+    /// Proven reads feed the replica demand and the repair tickets, so they
+    /// belong in the root.
+    #[test]
+    fn a_proven_read_changes_the_registry_root() {
+        let mut reg = StorageRegistry::new();
+        let manifest = ContentId([3u8; 32]);
+        let before = reg.root();
+        reg.record_proven_read(manifest, 10);
+        let one = reg.root();
+        assert_ne!(before, one, "the access log must reach the root");
+        reg.record_proven_read(manifest, 10);
+        assert_ne!(one, reg.root(), "the read count must reach the root");
+    }
+
+    /// Dictionary reference counts decide deletion, so they belong in the root.
+    #[test]
+    fn a_dictionary_changes_the_registry_root() {
+        let mut reg = StorageRegistry::new();
+        let before = reg.root();
+        reg.dictionaries
+            .register_dictionary(ContentId([9u8; 32]), 4_096)
+            .expect("the dictionary must register");
+        assert_ne!(before, reg.root(), "the dictionary must reach the root");
+    }
+
     /// The confidential record must reach the state root, both halves of it.
     ///
     /// A commitment that nobody can point at is not a promise, and an owner that
@@ -4758,6 +5729,7 @@ mod tests {
             merkle_proof: None,
             storage_root: None,
             merkle_depth: 64,
+            payer: None,
         };
         let before = storage_deal_leaf_hash(&a);
         a.shard_bytes = 1_048_576;
@@ -5050,6 +6022,56 @@ mod tests {
         assert_eq!(deal3.merkle_depth, 64);
         assert_eq!(reg.deals_for_shard(&m.manifest_id, &shard_id).len(), 3);
         assert_eq!(reg.deals_for_manifest(&m.manifest_id).len(), 3);
+    }
+
+    #[test]
+    fn challenge_window_refuses_future_start_and_unbounded_deadline() {
+        assert!(StorageRegistry::validate_challenge_window(10, 20, 10).is_ok());
+        assert!(StorageRegistry::validate_challenge_window(5, 20, 10).is_ok());
+        assert!(matches!(
+            StorageRegistry::validate_challenge_window(u64::MAX - 5, u64::MAX, 10),
+            Err(StorageError::InvalidEpochRange { .. })
+        ));
+        assert!(matches!(
+            StorageRegistry::validate_challenge_window(10, u64::MAX, 10),
+            Err(StorageError::InvalidEpochRange { .. })
+        ));
+        assert!(StorageRegistry::validate_challenge_window(
+            10,
+            10 + StorageRegistry::MAX_CHALLENGE_WINDOW_EPOCHS,
+            10
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_full_id_counter_refuses_instead_of_overflowing() {
+        // P23-F15: the counters used a bare `+= 1`. With overflow checks on
+        // that is a panic, so a full counter must be a clean refusal.
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, shard_id) = open_one(&mut reg, &m);
+        reg.next_challenge_id = u64::MAX;
+        assert!(matches!(
+            reg.open_challenge(deal_id, 0, 4, 110, 120, opener(), 50),
+            Err(StorageError::IdSpaceExhausted)
+        ));
+        reg.next_deal_id = u64::MAX;
+        let refused = reg.open_deal(
+            42,
+            &m,
+            shard_id,
+            operator(),
+            1,
+            100,
+            200,
+            good_econ(),
+            &params(),
+            Some(valid_merkle_proof()),
+            Some([0x42u8; 32]),
+        );
+        assert!(matches!(refused, Err(StorageError::IdSpaceExhausted)));
+        assert_eq!(reg.next_deal_id, u64::MAX);
     }
 
     #[test]
@@ -5600,9 +6622,11 @@ mod tests {
         assert!(reg.settled_tickets.is_empty());
 
         let current = bincode::serialize(&reg).unwrap();
-        let empty_map = 0u64.to_le_bytes();
-        assert!(current.ends_with(&empty_map));
-        let older = &current[..current.len() - empty_map.len()];
+        // The row ends with `settled_tickets`, then the three coding audit
+        // fields, all empty here: four zero u64 values.
+        let empty_tail = [0u8; 32];
+        assert!(current.ends_with(&empty_tail));
+        let older = &current[..current.len() - empty_tail.len()];
         assert!(
             bincode::deserialize::<StorageRegistry>(older).is_err(),
             "the shorter row must be refused, not padded"
@@ -5963,6 +6987,152 @@ mod tests {
         assert!(matches!(err, StorageError::InvalidMerkleProof(_)));
     }
 
+    /// BLG-0365 (P24-F06): prune defers while a retrieval challenge is open
+    /// on one of the deals, and proceeds once the challenge has been
+    /// finalized (the deal leaves Active with it).
+    #[test]
+    fn prune_defers_while_a_retrieval_challenge_is_open() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let manifest_id = m.manifest_id;
+        let shard_id = m.shards[0].shard_id;
+        let deal_id = reg
+            .open_deal(
+                42,
+                &m,
+                shard_id,
+                operator(),
+                0,
+                100,
+                200,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        let challenger = Address::from([0xC0u8; 32]);
+        let challenge_id = reg
+            .open_challenge(
+                deal_id,
+                0,
+                8,
+                140,
+                160,
+                challenger,
+                StorageRegistry::required_opener_bond(8),
+            )
+            .expect("a funded challenge opens");
+
+        let (pruned, bonds) = reg.prune_content(&manifest_id, 150);
+        assert_eq!(pruned, 0, "no pruning under an open challenge");
+        assert!(bonds.is_empty());
+        assert!(
+            reg.prune_fee_refunds(&manifest_id, 150).is_empty(),
+            "refused prune must return zero unearned fee refund"
+        );
+        assert_eq!(
+            reg.pending_prune_manifests(),
+            vec![manifest_id],
+            "refused prune must queue manifest for retry"
+        );
+        assert!(
+            reg.get_manifest(&manifest_id).is_some(),
+            "manifest stays live"
+        );
+        assert_eq!(
+            reg.get_deal(deal_id).map(|d| d.status),
+            Some(DealStatus::Active),
+            "the challenged deal must keep serving the answer window"
+        );
+
+        let closed = reg.finalize_missed_challenge(challenge_id, 161);
+        assert!(closed.is_ok(), "the open challenge finalizes: {closed:?}");
+        let (pruned_after, bonds_after) = reg.prune_content(&manifest_id, 162);
+        assert_eq!(pruned_after, 0, "the slashed deal is no longer active");
+        assert!(bonds_after.is_empty(), "a slashed operator is not refunded");
+        assert!(
+            reg.get_manifest(&manifest_id).is_none(),
+            "with the challenge closed, the manifest prunes"
+        );
+    }
+
+    #[test]
+    fn refused_storage_prune_paid_zero_and_retries_when_challenge_closes() {
+        let mut state = crate::core::account::AccountState::new();
+        state.epoch_index = 150;
+        let payer = Address::from([0x71; 32]);
+        let op = operator();
+        let challenger = Address::from([0x73; 32]);
+        let m = good_manifest();
+        let manifest_id = m.manifest_id;
+        let shard_id = m.shards[0].shard_id;
+        let deal_id = state
+            .storage_registry
+            .open_deal(
+                42,
+                &m,
+                shard_id,
+                op,
+                0,
+                100,
+                200,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap();
+        state.storage_registry.set_deal_payer(deal_id, payer);
+        let challenge_id = state
+            .storage_registry
+            .open_challenge(
+                deal_id,
+                0,
+                8,
+                140,
+                160,
+                challenger,
+                StorageRegistry::required_opener_bond(8),
+            )
+            .unwrap();
+
+        let root_before = state.storage_registry.root();
+        crate::chain::blockchain::Blockchain::prune_storage_content_in_state(
+            &mut state,
+            &manifest_id,
+        )
+        .unwrap();
+        assert_eq!(
+            state.get_balance(&payer),
+            0,
+            "refused prune must credit zero unearned fee refund"
+        );
+        assert_eq!(
+            state.get_balance(&op),
+            0,
+            "refused prune must return zero operator bond"
+        );
+        assert_ne!(
+            state.storage_registry.root(),
+            root_before,
+            "queued retry must commit into StorageRegistry::root()"
+        );
+
+        state.epoch_index = 162;
+        let _ = state
+            .storage_registry
+            .finalize_missed_challenge(challenge_id, 162);
+        for queued in state.storage_registry.pending_prune_manifests() {
+            crate::chain::blockchain::Blockchain::prune_storage_content_in_state(
+                &mut state, &queued,
+            )
+            .unwrap();
+        }
+        assert!(state.storage_registry.pending_prune_manifests().is_empty());
+        assert!(state.storage_registry.get_manifest(&manifest_id).is_none());
+    }
+
     #[test]
     fn prune_content_expires_active_deals_and_removes_manifest() {
         // F1 (Constitution section 1): if an NFT is burned the data is
@@ -6010,8 +7180,16 @@ mod tests {
         assert!(reg.get_manifest(&manifest_id).is_some());
 
         // Prune the content.
-        let pruned = reg.prune_content(&manifest_id, 150);
+        let (pruned, bond_returns) = reg.prune_content(&manifest_id, 150);
         assert_eq!(pruned, 2);
+        // P23-F01: every expired deal hands its operator bond back to the
+        // caller for settlement; the old u64-only return dropped them.
+        assert_eq!(bond_returns.len(), 2);
+        assert!(bond_returns.iter().all(|(_, bond)| *bond > 0));
+        // A repeated prune finds nothing active: no second payout.
+        let (pruned_again, returns_again) = reg.prune_content(&manifest_id, 151);
+        assert_eq!(pruned_again, 0);
+        assert!(returns_again.is_empty());
 
         // Both deals should now be Expired.
         assert_eq!(reg.all_deals().len(), 2);
@@ -6023,13 +7201,86 @@ mod tests {
         assert!(reg.get_manifest(&manifest_id).is_none());
     }
 
+    /// The rows keyed by the manifest leave with it, and the dictionary
+    /// reference drops exactly once.
+    #[test]
+    fn prune_content_clears_rows_keyed_by_the_manifest() {
+        let mut reg = StorageRegistry::new();
+        let dict = ContentId([9u8; 32]);
+        reg.dictionaries
+            .register_dictionary(dict, 4_096)
+            .expect("the dictionary must register");
+        let mut m = good_manifest();
+        m.owner = operator();
+        m.dictionary_id = Some(dict);
+        reg.register_manifest_with_source(&m)
+            .expect("the manifest must register");
+        let manifest_id = m.manifest_id;
+        reg.record_proven_read(manifest_id, 10);
+        reg.self_host_policies.insert(
+            (manifest_id, m.shards[0].shard_id),
+            crate::storage::MobileSelfContentPolicy {
+                content_id: m.shards[0].shard_id,
+                owner: operator(),
+                critical: false,
+                required_paid_replicas: 0,
+                self_host_allowed: true,
+            },
+        );
+        assert_eq!(reg.dictionaries.reference_count(&dict), Some(1));
+
+        assert!(
+            reg.has_claim(&manifest_id, &m.owner),
+            "the registered manifest carries its ownership claim"
+        );
+
+        reg.prune_content(&manifest_id, 150);
+        assert!(reg.access_events.is_empty());
+        assert!(reg.self_host_policies.is_empty());
+        assert_eq!(reg.dictionaries.reference_count(&dict), Some(0));
+        // The claim goes with the record. Left behind, it kept `owner_of`
+        // reporting an owner for content that is no longer registered, and the
+        // next registration of the same id created a second claim - after which
+        // `owner_of` returned `None` for both parties, permanently.
+        assert!(
+            reg.owner_of(&manifest_id).is_none(),
+            "a pruned manifest must not keep an ownership claim"
+        );
+        assert!(reg.manifest_claims.is_empty());
+
+        reg.prune_content(&manifest_id, 151);
+        assert_eq!(reg.dictionaries.reference_count(&dict), Some(0));
+    }
+
+    #[test]
+    fn prune_fee_refund_covers_only_the_unserved_epochs() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        let payer = Address::from([0x55u8; 32]);
+        // No payer recorded: nothing to refund.
+        assert!(reg.prune_fee_refunds(&m.manifest_id, 150).is_empty());
+        reg.set_deal_payer(deal_id, payer);
+        let deal = reg.get_deal(deal_id).unwrap().clone();
+        let refunds = reg.prune_fee_refunds(&m.manifest_id, 150);
+        let expected = deal.total_fee(50);
+        if expected == 0 {
+            assert!(refunds.is_empty());
+        } else {
+            assert_eq!(refunds, vec![(payer, expected)]);
+        }
+        // Past the end of the term: nothing left to refund.
+        assert!(reg.prune_fee_refunds(&m.manifest_id, 250).is_empty());
+    }
+
     #[test]
     fn prune_content_idempotent_on_empty_manifest() {
         // Pruning a manifest that doesn't exist should be a no-op.
         let mut reg = StorageRegistry::new();
         let bogus = ContentId([0xEEu8; 32]);
-        let pruned = reg.prune_content(&bogus, 100);
+        let (pruned, bond_returns) = reg.prune_content(&bogus, 100);
         assert_eq!(pruned, 0);
+        assert!(bond_returns.is_empty());
     }
     /// REGRESSION: max concurrent open challenges per deal.
     #[test]
@@ -6151,6 +7402,32 @@ mod tests {
     }
 
     #[test]
+    fn a_replica_index_beyond_the_target_is_refused() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let err = reg
+            .open_deal(
+                42,
+                &m,
+                m.shards[0].shard_id,
+                operator(),
+                STORAGE_REPLICATION_TARGET,
+                100,
+                200,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, StorageError::ReplicaIndexOutOfRange { .. }),
+            "got {err:?}"
+        );
+        assert!(reg.all_deals().is_empty());
+    }
+
+    #[test]
     fn max_open_challenges_per_deal() {
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -6167,6 +7444,44 @@ mod tests {
             matches!(err, StorageError::TooManyOpenChallenges { .. }),
             "got {err:?}"
         );
+    }
+
+    /// Challenges left open on a deal that was slashed can never resolve. They
+    /// must not count toward the operator cap on its other deals.
+    #[test]
+    fn stale_challenges_on_a_slashed_deal_do_not_fill_the_operator_cap() {
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (stale_deal, shard_id) = open_one(&mut reg, &m);
+        for i in 0..10u64 {
+            let epoch = 110 + i * StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
+            reg.open_challenge(stale_deal, 0, 4, epoch, epoch + 5, opener(), 50)
+                .expect("the challenge must open");
+        }
+        reg.deals
+            .get_mut(&stale_deal)
+            .expect("the deal exists")
+            .status = DealStatus::Slashed;
+        let live_deal = reg
+            .open_deal(
+                42,
+                &m,
+                shard_id,
+                operator(),
+                1,
+                101,
+                200,
+                good_econ(),
+                &params(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+            )
+            .expect("the second deal must open");
+        for j in 0..7u64 {
+            let epoch = 150 + j * StorageRegistry::MIN_OPERATOR_MANIFEST_CHALLENGE_EPOCHS;
+            reg.open_challenge(live_deal, 0, 4, epoch, epoch + 5, opener(), 50)
+                .unwrap_or_else(|e| panic!("challenge {j} on the live deal must open: {e:?}"));
+        }
     }
 
     #[test]
@@ -6432,6 +7747,802 @@ mod tests {
             reg.open_challenge(deal_id, 0, 4096, 100, 110, Address::from([9u8; 32]), 0),
             Err(StorageError::ZeroOpenerBond)
         ));
+    }
+
+    /// Stored coding audits: who was asked, by when, and what happened.
+    mod coding_audit {
+        use super::*;
+        use crate::storage::{encode_object, EncodedObject, ErasureScheme};
+
+        const NOW: u64 = 1_000_000;
+        const OPEN_EPOCH: u64 = 120;
+        const DEADLINE: u64 = 130;
+
+        fn op(byte: u8) -> Address {
+            Address::from([byte; 32])
+        }
+
+        /// A (4,6) object with two parity shards. Parity shard 0 is held by
+        /// operators 10 and 11, parity shard 1 by operator 12 alone, so the
+        /// registry has a choice to make for one shard and none for the other.
+        fn coded() -> (StorageRegistry, EncodedObject, ContentManifest) {
+            // Not a repeating pattern: equal shards share a content id, and a
+            // deal-open refuses a code word that repeats one.
+            let data: Vec<u8> = (0..800u32)
+                .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+                .collect();
+            let encoded = encode_object(&data, ErasureScheme { k: 4, n: 6 }).expect("encodes");
+            let manifest = encoded.to_manifest().expect("manifest");
+            let mut reg = StorageRegistry::new();
+            reg.register_manifest(&manifest);
+            for (shard, holder, replica) in [(4usize, 10u8, 0u8), (4, 11, 1), (5, 12, 0)] {
+                reg.open_deal(
+                    42,
+                    &manifest,
+                    manifest.shards[shard].shard_id,
+                    op(holder),
+                    replica,
+                    100,
+                    200,
+                    good_econ(),
+                    &params(),
+                    Some(valid_merkle_proof()),
+                    Some([0x42u8; 32]),
+                )
+                .expect("a parity shard deal opens");
+            }
+            (reg, encoded, manifest)
+        }
+
+        fn open(reg: &mut StorageRegistry, manifest: &ContentManifest, seed: u8) -> u64 {
+            reg.open_coding_audit(&[seed; 32], manifest.manifest_id, OPEN_EPOCH, DEADLINE)
+                .expect("an erasure coded object with live parity deals can be audited")
+        }
+
+        /// What an operator holding honest parity would send back.
+        fn honest(encoded: &EncodedObject, audit: &CodingAudit) -> (Vec<u8>, u8) {
+            let column = (0..encoded.scheme.k as usize)
+                .map(|j| encoded.shards[j][audit.column as usize])
+                .collect();
+            let parity = encoded.shards[encoded.scheme.k as usize + audit.parity_index as usize]
+                [audit.column as usize];
+            (column, parity)
+        }
+
+        fn stored(reg: &StorageRegistry, id: u64) -> StoredCodingAudit {
+            reg.coding_audits.get(&id).expect("audit is stored").clone()
+        }
+
+        #[test]
+        fn open_stores_the_operator_the_deadline_and_the_audit() {
+            let (mut reg, _, manifest) = coded();
+            let before = reg.root();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            assert_eq!(rec.audit_id, id);
+            assert_eq!(rec.opened_epoch, OPEN_EPOCH);
+            assert_eq!(rec.deadline_epoch, DEADLINE);
+            assert_eq!(rec.outcome, CodingAuditOutcome::Open);
+            let deal = reg.deals.get(&rec.deal_id).expect("deal exists");
+            assert_eq!(deal.operator, rec.operator);
+            assert_eq!(
+                deal.shard_id,
+                manifest.shards[4 + rec.audit.parity_index as usize].shard_id,
+                "the audited deal must hold the parity shard the audit asks about"
+            );
+            assert_ne!(before, reg.root(), "opening an audit must change the root");
+        }
+
+        #[test]
+        fn a_replicated_object_has_nothing_to_audit() {
+            let mut reg = StorageRegistry::new();
+            let m = good_manifest();
+            open_one(&mut reg, &m);
+            let err = reg
+                .open_coding_audit(&[1u8; 32], m.manifest_id, OPEN_EPOCH, DEADLINE)
+                .expect_err("replicas have no parity");
+            assert!(matches!(err, StorageError::NoParityToAudit { .. }));
+            assert!(reg.coding_audits.is_empty());
+        }
+
+        #[test]
+        fn a_deadline_not_after_the_open_epoch_is_refused() {
+            let (mut reg, _, manifest) = coded();
+            let err = reg
+                .open_coding_audit(&[1u8; 32], manifest.manifest_id, OPEN_EPOCH, OPEN_EPOCH)
+                .expect_err("zero length window");
+            assert!(matches!(err, StorageError::InvalidEpochRange { .. }));
+        }
+
+        #[test]
+        fn a_parity_shard_with_no_active_deal_cannot_be_audited() {
+            let (mut reg, _, manifest) = coded();
+            for deal in reg.deals.values_mut() {
+                deal.status = DealStatus::Expired;
+            }
+            let err = reg
+                .open_coding_audit(&[1u8; 32], manifest.manifest_id, OPEN_EPOCH, DEADLINE)
+                .expect_err("nobody holds the shard");
+            assert!(matches!(err, StorageError::NoActiveParityDeal { .. }));
+        }
+
+        #[test]
+        fn a_forged_parity_index_is_refused_and_nothing_is_decided() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let mut forged = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &forged.audit);
+            forged.audit.parity_index = 99;
+            reg.coding_audits.insert(id, forged.clone());
+            let root = reg.root();
+            let err = reg
+                .answer_coding_audit(id, forged.operator, &column, parity, OPEN_EPOCH, NOW)
+                .expect_err("an index outside the scheme is not an operator failure");
+            assert!(matches!(err, StorageError::NoParityToAudit { .. }));
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Open);
+            assert_eq!(
+                root,
+                reg.root(),
+                "an unanswerable audit must change nothing"
+            );
+            assert!(reg.operator_cooldown_until(&forged.operator, NOW).is_none());
+        }
+
+        #[test]
+        fn a_correct_answer_passes_without_a_cooldown() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+            let opened_root = reg.root();
+            let out = reg
+                .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE, NOW)
+                .expect("honest answer");
+            assert_eq!(out, CodingAuditOutcome::Passed);
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Passed);
+            assert!(reg.operator_cooldown_until(&rec.operator, NOW).is_none());
+            assert_ne!(opened_root, reg.root(), "the result must reach the root");
+        }
+
+        #[test]
+        fn a_wrong_parity_byte_fails_with_a_cooldown_and_no_slash() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+            let deal_before = reg.deals.get(&rec.deal_id).cloned().unwrap();
+            let opened_root = reg.root();
+            let out = reg
+                .answer_coding_audit(id, rec.operator, &column, parity ^ 0xFF, DEADLINE, NOW)
+                .expect("a wrong answer is a recorded outcome, not an error");
+            assert_eq!(out, CodingAuditOutcome::Failed);
+            assert_eq!(
+                reg.operator_cooldown_until(&rec.operator, NOW),
+                Some(NOW + MISSED_CHALLENGE_COOLDOWN_SECS)
+            );
+            assert_eq!(reg.deals.get(&rec.deal_id), Some(&deal_before));
+            assert!(reg.deals.get(&rec.deal_id).unwrap().is_active());
+            assert_ne!(opened_root, reg.root());
+        }
+
+        #[test]
+        fn a_wrong_data_column_fails_too() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 2);
+            let rec = stored(&reg, id);
+            let (mut column, parity) = honest(&encoded, &rec.audit);
+            column[0] ^= 0x01;
+            let out = reg
+                .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE, NOW)
+                .unwrap();
+            assert_eq!(out, CodingAuditOutcome::Failed);
+        }
+
+        #[test]
+        fn a_missed_audit_starts_a_cooldown_and_leaves_the_collateral() {
+            let (mut reg, _, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let deals_before = reg.deals.clone();
+            let opened_root = reg.root();
+
+            assert!(
+                reg.finalize_missed_coding_audits(DEADLINE, NOW).is_empty(),
+                "the deadline epoch itself is still in time"
+            );
+            assert_eq!(reg.root(), opened_root);
+
+            let missed = reg.finalize_missed_coding_audits(DEADLINE + 1, NOW);
+            assert_eq!(missed, vec![id]);
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Missed);
+            assert_eq!(
+                reg.operator_cooldown_until(&rec.operator, NOW),
+                Some(NOW + MISSED_CHALLENGE_COOLDOWN_SECS)
+            );
+            assert_eq!(reg.deals, deals_before, "no slash and no status change");
+            assert_ne!(opened_root, reg.root());
+            assert!(
+                reg.finalize_missed_coding_audits(DEADLINE + 5, NOW)
+                    .is_empty(),
+                "a decided audit is not decided twice"
+            );
+        }
+
+        #[test]
+        fn the_three_outcomes_and_the_open_state_have_four_different_roots() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+
+            let mut passed = reg.clone();
+            passed
+                .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE, NOW)
+                .unwrap();
+            let mut failed = reg.clone();
+            failed
+                .answer_coding_audit(id, rec.operator, &column, parity ^ 1, DEADLINE, NOW)
+                .unwrap();
+            let mut missed = reg.clone();
+            missed.finalize_missed_coding_audits(DEADLINE + 1, NOW);
+
+            let roots = [reg.root(), passed.root(), failed.root(), missed.root()];
+            for i in 0..roots.len() {
+                for j in (i + 1)..roots.len() {
+                    assert_ne!(roots[i], roots[j], "roots {i} and {j} collide");
+                }
+            }
+        }
+
+        #[test]
+        fn a_second_answer_is_refused_whatever_the_first_one_was() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+
+            // A failure cannot be repaired by answering again.
+            reg.answer_coding_audit(id, rec.operator, &column, parity ^ 1, DEADLINE, NOW)
+                .unwrap();
+            let err = reg
+                .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE, NOW)
+                .expect_err("already decided");
+            assert!(matches!(err, StorageError::CodingAuditNotOpen(_)));
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Failed);
+
+            // A pass cannot be turned into a failure either.
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+            reg.answer_coding_audit(id, rec.operator, &column, parity, DEADLINE, NOW)
+                .unwrap();
+            let root = reg.root();
+            assert!(reg
+                .answer_coding_audit(id, rec.operator, &column, parity ^ 1, DEADLINE, NOW)
+                .is_err());
+            assert_eq!(root, reg.root());
+        }
+
+        #[test]
+        fn a_late_answer_is_refused_and_the_audit_is_then_missed() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+            let err = reg
+                .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE + 1, NOW)
+                .expect_err("after the deadline");
+            assert!(matches!(err, StorageError::InvalidEpochRange { .. }));
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Open);
+            assert_eq!(
+                reg.finalize_missed_coding_audits(DEADLINE + 1, NOW),
+                vec![id]
+            );
+        }
+
+        #[test]
+        fn another_operator_cannot_answer_for_the_audited_one() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+            let root = reg.root();
+            let err = reg
+                .answer_coding_audit(id, op(99), &column, parity, DEADLINE, NOW)
+                .expect_err("not the audited operator");
+            assert!(matches!(
+                err,
+                StorageError::CodingAuditWrongResponder { .. }
+            ));
+            assert_eq!(root, reg.root());
+            assert!(reg.operator_cooldown_until(&op(99), NOW).is_none());
+        }
+
+        #[test]
+        fn an_unknown_audit_id_is_refused() {
+            let (mut reg, _, _) = coded();
+            let err = reg
+                .answer_coding_audit(7, op(10), &[0; 4], 0, DEADLINE, NOW)
+                .expect_err("no such audit");
+            assert!(matches!(err, StorageError::UnknownCodingAudit(7)));
+        }
+
+        #[test]
+        fn the_same_entropy_picks_the_same_holder_and_entropy_spreads_the_pick() {
+            let (reg, _, manifest) = coded();
+            let mut seen = std::collections::BTreeSet::new();
+            for seed in 0..64u8 {
+                let mut a = reg.clone();
+                let mut b = reg.clone();
+                let ia = open(&mut a, &manifest, seed);
+                let ib = open(&mut b, &manifest, seed);
+                assert_eq!(stored(&a, ia), stored(&b, ib), "selection must be pure");
+                let rec = stored(&a, ia);
+                if rec.audit.parity_index == 0 {
+                    seen.insert(rec.operator);
+                }
+            }
+            assert!(
+                seen.contains(&op(10)) && seen.contains(&op(11)),
+                "both holders of parity shard 0 must be reachable, got {seen:?}"
+            );
+        }
+
+        fn hex(root: [u8; 32]) -> String {
+            root.iter().map(|b| format!("{b:02x}")).collect()
+        }
+
+        /// Roots taken at 3dcbe16^ (before coding audits existed) for the
+        /// same registry. A registry that never opened an audit must keep
+        /// them byte for byte, or a chain that has no audit yet forks.
+        /// GOLDEN_CODED_ROOT re-frozen at 1101: manifest/deal serialization
+        /// grew fields after 3dcbe16 (provenance commitments), so the coded
+        /// fixture's root moved while the empty root - the side that must
+        /// never move - did not.
+        const GOLDEN_EMPTY_ROOT: &str =
+            "7cfd92f28556b4c748d9d4ef1ca7f94e8064f72d33c3f820182eb0916b6a8ec1";
+        const GOLDEN_CODED_ROOT: &str =
+            "cfa189a2449818bdc02116ffccde4acfd23642336046afe7ec09a3a37ecbf31e";
+
+        #[test]
+        fn a_registry_without_audits_keeps_its_pre_audit_root() {
+            assert_eq!(hex(StorageRegistry::new().root()), GOLDEN_EMPTY_ROOT);
+            let (reg, _, _) = coded();
+            assert_eq!(hex(reg.root()), GOLDEN_CODED_ROOT);
+        }
+
+        #[test]
+        fn a_data_column_of_the_wrong_length_fails_the_audit() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 3);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+            let short = &column[..column.len() - 1];
+            let out = reg
+                .answer_coding_audit(id, rec.operator, short, parity, DEADLINE, NOW)
+                .expect("a malformed answer is a recorded outcome");
+            assert_eq!(out, CodingAuditOutcome::Failed);
+            assert_eq!(
+                reg.operator_cooldown_until(&rec.operator, NOW),
+                Some(NOW + MISSED_CHALLENGE_COOLDOWN_SECS)
+            );
+        }
+
+        #[test]
+        fn a_deal_with_an_open_audit_takes_no_second_one() {
+            let (mut reg, _, manifest) = coded();
+            // Three active parity deals, so three audits fit; every pick
+            // after that lands on a deal that is already audited.
+            let mut opened = Vec::new();
+            for seed in 0..=255u8 {
+                if opened.len() == 3 {
+                    break;
+                }
+                if let Ok(id) =
+                    reg.open_coding_audit(&[seed; 32], manifest.manifest_id, OPEN_EPOCH, DEADLINE)
+                {
+                    opened.push(id);
+                }
+            }
+            assert_eq!(opened.len(), 3, "three deals, three audits");
+            let deal_ids: std::collections::BTreeSet<u64> =
+                opened.iter().map(|id| stored(&reg, *id).deal_id).collect();
+            assert_eq!(deal_ids.len(), 3, "one open audit per deal");
+
+            let root = reg.root();
+            let next = reg.next_coding_audit_id;
+            let err = reg
+                .open_coding_audit(&[9u8; 32], manifest.manifest_id, OPEN_EPOCH, DEADLINE)
+                .expect_err("every deal is already audited");
+            assert!(matches!(err, StorageError::CodingAuditAlreadyOpen { .. }));
+            assert_eq!(root, reg.root(), "a refused open changes nothing");
+            assert_eq!(next, reg.next_coding_audit_id);
+
+            // A closed audit frees its deal.
+            reg.finalize_missed_coding_audits(DEADLINE + 1, NOW);
+            reg.open_coding_audit(
+                &[9u8; 32],
+                manifest.manifest_id,
+                DEADLINE + 1,
+                DEADLINE + 11,
+            )
+            .expect("the deal is free again");
+        }
+
+        #[test]
+        fn an_audit_nobody_can_answer_is_voided_without_a_cooldown() {
+            // Deal no longer Active.
+            let (mut reg, _, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            reg.deals.get_mut(&rec.deal_id).unwrap().status = DealStatus::Expired;
+            assert_eq!(
+                reg.finalize_missed_coding_audits(DEADLINE + 1, NOW),
+                vec![id]
+            );
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Void);
+            assert!(reg.operator_cooldown_until(&rec.operator, NOW).is_none());
+
+            // Manifest pruned.
+            let (mut reg, _, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            // BLG-0365 refuses a prune under an open audit, so the
+            // gone-manifest state is entered directly, as the expiry
+            // sweep leaves it.
+            reg.manifests.remove(&manifest.manifest_id);
+            assert_eq!(
+                reg.finalize_missed_coding_audits(DEADLINE + 1, NOW),
+                vec![id]
+            );
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Void);
+            assert!(reg.operator_cooldown_until(&rec.operator, NOW).is_none());
+            assert!(reg.operator_cooldowns.is_empty());
+            assert_eq!(
+                reg.finalize_missed_coding_audits(DEADLINE + 5, NOW),
+                Vec::<u64>::new()
+            );
+        }
+
+        #[test]
+        fn an_on_time_answer_to_an_unanswerable_audit_is_voided_too() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+            // BLG-0365 refuses a prune under an open audit, so the
+            // gone-manifest state is entered directly, as the expiry
+            // sweep leaves it.
+            reg.manifests.remove(&manifest.manifest_id);
+            let out = reg
+                .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE, NOW)
+                .expect("nothing to check against is not the operator's failure");
+            assert_eq!(out, CodingAuditOutcome::Void);
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Void);
+            assert!(reg.operator_cooldowns.is_empty());
+            let err = reg
+                .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE, NOW)
+                .expect_err("a void audit is final");
+            assert!(matches!(err, StorageError::CodingAuditNotOpen(_)));
+        }
+
+        #[test]
+        fn a_late_answer_to_an_unanswerable_audit_is_refused_then_voided() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+            // BLG-0365 refuses a prune under an open audit, so the
+            // gone-manifest state is entered directly, as the expiry
+            // sweep leaves it.
+            reg.manifests.remove(&manifest.manifest_id);
+            let err = reg
+                .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE + 1, NOW)
+                .expect_err("after the deadline");
+            assert!(matches!(err, StorageError::InvalidEpochRange { .. }));
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Open);
+            reg.finalize_missed_coding_audits(DEADLINE + 1, NOW);
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Void);
+        }
+
+        #[test]
+        fn void_is_a_fifth_distinct_root() {
+            let (mut reg, _, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let mut missed = reg.clone();
+            missed.finalize_missed_coding_audits(DEADLINE + 1, NOW);
+            let rec = stored(&reg, id);
+            reg.deals.get_mut(&rec.deal_id).unwrap().status = DealStatus::Expired;
+            let mut void = reg.clone();
+            void.finalize_missed_coding_audits(DEADLINE + 1, NOW);
+            assert_eq!(stored(&void, id).outcome, CodingAuditOutcome::Void);
+            assert_eq!(stored(&missed, id).outcome, CodingAuditOutcome::Missed);
+            assert_ne!(missed.root(), void.root());
+        }
+
+        #[test]
+        fn finalize_missed_coding_audits_settles_overdue_open_audits_and_cooldowns() {
+            let (mut reg, encoded, manifest) = coded();
+            let late = open(&mut reg, &manifest, 1);
+            // Three parity deals, so some later seed lands on a free one.
+            let answered = (2..=255u8)
+                .find_map(|seed| {
+                    reg.open_coding_audit(&[seed; 32], manifest.manifest_id, OPEN_EPOCH, DEADLINE)
+                        .ok()
+                })
+                .expect("a second deal is free");
+            let late_rec = stored(&reg, late);
+            let answered_rec = stored(&reg, answered);
+            let (column, parity) = honest(&encoded, &answered_rec.audit);
+            reg.answer_coding_audit(
+                answered,
+                answered_rec.operator,
+                &column,
+                parity,
+                DEADLINE,
+                NOW,
+            )
+            .expect("honest answer");
+
+            let closed = reg.finalize_missed_coding_audits(DEADLINE + 1, NOW);
+            assert_eq!(closed, vec![late], "only the open overdue audit closes");
+            assert_eq!(stored(&reg, late).outcome, CodingAuditOutcome::Missed);
+            assert_eq!(stored(&reg, answered).outcome, CodingAuditOutcome::Passed);
+            assert_eq!(
+                reg.operator_cooldown_until(&late_rec.operator, NOW),
+                Some(NOW + MISSED_CHALLENGE_COOLDOWN_SECS)
+            );
+        }
+
+        #[test]
+        fn finalize_missed_coding_audits_leaves_deadline_audits_open() {
+            let (mut reg, _, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let root = reg.root();
+            assert!(reg.finalize_missed_coding_audits(DEADLINE, NOW).is_empty());
+            assert!(reg
+                .finalize_missed_coding_audits(OPEN_EPOCH, NOW)
+                .is_empty());
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Open);
+            assert!(reg.operator_cooldown_until(&rec.operator, NOW).is_none());
+            assert_eq!(root, reg.root(), "an audit still in time changes nothing");
+        }
+
+        #[test]
+        fn an_epoch_opens_at_most_one_audit_and_skips_an_audited_manifest() {
+            let (mut reg, _, manifest) = coded();
+            let first = reg.open_epoch_coding_audits(&[1u8; 32], OPEN_EPOCH);
+            assert_eq!(first.len(), CODING_AUDIT_OPENS_PER_EPOCH);
+            let rec = stored(&reg, first[0]);
+            assert_eq!(rec.audit.manifest_id, manifest.manifest_id);
+            assert_eq!(
+                rec.deadline_epoch,
+                OPEN_EPOCH + CODING_AUDIT_ANSWER_WINDOW_EPOCHS
+            );
+            let root = reg.root();
+            assert!(
+                reg.open_epoch_coding_audits(&[2u8; 32], OPEN_EPOCH + 1)
+                    .is_empty(),
+                "the only manifest already has an open audit"
+            );
+            assert_eq!(root, reg.root());
+        }
+
+        #[test]
+        fn an_epoch_open_skips_a_replicated_manifest_and_writes_nothing() {
+            let mut reg = StorageRegistry::new();
+            let m = good_manifest();
+            open_one(&mut reg, &m);
+            let root = reg.root();
+            let opened = reg.open_epoch_coding_audits(&[1u8; 32], OPEN_EPOCH);
+            assert!(opened.is_empty());
+            assert_eq!(root, reg.root());
+            assert_eq!(reg.next_coding_audit_id, 0);
+        }
+
+        #[test]
+        fn a_final_audit_leaves_after_the_retention_window_and_the_root_follows() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+            // The counter-only state: an audit was once opened, none is kept.
+            let mut counter_only = coded().0;
+            counter_only.next_coding_audit_id = 1;
+
+            reg.answer_coding_audit(id, rec.operator, &column, parity, DEADLINE, NOW)
+                .unwrap();
+            let settled_root = reg.root();
+            let window = CODING_AUDIT_RECORD_RETENTION_EPOCHS;
+
+            assert_eq!(
+                reg.sweep_settled_coding_audits(DEADLINE + window - 1),
+                0,
+                "one epoch early keeps the record"
+            );
+            assert_eq!(settled_root, reg.root());
+            assert_eq!(reg.sweep_settled_coding_audits(DEADLINE + window), 1);
+            assert!(reg.coding_audits.is_empty());
+            assert!(reg.settled_coding_audits.is_empty());
+            assert_ne!(settled_root, reg.root(), "the root follows the deletion");
+            assert_eq!(counter_only.root(), reg.root());
+            assert_eq!(reg.sweep_settled_coding_audits(DEADLINE + 10 * window), 0);
+        }
+
+        #[test]
+        fn the_sweep_helper_honours_a_shorter_window() {
+            let (mut reg, _, manifest) = coded();
+            open(&mut reg, &manifest, 1);
+            reg.finalize_missed_coding_audits(DEADLINE + 1, NOW);
+            assert_eq!(reg.sweep_coding_audits_older_than(DEADLINE + 2, 2), 0);
+            assert_eq!(reg.sweep_coding_audits_older_than(DEADLINE + 3, 2), 1);
+            assert!(reg.coding_audits.is_empty());
+        }
+
+        #[test]
+        fn the_retention_queue_reaches_the_root_and_the_default_window_is_the_ticket_window() {
+            assert_eq!(
+                CODING_AUDIT_RECORD_RETENTION_EPOCHS,
+                REALLOCATION_RECORD_RETENTION_EPOCHS
+            );
+            let (mut reg, _, manifest) = coded();
+            open(&mut reg, &manifest, 1);
+            reg.finalize_missed_coding_audits(DEADLINE + 1, NOW);
+            assert!(!reg.settled_coding_audits.is_empty());
+            let mut no_queue = reg.clone();
+            no_queue.settled_coding_audits.clear();
+            assert_ne!(reg.root(), no_queue.root());
+        }
+
+        #[test]
+        fn queues_that_differ_only_in_grouping_have_different_roots() {
+            let (base, _, _) = coded();
+            let mut one = base.clone();
+            one.settled_coding_audits.insert(5, vec![7, 9, 11]);
+            let mut two = base.clone();
+            two.settled_coding_audits.insert(5, vec![7]);
+            two.settled_coding_audits.insert(9, vec![11]);
+            assert_ne!(one.root(), two.root());
+            let mut three = base;
+            three.settled_coding_audits.insert(5, vec![7, 9]);
+            assert_ne!(one.root(), three.root());
+        }
+
+        #[test]
+        fn a_queued_open_audit_survives_the_sweep() {
+            let (mut reg, _, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            reg.settled_coding_audits
+                .entry(DEADLINE)
+                .or_default()
+                .push(id);
+            let window = CODING_AUDIT_RECORD_RETENTION_EPOCHS;
+            assert_eq!(reg.sweep_settled_coding_audits(DEADLINE + window), 0);
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Open);
+            assert!(reg.settled_coding_audits.is_empty(), "the hint is consumed");
+        }
+
+        #[test]
+        fn a_deleted_manifest_alone_voids_the_audit() {
+            let (mut reg, encoded, manifest) = coded();
+            let id = open(&mut reg, &manifest, 1);
+            let rec = stored(&reg, id);
+            let (column, parity) = honest(&encoded, &rec.audit);
+            reg.manifests.remove(&manifest.manifest_id);
+            assert!(reg.deals.get(&rec.deal_id).unwrap().is_active());
+
+            let mut answered = reg.clone();
+            let out = answered
+                .answer_coding_audit(id, rec.operator, &column, parity, DEADLINE, NOW)
+                .expect("nothing to check against is not the operator's failure");
+            assert_eq!(out, CodingAuditOutcome::Void);
+
+            assert_eq!(
+                reg.finalize_missed_coding_audits(DEADLINE + 1, NOW),
+                vec![id]
+            );
+            assert_eq!(stored(&reg, id).outcome, CodingAuditOutcome::Void);
+            assert!(reg.operator_cooldowns.is_empty());
+        }
+
+        fn deal_of(reg: &StorageRegistry, holder: u8) -> u64 {
+            reg.deals
+                .values()
+                .find(|deal| deal.operator == op(holder))
+                .expect("holder has a deal")
+                .deal_id
+        }
+
+        #[test]
+        fn a_deal_that_ends_by_the_deadline_is_never_selected() {
+            let (mut reg, _, manifest) = coded();
+            let early = deal_of(&reg, 10);
+            let late = deal_of(&reg, 11);
+            reg.deals.get_mut(&early).unwrap().deal_end_epoch = DEADLINE;
+            reg.deals.get_mut(&late).unwrap().deal_end_epoch = DEADLINE + 1;
+            let mut picked_shard_zero = 0;
+            for seed in 0..=255u8 {
+                let mut trial = reg.clone();
+                if let Ok(id) =
+                    trial.open_coding_audit(&[seed; 32], manifest.manifest_id, OPEN_EPOCH, DEADLINE)
+                {
+                    let rec = stored(&trial, id);
+                    assert_ne!(
+                        rec.deal_id, early,
+                        "seed {seed} chose a deal that ends early"
+                    );
+                    if rec.audit.parity_index == 0 {
+                        assert_eq!(rec.deal_id, late);
+                        picked_shard_zero += 1;
+                    }
+                }
+            }
+            assert!(
+                picked_shard_zero > 0,
+                "the late holder must stay selectable"
+            );
+
+            // No holder outlives the deadline: nothing to audit.
+            reg.deals.get_mut(&late).unwrap().deal_end_epoch = DEADLINE;
+            let mut shard_zero_refused = 0;
+            for seed in 0..=255u8 {
+                let mut trial = reg.clone();
+                if let Err(StorageError::NoActiveParityDeal {
+                    parity_index: 0, ..
+                }) =
+                    trial.open_coding_audit(&[seed; 32], manifest.manifest_id, OPEN_EPOCH, DEADLINE)
+                {
+                    shard_zero_refused += 1;
+                }
+            }
+            assert!(shard_zero_refused > 0);
+        }
+
+        #[test]
+        fn a_busy_holder_does_not_block_a_free_one() {
+            let (mut reg, _, manifest) = coded();
+            let busy = deal_of(&reg, 10);
+            let free = deal_of(&reg, 11);
+            // Mark the first holder of parity shard 0 as already audited.
+            let mut template_reg = coded().0;
+            let template_id = open(&mut template_reg, &manifest, 1);
+            let mut forged = stored(&template_reg, template_id);
+            forged.audit_id = 0;
+            forged.deal_id = busy;
+            forged.operator = op(10);
+            reg.coding_audits.insert(0, forged);
+            reg.next_coding_audit_id = 1;
+
+            let mut picked_shard_zero = 0;
+            for seed in 0..=255u8 {
+                let mut trial = reg.clone();
+                let id = trial
+                    .open_coding_audit(&[seed; 32], manifest.manifest_id, OPEN_EPOCH, DEADLINE)
+                    .unwrap_or_else(|err| panic!("seed {seed} refused: {err:?}"));
+                let rec = stored(&trial, id);
+                assert_ne!(rec.deal_id, busy);
+                if rec.audit.parity_index == 0 {
+                    assert_eq!(rec.deal_id, free);
+                    picked_shard_zero += 1;
+                }
+            }
+            assert!(
+                picked_shard_zero > 0,
+                "parity shard 0 must still be auditable"
+            );
+        }
+
+        #[test]
+        fn stored_audits_survive_a_bincode_round_trip() {
+            let (mut reg, _, manifest) = coded();
+            open(&mut reg, &manifest, 1);
+            reg.finalize_missed_coding_audits(DEADLINE + 1, NOW);
+            let bytes = bincode::serialize(&reg).expect("serialize");
+            let back: StorageRegistry = bincode::deserialize(&bytes).expect("deserialize");
+            assert_eq!(reg.root(), back.root());
+        }
     }
 }
 
@@ -6958,6 +9069,7 @@ mod demand_driven_replication_tests {
                 merkle_proof: None,
                 storage_root: None,
                 merkle_depth: 64,
+                payer: None,
             };
             self.deals.insert(deal_id, deal);
             self.deals_by_shard

@@ -1,0 +1,4 @@
+# gitleaks fingerprint allow-list (read by `gitleaks detect` from the repo root).
+# Doc placeholder key sk_live_abc123 in a skill file that no longer exists at the
+# branch head; the commit stays in history. See the note in .gitleaks.toml.
+6333d5a59f4610c8315036e88c01bb4c7c4e1822:.:generic-api-key:306

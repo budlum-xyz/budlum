@@ -27,7 +27,29 @@ fn code_of(root: &Path) -> Result<String, String> {
 }
 
 fn has_fn(code: &str, name: &str) -> bool {
-    code.contains(&format!("fn {name}("))
+    rust_literals::has_live_test(code, name)
+}
+
+/// `Some(true)` when the body of `fn <flag>()` is exactly `false`,
+/// `Some(false)` when it is anything else, `None` when there is no such fn.
+fn flag_is_constant_false(code: &str, flag: &str) -> Option<bool> {
+    let needle = format!("fn {flag}()");
+    let at = code.find(&needle)?;
+    let open = at + code[at..].find('{')?;
+    let mut depth = 0usize;
+    for (i, c) in code[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(code[open + 1..open + i].trim() == "false");
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// # Errors
@@ -39,20 +61,8 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    // The flag is a plain constant `false`. Line-based: find the line that
-    // defines `fn <flag>() -> bool {`, then the first non-empty line inside
-    // the body must be `false`.
-    let flag_value: Option<bool> = {
-        let needle = format!("fn {flag}()");
-        match code.lines().position(|l| l.contains(&needle)) {
-            None => None,
-            Some(def_idx) => code
-                .lines()
-                .skip(def_idx + 1)
-                .find(|l| !l.trim().is_empty())
-                .map(|l| l.trim() == "false"),
-        }
-    };
+    // The flag is a plain constant `false`: the whole body is that one word.
+    let flag_value = flag_is_constant_false(&code, flag);
     // `flag_value` is `Some(true)` when the body is exactly `false`, i.e.
     // the flag is correctly closed; `Some(false)` means the flag now reports
     // `true`.
@@ -148,7 +158,7 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-uncheck")?;
     let _ = std::fs::create_dir_all(dir.join("src/domain"));
 
-    let good = "pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {\n    false\n}\nfn f() {\n    match (a, b) {\n        (Some(_), Some(_)) if !Self::storage_challenge_proofs_are_checkable() => Ok(()),\n        (Some(_), None) => Err(StorageError::InvalidMerkleProof(\"x\".into())),\n        (None, _) => Ok(()),\n    }\n    DefaultAdapter::verify(&e, &i, &p);\n}\nfn an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable() {}\nfn the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof() {}\n";
+    let good = "pub(crate) fn storage_challenge_proofs_are_checkable() -> bool {\n    false\n}\nfn f() {\n    match (a, b) {\n        (Some(_), Some(_)) if !Self::storage_challenge_proofs_are_checkable() => Ok(()),\n        (Some(_), None) => Err(StorageError::InvalidMerkleProof(\"x\".into())),\n        (None, _) => Ok(()),\n    }\n    DefaultAdapter::verify(&e, &i, &p);\n}\n#[test]\nfn an_answer_carrying_a_proof_does_not_cost_the_bond_while_proofs_are_uncheckable() {}\n#[test]\nfn the_unverifiable_proof_carve_out_does_not_cover_a_missing_proof() {}\n";
     std::fs::write(dir.join("src/domain/storage_deal.rs"), good).map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
@@ -167,4 +177,20 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "uncheckable-proof canary OK (contained PASSes, a true flag FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_bare_false_body_is_a_closed_flag() {
+        let f = "storage_challenge_proofs_are_checkable";
+        let closed = format!("fn {f}() -> bool {{\n    false\n}}\n");
+        assert_eq!(flag_is_constant_false(&closed, f), Some(true));
+        let one_line = format!("fn {f}() -> bool {{ false }}\n");
+        assert_eq!(flag_is_constant_false(&one_line, f), Some(true));
+        let open = format!("fn {f}() -> bool {{\n    false\n        || enabled()\n}}\n");
+        assert_eq!(flag_is_constant_false(&open, f), Some(false));
+    }
 }

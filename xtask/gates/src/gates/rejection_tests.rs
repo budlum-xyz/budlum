@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates/wallet-core"];
 
 /// Substrings that make a function name promise a refusal (the shell
 /// PROMISE regex, precomputed).
@@ -42,10 +42,8 @@ const PROMISE_PARTS: &[&str] = &[
 /// A line naming a function whose name promises a refusal.
 fn promise_fn_name(line: &str) -> Option<&str> {
     let line = line.trim_start();
-    if !line.starts_with("fn ") {
-        return None;
-    }
-    let rest = &line[3..];
+    let line = line.strip_prefix("async ").unwrap_or(line);
+    let rest = line.strip_prefix("fn ")?;
     let name_end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '_')?;
     let name = &rest[..name_end];
     if !PROMISE_PARTS.iter().any(|p| name.contains(p)) {
@@ -242,7 +240,10 @@ pub fn run(root: &Path) -> Result<String, String> {
             // Must be an actual test, not a helper or production function.
             let window_start = i.saturating_sub(6);
             let window = &lines[window_start..i];
-            if !window.iter().any(|w| w.contains("#[test]")) {
+            if !window
+                .iter()
+                .any(|w| w.contains("#[test]") || w.contains("#[tokio::test"))
+            {
                 continue;
             }
             scanned += 1;
@@ -315,6 +316,13 @@ const REFUSES: &[&str] = &[
     "    assert_eq!(chain.len(), 3);",
     "}",
 ];
+const ASYNC_LIAR: &[&str] = &[
+    "#[tokio::test]",
+    "async fn replay_is_rejected_by_the_node() {",
+    "    let result = submit().await;",
+    "    assert!(result.is_ok());",
+    "}",
+];
 const NONE: &[&str] = &[
     "#[test]",
     "fn a_block_is_produced() {",
@@ -378,6 +386,13 @@ pub fn self_test() -> Result<String, String> {
     expect_fail(
         &run(&liar),
         "canary: a test named _rejected asserting is_some() was accepted",
+    )?;
+
+    // 1b. The same lie in an async test is found too.
+    let async_liar = mk_fixture(&tmp, "async_liar", ASYNC_LIAR)?;
+    expect_fail(
+        &run(&async_liar),
+        "canary: an async test named _rejected asserting success was accepted",
     )?;
 
     // 2. `_refuses` with a purely positive body must also fail.
@@ -464,5 +479,18 @@ mod tests {
         assert!(has_negative("assert_eq!(score, 0);"));
         assert!(!has_negative("assert_eq!(chain.len(), 3);"));
         assert!(!has_negative("let x = 1;"));
+    }
+}
+
+#[cfg(test)]
+mod scan_root_tests {
+    use super::*;
+
+    #[test]
+    fn every_scan_root_exists() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for r in SCAN_ROOTS {
+            assert!(repo.join(r).is_dir(), "missing scan root {r}");
+        }
     }
 }

@@ -7,11 +7,20 @@ pub trait ConsensusSigner: Send + Sync {
         Address::from(self.public_key_bytes())
     }
     fn sign_block(&self, block_hash: &[u8; 32]) -> Result<Vec<u8>, CryptoError>;
-    fn sign_prevote(&self, _msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        self.sign_block(&crate::core::hash::calculate_hash_bytes(_msg))
+    /// Domain-separated default (P02-F13): a prevote over `msg` must never
+    /// equal the block signature over the same bytes. The old default hashed
+    /// the message bare, so one Ed25519 key produced interchangeable
+    /// signatures for block, prevote and precommit.
+    fn sign_prevote(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let mut tagged = b"BDLM_PREVOTE_ED25519_V1".to_vec();
+        tagged.extend_from_slice(msg);
+        self.sign_block(&crate::core::hash::calculate_hash_bytes(&tagged))
     }
-    fn sign_precommit(&self, _msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        self.sign_block(&crate::core::hash::calculate_hash_bytes(_msg))
+    /// Domain-separated default (P02-F13), see [`Self::sign_prevote`].
+    fn sign_precommit(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let mut tagged = b"BDLM_PRECOMMIT_ED25519_V1".to_vec();
+        tagged.extend_from_slice(msg);
+        self.sign_block(&crate::core::hash::calculate_hash_bytes(&tagged))
     }
     fn bls_sign(&self, _msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         Err(CryptoError::Signing(

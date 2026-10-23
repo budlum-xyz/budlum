@@ -9,16 +9,21 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-/// Does this log line show `name` followed by `ok` somewhere?
+/// Is this log line the libtest result `test <path> ... ok` of the test
+/// `name`? The path must be `name` or end in `::name`.
 ///
-/// The shell gate matches `grep -Eq "test .*NAME .*ok|NAME.*ok"`. Both
-/// alternatives reduce to "NAME appears and `ok` appears after it", which is
-/// what this checks.
+/// The first version matched "name appears, then `ok` appears later" anywhere
+/// in the line. A failure line such as `thread 'tests::x::name' panicked at
+/// src/tokenomics/...` has the name followed by the letters `ok`, and a longer
+/// name such as `name_v2 ... ok` contains `name`. Both counted as a pass.
 fn line_matches(line: &str, name: &str) -> bool {
-    match line.find(name) {
-        Some(pos) => line[pos + name.len()..].contains("ok"),
-        None => false,
-    }
+    let Some(rest) = line.trim_end().strip_prefix("test ") else {
+        return false;
+    };
+    let Some(path) = rest.strip_suffix(" ... ok") else {
+        return false;
+    };
+    path == name || path.ends_with(&format!("::{name}"))
 }
 
 /// # Errors
@@ -27,6 +32,11 @@ fn line_matches(line: &str, name: &str) -> bool {
 /// when the log file is missing. The `subject` fills the message the shell
 /// gate printed (e.g. "Fork-choice").
 pub fn check_log(log: &Path, tests: &[&str], subject: &str) -> Result<String, String> {
+    if tests.is_empty() {
+        return Err(format!(
+            "{subject} gate has no required test names, so it would check nothing"
+        ));
+    }
     if !log.is_file() {
         return Err(format!("test log missing: {}", log.display()));
     }
@@ -49,6 +59,11 @@ pub fn check_log(log: &Path, tests: &[&str], subject: &str) -> Result<String, St
 /// required test must pass, and the same log minus the first test must fail.
 /// This is the shell gate's self-test, one for one.
 pub fn self_test(tests: &[&str], subject: &str) -> Result<String, String> {
+    if tests.is_empty() {
+        return Err(format!(
+            "{subject} self-test: the required test list is empty"
+        ));
+    }
     // The log lives in a directory this call created exclusively, so a
     // pre-planted symlink at a guessable name cannot redirect the write.
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-named")?;
@@ -67,7 +82,7 @@ pub fn self_test(tests: &[&str], subject: &str) -> Result<String, String> {
     }
 
     let mut missing = String::new();
-    for n in &tests[1..] {
+    for n in tests.iter().skip(1) {
         writeln!(missing, "test {n} ... ok").expect("writing to a String cannot fail");
     }
     fs::write(&log, &missing).map_err(|e| format!("cannot stage bad log: {e}"))?;
@@ -80,4 +95,52 @@ pub fn self_test(tests: &[&str], subject: &str) -> Result<String, String> {
 
     let _ = fs::remove_dir_all(&dir);
     Ok(format!("{subject} gate self-test OK"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::line_matches;
+
+    #[test]
+    fn only_the_exact_ok_line_of_the_named_test_matches() {
+        assert!(line_matches(
+            "test economy::tests::burn_is_capped ... ok",
+            "burn_is_capped"
+        ));
+        assert!(line_matches("test burn_is_capped ... ok", "burn_is_capped"));
+        // A failure line whose path holds "ok" after the name.
+        assert!(!line_matches(
+            "thread 'tests::burn_is_capped' panicked at src/tokenomics/mod.rs:9:1:",
+            "burn_is_capped"
+        ));
+        // A longer name must not satisfy a shorter one.
+        assert!(!line_matches(
+            "test tests::burn_is_capped_v2 ... ok",
+            "burn_is_capped"
+        ));
+        assert!(!line_matches(
+            "test tests::xburn_is_capped ... ok",
+            "burn_is_capped"
+        ));
+        // A failed or ignored result is not a pass.
+        assert!(!line_matches(
+            "test tests::burn_is_capped ... FAILED",
+            "burn_is_capped"
+        ));
+        assert!(!line_matches(
+            "test tests::burn_is_capped ... ignored",
+            "burn_is_capped"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod empty_list_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_name_list_is_an_error_not_a_pass() {
+        assert!(check_log(std::path::Path::new("/nonexistent"), &[], "x").is_err());
+        assert!(self_test(&[], "x").is_err());
+    }
 }

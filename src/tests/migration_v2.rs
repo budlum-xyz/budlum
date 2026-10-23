@@ -37,6 +37,7 @@ mod migration_tests {
         // Drop it down to schema-2.
         let mut old = snapshot.clone();
         old.schema_version = 2;
+        old.reseal_after_manual_edit();
 
         // Check the migration report BEFORE from_bytes.
         let report = old.migration_report().unwrap();

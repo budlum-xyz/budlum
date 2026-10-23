@@ -119,7 +119,9 @@ pub fn predict(segs: &[LinSeg], key: u64) -> Option<u64> {
 pub fn search_range(segs: &[LinSeg], key: u64) -> Option<(u64, u64)> {
     let seg = segs.iter().rev().find(|s| key >= s.key_start)?;
     let pred = (seg.a * key as f64 + seg.b).max(0.0) as u64;
-    let e = seg.err.max(1);
+    // The build rounds the error and this prediction is truncated, so the
+    // true offset can sit one step beyond `err`: widen by one.
+    let e = seg.err.checked_add(1)?;
     Some((pred.saturating_sub(e), pred.saturating_add(e)))
 }
 
@@ -138,6 +140,18 @@ pub fn pgm_digest(segs: &[LinSeg]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_range_holds_the_offset_when_the_error_was_rounded() {
+        // The fit through the end points predicts 10.9 at key 1; the offset is 13.
+        let keys = [0u64, 1, 10];
+        let offsets = [0u64, 13, 109];
+        let segs = build_pgm(&keys, &offsets, 2).expect("model");
+        for (k, o) in keys.iter().zip(offsets.iter()) {
+            let (lo, hi) = search_range(&segs, *k).expect("range");
+            assert!(lo <= *o && *o <= hi, "key {k}: {o} outside {lo}..={hi}");
+        }
+    }
 
     #[test]
     fn the_pgm_range_contains_the_true_offset() {

@@ -113,9 +113,28 @@ fn decode<T: DeserializeOwned>(value: &[u8]) -> std::io::Result<T> {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Storage {
     db: Db,
+    /// BLG-0190 (P09-F11): a test-only knob that makes the storage-economics
+    /// persist fail for real, so the accounting paths' `?` propagation can
+    /// be EXERCISED instead of grepped. Never set outside `cfg(test)`; no
+    /// production behaviour reads it.
+    #[cfg(test)]
+    fail_economics_writes: std::sync::atomic::AtomicBool,
+}
+
+impl Clone for Storage {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            #[cfg(test)]
+            fail_economics_writes: std::sync::atomic::AtomicBool::new(
+                self.fail_economics_writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
+        }
+    }
 }
 
 /// Sled's file-lock release is not synchronous with `Db::drop`: the flusher
@@ -148,6 +167,9 @@ fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<D
     unreachable!("retry loop returns on success, on final attempt, or on non-lock errors")
 }
 
+/// Version tag stored next to the storage registry row. Bump it when the row shape changes.
+const STORAGE_REGISTRY_ROW_VERSION: u32 = 1;
+
 impl Storage {
     /// # Errors
     ///
@@ -155,7 +177,11 @@ impl Storage {
     /// conditions.
     pub fn new(path: &str) -> std::io::Result<Self> {
         let db = sled_open_with_retry(path)?;
-        let storage = Self { db };
+        let storage = Self {
+            db,
+            #[cfg(test)]
+            fail_economics_writes: std::sync::atomic::AtomicBool::new(false),
+        };
         storage.apply_migrations()?;
         storage.recover_interrupted_commit()?;
         Ok(storage)
@@ -181,6 +207,18 @@ impl Storage {
     pub fn apply_migrations(&self) -> std::io::Result<()> {
         const CURRENT_SCHEMA_VERSION: u64 = 1;
         let current = self.schema_version()?;
+        // An older binary must not open a newer database: it would decode
+        // rows it does not know, and positional bincode rows decode wrongly
+        // without an error.
+        if current > CURRENT_SCHEMA_VERSION {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "database schema version {current} is newer than this binary supports \
+                     ({CURRENT_SCHEMA_VERSION}); refusing to open"
+                ),
+            ));
+        }
         if current < CURRENT_SCHEMA_VERSION {
             self.db.insert(
                 b"SCHEMA_VERSION",
@@ -234,15 +272,41 @@ impl Storage {
     /// The temporary file is written beside the destination and renamed only
     /// After all bytes are durable, so a crash never presents a partial file as
     /// A usable backup.
+    /// Reads every row twice and accepts the result only when both passes
+    /// agree and no durable commit is in flight. sled offers no point in time
+    /// iterator, so a commit landing mid-scan would otherwise be copied
+    /// half way (P26-F13).
+    fn read_consistent_entries(&self) -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let read = || -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            let mut rows = Vec::new();
+            for item in self.db.iter() {
+                let (key, value) = item?;
+                rows.push((key.to_vec(), value.to_vec()));
+            }
+            Ok(rows)
+        };
+        let first = read()?;
+        if first.iter().any(|(key, _)| key == b"IN_PROGRESS_HEIGHT") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "a durable commit is in progress; snapshot refused",
+            ));
+        }
+        let second = read()?;
+        if first != second {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "the database changed during the snapshot scan; retry",
+            ));
+        }
+        Ok(first)
+    }
+
     pub fn create_snapshot<P: AsRef<std::path::Path>>(&self, path: P) -> std::io::Result<()> {
         use std::io::Write;
 
         self.db.flush()?;
-        let mut snapshot = Vec::new();
-        for item in self.db.iter() {
-            let (key, value) = item?;
-            snapshot.push((key.to_vec(), value.to_vec()));
-        }
+        let snapshot = self.read_consistent_entries()?;
         let entries_payload = encode(&snapshot)?;
         let backup = DatabaseBackupV1 {
             format_version: 1,
@@ -366,7 +430,11 @@ impl Storage {
             // Reopen races with it and flakes (tur13_5, 2026-07-18). The
             // Semantics are unchanged - the checks run on the freshly
             // Restored data exactly as `Storage::new` would run them.
-            let restored = Self { db };
+            let restored = Self {
+                db,
+                #[cfg(test)]
+                fail_economics_writes: std::sync::atomic::AtomicBool::new(false),
+            };
             restored.apply_migrations()?;
             restored.recover_interrupted_commit()?;
             let errors = restored.check_integrity().map_err(std::io::Error::other)?;
@@ -507,17 +575,32 @@ impl Storage {
         Ok(())
     }
 
+    /// Whether a durable commit at `height` needs the `IN_PROGRESS_HEIGHT`
+    /// marker.
+    ///
+    /// The marker lets recovery delete a half written new height. The batch is
+    /// atomic, so a commit that replaces a height that already holds a block
+    /// leaves either the old rows or the new ones. A marker there would make
+    /// recovery delete the old, committed block, drop the tip to `height - 1`
+    /// and leave the account rows of `height` behind.
+    fn needs_progress_marker(&self, height: u64) -> std::io::Result<bool> {
+        let height_key = format!("HEIGHT:{height}");
+        Ok(self.db.get(height_key.as_bytes())?.is_none())
+    }
+
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
     pub fn commit_durable_batch(&self, batch: &DurableCommitBatch) -> std::io::Result<()> {
         // Write IN_PROGRESS_HEIGHT marker and flush it
-        self.db.insert(
-            b"IN_PROGRESS_HEIGHT",
-            batch.block.index.to_string().as_bytes(),
-        )?;
-        self.db.flush()?;
+        if self.needs_progress_marker(batch.block.index)? {
+            self.db.insert(
+                b"IN_PROGRESS_HEIGHT",
+                batch.block.index.to_string().as_bytes(),
+            )?;
+            self.db.flush()?;
+        }
 
         let mut b = sled::Batch::default();
 
@@ -662,6 +745,18 @@ impl Storage {
         let key = format!("HEIGHT:{height}");
         if let Some(hash_val) = self.db.get(key.as_bytes())? {
             let mut batch = sled::Batch::default();
+            // The index rows of this block go with it. A row that already
+            // points at another height was rewritten by a later block and
+            // stays.
+            let hash = from_utf8(&hash_val)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            if let Some(block) = self.get_block(hash)? {
+                for tx in &block.transactions {
+                    if self.get_tx_block_height(&tx.hash)? == Some(height) {
+                        batch.remove(format!("TX_IDX:{}", tx.hash).as_bytes());
+                    }
+                }
+            }
             batch.remove(&hash_val);
             batch.remove(key.as_bytes());
             batch.remove(format!("STATE_ROOT:{height}").as_bytes());
@@ -1124,6 +1219,10 @@ impl Storage {
         registry: &crate::domain::storage_deal::StorageRegistry,
     ) -> std::io::Result<()> {
         let val = encode(registry)?;
+        self.db.insert(
+            b"STORAGE_REGISTRY_VERSION",
+            STORAGE_REGISTRY_ROW_VERSION.to_le_bytes().to_vec(),
+        )?;
         self.db.insert(b"STORAGE_REGISTRY", val)?;
         self.db.flush()?;
         Ok(())
@@ -1137,6 +1236,15 @@ impl Storage {
         &self,
     ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
         if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
+            let version = self.db.get(b"STORAGE_REGISTRY_VERSION")?;
+            let expected_version = STORAGE_REGISTRY_ROW_VERSION.to_le_bytes();
+            if version.as_deref() != Some(expected_version.as_slice()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "STORAGE_REGISTRY row has no matching version tag; a row from another build \
+                     is refused",
+                ));
+            }
             // One shape only. A row written before the settled-ticket queue
             // used to be padded with an empty queue and accepted; the queue
             // is part of the registry root and decides when a ticket row is
@@ -1192,10 +1300,26 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    /// BLG-0190 (P09-F11): arm/disarm the test-only persist failure.
+    #[cfg(test)]
+    pub(crate) fn set_fail_economics_writes(&self, on: bool) {
+        self.fail_economics_writes
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn save_storage_economics_state(
         &self,
         snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
     ) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_economics_writes
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(std::io::Error::other(
+                "injected storage-economics persist failure (BLG-0190)",
+            ));
+        }
         let val = encode(snapshot)?;
         self.db.insert(b"STORAGE_ECONOMICS_STATE", val)?;
         self.db.flush()?;
@@ -1280,22 +1404,68 @@ impl Storage {
             Ok(None)
         }
     }
+    /// One step of a walk from the tip toward genesis.
+    ///
+    /// The record found under `key` must carry that hash, and its height must
+    /// be exactly one below the block the walk came from. The height rule
+    /// makes a `previous_hash` cycle impossible: heights fall at every step,
+    /// so the walk ends.
+    fn check_walk_step(key: &str, block: &Block, child_index: Option<u64>) -> std::io::Result<()> {
+        if block.hash != key {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("record under {key} carries hash {}", block.hash),
+            ));
+        }
+        if let Some(child_index) = child_index {
+            if block.index.checked_add(1) != Some(child_index) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "block {child_index} points at a parent at height {}, not one below",
+                        block.index
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
     pub fn load_chain(&self) -> std::io::Result<Vec<Block>> {
-        let mut chain = Vec::new();
+        let mut chain: Vec<Block> = Vec::new();
         if let Some(mut current_hash) = self.get_last_hash()? {
             // A read error is not the end of the chain. `while let Ok(Some)`
             // ended the walk on `Err` the same way as on `Ok(None)`, so one
             // unreadable record brought the node up on a silently short chain.
             while let Some(block) = self.get_block(&current_hash)? {
+                Self::check_walk_step(&current_hash, &block, chain.last().map(|b| b.index))?;
                 chain.push(block.clone());
                 if block.previous_hash == "0".repeat(64) {
                     break;
                 }
                 current_hash = block.previous_hash;
+            }
+            // The walk ends at a missing parent. On a pruned node the heights
+            // below the oldest kept block are gone too, so that is the end of
+            // the kept chain. A height index that still names a parent whose
+            // block is gone is damage, and it is not reported as a short chain.
+            if let Some(oldest) = chain.last() {
+                if oldest.index > 0 && oldest.previous_hash != "0".repeat(64) {
+                    let parent_key = format!("HEIGHT:{}", oldest.index - 1);
+                    if self.db.get(parent_key.as_bytes())?.is_some() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!(
+                                "block {} is indexed but its record is missing",
+                                oldest.index - 1
+                            ),
+                        ));
+                    }
+                }
             }
         }
         chain.reverse();
@@ -1323,7 +1493,14 @@ impl Storage {
         if let Some(val) = self.db.get(key.as_bytes())? {
             let s = from_utf8(&val)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            Ok(s.parse().ok())
+            // A value that is not a height is damage, not "no entry": reporting
+            // None would hide the corrupt row from every caller.
+            s.parse().map(Some).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("tx index row {tx_hash} is not a height: {e}"),
+                )
+            })
         } else {
             Ok(None)
         }
@@ -1473,12 +1650,37 @@ impl Storage {
         self.db.insert(key.as_bytes(), val)?;
         Ok(())
     }
+    /// Removes the persisted seen-block records below `min_slot`. The memory
+    /// map is pruned the same way. Without this, the records grow without
+    /// bound and every start loads all of them.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn prune_seen_blocks_below(&self, min_slot: u64) -> std::io::Result<usize> {
+        let mut removed = 0usize;
+        for item in self.db.scan_prefix(b"SEEN:") {
+            let (key, _) = item?;
+            let slot = from_utf8(&key)
+                .ok()
+                .and_then(|k| k.rsplit(':').next())
+                .and_then(|s| s.parse::<u64>().ok());
+            if slot.is_some_and(|s| s < min_slot) {
+                self.db.remove(&key)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
     pub fn load_all_seen_blocks(&self) -> std::io::Result<SeenBlockMap> {
         let mut seen = std::collections::HashMap::new();
+        let mut removed_corrupt = false;
         for item in self.db.scan_prefix(b"SEEN:") {
             let (key, val) = item?;
             let key_str = from_utf8(&key).unwrap_or("");
@@ -1487,13 +1689,36 @@ impl Storage {
                 .unwrap_or(key_str)
                 .split(':')
                 .collect();
-            if parts.len() == 2 {
-                let producer = Address::from_hex(parts[0])
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-                let index = parts[1].parse().unwrap_or(0);
-                let data: (crate::core::block::BlockHeader, Vec<u8>) = decode(&val)?;
-                seen.insert((producer, index), data);
+            if parts.len() != 2 {
+                continue;
             }
+            // One unreadable record must not stop the load. A failed load
+            // leaves the node with no checkpoints and no seen blocks, which
+            // turns off checkpoint enforcement and double-sign detection.
+            let parsed: Result<_, String> = (|| {
+                let producer = Address::from_hex(parts[0]).map_err(|e| e.to_string())?;
+                let index: u64 = parts[1].parse().map_err(|e| format!("bad height: {e}"))?;
+                let data: (crate::core::block::BlockHeader, Vec<u8>) =
+                    decode(&val).map_err(|e| e.to_string())?;
+                Ok(((producer, index), data))
+            })();
+            match parsed {
+                Ok((entry_key, data)) => {
+                    seen.insert(entry_key, data);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        key = %key_str,
+                        error = %error,
+                        "Dropping corrupt persisted seen-block record"
+                    );
+                    self.db.remove(&key)?;
+                    removed_corrupt = true;
+                }
+            }
+        }
+        if removed_corrupt {
+            self.db.flush()?;
         }
         Ok(seen)
     }
@@ -1516,10 +1741,21 @@ impl Storage {
         info!("Starting integrity audit up to height {height}");
 
         let mut prev_hash = "0".repeat(64);
+        // A pruned node has deleted a prefix of the chain. Heights before the
+        // first stored block are that prefix and are not damage; a gap after
+        // it still is.
+        let mut seen_block = false;
         for i in 0..=height {
             let block_res = self.get_block_by_height(i);
             match block_res {
+                Ok(None) if !seen_block => {
+                    continue;
+                }
                 Ok(Some(block)) => {
+                    if !seen_block {
+                        seen_block = true;
+                        prev_hash.clone_from(&block.previous_hash);
+                    }
                     let calc_hash = block.calculate_hash();
                     if block.hash != calc_hash {
                         errors.push(format!(
@@ -1561,7 +1797,15 @@ impl Storage {
 
         let mut current_hash = last_hash;
         let mut count = 0;
-        while let Ok(Some(block)) = self.get_block(&current_hash) {
+        let mut child_index: Option<u64> = None;
+        loop {
+            let block = self
+                .get_block(&current_hash)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Cannot repair: block {current_hash} is missing"))?;
+            Self::check_walk_step(&current_hash, &block, child_index)
+                .map_err(|e| format!("Cannot repair: {e}"))?;
+            child_index = Some(block.index);
             let height_key = format!("HEIGHT:{}", block.index);
             self.db
                 .insert(height_key.as_bytes(), block.hash.as_bytes())
@@ -1636,7 +1880,8 @@ impl Storage {
         &self,
         cid: &crate::storage::content_id::ContentId,
     ) -> std::io::Result<Vec<u8>> {
-        self.db
+        let bytes = self
+            .db
             .get(Self::content_key(cid).as_bytes())?
             .map(|value| value.to_vec())
             .ok_or_else(|| {
@@ -1644,7 +1889,16 @@ impl Storage {
                     std::io::ErrorKind::NotFound,
                     format!("content {cid} not found"),
                 )
-            })
+            })?;
+        // The row is addressed by its hash; a row that no longer hashes to its
+        // key is damage and must not be served as that content.
+        if &crate::storage::content_id::ContentId::of(&bytes) != cid {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("content {cid} does not match its stored bytes"),
+            ));
+        }
+        Ok(bytes)
     }
 }
 
@@ -1920,6 +2174,58 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn storage_registry_row_needs_its_version_tag() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let registry = crate::domain::storage_deal::StorageRegistry::default();
+        storage.save_storage_registry(&registry).unwrap();
+        assert!(storage.load_storage_registry().unwrap().is_some());
+        storage.db().remove(b"STORAGE_REGISTRY_VERSION").unwrap();
+        let err = storage.load_storage_registry().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn get_content_refuses_a_row_that_no_longer_hashes_to_its_key() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let cid = crate::storage::content_id::ContentId::of(b"hello");
+        storage.put_content(&cid, b"hello").unwrap();
+        assert_eq!(storage.get_content(&cid).unwrap(), b"hello");
+        storage
+            .db()
+            .insert(Storage::content_key(&cid).as_bytes(), b"tampered")
+            .unwrap();
+        let err = storage.get_content(&cid).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn snapshot_is_refused_while_a_commit_is_in_flight() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().join("db").to_str().unwrap()).unwrap();
+        let out = dir.path().join("backup.bin");
+        storage.create_snapshot(&out).expect("quiet db snapshots");
+        storage.db().insert(b"IN_PROGRESS_HEIGHT", b"5").unwrap();
+        let err = storage
+            .create_snapshot(dir.path().join("b2.bin"))
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn corrupt_tx_index_row_is_an_error_not_a_miss() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        storage.save_tx_index("abc", 7).unwrap();
+        assert_eq!(storage.get_tx_block_height("abc").unwrap(), Some(7));
+        assert_eq!(storage.get_tx_block_height("missing").unwrap(), None);
+        storage.db().insert(b"TX_IDX:bad", b"not-a-number").unwrap();
+        let err = storage.get_tx_block_height("bad").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn test_durable_commit_batch_and_recovery() {
         let dir = tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
@@ -2147,6 +2453,36 @@ mod tests {
         assert!(storage.db.get(b"MEMPOOL:corrupt").unwrap().is_none());
     }
 
+    /// BLG-0023: one bad SEEN record failed the whole load, so the node ran
+    /// with no checkpoints and no double-sign memory.
+    #[test]
+    fn load_all_seen_blocks_skips_corrupt_records() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let producer = Address::from([7u8; 32]);
+        let mut header = crate::core::block::BlockHeader::from_block(&Block::genesis());
+        header.index = 5;
+        header.producer = Some(producer);
+        storage.save_seen_block(&header, b"sig").unwrap();
+        let bad_value_key = format!("SEEN:{producer}:6");
+        storage
+            .db
+            .insert(bad_value_key.as_bytes(), b"not-a-header")
+            .unwrap();
+        storage.db.insert(b"SEEN:not-hex:7", b"junk").unwrap();
+        let bad_height_key = format!("SEEN:{producer}:abc");
+        storage
+            .db
+            .insert(bad_height_key.as_bytes(), b"junk")
+            .unwrap();
+
+        let seen = storage.load_all_seen_blocks().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen.contains_key(&(producer, 5)));
+        assert!(storage.db.get(bad_value_key.as_bytes()).unwrap().is_none());
+        assert!(storage.db.get(b"SEEN:not-hex:7").unwrap().is_none());
+    }
+
     #[test]
     fn content_store_roundtrip_and_rejects_wrong_cid() {
         let dir = tempdir().unwrap();
@@ -2189,6 +2525,163 @@ mod tests {
         // Blocking forever.
         let err = super::sled_open_with_retry(&path).unwrap_err();
         assert!(err.to_string().contains("could not acquire lock"));
+    }
+
+    fn commit_chain(storage: &Storage, len: u64) -> Vec<Block> {
+        let mut blocks: Vec<Block> = Vec::new();
+        for i in 0..len {
+            let prev = blocks
+                .last()
+                .map_or_else(|| "0".repeat(64), |b| b.hash.clone());
+            let mut b = Block::new(i, prev, vec![]);
+            b.hash = b.calculate_hash();
+            storage.commit_block(&b, "root").unwrap();
+            blocks.push(b);
+        }
+        blocks
+    }
+
+    #[test]
+    fn repair_index_fails_on_gap() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let blocks = commit_chain(&storage, 3);
+        storage.db.remove(blocks[1].hash.as_bytes()).unwrap();
+
+        let err = storage.repair_index().unwrap_err();
+        assert!(
+            err.contains(&blocks[1].hash),
+            "error names the missing hash"
+        );
+    }
+
+    #[test]
+    fn repair_index_ok_on_intact_chain() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let blocks = commit_chain(&storage, 3);
+        storage.db.remove(b"HEIGHT:1").unwrap();
+
+        storage.repair_index().unwrap();
+        let b1 = storage.get_block_by_height(1).unwrap().unwrap();
+        assert_eq!(b1.hash, blocks[1].hash);
+    }
+
+    /// Chain of `len` blocks where block 1 carries one transaction.
+    fn commit_chain_with_tx(storage: &Storage, len: u64) -> (Vec<Block>, String) {
+        let from = Address::from_hex(&"01".repeat(32)).unwrap();
+        let to = Address::from_hex(&"02".repeat(32)).unwrap();
+        let tx = crate::core::transaction::Transaction::new(from, to, 5, vec![]);
+        let tx_hash = tx.hash.clone();
+        let mut blocks: Vec<Block> = Vec::new();
+        for i in 0..len {
+            let prev = blocks
+                .last()
+                .map_or_else(|| "0".repeat(64), |b| b.hash.clone());
+            let txs = if i == 1 { vec![tx.clone()] } else { vec![] };
+            let mut b = Block::new(i, prev, txs);
+            b.hash = b.calculate_hash();
+            storage.commit_block(&b, "root").unwrap();
+            blocks.push(b);
+        }
+        (blocks, tx_hash)
+    }
+
+    /// P26-F07: a commit over a height that already holds a block writes no
+    /// recovery marker, so recovery can never delete the committed block.
+    #[test]
+    fn a_recommit_of_a_committed_height_needs_no_progress_marker() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        assert!(storage.needs_progress_marker(1).unwrap());
+
+        let mut block = Block::new(1, "0".repeat(64), vec![]);
+        block.hash = block.calculate_hash();
+        let batch = DurableCommitBatch {
+            block,
+            state_root: "root".to_string(),
+            finality_cert: None,
+            global_headers: vec![],
+            bridge_state: None,
+            accounts: vec![],
+        };
+        storage.commit_durable_batch(&batch).unwrap();
+        assert!(!storage.needs_progress_marker(1).unwrap());
+
+        storage.commit_durable_batch(&batch).unwrap();
+        assert!(storage.db.get(b"IN_PROGRESS_HEIGHT").unwrap().is_none());
+        assert_eq!(storage.get_canonical_height().unwrap(), 1);
+        assert!(storage.get_block_by_height(1).unwrap().is_some());
+    }
+
+    /// P26-F06: a `previous_hash` cycle ends the walk with an error instead of
+    /// looping on the boot path.
+    #[test]
+    fn a_previous_hash_cycle_is_an_error_not_a_loop() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let looped = "ab".repeat(32);
+        let mut block = Block::new(1, looped.clone(), vec![]);
+        block.hash = looped;
+        storage.commit_block(&block, "root").unwrap();
+
+        assert!(storage.load_chain().is_err());
+        assert!(storage.repair_index().is_err());
+    }
+
+    /// P26-F06: a record stored under a key other than its own hash is refused.
+    #[test]
+    fn a_record_under_the_wrong_hash_is_refused() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let blocks = commit_chain(&storage, 2);
+        let wrong = "cd".repeat(32);
+        storage
+            .db
+            .insert(wrong.as_bytes(), encode(&blocks[1]).unwrap())
+            .unwrap();
+        storage.db.insert(b"LAST", wrong.as_bytes()).unwrap();
+
+        assert!(storage.load_chain().is_err());
+    }
+
+    /// P26-F02: `delete_block` left the `TX_IDX` row pointing at a deleted block.
+    #[test]
+    fn delete_block_removes_its_tx_index_rows() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let (_blocks, tx_hash) = commit_chain_with_tx(&storage, 3);
+        assert_eq!(storage.get_tx_block_height(&tx_hash).unwrap(), Some(1));
+
+        storage.delete_block(1).unwrap();
+        assert_eq!(storage.get_tx_block_height(&tx_hash).unwrap(), None);
+    }
+
+    /// P26-F02: a pruned prefix is not reported as damage by the audit.
+    #[test]
+    fn check_integrity_accepts_a_pruned_prefix_but_not_a_gap() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        commit_chain(&storage, 5);
+        storage.delete_block(0).unwrap();
+        storage.delete_block(1).unwrap();
+        assert!(storage.check_integrity().unwrap().is_empty());
+
+        storage.delete_block(3).unwrap();
+        assert!(!storage.check_integrity().unwrap().is_empty());
+    }
+
+    /// P26-F02: a dangling height index is an error, not a short chain.
+    #[test]
+    fn load_chain_reports_a_missing_indexed_parent() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let blocks = commit_chain(&storage, 4);
+        storage.delete_block(0).unwrap();
+        assert_eq!(storage.load_chain().unwrap().len(), 3);
+
+        storage.db.remove(blocks[1].hash.as_bytes()).unwrap();
+        assert!(storage.load_chain().is_err());
     }
 }
 
@@ -2258,6 +2751,23 @@ mod storage_decode_locks {
         );
         // Too short to hold a u64 - this genuinely fails.
         assert!(super::decode::<Stored>(b"\xff\xff\xff").is_err());
+    }
+
+    /// P26-F05: a database written by a newer schema is refused, not opened.
+    #[test]
+    fn a_newer_schema_version_refuses_to_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().to_str().expect("utf-8 path");
+        let storage = super::Storage::new(path).expect("storage opens");
+        storage
+            .db
+            .insert(b"SCHEMA_VERSION", b"2".to_vec())
+            .expect("write newer version");
+        storage.db.flush().expect("flush");
+        drop(storage);
+
+        let err = super::Storage::new(path).expect_err("a newer schema must not open");
+        assert!(err.to_string().contains("newer than this binary"), "{err}");
     }
 
     /// A present-but-unreadable schema version must not read as zero.

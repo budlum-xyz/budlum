@@ -109,7 +109,11 @@ const BASELINE_PATH: &str = ".github/idle-code-baseline.txt";
 const ALWAYS_REACHED: &[&str] = &["main"];
 
 /// A scan finding too few items is vacuous and must fail rather than pass.
-const VACUITY_FLOOR: usize = 200;
+const VACUITY_FLOOR: usize = 2000;
+
+// The tree holds about 4600 public items. A floor of 200 passed a walk that had
+// lost 95 percent of them; 2000 still leaves room for the tree to shrink.
+const _: () = assert!(VACUITY_FLOOR >= 2000);
 
 /// How many findings are printed before the list is summarised.
 const MAX_REPORTED: usize = 40;
@@ -162,15 +166,64 @@ fn strip_cfg_test(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let mut i = 0usize;
     while i < src.len() {
-        let Some(rel) = src[i..].find("#[cfg(test)]") else {
+        let Some((at, after)) = next_test_attr(src, i) else {
             out.push_str(&src[i..]);
             break;
         };
-        let at = i + rel;
         out.push_str(&src[i..at]);
-        i = cfg_test_end(src, at + "#[cfg(test)]".len());
+        i = cfg_test_end(src, after);
     }
     out
+}
+
+/// Attribute openers that mark an item as compiled only under test.
+const TEST_ATTRS: &[&str] = &["#[cfg(test)]", "#[cfg(all(test,"];
+
+/// The earliest test-only attribute at or after `from`: its start and the
+/// offset just past the marker text.
+fn next_test_attr(src: &str, from: usize) -> Option<(usize, usize)> {
+    TEST_ATTRS
+        .iter()
+        .filter_map(|m| src[from..].find(m).map(|r| (from + r, from + r + m.len())))
+        .min()
+}
+
+/// Paths (relative to the scan root) of the files that a test-only
+/// `mod name;` declaration in `rel` pulls in. A directory is returned with
+/// a trailing slash and covers everything below it.
+fn test_module_paths(rel: &str, src: &str) -> Vec<String> {
+    let (dir, file) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let stem = file.strip_suffix(".rs").unwrap_or(file);
+    let base = if matches!(stem, "lib" | "main" | "mod") {
+        dir.to_string()
+    } else {
+        format!("{dir}/{stem}")
+    };
+    let mut found = Vec::new();
+    let mut i = 0usize;
+    while let Some((_, after)) = next_test_attr(src, i) {
+        i = after;
+        let rest = src[after..].trim_start();
+        let rest = rest.strip_prefix("pub ").unwrap_or(rest).trim_start();
+        let Some(rest) = rest.strip_prefix("mod ") else {
+            continue;
+        };
+        let name: String = rest
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty()
+            || !rest.trim_start()[name.len()..]
+                .trim_start()
+                .starts_with(';')
+        {
+            continue;
+        }
+        found.push(format!("{base}/{name}.rs"));
+        found.push(format!("{base}/{name}/"));
+    }
+    found
 }
 
 /// Byte offset just past the item, block or statement that a `#[cfg(test)]`
@@ -716,6 +769,18 @@ struct Exempt {
     names: BTreeSet<String>,
 }
 
+/// True when the line carries an exemption token followed by some text. A bare
+/// token names no door and exempts nothing.
+fn has_reasoned_token(line: &str) -> bool {
+    EXEMPT_TOKENS.iter().any(|tok| {
+        line.find(tok).is_some_and(|at| {
+            line[at + tok.len()..]
+                .chars()
+                .any(|c| c.is_ascii_alphanumeric())
+        })
+    })
+}
+
 /// Read one file's exemption from its original text, before any scrubbing
 /// erases the doc comments the exemption lives in.
 ///
@@ -731,7 +796,7 @@ fn exemptions_in(text: &str) -> Exempt {
     for line in &lines {
         let t = line.trim_start();
         if t.is_empty() || t.starts_with("//!") || t.starts_with("#![") {
-            if EXEMPT_TOKENS.iter().any(|tok| t.contains(tok)) {
+            if has_reasoned_token(t) {
                 module = true;
             }
             continue;
@@ -741,9 +806,16 @@ fn exemptions_in(text: &str) -> Exempt {
     let mut names = BTreeSet::new();
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim_start();
-        let Some(mut rest) = t.strip_prefix("pub ") else {
+        // `pub(crate)` is a declaration the scan reports, so the reader has
+        // to see it too: matching only the `pub ` spelling left crate-visible
+        // items with no way to carry a note.
+        let Some(mut rest) = t
+            .strip_prefix("pub")
+            .filter(|r| r.starts_with(' ') || r.starts_with('('))
+        else {
             continue;
         };
+        rest = rest.trim_start();
         // Skip a visibility restriction, then the modifiers, in the same
         // spirit as the scan's own extractor.
         if rest.starts_with('(') {
@@ -777,9 +849,16 @@ fn exemptions_in(text: &str) -> Exempt {
             continue;
         }
         let from = i.saturating_sub(EXEMPT_LOOKBACK);
+        // The note belongs to the nearest declaration below it: another `pub`
+        // line between the note and this item ends its reach.
         let noted = lines[from..i]
             .iter()
-            .any(|l| EXEMPT_TOKENS.iter().any(|tok| l.contains(tok)));
+            .rev()
+            .take_while(|l| {
+                let lt = l.trim_start();
+                !(lt.starts_with("pub ") || lt.starts_with("pub("))
+            })
+            .any(|l| has_reasoned_token(l));
         if noted {
             names.insert(ident);
         }
@@ -835,7 +914,7 @@ struct Scan {
     exempt_keys: BTreeSet<String>,
 }
 
-fn scan(root: &Path) -> Scan {
+fn read_sources(root: &Path) -> Vec<(String, String)> {
     let mut files: Vec<PathBuf> = Vec::new();
     for r in PROD_ROOTS {
         let p = root.join(r);
@@ -844,9 +923,7 @@ fn scan(root: &Path) -> Scan {
         }
     }
 
-    let mut scrubbed: BTreeMap<String, String> = BTreeMap::new();
-    let mut imports: BTreeMap<String, Imports> = BTreeMap::new();
-    let mut exemptions: BTreeMap<String, Exempt> = BTreeMap::new();
+    let mut sources: Vec<(String, String)> = Vec::new();
     for path in &files {
         let Ok(text) = fs::read_to_string(path) else {
             continue;
@@ -856,6 +933,31 @@ fn scan(root: &Path) -> Scan {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
+        sources.push((rel, text));
+    }
+    sources
+}
+
+fn scan(root: &Path) -> Scan {
+    let sources = read_sources(root);
+    let test_only: Vec<String> = sources
+        .iter()
+        .flat_map(|(rel, text)| test_module_paths(rel, text))
+        .collect();
+
+    let mut scrubbed: BTreeMap<String, String> = BTreeMap::new();
+    let mut imports: BTreeMap<String, Imports> = BTreeMap::new();
+    let mut exemptions: BTreeMap<String, Exempt> = BTreeMap::new();
+    for (rel, text) in sources {
+        if test_only.iter().any(|t| {
+            if t.ends_with('/') {
+                rel.starts_with(t.as_str())
+            } else {
+                rel == *t
+            }
+        }) {
+            continue;
+        }
         let prose_free = strip_comments_and_strings(&strip_cfg_test(&text));
         let s = strip_use_statements(&prose_free);
         imports.insert(rel.clone(), imports_in(&prose_free));
@@ -1062,12 +1164,17 @@ fn build_clean_tree(root: &Path) -> std::io::Result<()> {
     let src = root.join("src");
     fs::create_dir_all(&src)?;
     let mut driver = String::from("fn drive() {\n");
-    for i in 1..=210 {
-        fs::write(
-            src.join(format!("m{i}.rs")),
-            format!("pub fn reached{i}() -> u32 {{ {i} }}\n"),
-        )?;
-        let _ = writeln!(driver, "    let _ = crate::m{i}::reached{i}();");
+    // The vacuity floor is 2000 public items; 21 files of 100 reached
+    // functions clear it without the self-test having to copy thousands of
+    // files for every canary tree it stages.
+    for file in 1..=21usize {
+        let mut body = String::new();
+        for i in 1..=100usize {
+            let n = (file - 1) * 100 + i;
+            let _ = writeln!(body, "pub fn reached{n}() -> u32 {{ {n} }}");
+            let _ = writeln!(driver, "    let _ = crate::m{file}::reached{n}();");
+        }
+        fs::write(src.join(format!("m{file}.rs")), body)?;
     }
     driver.push_str("}\n");
     fs::write(src.join("driver.rs"), driver)?;
@@ -1157,6 +1264,66 @@ fn not_a_caller_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
         ));
     }
 
+    // A file pulled in by `#[cfg(test)] mod x;` is test code, and so is a
+    // block under `#[cfg(all(test, ...))]`.
+    for (label, files) in [
+        (
+            "testfile",
+            vec![
+                ("src/idle.rs", "pub fn only_a_test_file_calls() -> u32 { 2 }\n"),
+                ("src/lib.rs", "#[cfg(test)]\nmod idle_tests;\n"),
+                (
+                    "src/idle_tests.rs",
+                    "fn t() -> u32 { crate::idle::only_a_test_file_calls() }\n",
+                ),
+            ],
+        ),
+        (
+            "cfgall",
+            vec![
+                ("src/idle.rs", "pub fn only_a_gated_test_calls() -> u32 { 2 }\n"),
+                (
+                    "src/lib.rs",
+                    "#[cfg(all(test, feature = \"x\"))]\nmod t {\n  fn t() -> u32 { crate::idle::only_a_gated_test_calls() }\n}\n",
+                ),
+            ],
+        ),
+    ] {
+        if accepts_with(clean, tmp, label, &files)? {
+            let _ = fs::remove_dir_all(tmp);
+            return Err(String::from(
+                "canary: an item called only from test-gated code passed as reached",
+            ));
+        }
+    }
+
+    // A note covers the declaration below it, not the next `pub` items too,
+    // and a bare token exempts nothing.
+    for (label, body) in [
+        (
+            "note_shared",
+            "// WIRING: the door lands with the relay slice\npub fn covered() -> u32 { 1 }\npub fn not_covered() -> u32 { 2 }\n",
+        ),
+        ("note_bare", "// WIRING:\npub fn bare() -> u32 { 1 }\n"),
+    ] {
+        if accepts_with(clean, tmp, label, &[("src/idle.rs", body)])? {
+            let _ = fs::remove_dir_all(tmp);
+            return Err(String::from(
+                "canary: an exemption note reached past its own item or had no reason",
+            ));
+        }
+    }
+
+    nested_import_canaries(clean, tmp)
+}
+
+/// Imports that sit inside a nested module, behind an item body, under a
+/// restricted path, or only in prose.
+///
+/// # Errors
+///
+/// Returns the first canary that misbehaves.
+fn nested_import_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
     // An import inside a nested module, or one that follows an item body,
     // is still an import. Found only at the head of a `;` segment, a
     // `use` after `mod m {` or after a `}` stayed in the text and the name
@@ -1554,6 +1721,25 @@ fn wiring_exemption_canaries(clean: &Path, tmp: &Path) -> Result<(), String> {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
             "canary: an item with a WIRING: note above it was reported idle",
+        ));
+    }
+
+    // The same note settles a crate-visible item: the scan reports
+    // `pub(crate)` declarations, so the exemption reader has to see them
+    // too - matching only the `pub ` spelling left such an item with no
+    // way to carry its note.
+    if !accepts_with(
+        clean,
+        tmp,
+        "wiring_crate_item",
+        &[(
+            "src/staged_crate.rs",
+            "/// WIRING: called from the policy refresh beside it today.\npub(crate) fn staged_crate_helper() -> u32 { 10 }\n",
+        )],
+    )? {
+        let _ = fs::remove_dir_all(tmp);
+        return Err(String::from(
+            "canary: a pub(crate) item with a WIRING: note above it was reported idle",
         ));
     }
 

@@ -1,8 +1,13 @@
 use crate::core::hash::hash_fields_bytes;
-use crate::cross_domain::message::{CrossDomainMessage, MessageId};
+use crate::cross_domain::message::{CrossDomainMessage, MessageId, MessageKind};
 use crate::domain::types::Hash32;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Longest `Custom` kind tag the registry accepts. The registry keeps every
+/// message and hashes it into the state root, so an unbounded tag lets one
+/// message cost memory and hashing time without limit.
+const MAX_CUSTOM_KIND_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CrossDomainMessageRegistry {
@@ -17,9 +22,37 @@ impl CrossDomainMessageRegistry {
         }
     }
 
+    /// Drops messages whose useful life is over (BLG-0114/P05-F07): the
+    /// registry hashes EVERY message into the state root, so a registry
+    /// that never forgets is unbounded per-block cost and unbounded state.
+    /// A message past `expiry_height + retention` can never again be
+    /// consumed (mint/unlock refuse expired messages), so keeping it buys
+    /// nothing - re-registering a dead id is equally dead. Zero-expiry
+    /// messages age from `source_height` instead. Returns the drop count.
+    pub fn prune_expired(&mut self, current_height: u64, retention_blocks: u64) -> usize {
+        let before = self.messages.len();
+        self.messages.retain(|_, m| {
+            let horizon = if m.expiry_height != 0 {
+                m.expiry_height
+            } else {
+                m.source_height
+            };
+            horizon.saturating_add(retention_blocks) > current_height
+        });
+        before - self.messages.len()
+    }
+
     pub fn insert(&mut self, message: CrossDomainMessage) -> Result<(), String> {
         if !message.verify_id() {
             return Err("Invalid message id".into());
+        }
+        if let MessageKind::Custom(tag) = &message.kind {
+            if tag.len() > MAX_CUSTOM_KIND_BYTES {
+                return Err(format!(
+                    "Custom message kind is {} bytes, the limit is {MAX_CUSTOM_KIND_BYTES}",
+                    tag.len()
+                ));
+            }
         }
         if self.messages.contains_key(&message.message_id) {
             return Err(format!(
@@ -78,7 +111,7 @@ mod tests {
         crate::core::address::Address::from(b)
     }
 
-    use crate::cross_domain::message::{CrossDomainMessageParams, MessageKind};
+    use crate::cross_domain::message::CrossDomainMessageParams;
 
     fn hash(label: &[u8]) -> Hash32 {
         crate::core::hash::hash_fields_bytes(&[label])
@@ -134,5 +167,45 @@ mod tests {
         r2.insert(make_message(1)).unwrap();
 
         assert_ne!(r1.root(), r2.root());
+    }
+
+    /// P05-F07: a Custom kind tag has a length bound.
+    #[test]
+    fn an_oversized_custom_kind_is_rejected() {
+        let mut registry = CrossDomainMessageRegistry::new();
+        let make = |len: usize| {
+            CrossDomainMessage::new(CrossDomainMessageParams {
+                source_domain: 1,
+                target_domain: 2,
+                source_height: 10,
+                event_index: 0,
+                nonce: 0,
+                sender: test_addr_from_byte(1u8),
+                recipient: test_addr_from_byte(2u8),
+                payload_hash: hash(b"payload"),
+                kind: MessageKind::Custom(vec![7u8; len]),
+                expiry_height: 100,
+            })
+        };
+        assert!(registry.insert(make(MAX_CUSTOM_KIND_BYTES + 1)).is_err());
+        assert!(registry.is_empty());
+        registry.insert(make(MAX_CUSTOM_KIND_BYTES)).unwrap();
+    }
+
+    /// BLG-0114 (P05-F07): expired messages are pruned; live ones stay.
+    #[test]
+    fn expired_messages_are_pruned_and_live_ones_stay() {
+        let mut registry = CrossDomainMessageRegistry::new();
+        let mut old = make_message(1);
+        old.expiry_height = 10;
+        old.message_id = old.calculate_message_id();
+        let mut fresh = make_message(2);
+        fresh.expiry_height = 100_000;
+        fresh.message_id = fresh.calculate_message_id();
+        registry.insert(old).unwrap();
+        registry.insert(fresh).unwrap();
+        let dropped = registry.prune_expired(100_000, 1_000);
+        assert_eq!(dropped, 1);
+        assert_eq!(registry.len(), 1);
     }
 }

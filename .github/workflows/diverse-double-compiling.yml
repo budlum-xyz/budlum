@@ -80,7 +80,9 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
       - name: Build
-        run: cargo build --release 2>&1 | tail -5
+        run: |
+          set -euo pipefail
+          cargo build --release 2>&1 | tail -5
 
       - name: Canonical digests
         id: digests
@@ -152,7 +154,7 @@ jobs:
           cat "digests-${{ matrix.label }}.txt"
 
       - name: Upload digests
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: ddc-digests-${{ matrix.label }}
           path: digests-${{ matrix.label }}.txt
@@ -165,7 +167,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           pattern: ddc-digests-*
           merge-multiple: true

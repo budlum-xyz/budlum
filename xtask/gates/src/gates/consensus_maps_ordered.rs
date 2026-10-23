@@ -30,9 +30,29 @@ const HASHING_FNS: &[&str] = &[
     "compute_hash",
     "state_root",
     "digest",
+    "merkle_root",
+    "commitment",
 ];
 
-const UNORDERED: &[&str] = &["HashMap", "HashSet"];
+const UNORDERED: &[&str] = &[
+    "HashMap",
+    "HashSet",
+    "FxHashMap",
+    "FxHashSet",
+    "AHashMap",
+    "AHashSet",
+];
+
+/// Iteration adaptors that walk a collection in its stored order.
+const ITER_METHODS: &[&str] = &[
+    "values_mut()",
+    "values()",
+    "keys()",
+    "iter_mut()",
+    "iter()",
+    "into_iter()",
+    "drain()",
+];
 
 struct Finding {
     path: String,
@@ -199,16 +219,16 @@ fn iter_field(candidate: &str) -> Option<String> {
     // optional `.values()` / `.keys()` / `.iter()`
     let after_method = if let Some(r) = after_field.strip_prefix('.') {
         let r = r.trim_start();
-        let matched = ["values()", "keys()", "iter()"]
-            .iter()
-            .find(|m| r.starts_with(**m))?;
+        let matched = ITER_METHODS.iter().find(|m| r.starts_with(**m))?;
         &r[matched.len()..]
     } else {
         after_field
     };
-    // the iteration must be followed by `{` or `&`
+    // The iteration must be followed by `{` or `&`, or by a further adaptor
+    // (`.filter(..)`, `.map(..)`) after an iteration method.
     let tail = after_method.trim_start();
-    if tail.starts_with('{') || tail.starts_with('&') {
+    let chained = after_field.starts_with('.') && tail.starts_with('.');
+    if tail.starts_with('{') || tail.starts_with('&') || chained {
         Some(field.to_string())
     } else {
         None
@@ -328,6 +348,9 @@ fn word_assign_word_op(text: &str) -> bool {
 fn has_fold(body: &str) -> bool {
     word_then(body, ".", "update(")
         || word_then(body, ".", "push(")
+        || word_then(body, ".", "extend(")
+        || word_then(body, ".", "write(")
+        || word_then(body, ".", "absorb(")
         || word_op_assign(body)
         || word_assign_word_op(body)
 }
@@ -369,21 +392,29 @@ fn brace_delta(line: &str) -> i64 {
 
 /// Walk every `.rs` file under `root`, flagging hashing functions that
 /// iterate unordered collections.
-fn collect_findings(root: &Path) -> Vec<Finding> {
+///
+/// Returns the findings and the number of files scanned.
+///
+/// # Errors
+///
+/// An unreadable directory or file. A scan that could not look is not clean.
+fn collect_findings(root: &Path) -> Result<(Vec<Finding>, usize), String> {
     let mut findings: Vec<Finding> = Vec::new();
+    let mut scanned = 0usize;
     let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
-            continue;
-        };
+        let rd =
+            std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
         for entry in rd.filter_map(Result::ok) {
             let Ok(path_kind) = entry.file_type() else {
                 continue;
             };
             let path = entry.path();
             if path_kind.is_dir() {
-                let name = path.to_string_lossy();
-                if !name.contains("/target") && !name.contains("/.git") {
+                // The directory's own name, not a substring of the whole path:
+                // a checkout under `/work/target/..` must still be scanned.
+                let name = entry.file_name();
+                if name != "target" && name != ".git" {
                     stack.push(path);
                 }
             } else if path.extension().is_some_and(|ext| ext == "rs") {
@@ -392,20 +423,20 @@ fn collect_findings(root: &Path) -> Vec<Finding> {
                     .unwrap_or(&path)
                     .to_string_lossy()
                     .replace('\\', "/");
-                findings.extend(scan_file(&path, &rel));
+                findings.extend(scan_file(&path, &rel)?);
+                scanned += 1;
             }
         }
     }
-    findings
+    Ok((findings, scanned))
 }
 
 /// Analyse one `.rs` file: build the module-scoped declaration and alias
 /// tables from the scrubbed view, then walk hashing function bodies on the
 /// raw lines looking for unordered iteration.
-fn scan_file(path: &std::path::Path, rel: &str) -> Vec<Finding> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
+fn scan_file(path: &std::path::Path, rel: &str) -> Result<Vec<Finding>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let lines: Vec<&str> = text.lines().collect();
     let mut findings: Vec<Finding> = Vec::new();
 
@@ -504,18 +535,23 @@ fn scan_file(path: &std::path::Path, rel: &str) -> Vec<Finding> {
             inside = false;
         }
     }
-    findings
+    Ok(findings)
 }
 
 /// # Errors
 ///
 /// Returns a finding per hashing function iterating an unordered collection.
 pub fn run(root: &Path) -> Result<String, String> {
-    let findings = collect_findings(root);
+    let (findings, scanned) = collect_findings(root)?;
+    if scanned == 0 {
+        return Err(String::from(
+            "FAIL: no .rs file was scanned - wrong root, the gate would be vacuous",
+        ));
+    }
 
     if findings.is_empty() {
-        return Ok(String::from(
-            "Consensus-map ordering OK: every collection hashed into a commitment is ordered.",
+        return Ok(format!(
+            "Consensus-map ordering OK: every collection hashed into a commitment is ordered ({scanned} files scanned)."
         ));
     }
     let mut msg = String::from("FAIL: a hashing function iterates an unordered collection:\n");
@@ -737,5 +773,47 @@ mod tests {
         assert!(!has_fold("    let x = 1;"));
         assert!(has_own_slot_write("    self.leaves[pos] = h.finalize();"));
         assert!(!has_own_slot_write("    let x = y;"));
+    }
+}
+
+#[cfg(test)]
+mod iteration_tests {
+    use super::*;
+
+    #[test]
+    fn chained_adaptors_and_into_iter_are_iteration() {
+        assert_eq!(
+            iter_field("for x in self.entries.iter().filter(|e| e.ok()) {").as_deref(),
+            Some("entries")
+        );
+        assert_eq!(
+            iter_field("for x in self.entries.into_iter() {").as_deref(),
+            Some("entries")
+        );
+        assert_eq!(
+            iter_field("for x in self.entries.values_mut() {").as_deref(),
+            Some("entries")
+        );
+    }
+
+    #[test]
+    fn more_hashing_names_and_folds_are_seen() {
+        assert!(is_hashing_fn("pub fn merkle_root(&self) -> H {").is_some());
+        assert!(is_hashing_fn("pub fn commitment(&self) -> H {").is_some());
+        assert!(has_fold("h.absorb(x);"));
+        assert!(has_fold("h.extend(x);"));
+        assert!(has_fold("w.write(x);"));
+    }
+
+    #[test]
+    fn empty_root_and_target_named_parent_are_handled() {
+        let base =
+            std::env::temp_dir().join(format!("maps-target-{}/target/x", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(run(&base).is_err());
+        std::fs::write(base.join("a.rs"), "fn a() {}\n").unwrap();
+        let out = run(&base);
+        std::fs::remove_dir_all(base.parent().unwrap().parent().unwrap()).unwrap();
+        assert!(out.is_ok());
     }
 }

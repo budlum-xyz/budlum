@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2021"
 description = "B.U.D. 1.0/2.0/3.0 (Broad Universal Database) - Rust skeleton, no unsafe, a 128KB block holding 27 tx, ML-DSA-87 final"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
-authors = ["Lubo's Ruler <ayazkussann@gmail.com>"]
+authors = ["Budlum Security <security@budlum.xyz>"]
 
 [lib]
 name = "bud_core"
@@ -52,6 +52,8 @@ bud3 = ["bud2"]
 # silently.
 [lints.rust]
 unsafe_code = "forbid"
+# `cfg(kani)` is set by the kani driver, not by a Cargo feature.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [lints.clippy]
 # The panic boundary: `unwrap`/`expect` are forbidden on the production path.
@@ -98,4 +100,5 @@ serde_json = { version = "1", features = ["preserve_order"] }
 [profile.dev]
 panic = "abort"
 [profile.release]
+overflow-checks = true
 panic = "abort"

@@ -29,6 +29,15 @@ mod byzantine_settlement_tests {
         domain_height: u64,
         updates: Vec<(Address, u64)>,
     ) -> Result<(), String> {
+        // BLG-0286 (P18-F01): the executor now requires the sender to hold
+        // the seat the real builder signs from - an eligible validator.
+        // Registering it here is the honest fixture for that role, not a
+        // bypass: without a seat, this helper must fail, and a test below
+        // pins exactly that.
+        node.state
+            .validators
+            .entry(sender)
+            .or_insert_with(|| crate::core::account::Validator::new(sender, 1));
         let nonce = node.state.get_nonce(&sender);
         let tx = crate::core::transaction::Transaction::new_with_chain_id(
             sender,
@@ -107,6 +116,7 @@ mod byzantine_settlement_tests {
                     .unwrap();
             let proof_pos = FinalityProof::PoS {
                 cert: FinalityCert {
+                    chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                     epoch: 1,
                     checkpoint_height: i,
                     checkpoint_hash: b_pos.hash.clone(),
@@ -163,11 +173,16 @@ mod byzantine_settlement_tests {
         let (mut fake_com, proof) = pow_commitments[0].clone();
         fake_com.state_root = [0xFFu8; 32];
         fake_com.sequence = 9999;
+        // The proof carries no headers, so the adapter refuses it before any
+        // state root is compared. A forged root cannot ride on an empty proof.
+        // The accepting side of the same path is covered by the finalized
+        // depth test in settlement_prod.rs.
+        let err = node_a
+            .submit_verified_domain_commitment(fake_com, proof)
+            .expect_err("a forged state root on an empty proof must be rejected");
         assert!(
-            node_a
-                .submit_verified_domain_commitment(fake_com, proof)
-                .is_err(),
-            "Invalid state root in proof must be rejected"
+            err.contains("PoW header chain is empty"),
+            "unexpected rejection reason: {err}"
         );
 
         let header = node_a.seal_global_header(None).unwrap();
@@ -348,6 +363,48 @@ mod byzantine_settlement_tests {
     }
 
     #[tokio::test]
+    async fn state_update_from_a_non_committer_is_refused() {
+        // BLG-0286 (P18-F01): the freeze-the-victim path. A funded attacker
+        // with no validator seat tries the exact move the finding names -
+        // push the victim's nonce just under the ceiling, which the old
+        // ceiling/monotonicity guards happily waved through.
+        let consensus = std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0));
+        let mut node = Blockchain::new(consensus, None, 45262, None);
+        let attacker = test_addr_from_byte(0xAD);
+        let victim = test_addr_from_byte(0xB0);
+        node.state.add_balance(&attacker, 1_000_000);
+        node.state.add_balance(&victim, 500);
+        let tx = crate::core::transaction::Transaction::new_with_chain_id(
+            attacker,
+            Address::zero(),
+            0,
+            1,
+            node.state.get_nonce(&attacker),
+            Vec::new(),
+            45262,
+            crate::core::transaction::TransactionType::StateUpdate {
+                domain_id: 1,
+                domain_height: 1,
+                state_updates: vec![(victim, u64::MAX - 1001)],
+            },
+        );
+        // The checked entry point keeps the structured error: the plain
+        // `apply_transaction` facade flattens to the message only, which would
+        // make this assert on prose instead of the refusal's identity.
+        let err =
+            crate::execution::executor::Executor::apply_transaction_checked(&mut node.state, &tx)
+                .expect_err(
+                    "an attacker without a validator seat must not move another account's nonce",
+                );
+        assert_eq!(err.code(), "state_update_authority", "wrong refusal: {err}");
+        assert_eq!(
+            node.state.get_nonce(&victim),
+            0,
+            "the refused update must leave the victim untouched"
+        );
+    }
+
+    #[tokio::test]
     async fn test_cross_domain_non_conflicting_updates_can_coexist() {
         let consensus = std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0));
         let mut node = Blockchain::new(consensus, None, 45262, None);
@@ -392,8 +449,9 @@ mod byzantine_settlement_tests {
 
     #[tokio::test]
     async fn test_parallel_cross_domain_stress_determinism() {
-        use rand::rng;
+        use rand::rngs::StdRng;
         use rand::seq::SliceRandom;
+        use rand::SeedableRng;
 
         let make_node = || {
             let consensus = std::sync::Arc::new(crate::consensus::pow::PoWEngine::new(0));
@@ -439,7 +497,7 @@ mod byzantine_settlement_tests {
         let mut commitments_a = commitments.clone();
         let mut commitments_b = commitments.clone();
 
-        let mut rng = rng();
+        let mut rng = StdRng::seed_from_u64(7);
         commitments_a.shuffle(&mut rng);
         commitments_b.shuffle(&mut rng);
 
@@ -482,6 +540,10 @@ mod byzantine_settlement_tests {
                 node_a.state.get_nonce(addr),
                 node_b.state.get_nonce(addr),
                 "Determinism failed for account {addr:?}"
+            );
+            assert!(
+                node_a.state.get_nonce(addr) > 0,
+                "claims must have been applied for account {addr:?}"
             );
         }
     }
@@ -735,7 +797,7 @@ mod byzantine_settlement_tests {
     }
 
     #[tokio::test]
-    async fn test_old_partition_replay_message_rejected() {
+    async fn test_old_partition_replay_message_is_idempotent() {
         let mut node = make_node();
         let alice = Address::from([0xA1u8; 32]);
         node.state.add_balance(&alice, 1000);
@@ -1006,7 +1068,7 @@ mod byzantine_settlement_tests {
     }
 
     #[tokio::test]
-    async fn test_out_of_order_domain_height_buffering_or_rejection() {
+    async fn test_out_of_order_domain_height_is_buffered_then_applied() {
         let mut node = make_node();
         let alice = Address::from([0xA1u8; 32]);
         node.state.add_balance(&alice, 1000);

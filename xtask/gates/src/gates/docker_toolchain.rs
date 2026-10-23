@@ -58,6 +58,27 @@ fn dockerfile_tag_version(root: &Path) -> Result<String, String> {
         .ok_or_else(|| "could not parse a rust:VERSION tag from the Dockerfile FROM line - gate would be vacuous".to_string())
 }
 
+/// Does the workflow carry the divergence marker as a comment line that is
+/// followed by a written reason?
+///
+/// The marker in a `run:` body or a string does not count, and a bare marker
+/// with no reason line after it does not either.
+fn has_divergence_marker(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().collect();
+    lines.iter().enumerate().any(|(i, l)| {
+        let t = l.trim_start();
+        if !(t.starts_with('#') && t.contains("DELIBERATE-TOOLCHAIN-DIVERGENCE")) {
+            return false;
+        }
+        // The next non-blank comment line must say why, in at least a sentence.
+        lines[i + 1..]
+            .iter()
+            .map(|n| n.trim())
+            .find(|n| !n.is_empty() && *n != "#")
+            .is_some_and(|n| n.starts_with('#') && n.trim_start_matches('#').trim().len() >= 20)
+    })
+}
+
 fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
     let d = root.join(".github/workflows");
     if !d.is_dir() {
@@ -75,9 +96,8 @@ fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
             continue;
         };
         // A job may deliberately want another compiler, but it must do so **with a
-        // written justification**. If the file carries the `DELIBERATE-TOOLCHAIN-DIVERGENCE`
-        // marker is looked for; when it is present the versions in that file are checked against the pin
-        // denetlenmez.
+        // written justification**. The `DELIBERATE-TOOLCHAIN-DIVERGENCE` marker is
+        // looked for; when it is present the versions in that file are not checked against the pin.
         //
         // Today the only legitimate example is `diverse-double-compiling.yml`: the whole
         // point of the job is to build the same source with a second compiler, so
@@ -85,7 +105,7 @@ fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
         //
         // The marker does not open a door, it demands a declaration: the divergence is
         // stands with a stated reason and cannot come about by accident.
-        if text.contains("DELIBERATE-TOOLCHAIN-DIVERGENCE") {
+        if has_divergence_marker(&text) {
             continue;
         }
         for line in text.lines() {
@@ -99,6 +119,18 @@ fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
                     .collect();
                 if !v.is_empty() && !out.contains(&v) {
                     out.push(v);
+                }
+                // A floating channel moves under the pin, so it counts as a
+                // different toolchain unless the file declares the divergence.
+                let word = rest
+                    .split('#')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_matches('"')
+                    .to_string();
+                if matches!(word.as_str(), "stable" | "beta" | "nightly") && !out.contains(&word) {
+                    out.push(word);
                 }
             }
         }
@@ -244,6 +276,15 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
+    let floating = tmp.join("floating");
+    build_fixture(&floating, good_from, good_copy, good_check, "stable")?;
+    if run(&floating).is_ok() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "canary: a floating stable channel was accepted against the pin",
+        ));
+    }
+
     let nocopy = tmp.join("nocopy");
     build_fixture(
         &nocopy,
@@ -312,5 +353,22 @@ mod tests {
         assert_eq!(pinned_channel(&dir).unwrap(), "1.97.1");
         assert_eq!(dockerfile_tag_version(&dir).unwrap(), "1.97.1");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod marker_tests {
+    use super::*;
+
+    #[test]
+    fn marker_needs_a_comment_line_and_a_reason() {
+        let ok = "# DELIBERATE-TOOLCHAIN-DIVERGENCE\n#\n# This job builds with a second compiler on purpose.\n";
+        assert!(has_divergence_marker(ok));
+        assert!(!has_divergence_marker(
+            "# DELIBERATE-TOOLCHAIN-DIVERGENCE\nname: x\n"
+        ));
+        assert!(!has_divergence_marker(
+            "run: echo DELIBERATE-TOOLCHAIN-DIVERGENCE\n# a long enough reason line here\n"
+        ));
     }
 }

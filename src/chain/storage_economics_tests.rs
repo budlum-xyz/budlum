@@ -143,11 +143,15 @@ mod tests {
     /// Cursor and pays every epoch since a second time, out of an escrow
     /// Funded once.
     ///
-    /// Source-level because the failure needs an unwritable store, which the
-    /// In-memory test harness cannot produce. Canary: put the `let _ =` back
-    /// And this fails.
+    /// The scan half of the persist-failure rule. BLG-0190 (P09-F11): the
+    /// three paths a test can drive are now EXERCISED at runtime (see
+    /// `a_failed_persist_propagates_out_of_the_accounting_paths`); this scan
+    /// remains only for `finalize_missed_storage_challenges`, whose path
+    /// cannot be driven in-memory because issuing a challenge needs VRF
+    /// entropy on the chain tip that the test harness cannot mint. Canary:
+    /// drop the `?` in it and this still fails.
     #[test]
-    fn every_storage_accounting_path_propagates_a_failed_persist() {
+    fn the_missed_challenge_path_propagates_a_failed_persist() {
         let src = include_str!("blockchain.rs");
 
         // Line-based and doc-comment-aware. A raw `str::matches` over the whole
@@ -171,29 +175,63 @@ mod tests {
              blockchain.rs lines {dropped:?}"
         );
 
-        for name in [
-            "pub fn apply_storage_bond_slash",
-            "pub fn finalize_missed_storage_challenges",
-            "pub fn finalize_expired_storage_deals",
-            "pub fn accrue_storage_operator_rewards",
-        ] {
-            let at = src
-                .find(name)
-                .unwrap_or_else(|| panic!("{name} must still exist"));
-            // The window is the function itself: from its signature to the
-            // next `pub fn` (or the end of the file), on byte offsets that
-            // `find` returns, so no fixed width can split a multi-byte
-            // character or reach into the next function.
-            let rest = &src[at + name.len()..];
-            let end = rest
-                .find("\n    pub fn ")
-                .map_or(src.len(), |off| at + name.len() + off);
-            let body = &src[at..end];
-            assert!(
-                body.contains("self.persist_storage_economics_state()?"),
-                "{name} must propagate a failed persist, not drop it"
-            );
-        }
+        let name = "pub fn finalize_missed_storage_challenges";
+        let at = src
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} must still exist"));
+        // The window is the function itself: from its signature to the
+        // next `pub fn` (or the end of the file), on byte offsets that
+        // `find` returns, so no fixed width can split a multi-byte
+        // character or reach into the next function.
+        let rest = &src[at + name.len()..];
+        let end = rest
+            .find("\n    pub fn ")
+            .map_or(src.len(), |off| at + name.len() + off);
+        let body = &src[at..end];
+        assert!(
+            body.contains("self.persist_storage_economics_state()?"),
+            "{name} must propagate a failed persist, not drop it"
+        );
+    }
+
+    /// BLG-0190 (P09-F11): the persist failure is REAL here - `Storage`
+    /// carries a test-only knob that makes `save_storage_economics_state`
+    /// return `io::Error`, and the accounting paths run on a chain with an
+    /// actual store attached. A dropped `?` (a `let _ =`) now fails these
+    /// assertions at runtime, not by grepping the file.
+    #[test]
+    fn a_failed_persist_propagates_out_of_the_accounting_paths() {
+        let dir = tempdir().expect("tempdir");
+        let store =
+            Storage::new(dir.path().join("chain.db").to_str().unwrap()).expect("open the store");
+        store.set_fail_economics_writes(true);
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, Some(store), 45262, None);
+        let (deal_id, operator, _bond, _after) = blockchain_with_one_deal_in(10, &mut bc);
+
+        let err = bc
+            .accrue_storage_operator_rewards(5)
+            .expect_err("accrue must propagate the failed persist");
+        assert!(
+            err.contains("Failed to persist storage economics state"),
+            "accrue must name the persist failure, got: {err}"
+        );
+
+        let err = bc
+            .finalize_expired_storage_deals(20)
+            .expect_err("expiry settlement must propagate the failed persist");
+        assert!(
+            err.contains("Failed to persist storage economics state"),
+            "finalize_expired must name the persist failure, got: {err}"
+        );
+
+        let err = bc
+            .apply_storage_bond_slash(20, deal_id, operator, 1, "test slash")
+            .expect_err("a slash must propagate the failed persist");
+        assert!(
+            err.contains("Failed to persist storage economics state"),
+            "apply_storage_bond_slash must name the persist failure, got: {err}"
+        );
     }
 
     /// Shared setup: an operator with a funded balance and one active deal
@@ -202,7 +240,18 @@ mod tests {
     fn blockchain_with_one_deal(deal_end_epoch: u64) -> (Blockchain, u64, Address, u64, u64) {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let (deal_id, operator, bond, after_bond) =
+            blockchain_with_one_deal_in(deal_end_epoch, &mut blockchain);
+        (blockchain, deal_id, operator, bond, after_bond)
+    }
 
+    /// The deal-setup half, on a caller-supplied chain (which may or may not
+    /// have storage attached) - BLG-0190 needs the same fixture on a chain
+    /// with a real store.
+    fn blockchain_with_one_deal_in(
+        deal_end_epoch: u64,
+        blockchain: &mut Blockchain,
+    ) -> (u64, Address, u64, u64) {
         let operator = Address::from([11u8; 32]);
         let payer = Address::from([12u8; 32]);
         blockchain.state.add_balance(&operator, 5_000_000);
@@ -274,13 +323,7 @@ mod tests {
             .unwrap();
 
         let after_bond = blockchain.state.get_balance(&operator);
-        (
-            blockchain,
-            deal_id,
-            operator,
-            economics.operator_bond,
-            after_bond,
-        )
+        (deal_id, operator, economics.operator_bond, after_bond)
     }
 
     /// An operator that serves a deal to term must get its bond back.

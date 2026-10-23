@@ -154,7 +154,11 @@ pub fn disk_band_tokens_per_second_at(
     weight_bits: u8,
     speculation: f64,
 ) -> f64 {
-    if disk_gib_per_second <= 0.0 {
+    if !disk_gib_per_second.is_finite()
+        || disk_gib_per_second <= 0.0
+        || !speculation.is_finite()
+        || weight_bits == 0
+    {
         0.0
     } else {
         disk_gib_per_second / gib_per_cold_token(weight_bits) * speculation
@@ -308,6 +312,13 @@ impl CostComparison {
 #[cfg(test)]
 mod cost_forecast_tests {
     use super::*;
+
+    #[test]
+    fn zero_precision_or_nan_bandwidth_gives_zero_throughput() {
+        assert_eq!(disk_band_tokens_per_second_at(2.0, 0, 1.0), 0.0);
+        assert_eq!(disk_band_tokens_per_second_at(f64::NAN, 4, 1.0), 0.0);
+        assert_eq!(disk_band_tokens_per_second_at(f64::INFINITY, 4, 1.0), 0.0);
+    }
 
     /// Rental rates: accelerator and host memory, per gibibyte-hour.
     fn rates() -> HardwareCostModel {

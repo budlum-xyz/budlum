@@ -139,6 +139,14 @@ pub fn address_to_recipient_tag(addr: &[u8; 32]) -> u64 {
     // the crate is built: there is no branch left to reason about.
     let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *addr;
     let raw = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
+    // BLG-0282 (P17-F16, accepted with documentation): `%` is not a
+    // constant-time modular reduction and this fold consumes secret note
+    // material. Accepted because wallet-core is unwired to any network or
+    // consensus path (the node's own fold lives in bud-state, matching this
+    // one byte-for-byte), so there is no remote observer to time against.
+    // A constant-time rewrite happens in BOTH places together, if this ever
+    // joins a hot path - changing one alone would split the two folds,
+    // which is the worse bug.
     raw % GOLDILOCKS_P
 }
 
@@ -217,9 +225,14 @@ mod poseidon_lock_tests {
     fn poseidon4_hash3_canonical_output_lock() {
         let h = poseidon4_hash3(1, 2, 3);
         assert_ne!(h, 0, "hash must be non-zero");
-        // Lock: this exact output must match bud-vm poseidon4_hash3(1, 2, 3)
-        // If MDS or RC drift, this value changes and the test breaks.
-        let h2 = poseidon4_hash3(1, 2, 3);
-        assert_eq!(h, h2, "deterministic");
+        // Lock: these exact outputs were computed from the bud-vm constants
+        // (4 rounds, same RC and MDS). If MDS or RC drift in either crate,
+        // the value here no longer matches and the test breaks.
+        assert_eq!(h, 17_200_853_039_219_255_194, "hash3 must match bud-vm");
+        assert_eq!(
+            poseidon4_hash(1, 2),
+            7_468_504_783_086_785_855,
+            "hash2 must match bud-vm"
+        );
     }
 }

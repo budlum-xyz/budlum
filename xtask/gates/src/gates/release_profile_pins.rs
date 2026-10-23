@@ -108,10 +108,7 @@ pub fn run(root: &Path) -> Result<String, String> {
 
 /// A fresh scratch directory for the staged-copy canaries.
 fn staged_dir() -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join(format!("release-profile-pins-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).map_err(|e| format!("cannot stage the self-test dir: {e}"))?;
-    Ok(dir)
+    crate::gates::rust_literals::exclusive_scratch_dir("release-profile-pins")
 }
 
 /// Staged-copy canaries: the hardened manifest passes, and every tampered
@@ -204,6 +201,15 @@ pub fn self_test() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_staged_dir_is_new() {
+        let a = staged_dir().expect("first dir");
+        let b = staged_dir().expect("second dir");
+        let _ = fs::remove_dir_all(&a);
+        let _ = fs::remove_dir_all(&b);
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn the_hardened_profile_passes() {

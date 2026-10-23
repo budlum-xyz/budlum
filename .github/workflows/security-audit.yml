@@ -177,7 +177,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           languages: rust
           queries: security-extended
@@ -195,7 +195,7 @@ jobs:
       - name: Build (CodeQL extraction)
         run: cargo build --lib --locked
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
 
   msrv:
     name: MSRV check (1.97.1)
@@ -372,7 +372,14 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - name: Determinism test (genesis reproducibility)
         # The same determinism test must pass on both architectures (chain-split risk).
-        run: cargo test --lib --locked -- genesis_hash_deterministic
+        run: |
+          set -euo pipefail
+          cargo test --lib --locked -- genesis_hash_deterministic 2>&1 | tee /tmp/cross-arch-determinism.log
+          # A filter that matches nothing exits 0 and looks like a pass.
+          if grep -qE 'running 0 tests' /tmp/cross-arch-determinism.log; then
+            echo "::error::0 tests ran: the genesis determinism filter matched nothing (vacuous)"
+            exit 1
+          fi
 
   scorecard:
     name: OpenSSF Scorecard
@@ -385,7 +392,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Run Scorecard
-        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
         with:
           results_file: scorecard.sarif
           results_format: sarif
@@ -396,3 +403,9 @@ jobs:
           # (see the header comment): keep the SARIF upload, skip the
           # signed-publication step that cannot run unattended.
           publish_results: false
+      - name: Upload Scorecard SARIF (Security tab)
+        if: always()
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: scorecard.sarif
+          category: scorecard

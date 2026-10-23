@@ -56,6 +56,8 @@ pub struct RelayerWorker {
     /// so that a block held back by one retried request does not have its
     /// other requests relayed again on the next pass.
     settled: std::collections::HashSet<String>,
+    /// Failed relay attempts per request hash within the current block pass.
+    attempts: std::collections::HashMap<String, u32>,
     /// The nonce the next result transaction is signed with, when this pass
     /// has already submitted one. The chain's account nonce does not move
     /// until a result is included in a block, so two results signed in one
@@ -106,6 +108,9 @@ struct PendingResult {
     /// at [`MAX_REQUESTER_LOOKUP_FAILURES`] the entry is dropped and logged.
     #[serde(default)]
     requester_lookups_failed: u32,
+    /// True once the result transaction sits in a finalized block.
+    #[serde(default)]
+    done: bool,
 }
 
 /// The file name of the pending-result store, next to the cursor file.
@@ -126,6 +131,22 @@ const PENDING_FILE_NAME: &str = "relayer-pending.json";
 /// `UniversalRelay` has no chain-side deadline to lean on.
 const MAX_REQUESTER_LOOKUP_FAILURES: u32 = 1440;
 
+/// Records one failed attempt for a request. Returns true, and forgets the
+/// request, once it reached [`MAX_RELAY_ATTEMPTS`].
+fn note_failed_attempt(attempts: &mut std::collections::HashMap<String, u32>, hash: &str) -> bool {
+    let tries = attempts.entry(hash.to_string()).or_insert(0);
+    *tries = tries.saturating_add(1);
+    if *tries >= MAX_RELAY_ATTEMPTS {
+        attempts.remove(hash);
+        return true;
+    }
+    false
+}
+
+/// How many passes one relay request may fail with a retryable error before
+/// it is skipped. Passes are five seconds apart.
+const MAX_RELAY_ATTEMPTS: u32 = 120;
+
 impl RelayerWorker {
     pub fn new(chain: ChainHandle, relayer_address: Address) -> Self {
         Self {
@@ -135,6 +156,7 @@ impl RelayerWorker {
             adapters: Arc::new(AdapterRegistry::new()),
             cursor_path: None,
             settled: std::collections::HashSet::new(),
+            attempts: std::collections::HashMap::new(),
             next_nonce: None,
             observed: std::collections::HashMap::new(),
         }
@@ -176,6 +198,10 @@ impl RelayerWorker {
     /// cases are refused at startup rather than discovered as a mint against
     /// a transaction that never happened.
     #[must_use]
+    ///
+    /// WIRING: the startup seam that hands the worker its adapter
+    /// registry; the relayer binary still starts without adapters, so
+    /// this waits for the operator configuration that builds one.
     pub fn with_adapters(mut self, adapters: Arc<AdapterRegistry>) -> Self {
         self.adapters = adapters;
         self
@@ -314,6 +340,7 @@ impl RelayerWorker {
         let submitted: Vec<(String, String)> = self
             .observed
             .iter()
+            .filter(|(_, p)| !p.done)
             .filter_map(|(request, p)| p.submitted_tx.clone().map(|h| (request.clone(), h)))
             .collect();
         let mut changed = false;
@@ -321,7 +348,9 @@ impl RelayerWorker {
             match self.included_height(&tx_hash).await {
                 Some(height) if height <= finalized => {
                     info!(request, tx = %tx_hash, height, "Relayer: relay result finalized");
-                    self.observed.remove(&request);
+                    if let Some(pending) = self.observed.get_mut(&request) {
+                        pending.done = true;
+                    }
                     changed = true;
                 }
                 Some(_) => {}
@@ -342,6 +371,18 @@ impl RelayerWorker {
             }
         }
         if changed {
+            self.save_pending();
+        }
+    }
+
+    /// Drop the entries whose result is final once the cursor has moved past
+    /// the block of their request. Until then a finalized entry is the only
+    /// record that stops a restart from running the external action again for
+    /// a request in a block the cursor still holds.
+    fn release_behind_cursor(&mut self) {
+        let before = self.observed.len();
+        self.observed.retain(|_, p| !p.done);
+        if self.observed.len() != before {
             self.save_pending();
         }
     }
@@ -681,6 +722,18 @@ impl RelayerWorker {
                             RelayOutcome::Retry => {
                                 // The block stays under the cursor; the
                                 // next pass comes back to this request.
+                                // A request that keeps failing is dropped
+                                // after a bounded number of passes, so one
+                                // request cannot hold every later block.
+                                if note_failed_attempt(&mut self.attempts, &tx.hash) {
+                                    warn!(
+                                        height = h,
+                                        request = %tx.hash,
+                                        "Relayer: request failed repeatedly; skipping it so later blocks are not held"
+                                    );
+                                    self.settled.insert(tx.hash.clone());
+                                    continue;
+                                }
                                 warn!(
                                     height = h,
                                     request = %tx.hash,
@@ -706,9 +759,11 @@ impl RelayerWorker {
                 }
                 relayed_through = h;
                 self.save_cursor(relayed_through);
+                self.release_behind_cursor();
                 // Everything in this block is behind the cursor now. The
                 // pending results are not: they stay until finality.
                 self.settled.clear();
+                self.attempts.clear();
             }
         }
     }
@@ -858,6 +913,7 @@ impl RelayerWorker {
                     result: None,
                     submitted_tx: None,
                     requester_lookups_failed: 0,
+                    done: false,
                 },
             );
             self.save_pending();
@@ -1013,6 +1069,22 @@ const fn relay_outcome_for(error: &AdapterError) -> RelayOutcome {
 const CONFIRMATION_DEPTH: u32 = crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
 
 #[cfg(test)]
+mod attempt_budget {
+    use super::*;
+
+    #[test]
+    fn a_request_is_skipped_after_the_attempt_budget() {
+        let mut attempts = std::collections::HashMap::new();
+        for _ in 1..MAX_RELAY_ATTEMPTS {
+            assert!(!note_failed_attempt(&mut attempts, "0xaa"));
+        }
+        assert!(note_failed_attempt(&mut attempts, "0xaa"));
+        assert!(attempts.is_empty());
+        assert!(!note_failed_attempt(&mut attempts, "0xaa"));
+    }
+}
+
+#[cfg(test)]
 mod cursor_persistence {
     use super::*;
 
@@ -1101,6 +1173,13 @@ mod relay_outcomes {
 
     #[async_trait::async_trait]
     impl ChainAdapter for ConsistentAdapter {
+        fn verify_observation(
+            &self,
+            result: &crate::core::transaction::RelayerExternalResult,
+        ) -> Result<(), AdapterError> {
+            crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+        }
+
         fn chain_type(&self) -> ExternalChain {
             ExternalChain::Ethereum
         }
@@ -1248,6 +1327,13 @@ mod relay_outcomes {
 
     #[async_trait::async_trait]
     impl ChainAdapter for CountingAdapter {
+        fn verify_observation(
+            &self,
+            result: &crate::core::transaction::RelayerExternalResult,
+        ) -> Result<(), AdapterError> {
+            crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+        }
+
         fn chain_type(&self) -> ExternalChain {
             ExternalChain::Ethereum
         }
@@ -1441,6 +1527,7 @@ mod pending_results {
                 result: Some(observation(1)),
                 submitted_tx: Some("tx-a".to_string()),
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.observed.insert(
@@ -1449,6 +1536,7 @@ mod pending_results {
                 result: Some(observation(2)),
                 submitted_tx: None,
                 requester_lookups_failed: 3,
+                done: false,
             },
         );
         w.save_pending();
@@ -1528,6 +1616,7 @@ mod pending_results {
                 result: None,
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         first.save_pending();
@@ -1630,6 +1719,7 @@ mod pending_results {
                 result: Some(observation(1)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.save_pending();
@@ -1645,6 +1735,7 @@ mod pending_results {
                 result: Some(huge),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.save_pending();
@@ -1670,6 +1761,7 @@ mod pending_results {
                 result: Some(observation(6)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         for pass in 1..MAX_REQUESTER_LOOKUP_FAILURES {
@@ -1710,6 +1802,7 @@ mod pending_results {
                 result: Some(observation(6)),
                 submitted_tx: None,
                 requester_lookups_failed: MAX_REQUESTER_LOOKUP_FAILURES - 2,
+                done: false,
             },
         );
         w.save_pending();
@@ -1743,6 +1836,7 @@ mod pending_results {
                 result: Some(observation(3)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.save_pending();
@@ -1774,6 +1868,7 @@ mod pending_results {
                     result: Some(observation(9)),
                     submitted_tx: Some(hash.to_string()),
                     requester_lookups_failed: 0,
+                    done: false,
                 },
             );
         }
@@ -1781,8 +1876,13 @@ mod pending_results {
         w.reap_finalized(11).await;
 
         assert!(
+            w.observed["req-final"].done,
+            "a result in a finalized block is done, and stays until the cursor passes"
+        );
+        w.release_behind_cursor();
+        assert!(
             !w.observed.contains_key("req-final"),
-            "a result in a finalized block is done"
+            "a finalized entry is released once the cursor is past its block"
         );
         assert_eq!(
             w.observed["req-young"].submitted_tx.as_deref(),
@@ -1819,6 +1919,7 @@ mod pending_results {
                 result: Some(observation(5)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
 
@@ -1837,5 +1938,56 @@ mod pending_results {
             w.adapters.supported_chains().is_empty(),
             "no adapter was needed: the stored observation is what gets signed"
         );
+    }
+
+    /// BLG-0716: a finalized result must survive a restart while the cursor
+    /// still holds the request's block, so the replay does not repeat the
+    /// external action.
+    #[tokio::test]
+    async fn a_finalized_entry_survives_a_restart_until_the_cursor_passes() {
+        let included = std::collections::HashMap::from([("tx-final".to_string(), 10u64)]);
+        let handle = actor(
+            included,
+            std::collections::HashSet::new(),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relayer-cursor");
+        let mut w = RelayerWorker::new(handle, Address::from([7u8; 32]))
+            .with_cursor_path(Some(path.clone()));
+        w.observed.insert(
+            "req-a".to_string(),
+            PendingResult {
+                result: Some(observation(1)),
+                submitted_tx: Some("tx-final".to_string()),
+                requester_lookups_failed: 0,
+                done: false,
+            },
+        );
+        w.reap_finalized(11).await;
+
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(1);
+        let key = Arc::new(KeyPair::generate().expect("keypair"));
+        let mut again = RelayerWorker::new(ChainHandle::new(tx2), Address::from([7u8; 32]))
+            .with_cursor_path(Some(path))
+            .with_signing_key(key);
+        again.observed = again.load_pending().expect("load");
+        assert!(again.observed["req-a"].done);
+        let user = Address::from([8u8; 32]);
+        let request = crate::core::transaction::ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x00000000000000000000000000000000000000aa".to_string(),
+            payload: vec![1, 2, 3],
+            external_nonce: 7,
+        };
+        let outcome = again.process_relay("req-a", user, request).await;
+        assert_eq!(
+            outcome,
+            RelayOutcome::Submitted,
+            "no second external action"
+        );
+
+        again.release_behind_cursor();
+        assert!(again.load_pending().expect("load").is_empty());
     }
 }

@@ -1,12 +1,12 @@
-//! Budlum L1 CLI - send transactions, query state, validator guidance.
+//! Budlum CLI - send transactions, query state, validator guidance.
 //!
-//! This binary talks to the L1 core (`budlum_core`):
+//! This binary talks to the Universal Settlement Layer core (`budlum_core`):
 //! build and send a signed transaction (`tx send`), read-only queries
 //! (`query balance`/`query block`/`query status`), and guidance for running
 //! a validator (`validator run`).
 //!
 //! The BudZKVM toolchain (`budzero/bud-cli`) is a separate workspace; this binary
-//! is for L1 chain interaction and uses the core types directly.
+//! is for chain interaction and uses the core types directly.
 //!
 //! # Design
 //! - JSON-RPC transport: a hand-written minimal HTTP/1.1 POST over a std
@@ -35,7 +35,7 @@ const MAX_RPC_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
     name = "bud",
     author,
     version,
-    about = "Budlum L1 CLI - send txs, query state, validator guidance"
+    about = "Budlum CLI - send txs, query state, validator guidance"
 )]
 struct Cli {
     /// The node's JSON-RPC endpoint.
@@ -242,6 +242,7 @@ fn parse_address(s: &str) -> Result<Address, String> {
 /// `BUD_PRIV_KEY` environment variable, in that order, never from `argv`.
 fn load_priv_key(path: Option<&std::path::Path>) -> Result<String, String> {
     if let Some(path) = path {
+        check_key_file_mode(path)?;
         return std::fs::read_to_string(path)
             .map(|s| s.trim().to_string())
             .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()));
@@ -252,6 +253,31 @@ fn load_priv_key(path: Option<&std::path::Path>) -> Result<String, String> {
              (the seed is not accepted as a command-line argument)",
         )
     })
+}
+
+/// Refuse a seed file that group or others can read (Unix only).
+///
+/// A world-readable seed file is a leaked key; the user must `chmod 600` it.
+#[cfg(unix)]
+fn check_key_file_mode(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| format!("cannot read priv key file {}: {e}", path.display()))?;
+    let mode = meta.permissions().mode();
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "priv key file {} has mode {:03o}; group and others must have no access \
+             (chmod 600)",
+            path.display(),
+            mode & 0o777
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_key_file_mode(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn parse_seed(hex_str: &str) -> Result<[u8; 32], String> {
@@ -273,6 +299,27 @@ fn parse_rpc_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> 
     } else {
         s.parse::<u64>().map_err(|e| format!("{field} parse: {e}"))
     }
+}
+
+/// Build an unsigned transfer bound to `chain_id`.
+fn build_transfer(
+    from: Address,
+    to: Address,
+    amount: u64,
+    fee: u64,
+    nonce: u64,
+    chain_id: u64,
+) -> Transaction {
+    Transaction::new_with_chain_id(
+        from,
+        to,
+        amount,
+        fee,
+        nonce,
+        Vec::new(),
+        chain_id,
+        TransactionType::Transfer,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -300,11 +347,14 @@ fn run_tx_send(
         }
     };
 
+    // The chain id comes from the node, so the signature is bound to the
+    // network the node serves and never to a compiled-in default.
+    let chain_id_value = rpc_call(rpc_url, "bud_chainId", serde_json::json!([]))?;
+    let chain_id = parse_rpc_u64(&chain_id_value, "bud_chainId")?;
+    println!("chain id (from node): {chain_id}");
+
     // Build and sign the transaction.
-    let mut tx = Transaction::new(from, to_addr, amount, Vec::new());
-    tx.fee = fee;
-    tx.nonce = nonce;
-    tx.tx_type = TransactionType::Transfer;
+    let mut tx = build_transfer(from, to_addr, amount, fee, nonce, chain_id);
     tx.sign(&keypair);
 
     let tx_hash = tx.calculate_hash();
@@ -509,6 +559,33 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// BLG-1093: the CLI help names the product by its approved name, not
+    /// by the banned layer-one term.
+    #[test]
+    fn cli_help_does_not_use_the_layer_one_term() {
+        use clap::CommandFactory;
+        let help = Cli::command().render_long_help().to_string();
+        let banned = ["L", "1"].concat();
+        assert!(
+            !help
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|w| w == banned),
+            "help text uses the banned term: {help}"
+        );
+        // BLG-0099 (P04-F17): the ban covers every surface the CLI PRINTS -
+        // long help, short help and the subcommand helps - instead of
+        // scanning the source file as text.
+        let short = Cli::command().render_help().to_string();
+        assert!(!short.contains(&banned), "short help uses the banned term");
+        for sub in Cli::command().get_subcommands() {
+            let sub_help = sub.clone().render_help().to_string();
+            assert!(
+                !sub_help.contains(&banned),
+                "subcommand help uses the banned term: {sub_help}"
+            );
+        }
+    }
+
     #[test]
     fn parse_rpc_u64_accepts_hex_and_decimal() {
         assert_eq!(
@@ -526,6 +603,32 @@ mod tests {
         let (host, port) = parse_rpc_url("http://127.0.0.1").unwrap();
         assert_eq!(host, "127.0.0.1");
         assert_eq!(port, 8545);
+    }
+
+    /// A seed file readable by group or others is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_key_file_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("bud-key-mode-{}", std::process::id()));
+        std::fs::write(&path, "00").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = check_key_file_mode(&path).expect_err("mode 644 must be refused");
+        assert!(err.contains("chmod 600"), "{err}");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(check_key_file_mode(&path).is_ok());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The transfer carries the chain id it was given, not the devnet default.
+    #[test]
+    fn a_transfer_is_bound_to_the_given_chain_id() {
+        let from = Address::zero();
+        let tx = build_transfer(from, from, 1, 2, 3, 45260);
+        assert_eq!(tx.chain_id, 45260);
+        assert_eq!(tx.fee, 2);
+        assert_eq!(tx.nonce, 3);
+        assert_eq!(tx.tx_type, TransactionType::Transfer);
     }
 
     const SOURCE_HASH: &str = "0909090909090909090909090909090909090909090909090909090909090909";

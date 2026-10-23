@@ -21,6 +21,24 @@ impl Error for ConsensusError {}
 pub const MAX_FUTURE_BLOCK_TIME_MS: u128 = 15 * 1000;
 pub const MAX_PAST_BLOCK_TIME_MS: u128 = 2 * 60 * 60 * 1000;
 pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
+/// How many leader-election rounds one slot may run (P01-F01, P01-F02).
+///
+/// A slot with no elected leader used to stall forever: the VRF seed had no
+/// retry term, so every retry tick drew the same (empty) result. A round term
+/// in the seed re-rolls the election, and the round threshold multiplier
+/// widens eligibility geometrically, so a slot fills after a bounded number
+/// of rounds even with a minority of the validators online.
+pub const MAX_LEADER_ROUNDS: u64 = 16;
+/// Wall-clock spacing between leader rounds of one slot (P01-F01, P01-F02).
+///
+/// Claiming round `r` costs `r` timeouts: validation requires the block
+/// timestamp to sit at least `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
+/// after its parent. Without that floor every validator would jump straight
+/// to the widest threshold in round `MAX_LEADER_ROUNDS` and the round term
+/// would buy nothing but forks. The floor also removes the "stay 1 s ahead of
+/// the parent" steering channel (P01-F20): a later round can no longer be
+/// claimed on the minimum step.
+pub const ROUND_TIMEOUT_MS: u128 = 3 * 1000;
 /// Consensus block-size ceiling, measured over the **JSON** encoding.
 ///
 /// Distinct from `network::protocol::MAX_BLOCK_SIZE` (1 MiB) on purpose, and
@@ -42,6 +60,16 @@ pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
 /// above this one (JSON), or gossip starts admitting blocks every validator
 /// then refuses.
 pub const MAX_BLOCK_SIZE: usize = 1_000_000;
+/// Largest single slashing-evidence entry a block may carry.
+///
+/// Enforced where evidence is admitted (`submit_slashing_evidence`), where it
+/// is inlined into a block, and where the consensus engine hands its pool
+/// over, so an entry that is accepted is always small enough to be included in
+/// some future block. The block builder also reserves this much room for
+/// evidence before it spends the rest of the budget on transactions, so a
+/// saturated mempool cannot starve a queued double-sign proof out of every
+/// block.
+pub const MAX_SLASHING_EVIDENCE_BYTES: usize = 65_536;
 pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 5000;
 pub const MAX_REORG_DEPTH: usize = 100;
 use crate::core::account::AccountState;
@@ -85,7 +113,7 @@ pub trait ConsensusEngine: Send + Sync {
     ///
     /// `AccountState::execution_domain` is stamped from this at every point
     /// a state is built or replaced, and it is what the identity write gate
-    /// consults. The default is `PoS`, which is mainnet L1's fact and keeps
+    /// consults. The default is `PoS`, which is the Budlum mainnet fact and keeps
     /// the master registry closed: an engine that does not declare itself
     /// does not open a gated write. `PoAEngine` overrides; nothing else may.
     fn domain_kind(&self) -> crate::domain::ConsensusKind {
@@ -96,6 +124,15 @@ pub trait ConsensusEngine: Send + Sync {
         _block: &Block,
         _storage: Option<&crate::storage::db::Storage>,
     ) -> Result<(), ConsensusError> {
+        Ok(())
+    }
+
+    /// Look at a block received from the network, before the chain accepts or
+    /// rejects it, for proof of producer misbehaviour. It must not change
+    /// chain state and must not write checkpoints: the block may never
+    /// commit. The default is a no-op; `PoSEngine` turns a signed rival block
+    /// into double-sign evidence (BLG-0011).
+    fn observe_received_block(&self, _block: &Block) -> Result<(), ConsensusError> {
         Ok(())
     }
 
@@ -110,6 +147,22 @@ pub trait ConsensusEngine: Send + Sync {
     fn record_block_with_chain(
         &self,
         _block: &Block,
+        _chain: &[Block],
+        _storage: Option<&crate::storage::db::Storage>,
+    ) {
+    }
+
+    /// The chain reports the height finalised by quorum certificates
+    /// (P01-F04).
+    ///
+    /// A checkpoint written at local commit time is not a finality claim: two
+    /// nodes commit different blocks at an epoch boundary and then reject each
+    /// other's chains forever. Checkpoints are therefore held pending until
+    /// the height they name is finalised, and this method is how the chain
+    /// hands that finality to the engine. The default is a no-op.
+    fn note_finalized_height(
+        &self,
+        _height: u64,
         _chain: &[Block],
         _storage: Option<&crate::storage::db::Storage>,
     ) {
@@ -200,6 +253,9 @@ pub trait ConsensusEngine: Send + Sync {
         }
         chains.iter().max_by_key(|c| c.len()).copied()
     }
+    /// Test-only depth probe (P01-F21: `try_reorg` enforces the depth limit
+    /// on the live path; nothing production-side calls this).
+    #[cfg(test)]
     fn can_reorg(&self, current_chain: &[Block], new_chain: &[Block]) -> bool {
         if new_chain.len() <= current_chain.len() {
             return false;

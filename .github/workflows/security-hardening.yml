@@ -135,7 +135,17 @@ jobs:
     # 312 mutants / 24 = 13 mutants x 350 s = ~76 minutes, under the ceiling.
     # Shards need no coordination - each independently discovers the same
     # mutant set and tests its own slice.
-    timeout-minutes: 120
+    #
+    # Third measurement, run 39490423359 (87245eb6): the library suite had
+    # grown well past the 286 s above. The ordinary Budlum Core job now
+    # measures 3,781 tests in 649 s, mutant test phases measured 451-899 s,
+    # and nine shards were killed inside the 900 s per-run budget with 3,780
+    # tests done and exactly one - the differential VM oracle - still
+    # running: red shards that measured nothing. The per-run budget is now
+    # 1800 s and this ceiling 240 minutes. Neither softens a verdict - a
+    # TIMEOUT is never "caught" - they only let a slower suite finish saying
+    # what it was already trying to say.
+    timeout-minutes: 240
     strategy:
       # The point of the run is the LIST of survivors; cancelling seven shards
       # because one found something hides the rest of that list.
@@ -281,8 +291,18 @@ jobs:
           # What did soften the gate was a baseline that never ran.
           # `--baseline=skip` is still NOT used: every shard proves its own
           # tree is green before any verdict is trusted.
-          cargo mutants --in-place --timeout 900 --in-diff /tmp/pr.diff \
-            --shard "${SHARD}/24" -- --lib
+          #
+          # 900 stopped being enough once the suite grew (see the third
+          # measurement on the job): run 39490423359 killed nine baselines at
+          # 900 s with one test outstanding, so the budget is 1800 s now.
+          #
+          # `--bins` joins `--lib`: the diff can touch `src/bin/bud.rs`, and
+          # under `--lib` alone no test that could catch a mutant there ever
+          # ran - run 39490423359 reported seven such survivors that were not
+          # evidence about the tests at all, only about the flag. Binary unit
+          # tests belong to the same claim library tests make.
+          cargo mutants --in-place --timeout 1800 --in-diff /tmp/pr.diff \
+            --shard "${SHARD}/24" -- --lib --bins
 
   supply-chain:
     name: cargo-supply-chain (publisher visibility)
@@ -308,7 +328,7 @@ jobs:
       # still tolerates the list shape, but the pin stops the JSON from being
       # rewritten underneath a review.
       - name: cargo install cargo-supply-chain (version pinned)
-        run: cargo install cargo-supply-chain --version 0.3.7 --locked
+        run: cargo install cargo-supply-chain --version 0.3.8 --locked
       # Every run of `publishers` asked crates.io per crate at more than about
       # 2 seconds each, and with 566 dependencies that exceeded the 15-minute
       # timeout: the job was cancelled and produced no output. `update` fetches
@@ -331,96 +351,14 @@ jobs:
         run: |
           set -euo pipefail
           cargo supply-chain json --diffable > /tmp/supply-chain.json
-          cat > /tmp/ownerless_gate.py <<'PY'
-          import json, sys
-
-          def crate_owners(data):
-              crates = data.get("crates_io_crates")
-              if isinstance(crates, dict):
-                  # cargo-supply-chain 0.3.x emits name -> owners here; the old
-                  # script iterated this as a list of objects and died on
-                  # 'str' object has no attribute 'get', so the gate inspected
-                  # nothing while looking red for the wrong reason.
-                  for name, owners in crates.items():
-                      yield name, owners if isinstance(owners, list) else []
-              elif isinstance(crates, list):
-                  for entry in crates:
-                      if isinstance(entry, dict):
-                          yield entry.get("name", "?"), entry.get("owners") or []
-                      elif isinstance(entry, str):
-                          yield entry, []
-              else:
-                  sys.exit(
-                      "unrecognised crates_io_crates shape "
-                      f"({type(crates).__name__}); the gate refuses to claim "
-                      "a verdict over JSON it cannot parse"
-                  )
-
-          with open(sys.argv[1]) as f:
-              pairs = list(crate_owners(json.load(f)))
-          if not pairs:
-              print("THE GATE RAN EMPTY: no crates were inspected.", file=sys.stderr)
-              sys.exit(1)
-          orphans = sorted(n for n, owners in pairs if not owners)
-          if orphans:
-              print(f"{len(orphans)} ownerless dependencies:", file=sys.stderr)
-              for o in orphans:
-                  print(f"  {o}", file=sys.stderr)
-              print(
-                  "\nAn ownerless crate cannot be patched by anyone. If a "
-                  "vulnerability appears there is nobody to wait for; replace "
-                  "the dependency or vendor it in.",
-                  file=sys.stderr,
-              )
-              sys.exit(1)
-          print(f"No ownerless dependencies: all {len(pairs)} crates.io crates have a publisher.")
-          PY
-          # Canary before the real data: the parser must flag a synthetic
-          # ownerless crate sitting next to an owned one, otherwise a green
-          # verdict could come from a parser that inspects nothing.
-          cat > /tmp/ownerless-canary.json <<'J'
-          {"crates_io_crates": {"owned-crate": [{"login": "someone", "kind": "user"}], "orphan-crate": []}}
-          J
-          if python3 /tmp/ownerless_gate.py /tmp/ownerless-canary.json; then
-            echo "ERROR: the gate let a synthetic ownerless crate through -> vacuous" >&2
-            exit 1
-          fi
-          echo "canary OK (map shape): the gate flags an ownerless crate."
-          # Second canary, list-of-strings shape. The parser accepts three
-          # shapes so that a tool-side format change cannot crash it again
-          # (that is the AttributeError of issue #66) - but a branch nothing
-          # exercises is a branch that quietly rots into accepting everything.
-          # A bare string carries no owner, so it MUST be reported.
-          cat > /tmp/ownerless-canary-list.json <<'J'
-          {"crates_io_crates": [{"name": "owned-crate", "owners": [{"login": "someone"}]}, "bare-string-crate"]}
-          J
-          if python3 /tmp/ownerless_gate.py /tmp/ownerless-canary-list.json; then
-            echo "ERROR: the list-shape branch let an ownerless crate through -> vacuous" >&2
-            exit 1
-          fi
-          echo "canary OK (list shape): the gate flags an ownerless crate."
-          # Third canary: the gate must also refuse a shape it does not know
-          # rather than call an unparsed file clean.
-          echo '{"crates_io_crates": 42}' > /tmp/ownerless-canary-bogus.json
-          if python3 /tmp/ownerless_gate.py /tmp/ownerless-canary-bogus.json; then
-            echo "ERROR: the gate claimed a verdict over JSON it cannot parse -> vacuous" >&2
-            exit 1
-          fi
-          echo "canary OK (unknown shape): the gate refuses instead of guessing."
-          # Fourth canary: an empty inspection is a failure, not a pass.
-          echo '{"crates_io_crates": {}}' > /tmp/ownerless-canary-empty.json
-          if python3 /tmp/ownerless_gate.py /tmp/ownerless-canary-empty.json; then
-            echo "ERROR: the gate passed while inspecting zero crates -> vacuous" >&2
-            exit 1
-          fi
-          echo "canary OK (empty): an empty inspection cannot pass."
-          # Positive control: a wholly owned tree MUST pass, otherwise the four
-          # canaries above would be satisfied by a parser that fails always.
-          echo '{"crates_io_crates": {"a": [{"login": "x"}], "b": [{"login": "y"}]}}' \
-            > /tmp/ownerless-canary-clean.json
-          python3 /tmp/ownerless_gate.py /tmp/ownerless-canary-clean.json
-          echo "canary OK (clean): an owned tree passes, so the gate is not a constant FAIL."
-          python3 /tmp/ownerless_gate.py /tmp/supply-chain.json
+          # The parser and its canaries are a Rust gate (xtask/gates,
+          # ownerless_dependencies.rs), not a script written from a heredoc.
+          # The self-test feeds it a synthetic ownerless crate in each JSON
+          # shape the tool has emitted, an unknown shape and an empty
+          # inspection (all must fail) and an owned tree (must pass), so a
+          # green verdict cannot come from a parser that inspects nothing.
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ownerless-dependencies --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- ownerless-dependencies /tmp/supply-chain.json
 
   # BLOCKS. For a chain a data race is not a flaky test: if two nodes reach
   # different states depending on the outcome of a race, that is a fork.
@@ -439,7 +377,14 @@ jobs:
     # that run. The ceiling is now 120 minutes. This is not a softening; it is
     # letting the measurement finish. A run that ends with zero findings says
     # far more than a run that never ends.
-    timeout-minutes: 120
+    #
+    # Second measurement, run 39490423359 (87245eb6): the suite has since
+    # grown to 3,781 tests and 649 s uninstrumented. Under TSan it completed
+    # 3,237, then produced no completed test for the last 32 minutes before
+    # the 120-minute ceiling cancelled it with the two chaos-v2 load tests
+    # still outstanding - no race found, but also no verdict. The ceiling is
+    # now the hosted maximum of 360 minutes for the same reason as above.
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -894,4 +839,9 @@ jobs:
           fn main() {}
           EOF
           cd /tmp/loom-model
-          RUSTFLAGS="--cfg loom" cargo test --release -- --nocapture
+          RUSTFLAGS="--cfg loom" cargo test --release -- --nocapture 2>&1 | tee /tmp/loom-model.log
+          # A model run that executes zero tests is not a pass.
+          if ! grep -Eq '^running [1-9][0-9]* tests?$' /tmp/loom-model.log; then
+            echo "::error::the loom model ran zero tests"
+            exit 1
+          fi

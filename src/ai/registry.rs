@@ -118,6 +118,11 @@ pub struct AiRegistry {
     /// "verifier says so" to "mathematics prove it."
     #[serde(with = "crate::core::map_keys")]
     pub execution_proofs: BTreeMap<(AiRequestId, [u8; 32]), AiExecutionProof>,
+    /// Proofs that cleared FULL STARK verification against the registered
+    /// guest program (`verify_execution_proof_full`). Only these satisfy a
+    /// `require_proof` escrow release; structural-only attaches live in
+    /// `execution_proofs` alone and never unlock a proof-gated payment.
+    pub fully_verified_proofs: BTreeSet<(AiRequestId, [u8; 32])>,
     /// Verifier Quality of Service registry.
     /// Maps verifier address → QoS metrics. Enables QoS-aware verifier
     /// Selection for the Agentic Economy.
@@ -156,6 +161,7 @@ impl AiRegistry {
             verifier_effort_ceilings: BTreeMap::new(),
             callback_queue: BTreeMap::new(),
             execution_proofs: BTreeMap::new(),
+            fully_verified_proofs: BTreeSet::new(),
             verifier_qos: BTreeMap::new(),
             agent_payments: BTreeMap::new(),
             settled_agent_payments: BTreeMap::new(),
@@ -176,6 +182,7 @@ impl AiRegistry {
             && self.verifier_effort_ceilings.is_empty()
             && self.callback_queue.is_empty()
             && self.execution_proofs.is_empty()
+            && self.fully_verified_proofs.is_empty()
             && self.verifier_qos.is_empty()
             && self.agent_payments.is_empty()
             && self.settled_agent_payments.is_empty()
@@ -403,8 +410,11 @@ impl AiRegistry {
         // Equivocation detection:
         // If this verifier already submitted a result with a DIFFERENT
         // Commitment for the same request, that is equivocation.
-        let entries = self.results.entry(result.request_id).or_default();
-        if let Some(existing) = entries.iter().find(|r| r.verifier == result.verifier) {
+        let already_submitted = self
+            .results
+            .get(&result.request_id)
+            .and_then(|entries| entries.iter().find(|r| r.verifier == result.verifier));
+        if let Some(existing) = already_submitted {
             if existing.output_commitment == result.output_commitment {
                 return Err("Verifier has already submitted a result for this request".into());
             } else {
@@ -446,6 +456,7 @@ impl AiRegistry {
                 result.request_id.to_hex()
             ));
         }
+        let entries = self.results.entry(result.request_id).or_default();
         entries.push(result.clone());
 
         // Record verifier QoS metrics.
@@ -463,6 +474,12 @@ impl AiRegistry {
         // Hardening: when model.require_execution_proof, only verifiers that
         // Already attached a structurally-valid execution proof count toward
         // Agreement - attestation alone cannot finalize execution-class models.
+        // The stored output reference is the earliest one for the agreed
+        // commitment, the same choice `try_finalize_with_proofs` makes.
+        let first_output_ref = entries
+            .iter()
+            .find(|r| r.output_commitment == result.output_commitment)
+            .map_or_else(|| result.output_ref.clone(), |r| r.output_ref.clone());
         let candidates: Vec<(Address, [u8; 32])> = entries
             .iter()
             .filter(|r| r.output_commitment == result.output_commitment)
@@ -473,7 +490,7 @@ impl AiRegistry {
         let mut agreeing_verifiers = Vec::new();
         for (verifier, _) in candidates {
             if spec.require_execution_proof
-                && !self.has_execution_proof(&request_id_for_proof, &verifier)
+                && !self.has_verified_execution_proof(&request_id_for_proof, &verifier)
             {
                 continue;
             }
@@ -490,7 +507,7 @@ impl AiRegistry {
             let outcome = AiInferenceOutcome {
                 request_id: result.request_id,
                 output_commitment: result.output_commitment,
-                output_ref: result.output_ref.clone(),
+                output_ref: first_output_ref,
                 agreeing_verifiers,
                 finalized_at_block: result.submitted_at_block,
                 callback,
@@ -718,9 +735,18 @@ impl AiRegistry {
     /// - Outcomes that have been finalized + retention_blocks
     /// - Reclaimed and cancelled markers whose request row is gone
     ///
-    /// Returns the number of items pruned.
-    pub fn prune_expired(&mut self, current_block: u64, retention_blocks: u64) -> usize {
+    /// Returns `(pruned, refunds)`. `refunds` holds one `(requester, max_fee)`
+    /// entry for every pruned request row whose escrow was neither reclaimed
+    /// nor cancelled. The row is the last on-chain reference to that escrow,
+    /// so the caller must credit the requester; otherwise the fee vanishes
+    /// from supply accounting without being returned, burned, or paid.
+    pub fn prune_expired(
+        &mut self,
+        current_block: u64,
+        retention_blocks: u64,
+    ) -> (usize, Vec<(Address, u64)>) {
         let mut pruned = 0;
+        let mut refunds: Vec<(Address, u64)> = Vec::new();
 
         // Prune expired, unfinalized requests (and their results). A
         // reclaimed or cancelled request is terminal: nothing can act on it
@@ -747,6 +773,15 @@ impl AiRegistry {
             .collect();
 
         for id in &expired_request_ids {
+            // An unfinalized row that was neither reclaimed nor cancelled
+            // still holds the requester's escrowed max_fee (debited at
+            // request time). Pruning it without a refund would silently
+            // drop the fee out of supply accounting.
+            if !self.reclaimed_fees.contains(id) && !self.cancelled_requests.contains(id) {
+                if let Some(req) = self.requests.get(id) {
+                    refunds.push((req.requester, req.max_fee));
+                }
+            }
             self.requests.remove(id);
             self.results.remove(id);
             pruned += 1;
@@ -804,13 +839,22 @@ impl AiRegistry {
         // `submit_agent_payment` refuses a `payment_id` found among them,
         // and `payment_id` is caller-supplied rather than derived, so the
         // receipt is the replay guard, not a record of one.
+        let retired_requests: BTreeSet<AiRequestId> = expired_request_ids
+            .iter()
+            .chain(prunable_outcomes.iter())
+            .copied()
+            .collect();
         let before = self.execution_proofs.len();
-        self.execution_proofs.retain(|(request_id, _), _| {
-            !expired_request_ids.contains(request_id) && !prunable_outcomes.contains(request_id)
-        });
+        self.execution_proofs
+            .retain(|(request_id, _), _| !retired_requests.contains(request_id));
         pruned += before - self.execution_proofs.len();
 
-        pruned
+        let before_verified = self.fully_verified_proofs.len();
+        self.fully_verified_proofs
+            .retain(|(request_id, _)| !retired_requests.contains(request_id));
+        pruned += before_verified - self.fully_verified_proofs.len();
+
+        (pruned, refunds)
     }
     ///
     /// After a request's deadline has passed without reaching agreement threshold,
@@ -823,6 +867,18 @@ impl AiRegistry {
     /// already reclaimed, or already cancelled (the refund went out then).
     pub fn reclaim_fee(
         &mut self,
+        request_id: &AiRequestId,
+        current_block: u64,
+    ) -> Result<(Address, u64), String> {
+        let claim = self.check_reclaimable(request_id, current_block)?;
+        self.reclaimed_fees.insert(*request_id);
+        Ok(claim)
+    }
+
+    /// Read-only form of [`Self::reclaim_fee`]: applies every rule and changes nothing.
+    /// The status query uses it, so no registry copy is needed.
+    pub fn check_reclaimable(
+        &self,
         request_id: &AiRequestId,
         current_block: u64,
     ) -> Result<(Address, u64), String> {
@@ -873,12 +929,7 @@ impl AiRegistry {
             ));
         }
 
-        let requester = request.requester;
-        let max_fee = request.max_fee;
-
-        self.reclaimed_fees.insert(*request_id);
-
-        Ok((requester, max_fee))
+        Ok((request.requester, request.max_fee))
     }
 
     /// Cancel a pending inference request.
@@ -1325,6 +1376,7 @@ impl AiRegistry {
         request_id: &AiRequestId,
         verifier: &Address,
         proof: AiExecutionProof,
+        fully_verified: bool,
     ) -> Result<(), String> {
         // Cancellation is terminal. `submit_result` already refuses results
         // for a cancelled request; a proof attached to a result that was
@@ -1384,6 +1436,14 @@ impl AiRegistry {
         // Store the proof
         self.execution_proofs
             .insert((*request_id, verifier.0), proof);
+        if fully_verified {
+            self.fully_verified_proofs.insert((*request_id, verifier.0));
+        } else {
+            // A structural-only re-attach must never leave a stale
+            // full-verification mark behind for this (request, verifier).
+            self.fully_verified_proofs
+                .remove(&(*request_id, verifier.0));
+        }
         Ok(())
     }
 
@@ -1418,7 +1478,12 @@ impl AiRegistry {
         use std::collections::BTreeMap;
         let mut by_commit: BTreeMap<[u8; 32], Vec<Address>> = BTreeMap::new();
         for r in entries {
-            if spec.require_execution_proof && !self.has_execution_proof(request_id, &r.verifier) {
+            // A model that requires an execution proof settles only on a proof
+            // that cleared full STARK verification (`fully_verified_proofs`),
+            // never on structural-only envelope bytes (CWE-345).
+            if spec.require_execution_proof
+                && !self.has_verified_execution_proof(request_id, &r.verifier)
+            {
                 continue;
             }
             by_commit
@@ -1478,6 +1543,18 @@ impl AiRegistry {
     pub fn has_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
         self.execution_proofs
             .contains_key(&(*request_id, verifier.0))
+    }
+
+    /// True only when the (request, verifier) proof cleared FULL STARK
+    /// verification. `require_proof` escrow release gates on this, not on
+    /// the structural-only `has_execution_proof`: a payer that asked for a
+    /// verified proof must not be settled against envelope-shaped bytes.
+    fn has_verified_execution_proof(&self, request_id: &AiRequestId, verifier: &Address) -> bool {
+        self.execution_proofs
+            .contains_key(&(*request_id, verifier.0))
+            && self
+                .fully_verified_proofs
+                .contains(&(*request_id, verifier.0))
     }
 
     // ===================== Verifier QoS =====================
@@ -1584,9 +1661,11 @@ impl AiRegistry {
                         "Agent payment: recipient is not an agreeing verifier for this outcome",
                     ));
                 }
-                if payment.require_proof && !self.has_execution_proof(rid, &payment.to_agent) {
+                if payment.require_proof
+                    && !self.has_verified_execution_proof(rid, &payment.to_agent)
+                {
                     return Err(String::from(
-                        "Agent payment: execution proof required but not attached",
+                        "Agent payment: fully verified execution proof required but not attached",
                     ));
                 }
             } else {
@@ -1882,6 +1961,10 @@ impl AiRegistry {
 
     /// Get all agents sorted by trust score (descending - highest trust first).
     /// Returns Vec of (agent_address, trust_score) tuples.
+    ///
+    /// WIRING: the read model for ranking agents by trust; the operator
+    /// surface that lists agents this way does not call it yet, so the
+    /// ordering is pinned by this module's tests.
     pub fn agents_by_trust_score(&self) -> Vec<(Address, f64)> {
         let mut scored: Vec<(Address, f64)> = self
             .agent_reputations
@@ -1893,8 +1976,28 @@ impl AiRegistry {
     }
 
     /// Get the top-N agents by trust score.
+    ///
+    /// WIRING: the bounded cut of the ranking above, for the same
+    /// unwired operator surface; pinned by tests beside it.
     pub fn top_agents(&self, n: usize) -> Vec<(Address, f64)> {
         self.agents_by_trust_score().into_iter().take(n).collect()
+    }
+
+    /// The ranking in fixed-point permyriad scores (1/10_000 of a unit
+    /// trust), ordered as `agents_by_trust_score` orders. BLG-0201
+    /// (P10-F11): the actor and RPC boundary carries this, not the raw
+    /// `f64` - a float crossing process boundaries is the Z8 rule, and
+    /// quantizing once, here, keeps every consumer's ordering identical
+    /// without re-deriving a sort key from a float.
+    #[must_use]
+    pub fn agents_by_trust_score_permille(&self) -> Vec<(Address, u64)> {
+        self.agents_by_trust_score()
+            .into_iter()
+            .map(|(addr, score)| {
+                let q = (score * 10_000.0).round().clamp(0.0, u64::MAX as f64) as u64;
+                (addr, q)
+            })
+            .collect()
     }
 
     /// Calculate deterministic Merkle/SHA256 root of all AI registry maps.
@@ -1981,9 +2084,10 @@ impl AiRegistry {
         }
 
         // Domain: callback_queue
-        hasher.update(b"BDLM_AI_CALLBACK_QUEUE");
+        hasher.update(b"BDLM_AI_CALLBACK_QUEUE_V2");
         for (addr, events) in &self.callback_queue {
             hasher.update(addr.as_bytes());
+            hasher.update((events.len() as u64).to_le_bytes());
             for event in events {
                 hasher.update(event.request_id.0);
                 hasher.update(event.output_commitment);
@@ -1998,6 +2102,17 @@ impl AiRegistry {
             hasher.update(req_id.0);
             hasher.update(verifier_bytes);
             hasher.update(proof.calculate_leaf());
+        }
+
+        // Domain: fully_verified_proofs
+        //
+        // The verification verdict gates both AI inference finalization and
+        // `require_proof` escrow release, and cannot be re-derived from
+        // `execution_proofs` envelopes alone (CWE-345).
+        hasher.update(b"BDLM_AI_FULLY_VERIFIED_PROOFS");
+        for (req_id, verifier_bytes) in &self.fully_verified_proofs {
+            hasher.update(req_id.0);
+            hasher.update(verifier_bytes);
         }
 
         // Domain: verifier_qos

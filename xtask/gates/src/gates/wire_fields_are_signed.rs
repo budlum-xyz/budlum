@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 const TX: &str = "src/core/transaction.rs";
 
 /// Roots holding shipped library code, for resolving carried structs.
-const SCAN_ROOTS: &[&str] = &["src", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "crates/wallet-core"];
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
@@ -176,6 +176,85 @@ fn struct_fields(body: &str) -> Vec<(String, String)> {
     fields
 }
 
+/// `(variant, field, doc)` for each named field declared inline in an enum
+/// variant (`Variant { a: u64, b: String }`) of the enum body.
+fn inline_fields(enum_body: &str) -> Vec<(String, String, String)> {
+    let bytes = enum_body.as_bytes();
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' if depth == 1 => {
+                let mut k = i;
+                while k > 0 && bytes[k - 1].is_ascii_whitespace() {
+                    k -= 1;
+                }
+                let end = k;
+                while k > 0 && is_ident_byte(bytes[k - 1]) {
+                    k -= 1;
+                }
+                let variant = enum_body[k..end].to_string();
+                let body = balanced(enum_body, i);
+                let mut doc: Vec<String> = Vec::new();
+                let mut level = 0usize;
+                for line in body.split('\n') {
+                    let stripped = line.trim();
+                    if level == 1 && stripped.starts_with("//") {
+                        doc.push(stripped.to_string());
+                        continue;
+                    }
+                    if level == 1 && !stripped.starts_with('#') {
+                        let rest = stripped.strip_prefix("pub ").unwrap_or(stripped);
+                        let name_end = rest
+                            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                            .unwrap_or(rest.len());
+                        if name_end > 0 && rest[name_end..].trim_start().starts_with(':') {
+                            out.push((
+                                variant.clone(),
+                                rest[..name_end].to_string(),
+                                doc.join("\n"),
+                            ));
+                        }
+                        doc.clear();
+                    }
+                    for c in line.bytes() {
+                        match c {
+                            b'{' | b'(' | b'[' | b'<' => level += 1,
+                            b'}' | b')' | b']' | b'>' => level = level.saturating_sub(1),
+                            _ => {}
+                        }
+                    }
+                }
+                i += body.len();
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Is the bare identifier present with word boundaries in the text?
+fn word_in(text: &str, word: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut from = 0usize;
+    while let Some(at) = text[from..].find(word) {
+        let start = from + at;
+        let end = start + word.len();
+        let before_ok = start == 0 || !is_ident_byte(bytes[start - 1]);
+        let after_ok = end >= bytes.len() || !is_ident_byte(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
 /// A path under a test directory, or a file that is itself a test module.
 fn is_test_path(p: &Path) -> bool {
     let s = p.to_string_lossy();
@@ -187,7 +266,9 @@ fn collect_rs(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    for entry in entries.flatten() {
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
         let Ok(p_kind) = entry.file_type() else {
             continue;
         };
@@ -438,6 +519,21 @@ fn measure(root: &Path) -> Result<Outcome, String> {
         }
     }
 
+    for (variant, field, doc) in inline_fields(&enum_body) {
+        out.fields += 1;
+        let bound = word_in(&committed, &field);
+        let declared = signing_excluded(&doc);
+        if !bound && declared.is_none() {
+            out.problems.push(format!(
+                "{TX}: inline field {variant}.{field} rides inside a signed transaction \
+                 and is not in the signing preimage. A relaying node can rewrite it and \
+                 the signature still verifies. Append it in \
+                 `encode_transaction_type_payload`, or write `SIGNING: excluded - \
+                 <reason>` in the field's doc."
+            ));
+        }
+    }
+
     if out.structs == 0 {
         return Err(String::from(
             "gate resolved no struct carried by TransactionType - wrong root?",
@@ -477,6 +573,16 @@ enum Expect {
 }
 
 const CANARIES: &[Canary] = &[
+    Canary {
+        name: "inline_covered",
+        body: "pub struct Spec {\n    pub model_id: [u8; 32],\n}\npub enum TransactionType {\n    Register(Spec),\n    Mint {\n        amount: u64,\n        memo: String,\n    },\n}\nfn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>) {\n    match tx_type {\n        TransactionType::Register(spec) => put_fixed(out, &spec.model_id),\n        TransactionType::Mint { amount, memo } => {\n            put_u64(out, *amount);\n            put_str(out, memo);\n        }\n    }\n}",
+        expect: Expect::Pass,
+    },
+    Canary {
+        name: "inline_silent",
+        body: "pub struct Spec {\n    pub model_id: [u8; 32],\n}\npub enum TransactionType {\n    Register(Spec),\n    Mint {\n        amount: u64,\n        memo: String,\n    },\n}\nfn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>) {\n    match tx_type {\n        TransactionType::Register(spec) => put_fixed(out, &spec.model_id),\n        TransactionType::Mint { amount, .. } => {\n            put_u64(out, *amount);\n        }\n    }\n}",
+        expect: Expect::Finding,
+    },
     Canary {
         name: "covered",
         body: "pub struct Spec {\n    pub model_id: [u8; 32],\n    pub weights_digest: Option<[u8; 32]>,\n}\npub enum TransactionType {\n    Register(Spec),\n}\nfn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>) {\n    match tx_type {\n        TransactionType::Register(spec) => encode_spec(spec, out),\n    }\n}\nfn encode_spec(spec: &Spec, out: &mut Vec<u8>) {\n    put_fixed(out, &spec.model_id);\n    put_option_fixed32(out, spec.weights_digest);\n}",
@@ -536,7 +642,8 @@ fn verdict(tmp: &Path, case: &str, want: &Expect) -> Result<(), String> {
         (Err(msg), Expect::Finding) => {
             if msg.contains("no transaction module")
                 || msg.contains("no struct carried")
-                || msg.contains("TransactionType") && msg.contains("no")
+                || msg.contains("no `pub enum TransactionType`")
+                || msg.contains("`TransactionType` has no body")
             {
                 Err(format!(
                     "BROKEN: {case} measured nothing instead of finding: {msg}"
@@ -615,4 +722,17 @@ pub fn self_test() -> Result<String, String> {
          a covered variant, a declared exclusion, a two-level helper chain and an \
          array return all pass.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_scan_root_exists() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for r in SCAN_ROOTS {
+            assert!(repo.join(r).is_dir(), "missing scan root {r}");
+        }
+    }
 }

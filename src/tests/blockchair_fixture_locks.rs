@@ -196,18 +196,18 @@ fn real_ethereum_headers_form_a_linked_chain() {
 fn real_ethereum_verify_chain_accepts_and_refuses() {
     let rows: Vec<EthHeader> = ETH_HEADERS.iter().map(eth_header).collect();
     assert!(
-        verify_chain(&rows[0], &rows[1..4], 3).is_ok(),
+        verify_chain(&rows[0], &rows[1..4], 3, None).is_ok(),
         "3 real confirmations have to be accepted"
     );
     assert_eq!(
-        verify_chain(&rows[0], &rows[1..4], 4),
+        verify_chain(&rows[0], &rows[1..4], 4, None),
         Err(HeaderError::InsufficientConfirmations),
         "4 onay gerekince red"
     );
     let mut broken = rows[1].clone();
     broken.parent_hash = [0u8; 32];
     assert_eq!(
-        verify_chain(&rows[0], &[broken], 1),
+        verify_chain(&rows[0], &[broken], 1, None),
         Err(HeaderError::ChainBroken),
         "a broken chain has to be refused"
     );

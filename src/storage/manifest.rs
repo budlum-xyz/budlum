@@ -54,7 +54,9 @@ impl ShardRef {
             kind: ShardKind::Data,
             index,
             shard_id: ContentId::of(chunk),
-            size: chunk.len() as u32,
+            // A chunk longer than u32::MAX would wrap and understate its size;
+            // saturate so the manifest size checks still see an oversize shard.
+            size: u32::try_from(chunk.len()).unwrap_or(u32::MAX),
         }
     }
 }
@@ -66,6 +68,13 @@ impl ShardRef {
 /// bytes. An object declaring client-side encryption and carrying fewer than
 /// that was not produced by any of them.
 pub const MIN_AEAD_CIPHERTEXT_BYTES: u64 = 16;
+
+/// Most shards one manifest may list. The check runs before any per-shard work, so a hostile
+/// manifest cannot make validation allocate or loop without bound.
+///
+/// Convenience: pub so an upload caller can refuse past the same
+/// shard-count bound manifest validation enforces here.
+pub const MAX_MANIFEST_SHARDS: usize = 65_536;
 
 /// How the bytes behind a manifest were protected before they left the
 /// uploader.
@@ -628,6 +637,20 @@ impl ContentManifest {
         self
     }
 
+    /// Test-only until a dictionary mint path exists: nothing on the live
+    /// upload path attaches a dictionary, so there is no production caller
+    /// to keep honest yet. Mirrors the edition builder above.
+    #[cfg(test)]
+    /// Attach (or clear) the dictionary commitment. Recomputes the id: a
+    /// manifest whose provenance changed under a stale id is exactly the
+    /// squatted-registration shape `verify_id` refuses.
+    #[must_use]
+    pub fn with_dictionary_id(mut self, dictionary_id: Option<ContentId>) -> Self {
+        self.dictionary_id = dictionary_id;
+        self.recompute_id();
+        self
+    }
+
     fn recompute_id(&mut self) {
         self.manifest_id = manifest_id_from_parts(
             &self.shards,
@@ -729,6 +752,12 @@ impl ContentManifest {
     pub fn validate_untrusted(&self) -> Result<(), String> {
         if self.shards.is_empty() {
             return Err("ContentManifest must have at least one shard".into());
+        }
+        if self.shards.len() > MAX_MANIFEST_SHARDS {
+            return Err(format!(
+                "ContentManifest lists {} shards, above the {MAX_MANIFEST_SHARDS} allowed",
+                self.shards.len()
+            ));
         }
         if self.shards.len() as u32 != self.shard_count {
             return Err(format!(
@@ -954,7 +983,9 @@ impl ContentManifest {
             let slice = &data[off..end];
             shards.push(ShardRef::from_bytes(i, slice));
             off = end;
-            i += 1;
+            i = i
+                .checked_add(1)
+                .ok_or_else(|| "ContentManifest shard count exceeds u32".to_string())?;
         }
         Self::from_shards(shards)
     }
@@ -1068,7 +1099,9 @@ fn manifest_id_from_parts(
     // The dictionary commitment follows the same rule as the source commitment.
     // With no dictionary, no byte is written, so the preimage of manifests
     // recorded before this field does not change and their ids are preserved.
+    // A label separates it from the source bytes before it.
     if let Some(dict) = dictionary_id {
+        buf.extend_from_slice(b"BDLM_DICTIONARY");
         buf.push(1u8);
         buf.extend_from_slice(&dict.0);
     }
@@ -1106,12 +1139,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shard_ref_from_bytes_records_the_exact_chunk_length() {
+        let shard = ShardRef::from_bytes(3, &[7u8; 10]);
+        assert_eq!(shard.size, 10);
+        assert_eq!(shard.index, 3);
+    }
+
+    #[test]
     fn manifest_id_is_deterministic() {
         let m1 = ContentManifest::from_bytes_sliced(b"hello world", 4).unwrap();
         let m2 = ContentManifest::from_bytes_sliced(b"hello world", 4).unwrap();
         assert_eq!(m1.manifest_id, m2.manifest_id);
         assert_eq!(m1.total_size, m2.total_size);
         assert_eq!(m1.shard_count, m2.shard_count);
+    }
+
+    /// The browser core (`crates/budscan`, `BudManifest::manifest_id`) keeps a
+    /// copy of this preimage; the vector is pinned there with the same bytes.
+    /// If this changes, the browser verifies against a stale formula.
+    #[test]
+    fn manifest_id_of_a_single_stored_shard_matches_the_browser_vector() {
+        let m = ContentManifest::from_bytes_sliced(b"hello", 1024).unwrap();
+        assert_eq!(
+            hex::encode(m.manifest_id.0),
+            "eb4912748b11896901a5ab57022cb8e117554dfb67233933fd3ea2e9fc076ca1"
+        );
+    }
+
+    /// Same vector as the browser copy (`crates/budscan/src/fetch.rs`,
+    /// `a_dictionary_bound_manifest_id_matches_the_chain_vector`).
+    ///
+    /// The single-shard vector above is dictionary-free, so it cannot see a
+    /// missing `BDLM_DICTIONARY` label on the browser side - and that is
+    /// exactly what drifted: every dictionary-bound manifest hashed
+    /// differently there and failed its own integrity check.
+    #[test]
+    fn manifest_id_of_a_dictionary_bound_manifest_matches_the_browser_vector() {
+        let m = ContentManifest::from_bytes_sliced(b"hello", 1024)
+            .unwrap()
+            .with_dictionary_id(Some(ContentId([0x11; 32])));
+        assert_eq!(
+            hex::encode(m.manifest_id.0),
+            "44a313a2852858e91df89880151350a22a8c236a3c0f1fc7c916c2dfb8f5c257"
+        );
     }
 
     #[test]
@@ -1126,6 +1196,15 @@ mod tests {
         let m1 = ContentManifest::from_bytes_sliced(b"hello world", 4).unwrap();
         let m2 = ContentManifest::from_bytes_sliced(b"hello WORLD", 4).unwrap();
         assert_ne!(m1.manifest_id, m2.manifest_id);
+    }
+
+    #[test]
+    fn a_manifest_cannot_list_more_shards_than_the_ceiling() {
+        let mut manifest = ContentManifest::from_shards(vec![shard(0, ShardKind::Data)]).unwrap();
+        let first = manifest.shards[0].clone();
+        manifest.shards = vec![first; MAX_MANIFEST_SHARDS + 1];
+        let err = manifest.validate_untrusted().unwrap_err();
+        assert!(err.contains("allowed"), "{err}");
     }
 
     #[test]

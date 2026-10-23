@@ -9,6 +9,7 @@
 //!   clawed back (T3).
 //! - This module does not talk to RPC; the gateway must call `may_view` first.
 
+use crate::storage::qr_carousel::{oneshot_drop_count, ONESHOT_REPAIR_PERMILLAGE};
 use crate::storage::qr_recipe::{may_open_three_recipe, ThreeRecipe, ThreeRecipePublic};
 use crate::storage::qr_reemit::{RecipeEmitter, ReemitError};
 
@@ -19,6 +20,8 @@ pub enum RevealError {
     Forbidden,
     /// Sealed recipe presented without the full public opening.
     NeedFullRecipe,
+    /// The opening was sent but it does not open this sealed recipe.
+    WrongOpening,
     /// Nested re-emit error.
     Reemit(ReemitError),
 }
@@ -29,6 +32,9 @@ impl std::fmt::Display for RevealError {
             Self::Forbidden => write!(f, "three reveal forbidden without grant"),
             Self::NeedFullRecipe => {
                 write!(f, "three reveal needs full public recipe to open sealed")
+            }
+            Self::WrongOpening => {
+                write!(f, "three reveal opening does not open the sealed recipe")
             }
             Self::Reemit(e) => write!(f, "three reveal reemit: {e}"),
         }
@@ -73,19 +79,19 @@ impl RevealSession {
             ThreeRecipe::Public(p) => p.clone(),
             ThreeRecipe::Sealed(s) => {
                 let full = full.ok_or(RevealError::NeedFullRecipe)?;
-                s.open_with(full).map_err(|_| RevealError::NeedFullRecipe)?;
+                s.open_with(full).map_err(|_| RevealError::WrongOpening)?;
                 full.clone()
             }
         };
+        let public_k = public.carousel.k;
         let emitter = RecipeEmitter::open(public, packed)?;
-        // No stream-identity check here, deliberately: `RecipeEmitter::open`
-        // documents that the pinned `stream_id` is verified by whoever emits a
-        // complete range, and a session cannot know one. The pinned word is the
-        // fold of the whole published pass, while any range this session is asked
-        // for is a subset of it - probing with one frame refused a two-frame
-        // payload's own valid recipe (measured: the burst read path failed closed
-        // on `StreamMismatch` for a body that encoded and decoded fine). The
-        // check lives where the full set is in hand, in `qr_feed_preview`.
+        // The pinned stream id is the fold of the whole one-shot pass. Build
+        // that pass once, keep only its fold, and refuse a recipe that pins
+        // another stream. A session that serves a range later is a subset of
+        // this pass, so the check cannot be done on the requested range.
+        let pass = oneshot_drop_count(public_k, ONESHOT_REPAIR_PERMILLAGE);
+        let (_, pass_fold) = emitter.emit_frames(0, pass)?;
+        emitter.verify_stream_id(&pass_fold)?;
         Ok(Self { emitter })
     }
 
@@ -154,6 +160,55 @@ mod tests {
             RevealSession::open(&recipe, Some(&full), &packed, false).unwrap_err(),
             RevealError::Forbidden
         );
+    }
+
+    #[test]
+    fn a_wrong_opening_is_told_apart_from_a_missing_one() {
+        let (full, packed) = sample();
+        let recipe = ThreeRecipe::Sealed(full.seal());
+        assert_eq!(
+            RevealSession::open(&recipe, None, &packed, true).unwrap_err(),
+            RevealError::NeedFullRecipe
+        );
+        let mut other = full;
+        other.stream_id = [9u8; 32];
+        assert_eq!(
+            RevealSession::open(&recipe, Some(&other), &packed, true).unwrap_err(),
+            RevealError::WrongOpening
+        );
+    }
+
+    #[test]
+    fn forged_stream_pin_refused_at_open() {
+        let (mut full, packed) = sample();
+        full.stream_id = [7u8; 32];
+        let recipe = ThreeRecipe::Public(full);
+        assert_eq!(
+            RevealSession::open(&recipe, None, &packed, false).unwrap_err(),
+            RevealError::Reemit(ReemitError::StreamMismatch)
+        );
+    }
+
+    #[test]
+    fn forged_stream_pin_refused_when_sealed_and_granted() {
+        let (mut full, packed) = sample();
+        full.stream_id = [7u8; 32];
+        let recipe = ThreeRecipe::Sealed(full.seal());
+        assert_eq!(
+            RevealSession::open(&recipe, Some(&full), &packed, true).unwrap_err(),
+            RevealError::Reemit(ReemitError::StreamMismatch)
+        );
+    }
+
+    #[test]
+    fn pass_fold_pin_opens() {
+        let (mut full, packed) = sample();
+        let emitter = RecipeEmitter::open(full.clone(), &packed).unwrap();
+        let n = oneshot_drop_count(full.carousel.k, ONESHOT_REPAIR_PERMILLAGE);
+        let (_, fold) = emitter.emit_frames(0, n).unwrap();
+        full.stream_id = fold;
+        let recipe = ThreeRecipe::Public(full);
+        assert!(RevealSession::open(&recipe, None, &packed, false).is_ok());
     }
 
     #[test]

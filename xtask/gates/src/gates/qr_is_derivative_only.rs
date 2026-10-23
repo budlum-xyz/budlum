@@ -15,6 +15,28 @@ fn read(root: &Path, rel: &str) -> Result<String, String> {
     std::fs::read_to_string(&p).map_err(|e| format!("read {rel}: {e}"))
 }
 
+/// The deal and bond surfaces: none of them may name a QR stream.
+const DEAL_SURFACES: &[&str] = &[
+    "src/domain/storage_deal.rs",
+    "src/domain/deal_open.rs",
+    "src/domain/storage_tx.rs",
+];
+
+/// Spellings of the QR stream that must stay out of those surfaces and the RPC.
+const FORBIDDEN_NAMES: &[&str] = &[
+    "QrStream",
+    "QrFrame",
+    "QR_FRAME",
+    "qr_stream",
+    "qr_frame",
+    "BDLM_QR_FRAME",
+];
+
+/// Production text: test items and line comments removed.
+fn production_code(text: &str) -> String {
+    strip_line_comments(&super::capability_modules_are_wired::strip_test_mods(text))
+}
+
 fn strip_line_comments(text: &str) -> String {
     text.lines()
         .map(|l| l.split("//").next().unwrap_or(""))
@@ -53,13 +75,30 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
 
-    // 3. Storage deal surface must not name QrStream / QR frame as a deal object.
-    let deal_code = strip_line_comments(&deal);
-    for forbidden in ["QrStream", "QR_FRAME", "qr_stream", "BDLM_QR_FRAME"] {
-        if deal_code.contains(forbidden) {
+    // 3. No deal surface and no RPC code may name QrStream / QR frame. Test
+    //    items are dropped first: a test may say the format is refused.
+    for rel in DEAL_SURFACES {
+        let text = if *rel == "src/domain/storage_deal.rs" {
+            deal.clone()
+        } else {
+            read(root, rel)?
+        };
+        let code = production_code(&text);
+        for forbidden in FORBIDDEN_NAMES {
+            if code.contains(forbidden) {
+                return Err(format!(
+                    "{rel} production code names `{forbidden}`.\n  \
+                     QR must not enter the deal/bond surface; it is derivative-only."
+                ));
+            }
+        }
+    }
+    let rpc = production_code(&read(root, "src/rpc/server.rs")?);
+    for forbidden in FORBIDDEN_NAMES {
+        if rpc.contains(forbidden) {
             return Err(format!(
-                "storage_deal.rs production code names `{forbidden}`.\n  \
-                 QR must not enter the deal/bond surface; it is derivative-only."
+                "src/rpc/server.rs production code names `{forbidden}`.\n  \
+                 QrStream must not be reachable from the RPC."
             ));
         }
     }
@@ -88,6 +127,14 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-qr")?;
     std::fs::create_dir_all(dir.join("src/storage")).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(dir.join("src/domain")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir.join("src/rpc")).map_err(|e| e.to_string())?;
+    for other in [
+        "src/domain/deal_open.rs",
+        "src/domain/storage_tx.rs",
+        "src/rpc/server.rs",
+    ] {
+        std::fs::write(dir.join(other), "fn plain() {}\n").map_err(|e| e.to_string())?;
+    }
 
     let good_render = r"
 //! `QrStream` is deliberately not reachable from the RPC. It is a transport
@@ -120,4 +167,17 @@ fn qr_stream_content_id() {}
     Ok(String::from(
         "qr-is-derivative-only canary OK (clean PASSes, deal-named QrStream FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_code_drops_tests_and_comments_but_keeps_real_names() {
+        let src = "// QrStream note\n#[cfg(test)]\nmod t { fn x() { QrStream; } }\nfn y() { let _ = QrFrame; }\n";
+        let code = production_code(src);
+        assert!(!code.contains("QrStream"));
+        assert!(code.contains("QrFrame"));
+    }
 }

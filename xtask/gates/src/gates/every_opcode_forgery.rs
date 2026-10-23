@@ -8,8 +8,28 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+/// Blank `/* .. */` comments, keeping newlines.
+fn strip_block_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("*/") {
+            Some(end) => {
+                out.extend(after[..end].chars().filter(|c| *c == '\n'));
+                rest = &after[end + 2..];
+            }
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn strip_comments(text: &str) -> String {
-    text.lines()
+    strip_block_comments(text)
+        .lines()
         .map(|l| {
             let idx = l.find("//").unwrap_or(l.len());
             l[..idx].to_string()
@@ -98,6 +118,15 @@ fn collect_rejects_tests(prover_src: &str) -> std::collections::HashMap<String, 
             .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
             .unwrap_or(after.len());
         let name = format!("rejects_{}", &after[..name_end]);
+        // The attributes sit between the previous item and the `fn`. An
+        // ignored test runs nothing.
+        let consumed = prover_src.len() - rest.len() + pos;
+        let head = &prover_src[..consumed];
+        let attrs = &head[head.rfind(['}', ';']).map_or(0, |i| i + 1)..];
+        if attrs.contains("#[ignore") {
+            rest = &after[name_end..];
+            continue;
+        }
         if let Some(body) = body_after(rest, pos + "fn rejects_".len() + name_end) {
             tests.insert(name, body);
         }
@@ -147,7 +176,9 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
     let isa_src = strip_comments(&std::fs::read_to_string(&isa_path).map_err(|e| e.to_string())?);
-    let prover_src = std::fs::read_to_string(&prover_path).map_err(|e| e.to_string())?;
+    // Comments are stripped here too: a commented-out assert or column is no evidence.
+    let prover_src =
+        strip_comments(&std::fs::read_to_string(&prover_path).map_err(|e| e.to_string())?);
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
@@ -305,4 +336,23 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "every-opcode canary OK (partial coverage FAILs, full coverage PASSes).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignored_and_commented_tests_do_not_count() {
+        let src = strip_comments(
+            "#[test]\n#[ignore]\nfn rejects_a() { assert!(r.is_err()); }\n\
+             /* fn rejects_b() { x } */\n// fn rejects_c() { x }\n\
+             #[test]\nfn rejects_d() { assert!(r.is_err()); }\n",
+        );
+        let tests = collect_rejects_tests(&src);
+        assert!(!tests.contains_key("rejects_a"));
+        assert!(!tests.contains_key("rejects_b"));
+        assert!(!tests.contains_key("rejects_c"));
+        assert!(tests.contains_key("rejects_d"));
+    }
 }

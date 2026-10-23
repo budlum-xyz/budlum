@@ -41,7 +41,7 @@ jobs:
   # GATE: any cargo audit finding = FAIL.
   # cargo-auditable embeds the dependency list inside the binary, so
   # a distributed binary can be audited without the source tree
-  # (`cargo audit bin`). For an L1, being able to prove which crate versions
+  # (`cargo audit bin`). For a chain, being able to prove which crate versions
   # the operator's binary was built from is a real need.
   auditable-audit:
     name: Auditable + Audit (binary SBOM + CVE)

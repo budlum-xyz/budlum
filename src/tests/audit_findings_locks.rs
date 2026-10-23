@@ -71,7 +71,8 @@ mod tests {
             "config/testnet-genesis.json",
             "config/devnet-genesis.json",
         ] {
-            let raw = std::fs::read_to_string(path)
+            let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+            let raw = std::fs::read_to_string(&full)
                 .unwrap_or_else(|error| panic!("cannot read {path}: {error}"));
             let json: serde_json::Value = serde_json::from_str(&raw)
                 .unwrap_or_else(|error| panic!("{path} is not valid JSON: {error}"));
@@ -114,6 +115,49 @@ mod tests {
         }
     }
 
+    /// A checkpoint is on disk when `save_checkpoint` returns, not only after
+    /// the store is dropped. The directory is copied while the store is still
+    /// open, so only flushed bytes can appear in the copy.
+    #[test]
+    fn checkpoint_is_readable_from_a_copy_taken_while_the_store_is_open() {
+        fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+            std::fs::create_dir_all(to).expect("create copy dir");
+            for entry in std::fs::read_dir(from).expect("read dir") {
+                let entry = entry.expect("dir entry");
+                let target = to.join(entry.file_name());
+                if entry.file_type().expect("file type").is_dir() {
+                    copy_dir(&entry.path(), &target);
+                } else {
+                    std::fs::copy(entry.path(), &target).expect("copy file");
+                }
+            }
+        }
+
+        let live = tempfile::tempdir().expect("live dir");
+        let copy = tempfile::tempdir().expect("copy dir");
+        let live_path = live.path().join("db");
+        let copy_path = copy.path().join("db");
+        let storage = crate::storage::db::Storage::new(live_path.to_str().expect("utf8 path"))
+            .expect("open live store");
+        let checkpoint = crate::consensus::pos::Checkpoint {
+            block_index: 7,
+            block_hash: "ab".repeat(32),
+            timestamp: 1_000,
+        };
+        storage
+            .save_checkpoint(&checkpoint)
+            .expect("save checkpoint");
+
+        copy_dir(&live_path, &copy_path);
+        let reopened = crate::storage::db::Storage::new(copy_path.to_str().expect("utf8 path"))
+            .expect("open copy");
+        let loaded = reopened.load_checkpoints().expect("load checkpoints");
+        assert_eq!(loaded.len(), 1, "the copy must hold the flushed checkpoint");
+        assert_eq!(loaded[0].block_index, 7);
+        assert_eq!(loaded[0].block_hash, checkpoint.block_hash);
+        drop(storage);
+    }
+
     /// FIXED: a checkpoint that fails to persist is an error, not a shrug.
     #[test]
     fn checkpoint_persistence_failure_is_not_swallowed() {
@@ -125,7 +169,7 @@ mod tests {
              below it"
         );
         assert!(
-            pos_rs.contains("save_checkpoint(&checkpoint)"),
+            pos_rs.contains("save_checkpoint(checkpoint)"),
             "the checkpoint write disappeared entirely"
         );
     }

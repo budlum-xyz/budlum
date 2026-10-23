@@ -74,9 +74,12 @@ pub fn bench_get(name: &str) -> Option<&'static MediaBench> {
 /// `tolerance` is the measurement uncertainty; the default of 1.0 means the
 /// claim must be at most the measurement.
 pub fn holds_honest(name: &str, claimed: f64, tolerance: f64) -> bool {
+    if !tolerance.is_finite() {
+        return false; // an infinite tolerance would admit every claim
+    }
     match bench_get(name) {
         Some(b) => claimed <= b.measured_ratio * tolerance.max(1.0),
-        None => true, // an unknown measurement admits no claim; the caller must REFUSE
+        None => false, // an unknown measurement admits no claim
     }
 }
 
@@ -124,6 +127,10 @@ mod tests {
         assert!(!holds_honest("PNG->JXL-lossless", 4.3, 1.0));
         assert!(!holds_honest("YUV->AV1", 1000.0, 1.0));
         assert!(holds_honest("WAV->FLAC", 6.26, 1.0));
+        // An unknown name admits no claim, and a non-finite tolerance none.
+        assert!(!holds_honest("no-such-bench", 1.0, 1.0));
+        assert!(!holds_honest("WAV->FLAC", 1.0e9, f64::INFINITY));
+        assert!(!holds_honest("WAV->FLAC", 1.0, f64::NAN));
     }
 
     #[test]

@@ -73,7 +73,8 @@ fn main() {
             chain_id: 1,
             program_hash: program_hash(&program),
             initial_state_root,
-            final_state_root: [0u8; 32],
+            // The AIR ties the final root to the storage-writes fold.
+            final_state_root: receipt.state_writes_digest,
             sender: 0,
             nonce: 0,
             block_height: 0,
@@ -82,7 +83,7 @@ fn main() {
             exit_code: receipt.exit_code,
             trace_len: vm.trace.len() as u64,
             event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
+            state_writes_digest: receipt.state_writes_digest,
         };
 
         let started = Instant::now();

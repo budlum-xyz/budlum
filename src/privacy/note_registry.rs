@@ -40,14 +40,23 @@ pub const MAX_SPENT_NULLIFIERS: usize = 262_144;
 /// admitted, the two views cannot disagree about what is spent.
 #[must_use]
 pub fn is_note_hash(h: &NoteHash) -> bool {
-    budlum_note_packing::is_packed(h)
-        && budlum_note_packing::is_canonical_field(budlum_note_packing::field_from_hash(h))
+    // BLG-0284 (P17-F18): both halves of the shape check now live behind one
+    // fallible accessor in the crate that owns the packing, so admission and
+    // the zkVM's `is_spent(u64)` view fold through the SAME checked path.
+    budlum_note_packing::field_of_packed_hash(h).is_some()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct L1NoteRegistry {
     live_commitments: BTreeSet<NoteHash>,
     spent_nullifiers: BTreeSet<NoteHash>,
+    /// BLG-0058 (P03-F01, decision B): the spent *note* set, bound to the
+    /// commitment. A nullifier alone cannot close the loop while proofs are
+    /// free inputs: one commitment yields a fresh nullifier per proof, so a
+    /// spent commitment could be re-inserted and spent again. The commitment
+    /// itself is what dies.
+    #[serde(default)]
+    spent_commitments: BTreeSet<NoteHash>,
 }
 
 impl L1NoteRegistry {
@@ -75,13 +84,31 @@ impl L1NoteRegistry {
         self.spent_nullifiers.contains(n)
     }
 
+    /// BLG-0058: has this *note* been spent already? The chain-internal
+    /// filter (decision A) that stops resurrection.
+    ///
+    /// WIRING: the spent-note half of the double-spend pair, exposed
+    /// for the spend path's precheck; today the resurrection guard in
+    /// `insert_note` is the caller, and the executor asks the nullifier
+    /// half beside it.
+    pub fn is_commitment_spent(&self, c: &NoteHash) -> bool {
+        self.spent_commitments.contains(c)
+    }
+
     /// Genesis / faucet helper: insert a note without spending (tests + mint path).
     pub fn insert_note(&mut self, commitment: NoteHash) -> Result<(), String> {
         if self.live_commitments.contains(&commitment) {
             return Err("note commitment already live".into());
         }
+        // BLG-0058: a spent note cannot be resurrected. Without this check a
+        // PrivacyNoteInsert revived the commitment and a fresh proof minted a
+        // fresh nullifier, letting the same note be spent again.
+        if self.is_commitment_spent(&commitment) {
+            return Err("note commitment already spent".into());
+        }
         if self.spent_nullifiers.contains(&commitment) {
-            // Defensive: commitment hash space must not collide with nullifiers in use
+            // Commitment hash space must not collide with nullifiers in use.
+            return Err("note commitment collides with a spent nullifier".into());
         }
         // Bounded live commitment set - fail-closed
         if self.live_commitments.len() >= MAX_LIVE_COMMITMENTS {
@@ -95,23 +122,8 @@ impl L1NoteRegistry {
         Ok(())
     }
 
-    /// Apply a private transfer: spend nullifiers (each once) and insert outputs.
-    ///
-    /// `spent_commitments` are revealed only to the executor as private witness
-    /// Linkage for double-spend of the *note* set; nullifiers are the public
-    /// Anti-double-spend tags. For v1 submit we require the submitter to also
-    /// Pass the commitments being spent (encrypted/TEE path can hide them later).
-    pub fn apply_transfer(
-        &mut self,
-        spent_commitments: &[NoteHash],
-        nullifiers: &[NoteHash],
-        output_commitments: &[NoteHash],
-    ) -> Result<(), String> {
-        self.apply_transfer_with_proofs(spent_commitments, nullifiers, output_commitments, &[])
-    }
-
     /// Apply transfer with nullifier derivation proofs.
-    /// Each `proof[i]` must satisfy: `nullifier[i] == Poseidon(commitment[i], proof[i])`.
+    /// Each `proof[i]` must satisfy: `nullifier[i] == derive_nullifier(commitment[i], proof[i])`, a domain-separated SHA-256.
     /// If proofs is empty, falls back to legacy behavior (no binding check).
     pub fn apply_transfer_with_proofs(
         &mut self,
@@ -123,8 +135,11 @@ impl L1NoteRegistry {
         if spent_commitments.len() != nullifiers.len() {
             return Err("spent_commitments/nullifiers length mismatch".into());
         }
-        if !nullifier_proofs.is_empty() && nullifier_proofs.len() != nullifiers.len() {
-            return Err("nullifier_proofs length mismatch".into());
+        // BLG-0058 (decision C): the binding check is not optional. Without
+        // proofs the nullifier is a free input and a commitment could be
+        // spent once per proof; the legacy no-binding path is gone.
+        if nullifier_proofs.len() != nullifiers.len() {
+            return Err("nullifier_proofs length mismatch (proofs are mandatory)".into());
         }
         if spent_commitments.is_empty() {
             return Err("private transfer requires at least one input".into());
@@ -134,9 +149,16 @@ impl L1NoteRegistry {
         }
 
         // Pre-check nullifiers
+        // The nullifiers of one transfer must also be distinct from each other.
+        // The set records a repeated value once, so `[n, n]` would spend two
+        // notes and leave a single nullifier behind.
+        let mut seen_nullifiers = BTreeSet::new();
         for n in nullifiers {
             if self.spent_nullifiers.contains(n) {
                 return Err("double-spend: nullifier already spent".into());
+            }
+            if !seen_nullifiers.insert(*n) {
+                return Err("duplicate nullifier in transfer".into());
             }
         }
         // Pre-check outputs unique + not already live
@@ -147,6 +169,9 @@ impl L1NoteRegistry {
             }
             if self.live_commitments.contains(c) {
                 return Err("output commitment already live".into());
+            }
+            if self.spent_nullifiers.contains(c) {
+                return Err("output commitment collides with a spent nullifier".into());
             }
         }
         // Every remaining refusal, decided before a single note moves.
@@ -160,15 +185,13 @@ impl L1NoteRegistry {
         //
         // A private transfer is all-or-nothing by nature, so the ordering has
         // to say so: refuse while everything is still in place, then move.
-        if !nullifier_proofs.is_empty() {
-            for (i, (commitment, nullifier)) in
-                spent_commitments.iter().zip(nullifiers.iter()).enumerate()
-            {
-                let proof = &nullifier_proofs[i];
-                let expected_nullifier = Self::derive_nullifier(commitment, proof);
-                if *nullifier != expected_nullifier {
-                    return Err(format!("nullifier derivation proof invalid for input {i}"));
-                }
+        for (i, (commitment, nullifier)) in
+            spent_commitments.iter().zip(nullifiers.iter()).enumerate()
+        {
+            let proof = &nullifier_proofs[i];
+            let expected_nullifier = Self::derive_nullifier(commitment, proof);
+            if *nullifier != expected_nullifier {
+                return Err(format!("nullifier derivation proof invalid for input {i}"));
             }
         }
         // Inputs must be live and distinct. The old loop got distinctness for
@@ -184,6 +207,9 @@ impl L1NoteRegistry {
             if !self.live_commitments.contains(commitment) {
                 return Err("spend: commitment not in live set".into());
             }
+            if self.spent_commitments.contains(commitment) {
+                return Err("double-spend: commitment already spent".into());
+            }
         }
         // Bounded nullifier set - fail-closed. Counted for the whole transfer
         // rather than one input at a time: a transfer that would cross the
@@ -197,9 +223,31 @@ impl L1NoteRegistry {
             ));
         }
 
+        // Bounded live set. Outputs are counted against the same ceiling as
+        // `insert_note`: a transfer replaces its inputs with its outputs, so
+        // the set grows by the difference. Without this check one input and
+        // sixteen outputs add fifteen notes per transfer and walk past
+        // MAX_LIVE_COMMITMENTS without any insert_note call.
+        let live_after = self
+            .live_commitments
+            .len()
+            .saturating_sub(spent_commitments.len())
+            .saturating_add(output_commitments.len());
+        if live_after > MAX_LIVE_COMMITMENTS {
+            return Err(format!(
+                "live commitment set full ({}/{}) - transfer would add {} notes",
+                self.live_commitments.len(),
+                MAX_LIVE_COMMITMENTS,
+                output_commitments
+                    .len()
+                    .saturating_sub(spent_commitments.len())
+            ));
+        }
+
         // Past every refusal: the transfer now runs to completion.
         for (commitment, nullifier) in spent_commitments.iter().zip(nullifiers.iter()) {
             self.live_commitments.remove(commitment);
+            self.spent_commitments.insert(*commitment);
             self.spent_nullifiers.insert(*nullifier);
         }
         for c in output_commitments {
@@ -219,17 +267,32 @@ impl L1NoteRegistry {
         for n in &self.spent_nullifiers {
             h.update(n);
         }
+        // BLG-0058: the spent note set is consensus state and must commit.
+        h.update((self.spent_commitments.len() as u64).to_le_bytes());
+        for c in &self.spent_commitments {
+            h.update(c);
+        }
         h.finalize().into()
     }
 
     /// Derive nullifier from commitment and proof.
-    /// Nullifier = SHA-256("BDLM_NULLIFIER_DERIVE_V1" || commitment || proof)
+    ///
+    /// BLG-0061 (P03-F04): the result is a *packed note hash* - a canonical
+    /// Goldilocks element in the low eight bytes and zeros above - because a
+    /// raw SHA-256 output fails `is_note_hash` and every derived nullifier
+    /// would be refused at the transaction boundary. The digest is reduced
+    /// modulo `GOLDILOCKS_P` (V2). The earlier V1 form (`SHA-256(tag || c ||
+    /// p)` verbatim) is no longer produced.
     pub fn derive_nullifier(commitment: &NoteHash, proof: &NoteHash) -> NoteHash {
         let mut h = Sha256::new();
-        h.update(b"BDLM_NULLIFIER_DERIVE_V1");
+        h.update(b"BDLM_NULLIFIER_DERIVE_V2");
         h.update(commitment);
         h.update(proof);
-        h.finalize().into()
+        let digest: [u8; 32] = h.finalize().into();
+        let mut low = [0u8; 8];
+        low.copy_from_slice(&digest[..8]);
+        let fe = u64::from_le_bytes(low) % budlum_note_packing::GOLDILOCKS_P;
+        budlum_note_packing::hash_from_field(fe)
     }
 
     /// Enforce bounded storage via hard caps.
@@ -255,6 +318,19 @@ impl L1NoteRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BLG-0061: a derived nullifier must be note-shaped or the transaction
+    /// boundary (is_note_hash) would refuse every proof-bound transfer.
+    #[test]
+    fn derived_nullifiers_are_note_shaped() {
+        let c = budlum_note_packing::hash_from_field(0x0102_0304_0506_0708);
+        let p = budlum_note_packing::hash_from_field(0x1122_3344_5566_7788);
+        let n = L1NoteRegistry::derive_nullifier(&c, &p);
+        assert!(
+            is_note_hash(&n),
+            "derived nullifier must pass the shape gate"
+        );
+    }
 
     fn h(b: u8) -> NoteHash {
         let mut x = [0u8; 32];
@@ -282,7 +358,6 @@ mod tests {
     #[test]
     fn a_nullifier_packed_the_way_the_wallet_packs_it_is_found_by_the_registry() {
         let commitment = budlum_note_packing::hash_from_field(0x0102_0304_0506_0708);
-        let nullifier = budlum_note_packing::hash_from_field(0xDEAD_BEEF_CAFE_F00D);
         // A zero-output transfer must be rejected.
         let change = budlum_note_packing::hash_from_field(0x1122_3344_5566_7788);
 
@@ -293,7 +368,9 @@ mod tests {
             "a commitment packed by the shared rule must be found by the registry"
         );
 
-        r.apply_transfer(&[commitment], &[nullifier], &[change])
+        let proof = budlum_note_packing::hash_from_field(0x0FED_CBA9_8765_4321);
+        let nullifier = L1NoteRegistry::derive_nullifier(&commitment, &proof);
+        r.apply_transfer_with_proofs(&[commitment], &[nullifier], &[change], &[proof])
             .unwrap();
         assert!(
             r.is_nullifier_spent(&nullifier),
@@ -305,11 +382,90 @@ mod tests {
         );
 
         // And the note cannot be spent twice, which is the guarantee that
-        // silently disappears if the two packings drift apart.
+        // silently disappears if the two packings drift apart. BLG-0058: the
+        // spent *commitment* is refused even with a fresh proof and a fresh
+        // nullifier.
         let second = budlum_note_packing::hash_from_field(0x9900_AABB_CCDD_EEFF);
+        let fresh_proof = budlum_note_packing::hash_from_field(0x0123_4567_89AB_CDEF);
+        let fresh_nullifier = L1NoteRegistry::derive_nullifier(&commitment, &fresh_proof);
         assert!(r
-            .apply_transfer(&[commitment], &[nullifier], &[second])
+            .apply_transfer_with_proofs(
+                &[commitment],
+                &[fresh_nullifier],
+                &[second],
+                &[fresh_proof]
+            )
             .is_err());
+        assert!(r.insert_note(commitment).is_err(), "spent note stays dead");
+    }
+
+    /// One nullifier cannot cover two inputs of the same transfer.
+    #[test]
+    fn a_repeated_nullifier_in_one_transfer_is_refused() {
+        let a = budlum_note_packing::hash_from_field(11);
+        let b = budlum_note_packing::hash_from_field(12);
+        let n = budlum_note_packing::hash_from_field(0x8000_0001);
+        let out = budlum_note_packing::hash_from_field(0x8100_0001);
+        let mut r = L1NoteRegistry::new();
+        r.insert_note(a).unwrap();
+        r.insert_note(b).unwrap();
+        let pa = budlum_note_packing::hash_from_field(31);
+        let pb = budlum_note_packing::hash_from_field(32);
+        let err = r
+            .apply_transfer_with_proofs(&[a, b], &[n, n], &[out], &[pa, pb])
+            .unwrap_err();
+        assert!(err.contains("duplicate nullifier"));
+        assert!(r.contains_commitment(&a) && r.contains_commitment(&b));
+        assert_eq!(r.spent_count(), 0);
+    }
+
+    /// A commitment equal to a spent nullifier is not a note.
+    #[test]
+    fn a_commitment_equal_to_a_spent_nullifier_is_refused() {
+        let c = budlum_note_packing::hash_from_field(21);
+        let out = budlum_note_packing::hash_from_field(0x9100_0001);
+        let mut r = L1NoteRegistry::new();
+        r.insert_note(c).unwrap();
+        let pc = budlum_note_packing::hash_from_field(41);
+        let n = L1NoteRegistry::derive_nullifier(&c, &pc);
+        r.apply_transfer_with_proofs(&[c], &[n], &[out], &[pc])
+            .unwrap();
+        assert!(r.insert_note(n).is_err());
+        let spare = budlum_note_packing::hash_from_field(22);
+        let ps = budlum_note_packing::hash_from_field(42);
+        let next_n = L1NoteRegistry::derive_nullifier(&spare, &ps);
+        r.insert_note(spare).unwrap();
+        assert!(r
+            .apply_transfer_with_proofs(&[spare], &[next_n], &[n], &[ps])
+            .is_err());
+        assert!(r.contains_commitment(&spare));
+    }
+
+    /// A transfer cannot grow the live set past MAX_LIVE_COMMITMENTS.
+    #[test]
+    fn transfer_outputs_respect_the_live_commitment_cap() {
+        let mut r = L1NoteRegistry::new();
+        for i in 0..MAX_LIVE_COMMITMENTS {
+            r.insert_note(budlum_note_packing::hash_from_field(i as u64 + 1))
+                .unwrap();
+        }
+        let input = budlum_note_packing::hash_from_field(1);
+        let pf = budlum_note_packing::hash_from_field(0x7200_0001);
+        let nullifier = L1NoteRegistry::derive_nullifier(&input, &pf);
+        let outs = [
+            budlum_note_packing::hash_from_field(0x7100_0001),
+            budlum_note_packing::hash_from_field(0x7100_0002),
+        ];
+        assert!(r
+            .apply_transfer_with_proofs(&[input], &[nullifier], &outs, &[pf])
+            .is_err());
+        assert_eq!(r.live_count(), MAX_LIVE_COMMITMENTS);
+        assert!(r.contains_commitment(&input));
+        assert!(!r.is_nullifier_spent(&nullifier));
+        // One for one keeps the size and is still allowed.
+        r.apply_transfer_with_proofs(&[input], &[nullifier], &outs[..1], &[pf])
+            .unwrap();
+        assert_eq!(r.live_count(), MAX_LIVE_COMMITMENTS);
     }
 
     /// A registry hash is a packed hash, not an arbitrary 32 bytes.
@@ -366,10 +522,13 @@ mod tests {
     fn insert_spend_roundtrip() {
         let mut r = L1NoteRegistry::new();
         r.insert_note(h(1)).unwrap();
-        r.apply_transfer(&[h(1)], &[h(10)], &[h(2)]).unwrap();
+        let p1 = h(100);
+        let n1 = L1NoteRegistry::derive_nullifier(&h(1), &p1);
+        r.apply_transfer_with_proofs(&[h(1)], &[n1], &[h(2)], &[p1])
+            .unwrap();
         assert!(!r.contains_commitment(&h(1)));
         assert!(r.contains_commitment(&h(2)));
-        assert!(r.is_nullifier_spent(&h(10)));
+        assert!(r.is_nullifier_spent(&n1));
     }
 
     /// A refused transfer must leave every input exactly where it was.
@@ -386,8 +545,14 @@ mod tests {
         r.insert_note(h(2)).unwrap();
 
         // Three inputs, the third of which is not live. The first two are.
+        let (p1, p2, p3) = (h(110), h(111), h(112));
+        let (n1, n2, n3) = (
+            L1NoteRegistry::derive_nullifier(&h(1), &p1),
+            L1NoteRegistry::derive_nullifier(&h(2), &p2),
+            L1NoteRegistry::derive_nullifier(&h(3), &p3),
+        );
         let err = r
-            .apply_transfer(&[h(1), h(2), h(3)], &[h(10), h(11), h(12)], &[h(20)])
+            .apply_transfer_with_proofs(&[h(1), h(2), h(3)], &[n1, n2, n3], &[h(20)], &[p1, p2, p3])
             .expect_err("an input that is not live must refuse the transfer");
         assert!(err.contains("not in live set"), "got: {err}");
 
@@ -396,7 +561,7 @@ mod tests {
             "the inputs the loop would have reached first must still be live"
         );
         assert!(
-            !r.is_nullifier_spent(&h(10)) && !r.is_nullifier_spent(&h(11)),
+            !r.is_nullifier_spent(&n1) && !r.is_nullifier_spent(&n2),
             "and none of their nullifiers may be recorded as spent"
         );
         assert!(
@@ -407,7 +572,7 @@ mod tests {
         // And the transfer still works once the inputs are all live, which is
         // what proves the refusal above was about liveness and not a wedge.
         r.insert_note(h(3)).unwrap();
-        r.apply_transfer(&[h(1), h(2), h(3)], &[h(10), h(11), h(12)], &[h(20)])
+        r.apply_transfer_with_proofs(&[h(1), h(2), h(3)], &[n1, n2, n3], &[h(20)], &[p1, p2, p3])
             .expect("all three live now");
         assert!(r.contains_commitment(&h(20)));
     }
@@ -423,8 +588,13 @@ mod tests {
         let mut r = L1NoteRegistry::new();
         r.insert_note(h(1)).unwrap();
 
+        let (p1, p2) = (h(110), h(111));
+        let (n1, n2) = (
+            L1NoteRegistry::derive_nullifier(&h(1), &p1),
+            L1NoteRegistry::derive_nullifier(&h(1), &p2),
+        );
         let err = r
-            .apply_transfer(&[h(1), h(1)], &[h(10), h(11)], &[h(20)])
+            .apply_transfer_with_proofs(&[h(1), h(1)], &[n1, n2], &[h(20)], &[p1, p2])
             .expect_err("one note cannot be spent twice in a single transfer");
         assert!(err.contains("duplicate input"), "got: {err}");
         assert!(
@@ -437,25 +607,36 @@ mod tests {
     fn double_spend_rejected() {
         let mut r = L1NoteRegistry::new();
         r.insert_note(h(1)).unwrap();
-        r.apply_transfer(&[h(1)], &[h(10)], &[h(2)]).unwrap();
+        let p1 = h(100);
+        let n1 = L1NoteRegistry::derive_nullifier(&h(1), &p1);
+        r.apply_transfer_with_proofs(&[h(1)], &[n1], &[h(2)], &[p1])
+            .unwrap();
         r.insert_note(h(3)).unwrap();
-        assert!(r.apply_transfer(&[h(3)], &[h(10)], &[h(4)]).is_err());
+        assert!(r
+            .apply_transfer_with_proofs(&[h(3)], &[n1], &[h(4)], &[p1])
+            .is_err());
     }
 
     #[test]
     fn spent_nullifiers_are_never_deleted_by_compatibility_pruning() {
         let mut r = L1NoteRegistry::new();
         r.insert_note(h(1)).unwrap();
-        r.apply_transfer(&[h(1)], &[h(10)], &[h(2)]).unwrap();
+        let p1 = h(100);
+        let n1 = L1NoteRegistry::derive_nullifier(&h(1), &p1);
+        r.apply_transfer_with_proofs(&[h(1)], &[n1], &[h(2)], &[p1])
+            .unwrap();
         r.insert_note(h(3)).unwrap();
-        r.apply_transfer(&[h(3)], &[h(11)], &[h(4)]).unwrap();
+        let p2 = h(101);
+        let n2 = L1NoteRegistry::derive_nullifier(&h(3), &p2);
+        r.apply_transfer_with_proofs(&[h(3)], &[n2], &[h(4)], &[p2])
+            .unwrap();
 
         let root_before = r.state_root();
         r.prune_spent_nullifiers(1);
 
         assert_eq!(r.spent_nullifier_count(), 2);
-        assert!(r.is_nullifier_spent(&h(10)));
-        assert!(r.is_nullifier_spent(&h(11)));
+        assert!(r.is_nullifier_spent(&n1));
+        assert!(r.is_nullifier_spent(&n2));
         assert_eq!(r.state_root(), root_before);
     }
 }

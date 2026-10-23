@@ -35,6 +35,20 @@ fn serialize_payload_or_log<T: serde::Serialize>(what: &str, value: &T) -> Vec<u
     }
 }
 
+/// Same as [`serialize_payload_or_log`] for bincode payloads: a failure is logged, not silent.
+fn bincode_payload_or_log<T: serde::Serialize + ?Sized>(what: &str, value: &T) -> Vec<u8> {
+    match bincode::serialize(value) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!("Failed to serialize {what} for network payload: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// The only transaction wire version this node encodes and accepts.
+const TX_WIRE_VERSION: u32 = 2;
+
 impl From<&Transaction> for pb::ProtoTransaction {
     fn from(tx: &Transaction) -> Self {
         let (tx_type_i32, type_payload) = match &tx.tx_type {
@@ -179,15 +193,37 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::Identity as i32,
                 Some(pb::proto_transaction::TypePayload::Identity(
                     pb::ProtoIdentityTx {
-                        data: bincode::serialize(identity_tx).unwrap_or_default(),
+                        data: bincode_payload_or_log("IdentityTx", identity_tx),
                     },
+                )),
+            ),
+            TransactionType::PoaOnboarding(poa_tx) => (
+                pb::ProtoTransactionType::PoaOnboarding as i32,
+                Some(pb::proto_transaction::TypePayload::PoaOnboarding(
+                    pb::ProtoPoaOnboardingTx {
+                        data: bincode_payload_or_log("PoaOnboardingTx", poa_tx),
+                    },
+                )),
+            ),
+            TransactionType::RoleBond { role } => (
+                pb::ProtoTransactionType::RoleBond as i32,
+                Some(pb::proto_transaction::TypePayload::RoleBond(
+                    pb::ProtoRoleBond { role: *role },
                 )),
             ),
             TransactionType::Vault(vault_tx) => (
                 pb::ProtoTransactionType::Vault as i32,
                 Some(pb::proto_transaction::TypePayload::Vault(
                     pb::ProtoVaultTx {
-                        data: bincode::serialize(vault_tx).unwrap_or_default(),
+                        data: bincode_payload_or_log("VaultTx", vault_tx),
+                    },
+                )),
+            ),
+            TransactionType::Storage(storage_tx) => (
+                pb::ProtoTransactionType::Storage as i32,
+                Some(pb::proto_transaction::TypePayload::Storage(
+                    pb::ProtoStorageTx {
+                        data: bincode_payload_or_log("StorageTx", storage_tx),
                     },
                 )),
             ),
@@ -216,6 +252,12 @@ impl From<&Transaction> for pb::ProtoTransaction {
                             .map(|dims| dims.iter().map(|d| u32::from(*d)).collect())
                             .unwrap_or_default(),
                         modality_bits: spec.modalities.bits(),
+                        require_execution_proof: spec.require_execution_proof,
+                        execution_program_hash: spec
+                            .execution_program_hash
+                            .map(|d| d.to_vec())
+                            .unwrap_or_default(),
+                        execution_class: u32::from(spec.execution_class),
                     },
                 )),
             ),
@@ -344,7 +386,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenRegisterDataAsset as i32,
                 Some(pb::proto_transaction::TypePayload::PollenRegisterDataAsset(
                     pb::ProtoPollenDataAsset {
-                        data: bincode::serialize(asset).unwrap_or_default(),
+                        data: bincode_payload_or_log("DataAsset", asset),
                     },
                 )),
             ),
@@ -352,7 +394,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenAuthorizeSale as i32,
                 Some(pb::proto_transaction::TypePayload::PollenAuthorizeSale(
                     pb::ProtoPollenSaleAuthorization {
-                        data: bincode::serialize(authorization).unwrap_or_default(),
+                        data: bincode_payload_or_log("SaleAuthorization", authorization),
                     },
                 )),
             ),
@@ -360,7 +402,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                 pb::ProtoTransactionType::PollenGrantAccess as i32,
                 Some(pb::proto_transaction::TypePayload::PollenGrantAccess(
                     pb::ProtoPollenAccessGrant {
-                        data: bincode::serialize(grant).unwrap_or_default(),
+                        data: bincode_payload_or_log("AccessGrant", grant),
                     },
                 )),
             ),
@@ -397,6 +439,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
                             .collect(),
                         authorization_sig: sub.authorization_sig.clone(),
                         public_digest: sub.public_digest.to_vec(),
+                        nullifier_proofs: sub.nullifier_proofs.iter().map(|p| p.to_vec()).collect(),
                     },
                 )),
             ),
@@ -461,7 +504,7 @@ impl From<&Transaction> for pb::ProtoTransaction {
             chain_id: tx.chain_id,
             signature_version: tx.signature_version,
             tx_type: tx_type_i32,
-            wire_version: 2,
+            wire_version: TX_WIRE_VERSION,
             type_payload,
             signer_public_key: tx.signer_public_key.clone(),
             authorization: tx
@@ -804,6 +847,8 @@ fn convert_proto_to_relayer_result(
                 .map_err(|e| format!("Invalid message recipient: {e}"))?,
             payload_hash,
             kind,
+            sender_public_key: Vec::new(),
+            sender_signature: Vec::new(),
             expiry_height: p_msg.expiry_height,
         })
     } else {
@@ -829,6 +874,12 @@ fn convert_proto_to_relayer_result(
 impl TryFrom<pb::ProtoTransaction> for Transaction {
     type Error = String;
     fn try_from(proto: pb::ProtoTransaction) -> Result<Self, Self::Error> {
+        if proto.wire_version != TX_WIRE_VERSION {
+            return Err(format!(
+                "Unsupported transaction wire version {}, expected {TX_WIRE_VERSION}",
+                proto.wire_version
+            ));
+        }
         let timestamp = proto
             .timestamp
             .parse::<u128>()
@@ -1003,6 +1054,23 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                         .map_err(|e| format!("Invalid IdentityTx payload: {e}"))?,
                 )
             }
+            pb::ProtoTransactionType::PoaOnboarding => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::PoaOnboarding(p)) => p,
+                    _ => return Err("Missing or mismatched PoA onboarding payload".into()),
+                };
+                TransactionType::PoaOnboarding(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid PoA onboarding payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::RoleBond => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::RoleBond(p)) => p,
+                    _ => return Err("Missing or mismatched RoleBond payload".into()),
+                };
+                TransactionType::RoleBond { role: payload.role }
+            }
             pb::ProtoTransactionType::Vault => {
                 let payload = match proto.type_payload {
                     Some(pb::proto_transaction::TypePayload::Vault(p)) => p,
@@ -1011,6 +1079,16 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                 TransactionType::Vault(
                     bincode::deserialize(&payload.data)
                         .map_err(|e| format!("Invalid VaultTx payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::Storage => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Storage(p)) => p,
+                    _ => return Err("Missing or mismatched Storage payload".into()),
+                };
+                TransactionType::Storage(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid StorageTx payload: {e}"))?,
                 )
             }
             pb::ProtoTransactionType::AiModelRegister => {
@@ -1050,9 +1128,13 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                         d.copy_from_slice(&payload.execution_weights_digest);
                         Some(d)
                     },
-                    require_execution_proof: false,
-                    execution_program_hash: None,
-                    execution_class: 0,
+                    require_execution_proof: payload.require_execution_proof,
+                    execution_program_hash: decode_optional_hash32(
+                        payload.execution_program_hash,
+                        "AiModelRegister execution_program_hash",
+                    )?,
+                    execution_class: u8::try_from(payload.execution_class)
+                        .map_err(|_| "AiModelRegister execution_class exceeds u8".to_string())?,
                     execution_dims: if payload.execution_dims.is_empty() {
                         None
                     } else {
@@ -1395,10 +1477,16 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     .iter()
                     .map(|c| to32(c, "output"))
                     .collect();
+                let proofs: Result<Vec<_>, _> = payload
+                    .nullifier_proofs
+                    .iter()
+                    .map(|c| to32(c, "proof"))
+                    .collect();
                 TransactionType::PrivateTransferSubmit(crate::privacy::PrivateTransferSubmit {
                     spent_commitments: spent?,
                     nullifiers: nulls?,
                     output_commitments: outs?,
+                    nullifier_proofs: proofs?,
                     authorization_sig: payload.authorization_sig,
                     public_digest: to32(&payload.public_digest, "digest")?,
                 })
@@ -1559,6 +1647,15 @@ impl From<&BlockHeader> for pb::ProtoBlockHeader {
             validator_set_hash: header.validator_set_hash.clone(),
             storage_root: header.storage_root.map(Vec::from).unwrap_or_default(),
             shards_root: header.shards_root.map(Vec::from).unwrap_or_default(),
+            slashing_reports: header
+                .slashing_reports
+                .as_ref()
+                .map(|rs| {
+                    rs.iter()
+                        .filter_map(|r| bincode::serialize(r).ok())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -1587,6 +1684,23 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
         } else {
             Some(evidence)
         };
+        let mut reports = Vec::new();
+        if proto.slashing_reports.len() > 64 {
+            return Err("Too many slashing reports in block header".into());
+        }
+        for raw in proto.slashing_reports {
+            if raw.len() > 65_536 {
+                return Err("Slashing report entry exceeds size limit".into());
+            }
+            let r: crate::registry::evidence::SlashingReport =
+                bincode::deserialize(&raw).map_err(|e| format!("Invalid slashing report: {e}"))?;
+            reports.push(r);
+        }
+        let slashing_reports = if reports.is_empty() {
+            None
+        } else {
+            Some(reports)
+        };
         Ok(BlockHeader {
             index: proto.index,
             timestamp,
@@ -1597,6 +1711,7 @@ impl TryFrom<pb::ProtoBlockHeader> for BlockHeader {
             state_root: proto.state_root,
             tx_root: proto.tx_root,
             slashing_evidence,
+            slashing_reports,
             nonce: proto.nonce,
             epoch: proto.epoch,
             slot: proto.slot,
@@ -1642,6 +1757,15 @@ impl From<&Block> for pb::ProtoBlock {
             storage_root: block.storage_root.map(Vec::from).unwrap_or_default(),
             shards_root: block.shards_root.map(Vec::from).unwrap_or_default(),
             producer_public_key: block.producer_public_key.clone(),
+            slashing_reports: block
+                .slashing_reports
+                .as_ref()
+                .map(|rs| {
+                    rs.iter()
+                        .filter_map(|r| bincode::serialize(r).ok())
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -1676,6 +1800,23 @@ impl TryFrom<pb::ProtoBlock> for Block {
         } else {
             Some(evidence)
         };
+        let mut reports = Vec::new();
+        if proto.slashing_reports.len() > 64 {
+            return Err("Too many slashing reports in block".into());
+        }
+        for raw in proto.slashing_reports {
+            if raw.len() > 65_536 {
+                return Err("Slashing report entry exceeds size limit".into());
+            }
+            let r: crate::registry::evidence::SlashingReport =
+                bincode::deserialize(&raw).map_err(|e| format!("Invalid slashing report: {e}"))?;
+            reports.push(r);
+        }
+        let slashing_reports = if reports.is_empty() {
+            None
+        } else {
+            Some(reports)
+        };
 
         let mut transactions = Vec::new();
         for t in proto.transactions {
@@ -1694,6 +1835,7 @@ impl TryFrom<pb::ProtoBlock> for Block {
             producer_public_key: proto.producer_public_key,
             chain_id: proto.chain_id,
             slashing_evidence,
+            slashing_reports,
             state_root: proto.state_root,
             tx_root: proto.tx_root,
             epoch: proto.epoch,
@@ -1823,12 +1965,14 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 checkpoint_hash,
                 voter_id,
                 sig_bls,
+                auth_sig,
             } => pb::proto_network_message::Payload::Prevote(pb::ProtoPrevote {
                 epoch: *epoch,
                 checkpoint_height: *checkpoint_height,
                 checkpoint_hash: checkpoint_hash.clone(),
                 voter_id: voter_id.clone(),
                 sig_bls: sig_bls.clone(),
+                auth_sig: auth_sig.clone(),
             }),
             NetworkMessage::Precommit {
                 epoch,
@@ -1836,12 +1980,14 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 checkpoint_hash,
                 voter_id,
                 sig_bls,
+                auth_sig,
             } => pb::proto_network_message::Payload::Precommit(pb::ProtoPrecommit {
                 epoch: *epoch,
                 checkpoint_height: *checkpoint_height,
                 checkpoint_hash: checkpoint_hash.clone(),
                 voter_id: voter_id.clone(),
                 sig_bls: sig_bls.clone(),
+                auth_sig: auth_sig.clone(),
             }),
             NetworkMessage::FinalityCert {
                 epoch,
@@ -1953,12 +2099,22 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
             pb::proto_network_message::Payload::Transaction(t) => {
                 Ok(NetworkMessage::Transaction(Transaction::try_from(t)?))
             }
-            pb::proto_network_message::Payload::GetHeaders(h) => Ok(NetworkMessage::GetHeaders {
-                locator: h.locator,
-                limit: h.limit,
-            }),
+            pb::proto_network_message::Payload::GetHeaders(h) => {
+                if h.locator.len() > crate::network::protocol::MAX_HEADER_LOCATOR_HASHES {
+                    return Err("GetHeaders locator exceeds the limit".into());
+                }
+                Ok(NetworkMessage::GetHeaders {
+                    locator: h.locator,
+                    limit: h.limit,
+                })
+            }
             pb::proto_network_message::Payload::Headers(h) => {
-                let mut headers = Vec::new();
+                // Refuse before the second allocation pass: the count limit
+                // used to be applied only after every header was converted.
+                if h.headers.len() > crate::network::protocol::MAX_HEADERS_PER_REQUEST as usize {
+                    return Err("Headers message exceeds the header limit".into());
+                }
+                let mut headers = Vec::with_capacity(h.headers.len());
                 for header in h.headers {
                     headers.push(BlockHeader::try_from(header)?);
                 }
@@ -1971,7 +2127,10 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 })
             }
             pb::proto_network_message::Payload::Blocks(b) => {
-                let mut blocks = Vec::new();
+                if b.blocks.len() > crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS {
+                    return Err("Blocks message exceeds the block limit".into());
+                }
+                let mut blocks = Vec::with_capacity(b.blocks.len());
                 for block in b.blocks {
                     blocks.push(Block::try_from(block)?);
                 }
@@ -1984,7 +2143,10 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 })
             }
             pb::proto_network_message::Payload::BlocksByHeight(b) => {
-                let mut blocks = Vec::new();
+                if b.blocks.len() > crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS {
+                    return Err("BlocksByHeight message exceeds the block limit".into());
+                }
+                let mut blocks = Vec::with_capacity(b.blocks.len());
                 for block in b.blocks {
                     blocks.push(Block::try_from(block)?);
                 }
@@ -2019,6 +2181,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 checkpoint_hash: v.checkpoint_hash,
                 voter_id: v.voter_id,
                 sig_bls: v.sig_bls,
+                auth_sig: v.auth_sig,
             }),
             pb::proto_network_message::Payload::Precommit(v) => Ok(NetworkMessage::Precommit {
                 epoch: v.epoch,
@@ -2026,6 +2189,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 checkpoint_hash: v.checkpoint_hash,
                 voter_id: v.voter_id,
                 sig_bls: v.sig_bls,
+                auth_sig: v.auth_sig,
             }),
             pb::proto_network_message::Payload::FinalityCert(f) => {
                 Ok(NetworkMessage::FinalityCert {
@@ -2101,6 +2265,63 @@ mod tests {
             Transaction::try_from(proto_tx).expect("Failed to decode proto transaction");
 
         assert_eq!(tx, decoded_tx);
+    }
+
+    #[test]
+    fn oversized_item_counts_are_refused_before_conversion() {
+        let headers = pb::ProtoNetworkMessage {
+            payload: Some(pb::proto_network_message::Payload::Headers(
+                pb::ProtoHeaders {
+                    headers: vec![
+                        pb::ProtoBlockHeader::default();
+                        crate::network::protocol::MAX_HEADERS_PER_REQUEST as usize + 1
+                    ],
+                },
+            )),
+        };
+        let err = NetworkMessage::try_from(headers).expect_err("too many headers");
+        assert!(err.contains("header limit"), "{err}");
+        let blocks = pb::ProtoNetworkMessage {
+            payload: Some(pb::proto_network_message::Payload::Blocks(
+                pb::ProtoBlocks {
+                    blocks: vec![
+                        pb::ProtoBlock::default();
+                        crate::network::protocol::MAX_CHAIN_SYNC_BLOCKS + 1
+                    ],
+                },
+            )),
+        };
+        let err = NetworkMessage::try_from(blocks).expect_err("too many blocks");
+        assert!(err.contains("block limit"), "{err}");
+    }
+
+    #[test]
+    fn ai_model_register_keeps_execution_fields_over_the_wire() {
+        let keypair = KeyPair::generate().unwrap();
+        let from = Address::from(keypair.public_key_bytes());
+        let spec = crate::ai::types::AiModelSpec {
+            model_id: crate::ai::types::AiModelId([1u8; 32]),
+            model_hash: [2u8; 32],
+            owner: from,
+            min_verifier_count: 3,
+            agreement_threshold: 2,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 2048,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 50,
+            version: 1,
+            active: true,
+            require_execution_proof: true,
+            execution_program_hash: Some([9u8; 32]),
+            execution_class: 1,
+            execution_dims: Some(vec![4, 8, 2]),
+            execution_weights_digest: Some([7u8; 32]),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        };
+        let mut tx = Transaction::new_with_fee(from, Address::zero(), 0, 1, 1, vec![]);
+        tx.tx_type = TransactionType::AiModelRegister(spec);
+        let decoded = Transaction::try_from(pb::ProtoTransaction::from(&tx)).expect("decode");
+        assert_eq!(tx.tx_type, decoded.tx_type);
     }
 
     #[cfg(feature = "wallet-ml-dsa")]
@@ -2265,6 +2486,67 @@ mod tests {
                 to: 4,
                 member: 5,
             }),
+            TransactionType::Storage(crate::domain::StorageTx::RegisterManifest {
+                manifest: {
+                    let mut m = crate::storage::encode_object(
+                        &[5u8; 2048],
+                        crate::storage::ErasureScheme { k: 4, n: 6 },
+                    )
+                    .expect("encode")
+                    .to_manifest()
+                    .expect("manifest");
+                    m.owner = from;
+                    m
+                },
+            }),
+            TransactionType::Storage(crate::domain::StorageTx::DeclareOperatorClass {
+                class: crate::domain::storage_deal::OperatorClass::Mobile,
+            }),
+            TransactionType::Storage(crate::domain::StorageTx::DeclareSelfHostPolicy {
+                manifest_id: crate::storage::ContentId([1u8; 32]),
+                policy: crate::storage::MobileSelfContentPolicy {
+                    content_id: crate::storage::ContentId([2u8; 32]),
+                    owner: from,
+                    critical: true,
+                    required_paid_replicas: 2,
+                    self_host_allowed: false,
+                },
+                profile: crate::storage::MobileSelfProfile {
+                    owner: from,
+                    device_commitment: [3u8; 32],
+                    availability: crate::storage::MobileAvailabilityClass::Scheduled,
+                    max_storage_bytes: 1 << 20,
+                    metered_network_ok: true,
+                    battery_saver_aware: false,
+                    last_seen_block: 9,
+                },
+            }),
+            TransactionType::Storage(crate::domain::StorageTx::OpenDeal(Box::new(
+                crate::domain::StorageDealOpen {
+                    domain_id: 7,
+                    manifest_id: crate::storage::ContentId([1u8; 32]),
+                    shard_id: crate::storage::ContentId([2u8; 32]),
+                    operator: to,
+                    replica_index: 1,
+                    start_epoch: 3,
+                    end_epoch: 13,
+                    economics: crate::domain::StorageEconomicsParams {
+                        operator_bond: 1_000_000,
+                        fee_per_byte_epoch: 17,
+                    },
+                    merkle_proof: vec![9u8; 40],
+                    storage_root: [4u8; 32],
+                    operator_consent: crate::storage::GrantAuthorization {
+                        owner_key: [5u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+                        signature: vec![6u8; 64],
+                    },
+                },
+            ))),
+            TransactionType::Storage(crate::domain::StorageTx::AnswerCodingAudit {
+                audit_id: 11,
+                data_column: vec![1, 2, 3, 4],
+                parity_byte: 5,
+            }),
             TransactionType::Identity(crate::registry::IdentityTx::Register {
                 record: crate::registry::IdentityRecord::new(
                     from,
@@ -2332,8 +2614,40 @@ mod tests {
         proto.tx_type = pb::ProtoTransactionType::Vault as i32;
         assert!(Transaction::try_from(proto.clone()).is_err());
 
+        proto.tx_type = pb::ProtoTransactionType::Storage as i32;
+        assert!(Transaction::try_from(proto.clone()).is_err());
+
         proto.tx_type = 999; // Unknown transaction type tag
         assert!(Transaction::try_from(proto).is_err());
+    }
+
+    #[test]
+    fn a_bincode_payload_failure_gives_an_empty_payload_after_logging() {
+        struct Refuses;
+        impl serde::Serialize for Refuses {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("refused"))
+            }
+        }
+        assert!(bincode_payload_or_log("Refuses", &Refuses).is_empty());
+        assert!(!bincode_payload_or_log("u8", &7u8).is_empty());
+    }
+
+    #[test]
+    fn a_transaction_with_a_foreign_wire_version_is_refused() {
+        let tx = Transaction::new(
+            crate::core::address::Address::from([1u8; 32]),
+            crate::core::address::Address::from([2u8; 32]),
+            10,
+            vec![],
+        );
+        let mut proto = pb::ProtoTransaction::from(&tx);
+        assert!(Transaction::try_from(proto.clone()).is_ok());
+        for version in [0u32, 1, 3] {
+            proto.wire_version = version;
+            let error = Transaction::try_from(proto.clone()).expect_err("foreign version");
+            assert!(error.contains("wire version"));
+        }
     }
 
     #[test]

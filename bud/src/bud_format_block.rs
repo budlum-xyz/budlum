@@ -126,8 +126,13 @@ impl RegenerationBlock {
     /// The regeneration economics, the I2 premise: the total production cost in
     /// the block must be far below the corresponding proof cost, whether proof of
     /// replication or zero knowledge.
-    pub fn total_production_cost(&self) -> u64 {
-        self.pact_challenges.iter().map(|c| c.cost_units).sum()
+    ///
+    /// The units come from external bytes, so the sum is checked. `None`
+    /// means the total does not fit in a `u64`.
+    pub fn total_production_cost(&self) -> Option<u64> {
+        self.pact_challenges
+            .iter()
+            .try_fold(0u64, |acc, c| acc.checked_add(c.cost_units))
     }
 
     /// The deterministic blob: magic, version, the fields and a digest.
@@ -311,13 +316,22 @@ mod tests {
     }
 
     #[test]
+    fn production_cost_overflow_is_reported() {
+        let (pact, produced) = sample_pact();
+        let ch = RegenerationBlock::add_challenge(&pact, &produced, u64::MAX).unwrap();
+        let block =
+            RegenerationBlock::new(1, [0u8; 32], vec![ch.clone(), ch], [0u8; 32], 100, 1).unwrap();
+        assert_eq!(block.total_production_cost(), None);
+    }
+
+    #[test]
     fn production_cost_accumulates() {
         let (pact, produced) = sample_pact();
         let chs: Vec<PactChallengeInBlock> = (0..10)
             .map(|i| RegenerationBlock::add_challenge(&pact, &produced, i as u64 + 1).unwrap())
             .collect();
         let block = RegenerationBlock::new(3, [0u8; 32], chs, [0u8; 32], 100, 3).unwrap();
-        assert_eq!(block.total_production_cost(), 55);
+        assert_eq!(block.total_production_cost(), Some(55));
         // An empty exam list still gives a valid block, with a budget of zero.
         let empty = RegenerationBlock::new(4, block.hash, vec![], [0u8; 32], 0, 4).unwrap();
         assert!(empty.verify());

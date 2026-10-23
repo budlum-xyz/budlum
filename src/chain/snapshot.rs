@@ -16,7 +16,14 @@ pub struct StateSnapshot {
     pub finalized_hash: String,
     pub validators: HashMap<Address, crate::core::account::Validator>,
     pub snapshot_hash: String,
+    /// 0 for blobs written before entry counts were hashed, 1 afterwards.
+    /// A missing field reads as 0, so an old blob verifies against its own digest.
+    #[serde(default)]
+    pub digest_version: u8,
 }
+/// Digest version that prefixes every variable-length run with its entry count.
+const COUNTED_DIGEST_VERSION: u8 = 1;
+
 /// Stand-in bytes used when a snapshot value cannot be serialized.
 ///
 /// The previous `expect`s argued, correctly, that folding a failure into empty
@@ -54,6 +61,7 @@ impl StateSnapshot {
             finalized_hash,
             validators,
             snapshot_hash: String::new(),
+            digest_version: COUNTED_DIGEST_VERSION,
         };
         snapshot.snapshot_hash = snapshot.calculate_hash();
         snapshot
@@ -64,17 +72,27 @@ impl StateSnapshot {
         hasher.update(self.height.to_le_bytes());
         hasher.update(self.block_hash.as_bytes());
         hasher.update(self.chain_id.to_le_bytes());
+        let counted = self.digest_version >= COUNTED_DIGEST_VERSION;
+        if counted {
+            hasher.update((self.balances.len() as u64).to_le_bytes());
+        }
         let mut balance_keys: Vec<_> = self.balances.keys().collect();
         balance_keys.sort();
         for key in balance_keys {
             hasher.update(key.0);
             hasher.update(self.balances[key].to_le_bytes());
         }
+        if counted {
+            hasher.update((self.nonces.len() as u64).to_le_bytes());
+        }
         let mut nonce_keys: Vec<_> = self.nonces.keys().collect();
         nonce_keys.sort();
         for key in nonce_keys {
             hasher.update(key.0);
             hasher.update(self.nonces[key].to_le_bytes());
+        }
+        if counted {
+            hasher.update((self.validators.len() as u64).to_le_bytes());
         }
         let mut validator_keys: Vec<_> = self.validators.keys().collect();
         validator_keys.sort();
@@ -121,14 +139,10 @@ impl StateSnapshot {
         }
         serde_json::from_slice(data).map_err(|e| format!("Failed to parse snapshot: {e}"))
     }
-    pub fn size(&self) -> usize {
-        self.to_bytes().len()
-    }
-
-    pub fn chunk(&self, chunk_size: usize) -> Vec<Vec<u8>> {
-        let data = self.to_bytes();
-        data.chunks(chunk_size).map(<[u8]>::to_vec).collect()
-    }
+    // BLG-0213 (P11-F12): `size` and `chunk` were deleted. No caller in the
+    // tree and no entry in any baseline; a paged-transfer API that exists only
+    // as a public name is an unowned attack surface (the chunking a snapshot
+    // actually ships is the wire protocol's, not this method's).
 }
 #[derive(Clone)]
 pub struct PruningManager {
@@ -205,6 +219,24 @@ impl PruningManager {
         }
         (1..safe_prune_up_to).collect()
     }
+    /// The height of the newest snapshot file in the snapshot directory, or
+    /// 0 when there is none. Pruning must never delete blocks above this
+    /// height: a restart without them resumes from a snapshot it cannot
+    /// reach, because `load_chain` stops at the first deleted parent and the
+    /// node exits without genesis (P10-F03).
+    pub fn latest_snapshot_height(&self) -> u64 {
+        let dir = std::path::Path::new(&self.snapshot_dir);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|e| e == "json"))
+            .filter_map(|entry| get_snapshot_height(&entry.path()))
+            .max()
+            .unwrap_or(0)
+    }
+
     pub fn quarantine_snapshots_above_height(&self, max_height: u64) -> Result<usize, String> {
         use std::fs;
         use std::path::Path;
@@ -405,6 +437,13 @@ impl PruningManager {
                     continue;
                 }
             };
+            // A V1 file or a file from a newer release is not corrupt. Skip it
+            // without quarantine so the V1 fallback and a newer binary can
+            // still read it.
+            if let Some(reason) = v2_loader_skip_reason(&data) {
+                tracing::warn!("V2 loader skips {} ({reason})", path.display());
+                continue;
+            }
             let snapshot: StateSnapshotV2 = match serde_json::from_str(&data) {
                 Ok(s) => s,
                 Err(e) => {
@@ -440,6 +479,29 @@ impl PruningManager {
     }
 }
 
+/// Why the V2 startup loader must leave a candidate file alone, if it must.
+///
+/// A file with no `schema_version` is a V1 snapshot; a file whose version is
+/// outside the supported window comes from another release. Neither is
+/// corrupt. A file that does not parse, or whose version is not a number, is
+/// not skipped here: the caller quarantines it.
+fn v2_loader_skip_reason(data: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    let object = value.as_object()?;
+    let Some(raw) = object.get("schema_version") else {
+        return Some("no schema_version, V1 file".to_string());
+    };
+    let version = raw.as_u64()?;
+    if version < u64::from(MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION)
+        || version > u64::from(CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION)
+    {
+        return Some(format!(
+            "schema_version {version} is outside the supported window"
+        ));
+    }
+    None
+}
+
 fn get_snapshot_height(path: &std::path::Path) -> Option<u64> {
     let stem = path.file_stem()?.to_str()?;
     let height_str = stem.strip_prefix("snapshot_")?;
@@ -465,7 +527,14 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// memberships are digestive state - a node that dropped them would hand the
 /// screen a folder list that is not the chain's - so the field enters the
 /// digest under a `>= 6` gate and pre-vault pinned digests stay byte-exact.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 6;
+///
+/// Schema 7 digests the PoA admission records and the compliance ledger
+/// (BLG-0090 / BLG-0091). Both decide writes: a node that dropped an
+/// admission set or a freeze would serve a chain that is not the chain's,
+/// and the field shipped outside the digest was exactly the forgery surface
+/// the note-registry lesson closed. Pre-schema-7 pinned digests stay
+/// byte-exact: at 6 and below the two fields cannot affect the digest.
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -578,11 +647,24 @@ pub struct StateSnapshotV2 {
     /// was derived from.
     #[serde(default)]
     pub poa_onboarding: Option<crate::registry::poa_onboarding::PoAOnboarding>,
+    /// BLG-0091 (P04-F09): the PoA compliance ledger (screening, freeze,
+    /// travel-rule) alongside the admission records, both digested from
+    /// schema 7.
+    #[serde(default)]
+    pub poa_compliance: Option<crate::registry::PoaComplianceRegistry>,
+    /// Lifetime burned total, digested from schema 9.
+    #[serde(default)]
+    pub burned_total: u64,
     #[serde(default)]
     pub message_registry: Option<crate::cross_domain::message_registry::CrossDomainMessageRegistry>,
     #[serde(default)]
     pub external_roots:
         Option<BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>>,
+    /// Escrowed external-domain prover bonds (BLG-0155/P07-F10). `None` on a
+    /// snapshot taken before the bond money existed, which is what such a
+    /// chain had: declared numbers, no escrow.
+    #[serde(default)]
+    pub external_bond_escrow: Option<BTreeMap<Address, u64>>,
     /// Proof tasks and unpaid receipts.
     ///
     /// `#[serde(default)]` like its neighbours: a snapshot taken before this
@@ -779,8 +861,11 @@ impl StateSnapshotV2 {
             note_registry: Some(account_state.note_registry.clone()),
             bridge_state: Some(account_state.bridge_state.clone()),
             poa_onboarding: Some(account_state.poa_onboarding.clone()),
+            poa_compliance: Some(account_state.poa_compliance.clone()),
+            burned_total: account_state.burned_total,
             message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
+            external_bond_escrow: Some(account_state.external_bond_escrow.clone()),
             proof_market: Some(account_state.proof_market.clone()),
             identity: Some(account_state.identity.clone()),
             vault: Some(account_state.vault.clone()),
@@ -815,8 +900,9 @@ impl StateSnapshotV2 {
     pub fn calculate_digest(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
-        // Schema-4 domain-separation prefix (RFC_ACCESSGRANT_V2 §4, f40f5f6 dersi:
-        // A one-sided root change is FORBIDDEN - bump it together with the prefix).
+        // Schema-4 domain-separation prefix (RFC_ACCESSGRANT_V2 §4; the
+        // lesson of f40f5f6: a one-sided root change is FORBIDDEN - bump it
+        // together with the prefix).
         if self.schema_version >= 4 {
             hasher.update(b"budlum.snapshot.v4");
         }
@@ -836,6 +922,13 @@ impl StateSnapshotV2 {
         hasher.update(genesis_hash);
         hasher.update(self.chain_id.to_le_bytes());
 
+        // Schema 8 and above: every variable-length run carries its entry
+        // count. Balances and nonces share one entry width, so without the
+        // count an entry moved across the boundary kept the digest.
+        let counted = self.schema_version >= 8;
+        if counted {
+            hasher.update((self.balances.len() as u64).to_le_bytes());
+        }
         let mut balance_keys: Vec<_> = self.balances.keys().collect();
         balance_keys.sort();
         for key in balance_keys {
@@ -843,6 +936,9 @@ impl StateSnapshotV2 {
             hasher.update(self.balances[key].to_le_bytes());
         }
 
+        if counted {
+            hasher.update((self.nonces.len() as u64).to_le_bytes());
+        }
         let mut nonce_keys: Vec<_> = self.nonces.keys().collect();
         nonce_keys.sort();
         for key in nonce_keys {
@@ -874,6 +970,9 @@ impl StateSnapshotV2 {
             );
         }
 
+        if counted {
+            hasher.update((self.unbonding_queue.len() as u64).to_le_bytes());
+        }
         for entry in &self.unbonding_queue {
             hasher.update(entry.address.0);
             hasher.update(entry.amount.to_le_bytes());
@@ -972,6 +1071,23 @@ impl StateSnapshotV2 {
         //     different hash rather than a quietly-valid snapshot. ---
         if self.schema_version >= 6 {
             hash_opt_serializable(&mut hasher, &self.vault);
+        }
+        // --- The PoA admission + compliance pair (schema-7 wave, BLG-0090 /
+        //     BLG-0091). Same gate logic as identity and vault: at 6 and
+        //     below these fields cannot affect the digest, at 7 and above a
+        //     node that dropped an admission set or a freeze produces a
+        //     different hash instead of a quietly-valid snapshot. ---
+        if self.schema_version >= 7 {
+            hash_opt_serializable(&mut hasher, &self.poa_onboarding);
+            hash_opt_serializable(&mut hasher, &self.poa_compliance);
+        }
+        // Schema 9: the lifetime burned total bounds mint headroom, so a node
+        // that dropped it would mint into room that burns had closed; the
+        // external bond escrow is gated identically so pre-schema-9 snapshots
+        // preserve their stored digest.
+        if self.schema_version >= 9 {
+            hash_opt_serializable(&mut hasher, &self.external_bond_escrow);
+            hasher.update(self.burned_total.to_le_bytes());
         }
 
         hasher.finalize().into()
@@ -1127,6 +1243,15 @@ impl StateSnapshotV2 {
         // the schema-4 snapshot_hash + AllowUnsigned (devnet transition).
         // A RequireSigned production loader expects a signature (sign_manifest).
         if snapshot.schema_version < CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION {
+            // The old blob must match the digest of ITS OWN schema before it
+            // is rewritten; the rewrite recomputes the hash, so an edited
+            // legacy file would otherwise always pass.
+            if !snapshot.verify() {
+                return Err(format!(
+                    "legacy snapshot schema {} does not match its own digest",
+                    snapshot.schema_version
+                ));
+            }
             snapshot.schema_version = CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION;
             snapshot.snapshot_hash = snapshot.calculate_hash();
         }
@@ -1194,6 +1319,26 @@ mod tests {
         assert!(snapshot.verify());
     }
     #[test]
+    fn legacy_digest_version_verifies_against_its_own_digest() {
+        let account_state = AccountState::new();
+        let mut snapshot =
+            StateSnapshot::from_state(5, "h".to_string(), 42, &account_state, 1, "f".to_string());
+        let counted_hash = snapshot.snapshot_hash.clone();
+        snapshot.digest_version = 0;
+        assert!(!snapshot.verify());
+        snapshot.snapshot_hash = snapshot.calculate_hash();
+        assert!(snapshot.verify());
+        assert_ne!(snapshot.snapshot_hash, counted_hash);
+        let mut value = serde_json::to_value(&snapshot).expect("to value");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("digest_version");
+        let legacy: StateSnapshot = serde_json::from_value(value).expect("parse legacy blob");
+        assert_eq!(legacy.digest_version, 0);
+        assert!(legacy.verify());
+    }
+    #[test]
     fn test_pruning_manager() {
         let manager = PruningManager::new(100, 1000, "./snapshots".to_string());
 
@@ -1257,6 +1402,43 @@ mod tests {
         assert!(dir.path().join("snapshot_10.json").exists());
         assert!(dir.path().join("snapshot_20.json").exists());
         assert!(dir.path().join("snapshot_30.json.reorg").exists());
+    }
+
+    /// BLG-0208: the V2 startup loader leaves V1 and foreign-version files alone.
+    #[test]
+    fn v2_loader_does_not_quarantine_v1_or_out_of_window_files() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let v1 = dir.path().join("snapshot_10.json");
+        let future = dir.path().join("snapshot_20.json");
+        fs::write(&v1, r#"{"height":10}"#).unwrap();
+        let future_blob = format!(
+            r#"{{"schema_version":{}}}"#,
+            CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION + 1
+        );
+        fs::write(&future, future_blob).unwrap();
+        let manager = PruningManager::new(100, 1000, dir.path().to_string_lossy().to_string());
+
+        assert!(manager.load_latest_snapshot_v2().unwrap().is_none());
+        assert!(v1.exists(), "a V1 file must not be renamed");
+        assert!(future.exists(), "a newer-release file must not be renamed");
+    }
+
+    /// BLG-0208: a corrupt file is still quarantined.
+    #[test]
+    fn v2_loader_still_quarantines_a_file_that_does_not_parse() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let bad = dir.path().join("snapshot_5.json");
+        fs::write(&bad, "not json").unwrap();
+        let manager = PruningManager::new(100, 1000, dir.path().to_string_lossy().to_string());
+
+        assert!(manager.load_latest_snapshot_v2().is_err());
+        assert!(dir.path().join("snapshot_5.json.corrupted").exists());
     }
 
     /// A character cannot move from `block_hash` into `genesis_hash`.
@@ -1370,6 +1552,41 @@ mod tests {
         let quarantined_path = dir.path().join("snapshot_50.json.corrupted");
         assert!(quarantined_path.exists());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn latest_snapshot_height_bounds_rpc_pruning() {
+        use std::fs;
+        use tempfile::tempdir;
+        // P10-F03: the RPC-driven prune passed the tip height as the "latest
+        // snapshot", so the snapshot bound never applied and bud_requestPrune
+        // deleted blocks (with their finality certs) that the next restart
+        // needs: load_chain stops at the first deleted parent and the node
+        // cannot boot. Quarantined files (.json.corrupted) must not count.
+        let dir = tempdir().unwrap();
+        let mut pm = PruningManager::new(10, 100, dir.path().to_string_lossy().to_string());
+        pm.archive_mode = false;
+
+        // No snapshot on disk: nothing may be pruned, whatever the tip and
+        // finality heights say.
+        assert_eq!(pm.latest_snapshot_height(), 0);
+        assert!(pm
+            .get_prunable_blocks_with_retention(1000, pm.latest_snapshot_height(), 900, 10)
+            .is_empty());
+
+        // Snapshots at height 9 and 100: numerical order, not lexicographic.
+        fs::write(dir.path().join("snapshot_9.json"), "{}").unwrap();
+        fs::write(dir.path().join("snapshot_100.json"), "{}").unwrap();
+        fs::write(dir.path().join("snapshot_500.json.corrupted"), "{}").unwrap();
+        assert_eq!(pm.latest_snapshot_height(), 100);
+
+        // keep=10 at tip=1000 would prune up to 990, but the snapshot bound
+        // caps it below the newest snapshot.
+        let prunable =
+            pm.get_prunable_blocks_with_retention(1000, pm.latest_snapshot_height(), 900, 10);
+        assert_eq!(prunable.first().copied(), Some(1));
+        assert_eq!(prunable.last().copied(), Some(99));
+        assert!(!prunable.contains(&100));
     }
 
     #[test]
@@ -1612,6 +1829,46 @@ mod tests {
         let s2 = s1.clone();
         s1.bns_registry = None; // None vs Some(default) -> a different tag
         assert_ne!(s1.calculate_digest(), s2.calculate_digest());
+    }
+
+    #[test]
+    fn count_prefix_binds_the_balance_nonce_boundary() {
+        let account_state = AccountState::new();
+        let mut a = StateSnapshotV2::from_state(&account_state, legacy_params(9));
+        let k = Address::from([7u8; 32]);
+        a.balances.insert(k, 5);
+        let mut b = a.clone();
+        b.balances.remove(&k);
+        b.nonces.insert(k, 5);
+        assert_ne!(
+            a.calculate_digest(),
+            b.calculate_digest(),
+            "an entry moved from balances to nonces must change the digest"
+        );
+    }
+
+    #[test]
+    fn edited_legacy_blob_is_refused() {
+        let account_state = AccountState::new();
+        let mut snap = StateSnapshotV2::from_state(&account_state, legacy_params(9));
+        snap.schema_version = 5;
+        snap.reseal_after_manual_edit();
+        snap.balances.insert(Address::from([9u8; 32]), 1_000);
+        let blob = serde_json::to_vec(&snap).unwrap();
+        assert!(StateSnapshotV2::from_bytes(&blob).is_err());
+    }
+
+    #[test]
+    fn schema9_digest_binds_the_burned_total() {
+        let account_state = AccountState::new();
+        let mut a = StateSnapshotV2::from_state(&account_state, legacy_params(9));
+        let mut b = a.clone();
+        a.burned_total = 0;
+        b.burned_total = 5;
+        assert_ne!(a.calculate_digest(), b.calculate_digest());
+        a.schema_version = 8;
+        b.schema_version = 8;
+        assert_eq!(a.calculate_digest(), b.calculate_digest());
     }
 
     #[test]
@@ -2005,6 +2262,39 @@ mod tests {
         );
     }
 
+    /// The PoA admission records and the compliance ledger cross the wire
+    /// INSIDE the digest (BLG-0090 / BLG-0091): a peer that empties an
+    /// admission set or drops a freeze invalidates the snapshot instead of
+    /// quietly unpermissioning a domain or clearing a gate.
+    #[test]
+    fn the_poa_gate_state_crosses_the_wire_inside_the_digest() {
+        use crate::core::account::AccountState;
+        let mut st = AccountState::new();
+        st.poa_onboarding
+            .add_admin(0, crate::core::address::Address::from([1u8; 32]));
+        let mut snapshot = StateSnapshotV2::from_state(
+            &st,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "b".into(),
+                genesis_hash: "g".into(),
+                chain_id: 1,
+                finalized_height: 0,
+                finalized_hash: "f".into(),
+                finality_certificates: vec![],
+            },
+        );
+        assert!(snapshot.verify(), "the fixture must verify as issued");
+
+        // The attack: serve the same snapshot with the admission records
+        // emptied. No reseal - the stored digest is the issuer's.
+        snapshot.poa_onboarding = Some(crate::registry::poa_onboarding::PoAOnboarding::new());
+        assert!(
+            !snapshot.verify(),
+            "the admission records crossed the wire outside the digest"
+        );
+    }
+
     /// The signature fields stay outside, and must.
     ///
     /// Guarding the fix from the obvious overcorrection. `manifest_signature`
@@ -2075,6 +2365,11 @@ mod tests {
             "schema_version".to_string(),
             serde_json::Value::from(version),
         );
+        // An honest old blob carries the digest of its own schema; a loader
+        // refuses one that does not.
+        let mut sealed: StateSnapshotV2 = serde_json::from_value(value.clone()).unwrap();
+        sealed.reseal_after_manual_edit();
+        value["snapshot_hash"] = serde_json::Value::from(sealed.snapshot_hash);
         serde_json::to_vec(&value).unwrap()
     }
 
@@ -2097,6 +2392,7 @@ mod tests {
         "bridge_state",
         "message_registry",
         "external_roots",
+        "external_bond_escrow",
         "proof_market",
         "manifest_signer",
         "manifest_signature",
@@ -2107,16 +2403,16 @@ mod tests {
     /// Only the keys of the schema-4 wave.
     const SCHEMA4_ONLY_KEYS: &[&str] = &["manifest_signer", "manifest_signature", "trust_policy"];
 
-    /// PoA admission records: a field added with `#[serde(default)]`, without a
-    /// version bump.
+    /// PoA admission records: a field added with `#[serde(default)]`.
     ///
-    /// **Why `CURRENT_..._SCHEMA_VERSION` was not bumped:** the version exists for cases where an old
-    /// binary could read a new snapshot *wrongly*.
-    /// There is no such case here - if the field is absent the default is an empty record, and an empty
-    /// record means "this domain is not permissioned", which is exactly the truth of old
-    /// snapshots. Bumping the version would push old releases outside the supported
-    /// window: a compatibility break that gains nothing.
-    /// kaybi.
+    /// It shipped WITHOUT a version bump, on the argument that absence
+    /// defaults to an empty record ("not permissioned"), which is the truth
+    /// of old snapshots. BLG-0090 (P04-F08) overrode that: the records are
+    /// consensus gate state, and a field crossing the wire outside the
+    /// digest is a field a peer can empty without invalidating the
+    /// snapshot - the same forgery surface the note-registry lesson closed.
+    /// The key still ships at schema 4 (old blobs carry it, the legacy-blob
+    /// fixtures assert that); the VALUE enters the digest at schema 7.
     ///
     /// The derived set (`poa_admitted`) is NOT HERE and must not be: it is recomputed from the records
     /// at every block close. Had it been written to the snapshot, a hand-edited
@@ -2132,6 +2428,10 @@ mod tests {
     /// The schema-6 wave's key: dropped from every old-blob the trio
     /// assembles, exactly as identity's was for the schema-5 wave.
     const SCHEMA6_KEYS: &[&str] = &["vault"];
+    /// The schema-9 wave's key: the lifetime burned total, digested from
+    /// schema 9. Old blobs lack the key and it restores as zero - "nothing
+    /// was ever recorded burned", which under-counts rather than fabricates.
+    const SCHEMA9_KEYS: &[&str] = &["burned_total"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
@@ -2206,6 +2506,7 @@ mod tests {
 
     fn schema2_cert() -> FinalityCert {
         FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
             epoch: 1,
             checkpoint_height: 2,
             checkpoint_hash: "cp".into(),
@@ -2270,6 +2571,7 @@ mod tests {
             "bridge_state",
             "message_registry",
             "external_roots",
+            "external_bond_escrow",
             "proof_market",
             // schema-4 dalgasi
             "manifest_signer",
@@ -2277,6 +2579,10 @@ mod tests {
             "trust_policy",
             // admission records (a serde-default field with no version bump)
             "poa_onboarding",
+            // compliance ledger (schema-7 wave: default-filled AND digested)
+            "poa_compliance",
+            // lifetime burned total (schema-9 wave: default-filled AND digested)
+            "burned_total",
             // identity registry (schema-5 wave: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 wave: same discipline)
@@ -2311,7 +2617,7 @@ mod tests {
 
         let blob = as_legacy_blob(
             &full,
-            &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat(),
+            &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat(),
             2,
         );
         // Premise: the blob really behaves like a schema-2 record - the new
@@ -2319,7 +2625,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 2);
-        for key in &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat() {
+        for key in &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat() {
             assert!(
                 !obj.contains_key(*key),
                 "the source blob contains a key it must not have: {key}"
@@ -2360,6 +2666,10 @@ mod tests {
             "a field never present in the blob came back as data; that is not loss, it is fabrication"
         );
         assert_eq!(restored.trust_policy, SnapshotTrustPolicy::AllowUnsigned);
+        assert_eq!(
+            restored.burned_total, 0,
+            "the schema-9 burned total was fabricated from a blob that never carried it"
+        );
         assert_eq!(
             serde_json::to_value(restored.tokenomics).unwrap(),
             serde_json::to_value(crate::tokenomics::TokenomicsParams::default()).unwrap(),
@@ -2419,13 +2729,13 @@ mod tests {
 
         let blob = as_legacy_blob(
             &full,
-            &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat(),
+            &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat(),
             3,
         );
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 3);
-        for key in &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat() {
+        for key in &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat() {
             assert!(
                 !obj.contains_key(*key),
                 "the source blob carries a v4 key it must not: {key}"
@@ -2444,6 +2754,10 @@ mod tests {
         assert!(
             restored.vault.is_none(),
             "the schema-6 vault field was fabricated from a blob that never carried it"
+        );
+        assert_eq!(
+            restored.burned_total, 0,
+            "the schema-9 burned total was fabricated from a blob that never carried it"
         );
         // v2 + v3 alanlarinin tumu verisiyle tasindi.
         let mut preserved = SCHEMA2_FIELDS.to_vec();
@@ -2464,6 +2778,7 @@ mod tests {
             "bridge_state",
             "message_registry",
             "external_roots",
+            "external_bond_escrow",
             "proof_market",
         ]);
         assert_fields_preserved(&full, &restored, &preserved);
@@ -2569,5 +2884,33 @@ mod tests {
                 "unexpected refusal class (version {version}): {err}"
             );
         }
+    }
+
+    #[test]
+    fn schema9_gates_external_bond_escrow_digest_without_breaking_legacy_snapshots() {
+        let state = AccountState::new();
+        let mut s9_none = StateSnapshotV2::from_state(&state, legacy_params(1));
+        s9_none.external_bond_escrow = None;
+        s9_none.snapshot_hash = hex::encode(s9_none.calculate_digest());
+
+        let mut escrow = BTreeMap::new();
+        escrow.insert(Address::from([5u8; 32]), 1_000);
+        let mut s9_populated = s9_none.clone();
+        s9_populated.external_bond_escrow = Some(escrow);
+        assert!(
+            !s9_populated.verify(),
+            "schema 9 digest must commit external_bond_escrow"
+        );
+
+        let mut s8_a = s9_none;
+        s8_a.schema_version = 8;
+        let digest_a = s8_a.calculate_digest();
+        let mut s8_b = s9_populated;
+        s8_b.schema_version = 8;
+        assert_eq!(
+            digest_a,
+            s8_b.calculate_digest(),
+            "pre-schema-9 snapshots must ignore external_bond_escrow so stored digests remain valid"
+        );
     }
 }

@@ -85,12 +85,15 @@ FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe6
 # CVE-2026-86145 and CVE-2026-89161 (both HIGH, fixed in 10.42-1+deb12u1), and
 # an explicit install after `apt-get update` pulls the patched revision without
 # a blanket `apt-get upgrade` (hadolint DL3005).
+# perl-base is listed for the same reason: the pinned digest ships
+# 5.36.0-7+deb12u3, which Trivy flags (3 CRITICAL, 4 HIGH), fixed in deb12u4.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     openssl \
     curl \
     libpcre2-8-0 \
+    perl-base \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core
@@ -124,8 +127,13 @@ EXPOSE 4001 8545 8546 9090
 # --rpc-operator-listener; a default `docker run` never opens it, so a
 # probe there would mark a live rpc-role node unhealthy. A bare GET of
 # / is not a JSON-RPC request.
+# P61-F03: no `-f`. The image and compose run with RPC auth required and the
+# probe carries no key, so the listener answers 401; `-f` turned that live
+# answer into an unhealthy container. Without it curl exits 0 on any HTTP
+# response and non-zero only when the port does not answer (connect failure
+# or timeout), which is what "listening" means here.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD ["curl", "-sf", "--max-time", "4", "-H", "Content-Type: application/json", "-d", "{\"jsonrpc\":\"2.0\",\"method\":\"bud_netListening\",\"params\":[],\"id\":1}", "http://127.0.0.1:8545"]
+  CMD ["curl", "-s", "-o", "/dev/null", "--max-time", "4", "-H", "Content-Type: application/json", "-d", "{\"jsonrpc\":\"2.0\",\"method\":\"bud_netListening\",\"params\":[],\"id\":1}", "http://127.0.0.1:8545"]
 
 ENV RUST_LOG=info
 

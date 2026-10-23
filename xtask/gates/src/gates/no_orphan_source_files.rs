@@ -17,7 +17,7 @@
 //!
 //! # What is measured
 //!
-//! Every `.rs` file under `src/`, `budzero/` and `crates/wallet-core/` must be
+//! Every `.rs` file under `src/`, `budzero/` and `crates/` must be
 //! reachable from a module declaration. Cargo auto-discovers `src/bin/*.rs`
 //! and the `tests/`/`benches/`/`examples/` trees, so those are exempt, as are
 //! crate roots (`lib.rs`, `main.rs`, `mod.rs`, `build.rs`).
@@ -61,7 +61,7 @@ use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
 
 /// Roots holding shipped library code.
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates"];
 
 // ---------------------------------------------------------------------------
 // Sanitizing: blank comments and literals so they cannot be read as code.
@@ -455,11 +455,18 @@ fn exempt(rel: &str) -> bool {
         if p == "bin" && i > 0 && parts[i - 1] == "src" {
             return true;
         }
-        if matches!(p, "tests" | "benches" | "examples") {
+        if is_target_dir(&parts, i) {
             return true;
         }
     }
     false
+}
+
+/// Is `parts[i]` a `tests`, `benches` or `examples` directory that Cargo
+/// discovers? Only a sibling of `src` counts. Below a `src` component such a
+/// directory is a module tree (`src/tests/`) that a `mod` has to declare.
+fn is_target_dir(parts: &[&str], i: usize) -> bool {
+    matches!(parts[i], "tests" | "benches" | "examples") && !parts[..i].contains(&"src")
 }
 
 /// A crate root: the compiler starts here without anyone declaring it.
@@ -480,7 +487,7 @@ fn is_crate_root(rel: &str) -> bool {
         if parts[i] == "bin" && i > 0 && parts[i - 1] == "src" {
             return true;
         }
-        if matches!(parts[i], "tests" | "benches" | "examples") {
+        if is_target_dir(&parts, i) {
             return true;
         }
     }
@@ -576,8 +583,13 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     for sub in SCAN_ROOTS {
         let base = root.join(sub);
+        // A root that is not there is an error: a stale name here once skipped
+        // a whole crate without a word.
         if !base.is_dir() {
-            continue;
+            return Err(format!(
+                "the scan root {} is missing - wrong root, or a stale name in SCAN_ROOTS",
+                base.display()
+            ));
         }
         walk(&base, root, &mut files);
     }
@@ -683,6 +695,10 @@ pub fn run(root: &Path) -> Result<String, String> {
 /// Write a fixture tree, run the gate, check the verdict.
 fn check_fixture(files: &[(&str, &str)], expect_ok: bool, label: &str) -> Result<(), String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-orphan")?;
+    // Every scan root exists in a real tree; the gate refuses a missing one.
+    for sub in SCAN_ROOTS {
+        std::fs::create_dir_all(dir.join(sub)).map_err(|e| e.to_string())?;
+    }
     for (rel, content) in files {
         let path = dir.join(rel);
         if let Some(parent) = path.parent() {
@@ -859,4 +875,41 @@ pub fn self_test() -> Result<String, String> {
          nested, #[path], src/bin, inline-nested, comment-adjacent and \
          three-deep chained modules all pass.",
     ))
+}
+
+#[cfg(test)]
+mod root_tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_root_is_an_error_and_an_orphan_under_crates_is_found() {
+        let dir = std::env::temp_dir().join(format!("orphan-roots-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+        let missing = run(&dir);
+        for sub in SCAN_ROOTS {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::create_dir_all(dir.join("crates/c/src")).unwrap();
+        std::fs::write(dir.join("crates/c/src/lib.rs"), "").unwrap();
+        std::fs::write(dir.join("crates/c/src/orphan.rs"), "pub fn a() {}\n").unwrap();
+        let orphan = run(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(missing.is_err());
+        assert!(orphan.is_err());
+    }
+}
+
+#[cfg(test)]
+mod target_dir_tests {
+    use super::*;
+
+    #[test]
+    fn a_tests_directory_below_src_is_a_module_tree() {
+        assert!(exempt("budzero/bud-vm/tests/x.rs"));
+        assert!(is_crate_root("crates/bpqs/examples/x.rs"));
+        assert!(!exempt("src/tests/undeclared.rs"));
+        assert!(!is_crate_root("src/tests/undeclared.rs"));
+        assert!(exempt("src/tests/mod.rs"));
+    }
 }

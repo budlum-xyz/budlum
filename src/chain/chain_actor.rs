@@ -37,6 +37,14 @@ pub enum ChainCommand {
     GetHeight(oneshot::Sender<u64>),
     GetFinalizedHeight(oneshot::Sender<u64>),
     GetBlock(u64, oneshot::Sender<Option<Block>>),
+    /// A contiguous run of local blocks, `[from, from + count)`.
+    ///
+    /// The peer-driven reorg path needs the whole shared prefix in one step.
+    /// Asking for it one height at a time cost one round trip per block, which
+    /// is why a per-batch cap was placed on the fork height in the first
+    /// place; with a single read the only real bounds are the suffix length
+    /// and the fork depth, both already checked by the caller.
+    GetBlocksRange(u64, usize, oneshot::Sender<Vec<Block>>),
     GetBlockByHash(String, oneshot::Sender<Option<Block>>),
     GetBalance(Address, oneshot::Sender<u64>),
     GetNonce(Address, oneshot::Sender<u64>),
@@ -102,7 +110,6 @@ pub enum ChainCommand {
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
     AddBalance(Address, u64, oneshot::Sender<Result<(), String>>),
     FundDevelopmentAccount(Address, oneshot::Sender<Result<(), String>>),
-    StoragePrune([u8; 32]),
     GetStateSnapshotData(
         u64,
         oneshot::Sender<Option<crate::chain::snapshot::StateSnapshot>>,
@@ -130,8 +137,19 @@ pub enum ChainCommand {
         Box<crate::domain::sovereign::AuditExportBundle>,
         oneshot::Sender<Result<(), String>>,
     ),
+    // BLG-0199 (P10-F09): the raw, unverified-commitment path is test-only to
+    // the last hop. Production RPC answers `bud_submitDomainCommitment` with a
+    // refusal, and there is no longer any command route from the actor into
+    // `Blockchain::accept_domain_commitment` in a release build - a path that
+    // merely "returns Err in prod today" still compiles the unsafe body in
+    // every future build. Test suites keep their harness entry below.
+    #[cfg(test)]
     SubmitDomainCommitment(
         crate::domain::DomainCommitment,
+        oneshot::Sender<Result<(), String>>,
+    ),
+    VerifyVerifiedDomainCommitment(
+        crate::domain::VerifiedDomainCommitment,
         oneshot::Sender<Result<(), String>>,
     ),
     SubmitVerifiedDomainCommitment(
@@ -235,13 +253,6 @@ pub enum ChainCommand {
         u64,
         oneshot::Sender<Result<(), String>>,
     ),
-    /// F-17: operator self-declares `AlwaysOn` vs `Mobile`. The actor
-    /// writes only the local signer address; a caller cannot name a
-    /// third party.
-    SetStorageOperatorClass {
-        class: crate::domain::storage_deal::OperatorClass,
-        response: oneshot::Sender<Result<(), String>>,
-    },
     /// Begin unbonding an independently-debited role bond (`RELAYER`,
     /// `PROVER`, `STORAGE_OPERATOR`). Returns the release epoch.
     BeginRoleBondUnbonding(
@@ -335,7 +346,9 @@ pub enum ChainCommand {
         agent: crate::core::address::Address,
         response: oneshot::Sender<Option<crate::ai::types::AiAgentReputation>>,
     },
-    GetAiAgentRanking(oneshot::Sender<Vec<(crate::core::address::Address, f64)>>),
+    // BLG-0201 (P10-F11): fixed-point permyriad score, not an `f64` - the
+    // actor boundary does not carry floats (Z8).
+    GetAiAgentRanking(oneshot::Sender<Vec<(crate::core::address::Address, u64)>>),
     GetPruneStatus(oneshot::Sender<serde_json::Value>),
     RequestPrune(Option<u64>, oneshot::Sender<Result<u64, String>>),
     BuildGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
@@ -389,6 +402,7 @@ pub enum ChainCommand {
         domain_height: u64,
         event_index: u32,
         expiry_height: u64,
+        recipient_eth: [u8; 20],
         response: oneshot::Sender<Result<crate::cross_domain::DomainEvent, String>>,
     },
     UnlockBridgeTransfer {
@@ -666,6 +680,9 @@ pub enum ChainCommand {
     PollenGetPurchaseReceipts {
         response: oneshot::Sender<Vec<crate::pollen::PollenPurchaseReceipt>>,
     },
+    PollenGetEncryptionPolicies {
+        response: oneshot::Sender<Vec<crate::pollen::EncryptionPolicy>>,
+    },
     HubGetApps {
         response: oneshot::Sender<Vec<crate::budlumxyz::types::AppRecord>>,
     },
@@ -701,6 +718,17 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetBlock(height, tx)).await;
         rx.await.unwrap_or(None)
+    }
+
+    /// Read `count` contiguous local blocks starting at `from`, in one
+    /// round trip. Returns fewer than `count` when the chain is shorter.
+    pub async fn get_blocks_range(&self, from: u64, count: usize) -> Vec<Block> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetBlocksRange(from, count, tx))
+            .await;
+        rx.await.unwrap_or_default()
     }
 
     pub async fn get_block_by_hash(&self, hash: String) -> Option<Block> {
@@ -1507,12 +1535,6 @@ impl ChainHandle {
             .map_err(|e| format!("faucet response channel closed: {e}"))?
     }
 
-    pub async fn storage_prune(&self, cid: [u8; 32]) {
-        if let Err(e) = self.tx.send(ChainCommand::StoragePrune(cid)).await {
-            tracing::error!(error = %e, "Failed to send StoragePrune command to chain actor");
-        }
-    }
-
     pub async fn get_state_snapshot_data(
         &self,
         height: u64,
@@ -1646,6 +1668,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    #[cfg(test)]
     pub async fn submit_domain_commitment(
         &self,
         commitment: crate::domain::DomainCommitment,
@@ -1654,6 +1677,19 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::SubmitDomainCommitment(commitment, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    pub async fn verify_verified_domain_commitment(
+        &self,
+        payload: crate::domain::VerifiedDomainCommitment,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::VerifyVerifiedDomainCommitment(payload, tx))
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -1977,33 +2013,6 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    /// F-17: the local signer declares `AlwaysOn` vs `Mobile`.
-    ///
-    /// The actor ignores any third-party address. Class is
-    /// self-reported; `open_deal` holds the signer to whatever it
-    /// claimed. No consensus `TransactionType` is added here (that
-    /// is a wire-surface change).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the actor channel is closed or the node
-    /// cannot persist the class change.
-    pub async fn set_storage_operator_class(
-        &self,
-        class: crate::domain::storage_deal::OperatorClass,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SetStorageOperatorClass {
-                class,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
     /// Begin unbonding a `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
     ///
     /// These three bonds debit the account balance at bond time and had no exit
@@ -2050,7 +2059,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    /// Submit a ZK proof (permissionless; L1 ↔ BudZKVM bridge).
+    /// Submit a ZK proof (permissionless; chain ↔ BudZKVM bridge).
     pub async fn submit_zk_proof(
         &self,
         submission: crate::prover::ZkProofSubmission,
@@ -2395,7 +2404,7 @@ impl ChainHandle {
         rx.await.ok()?
     }
 
-    pub async fn get_ai_agent_ranking(&self) -> Vec<(crate::core::address::Address, f64)> {
+    pub async fn get_ai_agent_ranking(&self) -> Vec<(crate::core::address::Address, u64)> {
         let (tx, rx) = oneshot::channel();
         if self
             .tx
@@ -2540,6 +2549,7 @@ impl ChainHandle {
         domain_height: u64,
         event_index: u32,
         expiry_height: u64,
+        recipient_eth: [u8; 20],
     ) -> Result<crate::cross_domain::DomainEvent, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2550,6 +2560,7 @@ impl ChainHandle {
                 domain_height,
                 event_index,
                 expiry_height,
+                recipient_eth,
                 response: tx,
             })
             .await;
@@ -2935,6 +2946,15 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    pub async fn pollen_get_encryption_policies(&self) -> Vec<crate::pollen::EncryptionPolicy> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::PollenGetEncryptionPolicies { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
     pub async fn pollen_get_purchase_receipts(&self) -> Vec<crate::pollen::PollenPurchaseReceipt> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2965,11 +2985,14 @@ impl ChainHandle {
 /// feature being used, not to running a node. The first request after a new
 /// block pays; every later request at that height is a tree walk.
 ///
-/// `height` is what makes the cache honest. State only changes with a block,
-/// so a trie tagged with the height it was built at is either current or
-/// discarded - it can never serve a proof for state that has moved on.
+/// `leaves` is what makes the cache honest. Balances change outside blocks
+/// (faucet, bond debit and refund) and an equal length reorg swaps state at
+/// the same chain length, so the chain length cannot tag the trie. The trie
+/// keeps the exact (address, balance, nonce) list it was built from. A hit
+/// needs the live accounts to match that list, so a stale trie is never used.
+/// The compare is one pass over the accounts and is far cheaper than a build.
 struct ProofTrieCache {
-    height: u64,
+    leaves: Vec<([u8; 32], u64, u64)>,
     trie: crate::storage::merkle_trie::MerkleTrie,
 }
 
@@ -2992,25 +3015,33 @@ impl ChainActor {
         )
     }
 
-    /// Proof for one account, reusing the trie built for this height.
+    /// Proof for one account, reusing the trie when the accounts did not change.
     ///
-    /// The cache is keyed by height and rebuilt when it does not match, so a
-    /// proof is always drawn against the state the chain is at. A stale trie
-    /// would produce a proof that verifies against its own root and describes
-    /// state that no longer exists - worse than no proof, because it is a
-    /// correct-looking answer to the wrong question.
+    /// The cache is keyed by the account contents and rebuilt when they do not
+    /// match, so a proof is always drawn against the state the node holds. A
+    /// stale trie would produce a proof that verifies against its own root and
+    /// describes state that no longer exists - worse than no proof, because it
+    /// is a correct-looking answer to the wrong question.
     fn account_proof(&mut self, addr: &Address) -> crate::storage::merkle_trie::AccountProofBundle {
-        let height = self.blockchain.chain.len() as u64;
-        let stale = self
-            .proof_trie
-            .as_ref()
-            .is_none_or(|cached| cached.height != height);
-        if stale {
+        let accounts = &self.blockchain.state.accounts;
+        let fresh = self.proof_trie.as_ref().is_some_and(|cached| {
+            cached.leaves.len() == accounts.len()
+                && cached
+                    .leaves
+                    .iter()
+                    .zip(accounts.iter())
+                    .all(|(l, (a, acct))| l.0 == a.0 && l.1 == acct.balance && l.2 == acct.nonce)
+        });
+        if !fresh {
+            let leaves: Vec<([u8; 32], u64, u64)> = accounts
+                .iter()
+                .map(|(a, acct)| (a.0, acct.balance, acct.nonce))
+                .collect();
             let mut trie = crate::storage::merkle_trie::MerkleTrie::new();
-            for (a, acct) in &self.blockchain.state.accounts {
-                trie.insert(&a.0, acct.balance, acct.nonce);
+            for (a, balance, nonce) in &leaves {
+                trie.insert(a, *balance, *nonce);
             }
-            self.proof_trie = Some(ProofTrieCache { height, trie });
+            self.proof_trie = Some(ProofTrieCache { leaves, trie });
         }
         match self.proof_trie.as_ref() {
             Some(cached) => crate::storage::merkle_trie::prove_from_trie(&cached.trie, &addr.0),
@@ -3028,6 +3059,13 @@ impl ChainActor {
         }
     }
 
+    /// Height the AI read queries judge deadlines at. It is the height the
+    /// executor uses for the same checks, not an epoch guess that is only
+    /// right on a chain with 100 blocks per epoch.
+    fn ai_query_height(&self) -> u64 {
+        self.blockchain.state.current_block_height
+    }
+
     fn storage_economics_disabled_on_mainnet(&self) -> bool {
         self.blockchain.chain_id
             == crate::core::chain_config::Network::Mainnet
@@ -3037,6 +3075,18 @@ impl ChainActor {
 
     fn mainnet_storage_disabled_error() -> String {
         "B.U.D. storage economics are disabled on mainnet until transaction-only accounting is wired".into()
+    }
+
+    /// View grants are state-root bearing (`view_grants.root()` folds into
+    /// the storage registry root): mutating them between blocks diverges the
+    /// local root from every peer that did not see the RPC call. The refusal
+    /// is chain-independent until grant changes ride a block transaction.
+    fn view_grant_rpc_mutation_error() -> String {
+        "view grants are state-root bearing and cannot be mutated over RPC; grant changes must ride a block transaction".into()
+    }
+
+    fn social_delete_rpc_mutation_error() -> String {
+        "social delete changes state-root bearing rows and cannot be applied over RPC; it must ride a block transaction".into()
     }
 
     fn run_storage_maintenance(&mut self, block_height: u64) {
@@ -3362,26 +3412,15 @@ impl ChainActor {
     /// AI registry maintenance: expired requests, results, refunded fee
     /// records and dispute window records are evicted here.
     ///
-    /// The written mechanism (`AiRegistry::prune_expired` /
-    /// `expire_dispute_window`) had until now only been called from the tests:
-    /// nothing called it in production and the AI registry carried permanent
-    /// state growth (the "written but never called" class - a memory
-    /// lesson).
+    /// The eviction itself lives in
+    /// `Blockchain::apply_ai_registry_maintenance`, which the startup replay,
+    /// the reorg rebuilds and `rebuild_state` also run, so a restarted node
+    /// reconstructs exactly the state its live peers carry (P10-F02).
     fn run_ai_maintenance(&mut self, block_height: u64) {
-        // The dispute window (10_080 blocks) is also the retention window:
-        // unsettled requests and evidence are never deleted before the
-        // finality plus objection period has elapsed.
-        let retention = crate::ai::registry::DISPUTE_WINDOW_BLOCKS;
-        let pruned = self
-            .blockchain
-            .state
-            .ai_registry
-            .prune_expired(block_height, retention);
-        let expired = self
-            .blockchain
-            .state
-            .ai_registry
-            .expire_dispute_window(block_height);
+        let (pruned, expired) = crate::chain::blockchain::Blockchain::apply_ai_registry_maintenance(
+            &mut self.blockchain.state,
+            block_height,
+        );
         if pruned > 0 || expired > 0 {
             tracing::info!(%pruned, %expired, "AI registry maintenance at height {block_height}");
         }
@@ -3400,6 +3439,18 @@ impl ChainActor {
                 ChainCommand::GetBlock(height, tx) => {
                     let block = self.blockchain.chain.get(height as usize).cloned();
                     let _ = tx.send(block);
+                }
+                ChainCommand::GetBlocksRange(from, count, tx) => {
+                    let start = usize::try_from(from).unwrap_or(usize::MAX);
+                    let blocks = self
+                        .blockchain
+                        .chain
+                        .iter()
+                        .skip(start)
+                        .take(count)
+                        .cloned()
+                        .collect();
+                    let _ = tx.send(blocks);
                 }
                 ChainCommand::GetBlockByHash(hash, tx) => {
                     let block = self
@@ -3473,21 +3524,6 @@ impl ChainActor {
                         }
                     }
                     let _ = res_tx.send(res);
-                }
-                ChainCommand::StoragePrune(cid) => {
-                    // Manual prune trigger from CLI/RPC
-                    let now_epoch = self.blockchain.state.epoch_index;
-                    let cid_obj = crate::storage::content_id::ContentId(cid);
-                    let pruned_deals = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .prune_content(&cid_obj, now_epoch);
-                    tracing::info!(
-                        cid = %hex::encode(cid),
-                        pruned_deals,
-                        "Manual B.U.D. Hard Prune: storage registry entry removed"
-                    );
                 }
                 ChainCommand::GetTransactionByHash(hash, tx) => {
                     let tx_obj = self.blockchain.get_transaction_by_hash(&hash);
@@ -3618,7 +3654,27 @@ impl ChainActor {
                     let _ = tx.send(removed);
                 }
                 ChainCommand::TryReorg(fork, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.try_reorg(fork).map_err(|e| e.to_string()));
+                    let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.to_string());
+                    // BLG-0195 (P10-F05): after a successful reorg the old tip's
+                    // finality round is dead (0186 invalidated it), but nobody
+                    // restarted voting - the node just sat there and the post-
+                    // fork chain finalized nothing until the NEXT checkpoint
+                    // block happened to arrive through AddBlock. Resume the
+                    // prevote task on the new tip when it is itself a
+                    // checkpoint height, mirroring ValidateAndAddBlock.
+                    if matches!(outcome, Ok(true)) {
+                        let tip = self.blockchain.chain.last().cloned();
+                        if let Some(tip) = tip {
+                            if crate::chain::finality::is_checkpoint_height_for_chain(
+                                tip.index,
+                                self.blockchain.chain_id,
+                            ) {
+                                self.blockchain
+                                    .start_prevote_task(tip.index, tip.hash.clone());
+                            }
+                        }
+                    }
+                    let _ = res_tx.send(outcome);
                 }
                 ChainCommand::GetChainInfo(tx) => {
                     let info = format!(
@@ -3725,8 +3781,15 @@ impl ChainActor {
                             .validate_sovereign_audit_export(bundle.as_ref()),
                     );
                 }
+                #[cfg(test)]
                 ChainCommand::SubmitDomainCommitment(commitment, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_domain_commitment(commitment));
+                }
+                ChainCommand::VerifyVerifiedDomainCommitment(payload, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .verify_domain_commitment_finality(&payload.commitment, &payload.proof),
+                    );
                 }
                 ChainCommand::SubmitVerifiedDomainCommitment(payload, res_tx) => {
                     let _ = res_tx.send(
@@ -3862,25 +3925,6 @@ impl ChainActor {
                             .map_err(|e| e.to_string()),
                     );
                 }
-                ChainCommand::SetStorageOperatorClass { class, response } => {
-                    let Some(operator) = self
-                        .blockchain
-                        .consensus()
-                        .signer()
-                        .map(crate::crypto::signer::ConsensusSigner::address)
-                    else {
-                        let _ = response.send(Err(
-                            "storage operator class is self-declared by the local signer; no validator key is loaded".into(),
-                        ));
-                        continue;
-                    };
-                    self.blockchain
-                        .state
-                        .storage_registry
-                        .set_operator_class(operator, class);
-                    let persist = self.blockchain.persist_storage_registry();
-                    let _ = response.send(persist);
-                }
                 ChainCommand::BeginRoleBondUnbonding(address, role, res_tx) => {
                     let _ = res_tx.send(
                         self.blockchain
@@ -3925,9 +3969,12 @@ impl ChainActor {
                     let _ = res_tx.send(res);
                 }
                 ChainCommand::GetAiFeeReclaimStatus(id, res_tx) => {
-                    let current_block = self.blockchain.state.epoch_index.saturating_mul(100);
-                    let mut registry = self.blockchain.state.ai_registry.clone();
-                    let res = registry.reclaim_fee(&id, current_block);
+                    let current_block = self.ai_query_height();
+                    let res = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .check_reclaimable(&id, current_block);
                     let _ = res_tx.send(res);
                 }
                 ChainCommand::GetAiEquivocationStatus(request_id, verifier, res_tx) => {
@@ -3943,7 +3990,7 @@ impl ChainActor {
                     let _ = res_tx.send(is_cancelled);
                 }
                 ChainCommand::GetAiDisputeStatus(request_id, verifier, res_tx) => {
-                    let current_block = self.blockchain.state.epoch_index.saturating_mul(100);
+                    let current_block = self.ai_query_height();
                     let status = self.blockchain.state.ai_registry.get_dispute_status(
                         &request_id,
                         &verifier,
@@ -4049,7 +4096,11 @@ impl ChainActor {
                     let _ = response.send(rep);
                 }
                 ChainCommand::GetAiAgentRanking(res_tx) => {
-                    let ranking = self.blockchain.state.ai_registry.agents_by_trust_score();
+                    let ranking = self
+                        .blockchain
+                        .state
+                        .ai_registry
+                        .agents_by_trust_score_permille();
                     let _ = res_tx.send(ranking);
                 }
                 ChainCommand::GetPruneStatus(res_tx) => {
@@ -4074,9 +4125,15 @@ impl ChainActor {
                     let mut pruned_count = 0;
                     if let Some(ref pm) = self.blockchain.pruning_manager {
                         let keep = min_blocks.unwrap_or(pm.min_blocks_to_keep);
+                        // The snapshot bound has to be the newest snapshot
+                        // that actually exists. Passing the tip height here
+                        // (the old code) made the bound a no-op, so an
+                        // operator prune deleted blocks the next restart
+                        // needed to reach its snapshot: lasting data loss,
+                        // node unable to boot (P10-F03).
                         let prunable = pm.get_prunable_blocks_with_retention(
                             height,
-                            height.saturating_sub(1),
+                            pm.latest_snapshot_height(),
                             finalized,
                             keep,
                         );
@@ -4168,6 +4225,7 @@ impl ChainActor {
                     domain_height,
                     event_index,
                     expiry_height,
+                    recipient_eth,
                     response,
                 } => {
                     let _ = response.send(self.blockchain.burn_bridge_transfer_with_event(
@@ -4176,6 +4234,7 @@ impl ChainActor {
                         domain_height,
                         event_index,
                         expiry_height,
+                        recipient_eth,
                     ));
                 }
                 ChainCommand::UnlockBridgeTransfer {
@@ -4339,62 +4398,29 @@ impl ChainActor {
                         .map_err(|e| e.to_string());
                     let _ = response.send(persist.map(|_| manifest_id));
                 }
-                ChainCommand::IssueViewGrant {
-                    content_id,
-                    auth,
-                    grantee,
-                    key_id,
-                    policy,
-                    opened_epoch,
-                    response,
-                } => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let res = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .issue_view_grant(content_id, &auth, grantee, key_id, policy, opened_epoch)
-                        .map_err(|e| e.to_string());
-                    let _ = response.send(res);
+                ChainCommand::IssueViewGrant { response, .. } => {
+                    // View grants are folded into the storage state root, so
+                    // issuing one between blocks rewrites the local node's
+                    // root alone: a peer that never saw this RPC call computes
+                    // a different root and rejects honest blocks (P30-F01).
+                    // Until grants ride a block transaction, the RPC mutation
+                    // path is refused on every chain, not only on mainnet.
+                    let _ = response.send(Err(Self::view_grant_rpc_mutation_error()));
+                    continue;
                 }
-                ChainCommand::RevokeViewGrant {
-                    grant_id,
-                    auth,
-                    at_epoch,
-                    response,
-                } => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let res = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .revoke_view_grant(grant_id, &auth, at_epoch)
-                        .map_err(|e| e.to_string());
-                    let _ = response.send(res);
+                ChainCommand::RevokeViewGrant { response, .. } => {
+                    // Same invariant as IssueViewGrant: the grant book is
+                    // state-root bearing and may only change inside a block.
+                    let _ = response.send(Err(Self::view_grant_rpc_mutation_error()));
+                    continue;
                 }
-                ChainCommand::SocialDelete {
-                    content_id,
-                    auth,
-                    at_epoch,
-                    response,
-                } => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let res = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .social_delete(content_id, &auth, at_epoch)
-                        .map_err(|e| e.to_string());
-                    let _ = response.send(res);
+                ChainCommand::SocialDelete { response, .. } => {
+                    // A delete rewrites the grant book and the rows keyed by the
+                    // content, all state-root bearing. Applied between blocks it
+                    // changes this node's root alone, so it is refused on every
+                    // chain until it rides a block transaction.
+                    let _ = response.send(Err(Self::social_delete_rpc_mutation_error()));
+                    continue;
                 }
                 ChainCommand::GetViewGrants {
                     content_id,
@@ -4429,12 +4455,11 @@ impl ChainActor {
                         let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
                         continue;
                     }
-                    let res = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .register_confidential_commit(commit, &auth);
-                    let _ = response.send(res);
+                    let _ = (commit, auth);
+                    let _ = response.send(Err(
+                        "Out-of-block confidential commit registration is disabled to preserve state-root consensus"
+                            .to_string(),
+                    ));
                 }
                 ChainCommand::GetConfidentialOwner {
                     content_id,
@@ -4458,6 +4483,20 @@ impl ChainActor {
                 ChainCommand::OpenStorageChallenge { request, response } => {
                     if self.storage_economics_disabled_on_mainnet() {
                         let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
+                        continue;
+                    }
+                    let current_epoch = self.blockchain.last_block().index
+                        / crate::core::chain_config::epoch_len_for_chain_id(
+                            self.blockchain.chain_id,
+                        );
+                    if let Err(e) =
+                        crate::domain::storage_deal::StorageRegistry::validate_challenge_window(
+                            request.challenge_epoch,
+                            request.deadline_epoch,
+                            current_epoch,
+                        )
+                    {
+                        let _ = response.send(Err(e.to_string()));
                         continue;
                     }
                     let opener = request
@@ -5065,6 +5104,17 @@ impl ChainActor {
                         .collect();
                     let _ = response.send(authorizations);
                 }
+                ChainCommand::PollenGetEncryptionPolicies { response } => {
+                    let policies: Vec<_> = self
+                        .blockchain
+                        .state
+                        .marketplace
+                        .encryption_policies
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(policies);
+                }
                 ChainCommand::PollenGetPurchaseReceipts { response } => {
                     let receipts: Vec<_> = self
                         .blockchain
@@ -5089,5 +5139,36 @@ impl ChainActor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod proof_cache_tests {
+    use super::*;
+    use crate::consensus::pow::PoWEngine;
+    use std::sync::Arc;
+
+    #[test]
+    fn account_proof_follows_balance_change_at_equal_chain_length() {
+        let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let (mut actor, _handle) = ChainActor::new(bc);
+        let who = Address([7u8; 32]);
+        actor.blockchain.state.add_balance(&who, 100);
+        let before = actor.account_proof(&who);
+        assert_eq!(before.balance, 100);
+        // No block is added: the chain length stays the same.
+        actor.blockchain.state.add_balance(&who, 50);
+        let after = actor.account_proof(&who);
+        assert_eq!(after.balance, 150);
+        assert_ne!(before.root, after.root);
+    }
+
+    #[test]
+    fn ai_query_height_is_the_state_height_not_an_epoch_guess() {
+        let bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let (mut actor, _handle) = ChainActor::new(bc);
+        actor.blockchain.state.epoch_index = 0;
+        actor.blockchain.state.current_block_height = 37;
+        assert_eq!(actor.ai_query_height(), 37);
     }
 }

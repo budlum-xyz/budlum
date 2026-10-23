@@ -45,7 +45,7 @@
 //!
 //! # The six development fixtures, and why they must never hold value
 //!
-//! [`dev_fixture_device_signers`] returns six deterministic device signers.
+//! `dev_fixture_device_signers` returns six deterministic device signers.
 //! Their private keys are derived from seeds visible in this file, which means
 //! **they are public knowledge**: any signature any of them makes can be
 //! forged by anyone who has ever cloned this repository. They exist so that
@@ -140,23 +140,40 @@ impl DeviceSigner {
     }
 }
 
+/// The seed of development fixture device `device_id`.
+///
+/// Deliberately simple and visible: anything subtler would only pretend these
+/// keys have entropy. Kept in production code (BLG-0074) so `verify_quorum`
+/// can *reject* these public keys wherever they appear.
+fn dev_fixture_seed(device_id: u32) -> [u8; 32] {
+    let mut seed = [0u8; 32];
+    for (j, byte) in seed.iter_mut().enumerate() {
+        *byte = 0xC0 ^ (device_id as u8) ^ (j as u8);
+    }
+    seed
+}
+
+/// The verifying key fixture device `device_id` will always present.
+fn dev_fixture_verifying_key(device_id: u32) -> [u8; 32] {
+    SigningKey::from_bytes(&dev_fixture_seed(device_id))
+        .verifying_key()
+        .to_bytes()
+}
+
 /// The six development fixture devices, in committee order 1..=6.
 ///
 /// Deterministic on purpose: a test that cannot reproduce its signers cannot
 /// reproduce its quorum. Seeds are fixed bytes in this file, which is exactly
 /// why these keys must never custody anything (see the module header).
+/// BLG-0074 (P03-F17): test-only. Production code cannot even construct
+/// these signers, and `verify_quorum` refuses their identities outright.
+#[cfg(test)]
 #[must_use]
 pub fn dev_fixture_device_signers() -> Vec<DeviceSigner> {
     (1..=DEV_FIXTURE_DEVICE_COUNT)
         .map(|i| {
-            let mut seed = [0u8; 32];
-            // A deliberately simple, visibly deterministic pattern. Anything
-            // subtler would only pretend these keys have entropy.
-            for (j, byte) in seed.iter_mut().enumerate() {
-                *byte = 0xC0 ^ (i as u8) ^ (j as u8);
-            }
-            let key = SigningKey::from_bytes(&seed);
-            let verifying_key = key.verifying_key().to_bytes();
+            let key = SigningKey::from_bytes(&dev_fixture_seed(i));
+            let verifying_key = dev_fixture_verifying_key(i);
             DeviceSigner {
                 identity: SignerIdentity {
                     device_id: i,
@@ -185,6 +202,12 @@ pub enum QuorumError {
     SignerOutOfRange { device_id: u32, device_count: u32 },
     /// One device counted twice. Distinctness is the whole quorum property.
     DuplicateSigner { device_id: u32 },
+    /// BLG-0073: the identity set is not the full committee.
+    IdentitySetSizeMismatch { device_count: u32, presented: usize },
+    /// BLG-0073: two device ids present the same verifying key.
+    DuplicateVerifyingKey { device_id: u32 },
+    /// BLG-0074: a public development fixture identity tried to sign.
+    FixtureIdentity { device_id: u32 },
     /// A signature pinned to a different key epoch than the one the gate is
     /// asked to accept (rotation boundary enforcement).
     EpochMismatch {
@@ -208,6 +231,9 @@ impl QuorumError {
             Self::QuorumNotReached { .. } => "quorum-not-reached",
             Self::SignerOutOfRange { .. } => "quorum-signer-out-of-range",
             Self::DuplicateSigner { .. } => "quorum-duplicate-signer",
+            Self::IdentitySetSizeMismatch { .. } => "quorum-identity-set-size-mismatch",
+            Self::DuplicateVerifyingKey { .. } => "quorum-duplicate-verifying-key",
+            Self::FixtureIdentity { .. } => "quorum-fixture-identity",
             Self::EpochMismatch { .. } => "quorum-epoch-mismatch",
             Self::UnknownSigner { .. } => "quorum-unknown-signer",
             Self::InvalidSignature { .. } => "quorum-invalid-signature",
@@ -239,6 +265,25 @@ impl std::fmt::Display for QuorumError {
             ),
             Self::DuplicateSigner { device_id } => {
                 write!(f, "cold quorum signer id {device_id} presented twice")
+            }
+            Self::IdentitySetSizeMismatch {
+                device_count,
+                presented,
+            } => write!(
+                f,
+                "cold quorum needs identities for all {device_count} devices, got {presented}"
+            ),
+            Self::DuplicateVerifyingKey { device_id } => {
+                write!(
+                    f,
+                    "cold quorum verifying key reused at device id {device_id}"
+                )
+            }
+            Self::FixtureIdentity { device_id } => {
+                write!(
+                    f,
+                    "cold quorum refuses dev fixture identity at device id {device_id}"
+                )
             }
             Self::EpochMismatch {
                 signer_epoch,
@@ -296,6 +341,40 @@ pub fn verify_quorum(
             device_count: policy.device_count,
             presented: signatures.len(),
         });
+    }
+    // BLG-0073 (P03-F16): the presented identity set must be the whole
+    // committee - no more, no less. Without this rule a caller could present
+    // one real identity twice under two device ids.
+    if identities.len() != policy.device_count as usize {
+        return Err(QuorumError::IdentitySetSizeMismatch {
+            device_count: policy.device_count,
+            presented: identities.len(),
+        });
+    }
+    // BLG-0073: two device ids sharing one verifying key are one device.
+    for (i, a) in identities.iter().enumerate() {
+        for b in identities.iter().skip(i + 1) {
+            if a.verifying_key == b.verifying_key {
+                return Err(QuorumError::DuplicateVerifyingKey {
+                    device_id: a.device_id,
+                });
+            }
+        }
+    }
+    // BLG-0074: the dev fixture keys are public knowledge and must never
+    // pass a quorum in a production build, whatever identity they arrive
+    // under. Compiled out of `cfg(test)` on purpose: the test suite models
+    // committees with these very fixtures, and the rule that matters is the
+    // one that runs where value is at stake.
+    #[cfg(not(test))]
+    for identity in identities {
+        for fixture_id in 1..=DEV_FIXTURE_DEVICE_COUNT {
+            if identity.verifying_key == dev_fixture_verifying_key(fixture_id) {
+                return Err(QuorumError::FixtureIdentity {
+                    device_id: identity.device_id,
+                });
+            }
+        }
     }
     if signatures.len() < policy.required_quorum as usize {
         return Err(QuorumError::QuorumNotReached {
@@ -505,9 +584,20 @@ mod tests {
     fn a_signature_from_a_device_not_in_the_identity_set_is_refused() {
         let payload = payload();
         let signers = dev_fixture_device_signers();
-        // Only devices 4..=6 are known; signatures come from 1..=3.
-        let identities: Vec<SignerIdentity> =
+        // Only devices 4..=6 are known as ids 4..=6; ids 7..=9 pad the set to
+        // the committee size with unrelated keys. Signatures come from 1..=3,
+        // ids the set does not hold.
+        let mut identities: Vec<SignerIdentity> =
             signers[3..].iter().map(|s| s.identity.clone()).collect();
+        for pad in 7u8..=9 {
+            identities.push(SignerIdentity {
+                device_id: u32::from(pad),
+                label: format!("pad-{pad}"),
+                verifying_key: SigningKey::from_bytes(&[pad; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            });
+        }
         let sigs = three_of_six(&payload, 1);
         let err = verify_quorum(&policy(), &identities, &payload, 1, &sigs)
             .expect_err("unknown devices must fail");
@@ -552,5 +642,37 @@ mod tests {
         let err = verify_quorum(&broken, &identities, &payload, 1, &sigs)
             .expect_err("invalid policy must fail closed");
         assert_eq!(err.kind(), "quorum-invalid-policy");
+    }
+    // ---- BLG-0073 (P03-F16) ----
+
+    #[test]
+    fn a_partial_identity_set_is_refused() {
+        let p = policy();
+        let signers = dev_fixture_device_signers();
+        let identities: Vec<_> = signers.iter().take(2).map(|s| s.identity.clone()).collect();
+        let payload = b"quorum-size-check";
+        let signatures: Vec<_> = signers
+            .iter()
+            .take(2)
+            .map(|s| s.sign_payload(payload, 1))
+            .collect();
+        let err = verify_quorum(&p, &identities, payload, 1, &signatures).unwrap_err();
+        assert_eq!(err.kind(), "quorum-identity-set-size-mismatch");
+    }
+
+    #[test]
+    fn two_device_ids_sharing_one_key_are_refused() {
+        let p = policy();
+        let signers = dev_fixture_device_signers();
+        let mut identities: Vec<_> = signers.iter().map(|s| s.identity.clone()).collect();
+        identities[5].verifying_key = identities[0].verifying_key;
+        let payload = b"quorum-dup-key-check";
+        let signatures: Vec<_> = signers
+            .iter()
+            .take(3)
+            .map(|s| s.sign_payload(payload, 1))
+            .collect();
+        let err = verify_quorum(&p, &identities, payload, 1, &signatures).unwrap_err();
+        assert_eq!(err.kind(), "quorum-duplicate-verifying-key");
     }
 }

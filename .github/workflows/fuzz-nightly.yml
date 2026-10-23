@@ -56,6 +56,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # DELIBERATE-TOOLCHAIN-DIVERGENCE
+      # cargo-fuzz needs a nightly compiler, so this job cannot use the stable pin.
       - name: Install Rust (nightly - cargo-fuzz gereksinimi)
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
         with:
@@ -110,7 +112,7 @@ jobs:
       # no artifact and no second finding to report.
       - name: Crash artifact (varsa)
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-nightly-${{ matrix.target }}-${{ github.run_id }}
           path: fuzz/artifacts/${{ matrix.target }}/

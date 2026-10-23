@@ -22,12 +22,30 @@ pub use registry::AiRegistry;
 /// inference is compiled and tested, but it is not the production
 /// acceptance condition. Flip this only together with an AIR that binds
 /// the initial memory image (F-08) from a Fiat-Shamir transcript (F-09).
+///
+/// Additional flip conditions found by the second-pass audit (P32-F02):
+/// - `initial_state_root` is a prover claim: rebuilding it node-side
+///   (`expected_initial_state_root`) needs the weights, which are not on
+///   chain (the model registers only a digest and dims). Until weights are
+///   available to the verifier or the AIR binds them, a prover can pair a
+///   valid trace with substituted weights that fold to the claimed root.
+/// - `event_digest` is never compared with the result's `output_commitment`
+///   (different hash domains); the output the proof attests is not yet tied
+///   to the output the chain recorded.
+/// - `sender`, `nonce` and `block_height` in the public inputs are guest-VM
+///   context, not chain values: nothing binds them to the attaching
+///   transaction, so one proof can accompany several requests of the same
+///   model with identical commitments.
+///
+/// While the flag is off this is fail-closed: proof-required models refuse
+/// proofs without public inputs, and `require_proof` payment release accepts
+/// only fully verified attaches (`fully_verified_proofs`).
 pub const FULL_AI_STARK_VERIFICATION_LIVE: bool = false;
 pub use types::{
     AiAgentPayment, AiAgentPaymentSettlement, AiAgentReputation, AiCallbackEvent,
     AiDisputeStatusInfo, AiExecutionProof, AiInferenceOutcome, AiInferenceRequest,
-    AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus, AiRequestId, AiResultId,
-    AiVerifierQos, AiVerifierStakeInfo, BoundedBytes, MAX_INFERENCE_REF_BYTES,
+    AiInferenceResult, AiModelId, AiModelSpec, AiPaymentEscrowStatus, AiRequestId, AiVerifierQos,
+    AiVerifierStakeInfo, BoundedBytes, MAX_INFERENCE_REF_BYTES,
 };
 
 #[cfg(test)]
@@ -793,6 +811,15 @@ mod tests {
         .unwrap();
 
         // Deadline has passed (current_block=200 > deadline_block=110, result_deadline=60)
+        // The read-only check changes nothing (P10-F08): it can run twice.
+        assert_eq!(
+            registry.check_reclaimable(&req_id, 200),
+            Ok((requester, 500))
+        );
+        assert_eq!(
+            registry.check_reclaimable(&req_id, 200),
+            Ok((requester, 500))
+        );
         let result = registry.reclaim_fee(&req_id, 200);
         assert!(
             result.is_ok(),
@@ -801,6 +828,7 @@ mod tests {
         let (reclaimed_requester, max_fee) = result.unwrap();
         assert_eq!(reclaimed_requester, requester);
         assert_eq!(max_fee, 500);
+        assert!(registry.check_reclaimable(&req_id, 200).is_err());
     }
 
     #[test]
@@ -1637,11 +1665,11 @@ mod tests {
         let req_id = registry.submit_request(req, 5).unwrap();
 
         // Not pruned: within retention window
-        let pruned = registry.prune_expired(200, 100);
+        let (pruned, _) = registry.prune_expired(200, 100);
         assert_eq!(pruned, 0, "Should not prune within retention window");
 
         // Pruned: past retention window (effective_deadline=110, retention=100, current=300)
-        let pruned = registry.prune_expired(300, 100);
+        let (pruned, _) = registry.prune_expired(300, 100);
         assert!(pruned > 0, "Should prune expired requests past retention");
         assert!(!registry.requests.contains_key(&req_id));
     }
@@ -1705,12 +1733,12 @@ mod tests {
             .expect("the requester cancels");
 
         // Within retention everything stays, markers included.
-        assert_eq!(registry.prune_expired(200, 100), 0);
+        assert_eq!(registry.prune_expired(200, 100).0, 0);
         assert!(registry.reclaimed_fees.contains(&reclaimed));
         assert!(registry.cancelled_requests.contains(&cancelled));
 
         // Past retention the rows and their markers retire together.
-        assert_eq!(registry.prune_expired(300, 100), 4);
+        assert_eq!(registry.prune_expired(300, 100).0, 4);
         assert!(registry.requests.is_empty());
         assert!(registry.reclaimed_fees.is_empty());
         assert!(registry.cancelled_requests.is_empty());
@@ -2141,6 +2169,30 @@ mod tests {
         );
         // If we get here without error, the request was accepted
         assert!(registry.requests.contains_key(&req_id));
+    }
+
+    #[test]
+    fn outcome_keeps_earliest_agreeing_output_ref() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let mk = |v: u8, out: &[u8], nonce: u64| AiInferenceResult {
+            request_id: req_id,
+            verifier: Address::from([v; 32]),
+            output_commitment: [9u8; 32],
+            output_ref: BoundedBytes::try_new(out.to_vec()).unwrap(),
+            result_nonce: nonce,
+            signature: vec![1],
+            submitted_at_block: 11,
+        };
+        assert!(
+            submit_result_staked(&mut registry, mk(0x11, b"first", 1), 11)
+                .unwrap()
+                .is_none()
+        );
+        let outcome = submit_result_staked(&mut registry, mk(0x22, b"second", 1), 11)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.output_ref.as_slice(), b"first");
     }
 
     #[test]
@@ -3274,7 +3326,7 @@ mod tests {
             public_inputs: None,
         };
         let err = registry
-            .attach_execution_proof(&req_id, &v1, proof)
+            .attach_execution_proof(&req_id, &v1, proof, false)
             .unwrap_err();
         assert!(err.contains("reclaimed"), "{err}");
         assert!(!registry.has_execution_proof(&req_id, &v1));
@@ -3320,11 +3372,11 @@ mod tests {
         assert_eq!(registry.callback_queue.len(), 5);
 
         // Inside the retention window nothing moves.
-        assert_eq!(registry.prune_expired(100, 100), 0);
+        assert_eq!(registry.prune_expired(100, 100).0, 0);
         assert_eq!(registry.callback_queue.len(), 5);
 
         // Past it the outcomes retire, and so do their events and keys.
-        let pruned = registry.prune_expired(200, 100);
+        let (pruned, _) = registry.prune_expired(200, 100);
         assert!(pruned >= 10, "5 outcomes and 5 events retire: {pruned}");
         assert!(registry.callback_queue.is_empty());
         assert!(registry.outcomes.is_empty());
@@ -3392,7 +3444,7 @@ mod tests {
             weights_digest: None,
             public_inputs: None,
         };
-        let attached = registry.attach_execution_proof(&req_id, &v1, proof);
+        let attached = registry.attach_execution_proof(&req_id, &v1, proof, false);
         assert!(attached.is_err());
         assert!(attached.unwrap_err().contains("cancelled"));
         assert!(!registry.has_execution_proof(&req_id, &v1));
@@ -3505,6 +3557,20 @@ mod tests {
     }
 
     #[test]
+    fn test_refused_result_on_cancelled_request_leaves_no_results_row() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        registry.cancel_request(&req_id, &owner, 15).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        assert!(submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 16).is_err());
+
+        assert!(!registry.results.contains_key(&req_id));
+    }
+
+    #[test]
     fn test_prune_includes_new_fields() {
         // Prune_expired should clean up cancelled_requests
         // That are past the retention window.
@@ -3522,6 +3588,10 @@ mod tests {
         assert!(
             registry.get_request(&req_id).is_none(),
             "Pruned cancelled request should be removed"
+        );
+        assert!(
+            !registry.is_cancelled(&req_id),
+            "Pruned cancelled request must lose its cancellation marker"
         );
     }
 
@@ -4013,6 +4083,17 @@ mod tests {
     }
 
     #[test]
+    fn callback_queue_root_commits_to_event_count() {
+        let (mut registry, _model_id, _owner) = setup_ai_registry(2, 2);
+        let addr =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000CB")
+                .unwrap();
+        let absent = registry.state_root();
+        registry.callback_queue.insert(addr, Vec::new());
+        assert_ne!(absent, registry.state_root());
+    }
+
+    #[test]
     fn test_multiple_callbacks_same_address() {
         // Multiple outcomes can queue events for the same callback
         let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
@@ -4078,7 +4159,7 @@ mod tests {
         };
 
         // Attach proof successfully
-        let result = registry.attach_execution_proof(&req_id, &v1, proof.clone());
+        let result = registry.attach_execution_proof(&req_id, &v1, proof.clone(), false);
         assert!(result.is_ok());
         assert!(registry.has_execution_proof(&req_id, &v1));
 
@@ -4110,7 +4191,7 @@ mod tests {
             public_inputs: None,
         };
 
-        let result = registry.attach_execution_proof(&req_id, &v1, proof);
+        let result = registry.attach_execution_proof(&req_id, &v1, proof, false);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("output_commitment"));
     }
@@ -4137,7 +4218,7 @@ mod tests {
             public_inputs: None,
         };
 
-        let result = registry.attach_execution_proof(&req_id, &v1, proof);
+        let result = registry.attach_execution_proof(&req_id, &v1, proof, false);
         assert!(result.is_err());
     }
 
@@ -4239,20 +4320,104 @@ mod tests {
             public_inputs: None,
         };
         registry
-            .attach_execution_proof(&req_id, &v1, proof)
+            .attach_execution_proof(&req_id, &v1, proof, false)
             .unwrap();
 
         assert_ne!(root_before, registry.state_root());
+    }
+
+    /// P32-F02: the STARK public inputs are prover claims (initial state root,
+    /// event digest, sender, nonce, block height are not bound to the request).
+    /// Until they are, the flag stays off and proof-required models cannot
+    /// register. Whoever flips the flag must first replace this lock with
+    /// tests of the missing bindings.
+    #[test]
+    fn full_stark_verification_flag_is_locked_off_until_inputs_are_bound() {
+        const {
+            assert!(
+                !FULL_AI_STARK_VERIFICATION_LIVE,
+                "P32-F02: STARK public inputs are not bound to the request yet"
+            );
+        }
+    }
+
+    #[test]
+    fn require_proof_release_needs_fully_verified_proof() {
+        // BLG-0469 / P32-F03: a structural-only attach against a model that
+        // does not require proofs used to satisfy `has_execution_proof`, and
+        // that was the gate for releasing a `require_proof` escrow: the payer
+        // asked for a verified proof and an operator could settle with
+        // envelope-shaped bytes. Release now gates on FULL STARK verification.
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let v2 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
+                .unwrap();
+
+        // Finalize the request with two matching results.
+        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 1, 16).unwrap();
+        assert!(outcome.is_some(), "two matching results must finalize");
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: None,
+            public_inputs: None,
+        };
+
+        let payer =
+            Address::from_hex("00000000000000000000000000000000000000000000000000000000000000AA")
+                .unwrap();
+        let payment = AiAgentPayment {
+            payment_id: [7u8; 32],
+            from_agent: payer,
+            to_agent: v1,
+            amount: 500,
+            request_id: Some(req_id),
+            require_proof: true,
+            submitted_at_block: 20,
+            expiry_block: 500,
+        };
+        registry
+            .submit_agent_payment(payment, 20)
+            .expect("escrowed payment accepted");
+
+        // A structural-only attach records the proof but must NOT release.
+        registry
+            .attach_execution_proof(&req_id, &v1, proof.clone(), false)
+            .unwrap();
+        assert!(registry.has_execution_proof(&req_id, &v1));
+        let err = registry
+            .release_agent_payment(&[7u8; 32], 30)
+            .expect_err("structural-only proof must not release a require_proof escrow");
+        assert!(err.contains("fully verified"), "{err}");
+
+        // The same proof cleared by full STARK verification releases.
+        registry
+            .attach_execution_proof(&req_id, &v1, proof, true)
+            .unwrap();
+        let to = registry
+            .release_agent_payment(&[7u8; 32], 30)
+            .expect("fully verified proof releases the escrow");
+        assert_eq!(to, v1);
     }
 
     #[test]
     fn test_qos_changes_state_root() {
         // QoS changes affect state root
         let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
-        let root_before = registry.state_root();
 
         let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
-        let _ = root_before; // just trigger QoS via result submission
+        let root_before = registry.state_root();
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
@@ -4691,7 +4856,95 @@ mod tests {
 
         let top2 = registry.top_agents(2);
         assert_eq!(top2.len(), 2);
-        // And a3 should be top (both 100% reliability)
-        assert!(top2.iter().all(|(a, _)| *a == a1 || *a == a3));
+        // a1 and a3 tie at full reliability and keep address order.
+        assert_eq!(top2[0].0, a1);
+        assert_eq!(top2[1].0, a3);
+        assert_eq!(top2[0].1.to_bits(), top2[1].1.to_bits());
+
+        let all = registry.top_agents(3);
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[2].0, a2);
+        assert!(all[2].1 < all[1].1);
+    }
+
+    #[test]
+    fn state_root_commits_to_fully_verified_proofs_and_gates_proof_required_finalization() {
+        let mut reg = AiRegistry::new();
+        let owner =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000001")
+                .unwrap();
+        let model_id = AiModelId::of(&owner, &[7u8; 32], 1);
+        reg.register_model(AiModelSpec {
+            model_id,
+            model_hash: [7u8; 32],
+            owner,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 2048,
+            request_deadline_blocks: 100,
+            result_deadline_blocks: 50,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_dims: None,
+            execution_weights_digest: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        })
+        .unwrap();
+        {
+            let m = reg.models.get_mut(&model_id).unwrap();
+            m.require_execution_proof = true;
+            m.execution_program_hash = Some([0xAA; 32]);
+            m.execution_weights_digest = Some([0xBB; 32]);
+        }
+
+        let mut req = AiInferenceRequest {
+            request_id: AiRequestId::default(),
+            requester: owner,
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            input_ref: BoundedBytes::try_new(b"test".to_vec()).unwrap(),
+            max_fee: 100,
+            callback: None,
+            submitted_at_block: 10,
+            deadline_block: 110,
+            effort: crate::ai_inference::effort::EffortTier::default(),
+            perception: Some(text_perception()),
+        };
+        req.request_id = req.calculate_id();
+        let req_id = reg.submit_request(req, 10).unwrap();
+
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000021")
+                .unwrap();
+        let outcome = submit_ai_result(&mut reg, req_id, v1, [9u8; 32], 1, 12).unwrap();
+        assert!(outcome.is_none());
+
+        let proof = AiExecutionProof {
+            model_id,
+            input_commitment: canonical_input_commitment(b"test"),
+            output_commitment: [9u8; 32],
+            program_hash: [0xAA; 32],
+            proof_bytes: vec![1, 2, 3, 4],
+            steps: 100,
+            gas_used: 50000,
+            weights_digest: Some([0xBB; 32]),
+            public_inputs: None,
+        };
+        let mut reg_structural = reg.clone();
+        let mut reg_verified = reg;
+        reg_structural
+            .attach_execution_proof(&req_id, &v1, proof.clone(), false)
+            .unwrap();
+        reg_verified
+            .attach_execution_proof(&req_id, &v1, proof, true)
+            .unwrap();
+
+        assert_ne!(reg_structural.state_root(), reg_verified.state_root());
+        assert!(reg_structural.try_finalize_with_proofs(&req_id).is_none());
+        assert!(reg_verified.try_finalize_with_proofs(&req_id).is_some());
     }
 }

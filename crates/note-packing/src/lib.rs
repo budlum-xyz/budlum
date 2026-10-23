@@ -84,10 +84,35 @@ pub const fn hash_from_field(fe: u64) -> NoteHash {
 /// them as the same note is how a double spend gets through. [`is_packed`]
 /// answers whether a given hash is one this module could have produced.
 #[must_use]
+///
+/// WIRING: exposed for the note-hash consumers this crate was
+/// extracted for, which unpack a packed hash on their side of the
+/// seam; in-tree the round-trip tests pin the packing.
 pub fn field_from_hash(h: &NoteHash) -> u64 {
     let mut b = [0u8; FIELD_BYTES];
     b.copy_from_slice(&h[..FIELD_BYTES]);
     u64::from_le_bytes(b)
+}
+
+/// BLG-0284 (P17-F18): the fold the outside world should actually use.
+///
+/// The old contract was a comment: "callers must call [`is_packed`] first".
+/// A contract the type cannot check is a contract someone will forget, and
+/// forgetting it reads two distinct hashes as one field element. This
+/// accessor folds only when both halves of the shape check hold - upper
+/// bytes all zero AND the low bytes below the prime - and refuses anything
+/// else with `None`, so a foreign hash cannot alias through it.
+#[must_use]
+pub fn field_of_packed_hash(h: &NoteHash) -> Option<u64> {
+    if !is_packed(h) {
+        return None;
+    }
+    let fe = field_from_hash(h);
+    if fe < GOLDILOCKS_P {
+        Some(fe)
+    } else {
+        None
+    }
 }
 
 /// Whether a hash is one [`hash_from_field`] could have produced.
@@ -95,6 +120,10 @@ pub fn field_from_hash(h: &NoteHash) -> u64 {
 /// False means the upper bytes are non-zero, so [`field_from_hash`] would
 /// silently discard them.
 #[must_use]
+///
+/// WIRING: exposed for the same consumers as `field_from_hash`, to
+/// ask whether a foreign hash is one this packing could have made
+/// before trusting its low eight bytes.
 pub fn is_packed(h: &NoteHash) -> bool {
     let mut i = FIELD_BYTES;
     while i < 32 {
@@ -111,6 +140,9 @@ pub fn is_packed(h: &NoteHash) -> bool {
 /// The VM should never emit a non-canonical one. This exists so a caller can
 /// assert that rather than assume it.
 #[must_use]
+///
+/// WIRING: exposed for the same consumers as `field_from_hash`, to
+/// ask whether a value is canonical before it is packed or compared.
 pub const fn is_canonical_field(fe: u64) -> bool {
     fe < GOLDILOCKS_P
 }
@@ -118,6 +150,39 @@ pub const fn is_canonical_field(fe: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BLG-0284 (P17-F18): `field_of_packed_hash` is the refusal the raw
+    /// fold never gave. A foreign hash that shares the low eight bytes with
+    /// a real element must NOT fold through the checked accessor - that
+    /// aliasing is how two notes read as one.
+    #[test]
+    fn the_checked_accessor_refuses_what_the_raw_fold_would_drop() {
+        let real = hash_from_field(12345);
+        assert_eq!(field_of_packed_hash(&real), Some(12345));
+
+        // Same low bytes, non-zero tail: the fold would silently drop it.
+        let mut high = real;
+        high[FIELD_BYTES] = 0x01;
+        assert_eq!(
+            field_from_hash(&high),
+            field_from_hash(&real),
+            "raw fold aliases"
+        );
+        assert_eq!(
+            field_of_packed_hash(&high),
+            None,
+            "the checked accessor must refuse the aliasing input"
+        );
+
+        // Packed shape but non-canonical value (>= p).
+        let mut over = [0u8; 32];
+        over[..8].copy_from_slice(&GOLDILOCKS_P.to_le_bytes());
+        assert_eq!(
+            field_of_packed_hash(&over),
+            None,
+            "a value at or above the prime is not a field element"
+        );
+    }
 
     #[test]
     fn round_trip_is_exact_across_the_whole_range() {
@@ -130,6 +195,15 @@ mod tests {
             u64::MAX,
         ] {
             assert_eq!(field_from_hash(&hash_from_field(fe)), fe, "fe = {fe}");
+            // BLG-0284: the checked accessor agrees with the raw fold below
+            // the prime and refuses at-or-above it, even when the bytes came
+            // from this module's own packer.
+            let expected = if fe < GOLDILOCKS_P { Some(fe) } else { None };
+            assert_eq!(
+                field_of_packed_hash(&hash_from_field(fe)),
+                expected,
+                "fe = {fe}"
+            );
         }
     }
 

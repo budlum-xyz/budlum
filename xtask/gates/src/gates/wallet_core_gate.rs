@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-const TESTS: &[&str] = &[
+pub(crate) const TESTS: &[&str] = &[
     "entropy_size_preserves_mnemonic_word_count",
     "wallet_generate_rejects_placeholder_entropy_in_production",
     "mnemonic_checksum_validation_rejects_invalid",

@@ -49,6 +49,7 @@ const RPC_CONNECTION_LIMIT_CEILING: u32 = 100_000;
 /// [`RpcSecurityConfig::default`] so that every constructor in this file
 /// Produces a bounded listener.
 const RPC_DEFAULT_BODY_LIMIT: u32 = 16 * 1024 * 1024;
+const RPC_DEFAULT_RATE_LIMIT_PER_MINUTE: u64 = 120;
 const RPC_DEFAULT_CONNECTION_LIMIT: u32 = 500;
 
 // (security audit §5) `auth_required` defaults to `true` (secure
@@ -79,7 +80,9 @@ impl Default for RpcSecurityConfig {
             api_key: None,
             allowed_ips: vec!["127.0.0.1".into(), "::1".into()],
             cors_origins: Vec::new(),
-            rate_limit_per_minute: None,
+            // Secure default (P21-F01): a limiter that is off by default
+            // leaves API-key guessing unthrottled on the public listener.
+            rate_limit_per_minute: Some(120),
             trusted_proxies: Vec::new(),
             max_request_body_size: Some(16 * 1024 * 1024),
             max_connections: Some(10),
@@ -139,7 +142,9 @@ impl RpcSecurityConfig {
             api_key,
             allowed_ips,
             cors_origins,
-            rate_limit_per_minute,
+            // An unset limit falls back to the default, never to unlimited.
+            rate_limit_per_minute: rate_limit_per_minute
+                .or(Some(RPC_DEFAULT_RATE_LIMIT_PER_MINUTE)),
             trusted_proxies: Vec::new(),
             // Leaving these `None` handed the listener over to whatever the
             // Transport crate happened to default to, and the value differed
@@ -163,14 +168,20 @@ struct RpcSecurityLayer {
     config: Arc<RpcSecurityConfig>,
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    mode: RpcMode,
 }
 
 impl RpcSecurityLayer {
-    fn new(config: RpcSecurityConfig, metrics: Option<Arc<crate::core::metrics::Metrics>>) -> Self {
+    fn new(
+        config: RpcSecurityConfig,
+        metrics: Option<Arc<crate::core::metrics::Metrics>>,
+        mode: RpcMode,
+    ) -> Self {
         Self {
             config: Arc::new(config),
             per_ip_rates: Arc::new(Mutex::new(HashMap::new())),
             metrics,
+            mode,
         }
     }
 }
@@ -184,6 +195,7 @@ impl<S> Layer<S> for RpcSecurityLayer {
             config: self.config.clone(),
             per_ip_rates: self.per_ip_rates.clone(),
             metrics: self.metrics.clone(),
+            mode: self.mode.clone(),
         }
     }
 }
@@ -194,6 +206,7 @@ struct RpcSecurityService<S> {
     config: Arc<RpcSecurityConfig>,
     per_ip_rates: Arc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    mode: RpcMode,
 }
 
 impl<S, B> Service<HttpRequest<B>> for RpcSecurityService<S>
@@ -216,6 +229,10 @@ where
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
         }
 
+        if self.mode == RpcMode::Operator && !is_operator_request_allowed(&req) {
+            return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
+        }
+
         let cors = cors_outcome(&self.config, &req);
         if cors == CorsOutcome::Deny {
             return Box::pin(async { Ok(text_response(StatusCode::FORBIDDEN, "Forbidden")) });
@@ -232,16 +249,8 @@ where
             }
         }
 
-        if !is_authorized(&self.config, &req) {
-            return Box::pin(async move {
-                let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
-                if let CorsOutcome::Allow(ref origin) = cors {
-                    apply_cors_headers(&mut response, origin);
-                }
-                Ok(response)
-            });
-        }
-
+        // The limiter runs before the key check so that failed key guesses
+        // count against the client's budget.
         let client_ip = extract_client_ip(&self.config, &req);
         if !is_per_ip_rate_limited(&self.config, &self.per_ip_rates, client_ip) {
             if let Some(ref m) = self.metrics {
@@ -256,6 +265,17 @@ where
                 Ok(response)
             });
         }
+
+        if !is_authorized(&self.config, &req) {
+            return Box::pin(async move {
+                let mut response = text_response(StatusCode::UNAUTHORIZED, "Unauthorized");
+                if let CorsOutcome::Allow(ref origin) = cors {
+                    apply_cors_headers(&mut response, origin);
+                }
+                Ok(response)
+            });
+        }
+
         if let Some(ref m) = self.metrics {
             m.rpc_requests_total.inc();
         }
@@ -354,6 +374,7 @@ impl RpcServer {
         let http_middleware = ServiceBuilder::new().layer(RpcSecurityLayer::new(
             self.security.clone(),
             self.metrics.clone(),
+            self.mode.clone(),
         ));
 
         // jsonrpsee 0.26 moved the transport limits off the server builder and
@@ -715,15 +736,31 @@ fn validate_operator_bind_address(
 #[doc(hidden)]
 pub fn constant_time_eq_str(a: &str, b: &str) -> bool {
     use subtle::ConstantTimeEq;
-    // Length mismatch must still run a dummy compare to avoid leaking length via early return
-    // Of short-circuit equality on the string content alone.
+    // Walk the expected value `b` in full on every call, fold the length
+    // difference into the accumulator, and clamp the candidate index into
+    // range instead of branching on a length mismatch: the work performed
+    // then depends only on `b.len()`, never on whether the lengths match or
+    // where the first differing byte sits. A short candidate re-reads its
+    // last byte and an empty one reads `b` itself; the length fold still
+    // refuses both. The earlier shape dummy-compared `b` against itself on
+    // the mismatch path, and same-pointer loads do not cost what
+    // cross-buffer loads cost - a small but systematic gap the timing_safe
+    // regression bench measured at several nanoseconds.
     let a_b = a.as_bytes();
     let b_b = b.as_bytes();
-    if a_b.len() != b_b.len() {
-        let _ = a_b.ct_eq(a_b);
-        return false;
+    let mut acc: u8 = 0;
+    for byte in (a_b.len() ^ b_b.len()).to_le_bytes() {
+        acc |= byte;
     }
-    bool::from(a_b.ct_eq(b_b))
+    let src: &[u8] = if a_b.is_empty() { b_b } else { a_b };
+    for (i, &expected) in b_b.iter().enumerate() {
+        // `src` is empty only when `b` is empty too, in which case this
+        // loop body never runs and the length fold alone decides.
+        let provided = src[core::cmp::min(i, src.len() - 1)];
+        acc |= provided ^ expected;
+        acc = std::hint::black_box(acc);
+    }
+    bool::from(acc.ct_eq(&0u8))
 }
 
 fn is_authorized<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
@@ -783,7 +820,9 @@ fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Opt
             .headers()
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
+            // Rightmost entry: the one the trusted proxy itself appended.
+            // Entries to its left are client-supplied and can be forged.
+            .and_then(|value| value.split(',').next_back())
             .map(str::trim)
             .and_then(|ip| ip.parse::<IpAddr>().ok())
         {
@@ -801,6 +840,48 @@ fn extract_client_ip<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> Opt
     }
 
     direct_ip
+}
+
+/// The operator listener has no auth and always binds loopback. It accepts
+/// only a loopback `Host` and no `Origin` header, so a browser page cannot
+/// reach it.
+fn is_operator_request_allowed<B>(req: &HttpRequest<B>) -> bool {
+    if req.headers().contains_key("origin") {
+        return false;
+    }
+    req.headers()
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_loopback_host)
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let valid_port = |rest: &str| {
+        rest.is_empty()
+            || rest
+                .strip_prefix(':')
+                .is_some_and(|p| p.parse::<u16>().is_ok())
+    };
+    let name = if host.starts_with('[') {
+        let Some(end) = host.find(']') else {
+            return false;
+        };
+        if !valid_port(&host[end + 1..]) {
+            return false;
+        }
+        &host[..=end]
+    } else {
+        match host.split_once(':') {
+            None => host,
+            Some((name, port)) => {
+                if port.parse::<u16>().is_err() {
+                    return false;
+                }
+                name
+            }
+        }
+    };
+    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "[::1]"
 }
 
 fn is_ip_allowed<B>(config: &RpcSecurityConfig, req: &HttpRequest<B>) -> bool {
@@ -897,6 +978,23 @@ fn preflight_response(origin: &str) -> HttpResponse {
     let mut response = text_response(StatusCode::NO_CONTENT, "");
     apply_cors_headers(&mut response, origin);
     response
+}
+
+/// Upper bound for one `social_get_feed` page, whatever limit the caller asks for.
+const MAX_SOCIAL_FEED_LIMIT: usize = 200;
+
+fn clamp_feed_limit(limit: usize) -> usize {
+    limit.min(MAX_SOCIAL_FEED_LIMIT)
+}
+
+/// Upper bound for the length of one unpaginated list response (offers,
+/// data assets, grants, rankings, slashing history), so response size and
+/// serialization cost do not grow with chain state.
+const MAX_LIST_RESPONSE_ITEMS: usize = 1000;
+
+fn cap_list_response<T>(mut items: Vec<T>) -> Vec<T> {
+    items.truncate(MAX_LIST_RESPONSE_ITEMS);
+    items
 }
 
 fn is_per_ip_rate_limited(
@@ -1265,8 +1363,7 @@ fn qr_feed_json(feed: &crate::storage::emit::FeedPreview) -> serde_json::Value {
 /// the same body.
 fn emit_reject(e: crate::storage::emit::EmitError) -> ErrorObjectOwned {
     let code = match &e {
-        crate::storage::emit::EmitError::Empty
-        | crate::storage::emit::EmitError::ZeroBlockLen
+        crate::storage::emit::EmitError::ZeroBlockLen
         | crate::storage::emit::EmitError::TooLarge { .. }
         | crate::storage::emit::EmitError::BurstTooWide { .. }
         | crate::storage::emit::EmitError::FrameOutOfRange { .. }
@@ -1595,8 +1692,10 @@ impl BudlumApiServer for RpcServer {
         &self,
         registration: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: the bond figure in this build is a declared number,
-        // not a signed stake transfer, and only the operator may declare it.
+        // Operator-only: only the operator may declare the terms. BLG-0155
+        // (P07-F10): the bond itself is no longer a declared number - the
+        // registration debits the poster's balance into escrow before the
+        // registry sees it (Blockchain::register_external_domain).
         self.require_operator("bud_registerExternalDomain")?;
         #[derive(serde::Deserialize)]
         struct Params {
@@ -1659,6 +1758,9 @@ impl BudlumApiServer for RpcServer {
         &self,
         evidence: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: `submitter` is an unsigned field, so a public caller
+        // could vote under any bonded prover's name.
+        self.require_operator("bud_submitExternalEvidence")?;
         let evidence: crate::cross_domain::external::RawConsensusEvidence =
             serde_json::from_value(evidence).map_err(|e| {
                 ErrorObjectOwned::owned(-32602, format!("Invalid evidence: {e}"), None::<()>)
@@ -2563,9 +2665,45 @@ impl BudlumApiServer for RpcServer {
         &self,
         payload: crate::domain::VerifiedDomainCommitment,
     ) -> Result<String, ErrorObjectOwned> {
+        // Consensus-state isolation: `submit_verified_domain_commitment` writes
+        // to `external_roots` and `domain_registry`, so public listeners must
+        // not reach it directly, and the signed in-block StateUpdateTx carrier
+        // must be verified and enqueued fail-closed before applying state.
+        self.require_operator("bud_submitVerifiedDomainCommitment")?;
         let hash = hex::encode(payload.leaf_hash());
         let payload_clone = payload.clone();
         let commitment = payload.commitment.clone();
+
+        self.chain
+            .verify_verified_domain_commitment(payload.clone())
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid verified domain commitment: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let tx = self
+            .chain
+            .build_state_update_transaction(commitment)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("Could not build state update transaction: {e}"),
+                    None::<()>,
+                )
+            })?;
+        let tx_clone = tx.clone();
+        self.chain.add_transaction(tx).await.map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("State update transaction rejected: {e}"),
+                None::<()>,
+            )
+        })?;
 
         self.chain
             .submit_verified_domain_commitment(payload)
@@ -2578,27 +2716,7 @@ impl BudlumApiServer for RpcServer {
                 )
             })?;
 
-        // C3 (decision 50): the commitment's nonce writes travel in a signed
-        // StateUpdateTx, enqueued here so they apply inside block execution.
-        // The commitment broadcast below keeps the domain registry in sync
-        // across peers until that advancement moves in-block too.
-        match self.chain.build_state_update_transaction(commitment).await {
-            Ok(tx) => {
-                let tx_clone = tx.clone();
-                self.chain.add_transaction(tx).await.map_err(|e| {
-                    ErrorObjectOwned::owned(
-                        -32602,
-                        format!("State update transaction rejected: {e}"),
-                        None::<()>,
-                    )
-                })?;
-                self.node.broadcast_tx_sync(tx_clone);
-            }
-            Err(e) => {
-                tracing::warn!("Could not build state update transaction: {e}");
-            }
-        }
-
+        self.node.broadcast_tx_sync(tx_clone);
         self.node
             .broadcast_verified_domain_commitment_sync(payload_clone);
         Ok(format!("0x{hash}"))
@@ -2710,6 +2828,9 @@ impl BudlumApiServer for RpcServer {
         domain_height: u64,
         event_index: u32,
         expiry_height: u64,
+        // BLG-0116 (P05-F09): the burner declares the Ethereum destination
+        // here, at burn time - the claim cannot name a different one.
+        recipient_eth: [u8; 20],
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         // Bridge burn with event requires operator auth
         self.require_operator("bud_burnBridgeTransferWithEvent")?;
@@ -2721,6 +2842,7 @@ impl BudlumApiServer for RpcServer {
                 domain_height,
                 event_index,
                 expiry_height,
+                recipient_eth,
             )
             .await
             .map_err(|e| {
@@ -2997,6 +3119,12 @@ impl BudlumApiServer for RpcServer {
         &self,
         submission: crate::prover::ZkProofSubmission,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: `submission.message.sender` is an unsigned field and
+        // the proof fee is burned from that address when verification fails,
+        // so a public caller could burn the fee balance of any address
+        // (P18-F02). Until submissions carry a sender signature, the endpoint
+        // is restricted like its sibling domain-registration methods.
+        self.require_operator("bud_submitZkProof")?;
         match self.chain.submit_zk_proof(submission).await {
             Ok(crate::prover::ProofAcceptance::Accepted { rewarded, reward }) => {
                 Ok(serde_json::json!({
@@ -3078,8 +3206,9 @@ impl BudlumApiServer for RpcServer {
         // Security: never trust caller-supplied provenance. An external
         // Submitter cannot self-certify a report as ConsensusVerified to force a
         // Slash - the RPC path is always Unverified. Only the node's own
-        // Consensus layer emits ConsensusVerified reports internally.
-        report.provenance = crate::registry::ProofProvenance::Unverified;
+        // Consensus layer emits ConsensusVerified reports internally; a
+        // caller's claim is demoted first (BLG-0102/P04-F24).
+        report.demote_to_unverified();
         // A reporter is required so the anti-spam fee can be charged.
         if report.reporter.is_none() {
             return Err(ErrorObjectOwned::owned(
@@ -3088,7 +3217,11 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        // Permissionless submission; the chain layer decides actionability.
+        // A caller-supplied report stays `Unverified`: two signatures over two
+        // bare block hashes do not bind `height`, so this endpoint must never
+        // promote caller-supplied evidence to `ConsensusVerified`. The chain
+        // guard (`submit_registry_slashing_report`) refuses `Unverified`
+        // reports fail-closed; slashing travels the consensus path only.
         match self.chain.submit_registry_slashing_report(report).await {
             Ok(Some(outcome)) => Ok(serde_json::json!({
                 "slashed": true,
@@ -3220,6 +3353,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         manifest: crate::storage::ContentManifest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageRegisterManifest")?;
         let manifest_id = self
             .chain
             .register_storage_manifest(manifest.clone())
@@ -3264,10 +3399,35 @@ impl BudlumApiServer for RpcServer {
             ));
         }
         let hex = data_hex.strip_prefix("0x").unwrap_or(data_hex.as_str());
+        // Same cap as the QR feed calls: the re-encode below is a full
+        // erasure encode, so the body size bounds its CPU cost.
+        if hex.len() / 2 > crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!(
+                    "body over verify cap {}",
+                    crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES
+                ),
+                None::<()>,
+            ));
+        }
         let data = hex::decode(hex).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("data_hex decode failed: {e}"), None::<()>)
         })?;
-        crate::storage::verify_object_encoding(&data, &manifest).map_err(|e| {
+        // The encode is CPU bound: keep it off the async workers.
+        let (manifest, verdict) = tokio::task::spawn_blocking(move || {
+            let verdict = crate::storage::verify_object_encoding(&data, &manifest);
+            (manifest, verdict)
+        })
+        .await
+        .map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("verify_encoding task failed: {e}"),
+                None::<()>,
+            )
+        })?;
+        verdict.map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("verify_encoding failed: {e}"), None::<()>)
         })?;
         Ok(serde_json::json!({
@@ -3608,9 +3768,46 @@ impl BudlumApiServer for RpcServer {
             key_id,
             meter_budget,
         };
+        {
+            let mut gw = self.reveal_gateway.lock().map_err(|_| {
+                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
+            })?;
+            if gw.revoke_generation() != generation {
+                return Err(ErrorObjectOwned::owned(
+                    -32003,
+                    "reveal: a revoke started while the grant was being checked; retry the call",
+                    None::<()>,
+                ));
+            }
+            // Reclaim TTL-dead rows before admission so a burst of opens
+            // cannot be wedged by corpses, then refuse fast at the cap with
+            // its own code instead of paying for an open that admission
+            // would refuse.
+            gw.sweep(now);
+            if gw.session_count() >= crate::storage::MAX_REVEAL_SESSIONS {
+                return Err(ErrorObjectOwned::owned(
+                    -32003,
+                    format!(
+                        "reveal: session table full ({})",
+                        crate::storage::MAX_REVEAL_SESSIONS
+                    ),
+                    None::<()>,
+                ));
+            }
+        }
+        // The emitter builds a whole one-shot pass to check the stream pin.
+        // That runs off the async workers and outside the gateway lock, so
+        // frame serving, close and revoke of other viewers do not wait on it.
+        let prepared = tokio::task::spawn_blocking(move || {
+            crate::storage::RevealGateway::prepare_prechecked(req, grant_allows)
+        })
+        .await
+        .map_err(|_| ErrorObjectOwned::owned(-32603, "reveal open task failed", None::<()>))?
+        .map_err(reveal_gateway_rpc_error)?;
         let mut gw = self.reveal_gateway.lock().map_err(|_| {
             ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
         })?;
+        // A revoke may have started while the pass was built: ask again.
         if gw.revoke_generation() != generation {
             return Err(ErrorObjectOwned::owned(
                 -32003,
@@ -3618,22 +3815,8 @@ impl BudlumApiServer for RpcServer {
                 None::<()>,
             ));
         }
-        // Reclaim TTL-dead rows before admission so a burst of opens cannot
-        // be wedged by corpses, then refuse fast at the cap with its own
-        // code instead of paying for an open that admission would refuse.
-        gw.sweep(now);
-        if gw.session_count() >= crate::storage::MAX_REVEAL_SESSIONS {
-            return Err(ErrorObjectOwned::owned(
-                -32003,
-                format!(
-                    "reveal: session table full ({})",
-                    crate::storage::MAX_REVEAL_SESSIONS
-                ),
-                None::<()>,
-            ));
-        }
         let session_id = gw
-            .open_prechecked(req, grant_allows, now)
+            .open_prepared(prepared, now)
             .map_err(reveal_gateway_rpc_error)?;
         let commit = gw
             .stream_commitment(session_id)
@@ -3732,6 +3915,7 @@ impl BudlumApiServer for RpcServer {
         proof_kind: String,
         authorization: Option<serde_json::Value>,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        self.require_operator("bud_storageRegisterConfidentialCommit")?;
         let content_id = parse_content_id(&content_id)?;
         // The recorded owner is never typed by the caller: it is derived from
         // the key and then proven by the signature the registry checks. Handing
@@ -3857,6 +4041,8 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageOpenDeal")?;
         let clean_shard = shard_id.strip_prefix("0x").unwrap_or(&shard_id);
         let s_bytes = hex::decode(clean_shard).map_err(|e| {
             ErrorObjectOwned::owned(-32602, format!("Invalid shard_id hex: {e}"), None::<()>)
@@ -3927,8 +4113,10 @@ impl BudlumApiServer for RpcServer {
         // The chain also refuses a second active deal over the same
         // (manifest, shard, operator, replica, range), so replay is closed on
         // both layers.
+        let chain_id = self.chain.get_chain_id().await;
         let deal_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_OPEN_DEAL_V1",
+            b"BUD_OPEN_DEAL_V2",
+            &chain_id.to_le_bytes(),
             &domain_id.to_le_bytes(),
             s_id.as_bytes(),
             op_addr.as_bytes(),
@@ -3998,6 +4186,8 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageAcceptReallocation")?;
         let op_addr = Address::from_hex(&replacement_operator).map_err(|e| {
             ErrorObjectOwned::owned(
                 -32602,
@@ -4014,9 +4204,11 @@ impl BudlumApiServer for RpcServer {
         // signed message binds every parameter that changes the debit; the
         // placement (manifest, shard, replica, bytes) is derived by the
         // chain from the ticket, so a signature cannot be replayed against
-        // a different slot. Same pattern as BUD_OPEN_DEAL_V1.
+        // a different slot. Same pattern as BUD_OPEN_DEAL_V2.
+        let chain_id = self.chain.get_chain_id().await;
         let deal_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_ACCEPT_REALLOCATION_V1",
+            b"BUD_ACCEPT_REALLOCATION_V2",
+            &chain_id.to_le_bytes(),
             &ticket_id.to_le_bytes(),
             op_addr.as_bytes(),
             payer_addr.as_bytes(),
@@ -4147,7 +4339,7 @@ impl BudlumApiServer for RpcServer {
                 .map(|d| {
                     serde_json::json!({
                         "shardId": format!("0x{}", hex::encode(d.shard_id.0)),
-                        "size": d.shard_id.0.len(),
+                        "size": d.shard_bytes,
                     })
                 })
                 .collect()
@@ -4231,6 +4423,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         request: RetrievalChallengeRequest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageOpenChallenge")?;
         // + the opener is required and must be non-zero
         let opener = request
             .opener
@@ -4294,6 +4488,8 @@ impl BudlumApiServer for RpcServer {
         &self,
         response: RetrievalResponse,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
+        self.require_operator("bud_storageAnswerChallenge")?;
         let responder = response.responder;
 
         // Responder must cryptographically prove ownership of the
@@ -4759,7 +4955,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn social_get_feed(&self, limit: usize) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let nfts = self.chain.nft_get_feed(limit).await;
+        let nfts = self.chain.nft_get_feed(clamp_feed_limit(limit)).await;
         let list: Vec<_> = nfts
             .into_iter()
             .map(|nft| {
@@ -4918,7 +5114,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn market_get_offers(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let offers = self.chain.market_get_offers().await;
+        let offers = cap_list_response(self.chain.market_get_offers().await);
         Ok(serde_json::json!(offers))
     }
 
@@ -5018,22 +5214,22 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn pollen_get_data_assets(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let assets = self.chain.pollen_get_data_assets().await;
+        let assets = cap_list_response(self.chain.pollen_get_data_assets().await);
         Ok(serde_json::json!(assets))
     }
 
     async fn pollen_get_access_grants(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let grants = self.chain.pollen_get_access_grants().await;
+        let grants = cap_list_response(self.chain.pollen_get_access_grants().await);
         Ok(serde_json::json!(grants))
     }
 
     async fn pollen_get_sale_authorizations(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let authorizations = self.chain.pollen_get_sale_authorizations().await;
+        let authorizations = cap_list_response(self.chain.pollen_get_sale_authorizations().await);
         Ok(serde_json::json!(authorizations))
     }
 
     async fn pollen_get_purchase_receipts(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let receipts = self.chain.pollen_get_purchase_receipts().await;
+        let receipts = cap_list_response(self.chain.pollen_get_purchase_receipts().await);
         Ok(serde_json::json!(receipts))
     }
 
@@ -5194,6 +5390,11 @@ impl BudlumApiServer for RpcServer {
 
         let current_block = self.chain.get_height().await;
         let mut registry = crate::pollen::MarketplaceRegistry::new();
+        for policy in self.chain.pollen_get_encryption_policies().await {
+            registry
+                .set_encryption_policy(policy)
+                .map_err(|e| ErrorObjectOwned::owned(-32603, e, None::<()>))?;
+        }
         registry
             .register_data_asset(asset)
             .map_err(|e| ErrorObjectOwned::owned(-32602, e, None::<()>))?;
@@ -5356,13 +5557,15 @@ impl BudlumApiServer for RpcServer {
         //
         // Security check (HIGH): the check used to look at storage_root only,
         // so a record with content_id set and storage_root unset skipped the
-        // guard. The manifest identity is now resolved with content_id first.
+        // guard. The gateway serves storage_root, so the guard now checks
+        // every identity the record names (content_id and storage_root);
+        // a record with two different values cannot pick the unprotected one.
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
-        let manifest_id = resolved.as_ref().and_then(|r| {
-            r.content_id
-                .or(r.storage_root.map(crate::storage::ContentId))
-        });
-        if let Some(cid) = manifest_id {
+        for cid in resolved
+            .as_ref()
+            .map(crate::gateway::pollen_guard_ids)
+            .unwrap_or_default()
+        {
             if self.chain.pollen_asset_for_content(cid).await.is_some() {
                 return Err(ErrorObjectOwned::owned(
                     -32603,
@@ -5392,11 +5595,11 @@ impl BudlumApiServer for RpcServer {
         // the access rules: protected content stays protected in whatever
         // format it is requested.
         let resolved = self.chain.bns_resolve_full(name.clone()).await;
-        let manifest_id = resolved.as_ref().and_then(|r| {
-            r.content_id
-                .or(r.storage_root.map(crate::storage::ContentId))
-        });
-        if let Some(cid) = manifest_id {
+        for cid in resolved
+            .as_ref()
+            .map(crate::gateway::pollen_guard_ids)
+            .unwrap_or_default()
+        {
             if self.chain.pollen_asset_for_content(cid).await.is_some() {
                 return Err(ErrorObjectOwned::owned(
                     -32603,
@@ -6363,7 +6566,7 @@ impl BudlumApiServer for RpcServer {
 
     /// Get all verifiers ranked by reliability score.
     async fn ai_verifier_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let ranking = self.chain.get_ai_verifiers_by_reliability().await;
+        let ranking = cap_list_response(self.chain.get_ai_verifiers_by_reliability().await);
         let ranking_json: Vec<serde_json::Value> = ranking
             .iter()
             .enumerate()
@@ -6516,13 +6719,18 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn ai_agent_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        let ranking = self.chain.get_ai_agent_ranking().await;
+        // BLG-0201 (P10-F11): the score crosses the actor and the wire as a
+        // fixed-point permyriad integer (10_000 = full trust), never as an
+        // f64 - Z8. The unit is stated in the response so a client never has
+        // to guess whether 9000 is 9000.0 or 0.9.
+        let ranking = cap_list_response(self.chain.get_ai_agent_ranking().await);
         let entries: Vec<serde_json::Value> = ranking
             .iter()
             .map(|(addr, score)| {
                 serde_json::json!({
                     "agent": format!("0x{}", addr.to_hex()),
                     "trust_score": score,
+                    "trust_score_basis": 10_000,
                 })
             })
             .collect();
@@ -6618,7 +6826,7 @@ impl BudlumApiServer for RpcServer {
 
     async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let history: Vec<crate::registry::permissionless::SlashingRecord> =
-            self.chain.get_slashing_history().await;
+            cap_list_response(self.chain.get_slashing_history().await);
         let entries: Vec<serde_json::Value> = history
             .into_iter()
             .map(|entry| {
@@ -6628,7 +6836,7 @@ impl BudlumApiServer for RpcServer {
                     "condition": format!("{:?}", entry.report.condition()),
                     "penalty": entry.penalty,
                     "remainingStake": entry.remaining_stake,
-                    "provenance": format!("{:?}", entry.report.provenance),
+                    "provenance": format!("{:?}", entry.report.provenance()),
                     "reporter": entry.report.reporter.map(|a: crate::core::address::Address| Self::to_0x_hash(a.to_hex())),
                 })
             })
@@ -6691,6 +6899,20 @@ mod tests {
         let mut req = HttpRequest::builder().uri("/").body(()).unwrap();
         req.extensions_mut().insert(remote);
         req
+    }
+
+    #[test]
+    fn p21_f01_default_config_has_a_rate_limit() {
+        assert!(RpcSecurityConfig::default().rate_limit_per_minute.is_some());
+    }
+
+    #[test]
+    fn from_env_without_rate_limit_uses_default_limit() {
+        let ips = vec!["127.0.0.1".to_string()];
+        let cfg = RpcSecurityConfig::from_env(false, None, ips.clone(), Vec::new(), None).unwrap();
+        assert_eq!(cfg.rate_limit_per_minute, Some(120));
+        let cfg = RpcSecurityConfig::from_env(false, None, ips, Vec::new(), Some(7)).unwrap();
+        assert_eq!(cfg.rate_limit_per_minute, Some(7));
     }
 
     #[test]
@@ -6880,6 +7102,151 @@ mod tests {
         assert!(!is_cors_preflight(&req));
     }
 
+    async fn status_through_layer(
+        mode: RpcMode,
+        host: Option<&str>,
+        origin: Option<&str>,
+    ) -> StatusCode {
+        let layer = RpcSecurityLayer::new(
+            match mode {
+                RpcMode::Operator => RpcSecurityConfig::operator_default(),
+                RpcMode::Public => RpcSecurityConfig {
+                    auth_required: false,
+                    allowed_ips: Vec::new(),
+                    ..Default::default()
+                },
+            },
+            None,
+            mode,
+        );
+        let inner = tower::service_fn(|_req: HttpRequest<()>| async {
+            Ok::<_, std::convert::Infallible>(text_response(StatusCode::OK, "ok"))
+        });
+        let mut svc = layer.layer(inner);
+        let mut builder = HttpRequest::builder().uri("/");
+        if let Some(host) = host {
+            builder = builder.header("host", host);
+        }
+        if let Some(origin) = origin {
+            builder = builder.header("origin", origin);
+        }
+        let mut req = builder.body(()).unwrap();
+        req.extensions_mut()
+            .insert(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000));
+        svc.call(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn failed_api_key_attempts_are_rate_limited() {
+        let layer = RpcSecurityLayer::new(
+            RpcSecurityConfig {
+                auth_required: true,
+                api_key: Some("right-key".into()),
+                allowed_ips: Vec::new(),
+                rate_limit_per_minute: Some(2),
+                ..Default::default()
+            },
+            None,
+            RpcMode::Public,
+        );
+        let inner = tower::service_fn(|_req: HttpRequest<()>| async {
+            Ok::<_, std::convert::Infallible>(text_response(StatusCode::OK, "ok"))
+        });
+        let mut svc = layer.layer(inner);
+        let mut statuses = Vec::new();
+        for _ in 0..3 {
+            let mut req = HttpRequest::builder()
+                .uri("/")
+                .header("x-api-key", "wrong-key")
+                .body(())
+                .unwrap();
+            req.extensions_mut()
+                .insert(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000));
+            statuses.push(svc.call(req).await.unwrap().status());
+        }
+        assert_eq!(statuses[0], StatusCode::UNAUTHORIZED);
+        assert_eq!(statuses[1], StatusCode::UNAUTHORIZED);
+        assert_eq!(statuses[2], StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn operator_rejects_foreign_host() {
+        let op = RpcMode::Operator;
+        assert_ne!(
+            status_through_layer(op.clone(), Some("evil.example"), None).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("evil.example"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("evil.example:8546"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("127.0.0.1.evil.example"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), Some("127.0.0.1:abc"), None).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_through_layer(op.clone(), None, None).await,
+            StatusCode::FORBIDDEN
+        );
+        for host in [
+            "127.0.0.1:8546",
+            "127.0.0.1",
+            "localhost",
+            "LocalHost:8546",
+            "[::1]",
+            "[::1]:8546",
+        ] {
+            assert_eq!(
+                status_through_layer(op.clone(), Some(host), None).await,
+                StatusCode::OK,
+                "host {host}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operator_rejects_origin_header() {
+        assert_ne!(
+            status_through_layer(
+                RpcMode::Operator,
+                Some("127.0.0.1:8546"),
+                Some("http://x.example")
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_through_layer(
+                RpcMode::Operator,
+                Some("127.0.0.1:8546"),
+                Some("http://x.example")
+            )
+            .await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn public_mode_ignores_host_and_origin_rules() {
+        assert_eq!(
+            status_through_layer(
+                RpcMode::Public,
+                Some("rpc.budlum.example"),
+                Some("http://x.example")
+            )
+            .await,
+            StatusCode::OK
+        );
+    }
+
     #[test]
     fn operator_rpc_listener_must_bind_loopback() {
         assert!(validate_operator_bind_address(&RpcMode::Operator, "127.0.0.1:8546").is_ok());
@@ -6907,6 +7274,19 @@ mod tests {
             .as_bool()
             .unwrap_or(true));
         assert_eq!(stats["economy"]["status"], "decision_locked_not_wired");
+    }
+
+    #[test]
+    fn feed_limit_is_clamped() {
+        assert_eq!(clamp_feed_limit(usize::MAX), MAX_SOCIAL_FEED_LIMIT);
+        assert_eq!(clamp_feed_limit(5), 5);
+    }
+
+    #[test]
+    fn list_responses_are_capped() {
+        let capped = cap_list_response(vec![0u8; MAX_LIST_RESPONSE_ITEMS + 50]);
+        assert_eq!(capped.len(), MAX_LIST_RESPONSE_ITEMS);
+        assert_eq!(cap_list_response(vec![1u8; 3]).len(), 3);
     }
 
     #[test]
@@ -6988,6 +7368,25 @@ mod tests {
         assert_eq!(
             extract_client_ip(&config, &req),
             Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)))
+        );
+        assert!(!is_ip_allowed(&config, &req));
+    }
+
+    #[test]
+    fn forwarded_for_uses_the_entry_the_proxy_appended() {
+        let config = RpcSecurityConfig {
+            allowed_ips: vec!["10.0.0.5".into()],
+            trusted_proxies: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut req = request_with_remote(SocketAddr::from(([127, 0, 0, 1], 9000)));
+        req.headers_mut().insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("10.0.0.5, 203.0.113.7"),
+        );
+        assert_eq!(
+            extract_client_ip(&config, &req),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)))
         );
         assert!(!is_ip_allowed(&config, &req));
     }

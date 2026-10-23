@@ -9,24 +9,31 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_sybil_role_rejection() {
-    // Scenario: A malicious node attempts to submit consensus votes
-    // Without having the STAKED role.
-    let consensus = Arc::new(PoWEngine::new(0));
+    // Scenario: a node that holds no validator role submits a block to a PoS
+    // chain that has an active validator set. The block is well formed, so the
+    // only reason left to refuse it is the missing producer.
+    use crate::consensus::pos::{PoSConfig, PoSEngine};
+
+    let consensus = Arc::new(PoSEngine::new(PoSConfig::default(), None));
     let mut bc = Blockchain::new(consensus, None, 45262, None);
+    let validator = Address::from([0x55; 32]);
+    bc.state.add_validator(validator, 10_000);
 
     let attacker = Address::from([0x66; 32]);
-    // Attacker is NOT registered as a validator
     assert!(!bc.state.validators.contains_key(&attacker));
 
-    // Malicious block from attacker
-    let block = crate::core::block::Block::new(1, bc.chain[0].hash.clone(), vec![]);
-    // Block.producer = Some(attacker); // producer is Option<Address>
+    let mut block = crate::core::block::Block::new(1, bc.chain[0].hash.clone(), vec![]);
+    block.slot = 1;
+    block.state_root = "11".repeat(32);
+    block.hash = block.calculate_hash();
 
-    // The chain must reject this block
-    let res = bc.validate_and_add_block(block);
-    // Blockchain::validate_and_add_block internally calls consensus.full_validate
-    // Which checks producer eligibility.
-    assert!(res.is_err());
+    let err = bc
+        .validate_and_add_block(block)
+        .expect_err("a block without a staked producer must be rejected");
+    assert!(
+        err.contains("Block has no producer"),
+        "unexpected rejection reason: {err}"
+    );
 }
 
 #[tokio::test]
@@ -86,6 +93,13 @@ async fn test_p2p_topology_latency_drift_simulation() {
     future_block.hash = future_block.calculate_hash();
 
     // Usually accepted if within drift window (e.g. 15s in Bitcoin/Ethereum)
+    let future_ts = future_block.timestamp;
+    // `shadow` already committed its own copy of this block inside
+    // `produce_block`, so feeding the timestamp-shifted twin back to it is a
+    // same-height rival, not a follow: height continuity refuses it before
+    // anything else runs. The shadow's job is only to mint canonically
+    // shaped blocks; `bc` is the chain under test.
+    let future_hash = future_block.hash.clone();
     let future_res = bc.validate_and_add_block(future_block);
     assert!(
         future_res.is_ok(),
@@ -98,16 +112,20 @@ async fn test_p2p_topology_latency_drift_simulation() {
     // Timestamp is a deterministic constant (GENESIS_TIMESTAMP == 0), so
     // "older than genesis" is not representable; regressing against the tip
     // Exercises the same monotonicity guard.
-    let mut past_block =
-        crate::core::block::Block::new(2, bc.chain.last().unwrap().hash.clone(), vec![]);
-    past_block.timestamp = bc.chain.last().unwrap().timestamp - 1000;
+    let Some((mut past_block, _)) = shadow.produce_block(crate::core::address::Address::zero())
+    else {
+        panic!("shadow block production failed");
+    };
+    past_block.timestamp = future_ts - 1000;
+    // The shadow built this block on ITS block 1, whose hash differs from
+    // the timestamp-shifted twin `bc` accepted. Parent it on `bc`'s actual
+    // tip, or the previous-hash link refuses it before the timestamp guard
+    // this test exists to reach ever runs.
+    past_block.previous_hash = future_hash;
     past_block.hash = past_block.calculate_hash();
 
     // MUST be rejected
     let past_res = bc.validate_and_add_block(past_block);
-    assert!(
-        past_res.is_err(),
-        "clock-regressed block must be rejected, got {:?}",
-        past_res.ok()
-    );
+    let err = past_res.expect_err("clock-regressed block must be rejected");
+    assert!(err.contains("not monotonic"), "unexpected rejection: {err}");
 }
