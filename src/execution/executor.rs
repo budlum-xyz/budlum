@@ -2777,6 +2777,26 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::RelayCrossDomainMessage(message) => {
+                // N-12: the in-block door for relayed cross-domain messages.
+                // The body (`register_relayed_cross_domain_message`) checks
+                // every rule before it inserts, so a refusal leaves the
+                // registry as it was. The message moves no value.
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "relayed_message_shape",
+                        "a relayed cross-domain message requires zero amount, zero recipient and empty data",
+                    ));
+                }
+                state
+                    .register_relayed_cross_domain_message(&tx.from, message)
+                    .map_err(|e| BudlumError::validation("relayed_message_refused", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
             TransactionType::Storage(storage_tx) => {
                 // One arm delegating to the tested body
                 // (`domain::execute_storage_tx`), which runs every check

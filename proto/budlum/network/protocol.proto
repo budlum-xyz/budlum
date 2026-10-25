@@ -70,6 +70,10 @@ enum ProtoTransactionType {
     POA_ONBOARDING = 48;
     // Bond into a permissionless application role of the verifier family.
     ROLE_BOND = 49;
+    // A bonded relayer registers a cross-domain message, applied in block.
+    // The transaction signer must be the message sender; the payload carries
+    // no signature envelope of its own.
+    RELAY_CROSS_DOMAIN_MESSAGE = 50;
 }
 
 message ProtoTransaction {
@@ -126,6 +130,7 @@ message ProtoTransaction {
         ProtoStorageTx storage = 54;
         ProtoPoaOnboardingTx poa_onboarding = 55;
         ProtoRoleBond role_bond = 56;
+        ProtoCrossDomainMessagePayload relay_cross_domain_message = 57;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.

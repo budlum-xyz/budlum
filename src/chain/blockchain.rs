@@ -912,10 +912,21 @@ impl Blockchain {
 
             match store.load_cross_domain_messages() {
                 Ok(messages) => {
-                    let mut registry = CrossDomainMessageRegistry::new();
+                    // The stored rows are merged into the replayed registry,
+                    // not swapped in for it. The rows hold what the
+                    // out-of-block paths registered (bridge lock and burn);
+                    // the replay holds what blocks registered through the
+                    // `RelayCrossDomainMessage` door, which is never written
+                    // to the row table. The root depends only on the set of
+                    // messages, so the union is the state the node had
+                    // before it stopped.
+                    let mut registry = std::mem::take(&mut state.message_registry);
                     for msg in messages {
+                        if registry.get(&msg.message_id).is_some() {
+                            continue;
+                        }
                         if let Err(e) = registry.insert(msg) {
-                            warn!("Skipping duplicate cross domain message: {e}");
+                            warn!("Skipping unusable stored cross domain message: {e}");
                         }
                     }
                     let tip_height = chain_vec.last().map_or(0, |b| b.index);
@@ -3305,31 +3316,6 @@ impl Blockchain {
             }
         }
         reports.len()
-    }
-
-    /// Permissionless entry-point for relayed cross-domain messages.
-    ///
-    /// The `CrossDomainMessageRegistry` itself accepts any message, but the
-    /// Permissionless submission RPC must gate on the sender being an active
-    /// Relayer (registered with stake). The internal `submit_cross_domain_message`
-    /// Path used by the bridge lock/burn events is NOT gated - those messages
-    /// Come from authorized on-chain logic.
-    pub fn submit_relayed_cross_domain_message(
-        &mut self,
-        message: crate::cross_domain::CrossDomainMessage,
-    ) -> Result<(), String> {
-        self.state
-            .registry
-            .ensure_active_relayer(&message.sender)
-            .map_err(|e| e.to_string())?;
-        // BLG-0113 (P05-F06): the sender must SIGN the message id. The
-        // self-declared field alone let anybody name an active relayer and
-        // register arbitrary messages - or pre-register a predictable lock
-        // id out from under the real one. Chain-built messages (lock/burn/
-        // mint/unlock) enter through `submit_cross_domain_message` and are
-        // already the chain's own word; this door is for everything else.
-        message.verify_sender_signature()?;
-        self.submit_cross_domain_message(message)
     }
 
     /// Process a bridge lock event through the Universal Relayer.
@@ -6460,10 +6446,16 @@ impl Blockchain {
             }
 
             if let Ok(messages) = store.load_cross_domain_messages() {
-                let mut registry = CrossDomainMessageRegistry::new();
+                // Merged into the replayed candidate registry, for the reason
+                // given at the startup load: door-registered messages live in
+                // the replay, not in the row table.
+                let mut registry = std::mem::take(&mut self.state.message_registry);
                 for msg in messages {
+                    if registry.get(&msg.message_id).is_some() {
+                        continue;
+                    }
                     if let Err(e) = registry.insert(msg) {
-                        warn!("Skipping duplicate cross-domain message during reorg: {e}");
+                        warn!("Skipping unusable stored cross-domain message during reorg: {e}");
                     }
                 }
                 let tip_height = self.chain.last().map_or(0, |b| b.index);

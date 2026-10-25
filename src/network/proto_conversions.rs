@@ -211,6 +211,12 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     pb::ProtoRoleBond { role: *role },
                 )),
             ),
+            TransactionType::RelayCrossDomainMessage(message) => (
+                pb::ProtoTransactionType::RelayCrossDomainMessage as i32,
+                Some(pb::proto_transaction::TypePayload::RelayCrossDomainMessage(
+                    cross_domain_message_to_proto(message),
+                )),
+            ),
             TransactionType::Vault(vault_tx) => (
                 pb::ProtoTransactionType::Vault as i32,
                 Some(pb::proto_transaction::TypePayload::Vault(
@@ -657,6 +663,51 @@ fn convert_proto_to_app_category(
     }
 }
 
+/// A cross-domain message on the wire. The sender envelope is not carried:
+/// the only transaction that carries a message on its own
+/// (`RelayCrossDomainMessage`) refuses a non-empty envelope, and the relayer
+/// result never read it.
+fn cross_domain_message_to_proto(
+    msg: &crate::cross_domain::message::CrossDomainMessage,
+) -> pb::ProtoCrossDomainMessagePayload {
+    let kind = match &msg.kind {
+        crate::cross_domain::message::MessageKind::BridgeLock => pb::ProtoMessageKind {
+            kind_type: pb::proto_message_kind::KindType::BridgeLock as i32,
+            custom_bytes: Vec::new(),
+        },
+        crate::cross_domain::message::MessageKind::BridgeMint => pb::ProtoMessageKind {
+            kind_type: pb::proto_message_kind::KindType::BridgeMint as i32,
+            custom_bytes: Vec::new(),
+        },
+        crate::cross_domain::message::MessageKind::BridgeBurn => pb::ProtoMessageKind {
+            kind_type: pb::proto_message_kind::KindType::BridgeBurn as i32,
+            custom_bytes: Vec::new(),
+        },
+        crate::cross_domain::message::MessageKind::BridgeUnlock => pb::ProtoMessageKind {
+            kind_type: pb::proto_message_kind::KindType::BridgeUnlock as i32,
+            custom_bytes: Vec::new(),
+        },
+        crate::cross_domain::message::MessageKind::Custom(b) => pb::ProtoMessageKind {
+            kind_type: pb::proto_message_kind::KindType::Custom as i32,
+            custom_bytes: b.clone(),
+        },
+    };
+    pb::ProtoCrossDomainMessagePayload {
+        message_id: hex::encode(msg.message_id),
+        correlation_id: msg.correlation_id.map(hex::encode).unwrap_or_default(),
+        source_domain: format!("{}", msg.source_domain),
+        target_domain: format!("{}", msg.target_domain),
+        source_height: msg.source_height,
+        event_index: msg.event_index,
+        nonce: msg.nonce,
+        sender: msg.sender.to_string(),
+        recipient: msg.recipient.to_string(),
+        payload_hash: hex::encode(msg.payload_hash),
+        kind: Some(kind),
+        expiry_height: msg.expiry_height,
+    }
+}
+
 fn convert_relayer_result_to_proto(
     res: &crate::core::transaction::RelayerExternalResult,
 ) -> pb::ProtoRelayerResult {
@@ -690,44 +741,7 @@ fn convert_relayer_result_to_proto(
         chain_type,
         custom_id,
     };
-    let proto_msg = res.message.as_ref().map(|msg| {
-        let kind = match &msg.kind {
-            crate::cross_domain::message::MessageKind::BridgeLock => pb::ProtoMessageKind {
-                kind_type: pb::proto_message_kind::KindType::BridgeLock as i32,
-                custom_bytes: Vec::new(),
-            },
-            crate::cross_domain::message::MessageKind::BridgeMint => pb::ProtoMessageKind {
-                kind_type: pb::proto_message_kind::KindType::BridgeMint as i32,
-                custom_bytes: Vec::new(),
-            },
-            crate::cross_domain::message::MessageKind::BridgeBurn => pb::ProtoMessageKind {
-                kind_type: pb::proto_message_kind::KindType::BridgeBurn as i32,
-                custom_bytes: Vec::new(),
-            },
-            crate::cross_domain::message::MessageKind::BridgeUnlock => pb::ProtoMessageKind {
-                kind_type: pb::proto_message_kind::KindType::BridgeUnlock as i32,
-                custom_bytes: Vec::new(),
-            },
-            crate::cross_domain::message::MessageKind::Custom(b) => pb::ProtoMessageKind {
-                kind_type: pb::proto_message_kind::KindType::Custom as i32,
-                custom_bytes: b.clone(),
-            },
-        };
-        pb::ProtoCrossDomainMessagePayload {
-            message_id: hex::encode(msg.message_id),
-            correlation_id: msg.correlation_id.map(hex::encode).unwrap_or_default(),
-            source_domain: format!("{}", msg.source_domain),
-            target_domain: format!("{}", msg.target_domain),
-            source_height: msg.source_height,
-            event_index: msg.event_index,
-            nonce: msg.nonce,
-            sender: msg.sender.to_string(),
-            recipient: msg.recipient.to_string(),
-            payload_hash: hex::encode(msg.payload_hash),
-            kind: Some(kind),
-            expiry_height: msg.expiry_height,
-        }
-    });
+    let proto_msg = res.message.as_ref().map(cross_domain_message_to_proto);
 
     pb::ProtoRelayerResult {
         chain: Some(proto_chain),
@@ -737,6 +751,89 @@ fn convert_relayer_result_to_proto(
         receipt_proof: res.receipt_proof.clone(),
         external_state_root: res.external_state_root.to_vec(),
     }
+}
+
+/// The inverse of [`cross_domain_message_to_proto`]. The envelope arrives
+/// empty because the wire does not carry it.
+fn proto_to_cross_domain_message(
+    p_msg: &pb::ProtoCrossDomainMessagePayload,
+) -> Result<crate::cross_domain::message::CrossDomainMessage, String> {
+    let msg_id_bytes =
+        hex::decode(&p_msg.message_id).map_err(|e| format!("Invalid message_id hex: {e}"))?;
+    let mut message_id = [0u8; 32];
+    if msg_id_bytes.len() != 32 {
+        return Err("message_id must be 32 bytes".into());
+    }
+    message_id.copy_from_slice(&msg_id_bytes);
+
+    let correlation_id = if p_msg.correlation_id.is_empty() {
+        None
+    } else {
+        let corr_bytes = hex::decode(&p_msg.correlation_id)
+            .map_err(|e| format!("Invalid correlation_id hex: {e}"))?;
+        if corr_bytes.len() != 32 {
+            return Err("correlation_id must be 32 bytes".into());
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&corr_bytes);
+        Some(arr)
+    };
+
+    let src_dom = p_msg
+        .source_domain
+        .parse::<u32>()
+        .map_err(|e| format!("Invalid source_domain: {e}"))?;
+    let tgt_dom = p_msg
+        .target_domain
+        .parse::<u32>()
+        .map_err(|e| format!("Invalid target_domain: {e}"))?;
+
+    let payload_hash_bytes =
+        hex::decode(&p_msg.payload_hash).map_err(|e| format!("Invalid payload_hash hex: {e}"))?;
+    let mut payload_hash = [0u8; 32];
+    if payload_hash_bytes.len() != 32 {
+        return Err("payload_hash must be 32 bytes".into());
+    }
+    payload_hash.copy_from_slice(&payload_hash_bytes);
+
+    let p_kind = p_msg.kind.as_ref().ok_or("Missing message kind")?;
+    let kind = match pb::proto_message_kind::KindType::try_from(p_kind.kind_type) {
+        Ok(pb::proto_message_kind::KindType::BridgeLock) => {
+            crate::cross_domain::message::MessageKind::BridgeLock
+        }
+        Ok(pb::proto_message_kind::KindType::BridgeMint) => {
+            crate::cross_domain::message::MessageKind::BridgeMint
+        }
+        Ok(pb::proto_message_kind::KindType::BridgeBurn) => {
+            crate::cross_domain::message::MessageKind::BridgeBurn
+        }
+        Ok(pb::proto_message_kind::KindType::BridgeUnlock) => {
+            crate::cross_domain::message::MessageKind::BridgeUnlock
+        }
+        Ok(pb::proto_message_kind::KindType::Custom) => {
+            crate::cross_domain::message::MessageKind::Custom(p_kind.custom_bytes.clone())
+        }
+        Err(_) => return Err("Invalid cross domain message kind".into()),
+    };
+
+    Ok(crate::cross_domain::message::CrossDomainMessage {
+        message_id,
+        correlation_id,
+        source_domain: src_dom,
+        target_domain: tgt_dom,
+        source_height: p_msg.source_height,
+        event_index: p_msg.event_index,
+        nonce: p_msg.nonce,
+        sender: Address::from_hex(&p_msg.sender)
+            .map_err(|e| format!("Invalid message sender: {e}"))?,
+        recipient: Address::from_hex(&p_msg.recipient)
+            .map_err(|e| format!("Invalid message recipient: {e}"))?,
+        payload_hash,
+        kind,
+        sender_public_key: Vec::new(),
+        sender_signature: Vec::new(),
+        expiry_height: p_msg.expiry_height,
+    })
 }
 
 fn convert_proto_to_relayer_result(
@@ -774,86 +871,11 @@ fn convert_proto_to_relayer_result(
         Err(_) => return Err("Invalid external chain type".into()),
     };
 
-    let message = if let Some(ref p_msg) = proto.message {
-        let msg_id_bytes =
-            hex::decode(&p_msg.message_id).map_err(|e| format!("Invalid message_id hex: {e}"))?;
-        let mut message_id = [0u8; 32];
-        if msg_id_bytes.len() != 32 {
-            return Err("message_id must be 32 bytes".into());
-        }
-        message_id.copy_from_slice(&msg_id_bytes);
-
-        let correlation_id = if p_msg.correlation_id.is_empty() {
-            None
-        } else {
-            let corr_bytes = hex::decode(&p_msg.correlation_id)
-                .map_err(|e| format!("Invalid correlation_id hex: {e}"))?;
-            if corr_bytes.len() != 32 {
-                return Err("correlation_id must be 32 bytes".into());
-            }
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&corr_bytes);
-            Some(arr)
-        };
-
-        let src_dom = p_msg
-            .source_domain
-            .parse::<u32>()
-            .map_err(|e| format!("Invalid source_domain: {e}"))?;
-        let tgt_dom = p_msg
-            .target_domain
-            .parse::<u32>()
-            .map_err(|e| format!("Invalid target_domain: {e}"))?;
-
-        let payload_hash_bytes = hex::decode(&p_msg.payload_hash)
-            .map_err(|e| format!("Invalid payload_hash hex: {e}"))?;
-        let mut payload_hash = [0u8; 32];
-        if payload_hash_bytes.len() != 32 {
-            return Err("payload_hash must be 32 bytes".into());
-        }
-        payload_hash.copy_from_slice(&payload_hash_bytes);
-
-        let p_kind = p_msg.kind.as_ref().ok_or("Missing message kind")?;
-        let kind = match pb::proto_message_kind::KindType::try_from(p_kind.kind_type) {
-            Ok(pb::proto_message_kind::KindType::BridgeLock) => {
-                crate::cross_domain::message::MessageKind::BridgeLock
-            }
-            Ok(pb::proto_message_kind::KindType::BridgeMint) => {
-                crate::cross_domain::message::MessageKind::BridgeMint
-            }
-            Ok(pb::proto_message_kind::KindType::BridgeBurn) => {
-                crate::cross_domain::message::MessageKind::BridgeBurn
-            }
-            Ok(pb::proto_message_kind::KindType::BridgeUnlock) => {
-                crate::cross_domain::message::MessageKind::BridgeUnlock
-            }
-            Ok(pb::proto_message_kind::KindType::Custom) => {
-                crate::cross_domain::message::MessageKind::Custom(p_kind.custom_bytes.clone())
-            }
-            Err(_) => return Err("Invalid cross domain message kind".into()),
-        };
-
-        Some(crate::cross_domain::message::CrossDomainMessage {
-            message_id,
-            correlation_id,
-            source_domain: src_dom,
-            target_domain: tgt_dom,
-            source_height: p_msg.source_height,
-            event_index: p_msg.event_index,
-            nonce: p_msg.nonce,
-            sender: Address::from_hex(&p_msg.sender)
-                .map_err(|e| format!("Invalid message sender: {e}"))?,
-            recipient: Address::from_hex(&p_msg.recipient)
-                .map_err(|e| format!("Invalid message recipient: {e}"))?,
-            payload_hash,
-            kind,
-            sender_public_key: Vec::new(),
-            sender_signature: Vec::new(),
-            expiry_height: p_msg.expiry_height,
-        })
-    } else {
-        None
-    };
+    let message = proto
+        .message
+        .as_ref()
+        .map(proto_to_cross_domain_message)
+        .transpose()?;
 
     let mut external_state_root = [0u8; 32];
     if proto.external_state_root.len() != 32 {
@@ -1070,6 +1092,13 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched RoleBond payload".into()),
                 };
                 TransactionType::RoleBond { role: payload.role }
+            }
+            pb::ProtoTransactionType::RelayCrossDomainMessage => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::RelayCrossDomainMessage(p)) => p,
+                    _ => return Err("Missing or mismatched RelayCrossDomainMessage payload".into()),
+                };
+                TransactionType::RelayCrossDomainMessage(proto_to_cross_domain_message(&payload)?)
             }
             pb::ProtoTransactionType::Vault => {
                 let payload = match proto.type_payload {

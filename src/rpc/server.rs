@@ -404,7 +404,18 @@ impl RpcServer {
             RpcMode::Operator => "operator",
         };
         validate_operator_bind_address(&self.mode, &addr)?;
+        // Every served method must be classified, and a public listener
+        // without an API key must expose no consensus write
+        // (`src/rpc/method_class.rs`).
+        let keyless_public = self.mode == RpcMode::Public && !self.security.auth_required;
         let methods: Methods = self.into_rpc().into();
+        crate::rpc::method_class::check_served_methods(methods.method_names(), keyless_public)
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("RPC method classification refused this listener: {e}"),
+                )
+            })?;
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
         let (stop_handle, server_handle) = stop_channel();
@@ -2726,24 +2737,21 @@ impl BudlumApiServer for RpcServer {
         &self,
         msg: crate::cross_domain::CrossDomainMessage,
     ) -> Result<String, ErrorObjectOwned> {
-        let msg_id = hex::encode(msg.message_id);
-        let msg_clone = msg.clone();
-
-        // Relayer-gated: the message sender must be an active relayer in the
-        // Permissionless registry (no whitelist, only stake).
-        self.chain
-            .submit_relayed_cross_domain_message(msg)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid cross domain message: {e}"),
-                    None::<()>,
-                )
-            })?;
-
-        self.node.broadcast_cross_domain_message_sync(msg_clone);
-        Ok(format!("0x{msg_id}"))
+        // N-12: this method used to insert the message into the message
+        // registry (folded into the state root) on the serving node alone,
+        // from the public listener, and gossip it to peers that did the
+        // same at whatever moment it reached them. The registration is a
+        // transaction door now; the method stays so a client gets a pointer
+        // instead of "method not found".
+        let _ = msg;
+        Err(ErrorObjectOwned::owned(
+            -32602,
+            "Out-of-block cross-domain message registration is refused: it changed the \
+             message registry on this node alone. Send a signed RelayCrossDomainMessage \
+             transaction (signer = message sender, an active relayer) through \
+             bud_sendRawTransaction.",
+            None::<()>,
+        ))
     }
 
     async fn register_bridge_asset(

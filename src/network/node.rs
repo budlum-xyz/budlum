@@ -170,15 +170,6 @@ impl NodeClient {
             NetworkMessage::VerifiedDomainCommitment(payload),
         ));
     }
-    pub fn broadcast_cross_domain_message_sync(
-        &self,
-        msg: crate::cross_domain::CrossDomainMessage,
-    ) {
-        let _ = self.sender.try_send(NodeCommand::Broadcast(
-            "blocks".into(),
-            NetworkMessage::CrossDomainMessage(msg),
-        ));
-    }
     pub fn broadcast_slashing_evidence_sync(
         &self,
         evidence: crate::consensus::pos::SlashingEvidence,
@@ -3443,28 +3434,19 @@ impl Node {
                                         continue;
                                     }
                                     NetworkMessage::CrossDomainMessage(msg_obj) => {
-                                        info!("Received CrossDomainMessage from {peer_id} for bridge");
-                                        let msg_clone = msg_obj.clone();
-                                        let chain = self.chain.clone();
-                                        let swarm_cmd_tx = self.command_tx.clone();
-                                        let pm_arc = self.peer_manager.clone();
-                                        tokio::spawn(async move {
-                                            match chain.submit_relayed_cross_domain_message(msg_clone.clone()).await {
-                                                Ok(_) => {
-                                                    if let Ok(mut pm) = pm_arc.lock() {
-                                                        pm.report_good_behavior(&peer_id);
-                                                    }
-                                                    let msg = NetworkMessage::CrossDomainMessage(msg_clone);
-                                                    let _ = swarm_cmd_tx.send(NodeCommand::Broadcast("blocks".into(), msg)).await;
-                                                }
-                                                Err(e) => {
-                                                    warn!("Failed to process CrossDomainMessage from {peer_id}: {e}");
-                                                    if let Ok(mut pm) = pm_arc.lock() {
-                                                        pm.report_invalid_tx(&peer_id);
-                                                    }
-                                                }
-                                            }
-                                        });
+                                        // N-12: a gossiped message used to be
+                                        // inserted into the message registry
+                                        // (state-root bearing) whenever it
+                                        // arrived, so two nodes held different
+                                        // registries at the same height. A
+                                        // relayed message enters through the
+                                        // `RelayCrossDomainMessage` transaction
+                                        // now; the gossip form is dropped and
+                                        // not forwarded.
+                                        tracing::debug!(
+                                            "Dropping gossiped CrossDomainMessage {} from {peer_id}: relayed messages travel as RelayCrossDomainMessage transactions",
+                                            hex::encode(msg_obj.message_id)
+                                        );
                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }

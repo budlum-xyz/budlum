@@ -164,10 +164,6 @@ pub enum ChainCommand {
         crate::cross_domain::CrossDomainMessage,
         oneshot::Sender<Result<(), String>>,
     ),
-    SubmitRelayedCrossDomainMessage(
-        crate::cross_domain::CrossDomainMessage,
-        oneshot::Sender<Result<(), String>>,
-    ),
     BondRelayer(
         crate::core::address::Address,
         u64,
@@ -1956,19 +1952,6 @@ impl ChainHandle {
     }
 
     /// Relayer-gated cross-domain message submission (RPC / p2p entry points).
-    pub async fn submit_relayed_cross_domain_message(
-        &self,
-        message: crate::cross_domain::CrossDomainMessage,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SubmitRelayedCrossDomainMessage(message, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
     /// Bond stake to register as a relayer.
     pub async fn bond_relayer(
         &self,
@@ -3804,10 +3787,6 @@ impl ChainActor {
                 }
                 ChainCommand::SubmitCrossDomainMessage(message, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_cross_domain_message(message));
-                }
-                ChainCommand::SubmitRelayedCrossDomainMessage(message, res_tx) => {
-                    let _ =
-                        res_tx.send(self.blockchain.submit_relayed_cross_domain_message(message));
                 }
                 ChainCommand::BondRelayer(address, amount, res_tx) => {
                     let _ = res_tx.send(

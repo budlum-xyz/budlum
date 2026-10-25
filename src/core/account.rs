@@ -850,6 +850,60 @@ impl AccountState {
         self.bond_independent_role(address, crate::registry::role::roles::RELAYER, amount)
     }
 
+    /// Register a relayed cross-domain message inside block execution
+    /// (`TransactionType::RelayCrossDomainMessage`, testnet directive N-12).
+    ///
+    /// The rules are the ones the retired out-of-block door applied, with
+    /// the transaction signature in place of the message's own envelope:
+    /// the message must name the signer as its sender, the signer must hold
+    /// an active RELAYER bond (an unbonding bond still counts: it is locked
+    /// and slashable), the id must match its preimage, the two domains must
+    /// differ, and an expiry height must not have passed. Because this runs
+    /// inside the executor, every node registers the same message at the
+    /// same height and `message_root` agrees.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the rule that refused; the registry is unchanged.
+    pub fn register_relayed_cross_domain_message(
+        &mut self,
+        signer: &Address,
+        message: &crate::cross_domain::message::CrossDomainMessage,
+    ) -> Result<(), String> {
+        if message.sender != *signer {
+            return Err("relayed message sender is not the transaction signer".into());
+        }
+        if !message.sender_public_key.is_empty() || !message.sender_signature.is_empty() {
+            return Err(
+                "relayed message carries a sender envelope; the transaction signature \
+                 authenticates the sender, so the envelope must be empty"
+                    .into(),
+            );
+        }
+        self.registry
+            .ensure_active_relayer(signer)
+            .map_err(|e| e.to_string())?;
+        if !message.verify_id() {
+            return Err(
+                "Cross-domain message ID does not match canonical preimage (potential forgery)"
+                    .into(),
+            );
+        }
+        if message.source_domain == message.target_domain {
+            return Err(format!(
+                "Cross-domain message source and target domains must differ (both={})",
+                message.source_domain
+            ));
+        }
+        if message.expiry_height > 0 && self.current_block_height > message.expiry_height {
+            return Err(format!(
+                "Cross-domain message expired (expiry={}, current={})",
+                message.expiry_height, self.current_block_height
+            ));
+        }
+        self.message_registry.insert(message.clone())
+    }
+
     /// Bond `amount` into the Prover role. Unlike the relayer role, prover
     /// Registration is NOT a submission gate (proofs are self-verifying), it
     /// Only controls whether a successful proof earns its submitter a reward.
@@ -1450,6 +1504,22 @@ impl AccountState {
                     return Err(
                         "AI inference layer operator has open inference or dispute obligations"
                             .into(),
+                    );
+                }
+            }
+            TransactionType::RelayCrossDomainMessage(ref message) => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Relayed cross-domain message requires zero amount/recipient and empty data"
+                            .into(),
+                    );
+                }
+                if message.sender != tx.from {
+                    return Err("Relayed cross-domain message sender is not the signer".into());
+                }
+                if !self.registry.is_active_relayer(&tx.from) {
+                    return Err(
+                        "Relayed cross-domain message signer is not an active relayer".into(),
                     );
                 }
             }

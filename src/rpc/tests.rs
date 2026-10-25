@@ -782,24 +782,14 @@ mod rpc_tests {
         let commitments3 = server.get_domain_commitments().await.unwrap();
         assert_eq!(commitments3.as_array().unwrap().len(), 1);
 
-        // The relayed submit path requires the sender to be an active relayer.
-        // Fund and register a relayer (staking == registration), then use it as
-        // The message sender.
-        // The message envelope is signed (BLG-0113): the V4 address IS the
-        // Ed25519 public key, so the relayer is derived from the key that
-        // signs.
+        // N-12: the relayed submit path was an out-of-block write of the
+        // message registry from the public listener. It is a transaction
+        // door now (`RelayCrossDomainMessage`, covered in
+        // `src/tests/relayer_liveness.rs`); the RPC method refuses and names
+        // the door, and it registers nothing.
         let relayer_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
         let relayer = Address::from(relayer_keys.public_key_bytes());
-        chain
-            .credit_development_account(&relayer, 5_000)
-            .await
-            .expect("devnet credit");
-        server
-            .registry_bond_relayer(format!("0x{}", relayer.to_hex()), 2_000)
-            .await
-            .unwrap();
-
-        let mut cross_domain_msg = crate::cross_domain::CrossDomainMessage::new(
+        let cross_domain_msg = crate::cross_domain::CrossDomainMessage::new(
             crate::cross_domain::message::CrossDomainMessageParams {
                 source_domain: 1,
                 target_domain: 2,
@@ -813,15 +803,14 @@ mod rpc_tests {
                 expiry_height: 100,
             },
         );
-        cross_domain_msg.sign_sender_ed25519(&relayer_keys);
-
-        let msg_result = server
-            .submit_cross_domain_message(cross_domain_msg.clone())
+        let refused = server
+            .submit_cross_domain_message(cross_domain_msg)
             .await
-            .unwrap();
-        assert_eq!(
-            msg_result,
-            format!("0x{}", hex::encode(cross_domain_msg.message_id))
+            .expect_err("the out-of-block relayed message door is closed");
+        assert!(
+            refused.message().contains("RelayCrossDomainMessage"),
+            "the refusal names the transaction door: {}",
+            refused.message()
         );
 
         let asset_id = crate::cross_domain::AssetId([42u8; 32]);

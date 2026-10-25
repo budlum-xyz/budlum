@@ -55,77 +55,132 @@ fn relayed_message(sender: Address, nonce: u64) -> CrossDomainMessage {
     })
 }
 
-/// BLG-0113 (P05-F06): the sender envelope is mandatory at the relayed
-/// door - a key whose address IS the sender signs the message id.
-fn signed_relayed_message(
+/// A V4 transaction from `keypair` that carries `message` through the
+/// `RelayCrossDomainMessage` door (N-12).
+fn relay_tx(
     keypair: &crate::crypto::primitives::KeyPair,
-    nonce: u64,
-) -> CrossDomainMessage {
-    let sender = Address::from(keypair.public_key_bytes());
-    let mut msg = relayed_message(sender, nonce);
-    msg.sign_sender_ed25519(keypair);
-    msg
+    message: CrossDomainMessage,
+) -> crate::core::transaction::Transaction {
+    let from = Address::from(keypair.public_key_bytes());
+    let mut tx = crate::core::transaction::Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        1,
+        0,
+        Vec::new(),
+        45262,
+        crate::core::transaction::TransactionType::RelayCrossDomainMessage(message),
+    );
+    tx.sign(keypair);
+    tx
 }
 
-// --- 1. Relayer gating ------------------------------------------------------
+/// A bonded relayer with a fresh Ed25519 key, funded for fees.
+fn bonded_relayer(bc: &mut Blockchain) -> (crate::crypto::primitives::KeyPair, Address) {
+    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let relayer = Address::from(keypair.public_key_bytes());
+    bc.state.add_balance(&relayer, 5_000);
+    bc.state.bond_relayer(&relayer, 2_000).unwrap();
+    assert!(bc.state.registry.is_active_relayer(&relayer));
+    (keypair, relayer)
+}
+
+// --- 1. Relayer gating (the RelayCrossDomainMessage door, N-12) -------------
 
 #[test]
 fn unregistered_account_cannot_submit_cross_domain_message() {
     let mut bc = fresh_chain();
     let stranger = addr(0x01);
     let err = bc
-        .submit_relayed_cross_domain_message(relayed_message(stranger, 1))
+        .state
+        .register_relayed_cross_domain_message(&stranger, &relayed_message(stranger, 1))
         .unwrap_err();
-    assert!(err.contains("not an active relayer"));
+    assert!(err.contains("not an active relayer"), "{err}");
     // No message stored.
     assert_eq!(bc.state.message_registry.len(), 0);
 }
 
+/// The door end to end: a signed transaction through the executor registers
+/// the message, charges the fee and advances the nonce.
 #[test]
-fn active_relayer_can_submit_cross_domain_message() {
+fn active_relayer_registers_through_the_transaction_door() {
     let mut bc = fresh_chain();
-    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
-    let relayer = Address::from(keypair.public_key_bytes());
-    bc.state.add_balance(&relayer, 5_000);
-    bc.state.bond_relayer(&relayer, 2_000).unwrap();
-    assert!(bc.state.registry.is_active_relayer(&relayer));
+    let (keypair, relayer) = bonded_relayer(&mut bc);
+    let balance_before = bc.state.get_balance(&relayer);
+    let tx = relay_tx(&keypair, relayed_message(relayer, 1));
+    assert!(
+        tx.is_valid(),
+        "a well-formed relay transaction passes the shape check"
+    );
 
-    bc.submit_relayed_cross_domain_message(signed_relayed_message(&keypair, 1))
-        .unwrap();
+    crate::execution::executor::Executor::apply_transaction(&mut bc.state, &tx).unwrap();
+
     assert_eq!(bc.state.message_registry.len(), 1);
+    assert_eq!(bc.state.get_balance(&relayer), balance_before - tx.fee);
+    assert_eq!(bc.state.get_nonce(&relayer), 1);
 }
 
-/// BLG-0113 (P05-F06): an unsigned message - or one signed by somebody who
-/// is not the declared sender - is refused at the door even when the
-/// named sender IS an active relayer. That spoof is the finding.
+/// The transaction signature is the authentication, so the message must
+/// name the signer as its sender. Naming another active relayer is the
+/// spoof BLG-0113 closed, and it stays closed at the new door.
 #[test]
-fn a_relayed_message_must_be_signed_by_its_declared_sender() {
+fn a_relayed_message_must_name_its_signer_as_sender() {
     let mut bc = fresh_chain();
-    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
-    let relayer = Address::from(keypair.public_key_bytes());
-    bc.state.add_balance(&relayer, 5_000);
-    bc.state.bond_relayer(&relayer, 2_000).unwrap();
-    // Unsigned: refused.
+    let (keypair, relayer) = bonded_relayer(&mut bc);
+    let (_, other_relayer) = bonded_relayer(&mut bc);
+
+    // Naming another relayer: refused by the shape check and by the body.
+    let spoof = relayed_message(other_relayer, 1);
+    assert!(!relay_tx(&keypair, spoof.clone()).is_valid());
     let err = bc
-        .submit_relayed_cross_domain_message(relayed_message(relayer, 1))
+        .state
+        .register_relayed_cross_domain_message(&relayer, &spoof)
         .unwrap_err();
-    assert!(err.contains("sender signature"), "{err}");
-    // Signed by a DIFFERENT key while naming the relayer: refused.
-    let impostor = crate::crypto::primitives::KeyPair::generate().unwrap();
-    let mut forged = relayed_message(relayer, 1);
-    forged.sign_sender_ed25519(&impostor);
-    let err = bc.submit_relayed_cross_domain_message(forged).unwrap_err();
-    assert!(err.contains("signer is not the declared sender"), "{err}");
-    // A real signature over an id whose body was tampered afterwards: the
-    // envelope opens but the id no longer matches the preimage, so the
-    // pre-registration attack dies at the id check behind the envelope.
-    let mut tampered = signed_relayed_message(&keypair, 1);
+    assert!(err.contains("not the transaction signer"), "{err}");
+
+    // A body tampered after the id was computed: the id no longer matches
+    // its preimage, so a pre-registered id cannot be reused for a different
+    // message.
+    let mut tampered = relayed_message(relayer, 1);
     tampered.recipient = addr(0xEF);
     let err = bc
-        .submit_relayed_cross_domain_message(tampered)
+        .state
+        .register_relayed_cross_domain_message(&relayer, &tampered)
         .unwrap_err();
     assert!(err.contains("preimage"), "{err}");
     assert_eq!(bc.state.message_registry.len(), 0, "nothing registered");
+}
+
+/// The envelope is outside the signing preimage, so the door refuses any
+/// bytes there rather than store something a relay could have rewritten.
+#[test]
+fn a_relayed_message_with_a_sender_envelope_is_refused() {
+    let mut bc = fresh_chain();
+    let (keypair, relayer) = bonded_relayer(&mut bc);
+    let mut msg = relayed_message(relayer, 1);
+    msg.sender_public_key = keypair.public_key_bytes().to_vec();
+    msg.sender_signature = keypair.sign(&msg.message_id).to_vec();
+    let err = bc
+        .state
+        .register_relayed_cross_domain_message(&relayer, &msg)
+        .unwrap_err();
+    assert!(err.contains("envelope"), "{err}");
+    assert_eq!(bc.state.message_registry.len(), 0);
+}
+
+#[test]
+fn a_relayed_message_past_its_expiry_is_refused() {
+    let mut bc = fresh_chain();
+    let (_, relayer) = bonded_relayer(&mut bc);
+    // `relayed_message` expires at height 100.
+    bc.state.current_block_height = 101;
+    let err = bc
+        .state
+        .register_relayed_cross_domain_message(&relayer, &relayed_message(relayer, 1))
+        .unwrap_err();
+    assert!(err.contains("expired"), "{err}");
+    assert_eq!(bc.state.message_registry.len(), 0);
 }
 
 #[test]
@@ -146,12 +201,11 @@ fn slashed_relayer_cannot_submit_cross_domain_message() {
         .unwrap();
     assert!(!bc.state.registry.is_active_relayer(&relayer));
 
-    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
-    let mut msg = relayed_message(relayer, 1);
-    msg.sender_public_key = keypair.public_key_bytes().to_vec();
-    msg.sender_signature = keypair.sign(&msg.message_id).to_vec();
-    let err = bc.submit_relayed_cross_domain_message(msg).unwrap_err();
-    assert!(err.contains("not an active relayer"));
+    let err = bc
+        .state
+        .register_relayed_cross_domain_message(&relayer, &relayed_message(relayer, 1))
+        .unwrap_err();
+    assert!(err.contains("not an active relayer"), "{err}");
 }
 
 #[test]
@@ -159,16 +213,14 @@ fn unbonding_relayer_can_still_submit() {
     // Decision: unbonding is an exit process, not a punishment; the stake is
     // Still locked and slashable, so the relayer may keep relaying.
     let mut bc = fresh_chain();
-    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
-    let relayer = Address::from(keypair.public_key_bytes());
-    bc.state.add_balance(&relayer, 5_000);
-    bc.state.bond_relayer(&relayer, 2_000).unwrap();
+    let (_, relayer) = bonded_relayer(&mut bc);
     bc.state
         .registry
         .begin_unbonding(relayer, roles::RELAYER, 0)
         .unwrap();
     assert!(bc.state.registry.is_active_relayer(&relayer));
-    bc.submit_relayed_cross_domain_message(signed_relayed_message(&keypair, 1))
+    bc.state
+        .register_relayed_cross_domain_message(&relayer, &relayed_message(relayer, 1))
         .unwrap();
     assert_eq!(bc.state.message_registry.len(), 1);
 }

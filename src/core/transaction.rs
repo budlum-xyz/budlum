@@ -444,6 +444,15 @@ pub enum TransactionType {
     RoleBond {
         role: u32,
     },
+    /// A bonded relayer registers a cross-domain message, applied in block
+    /// (testnet directive N-12). The sender is `tx.from`, and the message's
+    /// own sender field must name the same account, so the transaction
+    /// signature is the authentication; the message's separate signature
+    /// envelope must be empty. Replaces the out-of-block registration the
+    /// public RPC and the gossip handler used to perform. (Written without
+    /// naming types: the signing gate reads the enum body's identifiers to
+    /// resolve carried payload types.)
+    RelayCrossDomainMessage(crate::cross_domain::message::CrossDomainMessage),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1118,6 +1127,18 @@ impl Transaction {
                     return false;
                 }
             }
+            TransactionType::RelayCrossDomainMessage(message) => {
+                if self.amount != 0 || self.to != Address::zero() || !self.data.is_empty() {
+                    debug!(
+                        "Relayed cross-domain message requires zero amount, zero recipient, and empty data"
+                    );
+                    return false;
+                }
+                if message.sender != self.from {
+                    debug!("Relayed cross-domain message sender is not the transaction signer");
+                    return false;
+                }
+            }
             TransactionType::ContractCall => {
                 if self.amount != 0 {
                     debug!("Contract call TX amount must be 0");
@@ -1246,6 +1267,9 @@ impl Transaction {
                 schedule.contract_call_gas * 2 + schedule.gas_per_signature
             }
             TransactionType::Storage(_) => schedule.contract_call_gas * 2,
+            // One registry insert behind a relayer-bond lookup: priced like
+            // the registry arms above.
+            TransactionType::RelayCrossDomainMessage(_) => schedule.contract_call_gas * 2,
         };
         let signature_gas = if self.signature.is_some() {
             schedule.gas_per_signature
@@ -1477,6 +1501,7 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::Storage(_) => 47,
         TransactionType::PoaOnboarding(_) => 48,
         TransactionType::RoleBond { .. } => 49,
+        TransactionType::RelayCrossDomainMessage(_) => 50,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -2219,6 +2244,7 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         }
         TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
         TransactionType::Storage(storage_tx) => encode_storage_tx(storage_tx, out),
+        TransactionType::RelayCrossDomainMessage(message) => encode_message(message, out),
     }
 }
 

@@ -2,10 +2,13 @@
 //!
 //! Architecture:
 //! - Any account with the RELAYER role (staked via PermissionlessRegistry) can
-//!   relay cross-domain messages. That check is the chain's
-//!   (`Blockchain::submit_relayed_cross_domain_message` calls `ensure_active_relayer` before this
-//!   module sees the submission); `process_relay` itself does not know the
-//!   registry and does not re-check the caller.
+//!   relay cross-domain messages. That check is the chain's:
+//!   `Blockchain::submit_relay_proof` calls `ensure_active_relayer` before
+//!   this module sees a relay, and a relayed message itself enters through
+//!   the `RelayCrossDomainMessage` transaction, whose body
+//!   (`AccountState::register_relayed_cross_domain_message`) checks the bond
+//!   in block. `process_relay` does not know the registry and does not
+//!   re-check the caller.
 //! - The relayer watches for bridge lock/burn events on the source domain and
 //!   Submits proofs to the target domain.
 //! - Slashing: if a relayer submits an invalid proof or fails to relay within
