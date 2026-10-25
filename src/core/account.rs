@@ -1733,6 +1733,21 @@ impl AccountState {
                         );
                     }
                 }
+                // A vote already cast carries weight equal to the voter's
+                // stake, while the quorum denominator (`get_total_stake`)
+                // counts only eligible stake. This report just took the
+                // offender out of that set, so the same stake has to leave the
+                // numerator as well. Left alone, a proposal the offender voted
+                // on keeps its full weight while the denominator shrinks by
+                // the whole jailed stake - a self-inflicted liveness jail then
+                // lets roughly a quarter of the stake reach a threshold that
+                // names a third. This is the reduction the `Unstake` path
+                // performs when stake moves, applied to the same rows.
+                for proposal in self.governance.proposals.iter_mut() {
+                    if proposal.status == crate::core::governance::ProposalStatus::Active {
+                        proposal.reduce_vote_weight(&report.offender, u64::MAX);
+                    }
+                }
             }
         }
         Ok(outcome)
@@ -1981,6 +1996,15 @@ impl AccountState {
                     {
                         self.burned_total = total;
                     }
+                    // Same tally rule as the report path: the stake this arm
+                    // just removed from the eligible set has to leave the
+                    // numerator too, or a vote cast before the slash keeps
+                    // weighing against a denominator it is no longer part of.
+                    for proposal in self.governance.proposals.iter_mut() {
+                        if proposal.status == crate::core::governance::ProposalStatus::Active {
+                            proposal.reduce_vote_weight(address, u64::MAX);
+                        }
+                    }
                     tracing::info!(
                         "Executing Governance: Slashed validator {address} (evidence-verified)"
                     );
@@ -1990,19 +2014,63 @@ impl AccountState {
                 // BLG-0089 (P04-F07): governance is the trust root of a
                 // permissioned domain - the first admin arrives here, and
                 // later ones can too.
-                self.poa_onboarding.add_admin(*domain_id, *admin);
-                tracing::info!("Executing Governance: PoA domain {domain_id} admin {admin} added");
+                //
+                // CWE-269: "the domain has an admin" is what declares a domain
+                // permissioned, so an ungated write here lets a proposal create
+                // PoA admission control over a permissionless domain and hand
+                // an arbitrary address the admission door. The domain's
+                // consensus kind lives in `ConsensusDomainRegistry`, which this
+                // state machine does not own, so the gate uses what it can
+                // see: the chain's own execution domain, and whether the
+                // domain already carries admins. A PoA chain keeps governance
+                // as the trust root for its first admin; a permissioned island
+                // keeps the ability to extend or shrink its own set; and a
+                // permissionless chain can no longer mint admission authority
+                // over a domain that has none, which is the state the
+                // constitution's `PermissionlessCoreNoAdminWhitelist` forbids.
+                // `Blockchain::register_consensus_domain` refuses the reverse
+                // mismatch - admins recorded under a non-PoA kind.
+                if *admin == Address::zero() {
+                    tracing::warn!(
+                        "Rejecting PoaAddAdmin domain {domain_id}: the admin address is zero"
+                    );
+                } else if self.execution_domain != crate::domain::ConsensusKind::PoA
+                    && !self.poa_is_permissioned(*domain_id)
+                {
+                    tracing::warn!(
+                        "Rejecting PoaAddAdmin domain {domain_id}: this chain is not a PoA \
+                         domain and {domain_id} holds no admins, so the write would put \
+                         admission control on a permissionless domain"
+                    );
+                } else {
+                    self.poa_onboarding.add_admin(*domain_id, *admin);
+                    tracing::info!(
+                        "Executing Governance: PoA domain {domain_id} admin {admin} added"
+                    );
+                }
             }
             ProposalType::PoaRemoveAdmin { domain_id, admin } => {
                 // BLG-0094 (P04-F12): governance may take the last admin -
                 // unpermissioning a domain is a recorded decision, not an
-                // admin door action.
-                self.poa_onboarding
-                    .registry_mut()
-                    .force_remove_admin(*domain_id, *admin);
-                tracing::info!(
-                    "Executing Governance: PoA domain {domain_id} admin {admin} removed"
-                );
+                // admin door action. The same kind gate applies: a domain that
+                // is not PoA and has no admins has nothing to remove, and
+                // treating it as a near miss would let the write create the
+                // record it was meant to delete.
+                if self.execution_domain != crate::domain::ConsensusKind::PoA
+                    && !self.poa_is_permissioned(*domain_id)
+                {
+                    tracing::warn!(
+                        "Rejecting PoaRemoveAdmin domain {domain_id}: this chain is not a PoA \
+                         domain and {domain_id} holds no admins"
+                    );
+                } else {
+                    self.poa_onboarding
+                        .registry_mut()
+                        .force_remove_admin(*domain_id, *admin);
+                    tracing::info!(
+                        "Executing Governance: PoA domain {domain_id} admin {admin} removed"
+                    );
+                }
             }
             ProposalType::FreezePoaAccount {
                 domain_id,
@@ -3251,6 +3319,69 @@ mod tests {
             1_000 - outcome.penalty
         );
     }
+    /// The quorum denominator is ELIGIBLE stake (`get_total_stake`), while a
+    /// vote carries the voter's raw stake. A validator that a report removes
+    /// from the eligible set therefore had to lose its vote weight with it:
+    /// the same 1_000 stake is a quarter of a 4_000 total and a third of the
+    /// 3_000 that is left, so a deliberately self-inflicted jail let a
+    /// minority reach a threshold it never held.
+    #[test]
+    fn a_slashed_voters_weight_leaves_the_proposal_it_voted_on() {
+        use crate::core::governance::{Proposal, ProposalStatus, ProposalType};
+        let offender = test_addr_from_byte(31u8);
+        let honest = test_addr_from_byte(32u8);
+        let mut state = AccountState::new();
+        state.add_validator(offender, 1_000);
+        state.add_validator(honest, 3_000);
+        assert_eq!(state.get_total_stake(), 4_000);
+
+        let mut proposal = Proposal::new(1, honest, ProposalType::ChangeBaseFee(2), 0, 10);
+        proposal.add_vote(offender, 1_000, true, 0).unwrap();
+        state.governance.proposals.push(proposal);
+
+        // A quarter of the eligible stake, below the 33% quorum.
+        let mut before = state.governance.proposals[0].clone();
+        before.finalize(state.get_total_stake(), 33, 10);
+        assert_eq!(before.status, ProposalStatus::Failed);
+
+        let report = crate::registry::evidence::SlashingReport::consensus_double_sign(
+            offender,
+            crate::registry::evidence::SlashingProof::DoubleSign {
+                height: 7,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "aa".into(),
+                block_hash_2: "bb".into(),
+                signature_1: vec![1],
+                signature_2: vec![2],
+            },
+            None,
+        );
+        state.slash_from_report(&report).unwrap();
+        assert_eq!(
+            state.get_total_stake(),
+            3_000,
+            "the slashed validator has left the quorum denominator"
+        );
+        let proposal = &state.governance.proposals[0];
+        assert_eq!(
+            proposal.votes_for, 0,
+            "the offender's weight has to leave the numerator too"
+        );
+        assert_eq!(proposal.vote_weight_of(&offender), 0);
+        assert_eq!(
+            proposal.voters.get(&offender),
+            Some(&true),
+            "the address stays recorded, so it cannot vote a second time"
+        );
+        let mut after = proposal.clone();
+        after.finalize(state.get_total_stake(), 33, 10);
+        assert_eq!(
+            after.status,
+            ProposalStatus::Failed,
+            "without the fix this 1_000 reads as 33% of the 3_000 that is left"
+        );
+    }
     #[test]
     fn test_new_account() {
         let account = Account::new(Address::zero());
@@ -3887,6 +4018,64 @@ mod tests {
             "the badge already has a writer; emitting the action here would \
              apply the same vote twice"
         );
+    }
+
+    /// CWE-269: a governance proposal used to be able to put PoA admission
+    /// control on a permissionless domain, which is the state the
+    /// constitution's `PermissionlessCoreNoAdminWhitelist` forbids. The state
+    /// machine cannot read the domain record, so it refuses the write unless
+    /// the chain itself is a PoA domain or the domain already carries admins.
+    #[test]
+    fn governance_cannot_put_admission_control_on_a_permissionless_domain() {
+        use crate::core::governance::{Proposal, ProposalType};
+        let proposer = test_addr_from_byte(7u8);
+        let admin = test_addr_from_byte(8u8);
+        let domain = 42;
+        let mut state = AccountState::new();
+        state.execution_domain = crate::domain::ConsensusKind::PoS;
+
+        let add = Proposal::new(
+            1,
+            proposer,
+            ProposalType::PoaAddAdmin {
+                domain_id: domain,
+                admin,
+            },
+            0,
+            10,
+        );
+        state.execute_proposal(&add);
+        assert!(
+            !state.poa_onboarding.registry().is_admin(domain, &admin),
+            "a permissionless chain must not mint admission authority over a domain that has none"
+        );
+        assert!(!state.poa_is_permissioned(domain));
+
+        // An established permissioned island keeps its own set in
+        // governance's hands: extending it is not the same write.
+        state.poa_onboarding.add_admin(domain, proposer);
+        state.execute_proposal(&add);
+        assert!(
+            state.poa_onboarding.registry().is_admin(domain, &admin),
+            "an existing PoA domain must still be able to extend its admin set"
+        );
+
+        // A zero admin is refused even where the domain is established.
+        let zero_admin = Proposal::new(
+            2,
+            proposer,
+            ProposalType::PoaAddAdmin {
+                domain_id: domain,
+                admin: Address::zero(),
+            },
+            0,
+            10,
+        );
+        state.execute_proposal(&zero_admin);
+        assert!(!state
+            .poa_onboarding
+            .registry()
+            .is_admin(domain, &Address::zero()));
     }
 
     /// A passed governance slash takes the stake in the unbonding queue and

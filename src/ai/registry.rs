@@ -383,6 +383,20 @@ impl AiRegistry {
         if result.output_ref.len() as u64 > spec.max_output_ref_bytes {
             return Err("output_ref exceeds model specification limits".into());
         }
+        // The commitment has to be the canonical one over the bytes it names,
+        // which is the check request admission already makes on
+        // `input_commitment`. Without it a verifier can group on the honest
+        // commitment and ship different bytes: the outcome serves
+        // `output_ref`, the output NFT and Pollen `DataAsset` are minted from
+        // it, and no dispute path covers the mismatch.
+        let canonical = crate::ai::types::canonical_output_commitment(result.output_ref.as_slice());
+        if result.output_commitment != canonical {
+            return Err(format!(
+                "Result output_commitment {} does not commit to output_ref (canonical {})",
+                hex::encode(result.output_commitment),
+                hex::encode(canonical)
+            ));
+        }
         // Deadline enforcement (registry layer):
         // Result must arrive before the request's deadline_block AND
         // Within result_deadline_blocks of the request's submission.

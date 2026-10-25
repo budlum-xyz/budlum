@@ -7,12 +7,12 @@
 //! No mocks; real types and real registry methods.
 
 use crate::ai::types::{
-    AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec, AiRequestId, BoundedBytes,
+    canonical_output_commitment, AiInferenceRequest, AiInferenceResult, AiModelId, AiModelSpec,
+    AiRequestId, BoundedBytes,
 };
 use crate::ai::AiRegistry;
 use crate::core::address::Address;
 use crate::pollen::data_rights::AccessGrant;
-use sha2::{Digest, Sha256};
 
 /// Register an AI inference layer model on chain (AiModelSpec + register_model).
 pub fn register_ai_model(
@@ -105,10 +105,10 @@ pub fn build_ai_result(
     submitted_at_block: u64,
 ) -> Result<AiInferenceResult, String> {
     let output_ref = BoundedBytes::try_new(output.clone())?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"AI_OUTPUT_COMMIT_V1");
-    hasher.update(&output);
-    let output_commitment: [u8; 32] = hasher.finalize().into();
+    // One definition of the commitment, shared with the check `submit_result`
+    // makes: a producer that computed it its own way would be refused by a
+    // rule it never read.
+    let output_commitment = canonical_output_commitment(&output);
     Ok(AiInferenceResult {
         request_id,
         verifier,

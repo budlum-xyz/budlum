@@ -552,13 +552,24 @@ impl Executor {
                 // before the fee and nonce are touched. The callers keep the
                 // state of a failed transaction, so a refusal after the
                 // debit would leave a half-applied transaction behind.
+                //
+                // The voter must also be ELIGIBLE, not merely present. A vote
+                // carries weight equal to the voter's stake while
+                // `get_total_stake()` counts only eligible stake, so a jailed
+                // or slashed validator whose stake has left that denominator
+                // must not vote: its weight would be measured against a total
+                // its own stake is missing from, and a deliberately jailed
+                // minority could reach the quorum with less stake than the
+                // threshold names.
                 if tx.to == Address::zero()
                     && tx.data.len() == 9
-                    && state.get_validator(&tx.from).map_or(0, |v| v.stake) == 0
+                    && !state
+                        .get_validator(&tx.from)
+                        .is_some_and(|v| v.stake > 0 && v.is_eligible(state.epoch_index))
                 {
                     return Err(BudlumError::validation(
                         "governance_voter_not_validator",
-                        "Only validators can vote in governance",
+                        "Only eligible validators can vote in governance",
                     ));
                 }
                 let sender_acc = state.get_or_create(&tx.from);

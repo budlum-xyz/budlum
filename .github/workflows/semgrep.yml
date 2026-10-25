@@ -10,6 +10,26 @@
 # is NOT USED. The SARIF is still uploaded to the Security tab (`if: always`),
 # so the findings are visible in the UI even on FAIL.
 #
+# Two rules are excluded at scan level, each with the reasoning written down
+# here. The mechanism is the same in both cases: an in-source `nosemgrep` marker
+# is still written to the SARIF with `suppressions: [{kind: inSource}]`, and
+# GitHub lists a suppressed result as an OPEN alert. A marker therefore keeps
+# the finding in the Security tab forever instead of closing it, so the rule is
+# excluded here and the marker stays in the source as documentation.
+#
+#   * `rust.lang.security.args.args` - see the dedicated note at the scan step.
+#   * `rust.lang.security.current-exe.current-exe` - ONE hit, and it is a test.
+#     `src/crypto/primitives.rs::keypair_generate_does_not_leak_public_key_via_println`
+#     re-executes the test binary with `--exact` and captures its stdout to prove
+#     that `KeyPair::generate` prints nothing; `current_exe()` is how it names
+#     that binary. Nothing is authorised, identified or keyed from that path -
+#     the process it starts is the test harness itself, and its exit code is not
+#     trusted either (the assertion is on the captured bytes). The rule's own
+#     text is about trusting the path "for security operations", which this is
+#     not. If a second call site appears, or the first moves to a non-test
+#     module, this exclusion is void: the scan-level rule hides every hit in the
+#     tree, so the guard is the marker plus this paragraph.
+#
 # `rust.lang.security.temp-dir.temp-dir` is excluded: the self-test canaries in
 # xtask/gates set up temporary trees with `temp_dir().join("budlum-gates-
 # <name>-<pid>-<nanos>")`. The name is unique by pid + nanos (the equivalent
@@ -99,6 +119,7 @@ jobs:
             --config=p/security-audit \
             --config=p/secrets \
             --exclude-rule=rust.lang.security.args.args \
+            --exclude-rule=rust.lang.security.current-exe.current-exe \
             --exclude-rule=rust.lang.security.temp-dir.temp-dir \
             --sarif --output=semgrep.sarif \
             --error \

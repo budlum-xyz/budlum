@@ -387,8 +387,23 @@ impl Vm {
                 {
                     let mut bytes = [0u8; 8];
                     bytes.copy_from_slice(&self.memory[addr..addr + 8]);
-                    memory_addr = Some(addr);
                     let val = u64::from_le_bytes(bytes);
+                    // The trace, every AIR constraint and the state-write
+                    // digest read a memory word as a Goldilocks element, i.e.
+                    // as `val mod P`, while this VM compares and stores the
+                    // raw `u64`. A word at or above the modulus therefore
+                    // makes the executed and the proven operand disagree, and
+                    // that is reachable: `Store` needs no alignment, so a
+                    // write to a neighbouring address rewrites a cell's low
+                    // byte without ever recording a value for that cell.
+                    // Refuse it, exactly as the immediate form above is
+                    // canonicalised rather than truncated.
+                    if val >= GOLDILOCKS_P {
+                        self.halted = true;
+                        self.error = Some(VmError::InvalidMemoryAccess);
+                        return Err(VmError::InvalidMemoryAccess);
+                    }
+                    memory_addr = Some(addr);
                     memory_val = Some(val);
                     val
                 } else {
@@ -2104,6 +2119,38 @@ mod tests {
         assert_eq!(vm.pc, 0);
         assert_eq!(vm.trace.len(), 1);
         assert_eq!(vm.registers[1], 0);
+    }
+
+    /// A memory word at or above the Goldilocks modulus is not a field
+    /// element. The trace, every AIR constraint and the state-write digest
+    /// read such a word as `val mod P` while the VM used to compare and store
+    /// the raw `u64`, so a proof could attest to a comparison outcome and a
+    /// storage value that no honest execution produces. `Store` needs no
+    /// alignment, so a neighbouring write can plant one; the memory form of
+    /// `Load` refuses it now, as the immediate form already canonicalises.
+    #[test]
+    fn load_refuses_a_memory_word_that_is_not_a_field_element() {
+        let program = vec![
+            inst(Opcode::Load, 1, 2, 0, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        vm.memory[0..8].copy_from_slice(&GOLDILOCKS_P.to_le_bytes());
+        let receipt = vm.run_receipt(&program);
+        assert!(
+            !receipt.success,
+            "a non-canonical word must not enter a register"
+        );
+        assert_eq!(receipt.error, Some(VmError::InvalidMemoryAccess));
+
+        // A guard that refused every memory word would satisfy the assertion
+        // above and break the opcode; the largest canonical value still loads.
+        let canonical = GOLDILOCKS_P - 1;
+        let mut vm = Vm::new(64);
+        vm.memory[0..8].copy_from_slice(&canonical.to_le_bytes());
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "a canonical word must still be loaded");
+        assert_eq!(vm.registers[1], canonical);
     }
 
     #[test]

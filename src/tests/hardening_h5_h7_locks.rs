@@ -162,7 +162,7 @@ mod tests {
             ".quality/deny.toml",
             ".quality/typos.toml",
             ".quality/grype.yaml",
-            ".quality/osv-scanner.toml",
+            "osv-scanner.toml",
             ".gitleaks.toml",
             ".github/coverage-baseline.txt",
         ] {
@@ -194,7 +194,7 @@ mod tests {
             ),
             (
                 include_str!("../../.github/workflows/osv-scanner.yml"),
-                ".quality/osv-scanner.toml",
+                "osv-scanner.toml",
             ),
         ] {
             assert!(

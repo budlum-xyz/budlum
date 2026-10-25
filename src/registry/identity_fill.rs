@@ -628,6 +628,19 @@ pub fn check_receipt(
                 reason: "gone from the registry".to_string(),
             }
         })?;
+        // The receipt speaks for its SUBJECT. A field opened from another
+        // subject's credential is not evidence about the signer, and the
+        // receipt does not expose the credential subject, so a relying party
+        // cannot check this itself without resolving every credential: the
+        // door has to be the one that refuses it. The prover-side builder
+        // above already refuses to produce such an entry, so an honest receipt
+        // is unaffected and a hand-built one dies here.
+        if credential.subject != receipt.subject {
+            return Err(FillError::CredentialNotValid {
+                slot: entry.slot.clone(),
+                reason: "its subject is someone else".to_string(),
+            });
+        }
         registry
             .is_credential_valid(&entry.credential_id, receipt.epoch)
             .map_err(|e| FillError::CredentialNotValid {
@@ -885,6 +898,104 @@ mod tests {
             .unwrap();
         assert!(matches!(
             check_receipt(&registry, &receipt, &requester, &filled),
+            Err(FillError::CredentialNotValid { .. })
+        ));
+    }
+
+    /// A receipt used to verify while it opened fields of *another* subject's
+    /// credential: the per-entry loop checked that each commitment existed in
+    /// some live credential, never that the credential belonged to the receipt
+    /// subject. The builder already refuses to produce such an entry, so the
+    /// verifier has to refuse it too - the receipt does not expose the
+    /// credential subject, and a relying party cannot resolve it itself.
+    #[test]
+    fn a_receipt_cannot_open_fields_from_another_subjects_credential() {
+        use crate::core::hash::hash_fields_bytes as hf;
+        use crate::registry::identity::{
+            credential_id, field_commitment, CredentialCommitment, FieldCommitment, IdentityOp,
+            IdentityRecord, MethodKind, VerificationMethod,
+        };
+        use crate::registry::IdentityRegistry;
+        let victim_key = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let victim = Address::from(victim_key.public_key_bytes());
+        let attacker_key = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let attacker = Address::from(attacker_key.public_key_bytes());
+        let issuer = Address([9u8; 32]);
+        let requester = Address([7u8; 32]);
+        let salt = [5u8; 32];
+        let value = "Elif Ayaz";
+        let key = hf(&[b"issuer-key"]);
+
+        let mut registry = IdentityRegistry::new();
+        for holder in [victim, issuer] {
+            registry
+                .apply(
+                    &crate::domain::ConsensusKind::PoA,
+                    IdentityOp::Register {
+                        record: IdentityRecord::new(
+                            holder,
+                            vec![VerificationMethod::new(key, MethodKind::MlDsa87)],
+                            vec![],
+                            0,
+                        )
+                        .unwrap(),
+                    },
+                    50,
+                )
+                .unwrap();
+        }
+        let credential = CredentialCommitment {
+            issuer,
+            subject: victim,
+            schema: "kycc-lite-v1".to_string(),
+            fields: vec![FieldCommitment {
+                name: "legal_name".to_string(),
+                commitment: field_commitment(
+                    "kycc-lite-v1",
+                    "legal_name",
+                    &salt,
+                    &value_digest_of(value),
+                ),
+            }],
+            issued_at: 100,
+            expires_at: Some(1_000),
+        };
+        let cid = credential_id(&credential);
+        registry
+            .apply(
+                &crate::domain::ConsensusKind::PoA,
+                IdentityOp::Issue {
+                    credential: credential.clone(),
+                },
+                100,
+            )
+            .unwrap();
+        let proof = credential_proof(&credential, 0).unwrap();
+        let filled = "Customer: Elif Ayaz.";
+        // Hand-built the way an attacker would: the attacker's own key signs a
+        // receipt whose entries point at the victim's credential.
+        let mut receipt = PresentationReceipt {
+            requester,
+            subject: attacker,
+            document_digest: document_digest_of(filled),
+            epoch: 200,
+            entries: vec![ReceiptEntry {
+                slot: "legal_name".to_string(),
+                credential_id: cid,
+                field: "legal_name".to_string(),
+                salt,
+                value_digest: value_digest_of(value),
+                proof,
+            }],
+            subject_public_key: Vec::new(),
+            signature: Vec::new(),
+        };
+        receipt.sign(&attacker_key);
+        receipt
+            .verify_binding()
+            .expect("the attacker's own signature holds");
+        assert!(matches!(
+            check_receipt(&registry, &receipt, &requester, filled),
             Err(FillError::CredentialNotValid { .. })
         ));
     }

@@ -244,14 +244,24 @@ mod tests {
     /// hide a regression if the graph ever slid back.
     #[test]
     fn patched_advisories_are_not_ignored_anywhere() {
-        let configs: [(&str, &str); 3] = [
+        let configs: [(&str, &str); 5] = [
             (
                 ".quality/deny.toml",
                 include_str!("../../.quality/deny.toml"),
             ),
+            ("osv-scanner.toml", include_str!("../../osv-scanner.toml")),
+            // BudZero and fuzz are separate workspaces with their own lockfiles
+            // and their own osv config beside them. BudZero's used to carry the
+            // yamux and hickory records, and the fuzz tree had no config at all;
+            // both were outside this test, so the drift was invisible until
+            // 2026-10-25.
             (
-                ".quality/osv-scanner.toml",
-                include_str!("../../.quality/osv-scanner.toml"),
+                "budzero/osv-scanner.toml",
+                include_str!("../../budzero/osv-scanner.toml"),
+            ),
+            (
+                "fuzz/osv-scanner.toml",
+                include_str!("../../fuzz/osv-scanner.toml"),
             ),
             (
                 ".quality/grype.yaml",
@@ -300,7 +310,7 @@ mod tests {
     }
 
     /// RUSTSEC-2026-0253 (lru `pop()` use-after-free) is waived in
-    /// `.quality/osv-scanner.toml` on one argument: the only `LruCache` in the
+    /// `osv-scanner.toml` on one argument: the only `LruCache` in the
     /// graph is rqrr's `LruCache<u8, ColoredRegion>`, and a `u8` key has no
     /// `Drop` that could panic mid-pop. The waiver is scoped to the locked
     /// version and dated; this test is what invalidates it early. It fails
@@ -340,7 +350,7 @@ mod tests {
              argument (or the rqrr upgrade that drops lru 0.16)"
         );
 
-        let osv = include_str!("../../.quality/osv-scanner.toml");
+        let osv = include_str!("../../osv-scanner.toml");
         let at = osv
             .find("name = \"lru\"")
             .expect("the lru waiver is a PackageOverrides entry, not a bare IgnoredVulns id");

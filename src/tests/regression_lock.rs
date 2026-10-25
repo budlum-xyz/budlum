@@ -331,7 +331,7 @@ mod relayer_escrow_silent_failure_regression {
         registry: &mut AiRegistry,
         request_id: AiRequestId,
         verifier: Address,
-        output_commitment: [u8; 32],
+        output_ref: &[u8],
         result_nonce: u64,
         current_block: u64,
     ) {
@@ -340,13 +340,16 @@ mod relayer_escrow_silent_failure_regression {
                 .lock_verifier_stake(&verifier, crate::ai::registry::MIN_VERIFIER_STAKE)
                 .expect("verifier stake locks");
         }
+        let output_ref = BoundedBytes::try_new(output_ref.to_vec()).unwrap();
         registry
             .submit_result(
                 AiInferenceResult {
                     request_id,
                     verifier,
-                    output_commitment,
-                    output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
+                    output_commitment: crate::ai::types::canonical_output_commitment(
+                        output_ref.as_slice(),
+                    ),
+                    output_ref,
                     result_nonce,
                     signature: vec![1],
                     submitted_at_block: current_block,
@@ -392,7 +395,7 @@ mod relayer_escrow_silent_failure_regression {
             &mut registry,
             request_id,
             verifier,
-            [0x11u8; 32],
+            b"response",
             1,
             current_block + 10,
         );
@@ -400,7 +403,7 @@ mod relayer_escrow_silent_failure_regression {
             &mut registry,
             request_id,
             verifier2,
-            [0x11u8; 32],
+            b"response",
             2,
             current_block + 11,
         );
@@ -674,7 +677,7 @@ mod relayer_escrow_silent_failure_regression {
             &mut registry,
             request_id,
             verifier,
-            [0x11u8; 32],
+            b"response",
             1,
             current_block + 10,
         );
@@ -682,7 +685,7 @@ mod relayer_escrow_silent_failure_regression {
             &mut registry,
             request_id,
             verifier2,
-            [0x11u8; 32],
+            b"response",
             2,
             current_block + 11,
         );
