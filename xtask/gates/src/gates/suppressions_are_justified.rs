@@ -255,18 +255,6 @@ const BUDGETS: &[Budget] = &[
         reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
     },
     Budget {
-        file: "src/bin/budlum-relayer.rs",
-        lint: "clippy::nursery",
-        count: 1,
-        reason: "nursery lints are unstable by definition and this file predates the crate-wide ratchet; listed so the exception is visible rather than assumed",
-    },
-    Budget {
-        file: "src/bin/budlum-relayer.rs",
-        lint: "clippy::pedantic",
-        count: 1,
-        reason: "pedantic is denied crate-wide; these files were exempted before the ratchet and each exemption is a debt, not a decision",
-    },
-    Budget {
         file: "src/chain/blockchain.rs",
         lint: "clippy::too_many_arguments",
         count: 4,
