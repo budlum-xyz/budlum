@@ -317,8 +317,8 @@ const BUDGETS: &[Budget] = &[
     Budget {
         file: "src/domain/storage_deal.rs",
         lint: "clippy::too_many_arguments",
-        count: 4,
-        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
+        count: 5,
+        reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply. The fifth is `answer_coding_audit`: the answer, the audit it answers and the clock reading are three different things, and the column, the byte and the inclusion path have to stay three slices a caller cannot confuse",
     },
     Budget {
         file: "src/ai_inference/executor.rs",

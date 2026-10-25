@@ -2546,6 +2546,7 @@ mod tests {
                 audit_id: 11,
                 data_column: vec![1, 2, 3, 4],
                 parity_byte: 5,
+                column_proof: vec![[7u8; 32], [8u8; 32]],
             }),
             TransactionType::Identity(crate::registry::IdentityTx::Register {
                 record: crate::registry::IdentityRecord::new(
