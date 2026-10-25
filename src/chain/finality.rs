@@ -221,6 +221,26 @@ pub fn vote_message_epoch(vote_msg: &[u8]) -> Option<u64> {
     Some(u64::from_le_bytes(epoch_bytes))
 }
 
+/// Extract the canonical chain id committed inside a domain-separated
+/// `Prevote` or `Precommit` signing preimage, returning `None` for any non-vote
+/// byte string.
+///
+/// The epoch reader below deliberately stops after the epoch, and the
+/// `InvalidSignatureSpam` proof carried only that: a vote sample minted on
+/// another chain with the same epoch satisfied every other check there. The
+/// chain id sits directly before the epoch in the preimage, so the two readers
+/// walk the same prefix through `vote_preimage_after_chain_id` and cannot drift
+/// apart.
+pub fn vote_message_chain_id(vote_msg: &[u8]) -> Option<u64> {
+    let scheme = BLS_SCHEME_RFC9380_V1.as_bytes();
+    let rest = vote_msg
+        .strip_prefix(PREVOTE_DOMAIN)
+        .or_else(|| vote_msg.strip_prefix(PRECOMMIT_DOMAIN))?;
+    let after_scheme = rest.strip_prefix(scheme)?;
+    let chain_bytes: [u8; 8] = after_scheme.get(..8)?.try_into().ok()?;
+    Some(u64::from_le_bytes(chain_bytes))
+}
+
 fn vote_preimage_after_chain_id(vote_msg: &[u8]) -> Option<&[u8]> {
     let scheme = BLS_SCHEME_RFC9380_V1.as_bytes();
     let rest = vote_msg

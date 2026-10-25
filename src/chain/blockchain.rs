@@ -5477,6 +5477,20 @@ impl Blockchain {
             // just closed are fixed before this block is assembled, so every
             // producer's contribution is already committed and none of them
             // can steer the draw.
+            //
+            // What is left, and what it costs: a producer that authors every
+            // block of the closing epoch can still vary its own block and so
+            // pick among the draws that epoch's hash fold allows. That is
+            // bounded work, not free choice, and it is why the fold covers the
+            // WHOLE epoch rather than the last block: one authored block in an
+            // epoch of somebody else's blocks moves one input. The draw also
+            // opens audits for every candidate the epoch's budget reaches
+            // (`CODING_AUDIT_OPENS_PER_EPOCH`), so while the candidate set fits
+            // the budget there is nothing left to steer - every parity manifest
+            // is audited regardless of the offset. Removing the residue
+            // entirely needs randomness this chain does not have yet (an
+            // external beacon); until then the audit is priced as a deterrent
+            // whose targeting is expensive, not as an unpredictable lottery.
             let mut seed = crate::core::hash::hash_fields_bytes(&[
                 b"BDLM_STORAGE_CODING_AUDIT_EPOCH_HISTORY_V1",
                 &chain_id.to_le_bytes(),
@@ -7274,6 +7288,20 @@ impl Blockchain {
                             return Err(
                                 "InvalidSignatureSpam sample epoch does not match report epoch"
                                     .into(),
+                            );
+                        }
+                        // The epoch is not the whole binding: a vote preimage
+                        // also commits to the chain id, and every other vote
+                        // check here reads that field. Without it a sample
+                        // minted for a foreign chain - same epoch, same
+                        // validator - counted towards this chain's spam
+                        // threshold, so anyone who could collect votes on a
+                        // test network could slash a validator here.
+                        if crate::chain::finality::vote_message_chain_id(vote_msg)
+                            != Some(block.chain_id)
+                        {
+                            return Err(
+                                "InvalidSignatureSpam sample does not bind this chain".into()
                             );
                         }
                         if crate::chain::finality::vote_auth_signing_message(vote_msg, bad_sig)

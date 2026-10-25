@@ -443,27 +443,38 @@ impl VerifierRegistry {
         let key = (role, account);
         match self.registrations.get_mut(&key) {
             Some(reg) => {
-                if matches!(reg.status, MemberStatus::Slashed) {
-                    // BLG-0253 (P16-F10): a slashed entry may only shrink.
-                    // Writing the caller's uncut total back undid the slash
-                    // on the next mirrored Stake/Unstake, which made the
-                    // "terminal" status below even less coherent.
-                    reg.stake = reg.stake.min(total_stake);
-                    return;
-                }
                 if total_stake == 0 {
                     // P16-F11: a zero stake is an exit, not a deletion. The
                     // bond stays slashable and locked for the unbonding
                     // window; removing it let evidence find `NotRegistered`.
+                    //
+                    // A bond that is already leaving is left exactly as it is:
+                    // a mirrored zero is a report about the ledger's total, not
+                    // an instruction to confiscate the remainder this entry
+                    // still holds for its `withdraw`.
                     if matches!(reg.status, MemberStatus::Active) {
                         reg.status = MemberStatus::Unbonding {
                             release_epoch: current_epoch
                                 .saturating_add(self.params.unbonding_epochs),
                         };
                     }
-                } else {
-                    reg.stake = total_stake;
+                    return;
                 }
+                if matches!(reg.status, MemberStatus::Active) {
+                    reg.stake = total_stake;
+                    return;
+                }
+                // BLG-0253 (P16-F10): a slashed entry may only shrink.
+                // Writing the caller's uncut total back undid the slash on the
+                // next mirrored Stake/Unstake, which made the "terminal" status
+                // below even less coherent.
+                //
+                // The rule follows the bond's state, not one terminal status:
+                // `begin_unbonding` moves a slashed entry to `Unbonding`, and
+                // once it is there the old `Slashed` test no longer saw it, so
+                // a mirrored pre-slash total raised the stake again and the
+                // very next `withdraw` paid the penalty out.
+                reg.stake = reg.stake.min(total_stake);
             }
             None => {
                 if total_stake >= self.params.min_stake {
@@ -1277,6 +1288,45 @@ mod tests {
             reg.get(&account, roles::VALIDATOR).unwrap().stake,
             4_000,
             "shrinks may follow"
+        );
+    }
+
+    /// BLG-0253 (P16-F10) was enforced only while the entry still carried
+    /// `Slashed`. `begin_unbonding` moves a slashed entry to `Unbonding`, and
+    /// from that point the shrink-only test no longer saw it: one mirrored
+    /// stake event carrying the pre-slash total raised the bond back, and the
+    /// next `withdraw` paid out the penalty the slash had already taken.
+    #[test]
+    fn a_slashed_bond_cannot_be_raised_after_it_begins_unbonding() {
+        let account = addr(54);
+        let mut reg = VerifierRegistry::new();
+        reg.register_validator(account, 10_000, 0).unwrap();
+        reg.slash(
+            account,
+            roles::VALIDATOR,
+            SlashingCondition::DoubleSign,
+            FIXED_POINT_SCALE / 2,
+        )
+        .unwrap();
+        let after_slash = reg.get(&account, roles::VALIDATOR).unwrap().stake;
+        assert_eq!(after_slash, 5_000, "the slash took half the bond");
+
+        reg.begin_unbonding(account, roles::VALIDATOR, 1).unwrap();
+        // The mirrored stake event reports the ledger's pre-slash total.
+        reg.upsert_stake(account, roles::VALIDATOR, 10_000, 2);
+        assert_eq!(
+            reg.get(&account, roles::VALIDATOR).unwrap().stake,
+            after_slash,
+            "an entry on its way out may only ever shrink"
+        );
+
+        let release = reg.params().unbonding_epochs;
+        let paid = reg
+            .withdraw(account, roles::VALIDATOR, 1 + release)
+            .unwrap();
+        assert_eq!(
+            paid, after_slash,
+            "the withdrawal pays the post-slash remainder, not the pre-slash total"
         );
     }
 

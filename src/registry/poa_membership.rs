@@ -79,6 +79,9 @@ pub enum PoaMembershipError {
     LastAdmin,
     /// The requested KYC validity horizon exceeds the bound (BLG-0094).
     InvalidValidityHorizon { requested: u64, max: u64 },
+    /// The domain has no admin, so it is not running admission control and an
+    /// application to it could never be decided.
+    NotPermissioned { domain: DomainId },
 }
 
 impl std::fmt::Display for PoaMembershipError {
@@ -107,6 +110,12 @@ impl std::fmt::Display for PoaMembershipError {
                 write!(
                     f,
                     "KYC validity horizon {requested} exceeds the bound {max}"
+                )
+            }
+            PoaMembershipError::NotPermissioned { domain } => {
+                write!(
+                    f,
+                    "PoA domain {domain} runs no admission control, so there is no one to decide an application"
                 )
             }
         }

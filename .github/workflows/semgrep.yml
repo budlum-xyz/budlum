@@ -111,6 +111,18 @@ jobs:
       # permanent false alerts in the Security tab. Excluding the rule at scan level
       # keeps the SARIF clean; the markers stay in the source as justification.
       #
+      # rust.lang.security.current-exe is NOT excluded here any more. The same
+      # reasoning had been extended to it to keep one test-only hit out of the
+      # tab, and that turned a single reviewed false positive into a rule no
+      # file in the repository is checked against - the exception swallowed the
+      # rule for the whole tree. The one call site (src/crypto/primitives.rs, a
+      # test probe that re-executes the test binary to capture its stdout, no
+      # security decision on the path) carries its own `nosemgrep` marker, which
+      # keeps this job green; the suppressed result shows up in the Security tab
+      # as a dismissible alert, which is where a reviewed false positive is
+      # supposed to be recorded. A path-scoped exclusion would have to name
+      # src/crypto/primitives.rs, and that would exempt the rest of that file.
+      #
       - name: Semgrep scan (a finding = fail)
         run: |
           set -euo pipefail
@@ -119,7 +131,6 @@ jobs:
             --config=p/security-audit \
             --config=p/secrets \
             --exclude-rule=rust.lang.security.args.args \
-            --exclude-rule=rust.lang.security.current-exe.current-exe \
             --exclude-rule=rust.lang.security.temp-dir.temp-dir \
             --sarif --output=semgrep.sarif \
             --error \

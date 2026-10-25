@@ -209,7 +209,11 @@ pub struct BudFile {
     pub chunks: Vec<BudChunk>,
     pub merkle_root: [u8; 32],
     pub pq_signature: Option<Vec<u8>>,
-    pub pq_public_key: Option<Vec<u8>>, // the ML-DSA-87 verification key (required for PQ_SIGNED)
+    /// UNTRUSTED provenance: the key the producer says it signed with.
+    /// Never feed this to a verifier - it travels inside the object it would
+    /// authenticate. Verification takes the caller's key
+    /// ([`BudFile::verify_pq_signature_with`]).
+    pub pq_public_key: Option<Vec<u8>>,
     pub encryption_key_wrapped: Option<Vec<u8>>,
     pub pollen_consent_token: Option<String>,
     pub files: Vec<BudFileEntry>,
@@ -302,19 +306,33 @@ impl BudFile {
         original_len as f64 / payload as f64
     }
 
+    /// Verify the PQ signature against a key the CALLER trusts.
+    ///
     /// Fix (2026-08-16): a .bud carrying the PQ_SIGNED flag must not be
     /// accepted by looking at the signature SIZE alone; the signature must be
     /// verified CRYPTOGRAPHICALLY against the ML-DSA-87 (FIPS 204 NIST final)
     /// public key. The message is domain tagged: BDLM_PQ_SIGN_V1 || content_id.
     /// A signature that cannot be verified is REFUSED.
-    pub fn verify_pq_signature(&self) -> Result<(), &'static str> {
+    ///
+    /// `trusted_key` is the publisher key the caller already trusts - pinned in
+    /// its configuration, carried with the content id, or delivered out of
+    /// band. It is deliberately NOT read from the container: a verification key
+    /// that travels inside the object being authenticated proves only that the
+    /// object agrees with itself, because whoever can rewrite the file can
+    /// rewrite the key. [`Self::pq_public_key`] stays on the wire as untrusted
+    /// provenance for display and nothing on the authentication path may read
+    /// it.
+    ///
+    /// WIRING: this is the door for a caller that already holds the publisher
+    /// key - a pinned trust store, or the key that arrived with the content id
+    /// out of band. `decode` is deliberately not that caller: a container
+    /// cannot authenticate itself, so the call belongs where the publisher's
+    /// identity is known and not in the parser.
+    pub fn verify_pq_signature_with(&self, trusted_key: &[u8]) -> Result<(), &'static str> {
         let sig = self.pq_signature.as_ref().ok_or("KQ-BUD-PQ: no sig")?;
-        let pk = self
-            .pq_public_key
-            .as_ref()
-            .ok_or("KQ-BUD-PQ: no public key")?;
+        let pk = trusted_key;
         // ML-DSA-87: decode the key and the signature
-        let enc_vk = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(pk.as_slice())
+        let enc_vk = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(pk)
             .map_err(|_| "KQ-BUD-PQ: invalid public key")?;
         let vk87 = ml_dsa::VerifyingKey::<ml_dsa::MlDsa87>::decode(&enc_vk);
         let sig87 = ml_dsa::Signature::<ml_dsa::MlDsa87>::try_from(sig.as_slice())
@@ -374,7 +392,21 @@ impl BudFile {
             return Err("K-BUD-ENCRYPT: no kw");
         }
         if self.header.flags.is_pq_signed() {
-            self.verify_pq_signature()?;
+            // Structural only. A signature inside a container cannot be
+            // verified without a key from outside it (see
+            // [`Self::verify_pq_signature_with`]), so `decode` checks that the
+            // file carries a well-formed signature and leaves the cryptographic
+            // answer to the caller that knows the publisher. Nothing here - and
+            // nothing downstream - treats the flag as provenance or
+            // authorisation on the strength of the embedded key.
+            self.pq_signature
+                .as_ref()
+                .ok_or("KQ-BUD-PQ: no sig")
+                .and_then(|sig| {
+                    ml_dsa::Signature::<ml_dsa::MlDsa87>::try_from(sig.as_slice())
+                        .map(|_| ())
+                        .map_err(|_| "KQ-BUD-PQ: invalid signature")
+                })?;
         }
         if self.header.flags.is_delta() && self.header.previous_version_hash == [0u8; 32] {
             return Err("K-BUD-VERSION: delta no prev");
@@ -1220,8 +1252,11 @@ mod tests {
         );
         f.header.flags = BudFlags(BudFlags::PQ_SIGNED);
         f.sign_pq(&sk).expect("imzala");
+        // The trusted key comes from OUT OF BAND. `sign_pq` also stored a copy
+        // inside the container; that copy is provenance, not authority.
+        let publisher_key: Vec<u8> = sk.as_ref().encode().into_iter().collect();
         assert!(
-            f.verify_pq_signature().is_ok(),
+            f.verify_pq_signature_with(&publisher_key).is_ok(),
             "a correct signature is accepted"
         );
         // corrupt the signature -> REFUSED
@@ -1229,17 +1264,57 @@ mod tests {
         let sig = corrupted.pq_signature.as_mut().unwrap();
         sig[10] ^= 0xFF;
         assert!(
-            corrupted.verify_pq_signature().is_err(),
+            corrupted.verify_pq_signature_with(&publisher_key).is_err(),
             "a corrupt signature is REFUSED"
         );
-        // public key yoksa RED
-        let mut no_pk = f.clone();
-        no_pk.pq_public_key = None;
-        assert!(no_pk.verify_pq_signature().is_err());
+        // no signature at all -> REFUSED
+        let mut no_sig = f.clone();
+        no_sig.pq_signature = None;
+        assert!(no_sig.verify_pq_signature_with(&publisher_key).is_err());
+        // A key from another publisher -> REFUSED, even though the container
+        // carries a key of its own that would verify it. This is the whole
+        // point: the embedded key is never the one the check runs against.
+        let attacker = Msk::<ml_dsa::MlDsa87>::from_seed(&[9u8; 32].into());
+        let attacker_key: Vec<u8> = attacker.as_ref().encode().into_iter().collect();
+        assert!(
+            f.verify_pq_signature_with(&attacker_key).is_err(),
+            "a signature the container vouches for itself is not provenance"
+        );
+        // ... and the file still decodes: the flag is not an authentication
+        // result either way.
+        assert!(f.decode().is_ok());
         // without the PQ_SIGNED flag no verification is needed (decode passes)
         let mut plain = f.clone();
         plain.header.flags = BudFlags(0);
         assert!(plain.decode().is_ok());
+    }
+
+    /// Strix Review 4: a container signed with a freshly generated key whose
+    /// public key is embedded in the file. Decoding it is fine (the bytes are
+    /// well formed); accepting its signature is not, unless the caller holds
+    /// the same key out of band.
+    #[test]
+    fn a_container_signed_with_its_own_embedded_key_is_not_provenance() {
+        use ml_dsa::SigningKey as Msk;
+        let publisher = Msk::<ml_dsa::MlDsa87>::from_seed(&[3u8; 32].into());
+        let mut f = BudFile::encode(
+            b"self-signed body",
+            BudFormatClass::Text,
+            "text/plain",
+            0,
+            0,
+            3,
+            BudFlags(BudFlags::PQ_SIGNED),
+            b"payload".to_vec(),
+        );
+        f.sign_pq(&publisher).expect("sign");
+        assert!(f.pq_public_key.is_some(), "the file carries a key");
+        // No publisher key in hand -> the caller cannot authenticate: passing an
+        // empty key must refuse rather than fall back to the embedded one.
+        assert!(f.verify_pq_signature_with(&[]).is_err());
+        // The right key, supplied out of band, verifies.
+        let key: Vec<u8> = publisher.as_ref().encode().into_iter().collect();
+        assert!(f.verify_pq_signature_with(&key).is_ok());
     }
 
     /// When no candidate passes, `select_best` says so. It used to answer

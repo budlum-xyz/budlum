@@ -302,7 +302,12 @@ impl Executor {
                     v.stake = v.stake.checked_add(stake_amount).ok_or_else(|| {
                         BudlumError::validation("stake_overflow", "stake overflow")
                     })?;
-                    v.active = v.stake >= min_stake && v.is_consensus_ready();
+                    // `!v.jailed` is not decoration: a liveness-fault jail is
+                    // a timed ban that the admission gates read through
+                    // `is_eligible`, and `active` must not report a banned
+                    // validator as available. Left out, one 1-unit top-up
+                    // rewrote `active` while the term was still running.
+                    v.active = v.stake >= min_stake && v.is_consensus_ready() && !v.jailed;
                     if !v.active {
                         tracing::warn!(
                             validator = %tx.from,
@@ -318,7 +323,7 @@ impl Executor {
                     // registry; plain `add_validator` auto-registers.
                     state.add_validator_with_floor(tx.from, stake_amount, min_stake);
                     if let Some(v) = state.get_validator_mut(&tx.from) {
-                        v.active = v.stake >= min_stake && v.is_consensus_ready();
+                        v.active = v.stake >= min_stake && v.is_consensus_ready() && !v.jailed;
                         if !v.active {
                             tracing::warn!(
                                 validator = %tx.from,
@@ -359,9 +364,12 @@ impl Executor {
                 validator.bls_public_key = registration.bls_public_key.clone();
                 validator.pop_signature = registration.pop_signature.clone();
                 validator.pq_public_key = registration.pq_public_key.clone();
+                // Same jail rule as the stake paths: registering consensus
+                // keys does not lift a liveness-fault term early.
                 validator.active = validator.stake >= min_stake
                     && validator.is_consensus_ready()
-                    && validator.verify_pop_is_valid(tx.chain_id);
+                    && validator.verify_pop_is_valid(tx.chain_id)
+                    && !validator.jailed;
 
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {

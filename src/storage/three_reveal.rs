@@ -50,9 +50,34 @@ impl From<ReemitError> for RevealError {
 }
 
 /// In-memory reveal session: emitter bound to packed body.
-#[derive(Debug, Clone)]
+///
+/// The frame-fold pin is verified on the first frame the session actually
+/// serves, not when it opens. Opening used to run the whole one-shot pass just
+/// to keep its fold, which made one cheap request buy a full carousel encode -
+/// and a caller that never asked for a frame still paid for one (CWE-407). The
+/// check is not weakened by moving it: `frame_at` and `frames_with_fold` are
+/// the only ways out of a session, and both go through `verify_stream_pin`.
+#[derive(Debug)]
 pub struct RevealSession {
     emitter: RecipeEmitter,
+    /// Carousel width the one-shot pass is built from.
+    k: u16,
+    /// Whether the pin has already been checked for this session.
+    verified: std::sync::atomic::AtomicBool,
+}
+
+impl Clone for RevealSession {
+    /// `AtomicBool` is not `Clone`; a clone inherits the verification result
+    /// rather than repeating the pass.
+    fn clone(&self) -> Self {
+        Self {
+            emitter: self.emitter.clone(),
+            k: self.k,
+            verified: std::sync::atomic::AtomicBool::new(
+                self.verified.load(std::sync::atomic::Ordering::Acquire),
+            ),
+        }
+    }
 }
 
 impl RevealSession {
@@ -85,14 +110,30 @@ impl RevealSession {
         };
         let public_k = public.carousel.k;
         let emitter = RecipeEmitter::open(public, packed)?;
-        // The pinned stream id is the fold of the whole one-shot pass. Build
-        // that pass once, keep only its fold, and refuse a recipe that pins
-        // another stream. A session that serves a range later is a subset of
-        // this pass, so the check cannot be done on the requested range.
-        let pass = oneshot_drop_count(public_k, ONESHOT_REPAIR_PERMILLAGE);
-        let (_, pass_fold) = emitter.emit_frames(0, pass)?;
-        emitter.verify_stream_id(&pass_fold)?;
-        Ok(Self { emitter })
+        Ok(Self {
+            emitter,
+            k: public_k,
+            verified: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Check the recipe's pinned stream id against the fold of the whole
+    /// one-shot pass, once per session.
+    ///
+    /// The pin covers the complete pass, so it cannot be checked on a subset:
+    /// a range a client later asks for is a slice of this pass. Building the
+    /// pass is the expensive step, which is why it happens here and not in
+    /// [`Self::open`].
+    fn verify_stream_pin(&self) -> Result<(), RevealError> {
+        use std::sync::atomic::Ordering;
+        if self.verified.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let pass = oneshot_drop_count(self.k, ONESHOT_REPAIR_PERMILLAGE);
+        let (_, pass_fold) = self.emitter.emit_frames(0, pass)?;
+        self.emitter.verify_stream_id(&pass_fold)?;
+        self.verified.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// Optical frame at `seq` (ephemeral).
@@ -101,6 +142,7 @@ impl RevealSession {
     ///
     /// A drop that does not fit one frame.
     pub fn frame_at(&self, seq: u32) -> Result<Vec<u8>, RevealError> {
+        self.verify_stream_pin()?;
         Ok(self.emitter.frame_at(seq)?)
     }
 
@@ -119,6 +161,7 @@ impl RevealSession {
         seq_start: u32,
         count: u32,
     ) -> Result<(Vec<Vec<u8>>, [u8; 32]), RevealError> {
+        self.verify_stream_pin()?;
         Ok(self.emitter.emit_frames(seq_start, count)?)
     }
 
@@ -183,8 +226,16 @@ mod tests {
         let (mut full, packed) = sample();
         full.stream_id = [7u8; 32];
         let recipe = ThreeRecipe::Public(full);
+        // The pin is checked on the first served frame, not on `open`: opening
+        // a session must not cost a full carousel pass by itself.
+        let s = RevealSession::open(&recipe, None, &packed, false).unwrap();
         assert_eq!(
-            RevealSession::open(&recipe, None, &packed, false).unwrap_err(),
+            s.frame_at(0).unwrap_err(),
+            RevealError::Reemit(ReemitError::StreamMismatch)
+        );
+        // A refused check does not mark the session verified either.
+        assert_eq!(
+            s.frames_with_fold(0, 1).unwrap_err(),
             RevealError::Reemit(ReemitError::StreamMismatch)
         );
     }
@@ -194,8 +245,9 @@ mod tests {
         let (mut full, packed) = sample();
         full.stream_id = [7u8; 32];
         let recipe = ThreeRecipe::Sealed(full.seal());
+        let s = RevealSession::open(&recipe, Some(&full), &packed, true).unwrap();
         assert_eq!(
-            RevealSession::open(&recipe, Some(&full), &packed, true).unwrap_err(),
+            s.frame_at(0).unwrap_err(),
             RevealError::Reemit(ReemitError::StreamMismatch)
         );
     }
@@ -208,7 +260,9 @@ mod tests {
         let (_, fold) = emitter.emit_frames(0, n).unwrap();
         full.stream_id = fold;
         let recipe = ThreeRecipe::Public(full);
-        assert!(RevealSession::open(&recipe, None, &packed, false).is_ok());
+        let s = RevealSession::open(&recipe, None, &packed, false).unwrap();
+        // The honest pin is accepted where it is checked: on the first frame.
+        assert!(!s.frame_at(0).unwrap().is_empty());
     }
 
     #[test]
