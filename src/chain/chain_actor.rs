@@ -1494,9 +1494,10 @@ impl ChainHandle {
     ///
     /// # Errors
     ///
-    /// Refuses on mainnet. The old signature returned `()` and logged, so a
-    /// caller could not tell a credit from a no-op; a faucet that silently
-    /// does nothing is as misleading as one that silently works.
+    /// Refuses on every chain id except devnet (testnet included). The old
+    /// signature returned `()` and logged, so a caller could not tell a
+    /// credit from a no-op; a faucet that silently does nothing is as
+    /// misleading as one that silently works.
     pub async fn credit_development_account(
         &self,
         address: &Address,
@@ -1521,7 +1522,7 @@ impl ChainHandle {
     ///
     /// # Errors
     ///
-    /// Refuses on mainnet.
+    /// Refuses on every chain id except devnet (testnet included).
     pub async fn fund_development_account(&self, address: &Address) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self

@@ -35,7 +35,8 @@
 //! They are gated rather than deleted, because devnet and the RPC tests do
 //! need funded accounts. The gate is the chain id, matching
 //! `mainnet_requires_signed_remote_snapshot`, which is how this tree already
-//! asks the question.
+//! asks the question. Both paths run on the devnet chain id only: testnet is
+//! the mainnet rehearsal and refuses them as mainnet does.
 
 use crate::chain::blockchain::Blockchain;
 use crate::consensus::pow::PoWEngine;
@@ -57,6 +58,13 @@ fn devnet_chain() -> Blockchain {
 fn mainnet_chain() -> Blockchain {
     let mut bc = devnet_chain();
     bc.chain_id = Network::Mainnet.chain_id().value();
+    bc
+}
+
+/// Testnet is the mainnet rehearsal, so it gets the mainnet answer.
+fn testnet_chain() -> Blockchain {
+    let mut bc = devnet_chain();
+    bc.chain_id = Network::Testnet.chain_id().value();
     bc
 }
 
@@ -109,8 +117,67 @@ fn the_out_of_consensus_credit_refuses_on_mainnet() {
     );
 }
 
+/// A testnet chain refuses the faucet top-up (testnet directive finding
+/// B-07: testnet balances move only through blocks).
+#[test]
+fn the_faucet_refuses_on_testnet() {
+    let mut bc = testnet_chain();
+
+    let target = addr(7);
+    let before = bc.state.get_balance(&target);
+
+    let err = bc
+        .fund_development_account(&target)
+        .expect_err("testnet must refuse a faucet top-up");
+    assert!(
+        err.contains(&Network::Testnet.chain_id().value().to_string()),
+        "the refusal should name the chain id that refused: {err}"
+    );
+    assert_eq!(
+        bc.state.get_balance(&target),
+        before,
+        "a refused faucet call must not move a single unit"
+    );
+}
+
+/// A testnet chain refuses an out-of-consensus credit.
+#[test]
+fn the_out_of_consensus_credit_refuses_on_testnet() {
+    let mut bc = testnet_chain();
+
+    let target = addr(8);
+    let before = bc.state.get_balance(&target);
+
+    let err = bc
+        .credit_development_account(&target, 5_000)
+        .expect_err("testnet must refuse an unsigned credit");
+    assert!(
+        err.contains("consensus"),
+        "the refusal should say what is being bypassed: {err}"
+    );
+    assert_eq!(
+        bc.state.get_balance(&target),
+        before,
+        "a refused credit must not move a single unit"
+    );
+}
+
+/// The gate is an allow list of one chain id, not a deny list of two: an id
+/// that is neither devnet, testnet nor mainnet refuses as well.
+#[test]
+fn an_unknown_chain_id_refuses_both_paths() {
+    let mut bc = devnet_chain();
+    bc.chain_id = 7;
+
+    let target = addr(9);
+    let before = bc.state.get_balance(&target);
+    assert!(bc.fund_development_account(&target).is_err());
+    assert!(bc.credit_development_account(&target, 1).is_err());
+    assert_eq!(bc.state.get_balance(&target), before);
+}
+
 /// The canary. If the gate were inverted or the chain id comparison were
-/// wrong, the two tests above would still pass on a chain that refuses
+/// wrong, the refusal tests above would still pass on a chain that refuses
 /// everything. This proves the development chain is still served.
 #[test]
 fn a_development_chain_still_gets_funded() {

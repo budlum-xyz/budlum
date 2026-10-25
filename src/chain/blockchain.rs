@@ -5853,13 +5853,17 @@ impl Blockchain {
     /// "any address, any time".
     ///
     /// So it is gated rather than deleted, because the devnet and RPC test
-    /// paths do need a funded account. On mainnet it refuses and says why.
+    /// paths do need a funded account. It runs on the devnet chain id only.
+    /// Testnet is the mainnet rehearsal, so it refuses here exactly as
+    /// mainnet does: a testnet node that credited an account outside a block
+    /// would compute a state root no peer reproduces. Testnet BUD comes from
+    /// the faucet service, which sends a signed transfer.
     ///
     /// # Errors
     ///
-    /// Returns an error on the mainnet chain id. The refusal is the point:
-    /// fail closed, and let the caller see it rather than silently doing
-    /// nothing.
+    /// Returns an error on every chain id except devnet. The refusal is the
+    /// point: fail closed, and let the caller see it rather than silently
+    /// doing nothing.
     pub fn fund_development_account(&mut self, address: &Address) -> Result<(), String> {
         if self.mainnet_chain_id() {
             return Err(format!(
@@ -5867,6 +5871,15 @@ impl Blockchain {
                  chain id is mainnet. There is no path that credits an account \
                  without consensus on mainnet, and adding one here would make \
                  BUD_TOTAL_SUPPLY (1e14) an advisory number."
+            ));
+        }
+        if !self.devnet_chain_id() {
+            return Err(format!(
+                "refusing to fund {address}: this is a development faucet and chain id \
+                 {} is not the devnet chain id. Outside devnet an account is credited \
+                 only by a signed transaction inside a block; on testnet use the \
+                 faucet service.",
+                self.chain_id
             ));
         }
         let account = self.state.get_or_create(address);
@@ -5885,7 +5898,8 @@ impl Blockchain {
     ///
     /// # Errors
     ///
-    /// Refuses on the mainnet chain id.
+    /// Refuses on every chain id except devnet, for the reason given on
+    /// [`Self::fund_development_account`].
     pub fn credit_development_account(
         &mut self,
         address: &Address,
@@ -5899,6 +5913,14 @@ impl Blockchain {
                  and nowhere else."
             ));
         }
+        if !self.devnet_chain_id() {
+            return Err(format!(
+                "refusing to credit {address} with {amount}: this path bypasses \
+                 consensus and runs on the devnet chain id only; chain id {} moves \
+                 value through a signed transaction or a verified bridge event.",
+                self.chain_id
+            ));
+        }
         self.state.add_balance(address, amount);
         Ok(())
     }
@@ -5910,6 +5932,15 @@ impl Blockchain {
     fn mainnet_chain_id(&self) -> bool {
         self.chain_id
             == crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value()
+    }
+
+    /// True when this chain is devnet, by chain id. The development credit
+    /// paths run here and nowhere else.
+    fn devnet_chain_id(&self) -> bool {
+        self.chain_id
+            == crate::core::chain_config::Network::Devnet
                 .chain_id()
                 .value()
     }
