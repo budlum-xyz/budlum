@@ -652,9 +652,21 @@ impl EncodedObject {
                 s
             })
             .collect();
+        // Column commitments over every PARITY shard, in parity order. This is
+        // the only place in the tree where the encoded parity bytes and the
+        // manifest are in the same hand, which is why the roots are built here
+        // rather than reconstructed later: a commitment that cannot be built
+        // from the bytes it claims to describe is not a commitment.
+        let parity_roots: Vec<[u8; 32]> = self
+            .shards
+            .iter()
+            .skip(usize::try_from(self.scheme.k).unwrap_or(usize::MAX))
+            .map(|bytes| crate::storage::column_commitment::column_root(bytes))
+            .collect();
         ContentManifest::from_shards(shards)?
             .with_erasure(self.scheme)?
-            .with_content_size(self.total_size)
+            .with_content_size(self.total_size)?
+            .with_column_roots(parity_roots)
     }
 }
 

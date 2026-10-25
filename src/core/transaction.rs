@@ -1709,11 +1709,19 @@ fn encode_storage_tx(tx: &crate::domain::storage_tx::StorageTx, out: &mut Vec<u8
             audit_id,
             data_column,
             parity_byte,
+            column_proof,
         } => {
             put_u8(out, 4);
             put_u64(out, *audit_id);
             put_bytes(out, data_column);
             put_u8(out, *parity_byte);
+            // The proof is part of the signed body: a relay that dropped it
+            // would turn a proven answer into an unproven one, and a relay that
+            // swapped it would answer for a byte the operator never held.
+            put_u32(out, column_proof.len() as u32);
+            for sibling in column_proof {
+                put_fixed(out, sibling);
+            }
         }
     }
 }
@@ -1759,6 +1767,16 @@ fn encode_manifest_body(manifest: &crate::storage::ContentManifest, out: &mut Ve
         },
     );
     put_u8(out, manifest.encryption.commitment_tag());
+    // Column commitments of the parity shards. Length-prefixed and written on
+    // every encoding (an empty list is a zero length, not an absence) so the
+    // signing preimage cannot tell two manifests apart by their roots alone.
+    // They are also inside `manifest_id`, which the preimage already carries -
+    // that makes a rewrite detectable, this makes it a signature failure
+    // rather than a refused registration.
+    put_u32(out, manifest.column_roots.len() as u32);
+    for root in &manifest.column_roots {
+        put_fixed(out, root);
+    }
 }
 
 /// Canonical preimage of an identity transaction. Every pub field of every

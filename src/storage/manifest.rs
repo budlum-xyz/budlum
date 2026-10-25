@@ -465,6 +465,28 @@ pub struct ContentManifest {
     /// object advertise a protection it never had.
     #[serde(default)]
     pub encryption: ContentEncryption,
+    /// Merkle roots over the columns of every PARITY shard, in shard order
+    /// (parity index 0 first).
+    ///
+    /// A coding audit checks that an operator can produce one byte column of a
+    /// parity shard that is consistent with the code. Consistency alone is
+    /// satisfiable by a column of *some* codeword, so without a commitment the
+    /// audit could never tell a holder from a memoriser. These roots are that
+    /// commitment: an audit answer carries the inclusion path for the byte it
+    /// claims, and a path cannot be produced without the real shard.
+    ///
+    /// Empty for replication (there is no parity to audit) and for manifests
+    /// written before this field, which get none of the guarantee - the audit
+    /// keeps its old, weaker meaning for them rather than inventing a proof.
+    ///
+    /// IDENTITY: included when non-empty, and following the rule the other
+    /// optional fields follow - a claim is committed only when something is
+    /// claimed - so the ids of manifests recorded before this field are
+    /// unchanged. A manifest whose roots could be edited after the fact could
+    /// be re-pointed at a different object's columns, which is exactly the
+    /// attack the field exists to stop.
+    #[serde(default)]
+    pub column_roots: Vec<[u8; 32]>,
 }
 
 /// The serde form of [`ContentManifest`]: the same fields in the same shape,
@@ -498,6 +520,8 @@ struct ContentManifestWire {
     content_size: u64,
     #[serde(default)]
     encryption: ContentEncryption,
+    #[serde(default)]
+    column_roots: Vec<[u8; 32]>,
 }
 
 impl From<ContentManifestWire> for ContentManifest {
@@ -519,6 +543,7 @@ impl From<ContentManifestWire> for ContentManifest {
             edition: w.edition,
             content_size: w.content_size,
             encryption: w.encryption,
+            column_roots: w.column_roots,
         }
     }
 }
@@ -579,6 +604,10 @@ impl ContentManifest {
             content_size: total,
             encryption,
             shards,
+            // Built from shard refs alone, so no shard bytes exist here and no
+            // column commitment can be honest. Callers that hold the encoded
+            // bytes set them with `with_column_roots`.
+            column_roots: Vec::new(),
         })
     }
 
@@ -604,6 +633,7 @@ impl ContentManifest {
                 source: &source,
                 dictionary_id: self.dictionary_id.as_ref(),
                 edition: self.edition,
+                column_roots: &self.column_roots,
             },
         );
         self.source = source;
@@ -631,6 +661,7 @@ impl ContentManifest {
                 source: &self.source,
                 dictionary_id: self.dictionary_id.as_ref(),
                 edition,
+                column_roots: &self.column_roots,
             },
         );
         self.edition = edition;
@@ -662,6 +693,7 @@ impl ContentManifest {
                 source: &self.source,
                 dictionary_id: self.dictionary_id.as_ref(),
                 edition: self.edition,
+                column_roots: &self.column_roots,
             },
         );
     }
@@ -727,6 +759,7 @@ impl ContentManifest {
                 source: &self.source,
                 dictionary_id: self.dictionary_id.as_ref(),
                 edition: self.edition,
+                column_roots: &self.column_roots,
             },
         );
         if expected != self.manifest_id {
@@ -860,6 +893,39 @@ impl ContentManifest {
     /// that claims a tolerance it cannot deliver is worse than one that claims
     /// none, because a repair trigger would read the claim and conclude the
     /// object is still safe.
+    /// Attach the per-parity-shard column commitments.
+    ///
+    /// The caller must have the encoded bytes: each root is
+    /// [`crate::storage::column_commitment::column_root`] over the parity
+    /// shard at the same position. One root per parity shard, in parity order.
+    ///
+    /// # Errors
+    ///
+    /// A count that does not match the scheme's parity count is refused: a
+    /// missing root would silently drop an audit back to the weaker check it
+    /// had before, and an extra one names a shard that does not exist.
+    pub fn with_column_roots(mut self, roots: Vec<[u8; 32]>) -> Result<Self, String> {
+        let parity = self.erasure.parity_count() as usize;
+        if roots.len() != parity {
+            return Err(format!(
+                "column_roots has {} entries but the scheme has {parity} parity shards",
+                roots.len()
+            ));
+        }
+        self.column_roots = roots;
+        self.recompute_id();
+        Ok(self)
+    }
+
+    /// The column commitment of one parity shard, if this manifest carries one.
+    #[must_use]
+    pub fn column_root(&self, parity_index: u32) -> Option<[u8; 32]> {
+        self.column_roots
+            .get(parity_index as usize)
+            .copied()
+            .filter(|_| !self.column_roots.is_empty())
+    }
+
     pub fn with_erasure(mut self, erasure: ErasureScheme) -> Result<Self, String> {
         erasure.validate()?;
         if erasure.n != self.shard_count {
@@ -1047,6 +1113,8 @@ pub fn manifest_id_from_shards(shards: &[ShardRef]) -> ContentId {
 /// came from and under which claim they are registered.
 #[derive(Debug, Clone, Copy)]
 struct ManifestProvenance<'a> {
+    /// Per-parity-shard column roots; committed only when non-empty.
+    column_roots: &'a [[u8; 32]],
     /// Where the bytes came from (the upload path).
     pub source: &'a crate::storage::generated::ContentSource,
     /// Optional dictionary binding (dedup) the manifest commits to.
@@ -1067,6 +1135,7 @@ fn manifest_id_from_parts(
         source,
         dictionary_id,
         edition,
+        column_roots,
     } = provenance;
     let mut buf = Vec::with_capacity(32 + shards.len() * (4 + 32 + 4 + 1));
     buf.extend_from_slice(b"BDLM_MANIFEST_V4");
@@ -1105,6 +1174,18 @@ fn manifest_id_from_parts(
         buf.push(1u8);
         buf.extend_from_slice(&dict.0);
     }
+    // Column commitments, on the same rule as the other optional fields: no
+    // roots, no bytes, so a manifest recorded before this field keeps its id.
+    // A label goes first so the roots cannot be confused with a dictionary
+    // that happens to follow them.
+    if !column_roots.is_empty() {
+        buf.extend_from_slice(b"BDLM_COLUMNS");
+        buf.push(1u8);
+        buf.extend_from_slice(&(column_roots.len() as u32).to_le_bytes());
+        for root in column_roots {
+            buf.extend_from_slice(root);
+        }
+    }
     ContentId(hash_fields_bytes(&[b"BDLM_MANIFEST_V4", &buf]))
 }
 
@@ -1130,6 +1211,7 @@ pub fn manifest_id_from_parts_stored(
             source: &crate::storage::generated::ContentSource::Stored,
             dictionary_id: None,
             edition: crate::storage::generated::BudStorageEdition::Classic,
+            column_roots: &[],
         },
     )
 }

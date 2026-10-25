@@ -2673,6 +2673,22 @@ impl Blockchain {
         Err("Raw bridge burn is disabled; use a target-domain burn event path".into())
     }
 
+    /// Burn the minted half of a bridge transfer, as the burn domain's event
+    /// path does.
+    ///
+    /// Known structural gap, stated so it cannot be read past: this mutates
+    /// consensus state (the recipient's balance and `bridge_state`) from the
+    /// RPC path, outside block execution. A node whose RPC is called and a node
+    /// that never saw the call therefore disagree until the next state sync,
+    /// which is why the door that moves money has to become an in-block
+    /// transaction type (`TransactionType::BridgeBurn`) with the relayer as its
+    /// sender. That is an execution-layer change - a new signed variant, an
+    /// executor arm and the mempool path - not a fix that belongs in a
+    /// hardening round. What THIS function guarantees, so the gap cannot cost
+    /// units in the meantime: the burn is atomic. The message is registered
+    /// before the transfer is touched, so a refusal there leaves the balance
+    /// and the row exactly as they were; the debit can no longer outlive a
+    /// failed registration.
     pub fn burn_bridge_transfer_with_event(
         &mut self,
         message_id: crate::cross_domain::MessageId,
@@ -2714,6 +2730,36 @@ impl Blockchain {
                 "Insufficient balance for bridge burn: burner has {burner_balance}, needed {amount}"
             ));
         }
+        // All or nothing. The message this burn produces is what the far side
+        // unlocks against, so a debit without a registered message is money
+        // taken for nothing - the old order wrote the debit first and left it
+        // standing when registration refused the message.
+        //
+        // The event is therefore built once on a COPY of the bridge state, to
+        // learn the message without writing anything, and the copy is thrown
+        // away. Registration runs next, on the real state, while the transfer
+        // and the balance are still exactly as they were. Only then is the same
+        // call made again for real; it cannot fail, because the run on the copy
+        // already succeeded against identical state (bridge state is the only
+        // input, and `submit_cross_domain_message` does not touch it).
+        let mut trial = self.state.bridge_state.clone();
+        let trial_event = trial
+            .burn_with_event(
+                message_id,
+                domain,
+                domain_height,
+                event_index,
+                expiry_height,
+                recipient_eth,
+            )
+            .map_err(|e| e.to_string())?;
+        let message = match trial_event.message.clone() {
+            Some(message) => {
+                self.submit_cross_domain_message(message.clone())?;
+                Some(message)
+            }
+            None => None,
+        };
         let event = self
             .state
             .bridge_state
@@ -2734,8 +2780,7 @@ impl Blockchain {
                 .save_bridge_state(&self.state.bridge_state)
                 .map_err(|e| format!("Failed to persist bridge state: {e}"))?;
         }
-        if let Some(message) = event.message.clone() {
-            self.submit_cross_domain_message(message.clone())?;
+        if let Some(message) = message {
             self.enqueue_bridge_relay(event.clone(), &message);
         }
         Ok(event)
@@ -3314,6 +3359,20 @@ impl Blockchain {
     /// Relayer (registered with stake). The internal `submit_cross_domain_message`
     /// Path used by the bridge lock/burn events is NOT gated - those messages
     /// Come from authorized on-chain logic.
+    ///
+    /// Known structural gap, the same one [`Self::burn_bridge_transfer_with_event`]
+    /// states: this writes consensus-committed message state (the registry, and
+    /// through it the state root) from the RPC path rather than from block
+    /// execution, so two nodes that saw different RPC calls disagree until a
+    /// state sync. Closing it means one `TransactionType::CrossDomainMessage`
+    /// carrying the signed message, executed in `execution/executor.rs` with
+    /// the relayer as the sender - the message is already signed by its sender
+    /// (`verify_sender_signature` below), so it is the transaction body's
+    /// payload rather than a new authority. Decided as an execution-layer
+    /// change, not a hardening fix: the registry, the bridge pipeline and the
+    /// relay enqueue all have to move with it. Nothing else in this door
+    /// changes: the gate order (active relayer, then the sender's signature) is
+    /// what makes a relayed message a relayed message.
     pub fn submit_relayed_cross_domain_message(
         &mut self,
         message: crate::cross_domain::CrossDomainMessage,
@@ -5478,27 +5537,42 @@ impl Blockchain {
             // producer's contribution is already committed and none of them
             // can steer the draw.
             //
-            // What is left, and what it costs: a producer that authors every
-            // block of the closing epoch can still vary its own block and so
-            // pick among the draws that epoch's hash fold allows. That is
-            // bounded work, not free choice, and it is why the fold covers the
-            // WHOLE epoch rather than the last block: one authored block in an
-            // epoch of somebody else's blocks moves one input. The draw also
-            // opens audits for every candidate the epoch's budget reaches
+            // The fold therefore covers the epoch that closed ONE EPOCH AGO,
+            // not the one that just closed. Folding the closing epoch still
+            // left its last block in the input: a producer that signs that
+            // block picks its timestamp, its transaction set and its nonce, so
+            // it can try candidates until the fold lands on a shard it holds.
+            // Lagging the draw by a full epoch removes that entirely - every
+            // input below was fixed before the closing epoch even began, so the
+            // producer of the block that triggers this draw has had no say in
+            // it for an entire epoch.
+            //
+            // What is left: a producer that authored every block of the epoch
+            // drawn from could still choose among the draws that fold allows,
+            // and it would have had to decide a full epoch before the audit
+            // opens, with the intervening epoch's blocks and every honest
+            // producer's own contributions in between. The draw also opens
+            // audits for every candidate the epoch's budget reaches
             // (`CODING_AUDIT_OPENS_PER_EPOCH`), so while the candidate set fits
             // the budget there is nothing left to steer - every parity manifest
             // is audited regardless of the offset. Removing the residue
             // entirely needs randomness this chain does not have yet (an
             // external beacon); until then the audit is priced as a deterrent
-            // whose targeting is expensive, not as an unpredictable lottery.
+            // whose targeting is expensive and stale, not as a lottery.
             let mut seed = crate::core::hash::hash_fields_bytes(&[
                 b"BDLM_STORAGE_CODING_AUDIT_EPOCH_HISTORY_V1",
                 &chain_id.to_le_bytes(),
                 &epoch.to_le_bytes(),
             ]);
             let epoch_length = crate::core::chain_config::epoch_len_for_chain_id(chain_id).max(1);
-            let first = epoch.saturating_sub(1).saturating_mul(epoch_length);
-            for block in preceding_chain.iter().filter(|block| block.index >= first) {
+            // First index of the epoch that just closed, and of the one before
+            // it: the drawn range is `[lagged_first, closing_first)`.
+            let closing_first = epoch.saturating_sub(1).saturating_mul(epoch_length);
+            let lagged_first = epoch.saturating_sub(2).saturating_mul(epoch_length);
+            for block in preceding_chain
+                .iter()
+                .filter(|block| block.index >= lagged_first && block.index < closing_first)
+            {
                 seed = crate::core::hash::hash_fields_bytes(&[
                     b"BDLM_STORAGE_CODING_AUDIT_EPOCH_STEP_V1",
                     &seed,
