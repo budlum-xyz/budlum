@@ -847,6 +847,17 @@ impl WalletKeyPair {
         Self { signing_key }
     }
 
+    /// Rebuild the keypair from its 32-byte FIPS 204 seed (`xi`), the form a
+    /// key file holds. The same seed always yields the same key, so a
+    /// service that signs with a long-lived address (the testnet faucet)
+    /// reloads it from disk instead of keeping key material in memory
+    /// between runs.
+    #[must_use]
+    pub fn from_seed(seed: &[u8; 32]) -> Self {
+        let signing_key = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed(seed.into());
+        Self { signing_key }
+    }
+
     pub fn public_key_bytes(&self) -> [u8; ML_DSA_87_PUBLIC_KEY_LEN] {
         use ml_dsa::signature::Keypair;
         let vk = self.signing_key.verifying_key();

@@ -1353,7 +1353,6 @@ src/core/transaction.rs	fn	new_ai_operator_withdraw
 src/core/transaction.rs	fn	new_proposal
 src/core/transaction.rs	fn	new_vote
 src/core/transaction.rs	fn	new_with_fee
-src/core/transaction.rs	fn	sign_v5
 src/core/transaction.rs	fn	sign_v6
 src/cross_domain/bridge_relayer.rs	enum	PipelineError
 src/cross_domain/bridge_relayer.rs	fn	event_proof
