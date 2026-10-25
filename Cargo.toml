@@ -22,6 +22,12 @@ p2p-mdns = ["libp2p/mdns"]
 # production `BudlumBpqsReserved` slot stays fail-closed until the four
 # promotion-bar items land; nothing in the default build links this crate.
 bpqs-research = ["dep:budlum-bpqs"]
+# Declared and never enabled: `[[bench]] domain_throughput` gates on it, so a
+# plain `cargo test`/`cargo bench` leaves the benchmark out of `--all-targets`
+# and it only builds when somebody turns this on by hand. Cargo warns about a
+# required-features entry with no matching feature, and this is the declaration
+# that silences the warning without making the bench part of any normal build.
+__bench_domain_throughput_disabled = []
 
 [dependencies]
 sha2 = "0.11"
