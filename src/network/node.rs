@@ -856,14 +856,13 @@ impl Node {
             return;
         };
         let start = first.index;
-        // Charged on every exit from here on, so the interval is always
-        // measured from when the work actually stopped. The slot starts after
-        // the window check: only an attempt that is actually paid for stamps
-        // it, and a refused frame leaves the window untouched.
-        let _slot = ReorgSlot {
-            last_completed: Arc::clone(&last_completed),
-            reorg: flight_guard,
-        };
+        // The interval has already been decided, so nothing below this point
+        // may stamp it until the batch has cleared the checks that cost the
+        // node nothing. Those checks are the deadline for the slot: see where
+        // it is created, after the fork-depth and parent-hash tests. The
+        // single-flight guard is a parameter, so every early return still
+        // releases it whether or not the slot exists yet.
+        //
         // The cost that has to be bounded here is the work one peer batch can
         // make this node do, not the height the fork happens to sit at. It is
         // bounded twice over below: the fork depth (`MAX_REORG_DEPTH`) and the
@@ -896,6 +895,18 @@ impl Node {
                 }
             }
         }
+        // The batch cleared the depth and parent checks, so the work below is
+        // real: a prefix read, a candidate join and a reconstruction. Only from
+        // here on does the attempt charge the interval. Stamping it earlier
+        // let a peer occupy the one global window with a batch refused for
+        // depth or for not continuing this chain - work the node did not do -
+        // and every other peer's genuine batch then arrived inside a closed
+        // window, so one peer could deny this node fork recovery for as long
+        // as it kept sending (CWE-400).
+        let _slot = ReorgSlot {
+            last_completed: Arc::clone(&last_completed),
+            reorg: flight_guard,
+        };
         // One read for the whole prefix. The previous loop issued one chain
         // round trip per height, which is what the removed height cap was
         // protecting against; a single range read is proportional to the
@@ -4372,6 +4383,33 @@ mod sync_handler_order_tests {
         assert!(
             super::reorg_interval_elapsed(&completed, now),
             "the interval must expire measured from completion"
+        );
+
+        // A batch refused for depth or for not continuing the local chain does
+        // no work, so it must not charge the interval that every other peer
+        // competes for. Pinned as source order in the one function that has
+        // the throttle: the stamping slot is created after both structural
+        // checks, and before the prefix read that starts the real work.
+        let body = production();
+        let slot = body
+            .find("let _slot = ReorgSlot {")
+            .expect("the throttle must still stamp through a slot");
+        let depth_check = body
+            .find("MAX_REORG_DEPTH as u64")
+            .expect("the depth check must still exist");
+        let parent_check = body
+            .find("does not continue the local chain")
+            .expect("the parent-hash check must still exist");
+        let prefix_read = body
+            .find("let prefix = chain.get_blocks_range(0, prefix_len).await;")
+            .expect("the prefix read must still exist");
+        assert!(
+            depth_check < slot && parent_check < slot,
+            "a batch refused for depth or parent must not stamp the reorg window"
+        );
+        assert!(
+            slot < prefix_read,
+            "an attempt that reaches the prefix read must stamp the window"
         );
 
         let code = production();

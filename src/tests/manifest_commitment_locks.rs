@@ -782,6 +782,18 @@ mod coding_audit {
             .collect()
     }
 
+    /// The inclusion path for `audit.column` in the audited parity shard, which
+    /// is what an operator holding the shard can produce and a memoriser
+    /// cannot.
+    fn parity_proof(
+        encoded: &crate::storage::EncodedObject,
+        audit: &crate::domain::storage_deal::CodingAudit,
+    ) -> Vec<[u8; 32]> {
+        let shard = &encoded.shards[encoded.scheme.k as usize + audit.parity_index as usize];
+        crate::storage::column_commitment::column_proof(shard, audit.column)
+            .expect("a real column has a proof")
+    }
+
     /// The coding audit is reachable from the chain, not only from these tests.
     ///
     /// `derive_coding_audit` and `verify_coding_audit` were complete and
@@ -889,8 +901,9 @@ mod coding_audit {
         let parity_byte = encoded.shards[encoded.scheme.k as usize + audit.parity_index as usize]
             [audit.column as usize];
 
+        let proof = parity_proof(&encoded, &audit);
         assert!(
-            reg.verify_coding_audit(&audit, &column, parity_byte)
+            reg.verify_coding_audit(&audit, &column, parity_byte, &proof)
                 .is_ok(),
             "an honestly encoded object must pass"
         );
@@ -906,12 +919,19 @@ mod coding_audit {
         let honest = encoded.shards[encoded.scheme.k as usize + audit.parity_index as usize]
             [audit.column as usize];
 
+        let proof = parity_proof(&encoded, &audit);
         let err = reg
-            .verify_coding_audit(&audit, &column, honest ^ 0xFF)
+            .verify_coding_audit(&audit, &column, honest ^ 0xFF, &proof)
             .expect_err("parity that is not parity must be refused");
+        // Caught one check earlier than the relationship: a flipped byte has
+        // no inclusion path against the commitment, so it fails as possession
+        // before it ever reaches the encoder. Both errors refuse it; the
+        // relationship check still answers for manifests recorded before the
+        // commitment existed
+        // (`a_manifest_without_column_roots_keeps_the_relationship_check`).
         assert!(
-            matches!(err, StorageError::ParityColumnMismatch { .. }),
-            "the error must name the mismatch, got: {err:?}"
+            matches!(err, StorageError::CodingAuditColumnProofRejected { .. }),
+            "the error must name the refusal, got: {err:?}"
         );
     }
 
@@ -923,9 +943,12 @@ mod coding_audit {
         let honest = encoded.shards[encoded.scheme.k as usize + audit.parity_index as usize]
             [audit.column as usize];
 
-        assert!(reg.verify_coding_audit(&audit, &column, honest).is_ok());
+        let proof = parity_proof(&encoded, &audit);
+        assert!(reg
+            .verify_coding_audit(&audit, &column, honest, &proof)
+            .is_ok());
         assert!(
-            reg.verify_coding_audit(&audit, &column, honest ^ 1)
+            reg.verify_coding_audit(&audit, &column, honest ^ 1, &proof)
                 .is_err(),
             "one bit is enough; the audit checks the relationship, not a checksum"
         );
@@ -1017,67 +1040,143 @@ mod coding_audit {
         let parity_byte = encoded.shards[manifest.erasure.k as usize + audit.parity_index as usize]
             [audit.column as usize];
 
+        let proof = parity_proof(&encoded, &audit);
         assert_eq!(
             rs.column_is_correctly_encoded(audit.parity_index as usize, &column, parity_byte),
-            reg.verify_coding_audit(&audit, &column, parity_byte)
+            reg.verify_coding_audit(&audit, &column, parity_byte, &proof)
                 .is_ok(),
         );
     }
 
-    /// The answer picks the column the verifier checks.
+    /// The answer is bound to the column that was asked.
     ///
     /// `derive_coding_audit` selects `(parity_index, column)` from chain
-    /// entropy precisely so neither side chooses it, and the doc on
-    /// `CodingAudit` says it is "deliberately not a stored type ... so there
-    /// is no second copy of the selection that could drift".
+    /// entropy so that neither side chooses it, and the `(1 - f)^rounds`
+    /// argument in the module doc assumes the operator cannot predict the
+    /// column. The selector alone never delivered that: the relationship check
+    /// reads `parity_index` and nothing else, so an operator holding honest
+    /// parity at one column and garbage elsewhere could answer every audit at
+    /// the column it kept. The column commitment is what closes it - the
+    /// inclusion path is checked AT `audit.column`, and the siblings in it are
+    /// hashes of the real shard, so a byte from another column has no path.
     ///
-    /// On the RPC path there is a second copy. `ChainCommand::AnswerCodingAudit`
-    /// carries the whole `CodingAudit` struct up from the responder, and
-    /// `verify_coding_audit` never recomputes it: it reads `parity_index` to
-    /// pick the generator row and uses `column` only to fill in an error
-    /// message. So the byte offset the verifier checks is the offset the
-    /// answerer named.
-    ///
-    /// The consequence is narrow but it is the exact property entropy
-    /// selection exists to provide. An operator holding valid parity at one
-    /// column and garbage elsewhere can answer every audit at the column it
-    /// kept, because nothing binds the answer to the column that was asked.
-    /// The audit still proves the relationship holds somewhere; it stops
-    /// proving it holds at a place the operator could not predict, and the
-    /// `(1 - f)^rounds` argument in the module doc assumes exactly that
-    /// unpredictability.
-    ///
-    /// Not fixed here: closing it means either recomputing the selection
-    /// inside `verify_coding_audit` from the entropy and challenge id, or
-    /// carrying those instead of the derived struct, and that changes the
-    /// `ChainCommand` shape. Pinned so the gap is a decision rather than an
-    /// oversight.
+    /// This test used to pin the gap and say so. It now asserts the refusal,
+    /// which is the condition the pin named for its own replacement.
     #[test]
-    fn a_coding_audit_answer_is_not_bound_to_the_column_that_was_asked() {
+    fn a_coding_audit_answer_is_bound_to_the_column_that_was_asked() {
         let (reg, encoded, manifest) = coded_registry();
         let asked = StorageRegistry::derive_coding_audit(&[42u8; 32], &manifest, 9)
             .expect("a coded manifest has parity to audit");
 
-        // A different column of the same code word. Entropy chose `asked`;
-        // this is one the operator chose instead.
+        // A different column of the same code word: self-consistent, and not
+        // the one entropy chose.
         let substituted = (asked.column + 1) % u64::from(manifest.shards[0].size);
         assert_ne!(substituted, asked.column, "the fixture needs two columns");
 
-        let forged = crate::domain::storage_deal::CodingAudit {
-            column: substituted,
-            ..asked
-        };
         let column = data_column(&encoded, substituted);
-        let parity_byte = encoded.shards
-            [manifest.erasure.k as usize + forged.parity_index as usize][substituted as usize];
+        let parity_byte = encoded.shards[manifest.erasure.k as usize + asked.parity_index as usize]
+            [substituted as usize];
+        let proof_at_substituted = crate::storage::column_commitment::column_proof(
+            &encoded.shards[manifest.erasure.k as usize + asked.parity_index as usize],
+            substituted,
+        )
+        .expect("the other column has a proof too, just not at the asked offset");
 
         assert!(
-            reg.verify_coding_audit(&forged, &column, parity_byte)
-                .is_ok(),
-            "an answer at a self-chosen column passes today; when this starts \
-             failing the selection has been bound and this test should assert \
-             the refusal instead"
+            matches!(
+                reg.verify_coding_audit(&asked, &column, parity_byte, &proof_at_substituted),
+                Err(StorageError::CodingAuditColumnProofRejected { .. })
+            ),
+            "a byte from another column must not answer an audit at this one"
         );
+    }
+
+    /// The attack the commitment exists for, end to end: an operator that
+    /// memorised one consistent column of a DIFFERENT object.
+    ///
+    /// It answers with a column that encodes - so the relationship check alone
+    /// would pass it, and did for as long as the gap was pinned - but the byte
+    /// is not the audited shard's byte at the audited column, so it has no
+    /// inclusion path.
+    #[test]
+    fn a_memorised_column_of_another_object_cannot_answer() {
+        let (reg, encoded, manifest) = coded_registry();
+        let audit = StorageRegistry::derive_coding_audit(&[5u8; 32], &manifest, 4).unwrap();
+
+        // A different object's codeword, and an honest column of it.
+        let other_data: Vec<u8> = (0..800u32).map(|i| (i * 37 % 251) as u8).collect();
+        let other = enc_obj(&other_data, ErasureScheme { k: 4, n: 6 }).expect("encodes");
+        let column = data_column(&other, audit.column);
+        let parity_shard = &other.shards[other.scheme.k as usize + audit.parity_index as usize];
+        let parity_byte = parity_shard[audit.column as usize];
+        // The memoriser can build a path - of ITS shard. That is the point.
+        let proof = crate::storage::column_commitment::column_proof(parity_shard, audit.column)
+            .expect("its own column has a proof");
+
+        assert_ne!(
+            crate::storage::column_commitment::column_root(parity_shard),
+            manifest
+                .column_root(audit.parity_index)
+                .expect("the manifest commits"),
+            "the fixture needs two different parity shards"
+        );
+        assert!(
+            matches!(
+                reg.verify_coding_audit(&audit, &column, parity_byte, &proof),
+                Err(StorageError::CodingAuditColumnProofRejected { .. })
+            ),
+            "a consistent column of another object must not answer this audit"
+        );
+        // Sanity: the same bytes would have passed the relationship check on
+        // their own, which is exactly why the commitment is needed.
+        let rs = ReedSolomon::for_scheme(&manifest.erasure).unwrap();
+        assert!(rs.column_is_correctly_encoded(audit.parity_index as usize, &column, parity_byte));
+        // And the real object still passes with its own path.
+        let honest_column = data_column(&encoded, audit.column);
+        let honest_shard = &encoded.shards[encoded.scheme.k as usize + audit.parity_index as usize];
+        let honest_byte = honest_shard[audit.column as usize];
+        assert!(reg
+            .verify_coding_audit(
+                &audit,
+                &honest_column,
+                honest_byte,
+                &parity_proof(&encoded, &audit)
+            )
+            .is_ok());
+    }
+
+    /// A manifest recorded before column commitments keeps the older check.
+    ///
+    /// Its audits have nothing to prove against, and refusing them would fail
+    /// honest operators for a field their manifest never carried.
+    #[test]
+    fn a_manifest_without_column_roots_keeps_the_relationship_check() {
+        let (reg, encoded, manifest) = coded_registry();
+        assert!(manifest.column_root(0).is_some(), "the fixture commits");
+
+        let mut legacy = manifest.clone();
+        legacy.column_roots.clear();
+        let mut legacy_reg = StorageRegistry::new();
+        legacy_reg.register_manifest(&legacy);
+
+        let audit = StorageRegistry::derive_coding_audit(&[6u8; 32], &legacy, 1).unwrap();
+        let column = data_column(&encoded, audit.column);
+        let honest = encoded.shards[encoded.scheme.k as usize + audit.parity_index as usize]
+            [audit.column as usize];
+
+        assert!(
+            legacy_reg
+                .verify_coding_audit(&audit, &column, honest, &[])
+                .is_ok(),
+            "without a commitment there is nothing for the proof to fail"
+        );
+        assert!(matches!(
+            legacy_reg.verify_coding_audit(&audit, &column, honest ^ 0xFF, &[]),
+            Err(StorageError::ParityColumnMismatch { .. })
+        ));
+        assert!(reg
+            .verify_coding_audit(&audit, &column, honest, &parity_proof(&encoded, &audit))
+            .is_ok());
     }
 
     #[test]
@@ -1089,7 +1188,7 @@ mod coding_audit {
             column: 0,
         };
         assert!(matches!(
-            reg.verify_coding_audit(&audit, &[0, 0, 0, 0], 0),
+            reg.verify_coding_audit(&audit, &[0, 0, 0, 0], 0, &[]),
             Err(StorageError::UnknownManifest(_))
         ));
     }

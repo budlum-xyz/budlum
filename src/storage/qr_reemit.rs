@@ -183,6 +183,17 @@ impl RecipeEmitter {
         Ok((frames, fold))
     }
 
+    /// The stream id the recipe pins, as carried by the emitter.
+    ///
+    /// [`Self::verify_stream_id`] accepts either the A2 `stream_commitment` or
+    /// a folded frame-digest id, and a caller has to know which before it can
+    /// decide whether a full frame pass is needed to answer.
+    /// [`Self::stream_commitment`] is the A2 value; this is the pinned one.
+    #[must_use]
+    pub const fn pinned_stream_id(&self) -> [u8; 32] {
+        self.recipe.stream_id
+    }
+
     /// If the recipe pinned a frame-fold stream id, check it equals a fresh fold.
     ///
     /// # Errors

@@ -415,6 +415,19 @@ fn the_registration_signature_commits_the_whole_manifest() {
         base
     );
     assert_ne!(changed(&|c| c.shard_count += 1), base);
+    // The column commitments of the parity shards. A relay that rewrote a root
+    // would be re-pointing the coding audit at a different object's columns;
+    // the signature has to fail rather than let the registration through and
+    // rely on `manifest_id` being recomputed.
+    assert_ne!(
+        changed(&|c| c.column_roots = vec![[9u8; 32], [10u8; 32]]),
+        base
+    );
+    assert_ne!(
+        changed(&|c| c.column_roots.push([11u8; 32])),
+        base,
+        "the count is committed too, not only the bytes"
+    );
 }
 
 fn generated_spec() -> crate::storage::generated::GeneratedSpec {
@@ -965,10 +978,16 @@ mod answer_coding_audit {
             .expect("audit is stored");
         let column = stored.audit.column as usize;
         let k = encoded.scheme.k as usize;
+        let parity_shard = &encoded.shards[k + stored.audit.parity_index as usize];
         let body = StorageTx::AnswerCodingAudit {
             audit_id: id,
             data_column: (0..k).map(|j| encoded.shards[j][column]).collect(),
-            parity_byte: encoded.shards[k + stored.audit.parity_index as usize][column],
+            parity_byte: parity_shard[column],
+            column_proof: crate::storage::column_commitment::column_proof(
+                parity_shard,
+                stored.audit.column,
+            )
+            .expect("a real column has a proof"),
         };
         (stored.operator, body)
     }
@@ -1013,18 +1032,49 @@ mod answer_coding_audit {
 
     #[test]
     fn the_signature_commits_every_answer_field() {
-        let hash_of = |audit_id: u64, data_column: Vec<u8>, parity_byte: u8| {
-            let body = StorageTx::AnswerCodingAudit {
-                audit_id,
-                data_column,
-                parity_byte,
+        let hash_of =
+            |audit_id: u64, data_column: Vec<u8>, parity_byte: u8, proof: Vec<[u8; 32]>| {
+                let body = StorageTx::AnswerCodingAudit {
+                    audit_id,
+                    data_column,
+                    parity_byte,
+                    column_proof: proof,
+                };
+                storage_tx(addr(10), 0, body, 0).calculate_hash()
             };
-            storage_tx(addr(10), 0, body, 0).calculate_hash()
-        };
-        let honest = hash_of(1, vec![1, 2, 3, 4], 5);
-        assert_ne!(hash_of(2, vec![1, 2, 3, 4], 5), honest, "audit_id");
-        assert_ne!(hash_of(1, vec![1, 2, 3, 5], 5), honest, "data_column");
-        assert_ne!(hash_of(1, vec![1, 2, 3, 4, 0], 5), honest, "column length");
-        assert_ne!(hash_of(1, vec![1, 2, 3, 4], 6), honest, "parity_byte");
+        let honest = hash_of(1, vec![1, 2, 3, 4], 5, vec![[7u8; 32]]);
+        assert_ne!(
+            hash_of(2, vec![1, 2, 3, 4], 5, vec![[7u8; 32]]),
+            honest,
+            "audit_id"
+        );
+        assert_ne!(
+            hash_of(1, vec![1, 2, 3, 5], 5, vec![[7u8; 32]]),
+            honest,
+            "data_column"
+        );
+        assert_ne!(
+            hash_of(1, vec![1, 2, 3, 4, 0], 5, vec![[7u8; 32]]),
+            honest,
+            "column length"
+        );
+        assert_ne!(
+            hash_of(1, vec![1, 2, 3, 4], 6, vec![[7u8; 32]]),
+            honest,
+            "parity_byte"
+        );
+        // A relay that drops the path turns a proven answer into a refused one,
+        // and one that rewrites a sibling can answer for a byte the operator
+        // never held. Both must move the hash.
+        assert_ne!(
+            hash_of(1, vec![1, 2, 3, 4], 5, Vec::new()),
+            honest,
+            "column_proof presence"
+        );
+        assert_ne!(
+            hash_of(1, vec![1, 2, 3, 4], 5, vec![[8u8; 32]]),
+            honest,
+            "column_proof contents"
+        );
     }
 }
