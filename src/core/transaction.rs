@@ -1288,9 +1288,10 @@ impl Transaction {
             // shard: priced like the registry arms beside it. Opening a deal
             // also verifies the operator's consent signature, so it adds
             // one signature check on top.
-            TransactionType::Storage(crate::domain::storage_tx::StorageTx::OpenDeal(_)) => {
-                schedule.contract_call_gas * 2 + schedule.gas_per_signature
-            }
+            TransactionType::Storage(
+                crate::domain::storage_tx::StorageTx::OpenDeal(_)
+                | crate::domain::storage_tx::StorageTx::AcceptReallocation(_),
+            ) => schedule.contract_call_gas * 2 + schedule.gas_per_signature,
             TransactionType::Storage(_) => schedule.contract_call_gas * 2,
             // One registry insert behind a relayer-bond lookup: priced like
             // the registry arms above.
@@ -1770,6 +1771,42 @@ fn encode_storage_tx(tx: &crate::domain::storage_tx::StorageTx, out: &mut Vec<u8
             put_u64(out, *audit_id);
             put_bytes(out, data_column);
             put_u8(out, *parity_byte);
+        }
+        crate::domain::storage_tx::StorageTx::AcceptReallocation(accept) => {
+            put_u8(out, 5);
+            put_u64(out, accept.ticket_id);
+            put_fixed(out, accept.replacement_operator.as_bytes());
+            put_u64(out, accept.start_epoch);
+            put_u64(out, accept.end_epoch);
+            put_u64(out, accept.economics.operator_bond);
+            put_u64(out, accept.economics.fee_per_byte_epoch);
+            put_bytes(out, &accept.merkle_proof);
+            put_fixed(out, &accept.storage_root);
+            // Committed whole, like the deal-open consent.
+            put_fixed(out, &accept.operator_consent.owner_key);
+            put_bytes(out, &accept.operator_consent.signature);
+        }
+        crate::domain::storage_tx::StorageTx::OpenChallenge {
+            deal_id,
+            range_len,
+            deadline_epoch,
+            opener_bond,
+        } => {
+            put_u8(out, 6);
+            put_u64(out, *deal_id);
+            put_u64(out, *range_len);
+            put_u64(out, *deadline_epoch);
+            put_u64(out, *opener_bond);
+        }
+        crate::domain::storage_tx::StorageTx::AnswerChallenge {
+            challenge_id,
+            range_hash,
+            proof,
+        } => {
+            put_u8(out, 7);
+            put_u64(out, *challenge_id);
+            put_fixed(out, range_hash.as_bytes());
+            put_bytes(out, proof);
         }
     }
 }

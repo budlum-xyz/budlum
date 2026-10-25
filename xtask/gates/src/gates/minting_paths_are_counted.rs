@@ -95,6 +95,14 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          supply and goes through `try_mint_balance`.",
     ),
     (
+        "src/domain/storage_tx.rs",
+        1,
+        "the in-block answer to a retrieval challenge returns the opener bond \
+         that the in-block `OpenChallenge` debited from the same opener \
+         (testnet directive WP-1). Auto-challenges opened by block \
+         maintenance carry no debited bond and are not refunded.",
+    ),
+    (
         "src/core/account.rs",
         4,
         "one is the release of the unbonding queue (money already committed as stake \
