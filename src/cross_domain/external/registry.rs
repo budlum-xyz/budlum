@@ -857,6 +857,13 @@ impl ExternalDomainRegistry {
         let penalty = reg.economics.penalty_for(value_atoms, bond.live_atoms());
         let reward = reg.economics.challenge.for_slash(penalty);
         let taken = bond.slash(height, evidence_digest, penalty, challenger, reward);
+        // The bond record clamps the reward it *records* to what the slash
+        // actually took; the value handed back to the caller has to be the same
+        // one, or the escrow seam refuses a reward larger than the slash - and
+        // by then the attestation below has already been withdrawn, so the
+        // evidence could never be presented again. Clamped here, the escrow
+        // step cannot be the thing that fails after the point of no return.
+        let reward = reward.min(taken);
         // BLG-0156 (P07-F11): a contradicted attestation is withdrawn from
         // the served book, and both its carrier digest and its domain-separated
         // `(height, version, state_root)` claim tombstone remain recorded in

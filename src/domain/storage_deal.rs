@@ -409,6 +409,20 @@ pub struct CodingAudit {
 ///
 /// WIRING: read by ADIM 4b (open and finalize in `apply_block_effects` at
 /// epoch start) and 4c (`StorageTx::AnswerCodingAudit`).
+/// What a coding audit is allowed to mean.
+///
+/// **A `Passed` outcome is not evidence of retention.** It says one thing: the
+/// operator could produce a byte column that is consistent with the manifest's
+/// Reed-Solomon code for the drawn parity symbol. It cannot say that the column
+/// came from *this* object, because the answer is a single byte per shard and
+/// the manifest pins no per-column commitment to check it against - an operator
+/// that memorised a consistent column of some other object passes. The check
+/// the audit does make is still worth making (it catches an operator that does
+/// not answer, and one that answers with a column that does not encode), and
+/// that is all it is documented to do. Nothing in consensus reads `Passed`:
+/// deals stay `Active`, bonds do not move and repair is not suppressed by it,
+/// so an audit that passes buys the operator nothing it did not already have
+/// ([BLG-0152 S2, accepted gap]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodingAuditOutcome {
     Open,
@@ -2576,10 +2590,17 @@ impl StorageRegistry {
     /// nor the operator. The audit, its operator and `deadline_epoch` are
     /// stored, and only that stored copy is used to check the answer.
     ///
-    /// Known accepted gap (S2): the audit is not bound to a column commitment
-    /// in the manifest, so it detects operators that do not answer or answer
-    /// with a column that breaks the code. It does not detect an operator
-    /// that serves a consistent column of the wrong object.
+    /// Known accepted gap (S2), restated so the limit cannot be read past: the
+    /// audit is not bound to a column commitment in the manifest, so it detects
+    /// operators that do not answer or answer with a column that breaks the
+    /// code. It does not detect an operator that serves a consistent column of
+    /// the wrong object, and a `Passed` outcome therefore proves only that the
+    /// operator once held *a* codeword - never that it still holds the data.
+    /// Closing the gap needs a per-shard column commitment fixed at deal-open
+    /// (a Merkle root over `H(column_index || column_bytes)` carried in the
+    /// manifest, with an inclusion proof in the answer); until that exists the
+    /// audit stays out of every retention and repair decision, exactly as
+    /// [`CodingAuditOutcome::Passed`] states.
     ///
     /// Returns the new audit id.
     ///
