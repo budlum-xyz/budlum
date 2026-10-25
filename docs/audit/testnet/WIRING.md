@@ -54,7 +54,8 @@ only by the node-local global header. See N-10 in `FINDINGS.md`.
 | Consensus | Delegation | none (B-12) | none | none | none | none | none | none | none | missing |
 | Consensus domains | PoW, BFT, ZK domain finality | none (operator RPC `bud_registerConsensusDomain`, `bud_submitVerifiedDomainCommitment`, B-02) | none | `external_roots` only | `domain_registry_root`, `domain_commitment_root` | `bud_getConsensusDomains`, `bud_getDomainCommitments`, `bud_getDomainInfo` | sled | not verified | none | missing |
 | Consensus domains | PoA domain | `PoaOnboarding` | yes | PoA admission, PoA compliance | none | not verified | not verified | not verified | none (bootstrap domain frozen, B-19) | missing |
-| Cross domain | Messages | none (`bud_submitCrossDomainMessage` writes out of block) | none | `message_root` | `message_root` | not verified | `save_cross_domain_message` | not verified | none | missing |
+| Cross domain | Relayed messages | `RelayCrossDomainMessage` (N-12) | yes (`register_relayed_cross_domain_message`) | `message_root` | `message_root` | not verified | replayed from blocks; stored rows merged at load | not verified | none | missing |
+| Cross domain | Bridge-built messages (lock, burn) | none (operator bridge RPCs, B-02) | none | `message_root` | `message_root` | not verified | `save_cross_domain_message` | not verified | none | missing |
 | Cross domain | Bridge lock, mint, burn, unlock | none (operator RPCs, B-02) | none | `bridge_root` | `bridge_state_root`, `replay_nonce_root` | `bud_getSettlementInfo` | `save_bridge_state` | `bridge_transfers_total` | none | missing |
 | Cross domain | Relay proof settlement | `RelayerResult` (exists); proof path is operator RPC `bud_submitRelayProof` (B-02) | `RelayerResult` arm not verified | partial | none | none | `save_universal_relayer` | not verified | none | missing |
 | Cross domain | EVM adapter (Sepolia) | none | none | none | none | `bud_inspectEthereumUpdate`, `bud_planEvmVerification` | n/a | none | none | missing |
@@ -97,6 +98,25 @@ only by the node-local global header. See N-10 in `FINDINGS.md`.
 | Faucet | Testnet BUD | none (B-07: dev credit is out of consensus) | n/a | n/a | n/a | none | none | none | none | missing |
 | Graft | Apps from other networks, paid in BUD | none (WP-8) | none | none | none | none | none | none | none | missing |
 | Shared security | Restaked validators | none (WP-10) | none | none | none | none | none | none | none | missing |
+
+## RPC method classes (measured)
+
+`src/rpc/method_class.rs` holds one row per method; its tests compare it
+with `src/rpc/api.rs` and with the `require_operator` calls, and the server
+refuses to start a listener whose served methods differ from the table.
+
+| Effect | Public | Operator | Total |
+|---|---|---|---|
+| Read | 95 | 1 | 96 |
+| TxSubmit | 18 | 0 | 18 |
+| LocalAdmin | 3 | 3 | 6 |
+| Refused | 7 | 6 | 13 |
+| ConsensusWrite | 0 | 23 | 23 |
+| Total | 123 | 33 | 156 |
+
+The 23 operator consensus writes are the open WP-1 conversions (B-01,
+B-02); the test `the_open_consensus_writes_are_exactly_the_pinned_list`
+names each with its finding and lets the list only shrink.
 
 ## Gated rows: what is still owed
 
