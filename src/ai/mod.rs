@@ -170,9 +170,7 @@ mod tests {
         let res1 = AiInferenceResult {
             request_id: req_id,
             verifier: v1,
-            output_commitment: crate::ai::types::canonical_output_commitment(
-                &b"response: hi".to_vec(),
-            ),
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response: hi"),
             output_ref: BoundedBytes::try_new(b"response: hi".to_vec()).unwrap(),
             result_nonce: 1,
             signature: vec![1, 2, 3],
@@ -188,9 +186,7 @@ mod tests {
         let res2 = AiInferenceResult {
             request_id: req_id,
             verifier: v2,
-            output_commitment: crate::ai::types::canonical_output_commitment(
-                &b"response: hi".to_vec(),
-            ),
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response: hi"),
             output_ref: BoundedBytes::try_new(b"response: hi".to_vec()).unwrap(),
             result_nonce: 2,
             signature: vec![4, 5, 6],
@@ -295,9 +291,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v_minority,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"wrong".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"wrong"),
                 output_ref: BoundedBytes::try_new(b"wrong".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -313,9 +307,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"correct".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"correct"),
                 output_ref: BoundedBytes::try_new(b"correct".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -330,9 +322,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"correct".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"correct"),
                 output_ref: BoundedBytes::try_new(b"correct".to_vec()).unwrap(),
                 result_nonce: 3,
                 signature: vec![3],
@@ -460,9 +450,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"result".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"result"),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -536,9 +524,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"result".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"result"),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -613,7 +599,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(&b"a".to_vec()),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"a"),
                 output_ref: BoundedBytes::try_new(b"a".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -629,7 +615,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(&b"b".to_vec()),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"b"),
                 output_ref: BoundedBytes::try_new(b"b".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -701,7 +687,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(&b"same".to_vec()),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"same"),
                 output_ref: BoundedBytes::try_new(b"same".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -717,7 +703,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(&b"same".to_vec()),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"same"),
                 output_ref: BoundedBytes::try_new(b"same".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -843,9 +829,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"result".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"result"),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -991,9 +975,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"result".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"result"),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -1007,9 +989,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"result".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"result"),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -1145,9 +1125,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"result".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"result"),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 0,
                 signature: vec![1],
@@ -1421,9 +1399,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"result".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"result"),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -1437,9 +1413,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"result".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"result"),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -1514,9 +1488,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"result".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"result"),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -1530,9 +1502,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"result".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"result"),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -1918,7 +1888,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(&b"r".to_vec()),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"r"),
                 output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -1932,7 +1902,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: crate::ai::types::canonical_output_commitment(&b"r".to_vec()),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"r"),
                 output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -1946,7 +1916,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v3,
-                output_commitment: crate::ai::types::canonical_output_commitment(&b"r".to_vec()),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"r"),
                 output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
                 result_nonce: 3,
                 signature: vec![3],
@@ -3325,9 +3295,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: crate::ai::types::canonical_output_commitment(
-                    &b"response".to_vec(),
-                ),
+                output_commitment: crate::ai::types::canonical_output_commitment(b"response"),
                 output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -3414,7 +3382,7 @@ mod tests {
         let second = AiInferenceResult {
             request_id: req_id,
             verifier: v2,
-            output_commitment: crate::ai::types::canonical_output_commitment(&b"response".to_vec()),
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response"),
             output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
             result_nonce: 2,
             signature: vec![1],
@@ -3534,7 +3502,7 @@ mod tests {
         let second = AiInferenceResult {
             request_id: req_id,
             verifier: v2,
-            output_commitment: crate::ai::types::canonical_output_commitment(&b"response".to_vec()),
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response"),
             output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
             result_nonce: 2,
             signature: vec![1],
