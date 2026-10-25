@@ -17,6 +17,7 @@
 //! Transport types).
 
 pub mod assignment;
+pub mod column_commitment;
 pub mod content_id;
 pub mod db;
 pub mod derived;
@@ -71,6 +72,7 @@ pub mod view_grant;
 pub use assignment::{
     assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,
 };
+pub use column_commitment::{column_proof, column_root, verify_column_proof};
 pub use content_id::{ContentId, DEFAULT_CHUNK_SIZE_BYTES};
 pub use derived::{
     DerivedError, DerivedSpec, DerivedTransform, PrefixSpan, DERIVED_BLOCK_PIXELS,
