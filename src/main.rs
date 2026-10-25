@@ -1423,7 +1423,7 @@ async fn main() {
         // An unauthenticated node.
         if !rpc_security.auth_required {
             tracing::warn!(
-                "[SECURITY] Public RPC is running with auth_required=false: every state-changing method is exposed to the network with no authentication. Close it with --rpc-auth-required=true, or the equivalent config."
+                "[SECURITY] Public RPC is running with auth_required=false: reads, signed-transaction submission and transaction preparation are served without an API key. The method class table refuses to start this listener if any public method would write consensus state; per-IP rate limits still apply. Close it with --rpc-auth-required=true, or the equivalent config."
             );
         }
         // Same reasoning for an unrestricted IP allow-list. The runtime

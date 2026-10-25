@@ -28,15 +28,21 @@ mdns_enabled = false
 
 [rpc]
 # Same shape as mainnet: plain HTTP on loopback, TLS terminated by a reverse
-# proxy on this host, the API key never on the wire in clear text.
+# proxy on this host (ops/Caddyfile.testnet).
 public_listener = "127.0.0.1:18545"
 operator_listener = "127.0.0.1:18546"
 trusted_proxies = ["127.0.0.1"]
 enabled = true
-# Same rule as mainnet: the key is required whatever the bind address.
-auth_required = true
-api_key_env = "BUDLUM_RPC_API_KEY"
+# TESTNET-DEFAULT (directive decision A-06): the public listener serves
+# wallets and users without an API key. What it can serve is bounded by the
+# method class table (src/rpc/method_class.rs): reads, signed-transaction
+# submission and unsigned-transaction preparation. A keyless public
+# listener refuses to start while any public method would write consensus
+# state, so this flag cannot expose one. Operator methods stay on the
+# loopback-only operator listener. Mainnet refuses auth_required = false.
+auth_required = false
 allowed_ips = []
+# Per client IP, read from X-Forwarded-For only when the proxy is trusted.
 rate_limit_per_minute = 600
 
 [metrics]

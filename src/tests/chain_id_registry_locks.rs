@@ -161,7 +161,8 @@ fn the_shipped_node_profiles_agree_with_the_code() {
 }
 
 /// Every shipped profile keeps both RPC listeners and the metrics listener
-/// on loopback, and the public profiles carry a key.
+/// on loopback, the mainnet profile carries a key, and the testnet profile
+/// states its keyless public listener explicitly (decision A-06).
 ///
 /// `mainnet.toml` and `testnet.toml` bound the public RPC to `0.0.0.0` with
 /// no `auth_required` and no `api_key_env`. The code default is
@@ -253,16 +254,45 @@ fn shipped_profiles_keep_rpc_on_loopback_and_carry_a_key() {
                 .and_then(|r| r.get("api_key_env"))
                 .and_then(toml::Value::as_str)
                 .unwrap_or("");
-            assert_eq!(
-                auth,
-                Some(true),
-                "{file} is a {profile} profile and must say auth_required = true; TLS \
-                 names the server, the key names the caller"
-            );
-            assert!(
-                !key_env.trim().is_empty(),
-                "{file} is a {profile} profile and must name api_key_env"
-            );
+            if profile == "mainnet" {
+                assert_eq!(
+                    auth,
+                    Some(true),
+                    "{file} is a mainnet profile and must say auth_required = true; TLS \
+                     names the server, the key names the caller"
+                );
+                assert!(
+                    !key_env.trim().is_empty(),
+                    "{file} is a mainnet profile and must name api_key_env"
+                );
+            } else {
+                // Testnet decision A-06: the public RPC node serves wallets
+                // and users without a key, stated explicitly in the profile
+                // rather than inherited. A keyless public listener is bounded
+                // by the method class table, which refuses to start one that
+                // would expose a consensus write
+                // (`rpc::method_class::check_served_methods`). Another
+                // testnet profile (the archive node) may keep a key, and
+                // then it must name where the key comes from.
+                assert!(
+                    auth.is_some(),
+                    "{file} is a testnet profile and must state auth_required explicitly"
+                );
+                if file == "config/testnet.toml" {
+                    assert_eq!(
+                        auth,
+                        Some(false),
+                        "{file} is the public testnet profile; decision A-06 serves its \
+                         public listener without a key"
+                    );
+                }
+                if auth == Some(true) {
+                    assert!(
+                        !key_env.trim().is_empty(),
+                        "{file} requires a key and must name api_key_env"
+                    );
+                }
+            }
             let proxies = rpc
                 .and_then(|r| r.get("trusted_proxies"))
                 .and_then(toml::Value::as_array)
