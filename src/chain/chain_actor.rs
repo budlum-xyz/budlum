@@ -164,11 +164,6 @@ pub enum ChainCommand {
         crate::cross_domain::CrossDomainMessage,
         oneshot::Sender<Result<(), String>>,
     ),
-    BondRelayer(
-        crate::core::address::Address,
-        u64,
-        oneshot::Sender<Result<(), String>>,
-    ),
     RegisterExternalDomain(
         Box<crate::cross_domain::external::RegistrationRequest>,
         oneshot::Sender<Result<crate::cross_domain::external::DomainKey, String>>,
@@ -239,29 +234,10 @@ pub enum ChainCommand {
         crate::cross_domain::external::DomainKey,
         oneshot::Sender<Option<(crate::cross_domain::external::DomainRegistration, u64)>>,
     ),
-    BondProver(
-        crate::core::address::Address,
-        u64,
-        oneshot::Sender<Result<(), String>>,
-    ),
     BondStorageOperator(
         crate::core::address::Address,
         u64,
         oneshot::Sender<Result<(), String>>,
-    ),
-    /// Begin unbonding an independently-debited role bond (`RELAYER`,
-    /// `PROVER`, `STORAGE_OPERATOR`). Returns the release epoch.
-    BeginRoleBondUnbonding(
-        crate::core::address::Address,
-        crate::registry::RoleId,
-        oneshot::Sender<Result<u64, String>>,
-    ),
-    /// Withdraw a matured role bond back into the account balance. Returns the
-    /// Withdrawn amount.
-    WithdrawRoleBond(
-        crate::core::address::Address,
-        crate::registry::RoleId,
-        oneshot::Sender<Result<u64, String>>,
     ),
     SubmitZkProof(
         crate::prover::ZkProofSubmission,
@@ -1951,37 +1927,6 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
-    /// Relayer-gated cross-domain message submission (RPC / p2p entry points).
-    /// Bond stake to register as a relayer.
-    pub async fn bond_relayer(
-        &self,
-        address: crate::core::address::Address,
-        amount: u64,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BondRelayer(address, amount, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Bond stake to register as a prover (optional; for reward eligibility).
-    pub async fn bond_prover(
-        &self,
-        address: crate::core::address::Address,
-        amount: u64,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BondProver(address, amount, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
     /// Bond stake for STORAGE_OPERATOR (permissionless).
     pub async fn bond_storage_operator(
         &self,
@@ -1992,52 +1937,6 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::BondStorageOperator(address, amount, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Begin unbonding a `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
-    ///
-    /// These three bonds debit the account balance at bond time and had no exit
-    /// Path at all, so the debit was one-way. Returns the release epoch, which
-    /// Follows the `unbonding_epochs` governance parameter.
-    ///
-    /// # Errors
-    ///
-    /// Returns the registry error as a string when the role carries no
-    /// Independently debited bond, the account is not registered for it, or
-    /// The bond is not `Active`. Also errors if the chain actor has stopped.
-    pub async fn begin_role_bond_unbonding(
-        &self,
-        address: crate::core::address::Address,
-        role: crate::registry::RoleId,
-    ) -> Result<u64, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BeginRoleBondUnbonding(address, role, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Withdraw a matured `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
-    ///
-    /// # Errors
-    ///
-    /// Returns the registry error as a string when the bond is still inside
-    /// Its unbonding window, was already withdrawn, or belongs to a role this
-    /// Path does not own. Also errors if the chain actor has stopped.
-    pub async fn withdraw_role_bond(
-        &self,
-        address: crate::core::address::Address,
-        role: crate::registry::RoleId,
-    ) -> Result<u64, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::WithdrawRoleBond(address, role, tx))
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -3788,15 +3687,6 @@ impl ChainActor {
                 ChainCommand::SubmitCrossDomainMessage(message, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_cross_domain_message(message));
                 }
-                ChainCommand::BondRelayer(address, amount, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .state
-                            .bond_relayer(&address, amount)
-                            .map(|_| ())
-                            .map_err(|e| e.to_string()),
-                    );
-                }
                 ChainCommand::RegisterExternalDomain(registration, res_tx) => {
                     let request = *registration;
                     let bls = matches!(
@@ -3887,15 +3777,6 @@ impl ChainActor {
                 ChainCommand::GetExternalDomainRegistration(key, res_tx) => {
                     let _ = res_tx.send(self.blockchain.external_domain_registration(&key));
                 }
-                ChainCommand::BondProver(address, amount, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .state
-                            .bond_prover(&address, amount)
-                            .map(|_| ())
-                            .map_err(|e| e.to_string()),
-                    );
-                }
                 ChainCommand::BondStorageOperator(address, amount, res_tx) => {
                     let _ = res_tx.send(
                         self.blockchain
@@ -3904,16 +3785,6 @@ impl ChainActor {
                             .map(|_| ())
                             .map_err(|e| e.to_string()),
                     );
-                }
-                ChainCommand::BeginRoleBondUnbonding(address, role, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .state
-                            .begin_role_bond_unbonding(&address, role),
-                    );
-                }
-                ChainCommand::WithdrawRoleBond(address, role, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.state.withdraw_role_bond(&address, role));
                 }
                 ChainCommand::SubmitZkProof(submission, res_tx) => {
                     let _ = res_tx.send(

@@ -566,7 +566,7 @@ fn print_usage() {
     eprintln!();
     eprintln!("Permissionless model (D1):");
     eprintln!("  - The only gate: the registry min_stake floor (atoms), PermissionlessRegistry RoleId(3) RELAYER");
-    eprintln!("  - Bond: the stake is placed through bud_registryBondRelayer");
+    eprintln!("  - Bond: a signed RoleBond transaction with role 3 (RELAYER)");
     eprintln!(
         "  - Slashing: the relayer_invalid_proof tag leads to a 100% MaliciousBehaviour slash"
     );
@@ -665,7 +665,7 @@ async fn check_relayer_active(budlum_client: &BudlumClient, config: &RelayerConf
                     config.relayer_address, config.min_stake
                 );
             } else {
-                eprintln!("Relayer {} is NOT active - need to bond >= {} via bud_registryBondRelayer (RoleId 3 RELAYER).", config.relayer_address, config.min_stake);
+                eprintln!("Relayer {} is NOT active - need to bond >= {} with a signed RoleBond transaction (RoleId 3 RELAYER).", config.relayer_address, config.min_stake);
                 eprintln!("Continuing in observation mode (will fail on submit). Bond first for production.");
             }
             active
@@ -694,8 +694,8 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
 
     if !check_relayer_active(&budlum_client, &config).await {
         return Err(format!(
-            "relayer {} is not an active bonded relayer; bond via bud_registryBondRelayer \
-             (RoleId 3 RELAYER, >= {} atoms) before relaying",
+            "relayer {} is not an active bonded relayer; bond with a signed \
+             RoleBond transaction (RoleId 3 RELAYER, >= {} atoms) before relaying",
             config.relayer_address, config.min_stake
         ));
     }

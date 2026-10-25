@@ -2767,10 +2767,23 @@ impl Executor {
                         "a role bond requires zero recipient and empty data",
                     ));
                 }
+                // The relayer, prover and storage operator roles hold an
+                // independently debited bond that also takes a top-up; the
+                // verifier family registers once at the floor (testnet
+                // directive WP-1: these three used to be bonded through
+                // operator RPCs outside a block).
                 let role = crate::registry::role::RoleId(*role);
-                state
-                    .bond_role(&tx.from, role, tx.amount)
-                    .map_err(|e| BudlumError::validation("role_bond_failed", e.to_string()))?;
+                let bonded = match role {
+                    crate::registry::role::roles::RELAYER => {
+                        state.bond_relayer(&tx.from, tx.amount)
+                    }
+                    crate::registry::role::roles::PROVER => state.bond_prover(&tx.from, tx.amount),
+                    crate::registry::role::roles::STORAGE_OPERATOR => {
+                        state.bond_storage_operator(&tx.from, tx.amount)
+                    }
+                    _ => state.bond_role(&tx.from, role, tx.amount),
+                };
+                bonded.map_err(|e| BudlumError::validation("role_bond_failed", e.to_string()))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -2791,6 +2804,45 @@ impl Executor {
                 state
                     .register_relayed_cross_domain_message(&tx.from, message)
                     .map_err(|e| BudlumError::validation("relayed_message_refused", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::RoleUnbond { role } => {
+                // WP-1: the in-block exit of a role bond. The registry
+                // decides every refusal before it writes the unbonding
+                // status, and the bond stays locked and slashable.
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "role_unbond_shape",
+                        "a role unbond requires zero amount, zero recipient and empty data",
+                    ));
+                }
+                state
+                    .begin_role_bond_unbonding(&tx.from, crate::registry::role::RoleId(*role))
+                    .map_err(|e| BudlumError::validation("role_unbond_failed", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::RoleWithdraw { role } => {
+                // WP-1: the in-block withdrawal of a matured role bond. The
+                // registry's maturity check runs before the principal is
+                // credited, and the registration is removed, so a premature
+                // or repeated withdrawal cannot mint.
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "role_withdraw_shape",
+                        "a role withdrawal requires zero amount, zero recipient and empty data",
+                    ));
+                }
+                state
+                    .withdraw_role_bond(&tx.from, crate::registry::role::RoleId(*role))
+                    .map_err(|e| BudlumError::validation("role_withdraw_failed", e))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")

@@ -436,11 +436,13 @@ pub enum TransactionType {
     /// execution body. (Written without naming types: the signing gate reads
     /// the enum body's identifiers to resolve carried payload types.)
     PoaOnboarding(crate::registry::poa_onboarding::PoAOnboardingTx),
-    /// Bond into a permissionless application role of the verifier family
-    /// (BLG-0092 / P04-F10): the role id and the bond amount in the signed
-    /// header, nothing else. The five role seats that had no production
-    /// registration path - without one, the ATTESTER stake stayed at zero
-    /// and the storage-attestation authority check never ran.
+    /// Bond into a permissionless role (BLG-0092 / P04-F10, testnet
+    /// directive WP-1): the role id and the bond amount in the signed
+    /// header, nothing else. The verifier family registers at the floor;
+    /// the relayer, prover and storage operator roles also take a top-up of
+    /// an active bond. The relayer, prover and storage operator seats were
+    /// reachable only through operator RPCs that wrote the registry outside
+    /// a block, and the verifier family had no production path at all.
     RoleBond {
         role: u32,
     },
@@ -453,6 +455,21 @@ pub enum TransactionType {
     /// naming types: the signing gate reads the enum body's identifiers to
     /// resolve carried payload types.)
     RelayCrossDomainMessage(crate::cross_domain::message::CrossDomainMessage),
+    /// Begin unbonding the signer's bond in one permissionless role, applied
+    /// in block (testnet directive WP-1). The role id is the only payload;
+    /// the bond stays locked and slashable until the governance unbonding
+    /// window has passed. Replaces the operator RPC that wrote the registry
+    /// outside a block.
+    RoleUnbond {
+        role: u32,
+    },
+    /// Withdraw the signer's matured role bond back into its balance,
+    /// applied in block (testnet directive WP-1). Refused inside the
+    /// unbonding window; the registration is removed on success, so the
+    /// same bond cannot be withdrawn twice.
+    RoleWithdraw {
+        role: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1139,6 +1156,14 @@ impl Transaction {
                     return false;
                 }
             }
+            TransactionType::RoleUnbond { .. } | TransactionType::RoleWithdraw { .. } => {
+                if self.amount != 0 || self.to != Address::zero() || !self.data.is_empty() {
+                    debug!(
+                        "Role unbond/withdraw requires zero amount, zero recipient, and empty data"
+                    );
+                    return false;
+                }
+            }
             TransactionType::ContractCall => {
                 if self.amount != 0 {
                     debug!("Contract call TX amount must be 0");
@@ -1270,6 +1295,11 @@ impl Transaction {
             // One registry insert behind a relayer-bond lookup: priced like
             // the registry arms above.
             TransactionType::RelayCrossDomainMessage(_) => schedule.contract_call_gas * 2,
+            // One registry status write (unbond) or one registry removal and
+            // one balance credit (withdraw): priced like the bond itself.
+            TransactionType::RoleUnbond { .. } | TransactionType::RoleWithdraw { .. } => {
+                schedule.contract_call_gas
+            }
         };
         let signature_gas = if self.signature.is_some() {
             schedule.gas_per_signature
@@ -1502,6 +1532,8 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::PoaOnboarding(_) => 48,
         TransactionType::RoleBond { .. } => 49,
         TransactionType::RelayCrossDomainMessage(_) => 50,
+        TransactionType::RoleUnbond { .. } => 51,
+        TransactionType::RoleWithdraw { .. } => 52,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -2245,6 +2277,14 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
         TransactionType::Storage(storage_tx) => encode_storage_tx(storage_tx, out),
         TransactionType::RelayCrossDomainMessage(message) => encode_message(message, out),
+        TransactionType::RoleUnbond { role } => {
+            put_u8(out, 51);
+            put_u32(out, *role);
+        }
+        TransactionType::RoleWithdraw { role } => {
+            put_u8(out, 52);
+            put_u32(out, *role);
+        }
     }
 }
 

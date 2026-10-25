@@ -1187,7 +1187,6 @@ src/chain/blockchain.rs	fn	verify_domain_event_proof
 src/chain/chain_actor.rs	enum	ChainCommand
 src/chain/chain_actor.rs	fn	apply_snapshot
 src/chain/chain_actor.rs	fn	bns_set_storage
-src/chain/chain_actor.rs	fn	bond_storage_operator
 src/chain/chain_actor.rs	fn	build_global_header
 src/chain/chain_actor.rs	fn	credit_development_account
 src/chain/chain_actor.rs	fn	derive_coding_audit
@@ -1283,7 +1282,6 @@ src/core/account.rs	const	MAX_BLOCK_REWARD
 src/core/account.rs	const	MIN_BLOCK_REWARD
 src/core/account.rs	fn	account_count
 src/core/account.rs	fn	add_role
-src/core/account.rs	fn	bond_storage_operator
 src/core/account.rs	fn	circulating_supply
 src/core/account.rs	fn	clear_dirty
 src/core/account.rs	fn	dirty_account_count

@@ -389,8 +389,10 @@ pub trait BudlumApi {
         tx: Transaction,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Legacy operator helper for test/dev administration. Public participants
-    /// Must use a signed Stake transaction through `bud_registryRegister`.
+    /// Refused (testnet directive WP-1). This helper bonded an address
+    /// into the RELAYER role outside a block, without the address's
+    /// signature. A relayer bonds itself with a signed `RoleBond`
+    /// transaction (role 3) through `bud_sendRawTransaction`.
     #[method(name = "bud_registryBondRelayer")]
     async fn registry_bond_relayer(
         &self,
@@ -398,8 +400,8 @@ pub trait BudlumApi {
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Legacy operator helper for a prover bond. Proof submission remains
-    /// Permissionless; public stake registration uses a signed Stake tx.
+    /// Refused (testnet directive WP-1). A prover bonds itself with a signed
+    /// `RoleBond` transaction (role 4) through `bud_sendRawTransaction`.
     #[method(name = "bud_registryBondProver")]
     async fn registry_bond_prover(
         &self,
@@ -407,16 +409,9 @@ pub trait BudlumApi {
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Begin unbonding a `RELAYER` (3), `PROVER` (4) or `STORAGE_OPERATOR` (5) bond.
-    ///
-    /// These three bonds debit the account balance when they are posted and had
-    /// No exit path: no command, no RPC, no transaction type. The bond was
-    /// Permanently unrecoverable. Returns the release epoch, which follows the
-    /// `unbonding_epochs` governance parameter.
-    ///
-    /// Operator-only, matching `bud_registryBondRelayer` - it is the same
-    /// Unsigned legacy administration surface, and the exit must not be easier
-    /// To reach than the entry.
+    /// Refused (testnet directive WP-1). Unbonding a role bond is a signed
+    /// `RoleUnbond` transaction from the bonded account, applied in block,
+    /// so every node starts the unbonding window at the same height.
     #[method(name = "bud_registryBeginRoleBondUnbonding")]
     async fn registry_begin_role_bond_unbonding(
         &self,
@@ -424,9 +419,9 @@ pub trait BudlumApi {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Withdraw a matured `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond back into the
-    /// Account balance. Fails while the bond is still inside its unbonding
-    /// Window, and the registration is removed so it cannot be withdrawn twice.
+    /// Refused (testnet directive WP-1). Withdrawing a matured role bond is
+    /// a signed `RoleWithdraw` transaction from the bonded account, applied
+    /// in block.
     #[method(name = "bud_registryWithdrawRoleBond")]
     async fn registry_withdraw_role_bond(
         &self,

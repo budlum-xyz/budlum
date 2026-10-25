@@ -149,18 +149,12 @@ const METHOD_CLASSES: &[MethodClass] = &[
     // B-01: appends to the node-local global header sequence.
     row("bud_sealGlobalHeader", Operator, ConsensusWrite),
     row("bud_registryRegister", Public, TxSubmit),
-    // B-02: writes the permissionless registry and balances.
-    row("bud_registryBondRelayer", Operator, ConsensusWrite),
-    // B-02: writes the permissionless registry and balances.
-    row("bud_registryBondProver", Operator, ConsensusWrite),
-    // B-02: writes the permissionless registry.
-    row(
-        "bud_registryBeginRoleBondUnbonding",
-        Operator,
-        ConsensusWrite,
-    ),
-    // B-02: writes the permissionless registry and balances.
-    row("bud_registryWithdrawRoleBond", Operator, ConsensusWrite),
+    // WP-1: refused; a role bond is a `RoleBond` transaction now.
+    row("bud_registryBondRelayer", Operator, Refused),
+    row("bud_registryBondProver", Operator, Refused),
+    // WP-1: refused; the exits are `RoleUnbond` and `RoleWithdraw`.
+    row("bud_registryBeginRoleBondUnbonding", Operator, Refused),
+    row("bud_registryWithdrawRoleBond", Operator, Refused),
     // B-02: writes the proof claim book.
     row("bud_submitZkProof", Operator, ConsensusWrite),
     row("bud_registryQuery", Public, Read),
@@ -420,10 +414,6 @@ mod tests {
         ("bud_unlockBridgeTransferVerified", "B-02"),
         ("bud_submitRelayProof", "B-02"),
         ("bud_sealGlobalHeader", "B-01"),
-        ("bud_registryBondRelayer", "B-02"),
-        ("bud_registryBondProver", "B-02"),
-        ("bud_registryBeginRoleBondUnbonding", "B-02"),
-        ("bud_registryWithdrawRoleBond", "B-02"),
         ("bud_submitZkProof", "B-02"),
         ("bud_storageRegisterManifest", "B-02"),
         ("bud_storageOpenDeal", "B-02"),

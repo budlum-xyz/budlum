@@ -526,6 +526,13 @@ impl RpcServer {
         Ok(crate::cross_domain::external::DomainKey(key_bytes))
     }
 
+    /// The answer of a method whose state change moved to a transaction
+    /// door (testnet directive WP-1). The method stays declared so a client
+    /// gets the name of the door instead of "method not found".
+    fn door_refusal(message: &'static str) -> ErrorObjectOwned {
+        ErrorObjectOwned::owned(-32602, message, None::<()>)
+    }
+
     fn to_0x_hash(h: String) -> String {
         if h.is_empty() {
             "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
@@ -3011,28 +3018,16 @@ impl BudlumApiServer for RpcServer {
         address: String,
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // This legacy helper mutates stake without a signed transaction. Keep
-        // It operator-only; permissionless users use `bud_registryRegister`
-        // With a signed Stake transaction.
+        // WP-1: this helper bonded any address into the relayer role outside
+        // a block, on this node alone. The method stays so a client gets a
+        // pointer instead of "method not found".
         self.require_operator("bud_registryBondRelayer")?;
-        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
-        let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
-        })?;
-        self.chain.bond_relayer(addr, amount).await.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Relayer bond failed: {e}"), None::<()>)
-        })?;
-        let role = crate::registry::role::roles::RELAYER;
-        let active = self
-            .chain
-            .get_registry_member(addr, role)
-            .await
-            .is_some_and(|r| r.is_active());
-        Ok(serde_json::json!({
-            "address": Self::to_0x_hash(addr.to_hex()),
-            "role": "relayer",
-            "active": active,
-        }))
+        let _ = (address, amount);
+        Err(Self::door_refusal(
+            "Out-of-block relayer bonding is refused: it changed the registry on this node \
+             alone. Send a signed RoleBond transaction with role 3 (RELAYER) through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn registry_bond_prover(
@@ -3041,24 +3036,12 @@ impl BudlumApiServer for RpcServer {
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_registryBondProver")?;
-        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
-        let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
-        })?;
-        self.chain.bond_prover(addr, amount).await.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Prover bond failed: {e}"), None::<()>)
-        })?;
-        let role = crate::registry::role::roles::PROVER;
-        let active = self
-            .chain
-            .get_registry_member(addr, role)
-            .await
-            .is_some_and(|r| r.is_active());
-        Ok(serde_json::json!({
-            "address": Self::to_0x_hash(addr.to_hex()),
-            "role": "prover",
-            "active": active,
-        }))
+        let _ = (address, amount);
+        Err(Self::door_refusal(
+            "Out-of-block prover bonding is refused: it changed the registry on this node \
+             alone. Send a signed RoleBond transaction with role 4 (PROVER) through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn registry_begin_role_bond_unbonding(
@@ -3066,31 +3049,13 @@ impl BudlumApiServer for RpcServer {
         address: String,
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // The exit for a bond posted through the legacy operator helpers must
-        // Sit behind the same listener as the entry.
         self.require_operator("bud_registryBeginRoleBondUnbonding")?;
-        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
-        let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
-        })?;
-        let role = crate::registry::RoleId::new(role_id);
-        let release_epoch = self
-            .chain
-            .begin_role_bond_unbonding(addr, role)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Role bond unbonding failed: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(serde_json::json!({
-            "address": Self::to_0x_hash(addr.to_hex()),
-            "roleId": role_id,
-            "status": "unbonding",
-            "releaseEpoch": release_epoch,
-        }))
+        let _ = (address, role_id);
+        Err(Self::door_refusal(
+            "Out-of-block role unbonding is refused: it changed the registry on this node \
+             alone. The bonded account sends a signed RoleUnbond transaction through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn registry_withdraw_role_bond(
@@ -3099,28 +3064,12 @@ impl BudlumApiServer for RpcServer {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_registryWithdrawRoleBond")?;
-        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
-        let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
-        })?;
-        let role = crate::registry::RoleId::new(role_id);
-        let withdrawn = self
-            .chain
-            .withdraw_role_bond(addr, role)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Role bond withdrawal failed: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(serde_json::json!({
-            "address": Self::to_0x_hash(addr.to_hex()),
-            "roleId": role_id,
-            "status": "withdrawn",
-            "amount": withdrawn,
-        }))
+        let _ = (address, role_id);
+        Err(Self::door_refusal(
+            "Out-of-block role bond withdrawal is refused: it changed balances on this node \
+             alone. The bonded account sends a signed RoleWithdraw transaction through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn submit_zk_proof(

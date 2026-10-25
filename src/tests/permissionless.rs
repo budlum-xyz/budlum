@@ -810,6 +810,209 @@ fn a_role_bond_round_trip_conserves_supply() {
     assert_eq!(state.get_balance(&relayer), 10_000);
 }
 
+// --- Role bond doors (testnet directive WP-1) ---------------------------------
+//
+// The relayer, prover and storage operator bonds used to be posted, unbonded
+// and withdrawn through operator RPCs that wrote the registry outside a
+// block. They travel through signed transactions now: `RoleBond`,
+// `RoleUnbond` and `RoleWithdraw`, applied by the executor.
+
+fn role_door_tx(from: Address, amount: u64, nonce: u64, tx_type: TransactionType) -> Transaction {
+    let mut tx = Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        amount,
+        1, // fee
+        nonce,
+        vec![],
+        crate::core::transaction::DEFAULT_CHAIN_ID,
+        tx_type,
+    );
+    tx.hash = tx.calculate_hash();
+    tx
+}
+
+#[test]
+fn independent_role_bonds_travel_through_the_transaction_doors() {
+    for (idx, role) in [roles::RELAYER, roles::PROVER, roles::STORAGE_OPERATOR]
+        .into_iter()
+        .enumerate()
+    {
+        let who = addr(0x90 + idx as u8);
+        let start = 1_000_000;
+        let bond = 5_000;
+        let mut state = funded_state(who, start);
+        let before = state.total_bud_committed();
+
+        Executor::apply_transaction(
+            &mut state,
+            &role_door_tx(who, bond, 0, TransactionType::RoleBond { role: role.0 }),
+        )
+        .expect("the RoleBond door bonds an independent role");
+        assert!(state.registry.is_active(&who, role), "{role} is active");
+        assert_eq!(state.get_balance(&who), start - bond - 1);
+
+        Executor::apply_transaction(
+            &mut state,
+            &role_door_tx(who, 0, 1, TransactionType::RoleUnbond { role: role.0 }),
+        )
+        .expect("the RoleUnbond door starts the unbonding window");
+        let release = match state.registry.get(&who, role).map(|r| r.status) {
+            Some(crate::registry::MemberStatus::Unbonding { release_epoch }) => release_epoch,
+            other => panic!("{role} is not unbonding: {other:?}"),
+        };
+
+        let early = Executor::apply_transaction(
+            &mut state,
+            &role_door_tx(who, 0, 2, TransactionType::RoleWithdraw { role: role.0 }),
+        );
+        assert!(early.is_err(), "{role} withdrew inside its window");
+        assert_eq!(state.get_balance(&who), start - bond - 2);
+
+        state.epoch_index = release;
+        Executor::apply_transaction(
+            &mut state,
+            &role_door_tx(who, 0, 2, TransactionType::RoleWithdraw { role: role.0 }),
+        )
+        .expect("the RoleWithdraw door returns a matured bond");
+        assert_eq!(state.get_balance(&who), start - 3);
+        assert!(state.registry.get(&who, role).is_none());
+        assert_eq!(
+            state.total_bud_committed(),
+            before - 3,
+            "the round trip costs the three fees and nothing else"
+        );
+
+        let twice = Executor::apply_transaction(
+            &mut state,
+            &role_door_tx(who, 0, 3, TransactionType::RoleWithdraw { role: role.0 }),
+        );
+        assert!(twice.is_err(), "{role} bond was withdrawn twice");
+        assert_eq!(state.get_balance(&who), start - 3);
+    }
+}
+
+#[test]
+fn an_active_relayer_bond_takes_a_top_up_through_the_door() {
+    let relayer = addr(0x94);
+    let mut state = funded_state(relayer, 1_000_000);
+    for (nonce, amount) in [(0, 5_000), (1, 7)] {
+        Executor::apply_transaction(
+            &mut state,
+            &role_door_tx(
+                relayer,
+                amount,
+                nonce,
+                TransactionType::RoleBond {
+                    role: roles::RELAYER.0,
+                },
+            ),
+        )
+        .expect("bond and top-up");
+    }
+    let stake = state
+        .registry
+        .get(&relayer, roles::RELAYER)
+        .map(|r| r.stake);
+    assert_eq!(stake, Some(5_007));
+}
+
+#[test]
+fn a_role_unbond_carrying_value_is_refused() {
+    let relayer = addr(0x95);
+    let mut state = funded_state(relayer, 1_000_000);
+    Executor::apply_transaction(
+        &mut state,
+        &role_door_tx(
+            relayer,
+            5_000,
+            0,
+            TransactionType::RoleBond {
+                role: roles::RELAYER.0,
+            },
+        ),
+    )
+    .expect("bond");
+    let refused = Executor::apply_transaction(
+        &mut state,
+        &role_door_tx(
+            relayer,
+            1,
+            1,
+            TransactionType::RoleUnbond {
+                role: roles::RELAYER.0,
+            },
+        ),
+    );
+    assert!(refused.is_err());
+    assert!(state.registry.is_active(&relayer, roles::RELAYER));
+}
+
+#[test]
+fn validator_stake_cannot_leave_through_the_role_withdraw_door_refused() {
+    let staker = addr(0x96);
+    let mut state = funded_state(staker, 1_000_000);
+    Executor::apply_transaction(&mut state, &stake_tx(staker, 10_000, 0)).unwrap();
+    let unbond = Executor::apply_transaction(
+        &mut state,
+        &role_door_tx(
+            staker,
+            0,
+            1,
+            TransactionType::RoleUnbond {
+                role: roles::VALIDATOR.0,
+            },
+        ),
+    );
+    assert!(unbond.is_err(), "validator stake unwinds through Unstake");
+    let withdraw = Executor::apply_transaction(
+        &mut state,
+        &role_door_tx(
+            staker,
+            0,
+            1,
+            TransactionType::RoleWithdraw {
+                role: roles::VALIDATOR.0,
+            },
+        ),
+    );
+    assert!(withdraw.is_err(), "validator stake unwinds through Unstake");
+    assert!(state.registry.is_active(&staker, roles::VALIDATOR));
+}
+
+#[test]
+fn the_role_doors_survive_the_wire_and_bind_their_role_to_the_signature() {
+    let who = addr(0x97);
+    for tx_type in [
+        TransactionType::RoleUnbond {
+            role: roles::RELAYER.0,
+        },
+        TransactionType::RoleWithdraw {
+            role: roles::RELAYER.0,
+        },
+    ] {
+        let tx = role_door_tx(who, 0, 0, tx_type.clone());
+        let proto = crate::network::proto_conversions::pb::ProtoTransaction::from(&tx);
+        let back = Transaction::try_from(proto).expect("the door survives the wire");
+        assert_eq!(back.tx_type, tx_type);
+
+        let mut other = tx.clone();
+        other.tx_type = match tx_type {
+            TransactionType::RoleUnbond { .. } => TransactionType::RoleUnbond {
+                role: roles::PROVER.0,
+            },
+            _ => TransactionType::RoleWithdraw {
+                role: roles::PROVER.0,
+            },
+        };
+        assert_ne!(
+            tx.signing_hash(),
+            other.signing_hash(),
+            "the role id is inside the signing preimage"
+        );
+    }
+}
+
 /// Regression guard: introducing the registry must not disturb PoA isolation.
 /// A staked (thus registry-registered) validator still has zero PoA authority.
 #[test]

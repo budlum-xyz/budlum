@@ -217,6 +217,18 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     cross_domain_message_to_proto(message),
                 )),
             ),
+            TransactionType::RoleUnbond { role } => (
+                pb::ProtoTransactionType::RoleUnbond as i32,
+                Some(pb::proto_transaction::TypePayload::RoleUnbond(
+                    pb::ProtoRoleBond { role: *role },
+                )),
+            ),
+            TransactionType::RoleWithdraw { role } => (
+                pb::ProtoTransactionType::RoleWithdraw as i32,
+                Some(pb::proto_transaction::TypePayload::RoleWithdraw(
+                    pb::ProtoRoleBond { role: *role },
+                )),
+            ),
             TransactionType::Vault(vault_tx) => (
                 pb::ProtoTransactionType::Vault as i32,
                 Some(pb::proto_transaction::TypePayload::Vault(
@@ -1099,6 +1111,20 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched RelayCrossDomainMessage payload".into()),
                 };
                 TransactionType::RelayCrossDomainMessage(proto_to_cross_domain_message(&payload)?)
+            }
+            pb::ProtoTransactionType::RoleUnbond => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::RoleUnbond(p)) => p,
+                    _ => return Err("Missing or mismatched RoleUnbond payload".into()),
+                };
+                TransactionType::RoleUnbond { role: payload.role }
+            }
+            pb::ProtoTransactionType::RoleWithdraw => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::RoleWithdraw(p)) => p,
+                    _ => return Err("Missing or mismatched RoleWithdraw payload".into()),
+                };
+                TransactionType::RoleWithdraw { role: payload.role }
             }
             pb::ProtoTransactionType::Vault => {
                 let payload = match proto.type_payload {

@@ -1523,6 +1523,18 @@ impl AccountState {
                     );
                 }
             }
+            TransactionType::RoleUnbond { role } | TransactionType::RoleWithdraw { role } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Role unbond/withdraw requires zero amount/recipient and empty data".into(),
+                    );
+                }
+                let role = crate::registry::role::RoleId(role);
+                Self::ensure_withdrawable_role(role)?;
+                if self.registry.get(&tx.from, role).is_none() {
+                    return Err(format!("no {role} bond registered for {}", tx.from));
+                }
+            }
             TransactionType::AiOperatorWithdraw => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     return Err(
