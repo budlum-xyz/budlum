@@ -474,7 +474,6 @@ pub struct Transaction {
     /// Must be `None` for V4/V5. A V5 transaction carrying this field is
     /// refused: an unchecked authorization sitting next to a transaction verified by a single
     /// signature would leave every reader to guess which one binds.
-    /// tahmin etmesini gerektirirdi.
     #[serde(default)]
     pub authorization: Option<MultisigAuthorizationV6>,
     pub chain_id: u64,
