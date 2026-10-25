@@ -527,8 +527,11 @@ impl PoSEngine {
             let pubkey = Address::from(keys.sig_key.public_key_bytes());
 
             if let Some(validator) = state.get_validator(&pubkey) {
-                if validator.active
-                    && !validator.slashed
+                // Eligibility, not the two flags it is made of: `is_eligible`
+                // also carries the liveness-fault jail, so a validator serving
+                // an unexpired term cannot build a block for this slot even if
+                // an ordinary transaction has rewritten `active` underneath.
+                if validator.is_eligible(state.epoch_index)
                     && validator.stake >= self.config.min_stake
                 {
                     if block.vrf_output.is_empty() || block.vrf_proof.is_empty() {
@@ -797,7 +800,12 @@ impl ConsensusEngine for PoSEngine {
             let validator = state
                 .get_validator(producer)
                 .ok_or_else(|| ConsensusError("Unknown block producer".into()))?;
-            if !validator.active || validator.slashed || validator.stake < self.config.min_stake {
+            // Same predicate as the production gate above: a jailed validator
+            // is not eligible until `jail_until`, whatever `active` says. The
+            // two gates have to agree - one that admits a block the other
+            // refuses splits the chain.
+            if !validator.is_eligible(state.epoch_index) || validator.stake < self.config.min_stake
+            {
                 return Err(ConsensusError("Producer is not an active validator".into()));
             }
 

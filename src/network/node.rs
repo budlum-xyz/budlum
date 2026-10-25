@@ -830,23 +830,18 @@ impl Node {
         flight_guard: ReorgFlightGuard,
         last_completed: Arc<AtomicU64>,
     ) {
-        // Charged on every exit, so the interval is always measured from when
-        // the work actually stopped - including the refusals, which still cost
-        // the reads that produced them.
-        let _slot = ReorgSlot {
-            last_completed: Arc::clone(&last_completed),
-            reorg: flight_guard,
-        };
-        let Some(first) = suffix.first() else {
-            return;
-        };
-        let start = first.index;
         // Peer-independent throttle (CWE-407). A batch is cheap to send and
         // proportional to the node's own chain to act on, so an attacker who
         // can gossip can otherwise keep this actor rebuilding forever. Counted
         // from completion, and applied before any chain read: a frame that
         // arrives inside the window is dropped without the node paying for the
         // work it would have triggered.
+        //
+        // The throttle is decided BEFORE the slot exists. Charging the
+        // interval on the refusal path let a peer roll the window forward with
+        // every cheap attempt - and `try_reorg` is reachable from nowhere else
+        // - so one peer could keep every honest reconstruction out for as long
+        // as it kept trying (CWE-400).
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -857,6 +852,18 @@ impl Node {
             );
             return;
         }
+        let Some(first) = suffix.first() else {
+            return;
+        };
+        let start = first.index;
+        // Charged on every exit from here on, so the interval is always
+        // measured from when the work actually stopped. The slot starts after
+        // the window check: only an attempt that is actually paid for stamps
+        // it, and a refused frame leaves the window untouched.
+        let _slot = ReorgSlot {
+            last_completed: Arc::clone(&last_completed),
+            reorg: flight_guard,
+        };
         // The cost that has to be bounded here is the work one peer batch can
         // make this node do, not the height the fork happens to sit at. It is
         // bounded twice over below: the fork depth (`MAX_REORG_DEPTH`) and the

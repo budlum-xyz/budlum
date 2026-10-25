@@ -1238,7 +1238,14 @@ impl Storage {
         if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
             let version = self.db.get(b"STORAGE_REGISTRY_VERSION")?;
             let expected_version = STORAGE_REGISTRY_ROW_VERSION.to_le_bytes();
-            if version.as_deref() != Some(expected_version.as_slice()) {
+            // No tag means the row was written before the tag existed, which is
+            // still the row this build writes: it must load, or every node that
+            // ever persisted a registry refuses to boot after an upgrade. A row
+            // that does carry a tag from another build is still refused.
+            if version
+                .as_deref()
+                .is_some_and(|tag| tag != expected_version.as_slice())
+            {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "STORAGE_REGISTRY row has no matching version tag; a row from another build \
@@ -2173,6 +2180,9 @@ mod tests {
     use crate::core::block::Block;
     use tempfile::tempdir;
 
+    /// Two rules, and the difference between them is what keeps an upgraded
+    /// node booting: a row with NO tag is the legacy row this build still
+    /// writes and must load; a row with a FOREIGN tag is refused.
     #[test]
     fn storage_registry_row_needs_its_version_tag() {
         let dir = tempdir().unwrap();
@@ -2180,7 +2190,24 @@ mod tests {
         let registry = crate::domain::storage_deal::StorageRegistry::default();
         storage.save_storage_registry(&registry).unwrap();
         assert!(storage.load_storage_registry().unwrap().is_some());
+
+        // No tag at all: written before the tag existed. It must load - every
+        // database persisted by the previous release looks like this, and
+        // refusing it left those nodes unable to start.
         storage.db().remove(b"STORAGE_REGISTRY_VERSION").unwrap();
+        assert!(
+            storage.load_storage_registry().unwrap().is_some(),
+            "a row from before the tag existed still loads"
+        );
+
+        // A tag from another build is still refused.
+        storage
+            .db()
+            .insert(
+                b"STORAGE_REGISTRY_VERSION",
+                &(STORAGE_REGISTRY_ROW_VERSION.wrapping_add(1)).to_le_bytes(),
+            )
+            .unwrap();
         let err = storage.load_storage_registry().unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
