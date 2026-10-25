@@ -12,7 +12,7 @@
 # P2P multiplexer this is a class cargo-audit structurally cannot see.
 #
 # Gate policy: a finding = FAIL (NO `continue-on-error`). Exceptions live in
-# .quality/osv-scanner.toml and budzero/osv-scanner.toml, each written with
+# osv-scanner.toml (repository root) and budzero/osv-scanner.toml, each written with
 # evidence of why it is UNREACHABLE in the code (VEX logic). A reachable finding
 # is not ignored, the dependency is upgraded.
 #
@@ -107,7 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           osv-scanner scan source \
-            --config=.quality/osv-scanner.toml \
+            --config=osv-scanner.toml \
             --lockfile=Cargo.lock \
             --lockfile=budzero/Cargo.lock \
             --lockfile=fuzz/Cargo.lock \

@@ -16,7 +16,7 @@
 #      place. Grype closes that gap.
 #
 # Gate policy: high and above = FAIL (NO `continue-on-error`). Exceptions live in
-# .quality/grype.yaml and are identical to the justifications in .quality/osv-scanner.toml -
+# .quality/grype.yaml and are identical to the justifications in osv-scanner.toml -
 # two scanners contradicting each other on the same finding erodes gate trust.
 #
 # The tool is version + sha256 pinned (the gitleaks/hadolint/actionlint/typos pattern).
