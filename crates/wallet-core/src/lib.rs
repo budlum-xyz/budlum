@@ -2421,6 +2421,58 @@ mod tests {
         assert!(matches!(err, WalletError::NotePrivacyDisabled));
     }
 
+    /// BLG-0280 (P17-F14): the derived Debug printed the note opening, and a
+    /// wallet formats witnesses into error and test output. Redacting only
+    /// `spend_secret` left `amount`, `blinding` and `recipient_tag` - the three
+    /// field elements `privacy_commit` exists to hide - readable, and both the
+    /// intent and the request derive Debug over them. This pins every path a
+    /// formatted value takes to the terminal.
+    #[test]
+    fn a_formatted_transfer_never_prints_the_note_opening() {
+        let w = Wallet::from_entropy(&[0x44u8; 16]).unwrap();
+        let inp = PrivateNoteInput {
+            amount: 987_654_321,
+            recipient_tag: 112_233_445_566,
+            blinding: 77_889_900_112,
+            spend_secret: 1_234_567_890,
+        };
+        let req = PrivateTransferRequest {
+            input: inp.clone(),
+            to: [7u8; 32],
+            // Public on the wire by design; kept distinct from the secrets so
+            // the assertion below is about them and not about this.
+            send_amount: 55,
+            output_blinding: 55_667_788_990,
+            change_recipient_tag: Some(43_211),
+            change_blinding: Some(99_887_766_554),
+        };
+        let out = PrivateNoteOutput {
+            amount: 987_654_321,
+            recipient: [7u8; 32],
+            recipient_tag: 112_233_445_566,
+            blinding: 55_667_788_990,
+        };
+        let rendered = format!("{inp:?} {req:?} {out:?}");
+        for secret in [
+            "987654321",
+            "112233445566",
+            "77889900112",
+            "1234567890",
+            "55667788990",
+            "99887766554",
+            "43211",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "the formatted transfer printed {secret}: {rendered}"
+            );
+        }
+        assert!(rendered.contains("[redacted]"));
+        // The public half still prints: a redaction that hid everything would
+        // pass the assertions above while telling a reader nothing.
+        assert!(rendered.contains("send_amount: 55"));
+    }
+
     /// Two notes that share a blinding share a commitment: an observer learns
     /// they carry the same amount and the nullifier set rejects the second
     /// spend. The caller picks the counter, so the wallet has to be the one

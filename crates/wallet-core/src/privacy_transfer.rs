@@ -22,11 +22,17 @@ impl std::fmt::Debug for PrivateNoteInput {
     /// BLG-0280 (P17-F14): `spend_secret` is the nullifier secret - the
     /// derived Debug printed it, and wallets format witnesses into error and
     /// test output. Redacted like the rest of the secret material.
+    ///
+    /// The rest of the opening is redacted too. `amount` and `blinding` are
+    /// exactly what `privacy_commit` hides, so printing them in an error or a
+    /// test log undoes the hiding property for that note; `recipient_tag` is
+    /// the note's link to its recipient. A Debug that leaks the opening is not
+    /// made safe by redacting one of its four fields.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PrivateNoteInput")
-            .field("amount", &self.amount)
-            .field("recipient_tag", &self.recipient_tag)
-            .field("blinding", &self.blinding)
+            .field("amount", &"[redacted]")
+            .field("recipient_tag", &"[redacted]")
+            .field("blinding", &"[redacted]")
             .field("spend_secret", &"[redacted]")
             .finish()
     }
@@ -57,12 +63,28 @@ impl Drop for PrivateNoteInput {
 }
 
 /// One created output note.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PrivateNoteOutput {
     pub amount: u64,
     pub recipient: BudlumAddress,
     pub recipient_tag: u64,
     pub blinding: u64,
+}
+
+impl std::fmt::Debug for PrivateNoteOutput {
+    /// The output side carries the same opening material as the input side
+    /// (`amount`, `blinding`, `recipient_tag`), and `PrivateTransferIntent`
+    /// derives Debug over a vector of these. Redacted for the same reason:
+    /// a formatted intent must not hand out what opens the commitment it
+    /// carries. The recipient address is public on both sides and stays.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateNoteOutput")
+            .field("amount", &"[redacted]")
+            .field("recipient", &self.recipient)
+            .field("recipient_tag", &"[redacted]")
+            .field("blinding", &"[redacted]")
+            .finish()
+    }
 }
 
 impl PrivateNoteOutput {
@@ -74,7 +96,7 @@ impl PrivateNoteOutput {
 }
 
 /// Fully built private transfer intent (public + private halves).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PrivateTransferIntent {
     /// Public commitments for new notes (NoteRegistry insert candidates).
     pub output_commitments: Vec<[u8; 32]>,
@@ -100,6 +122,29 @@ pub struct PrivateTransferIntent {
     /// "over `public_digest`" described V1, which replayed across chains and
     /// across the sender's future transactions).
     pub authorization_sig: [u8; crate::ML_DSA_87_SIGNATURE_LEN],
+}
+
+impl std::fmt::Debug for PrivateTransferIntent {
+    /// The intent is half witness. `sum_in`/`sum_out` are the SumConservation
+    /// registers and the two vectors are note witnesses (each entry has its
+    /// own redacting Debug); the public half - commitments, nullifiers,
+    /// chain id, sender, nonce, digest and signature - prints as-is, because
+    /// that is the part a relayer is handed anyway.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateTransferIntent")
+            .field("output_commitments", &self.output_commitments)
+            .field("nullifiers", &self.nullifiers)
+            .field("sum_in", &"[redacted]")
+            .field("sum_out", &"[redacted]")
+            .field("inputs", &self.inputs)
+            .field("outputs", &self.outputs)
+            .field("public_digest", &self.public_digest)
+            .field("chain_id", &self.chain_id)
+            .field("sender", &self.sender)
+            .field("sender_nonce", &self.sender_nonce)
+            .field("authorization_sig", &"[signature]")
+            .finish()
+    }
 }
 
 /// The message the wallet's authorization signature covers
@@ -140,7 +185,7 @@ pub fn intent_authorization_message(intent: &PrivateTransferIntent) -> [u8; 32] 
 }
 
 /// Build parameters for a simple 1-in → 1-out (+ optional change) transfer.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PrivateTransferRequest {
     pub input: PrivateNoteInput,
     pub to: BudlumAddress,
@@ -150,6 +195,24 @@ pub struct PrivateTransferRequest {
     /// If input.amount > send_amount, change returns to this tag with this blinding.
     pub change_recipient_tag: Option<u64>,
     pub change_blinding: Option<u64>,
+}
+
+impl std::fmt::Debug for PrivateTransferRequest {
+    /// The request carries two output openings and one input witness. The
+    /// destination address and the amount being sent are public once the
+    /// intent is built; the two blindings and the change tag are not, and
+    /// printing them would let a log reproduce the commitments the transfer
+    /// is supposed to hide.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateTransferRequest")
+            .field("input", &self.input)
+            .field("to", &self.to)
+            .field("send_amount", &self.send_amount)
+            .field("output_blinding", &"[redacted]")
+            .field("change_recipient_tag", &"[redacted]")
+            .field("change_blinding", &"[redacted]")
+            .finish()
+    }
 }
 
 impl PrivateTransferRequest {
