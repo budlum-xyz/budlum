@@ -377,6 +377,24 @@ pub fn canonical_input_commitment(input_ref: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// The canonical commitment over an output ref: `AI_OUTPUT_COMMIT_V1`
+/// domain tag + the ref bytes.
+///
+/// `AiRegistry::submit_result` verifies that a result's `output_commitment`
+/// equals this value, the same binding request admission applies to a
+/// request's `input_commitment`. Agreement, finalization and settlement all
+/// group on `output_commitment` while the artifact the chain serves and mints
+/// is the `output_ref` bytes, so without the check a verifier can agree on the
+/// honest commitment and ship different content - and no dispute path covers
+/// the mismatch, because equivocation is two commitments, not two payloads.
+#[must_use]
+pub fn canonical_output_commitment(output_ref: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"AI_OUTPUT_COMMIT_V1");
+    hasher.update(output_ref);
+    hasher.finalize().into()
+}
+
 impl AiInferenceRequest {
     /// The canonical identity of a request.
     ///

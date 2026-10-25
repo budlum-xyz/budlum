@@ -170,7 +170,9 @@ mod tests {
         let res1 = AiInferenceResult {
             request_id: req_id,
             verifier: v1,
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(
+                &b"response: hi".to_vec(),
+            ),
             output_ref: BoundedBytes::try_new(b"response: hi".to_vec()).unwrap(),
             result_nonce: 1,
             signature: vec![1, 2, 3],
@@ -186,7 +188,9 @@ mod tests {
         let res2 = AiInferenceResult {
             request_id: req_id,
             verifier: v2,
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(
+                &b"response: hi".to_vec(),
+            ),
             output_ref: BoundedBytes::try_new(b"response: hi".to_vec()).unwrap(),
             result_nonce: 2,
             signature: vec![4, 5, 6],
@@ -196,7 +200,36 @@ mod tests {
         assert!(outcome2.is_some());
         let finalized = outcome2.unwrap();
         assert_eq!(finalized.agreeing_verifiers.len(), 2);
-        assert_eq!(finalized.output_commitment, [9u8; 32]);
+        assert_eq!(
+            finalized.output_commitment,
+            crate::ai::types::canonical_output_commitment(b"response: hi")
+        );
+    }
+
+    /// CWE-345: a result's `output_commitment` used to be taken on trust.
+    /// Agreement, finalization and settlement group on it while the artifact
+    /// the chain serves and mints is `output_ref`, so a verifier could agree
+    /// on the honest commitment and ship different bytes. The registry now
+    /// refuses a result whose commitment is not the canonical one over the
+    /// payload it carries.
+    #[test]
+    fn a_result_whose_commitment_does_not_match_its_bytes_is_refused() {
+        let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
+        let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 100, 100);
+        let v1 =
+            Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
+                .unwrap();
+        let res = AiInferenceResult {
+            request_id: req_id,
+            verifier: v1,
+            output_commitment: [7u8; 32],
+            output_ref: BoundedBytes::try_new(b"delivered".to_vec()).unwrap(),
+            result_nonce: 1,
+            signature: vec![1],
+            submitted_at_block: 12,
+        };
+        let err = submit_result_staked(&mut registry, res, 12).unwrap_err();
+        assert!(err.contains("does not commit"), "got {err}");
     }
 
     #[test]
@@ -262,7 +295,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v_minority,
-                output_commitment: [88u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"wrong".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"wrong".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -278,7 +313,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [99u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"correct".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"correct".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -293,7 +330,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: [99u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"correct".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"correct".to_vec()).unwrap(),
                 result_nonce: 3,
                 signature: vec![3],
@@ -421,7 +460,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"result".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -495,7 +536,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"result".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -570,7 +613,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [1u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(&b"a".to_vec()),
                 output_ref: BoundedBytes::try_new(b"a".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -586,7 +629,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [2u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(&b"b".to_vec()),
                 output_ref: BoundedBytes::try_new(b"b".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -658,7 +701,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(&b"same".to_vec()),
                 output_ref: BoundedBytes::try_new(b"same".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -674,7 +717,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(&b"same".to_vec()),
                 output_ref: BoundedBytes::try_new(b"same".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -800,7 +843,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"result".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -946,7 +991,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"result".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -960,7 +1007,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"result".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -1096,7 +1145,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"result".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 0,
                 signature: vec![1],
@@ -1370,7 +1421,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"result".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -1384,7 +1437,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"result".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -1459,7 +1514,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"result".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -1473,7 +1530,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"result".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"result".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -1859,7 +1918,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(&b"r".to_vec()),
                 output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -1873,7 +1932,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(&b"r".to_vec()),
                 output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -1887,7 +1946,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v3,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(&b"r".to_vec()),
                 output_ref: BoundedBytes::try_new(b"r".to_vec()).unwrap(),
                 result_nonce: 3,
                 signature: vec![3],
@@ -2133,17 +2192,23 @@ mod tests {
         registry: &mut AiRegistry,
         request_id: AiRequestId,
         verifier: Address,
-        output_commitment: [u8; 32],
+        output_ref: &[u8],
         result_nonce: u64,
         current_block: u64,
     ) -> Result<Option<AiInferenceOutcome>, String> {
+        // The commitment is derived from the bytes, not passed beside them:
+        // the registry refuses a result whose `output_commitment` is not the
+        // canonical commitment over its `output_ref`.
+        let output_ref = BoundedBytes::try_new(output_ref.to_vec()).unwrap();
         submit_result_staked(
             registry,
             AiInferenceResult {
                 request_id,
                 verifier,
-                output_commitment,
-                output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    output_ref.as_slice(),
+                ),
+                output_ref,
                 result_nonce,
                 signature: vec![1],
                 submitted_at_block: current_block,
@@ -2171,14 +2236,20 @@ mod tests {
         assert!(registry.requests.contains_key(&req_id));
     }
 
+    /// The commitment is both the consensus signal and the identity of the
+    /// bytes: `submit_result` refuses a result whose `output_commitment` is
+    /// not the canonical commitment over its `output_ref`. Two verifiers that
+    /// agree therefore agree on the payload, and the outcome serves exactly
+    /// those bytes. A result that keeps the commitment and swaps the payload
+    /// is refused at the door instead of being counted as a second opinion.
     #[test]
-    fn outcome_keeps_earliest_agreeing_output_ref() {
+    fn an_outcome_serves_the_bytes_its_commitment_names() {
         let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
         let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
         let mk = |v: u8, out: &[u8], nonce: u64| AiInferenceResult {
             request_id: req_id,
             verifier: Address::from([v; 32]),
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(out),
             output_ref: BoundedBytes::try_new(out.to_vec()).unwrap(),
             result_nonce: nonce,
             signature: vec![1],
@@ -2189,10 +2260,15 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let outcome = submit_result_staked(&mut registry, mk(0x22, b"second", 1), 11)
+        let outcome = submit_result_staked(&mut registry, mk(0x22, b"first", 1), 11)
             .unwrap()
             .unwrap();
         assert_eq!(outcome.output_ref.as_slice(), b"first");
+
+        let mut swapped = mk(0x33, b"second", 1);
+        swapped.output_commitment = crate::ai::types::canonical_output_commitment(b"first");
+        let err = submit_result_staked(&mut registry, swapped, 11).unwrap_err();
+        assert!(err.contains("does not commit"), "got {err}");
     }
 
     #[test]
@@ -2254,7 +2330,7 @@ mod tests {
                 .unwrap();
         // Result at exactly deadline_block (110) should be accepted
         // (result_deadline=210 > 110, so second check passes too)
-        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 110);
+        let result = submit_ai_result(&mut registry, req_id, v1, b"response", 1, 110);
         assert!(
             result.is_ok(),
             "Result at exact deadline should be accepted"
@@ -2276,7 +2352,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 111);
+        let result = submit_ai_result(&mut registry, req_id, v1, b"response", 1, 111);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("deadline"));
     }
@@ -2318,7 +2394,7 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
         // Result at exactly result_deadline (60) → accepted
-        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 60);
+        let result = submit_ai_result(&mut registry, req_id, v1, b"response", 1, 60);
         assert!(
             result.is_ok(),
             "Result at exact result_deadline should be accepted"
@@ -2350,7 +2426,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 61);
+        let result = submit_ai_result(&mut registry, req_id, v1, b"response", 1, 61);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("deadline"));
     }
@@ -2372,14 +2448,14 @@ mod tests {
                 .unwrap();
 
         // Verifier A submits first commitment
-        submit_ai_result(&mut registry, req_id, v_a, [1u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v_a, b"one", 1, 15).unwrap();
 
         // Verifier A submits conflicting commitment → EQUIVOCATION
-        let err = submit_ai_result(&mut registry, req_id, v_a, [2u8; 32], 2, 16).unwrap_err();
+        let err = submit_ai_result(&mut registry, req_id, v_a, b"two", 2, 16).unwrap_err();
         assert!(err.contains("EQUIVOCATION"));
 
         // Verifier B submits the first commitment → should succeed
-        let outcome = submit_ai_result(&mut registry, req_id, v_b, [1u8; 32], 2, 17).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v_b, b"one", 2, 17).unwrap();
         // Agreement_threshold=2, two verifiers with [1u8;32] → finalization
         assert!(
             outcome.is_some(),
@@ -2403,14 +2479,14 @@ mod tests {
                 .unwrap();
 
         // First submission
-        submit_ai_result(&mut registry, req_id, v_a, [1u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v_a, b"one", 1, 15).unwrap();
 
         // Second (equivocation)
-        let err1 = submit_ai_result(&mut registry, req_id, v_a, [2u8; 32], 2, 16).unwrap_err();
+        let err1 = submit_ai_result(&mut registry, req_id, v_a, b"two", 2, 16).unwrap_err();
         assert!(err1.contains("EQUIVOCATION"));
 
         // Third attempt (also equivocation - compared against first [1u8;32])
-        let err2 = submit_ai_result(&mut registry, req_id, v_a, [3u8; 32], 3, 17).unwrap_err();
+        let err2 = submit_ai_result(&mut registry, req_id, v_a, b"three", 3, 17).unwrap_err();
         assert!(err2.contains("EQUIVOCATION"));
     }
 
@@ -2432,7 +2508,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 200);
+        let result = submit_ai_result(&mut registry, req_id, v1, b"response", 1, 200);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("deadline"));
     }
@@ -2463,8 +2539,8 @@ mod tests {
         let v2 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, b"response", 2, 16).unwrap();
 
         // Try to reclaim - should fail because outcome exists
         let err = registry.reclaim_fee(&req_id, 200).unwrap_err();
@@ -2491,15 +2567,15 @@ mod tests {
                 .unwrap();
 
         // 2 verifiers agree → not enough (need 3)
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let outcome2 = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let outcome2 = submit_ai_result(&mut registry, req_id, v2, b"response", 2, 16).unwrap();
         assert!(
             outcome2.is_none(),
             "2/3 should not finalize when threshold=3"
         );
 
         // 3rd verifier agrees → finalization
-        let outcome3 = submit_ai_result(&mut registry, req_id, v3, [9u8; 32], 3, 17).unwrap();
+        let outcome3 = submit_ai_result(&mut registry, req_id, v3, b"response", 3, 17).unwrap();
         assert!(outcome3.is_some(), "3/3 should finalize when threshold=3");
         assert_eq!(outcome3.unwrap().agreeing_verifiers.len(), 3);
     }
@@ -2514,7 +2590,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        let outcome = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
         assert!(
             outcome.is_some(),
             "Single verifier should finalize when threshold=1"
@@ -2535,8 +2611,8 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
                 .unwrap();
 
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v2, b"response", 2, 16).unwrap();
         assert!(
             outcome.is_none(),
             "2 verifiers with threshold=3 should not finalize"
@@ -2561,12 +2637,12 @@ mod tests {
                 .unwrap();
 
         // 2 matching → finalize
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let outcome1 = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let outcome1 = submit_ai_result(&mut registry, req_id, v2, b"response", 2, 16).unwrap();
         assert!(outcome1.is_some());
 
         // 3rd matching result → no duplicate outcome (returns None, not error)
-        let outcome2 = submit_ai_result(&mut registry, req_id, v3, [9u8; 32], 3, 17).unwrap();
+        let outcome2 = submit_ai_result(&mut registry, req_id, v3, b"response", 3, 17).unwrap();
         assert!(
             outcome2.is_none(),
             "Extra result after finalization should return None"
@@ -2579,10 +2655,14 @@ mod tests {
     // ---- (e) Output commitment edge cases ----
 
     #[test]
-    fn test_same_commitment_different_ref_both_counted() {
-        // P5 -T1(e): Two verifiers with same output_commitment but
-        // Different output_ref → both counted as agreeing (commitment is
-        // The consensus signal, ref is just the data location).
+    fn a_verifier_cannot_agree_on_a_commitment_and_ship_other_bytes() {
+        // P5 -T1(e): The commitment is the consensus signal AND it names the
+        // bytes it is over. Agreement used to be collected on the commitment
+        // alone, so a verifier could sign the honest commitment and hand over
+        // different content - the outcome, the output NFT and the Pollen
+        // `DataAsset` are all built from `output_ref`. The registry now binds
+        // the two, so claiming an agreed commitment over other bytes is
+        // refused before it can be counted (CWE-345).
         let (mut registry, model_id, owner) = setup_ai_registry(2, 2);
         let req_id = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
 
@@ -2593,13 +2673,13 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
                 .unwrap();
 
-        // V1: commitment=[9u8;32], ref="ipfs://abc"
+        // V1 commits to its own bytes: the honest shape.
         submit_result_staked(
             &mut registry,
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(b"ipfs://abc"),
                 output_ref: BoundedBytes::try_new(b"ipfs://abc".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -2609,13 +2689,13 @@ mod tests {
         )
         .unwrap();
 
-        // V2: same commitment, different ref → still counts as agreeing
-        let outcome = submit_result_staked(
+        // V2 claims V1's commitment while carrying a different ref.
+        let err = submit_result_staked(
             &mut registry,
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v2,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(b"ipfs://abc"),
                 output_ref: BoundedBytes::try_new(b"ipfs://xyz".to_vec()).unwrap(),
                 result_nonce: 2,
                 signature: vec![2],
@@ -2623,15 +2703,13 @@ mod tests {
             },
             16,
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(err.contains("does not commit"), "got {err}");
         assert!(
-            outcome.is_some(),
-            "Same commitment different ref should finalize"
+            registry.outcomes.is_empty(),
+            "one accepted result cannot finalize a 2-of-2 request"
         );
-        let finalized = outcome.unwrap();
-        assert_eq!(finalized.agreeing_verifiers.len(), 2);
     }
-
     #[test]
     fn test_result_for_nonexistent_request_rejected() {
         // P5 -T1(e): Result for a request that doesn't exist → error.
@@ -2640,7 +2718,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        let result = submit_ai_result(&mut registry, fake_req_id, v1, [9u8; 32], 1, 15);
+        let result = submit_ai_result(&mut registry, fake_req_id, v1, b"response", 1, 15);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
     }
@@ -2655,9 +2733,9 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
 
-        let err = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 2, 16).unwrap_err();
+        let err = submit_ai_result(&mut registry, req_id, v1, b"response", 2, 16).unwrap_err();
         assert!(err.contains("already submitted"));
     }
 
@@ -2680,8 +2758,8 @@ mod tests {
         let v2 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v2, b"response", 2, 16).unwrap();
         assert!(
             outcome.is_some(),
             "Results should finalize even after model deactivation"
@@ -2796,8 +2874,8 @@ mod tests {
         let v2 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16)
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _outcome = submit_ai_result(&mut registry, req_id, v2, b"response", 2, 16)
             .unwrap()
             .unwrap();
 
@@ -2830,7 +2908,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
         let root_after_result = registry.state_root();
         assert_ne!(root_after_request, root_after_result);
 
@@ -2856,7 +2934,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
 
         // No finalization occurred
         assert!(registry.get_outcome(&req_id).is_none());
@@ -2885,9 +2963,9 @@ mod tests {
                 .unwrap();
 
         // Three different commitments → no pair reaches threshold=2
-        submit_ai_result(&mut registry, req_id, v1, [1u8; 32], 1, 15).unwrap();
-        submit_ai_result(&mut registry, req_id, v2, [2u8; 32], 2, 16).unwrap();
-        let outcome = submit_ai_result(&mut registry, req_id, v3, [3u8; 32], 3, 17).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"one", 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, b"two", 2, 16).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v3, b"three", 3, 17).unwrap();
         assert!(
             outcome.is_none(),
             "All-different commitments should not finalize"
@@ -2938,7 +3016,7 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(&vec![0u8; 4096]),
                 output_ref: BoundedBytes::try_new(vec![0u8; 4096]).unwrap(), // exceeds 2048
                 result_nonce: 1,
                 signature: vec![1],
@@ -2964,10 +3042,10 @@ mod tests {
                 .unwrap();
 
         // First result from v1
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
 
         // Second result from v1 with DIFFERENT commitment → equivocation
-        let equiv_result = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        let equiv_result = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         assert!(equiv_result.is_err());
         assert!(equiv_result.unwrap_err().contains("EQUIVOCATION"));
 
@@ -2998,13 +3076,13 @@ mod tests {
 
         // Request 1: v1 equivocates
         let req1 = submit_ai_request(&mut registry, model_id, owner, 10, 110, 100);
-        submit_ai_result(&mut registry, req1, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req1, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req1, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req1, v1, b"eighty-eight", 2, 16);
 
         // Request 2: v1 equivocates again
         let req2 = submit_ai_request(&mut registry, model_id, owner, 20, 120, 100);
-        submit_ai_result(&mut registry, req2, v1, [7u8; 32], 1, 25).unwrap();
-        let _ = submit_ai_result(&mut registry, req2, v1, [99u8; 32], 2, 26);
+        submit_ai_result(&mut registry, req2, v1, b"seven", 1, 25).unwrap();
+        let _ = submit_ai_result(&mut registry, req2, v1, b"ninety-nine", 2, 26);
 
         // V1 has 2 equivocation events
         assert_eq!(
@@ -3037,8 +3115,8 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         let root_after_equiv = registry.state_root();
         assert_ne!(
             root_before, root_after_equiv,
@@ -3152,8 +3230,8 @@ mod tests {
         let v2 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000012")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 16).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, b"response", 2, 16).unwrap();
 
         // Request is finalized now
         assert!(registry.get_outcome(&req_id).is_some());
@@ -3247,7 +3325,9 @@ mod tests {
             AiInferenceResult {
                 request_id: req_id,
                 verifier: v1,
-                output_commitment: [9u8; 32],
+                output_commitment: crate::ai::types::canonical_output_commitment(
+                    &b"response".to_vec(),
+                ),
                 output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
                 result_nonce: 1,
                 signature: vec![1],
@@ -3258,7 +3338,7 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("not the current block"), "{err}");
         assert!(registry.outcomes.is_empty());
-        let outcome = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15)
+        let outcome = submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15)
             .unwrap()
             .expect("the threshold of one finalizes");
         assert_eq!(outcome.finalized_at_block, 15);
@@ -3285,7 +3365,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15)
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15)
             .unwrap()
             .expect("finalized");
         registry
@@ -3310,14 +3390,14 @@ mod tests {
         let v2 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
         let (requester, max_fee) = registry.reclaim_fee(&req_id, 200).unwrap();
         assert_eq!((requester, max_fee), (owner, 100));
 
         let proof = AiExecutionProof {
             model_id,
             input_commitment: canonical_input_commitment(b"test"),
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response"),
             program_hash: [0xAA; 32],
             proof_bytes: vec![1, 2, 3, 4],
             steps: 100,
@@ -3334,7 +3414,7 @@ mod tests {
         let second = AiInferenceResult {
             request_id: req_id,
             verifier: v2,
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(&b"response".to_vec()),
             output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
             result_nonce: 2,
             signature: vec![1],
@@ -3365,7 +3445,7 @@ mod tests {
                 100,
                 Some(cb),
             );
-            submit_ai_result(&mut registry, req_id, v1, [9u8; 32], u64::from(i), 15)
+            submit_ai_result(&mut registry, req_id, v1, b"response", u64::from(i), 15)
                 .unwrap()
                 .expect("finalized");
         }
@@ -3410,7 +3490,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        let result = submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 20);
+        let result = submit_ai_result(&mut registry, req_id, v1, b"response", 1, 20);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("cancelled"));
     }
@@ -3430,13 +3510,13 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
                 .unwrap();
         // One agreeing result: below the threshold, so nothing finalizes.
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
         registry.cancel_request(&req_id, &owner, 20).unwrap();
 
         let proof = AiExecutionProof {
             model_id,
             input_commitment: canonical_input_commitment(b"test"),
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response"),
             program_hash: [0xAA; 32],
             proof_bytes: vec![1, 2, 3, 4],
             steps: 100,
@@ -3454,7 +3534,7 @@ mod tests {
         let second = AiInferenceResult {
             request_id: req_id,
             verifier: v2,
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(&b"response".to_vec()),
             output_ref: BoundedBytes::try_new(b"response".to_vec()).unwrap(),
             result_nonce: 2,
             signature: vec![1],
@@ -3504,11 +3584,11 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
         let root_before = registry.state_root();
 
         // Trigger equivocation
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         let root_after = registry.state_root();
 
         assert_ne!(
@@ -3565,7 +3645,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        assert!(submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 16).is_err());
+        assert!(submit_ai_result(&mut registry, req_id, v1, b"response", 1, 16).is_err());
 
         assert!(!registry.results.contains_key(&req_id));
     }
@@ -3604,8 +3684,8 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         assert!(registry.has_equivocated(&req_id, &v1));
         let (slashed, _seized) = registry.slash_equivocator(&req_id, &v1, 20).unwrap();
         assert_eq!(slashed, v1);
@@ -3619,8 +3699,8 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         registry.slash_equivocator(&req_id, &v1, 20).unwrap();
         assert!(registry.slash_equivocator(&req_id, &v1, 20).is_err());
     }
@@ -3642,8 +3722,8 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         let root_before = registry.state_root();
         registry.slash_equivocator(&req_id, &v1, 20).unwrap();
         assert_ne!(root_before, registry.state_root());
@@ -3682,8 +3762,8 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         // Slash at block 50 - equivocation detected at block 16, well within window
         assert!(registry.slash_equivocator(&req_id, &v1, 50).is_ok());
     }
@@ -3696,8 +3776,8 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         // Detected at block 16, window = 10080, so after 10096 should fail
         let result = registry.slash_equivocator(&req_id, &v1, 10_097);
         assert!(result.is_err());
@@ -3712,8 +3792,8 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         assert!(registry.is_disputable(&req_id, &v1, 50));
         assert!(!registry.is_disputable(&req_id, &v1, 10_097));
     }
@@ -3726,8 +3806,8 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         assert!(registry.has_equivocated(&req_id, &v1));
         let expired = registry.expire_dispute_window(10_097);
         assert_eq!(expired, 1);
@@ -3781,8 +3861,8 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
         registry.lock_verifier_stake(&v1, 5000).unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         // Cannot withdraw while disputable
         let result = registry.withdraw_verifier_stake(&v1, 3000, 50);
         assert!(result.is_err());
@@ -3798,8 +3878,8 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
         registry.lock_verifier_stake(&v1, 5000).unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
         let (_, seized) = registry.slash_equivocator(&req_id, &v1, 50).unwrap();
         assert_eq!(seized, 5000);
         assert!(!registry.is_staked_verifier(&v1));
@@ -3836,8 +3916,8 @@ mod tests {
         assert!(status.stake_amount == 5000);
 
         // Cause equivocation
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
 
         // After equivocation: disputable
         let status = registry.get_dispute_status(&req_id, &v1, 50);
@@ -3857,8 +3937,8 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
 
         // After dispute window expires
         let status = registry.get_dispute_status(&req_id, &v1, 10_097);
@@ -3911,8 +3991,8 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
                 .unwrap();
 
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v2, b"response", 2, 20).unwrap();
 
         // Outcome should be finalized
         assert!(outcome.is_some());
@@ -3921,7 +4001,10 @@ mod tests {
         let events = registry.get_callback_queue(&cb_addr);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].request_id, req_id);
-        assert_eq!(events[0].output_commitment, [9u8; 32]);
+        assert_eq!(
+            events[0].output_commitment,
+            crate::ai::types::canonical_output_commitment(b"response")
+        );
         assert_eq!(events[0].callback_address, cb_addr);
     }
 
@@ -3957,7 +4040,8 @@ mod tests {
         let mut first_commitment = None;
         let mut last_commitment = [0u8; 32];
         for i in 0..overshoot {
-            let commitment = [u8::try_from(i % 251).expect("i % 251 fits u8"); 32];
+            let output = vec![u8::try_from(i % 251).expect("i % 251 fits u8")];
+            let commitment = crate::ai::types::canonical_output_commitment(&output);
             let block = 10 + u64::try_from(i).expect("loop counter fits u64") * 10;
             let req_id = submit_request_with_callback(
                 &mut registry,
@@ -3968,8 +4052,8 @@ mod tests {
                 100,
                 Some(cb_addr),
             );
-            submit_ai_result(&mut registry, req_id, v1, commitment, 1, block + 5).unwrap();
-            submit_ai_result(&mut registry, req_id, v2, commitment, 2, block + 6).unwrap();
+            submit_ai_result(&mut registry, req_id, v1, &output, 1, block + 5).unwrap();
+            submit_ai_result(&mut registry, req_id, v2, &output, 2, block + 6).unwrap();
             if first_commitment.is_none() {
                 first_commitment = Some(commitment);
             }
@@ -4010,8 +4094,8 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
                 .unwrap();
 
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, b"response", 2, 20).unwrap();
 
         // Callback queue should be empty (no callback address)
         assert!(registry.callback_queue.is_empty());
@@ -4040,8 +4124,8 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
                 .unwrap();
 
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, b"response", 2, 20).unwrap();
 
         // Consume events
         let count = registry.consume_callback_events(&cb_addr);
@@ -4075,9 +4159,9 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
                 .unwrap();
 
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
         let root_before = registry.state_root();
-        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, b"response", 2, 20).unwrap();
         // Callback event added → state root should change
         assert_ne!(root_before, registry.state_root());
     }
@@ -4127,10 +4211,10 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
                 .unwrap();
 
-        submit_ai_result(&mut registry, req1, v1, [9u8; 32], 1, 15).unwrap();
-        submit_ai_result(&mut registry, req1, v2, [9u8; 32], 2, 20).unwrap();
-        submit_ai_result(&mut registry, req2, v1, [8u8; 32], 3, 25).unwrap();
-        submit_ai_result(&mut registry, req2, v2, [8u8; 32], 4, 30).unwrap();
+        submit_ai_result(&mut registry, req1, v1, b"response", 1, 15).unwrap();
+        submit_ai_result(&mut registry, req1, v2, b"response", 2, 20).unwrap();
+        submit_ai_result(&mut registry, req2, v1, b"eight", 3, 25).unwrap();
+        submit_ai_result(&mut registry, req2, v2, b"eight", 4, 30).unwrap();
 
         let events = registry.get_callback_queue(&cb_addr);
         assert_eq!(events.len(), 2);
@@ -4144,12 +4228,12 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
 
         let proof = AiExecutionProof {
             model_id,
             input_commitment: canonical_input_commitment(b"test"), // the request's
-            output_commitment: [9u8; 32], // matches result's output_commitment
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response"), // matches result's output_commitment
             program_hash: [0xAA; 32],
             proof_bytes: vec![1, 2, 3, 4],
             steps: 100,
@@ -4177,7 +4261,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
 
         let proof = AiExecutionProof {
             model_id,
@@ -4209,7 +4293,7 @@ mod tests {
         let proof = AiExecutionProof {
             model_id,
             input_commitment: canonical_input_commitment(b"test"),
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response"),
             program_hash: [0xAA; 32],
             proof_bytes: vec![],
             steps: 100,
@@ -4233,7 +4317,7 @@ mod tests {
 
         assert!(registry.get_verifier_qos(&v1).is_none());
 
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
 
         let qos = registry.get_verifier_qos(&v1).unwrap();
         assert_eq!(qos.total_results_submitted, 1);
@@ -4252,8 +4336,8 @@ mod tests {
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000022")
                 .unwrap();
 
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, b"response", 2, 20).unwrap();
 
         // Both verifiers should have finalization recorded
         let qos_v1 = registry.get_verifier_qos(&v1).unwrap();
@@ -4270,8 +4354,8 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let _ = submit_ai_result(&mut registry, req_id, v1, [88u8; 32], 2, 16);
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let _ = submit_ai_result(&mut registry, req_id, v1, b"eighty-eight", 2, 16);
 
         let qos = registry.get_verifier_qos(&v1).unwrap();
         assert_eq!(qos.equivocation_count, 1);
@@ -4304,14 +4388,14 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
 
         let root_before = registry.state_root();
 
         let proof = AiExecutionProof {
             model_id,
             input_commitment: canonical_input_commitment(b"test"),
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response"),
             program_hash: [0xAA; 32],
             proof_bytes: vec![1, 2, 3],
             steps: 100,
@@ -4358,14 +4442,14 @@ mod tests {
                 .unwrap();
 
         // Finalize the request with two matching results.
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        let outcome = submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 1, 16).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        let outcome = submit_ai_result(&mut registry, req_id, v2, b"response", 1, 16).unwrap();
         assert!(outcome.is_some(), "two matching results must finalize");
 
         let proof = AiExecutionProof {
             model_id,
             input_commitment: canonical_input_commitment(b"test"),
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response"),
             program_hash: [0xAA; 32],
             proof_bytes: vec![1, 2, 3],
             steps: 100,
@@ -4421,7 +4505,7 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000011")
                 .unwrap();
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
 
         // QoS recorded → state root should change
         assert_ne!(root_before, registry.state_root());
@@ -4580,8 +4664,8 @@ mod tests {
         registry.submit_agent_payment(payment, 20).unwrap();
 
         // Submit results to finalize outcome
-        submit_ai_result(&mut registry, req_id, v1, [9u8; 32], 1, 15).unwrap();
-        submit_ai_result(&mut registry, req_id, v2, [9u8; 32], 2, 20).unwrap();
+        submit_ai_result(&mut registry, req_id, v1, b"response", 1, 15).unwrap();
+        submit_ai_result(&mut registry, req_id, v2, b"response", 2, 20).unwrap();
 
         // Now release the payment
         let recipient = registry.release_agent_payment(&[6u8; 32], 30).unwrap();
@@ -4920,13 +5004,13 @@ mod tests {
         let v1 =
             Address::from_hex("0000000000000000000000000000000000000000000000000000000000000021")
                 .unwrap();
-        let outcome = submit_ai_result(&mut reg, req_id, v1, [9u8; 32], 1, 12).unwrap();
+        let outcome = submit_ai_result(&mut reg, req_id, v1, b"response", 1, 12).unwrap();
         assert!(outcome.is_none());
 
         let proof = AiExecutionProof {
             model_id,
             input_commitment: canonical_input_commitment(b"test"),
-            output_commitment: [9u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(b"response"),
             program_hash: [0xAA; 32],
             proof_bytes: vec![1, 2, 3, 4],
             steps: 100,

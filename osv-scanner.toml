@@ -1,5 +1,18 @@
 # osv-scanner.toml, justified exceptions for the OSV.dev based vulnerability scan
 #
+# WHY THIS FILE IS HERE AND NOT UNDER `.quality/`: osv-scanner loads
+# `osv-scanner.toml` from the directory of the thing it is scanning unless the
+# caller passes `--config`. The project's own workflow passes the path
+# explicitly, so a private location worked for it - but every OTHER OSV consumer
+# reads the default path, and one of them is in the Security tab: the OpenSSF
+# Scorecard `Vulnerabilities` check calls osv-scanner on the checked-out tree with
+# no override (scorecard v5 `clients/osv.go` builds `osvscanner.ScannerActions`
+# with an empty `ConfigOverridePath`), so the reviewed exceptions below were
+# invisible to it and the eight accepted unmaintained records kept the alert
+# open. `budzero/osv-scanner.toml` already described this file as "the root
+# osv-scanner.toml" - this is that path. One reviewed list, read by every
+# scanner that speaks OSV, instead of two lists that can drift.
+#
 # WHY A SEPARATE SCANNER: cargo-audit and cargo-deny read only the RustSec advisory
 # database. OSV.dev is an aggregator (RustSec + GHSA + NVD + CVE) and it also sees
 # records that have NO COUNTERPART in RustSec. This is not a theoretical difference:
