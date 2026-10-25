@@ -572,7 +572,16 @@ pub fn execute_poa_onboarding_tx(
             kyc_commitment,
         } => {
             // Self-application only: a sender cannot push another address
-            // into a KYC process.
+            // into a KYC process. The domain must also be running admission
+            // control: the first admin arrives through governance, so an
+            // application to a domain that has none can never be decided - and
+            // an unbounded set of applicant-chosen domain ids makes every
+            // block close scan the whole membership set once per domain
+            // (CWE-407), which a few thousand cheap transactions turn into a
+            // permanent stall.
+            if !state.is_permissioned(domain) {
+                return Err(PoaMembershipError::NotPermissioned { domain });
+            }
             state.submit_application(domain, *sender, kyc_commitment, at_block)
         }
         PoAOnboardingTx::Approve {

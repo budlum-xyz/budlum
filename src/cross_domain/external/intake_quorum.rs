@@ -180,11 +180,6 @@ pub enum RoundError {
     /// round or count toward any threshold.
     #[error("the bytes are not evidence and cannot vote: {reason}")]
     NotAVote { reason: String },
-    /// BLG-0152 (P07-F07, decision A): rounds are bounded per domain. A
-    /// prover-chosen height opened a retained round per call; the state
-    /// growth was bounded only by call rate.
-    #[error("the domain already has {max} open rounds; old rounds must decide or sweep first")]
-    TooManyOpenRounds { max: usize },
 }
 
 /// The quorum layer of the intake: policies per domain, live rounds, and the
@@ -314,9 +309,23 @@ impl QuorumRounds {
                     .filter(|(k, r)| k.domain == domain && matches!(r.state, RoundState::Open))
                     .count();
                 if open >= MAX_OPEN_ROUNDS_PER_DOMAIN {
-                    return Err(RoundError::TooManyOpenRounds {
-                        max: MAX_OPEN_ROUNDS_PER_DOMAIN,
-                    });
+                    // Evict the oldest open round instead of refusing the
+                    // submission. Refusing let one bonded prover squat the cap
+                    // with consensus-refused evidence at 64 heights of its
+                    // choosing and deny every honest height for the whole
+                    // retention window (CWE-770): a refusal is cheap and the
+                    // round it creates lives for `ROUND_RETENTION_BLOCKS`.
+                    // Eviction still bounds memory - it just cannot be used to
+                    // censor a height the squatter does not occupy.
+                    let oldest = self
+                        .rounds
+                        .iter()
+                        .filter(|(k, r)| k.domain == domain && matches!(r.state, RoundState::Open))
+                        .min_by_key(|(k, r)| (r.opened_at, **k))
+                        .map(|(k, _)| *k);
+                    if let Some(oldest) = oldest {
+                        self.rounds.remove(&oldest);
+                    }
                 }
                 self.rounds.insert(
                     key,
