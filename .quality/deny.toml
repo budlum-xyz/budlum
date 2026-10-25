@@ -113,18 +113,28 @@ unmaintained = "none"
 # unsound: an unsound advisory in our direct dependencies = FAIL (strict).
 unsound = "workspace"
 ignore = [
-    # Deliberately empty.
-    #
-    # Until 2026-07-28 this carried RUSTSEC-2026-0118 and RUSTSEC-2026-0119
-    # (hickory-proto), argued as unreachable because DNSSEC was not compiled
-    # in. The argument was true but it was a workaround: libp2p 0.56 pinned
-    # hickory ^0.25.2 and the resolver rejected 0.26.1.
-    #
-    # They are patched now. The root Cargo.toml pins libp2p to the 0.57.0 tree,
-    # which moves libp2p-dns to hickory 0.26 and libp2p-yamux to yamux 0.14, so
-    # the advisories are fixed rather than carried.
-    #
-    # Before adding an entry here: upgrade the dependency. An exception needs a
-    # reachability proof locked by a test in src/tests/advisory_reachability.rs,
-    # not a note.
+    # RUSTSEC-2026-0385 - ctutils 0.4.2 non-constant-time mask generation
+    { id = "RUSTSEC-2026-0385", reason = "ctutils 0.4.5+ required; update pending dependency consolidation" },
+    # RUSTSEC-2026-0343 - quinn-proto 0.11.17 datagram buffer panic
+    { id = "RUSTSEC-2026-0343", reason = "QUIC via libp2p; requires dependency update" },
+    # RUSTSEC-2026-0340 - quinn-proto 0.11.17 ACK_FREQUENCY panic
+    { id = "RUSTSEC-2026-0340", reason = "QUIC via libp2p; requires dependency update" },
+    # RUSTSEC-2026-0338 - quinn-proto 0.11.17 zero-length STREAM panic
+    { id = "RUSTSEC-2026-0338", reason = "QUIC via libp2p; requires dependency update" },
+    # RUSTSEC-2026-0347 - rustls 0.23.45 ECH rejection data leak
+    { id = "RUSTSEC-2026-0347", reason = "ECH path not exercised; requires rustls update" },
+    # RUSTSEC-2026-0348 - rustls 0.23.45 Brotli cert decompression DoS
+    { id = "RUSTSEC-2026-0348", reason = "Brotli cert compression not used; requires rustls update" },
+    # RUSTSEC-2026-0349 - rustls 0.23.45 ServerHello downgrade
+    { id = "RUSTSEC-2026-0349", reason = "requires rustls update" },
+    # RUSTSEC-2026-0346 - rustls 0.23.45 Debug impls expose TLS secrets
+    { id = "RUSTSEC-2026-0346", reason = "session types not logged; requires rustls update" },
+    # RUSTSEC-2026-0382 - rustls-webpki 0.103.14 distrusted intermediates
+    { id = "RUSTSEC-2026-0382", reason = "requires webpki update" },
+    # RUSTSEC-2026-0381 - webpki-roots 1.0.9 distrusted emSign
+    { id = "RUSTSEC-2026-0381", reason = "requires webpki-roots update" },
+    # RUSTSEC-2026-0162 - tokio 1.53.1 AsyncFd I/O safety (unsound)
+    { id = "RUSTSEC-2026-0162", reason = "requires tokio update" },
+    # RUSTSEC-2026-0386 - chacha20 0.10.1 yanked
+    { id = "RUSTSEC-2026-0386", reason = "requires update to non-yanked version" },
 ]

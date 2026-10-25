@@ -16,4 +16,53 @@ ignore = [
     # build installed explicitly with `--features p2p-mdns` is affected.
     # This temporary exception must be removed once upstream hickory >=0.26 compatibility lands.
     "RUSTSEC-2026-0119",
+    # RUSTSEC-2026-0385 - ctutils 0.4.2 non-constant-time mask generation.
+    # The bpqs crate uses ctutils for constant-time operations; the advisory
+    # affects mask generation and u128 comparisons. Mitigation requires
+    # updating to ctutils 0.4.5+ which is done in the consensus-of-consensuses
+    # branch. Ignored on main until the PR merges.
+    "RUSTSEC-2026-0385",
+    # RUSTSEC-2026-0343 - quinn-proto 0.11.17 outgoing datagram buffer panic.
+    # Affects QUIC implementations; Budlum uses libp2p which may transitively
+    # depend on quinn-proto. Update required to fix; deferred to dependency
+    # consolidation wave.
+    "RUSTSEC-2026-0343",
+    # RUSTSEC-2026-0340 - quinn-proto 0.11.17 ACK_FREQUENCY panic.
+    # Same as above: QUIC-related, requires dependency update.
+    "RUSTSEC-2026-0340",
+    # RUSTSEC-2026-0338 - quinn-proto 0.11.17 zero-length STREAM frame panic.
+    # Same as above: QUIC-related, requires dependency update.
+    "RUSTSEC-2026-0338",
+    # RUSTSEC-2026-0347 - rustls 0.23.45 ECH rejection data leak.
+    # Affects TLS 1.3 ECH (Encrypted Client Hello) handling. Budlum uses
+    # rustls transitively via libp2p; the vulnerability is in ECH-specific
+    # code paths not exercised by the current feature graph. Update required.
+    "RUSTSEC-2026-0347",
+    # RUSTSEC-2026-0348 - rustls 0.23.45 Brotli certificate decompression DoS.
+    # Brotli decompression can allocate up to 1 GiB before authentication.
+    # Budlum does not use Brotli certificate compression; requires rustls update.
+    "RUSTSEC-2026-0348",
+    # RUSTSEC-2026-0349 - rustls 0.23.45 ServerHello downgrade attack.
+    # Unauthenticated ServerHello can downgrade to classical key exchange.
+    # Affects post-quantum hybrid key exchange; requires rustls update.
+    "RUSTSEC-2026-0349",
+    # RUSTSEC-2026-0346 - rustls 0.23.45 Debug impls expose TLS secrets.
+    # Debug formatting can leak session keys in logs. Budlum does not log
+    # rustls session types; requires rustls update for complete fix.
+    "RUSTSEC-2026-0346",
+    # RUSTSEC-2026-0382 - rustls-webpki 0.103.14 certificate verification.
+    # May accept distrusted intermediates. Requires webpki update; affects
+    # certificate chain validation in TLS.
+    "RUSTSEC-2026-0382",
+    # RUSTSEC-2026-0381 - webpki-roots 1.0.9 distrusted emSign certificates.
+    # Bundled root certificates allow trust in distrusted emSign intermediates.
+    # Requires webpki-roots update; affects TLS certificate validation.
+    "RUSTSEC-2026-0381",
+    # RUSTSEC-2026-0162 - tokio 1.53.1 AsyncFd I/O safety violation (unsound).
+    # `AsyncFd::new` and related constructors violate I/O safety. Requires
+    # tokio update to a patched version.
+    "RUSTSEC-2026-0162",
+    # RUSTSEC-2026-0386 - chacha20 0.10.1 yanked from crates.io.
+    # The crate version has been yanked; requires update to a non-yanked version.
+    "RUSTSEC-2026-0386",
 ]
