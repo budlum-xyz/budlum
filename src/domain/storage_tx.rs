@@ -77,7 +77,7 @@ pub enum StorageTx {
         /// so a memorised column of another object cannot answer. A manifest
         /// recorded before column commitments carries none, and an answer for
         /// it is checked the old way - see
-        /// [`crate::domain::storage_deal::StorageError::CodingAuditColumnProofRequired`].
+        /// [`crate::domain::storage_deal::StorageError::CodingAuditColumnProofRejected`].
         column_proof: Vec<[u8; 32]>,
     },
 }
