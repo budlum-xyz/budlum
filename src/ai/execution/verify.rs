@@ -179,7 +179,7 @@ mod tests {
         let res = AiInferenceResult {
             request_id: req.request_id,
             verifier: owner,
-            output_commitment: [4u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(&[]),
             output_ref: BoundedBytes::empty(),
             result_nonce: 0,
             signature: vec![],
