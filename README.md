@@ -1,8 +1,9 @@
 ![Budlum](assets/budlum-consensus-of-consensuses.png)
 
-Budlum is the next layer of the internet, focused on data sovereignty and social flourishing.
+Budlum is the consensus of consensuses.
 
-Budlum is a permissionless Universal Settlement Layer. It does not compete with other chains, it *settles* them.
+Every network keeps its own rules. Budlum unifies their finality into a single proof.
+
 PoW, PoS, PoA, BFT and ZK domains each keep their own consensus; Budlum verifies their
 finality proofs and records cross-domain value transfer as a cryptographic fact on a single
 `GlobalBlockHeader`. Sovereignty over data, keys and computation stays with the participants.
@@ -279,7 +280,7 @@ cargo run --release -- --network devnet
 
 ```bash
 docker compose -f ops/docker-compose.yml up   # see ops/docker-compose.yml
-bash ops/scripts/devnet-multinode-smoke.sh
+cargo run --release --manifest-path xtask/tools/Cargo.toml -- devnet-multinode-smoke
 ```
 
 ### From a profile

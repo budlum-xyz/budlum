@@ -1,8 +1,9 @@
 ![Budlum](assets/budlum-konsensuslerin-konsensusu.png)
 
-Budlum veri egemenliğine ve toplumsal yeşermeye odaklanmış internetin bir sonraki katmanıdır.
+Budlum, konsensüslerin konsensüsüdür.
 
-Budlum, izin gerektirmeyen bir Evrensel Uzlaşma Katmanıdır. Diğer zincirlerle yarışmaz, onları *uzlaştırır*.
+Her ağ kendi kurallarını korur. Budlum onların kesinliğini tek bir kanıtta birleştirir.
+
 PoW, PoS, PoA, BFT ve ZK alanlarının her biri kendi konsensüsünü korur; Budlum bu alanların
 kesinlik kanıtlarını doğrular ve alanlar arası değer transferini tek bir `GlobalBlockHeader`
 üzerinde kriptografik bir olgu olarak kaydeder. Veri, anahtar ve hesaplama egemenliği
@@ -283,7 +284,7 @@ cargo run --release -- --network devnet
 
 ```bash
 docker compose -f ops/docker-compose.yml up   # bkz. ops/docker-compose.yml
-bash ops/scripts/devnet-multinode-smoke.sh
+cargo run --release --manifest-path xtask/tools/Cargo.toml -- devnet-multinode-smoke
 ```
 
 ### Profilden çalıştırma

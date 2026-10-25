@@ -2,7 +2,7 @@
 
 Thanks for helping improve Budlum Core.
 
-Budlum is an experimental Rust Layer-1 blockchain core focused on modular consensus, deterministic execution, ZKVM-native contracts, privacy research, and future AI-assisted execution tooling. Contributions are welcome, especially from builders who enjoy protocol internals and clean systems code.
+Budlum is the consensus of consensuses. Every network keeps its own rules. Budlum unifies their finality into a single proof. This repository is its experimental Rust core: modular consensus, deterministic execution, ZKVM-native contracts, privacy research, and future AI-assisted execution tooling. Contributions are welcome, especially from builders who enjoy protocol internals and clean systems code.
 
 If you find the project useful, please also consider starring and forking the repo. It helps the project reach more protocol researchers and chain builders.
 
@@ -89,13 +89,13 @@ cargo test --lib --verbose                      # CI: Test (root lib tests)
 ```
 
 The pedantic/nursery surface is a ratchet, not a wall: it is measured by
-`ops/scripts/clippy-extra-report.py` against `.github/clippy-extra-baseline.txt` and
-only refuses growth.
+`cargo run --manifest-path xtask/tools/Cargo.toml -- clippy-extra-report` against
+`.github/clippy-extra-baseline.txt` and only refuses growth.
 
 A workflow edit cannot be tried locally, so it is checked two other ways. Step bodies
 are extracted and executed (see the third rule below), and the reachability of every step
-is computed by `python3 ops/scripts/check-step-reachability.py`: it reports a guard that
-references a `steps.<id>` no step declares, or declares later, and
+is computed by `cargo run --manifest-path xtask/tools/Cargo.toml -- step-reachability`:
+it reports a guard that references a `steps.<id>` no step declares, or declares later, and
 `--fail 'budlum:Test'` prints which steps still run when that step is red. Run it after
 touching any job's `if:` lines - a mistyped id skips every step behind it and leaves the
 job looking green.

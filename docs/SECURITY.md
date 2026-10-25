@@ -1,6 +1,6 @@
 # Security Policy
 
-Budlum Core is experimental Layer-1 blockchain infrastructure. Security reports are taken seriously, especially issues affecting consensus safety, deterministic execution, networking, storage integrity, cryptography, privacy, or validator operation.
+Budlum is the consensus of consensuses: every network keeps its own rules, and Budlum unifies their finality into a single proof. Budlum Core is the experimental infrastructure that does it. Security reports are taken seriously, especially issues affecting consensus safety, deterministic execution, networking, storage integrity, cryptography, privacy, or validator operation.
 
 Please do not disclose serious vulnerabilities publicly until they have been reviewed and patched.
 
