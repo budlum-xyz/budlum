@@ -713,6 +713,34 @@ mod open_deal {
         assert!(err.contains("not registered"), "got {err}");
     }
 
+    /// A deal row is what every durability number is derived from: it
+    /// suppresses repair and holds the guard that keeps an object's last
+    /// copies from being released. Anyone used to be able to open one over
+    /// somebody else's manifest - the operator consented, the payer paid, and
+    /// nothing tied the payer to the content. The registry's own authority
+    /// (`has_claim`) now decides, as it does for grants, self-host, reads and
+    /// prunes.
+    #[test]
+    fn a_deal_over_someone_elses_manifest_is_refused() {
+        let mut state = AccountState::new();
+        let owner = addr(99);
+        let mut m = deal_manifest();
+        m.owner = owner;
+        state.storage_registry.register_manifest(&m);
+        state.add_balance(&payer(), PAYER_FUNDS);
+        let op = WalletKeyPair::generate();
+        state.add_balance(&op.address(), STORAGE_MIN_OPERATOR_BOND * 2);
+
+        let err = apply_without_write(
+            &mut state,
+            &op.address(),
+            open_tx(signed_body(&m, &op), DEFAULT_CHAIN_ID),
+        )
+        .unwrap_err();
+        assert!(err.contains("not the owner"), "got {err}");
+        assert_eq!(state.storage_registry.deals_iter().count(), 0);
+    }
+
     #[test]
     fn an_operator_in_cooldown_is_refused_until_the_cooldown_ends() {
         let (mut state, m, op) = world();

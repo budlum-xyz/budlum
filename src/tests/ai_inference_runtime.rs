@@ -53,22 +53,24 @@ fn model_and_request(requester: Address) -> (AiModelSpec, AiInferenceRequest) {
 }
 
 fn result_transaction(operator: Address, request_id: AiRequestId, fee: u64) -> Transaction {
-    result_transaction_with_commitment(operator, request_id, fee, [0xC3; 32], 1, 1)
+    result_transaction_with_commitment(operator, request_id, fee, b"", 1, 1)
 }
 
 fn result_transaction_with_commitment(
     operator: Address,
     request_id: AiRequestId,
     fee: u64,
-    output_commitment: [u8; 32],
+    output_ref: &[u8],
     result_nonce: u64,
     tx_nonce: u64,
 ) -> Transaction {
+    let output_ref =
+        BoundedBytes::try_new(output_ref.to_vec()).unwrap_or_else(|_| BoundedBytes::empty());
     let result = AiInferenceResult {
         request_id,
         verifier: operator,
-        output_commitment,
-        output_ref: BoundedBytes::empty(),
+        output_commitment: crate::ai::types::canonical_output_commitment(output_ref.as_slice()),
+        output_ref,
         result_nonce,
         signature: vec![1],
         submitted_at_block: 0,
@@ -338,11 +340,10 @@ fn conflicting_signed_result_commits_evidence_and_burns_only_role8_bond() {
         .submit_request(request.clone(), 0)
         .expect("request");
 
-    let first =
-        result_transaction_with_commitment(operator, request.request_id, fee, [0xC3; 32], 1, 1);
+    let first = result_transaction_with_commitment(operator, request.request_id, fee, b"", 1, 1);
     Executor::apply_transaction(&mut state, &first).expect("first result");
     let conflicting =
-        result_transaction_with_commitment(operator, request.request_id, fee, [0xD4; 32], 2, 2);
+        result_transaction_with_commitment(operator, request.request_id, fee, b"conflicting", 2, 2);
     Executor::apply_transaction(&mut state, &conflicting)
         .expect("conflicting signed result must commit evidence");
     assert!(state
@@ -588,7 +589,7 @@ fn finalized_ai_output_is_bridged_to_socialfi_nft() {
     // Two matching results (threshold=2, two separate operators) lead to
     // finalization and the NFT bridge.
     let output = b"ai_inference-finalized-output".to_vec();
-    let commitment = [0xC3; 32];
+    let commitment = crate::ai::types::canonical_output_commitment(&output);
     for (tx_nonce, op) in [(1u64, operator), (2u64, operator2)] {
         let res = AiInferenceResult {
             request_id: request.request_id,

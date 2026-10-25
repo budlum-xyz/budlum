@@ -145,6 +145,16 @@ pub enum StorageTxError {
     GeneratedRegistrationNotPriced,
     /// The manifest a self-host policy names is not registered.
     ManifestNotRegistered,
+    /// The payer is not the authority for the manifest a deal names.
+    ///
+    /// Every durability number the storage registry reports is derived from
+    /// `Active` deal rows: an opened deal suppresses repair and holds the
+    /// guard that keeps an object's last copies from being released. A deal
+    /// over somebody else's content would therefore steer that bookkeeping
+    /// without the owner's say, so only the account the chain records as the
+    /// content's owner may open one (`has_claim`, the gate the grant,
+    /// self-host, read and prune paths already use).
+    DealManifestNotOwned { sender: Address },
     /// The policy's `owner` is not the signer.
     PolicyOwnerIsNotSender { owner: Address, sender: Address },
     /// The policy's `content_id` is not a shard of the named manifest.
@@ -192,6 +202,10 @@ impl fmt::Display for StorageTxError {
                 "registering a generated source in block is not priced yet"
             ),
             Self::ManifestNotRegistered => write!(f, "manifest is not registered"),
+            Self::DealManifestNotOwned { sender } => write!(
+                f,
+                "the payer {sender} is not the owner of the manifest this deal names"
+            ),
             Self::PolicyOwnerIsNotSender { owner, sender } => write!(
                 f,
                 "policy owner {owner} is not the sender {sender}; a signer declares policy only \
@@ -352,6 +366,20 @@ fn open_deal(
         .get_manifest(&open.manifest_id)
         .ok_or(StorageTxError::ManifestNotRegistered)?
         .clone();
+    // The payer has to be the content's authority. Everything the registry
+    // reports about durability - repair, the last-copy release guard, the
+    // operator's standing - is derived from `Active` deal rows and nothing
+    // else, so a deal opened by a stranger over somebody else's manifest buys
+    // silence about a shard the real owner never placed and unblocks the
+    // holder it was meant to protect. Authority is looked up, not believed:
+    // `has_claim` resolves `owner_of`, the same answer the grant, self-host,
+    // read and prune doors use.
+    if !state
+        .storage_registry
+        .has_claim(&open.manifest_id, &ctx.sender)
+    {
+        return Err(StorageTxError::DealManifestNotOwned { sender: ctx.sender });
+    }
     let digest = open_deal_consent_digest(ctx.chain_id, &ctx.sender, ctx.nonce, open);
     open.operator_consent
         .verify(&digest, &open.operator)

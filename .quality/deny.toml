@@ -106,7 +106,7 @@ allow-git = ["https://github.com/libp2p/rust-libp2p"]
 #
 # Somut bedeli: RUSTSEC-2024-0380 (`pqcrypto-dilithium` - `pqcrypto-mldsa`
 # was superseded by) sits on the mainnet default PQ signature path. The decision
-# was made and is recorded with its reason in `.quality/osv-scanner.toml`; even so
+# was made and is recorded with its reason in `osv-scanner.toml`; even so
 # it never appeared on the cargo audit side in any run. Of the two tools scanning the
 # same tree only one result was readable - the visibility the "warn, no fail" decision
 # rested on stood on one leg.

@@ -1306,6 +1306,21 @@ impl Blockchain {
 
     pub fn register_consensus_domain(&mut self, domain: ConsensusDomain) -> Result<(), String> {
         Self::validate_consensus_domain_registration(&domain)?;
+        // The other half of the admission gate in
+        // `AccountState::execute_proposal`: a domain that already carries PoA
+        // admins must be a PoA domain. Registering it under any other kind
+        // would leave admission authority in state that the recorded kind says
+        // does not exist, and there is no later point at which the two could
+        // be reconciled.
+        if self.state.poa_is_permissioned(domain.id)
+            && domain.kind != crate::domain::ConsensusKind::PoA
+        {
+            return Err(format!(
+                "Domain {} already holds PoA admission admins but is registered as {:?}: the \
+                 admission authority and the recorded consensus kind must agree",
+                domain.id, domain.kind
+            ));
+        }
         self.domain_registry.register(domain.clone())?;
         if let Some(store) = &self.storage {
             store
@@ -5376,7 +5391,12 @@ impl Blockchain {
             Self::prune_storage_content_in_state(&mut next_state, &content_id)?;
         }
         let previous_epoch = base_state.epoch_index;
-        Self::apply_coding_audit_epoch_step(&mut next_state, previous_epoch, block.chain_id);
+        Self::apply_coding_audit_epoch_step(
+            &mut next_state,
+            previous_epoch,
+            block.chain_id,
+            preceding_chain,
+        );
         for content_id in next_state.storage_registry.pending_prune_manifests() {
             Self::prune_storage_content_in_state(&mut next_state, &content_id)?;
         }
@@ -5433,22 +5453,47 @@ impl Blockchain {
     /// on, and the clock is the block timestamp. Nothing here reads a map in
     /// hash order, the wall clock or local randomness, so a replay of the same
     /// blocks opens and settles the same audits.
-    fn apply_coding_audit_epoch_step(state: &mut AccountState, previous_epoch: u64, chain_id: u64) {
+    fn apply_coding_audit_epoch_step(
+        state: &mut AccountState,
+        previous_epoch: u64,
+        chain_id: u64,
+        preceding_chain: &[Block],
+    ) {
         let epoch = state.epoch_index;
         let now_secs = state.current_block_unix_secs;
         state
             .storage_registry
             .finalize_missed_coding_audits(epoch, now_secs);
         if epoch > previous_epoch {
-            let entropy = crate::core::hash::hash_fields_bytes(&[
-                b"BDLM_STORAGE_CODING_AUDIT_ENTROPY_V1",
+            // The seed decides which manifest, which deal and which parity
+            // symbol is audited, so it must not contain anything the block
+            // producer picks at signing time. `state.current_block_entropy`
+            // folds `vrf_output`, and only the PoS engine verifies that field:
+            // the PoA engine never looks at it and the PoW engine's only
+            // admission control is the difficulty target. A producer that is
+            // also a storage operator could therefore grind it offline - two
+            // hashes and a modulo per attempt - until the epoch's single audit
+            // landed on a shard it still holds. The hashes of the epoch that
+            // just closed are fixed before this block is assembled, so every
+            // producer's contribution is already committed and none of them
+            // can steer the draw.
+            let mut seed = crate::core::hash::hash_fields_bytes(&[
+                b"BDLM_STORAGE_CODING_AUDIT_EPOCH_HISTORY_V1",
                 &chain_id.to_le_bytes(),
                 &epoch.to_le_bytes(),
-                &state.current_block_entropy,
             ]);
+            let epoch_length = crate::core::chain_config::epoch_len_for_chain_id(chain_id).max(1);
+            let first = epoch.saturating_sub(1).saturating_mul(epoch_length);
+            for block in preceding_chain.iter().filter(|block| block.index >= first) {
+                seed = crate::core::hash::hash_fields_bytes(&[
+                    b"BDLM_STORAGE_CODING_AUDIT_EPOCH_STEP_V1",
+                    &seed,
+                    block.hash.as_bytes(),
+                ]);
+            }
             state
                 .storage_registry
-                .open_epoch_coding_audits(&entropy, epoch);
+                .open_epoch_coding_audits(&seed, epoch);
         }
         state.storage_registry.sweep_settled_coding_audits(epoch);
     }
