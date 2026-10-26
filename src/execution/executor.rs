@@ -2803,6 +2803,25 @@ impl Executor {
                         "insufficient balance for the bridge burn fee",
                     ));
                 }
+                // The authority is the HOLDER's signature, checked here before
+                // the shared body runs. The body separately refuses a burner
+                // that is not the row's holder, so the two together mean a burn
+                // can only happen for the account it debits, and only with that
+                // account's consent - the transaction signer is just the fee
+                // payer. Without this, the ordinary transaction path would let
+                // any funded account burn somebody else's minted balance.
+                let holder = state
+                    .bridge_state
+                    .get_transfer(&burn.message_id)
+                    .map(|transfer| transfer.recipient)
+                    .ok_or_else(|| {
+                        BudlumError::validation(
+                            "bridge_burn_failed",
+                            "Unknown bridge transfer".to_string(),
+                        )
+                    })?;
+                burn.verify_holder_authorization(holder, tx.chain_id)
+                    .map_err(|e| BudlumError::validation("bridge_burn_failed", e))?;
                 let event = crate::cross_domain::bridge::apply_burn_to_state(
                     state,
                     &crate::cross_domain::bridge::BridgeBurnParams {
@@ -2813,6 +2832,7 @@ impl Executor {
                         expiry_height: burn.expiry_height,
                         recipient_eth: burn.recipient_eth,
                     },
+                    holder,
                 )
                 .map_err(|e| BudlumError::validation("bridge_burn_failed", e))?;
                 // The relay request is node-local work, so it is handed to the

@@ -1353,19 +1353,37 @@ mod tests {
 ///
 /// # Errors
 ///
-/// The transfer's own refusals (unknown id, not minted here, bad expiry, the
-/// burner not holding what was minted) and the registry's registration
-/// refusal, which leaves the burn unapplied because the registration runs
-/// before the debit.
+/// The caller is not the holder of the minted units ([`BridgeBurnParams`] has
+/// no authority of its own), the transfer's own refusals (unknown id, not
+/// minted here, bad expiry, the burner not holding what was minted) and the
+/// registry's registration refusal, which leaves the burn unapplied because
+/// the registration runs before the debit.
+///
+/// `burner` is the account asking to burn, and it must be the row's
+/// `recipient` - the account the mint credited. The burn destroys *that
+/// account's* units and picks the external payout address for them, so the
+/// right to do it is the holder's signature and nobody else's: a door that let
+/// any funded account name a holder's `message_id` could empty the holder's
+/// minted balance and route the value to an address of its own choosing. That
+/// is why this body takes the burner as an argument instead of trusting the
+/// payload, and why the transaction door passes the signer.
 pub fn apply_burn_to_state(
     state: &mut crate::core::account::AccountState,
     burn: &BridgeBurnParams,
+    burner: Address,
 ) -> Result<DomainEvent, String> {
     let transfer = state
         .bridge_state
         .get_transfer(&burn.message_id)
         .cloned()
         .ok_or_else(|| "Unknown bridge transfer".to_string())?;
+    if burner != transfer.recipient {
+        return Err(format!(
+            "Bridge burn refused: {} does not hold the minted units of this transfer (the holder is {})",
+            burner.to_hex(),
+            transfer.recipient.to_hex()
+        ));
+    }
     let params = *state.registry.params();
     let (held, _relayer_fee) = split_bridge_fee(
         transfer.amount,
@@ -1374,7 +1392,6 @@ pub fn apply_burn_to_state(
     )
     .map_err(|e| e.to_string())?;
     let amount = held.get();
-    let burner = transfer.recipient;
     let burner_balance = state.get_balance(&burner);
     if burner_balance < amount {
         return Err(format!(
