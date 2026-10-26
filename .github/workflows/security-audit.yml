@@ -162,7 +162,7 @@ jobs:
             cat /tmp/zizmor-canary.log >&2
             exit 1
           fi
-      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+      - uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:
           persona: regular
 
@@ -177,7 +177,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
           languages: rust
           queries: security-extended
@@ -195,7 +195,7 @@ jobs:
       - name: Build (CodeQL extraction)
         run: cargo build --lib --locked
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
 
   msrv:
     name: MSRV check (1.97.1)
@@ -385,7 +385,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Run Scorecard
-        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
         with:
           results_file: scorecard.sarif
           results_format: sarif
