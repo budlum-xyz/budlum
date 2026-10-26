@@ -820,9 +820,9 @@ impl Node {
 
     /// Try to switch to the fork that `suffix` belongs to.
     ///
-    /// `try_reorg` needs the whole candidate chain from genesis. The peer
-    /// sends only the blocks from the fork height, so the shared prefix is
-    /// taken from the local chain. The result is logged, never dropped.
+    /// The peer sends only the blocks from its fork height; the shared prefix
+    /// is joined to them by the chain actor, which already holds it. The
+    /// result is logged, never dropped.
     async fn reorg_to_peer_suffix(
         chain: ChainHandle,
         suffix: Vec<crate::core::block::Block>,
@@ -896,38 +896,24 @@ impl Node {
             }
         }
         // The batch cleared the depth and parent checks, so the work below is
-        // real: a prefix read, a candidate join and a reconstruction. Only from
-        // here on does the attempt charge the interval. Stamping it earlier
-        // let a peer occupy the one global window with a batch refused for
-        // depth or for not continuing this chain - work the node did not do -
-        // and every other peer's genuine batch then arrived inside a closed
-        // window, so one peer could deny this node fork recovery for as long
-        // as it kept sending (CWE-400).
+        // real: a fork-choice evaluation over the peer's suffix and, if it
+        // wins, a reconstruction. Only from here on does the attempt charge
+        // the interval. Stamping it earlier let a peer occupy the one global
+        // window with a batch refused for depth or for not continuing this
+        // chain - work the node did not do - and every other peer's genuine
+        // batch then arrived inside a closed window, so one peer could deny
+        // this node fork recovery for as long as it kept sending (CWE-400).
         let _slot = ReorgSlot {
             last_completed: Arc::clone(&last_completed),
             reorg: flight_guard,
         };
-        // One read for the whole prefix. The previous loop issued one chain
-        // round trip per height, which is what the removed height cap was
-        // protecting against; a single range read is proportional to the
-        // local chain the node already holds.
-        let prefix_len = usize::try_from(start).unwrap_or(usize::MAX);
-        let prefix = chain.get_blocks_range(0, prefix_len).await;
-        if prefix.len() != prefix_len {
-            warn!(
-                "Reorg from {peer} skipped: local chain holds {} blocks of the {start} the fork needs",
-                prefix.len()
-            );
-            return;
-        }
-        let candidate = match join_reorg_candidate(prefix, suffix) {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                warn!("Reorg candidate from {peer} rejected: {error}");
-                return;
-            }
-        };
-        match chain.try_reorg(candidate).await {
+        // The join happens on the chain actor's side of the boundary
+        // (CWE-400). Reading the prefix here meant a genesis-wide copy whose
+        // size the peer chose with `start`, every five minutes, whether or not
+        // the candidate could win fork choice; the actor already holds the
+        // chain and joins the suffix before copying anything, refusing a batch
+        // that cannot make the chain longer for two integer comparisons.
+        match chain.try_reorg_suffix(suffix).await {
             Ok(true) => info!("Reorg to the chain of {peer} done"),
             Ok(false) => info!("Reorg to the chain of {peer} not needed: not a better chain"),
             Err(error) => warn!("Reorg to the chain of {peer} failed: {error}"),
@@ -3930,54 +3916,6 @@ const _: fn(&mut Node) = |node| {
     assert_send(node.run());
 };
 
-/// Join the local prefix (genesis up to the fork height) and the peer suffix
-/// into one chain for `try_reorg`. The suffix must continue the prefix.
-fn join_reorg_candidate(
-    mut prefix: Vec<crate::core::block::Block>,
-    suffix: Vec<crate::core::block::Block>,
-) -> Result<Vec<crate::core::block::Block>, String> {
-    let first = suffix.first().ok_or("empty suffix")?;
-    let parent = prefix.last().ok_or("fork starts at genesis")?;
-    if first.index != prefix.len() as u64 || first.previous_hash != parent.hash {
-        return Err("suffix does not continue the local prefix".into());
-    }
-    prefix.extend(suffix);
-    Ok(prefix)
-}
-
-#[cfg(test)]
-mod reorg_candidate_tests {
-    use super::join_reorg_candidate;
-    use crate::core::block::Block;
-
-    fn child(parent: &Block) -> Block {
-        Block::new(parent.index + 1, parent.hash.clone(), Vec::new())
-    }
-
-    #[test]
-    fn suffix_is_joined_to_the_prefix_from_genesis() {
-        let genesis = Block::genesis();
-        let one = child(&genesis);
-        let two = child(&one);
-        let joined = join_reorg_candidate(vec![genesis.clone(), one.clone()], vec![two.clone()])
-            .expect("suffix continues prefix");
-        assert_eq!(joined.len(), 3);
-        assert_eq!(joined[0], genesis);
-        assert_eq!(joined[2], two);
-    }
-
-    #[test]
-    fn a_suffix_that_does_not_continue_the_prefix_is_refused() {
-        let genesis = Block::genesis();
-        let one = child(&genesis);
-        let two = child(&one);
-        let three = child(&two);
-        assert!(join_reorg_candidate(vec![genesis.clone()], vec![three]).is_err());
-        assert!(join_reorg_candidate(Vec::new(), vec![one]).is_err());
-        assert!(join_reorg_candidate(vec![genesis], Vec::new()).is_err());
-    }
-}
-
 #[cfg(test)]
 mod vote_history_wiring_tests {
     use crate::core::chain_config::Network;
@@ -4386,7 +4324,7 @@ mod sync_handler_order_tests {
         // no work, so it must not charge the interval that every other peer
         // competes for. Pinned as source order in the one function that has
         // the throttle: the stamping slot is created after both structural
-        // checks, and before the prefix read that starts the real work.
+        // checks, and before the call that starts the real work.
         let body = production();
         let slot = body
             .find("let _slot = ReorgSlot {")
@@ -4397,16 +4335,23 @@ mod sync_handler_order_tests {
         let parent_check = body
             .find("does not continue the local chain")
             .expect("the parent-hash check must still exist");
-        let prefix_read = body
-            .find("let prefix = chain.get_blocks_range(0, prefix_len).await;")
-            .expect("the prefix read must still exist");
+        let actor_call = body
+            .find("match chain.try_reorg_suffix(suffix).await {")
+            .expect("the suffix must be handed to the chain actor");
         assert!(
             depth_check < slot && parent_check < slot,
             "a batch refused for depth or parent must not stamp the reorg window"
         );
         assert!(
-            slot < prefix_read,
-            "an attempt that reaches the prefix read must stamp the window"
+            slot < actor_call,
+            "an attempt that reaches the actor must stamp the window"
+        );
+        // CWE-400: the peer's fork height used to size a genesis-wide chain
+        // read on this side of the actor boundary. Nothing here may read the
+        // prefix again; the actor joins it from the chain it already holds.
+        assert!(
+            !body.contains("get_blocks_range(0,"),
+            "the peer-chosen fork height must not size a chain read in the network layer"
         );
 
         let code = production();
