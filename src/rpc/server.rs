@@ -3858,15 +3858,37 @@ impl BudlumApiServer for RpcServer {
         // read under the lock, the chain is asked without it, and the answer
         // is applied under the lock again; a session closed in between is
         // reported as unknown, which is what it is.
-        let (scope, generation): (Option<crate::storage::GrantScope>, u64) = {
+        let (scope, generation, session): (
+            Option<crate::storage::GrantScope>,
+            u64,
+            std::sync::Arc<crate::storage::RevealSession>,
+        ) = {
             let gw = self.reveal_gateway.lock().map_err(|_| {
                 ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
             })?;
             let scope = gw
                 .grant_scope(session_id)
                 .map_err(reveal_gateway_rpc_error)?;
-            (scope, gw.revoke_generation())
+            // The session is taken OUT of the table here so the stream-pin
+            // check below can run with the lock released. That check is the
+            // only part of serving a frame that scales with the stream: a
+            // recipe pinning a frame fold makes it build the whole one-shot
+            // carousel pass. Run under the table lock, one caller's first frame
+            // stalls every other viewer for the length of an encode (CWE-407).
+            // The session is an `Arc`, so `emit_frames` still re-checks it -
+            // expiry, grant and budget - on the way back.
+            (
+                scope,
+                gw.revoke_generation(),
+                gw.session_handle(session_id)
+                    .map_err(reveal_gateway_rpc_error)?,
+            )
         };
+        // Outside the lock. The answer is remembered on the session, so the
+        // emit below never repeats it.
+        session
+            .verify_stream_pin()
+            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
         let grant_allows = match scope {
             None => true,
             Some(scope) => self
