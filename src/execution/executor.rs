@@ -2785,6 +2785,79 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::BridgeBurn(burn) => {
+                // A burn moves the transfer's units back out of the burner and
+                // writes `bridge_state`; both are in the state root, so this is
+                // a transaction rather than an RPC mutation. The carried amount
+                // is refused: the amount is the transfer row's, and a caller
+                // that could name one would name a different one.
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "bridge_burn_amount_must_be_zero",
+                        "a bridge burn takes its amount from the transfer row; it cannot carry one",
+                    ));
+                }
+                if state.get_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance_for_fee",
+                        "insufficient balance for the bridge burn fee",
+                    ));
+                }
+                let event = crate::cross_domain::bridge::apply_burn_to_state(
+                    state,
+                    &crate::cross_domain::bridge::BridgeBurnParams {
+                        message_id: burn.message_id,
+                        domain: burn.domain,
+                        domain_height: burn.domain_height,
+                        event_index: burn.event_index,
+                        expiry_height: burn.expiry_height,
+                        recipient_eth: burn.recipient_eth,
+                    },
+                )
+                .map_err(|e| BudlumError::validation("bridge_burn_failed", e))?;
+                // The relay request is node-local work, so it is handed to the
+                // chain after the block rather than written from here.
+                state.pending_bridge_burns.push(event);
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::CrossDomainMessage(message) => {
+                // The door that used to insert into `message_registry` from the
+                // request path. The registry is in the state root, so a node
+                // that served the call and one that did not disagreed until the
+                // next state sync.
+                if tx.amount != 0 {
+                    return Err(BudlumError::validation(
+                        "cross_domain_message_amount_must_be_zero",
+                        "registering a cross-domain message moves no value",
+                    ));
+                }
+                if state.get_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance_for_fee",
+                        "insufficient balance for the cross-domain message fee",
+                    ));
+                }
+                // The gate follows the message, not the payer: the account that
+                // must be an active relayer is the one that declared and signed
+                // the message (`message.sender`), which is the rule the out-of-
+                // block door applied. `tx.from` only pays the fee, so this door
+                // does not turn into "only validators may relay".
+                crate::cross_domain::message::register_relayed_on_state(
+                    state,
+                    message,
+                    message.sender,
+                )
+                .map_err(|e| BudlumError::validation("cross_domain_message_failed", e))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
             TransactionType::Storage(storage_tx) => {
                 // One arm delegating to the tested body
                 // (`domain::execute_storage_tx`), which runs every check

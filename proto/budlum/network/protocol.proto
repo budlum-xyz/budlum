@@ -70,6 +70,8 @@ enum ProtoTransactionType {
     POA_ONBOARDING = 48;
     // Bond into a permissionless application role of the verifier family.
     ROLE_BOND = 49;
+    BRIDGE_BURN = 50;
+    CROSS_DOMAIN_MESSAGE = 51;
 }
 
 message ProtoTransaction {
@@ -126,6 +128,8 @@ message ProtoTransaction {
         ProtoStorageTx storage = 54;
         ProtoPoaOnboardingTx poa_onboarding = 55;
         ProtoRoleBond role_bond = 56;
+        ProtoBridgeBurn bridge_burn = 57;
+        ProtoCrossDomainMessageTx cross_domain_message = 58;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
@@ -476,6 +480,19 @@ message ProtoPoaOnboardingTx {
 // transaction header's amount.
 message ProtoRoleBond {
     uint32 role = 1;
+}
+
+// A bridge burn: bincode-encoded `core::transaction::BridgeBurnTx`. Ids and
+// heights only - the amount and the burner come from the transfer row, which
+// the executor reads from consensus state.
+message ProtoBridgeBurn {
+    bytes data = 1;
+}
+
+// A relayed cross-domain message: bincode-encoded
+// `cross_domain::message::CrossDomainMessage`, sender signature included.
+message ProtoCrossDomainMessageTx {
+    bytes data = 1;
 }
 
 // The storage transaction payload: bincode-encoded `domain::StorageTx`, the

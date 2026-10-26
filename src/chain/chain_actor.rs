@@ -166,7 +166,7 @@ pub enum ChainCommand {
     ),
     SubmitRelayedCrossDomainMessage(
         crate::cross_domain::CrossDomainMessage,
-        oneshot::Sender<Result<(), String>>,
+        oneshot::Sender<Result<String, String>>,
     ),
     BondRelayer(
         crate::core::address::Address,
@@ -403,7 +403,7 @@ pub enum ChainCommand {
         event_index: u32,
         expiry_height: u64,
         recipient_eth: [u8; 20],
-        response: oneshot::Sender<Result<crate::cross_domain::DomainEvent, String>>,
+        response: oneshot::Sender<Result<String, String>>,
     },
     UnlockBridgeTransfer {
         message_id: crate::cross_domain::MessageId,
@@ -1960,10 +1960,15 @@ impl ChainHandle {
     }
 
     /// Relayer-gated cross-domain message submission (RPC / p2p entry points).
+    /// Submit a relayed cross-domain message as an in-block transaction.
+    ///
+    /// Returns the transaction hash. The registration lands when a block
+    /// carries it, not when this call returns: `message_registry` is in the
+    /// state root and may not be written from a request path.
     pub async fn submit_relayed_cross_domain_message(
         &self,
         message: crate::cross_domain::CrossDomainMessage,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -2555,7 +2560,7 @@ impl ChainHandle {
         event_index: u32,
         expiry_height: u64,
         recipient_eth: [u8; 20],
-    ) -> Result<crate::cross_domain::DomainEvent, String> {
+    ) -> Result<String, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
@@ -3806,12 +3811,24 @@ impl ChainActor {
                     let _ =
                         res_tx.send(self.blockchain.build_state_update_transaction(&commitment));
                 }
-                ChainCommand::SubmitCrossDomainMessage(message, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.submit_cross_domain_message(message));
+                ChainCommand::SubmitCrossDomainMessage(_message, res_tx) => {
+                    // Registration is consensus state and happens in block; a
+                    // chain-built message reaches the registry through the
+                    // bridge transaction that produced it.
+                    let _ = res_tx.send(Err(
+                        "Cross-domain messages are registered in block; submit the bridge transaction instead"
+                            .to_string(),
+                    ));
                 }
                 ChainCommand::SubmitRelayedCrossDomainMessage(message, res_tx) => {
-                    let _ =
-                        res_tx.send(self.blockchain.submit_relayed_cross_domain_message(message));
+                    let res = self
+                        .blockchain
+                        .build_cross_domain_message_transaction(message)
+                        .and_then(|tx| {
+                            let hash = tx.hash.clone();
+                            self.blockchain.add_transaction(tx).map(|()| hash)
+                        });
+                    let _ = res_tx.send(res);
                 }
                 ChainCommand::BondRelayer(address, amount, res_tx) => {
                     let _ = res_tx.send(
@@ -4222,7 +4239,10 @@ impl ChainActor {
                     domain,
                     response,
                 } => {
-                    let _ = response.send(self.blockchain.burn_bridge_transfer(message_id, domain));
+                    let _ = (message_id, domain);
+                    let _ = response.send(Err(
+                        "Raw bridge burn is disabled; use a target-domain burn event path".into(),
+                    ));
                 }
                 ChainCommand::BurnBridgeTransferWithEvent {
                     message_id,
@@ -4233,14 +4253,26 @@ impl ChainActor {
                     recipient_eth,
                     response,
                 } => {
-                    let _ = response.send(self.blockchain.burn_bridge_transfer_with_event(
-                        message_id,
-                        domain,
-                        domain_height,
-                        event_index,
-                        expiry_height,
-                        recipient_eth,
-                    ));
+                    // The burn is a transaction now: the debit and
+                    // `bridge_state` are in the state root, so applying them
+                    // here would make this node disagree with its peers. Build
+                    // the signed transaction, enqueue it, and answer with its
+                    // hash; the balance moves when a block carries it.
+                    let res = self
+                        .blockchain
+                        .build_bridge_burn_transaction(crate::core::transaction::BridgeBurnTx {
+                            message_id,
+                            domain,
+                            domain_height,
+                            event_index,
+                            expiry_height,
+                            recipient_eth,
+                        })
+                        .and_then(|tx| {
+                            let hash = tx.hash.clone();
+                            self.blockchain.add_transaction(tx).map(|()| hash)
+                        });
+                    let _ = response.send(res);
                 }
                 ChainCommand::UnlockBridgeTransfer {
                     message_id,

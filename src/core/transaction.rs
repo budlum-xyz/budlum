@@ -178,6 +178,35 @@ pub struct ExternalTransaction {
     pub external_nonce: u64,
 }
 
+/// Payload of [`TransactionType::BridgeBurn`].
+///
+/// The burn is the debit half of a bridge mint: it takes the minted units back
+/// from the transfer's recipient and registers the burn message the far side
+/// unlocks against. It moves value and writes `bridge_state`, both of which are
+/// in the state root, so it is a transaction and not an RPC mutation - a node
+/// that served the call and a node that did not must not disagree.
+///
+/// Every field is a claim the executor re-derives: the transfer row supplies
+/// the amount and the burner, `bridge_state.burn_with_event` re-checks the
+/// status and the expiry against the row it holds. The payload carries ids and
+/// heights only, never an amount or an actor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BridgeBurnTx {
+    /// The transfer being burned back out of this domain.
+    pub message_id: crate::cross_domain::message::MessageId,
+    /// The domain the burn happens on; must be the domain the transfer was
+    /// minted on.
+    pub domain: crate::domain::types::DomainId,
+    pub domain_height: u64,
+    pub event_index: u32,
+    /// Height after which an unrelayed burn returns to `Minted`. Zero means no
+    /// expiry.
+    pub expiry_height: u64,
+    /// The Ethereum destination the burner declares; committed in the burn
+    /// payload hash.
+    pub recipient_eth: [u8; 20],
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelayerExternalResult {
     pub chain: ExternalChain,
@@ -444,6 +473,23 @@ pub enum TransactionType {
     RoleBond {
         role: u32,
     },
+    /// Burn the minted half of a bridge transfer, in block.
+    ///
+    /// Replaces the out-of-block `Blockchain::burn_bridge_transfer_with_event`,
+    /// which debited the recipient and wrote `bridge_state` from the RPC path:
+    /// both are in the state root, so a node that served the call sealed blocks
+    /// its peers rejected. The body is the same one, reached through the
+    /// executor, and the relay enqueue that follows it is node-local and drains
+    /// after the block.
+    BridgeBurn(BridgeBurnTx),
+    /// Register a relayed cross-domain message, in block.
+    ///
+    /// The message is already signed by its sender (`verify_sender_signature`),
+    /// so the transaction body carries it rather than a new authority. The
+    /// executor re-runs the relayer gate and the registry's own checks against
+    /// consensus state; the old out-of-block door inserted into
+    /// `message_registry`, which is in the state root.
+    CrossDomainMessage(crate::cross_domain::message::CrossDomainMessage),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1196,6 +1242,12 @@ impl Transaction {
             TransactionType::UniversalRelay(_) | TransactionType::RelayerResult(_) => {
                 schedule.contract_call_gas * 3
             }
+            // Both write registry state and one moves the transfer's balance;
+            // priced with the other state-writing doors rather than as a plain
+            // transfer.
+            TransactionType::BridgeBurn(_) | TransactionType::CrossDomainMessage(_) => {
+                schedule.contract_call_gas
+            }
             TransactionType::AiOfferData { .. } | TransactionType::AiPurchaseData { .. } => {
                 schedule.transfer_gas * 5
             }
@@ -1478,6 +1530,8 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::Storage(_) => 47,
         TransactionType::PoaOnboarding(_) => 48,
         TransactionType::RoleBond { .. } => 49,
+        TransactionType::BridgeBurn(_) => 50,
+        TransactionType::CrossDomainMessage(_) => 51,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -2238,6 +2292,48 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         }
         TransactionType::Vault(vault_tx) => encode_vault_tx(vault_tx, out),
         TransactionType::Storage(storage_tx) => encode_storage_tx(storage_tx, out),
+        TransactionType::BridgeBurn(burn) => {
+            put_u8(out, 50);
+            put_fixed(out, &burn.message_id);
+            put_u32(out, burn.domain);
+            put_u64(out, burn.domain_height);
+            put_u32(out, burn.event_index);
+            put_u64(out, burn.expiry_height);
+            put_fixed(out, &burn.recipient_eth);
+        }
+        TransactionType::CrossDomainMessage(message) => {
+            put_u8(out, 51);
+            // Every field is written out: the id binds them too, but the id is
+            // a hash the sender computed, and a signature over the id alone
+            // would not commit to WHICH fields the executor is about to insert.
+            // Written explicitly, a relay that rewrote one changes the
+            // transaction hash.
+            put_fixed(out, &message.message_id);
+            match message.correlation_id {
+                None => put_u8(out, 0),
+                Some(correlation) => {
+                    put_u8(out, 1);
+                    put_fixed(out, &correlation);
+                }
+            }
+            put_u32(out, message.source_domain);
+            put_u32(out, message.target_domain);
+            put_u64(out, message.source_height);
+            put_u32(out, message.event_index);
+            put_u64(out, message.nonce);
+            put_fixed(out, message.sender.as_bytes());
+            put_fixed(out, message.recipient.as_bytes());
+            put_fixed(out, &message.payload_hash);
+            put_bytes(out, &message.kind.as_bytes());
+            put_u64(out, message.expiry_height);
+            put_bytes(out, &message.sender_public_key);
+            // The sender's own signature is part of the preimage too: the
+            // executor verifies it against `sender`, so a relaying node that
+            // rewrote it (say, to a different valid signature by the same key,
+            // or to garbage that the gate then rejects) would otherwise change
+            // the executed outcome under an unchanged transaction hash.
+            put_bytes(out, &message.sender_signature);
+        }
     }
 }
 
