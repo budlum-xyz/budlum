@@ -116,14 +116,22 @@ pub struct RevealHandle {
     /// work that is proportional to the stream (the stream-pin check) without
     /// holding the table lock. See `RevealGateway::session_handle`.
     session: std::sync::Arc<RevealSession>,
+    /// The session's stream commitment, cached in the handle.
+    ///
+    /// `stream_commitment` is a `const fn` on the published API. Reading it
+    /// through the `Arc` would demote it to a plain method, which
+    /// `cargo-semver-checks` reports as `inherent_method_const_removed` - a
+    /// public API break. The commitment is fixed for the session's lifetime,
+    /// so a copy costs 32 bytes and keeps the signature.
+    stream_commitment: [u8; 32],
     meter: ThreeMeter,
 }
 
 impl RevealHandle {
     /// Stream commitment for the receivers of this session.
     #[must_use]
-    pub fn stream_commitment(&self) -> [u8; 32] {
-        self.session.stream_commitment()
+    pub const fn stream_commitment(&self) -> [u8; 32] {
+        self.stream_commitment
     }
 
     /// The session itself, cloned out of the handle.
@@ -211,6 +219,7 @@ pub fn open_reveal_session_prechecked(
     )?;
     let meter = ThreeMeter::with_budget(req.meter_budget);
     Ok(RevealHandle {
+        stream_commitment: session.stream_commitment(),
         session: std::sync::Arc::new(session),
         meter,
     })
