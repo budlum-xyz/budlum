@@ -396,15 +396,6 @@ pub enum ChainCommand {
         domain: crate::domain::DomainId,
         response: oneshot::Sender<Result<(), String>>,
     },
-    BurnBridgeTransferWithEvent {
-        message_id: crate::cross_domain::MessageId,
-        domain: crate::domain::DomainId,
-        domain_height: u64,
-        event_index: u32,
-        expiry_height: u64,
-        recipient_eth: [u8; 20],
-        response: oneshot::Sender<Result<String, String>>,
-    },
     UnlockBridgeTransfer {
         message_id: crate::cross_domain::MessageId,
         source_domain: crate::domain::DomainId,
@@ -2552,32 +2543,6 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    pub async fn burn_bridge_transfer_with_event(
-        &self,
-        message_id: crate::cross_domain::MessageId,
-        domain: crate::domain::DomainId,
-        domain_height: u64,
-        event_index: u32,
-        expiry_height: u64,
-        recipient_eth: [u8; 20],
-    ) -> Result<String, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BurnBridgeTransferWithEvent {
-                message_id,
-                domain,
-                domain_height,
-                event_index,
-                expiry_height,
-                recipient_eth,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
     pub async fn unlock_bridge_transfer(
         &self,
         message_id: crate::cross_domain::MessageId,
@@ -4243,36 +4208,6 @@ impl ChainActor {
                     let _ = response.send(Err(
                         "Raw bridge burn is disabled; use a target-domain burn event path".into(),
                     ));
-                }
-                ChainCommand::BurnBridgeTransferWithEvent {
-                    message_id,
-                    domain,
-                    domain_height,
-                    event_index,
-                    expiry_height,
-                    recipient_eth,
-                    response,
-                } => {
-                    // The burn is a transaction now: the debit and
-                    // `bridge_state` are in the state root, so applying them
-                    // here would make this node disagree with its peers. Build
-                    // the signed transaction, enqueue it, and answer with its
-                    // hash; the balance moves when a block carries it.
-                    let res = self
-                        .blockchain
-                        .build_bridge_burn_transaction(crate::core::transaction::BridgeBurnTx {
-                            message_id,
-                            domain,
-                            domain_height,
-                            event_index,
-                            expiry_height,
-                            recipient_eth,
-                        })
-                        .and_then(|tx| {
-                            let hash = tx.hash.clone();
-                            self.blockchain.add_transaction(tx).map(|()| hash)
-                        });
-                    let _ = response.send(res);
                 }
                 ChainCommand::UnlockBridgeTransfer {
                     message_id,
