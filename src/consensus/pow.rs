@@ -559,6 +559,13 @@ impl ConsensusEngine for PoWEngine {
         self.accumulated_work(chain).saturating_to_u128()
     }
 
+    /// A shorter chain can hold more accumulated work: replacing two easy
+    /// blocks with one hard one wins fork choice. The suffix shortcut must not
+    /// refuse it.
+    fn shorter_chain_can_never_win(&self) -> bool {
+        false
+    }
+
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
         let current_work = self.accumulated_work(current);
         let candidate_work = self.accumulated_work(candidate);
