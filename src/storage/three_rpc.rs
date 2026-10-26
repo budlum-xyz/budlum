@@ -111,15 +111,30 @@ pub struct RevealRequest {
 /// A granted, metered reveal session, guarded by the RPC layer.
 #[derive(Debug, Clone)]
 pub struct RevealHandle {
-    session: RevealSession,
+    /// Behind an `Arc` so a server that keeps its sessions in a table can take
+    /// the session OUT of the table's critical section and do the one piece of
+    /// work that is proportional to the stream (the stream-pin check) without
+    /// holding the table lock. See `RevealGateway::session_handle`.
+    session: std::sync::Arc<RevealSession>,
     meter: ThreeMeter,
 }
 
 impl RevealHandle {
     /// Stream commitment for the receivers of this session.
     #[must_use]
-    pub const fn stream_commitment(&self) -> [u8; 32] {
+    pub fn stream_commitment(&self) -> [u8; 32] {
         self.session.stream_commitment()
+    }
+
+    /// The session itself, cloned out of the handle.
+    ///
+    /// Exists so the stream-pin check can run outside a session table's lock:
+    /// the check may build a whole one-shot carousel pass, and doing that under
+    /// a table every other viewer needs turns one request into a stall for all
+    /// of them (CWE-407).
+    #[must_use]
+    pub fn session_handle(&self) -> std::sync::Arc<RevealSession> {
+        std::sync::Arc::clone(&self.session)
     }
 
     /// Emit a range of frames under this session's gate and budget.
@@ -195,7 +210,10 @@ pub fn open_reveal_session_prechecked(
         grant_allows,
     )?;
     let meter = ThreeMeter::with_budget(req.meter_budget);
-    Ok(RevealHandle { session, meter })
+    Ok(RevealHandle {
+        session: std::sync::Arc::new(session),
+        meter,
+    })
 }
 
 #[cfg(test)]
