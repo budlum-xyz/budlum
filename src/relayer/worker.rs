@@ -200,6 +200,27 @@ impl RelayerWorker {
         }
     }
 
+    /// Refuse to run without a signing key (P8-01, fail-closed).
+    ///
+    /// `process_relay` already refuses to submit an unsigned result. That
+    /// refusal happens per request, inside the pass loop, and because the
+    /// request must not be abandoned (it is paid and has no expiry) the loop
+    /// returns the same `Retry` on every pass: the cursor never moves and
+    /// every five seconds the node logs the same critical line. A key cannot
+    /// arrive at runtime - it is bound before the worker starts - so the
+    /// honest state is "the relayer is not running", stated once at startup.
+    fn require_signing_key(&self) -> Result<(), &'static str> {
+        if self.relayer_keypair.is_some() {
+            Ok(())
+        } else {
+            Err(
+                "worker started without a signing key, so no relay result could ever be \
+                 submitted. The worker is not running and the relay cursor is not moving. \
+                 Bind a key with RelayerWorker::with_signing_key() and restart.",
+            )
+        }
+    }
+
     /// Bind a signing key so result TXs are
     /// cryptographically signed before injection into the chain.
     #[must_use]
@@ -726,6 +747,18 @@ impl RelayerWorker {
             "Universal Relayer Worker started for {}",
             self.relayer_address
         );
+        // A worker with no signing key can never submit a result: every
+        // request would take the retry path and the cursor would sit on the
+        // first block containing one, forever, logging the same error every
+        // pass. Nothing is lost by holding the cursor - and nothing may be
+        // lost, since a `UniversalRelay` request has no chain-side deadline -
+        // but a permanent, silent-from-the-outside stall is not a state to
+        // run in. Refuse to run and say so once, loudly, so an operator sees
+        // that relay is not operating the moment the node starts.
+        if let Err(refusal) = self.require_signing_key() {
+            error!("Relayer: {refusal}");
+            return;
+        }
         if self.adapters.supported_chains().is_empty() {
             warn!(
                 "Relayer worker started with no chain adapters registered. It will observe \
@@ -1241,6 +1274,38 @@ mod attempt_budget {
         // and these tests run in parallel, so the variable is read through the
         // helper rather than set here.
         assert!(super::relay_alarm_after_attempts() > 0);
+    }
+
+    /// A relayer with no signing key refuses to run instead of stalling.
+    ///
+    /// Without the startup refusal the worker entered its pass loop, matched
+    /// every request against `process_relay`, was refused for the missing key
+    /// (`Retry`), and held the cursor there for good: correct about not losing
+    /// a paid request, useless to an operator, and it re-logged the same
+    /// critical line every five seconds.
+    #[test]
+    fn a_worker_without_a_signing_key_refuses_to_run() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let worker = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]));
+        let refusal = worker
+            .require_signing_key()
+            .expect_err("a keyless worker must not run");
+        assert!(
+            refusal.contains("signing key") && refusal.contains("not running"),
+            "the refusal must name the missing key and the consequence: {refusal}"
+        );
+
+        let keypair =
+            std::sync::Arc::new(crate::crypto::primitives::KeyPair::generate().expect("key"));
+        let bound = RelayerWorker::new(
+            ChainHandle::new(tokio::sync::mpsc::channel(1).0),
+            Address::from([7u8; 32]),
+        )
+        .with_signing_key(keypair);
+        assert!(
+            bound.require_signing_key().is_ok(),
+            "a bound key must let the worker run"
+        );
     }
 
     /// An abandoned request leaves a record an operator can act on.
