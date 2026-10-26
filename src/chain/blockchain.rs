@@ -1978,21 +1978,13 @@ impl Blockchain {
         Ok(tx)
     }
 
-    /// Build the signed `BridgeBurn` transaction for a burn request.
-    ///
-    /// Read-only, like [`Self::build_state_update_transaction`]: the caller
-    /// enqueues it, and the burn itself happens in block. This is the door the
-    /// RPC uses; the state change no longer happens on the request path.
-    ///
-    /// # Errors
-    ///
-    /// When this node has no consensus signer to sign with.
-    pub fn build_bridge_burn_transaction(
-        &self,
-        burn: crate::core::transaction::BridgeBurnTx,
-    ) -> Result<Transaction, String> {
-        self.build_signed_transaction(crate::core::transaction::TransactionType::BridgeBurn(burn))
-    }
+    // A `build_bridge_burn_transaction` used to live here: it signed the burn
+    // with the node's own consensus key, which made the operator the burner.
+    // The burn's authority is the holder's - `BridgeBurnTx` carries the
+    // holder's authorization, and the executor verifies it against the row -
+    // so there is no version of this helper that a node could call on somebody
+    // else's behalf. A holder builds and signs the transaction themselves and
+    // submits it through `bud_sendRawTransaction`.
 
     /// Build the signed `CrossDomainMessage` transaction for a relayed message.
     ///
@@ -2752,6 +2744,11 @@ impl Blockchain {
     /// directly and then assert on the event it returns; the body itself is
     /// shared with the executor (`cross_domain::bridge::apply_burn_to_state`),
     /// so a test here proves the same code the block path runs.
+    ///
+    /// The body binds the burn to the row's holder, and this door stands in for
+    /// the holder's signature by looking the holder up in the state it is about
+    /// to burn. A suite that wants to prove the binding refuses a stranger
+    /// calls `apply_burn_to_state` with the wrong address instead.
     #[cfg(test)]
     pub fn burn_bridge_transfer_with_event(
         &mut self,
@@ -2762,6 +2759,12 @@ impl Blockchain {
         expiry_height: u64,
         recipient_eth: [u8; 20],
     ) -> Result<DomainEvent, String> {
+        let holder = self
+            .state
+            .bridge_state
+            .get_transfer(&message_id)
+            .map(|transfer| transfer.recipient)
+            .ok_or_else(|| "Unknown bridge transfer".to_string())?;
         let event = crate::cross_domain::bridge::apply_burn_to_state(
             &mut self.state,
             &crate::cross_domain::bridge::BridgeBurnParams {
@@ -2772,6 +2775,7 @@ impl Blockchain {
                 expiry_height,
                 recipient_eth,
             },
+            holder,
         )?;
         if let Some(message) = event.message.clone() {
             self.enqueue_bridge_relay(event.clone(), &message);
