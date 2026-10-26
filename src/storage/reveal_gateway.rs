@@ -23,6 +23,7 @@ use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 use crate::storage::content_id::ContentId;
 use crate::storage::qr_recipe::ThreeRecipe;
+use crate::storage::three_reveal::RevealSession;
 use crate::storage::three_rpc::{
     open_reveal_session, open_reveal_session_prechecked, RevealHandle, RevealRequest,
     RevealRpcError,
@@ -386,6 +387,31 @@ impl RevealGateway {
         self.sessions
             .get(&id)
             .map(|session| session.grant)
+            .ok_or(RevealGatewayError::UnknownSession(id))
+    }
+
+    /// The session itself, so the caller can do its one expensive step
+    /// ([`RevealSession::verify_stream_pin`]) OUTSIDE this table's lock.
+    ///
+    /// The pin check is the only part of serving a frame that can cost a whole
+    /// one-shot carousel pass. Every caller that reaches `emit_frames` holds
+    /// the table lock, so running it there made one session holder's first
+    /// frame a stall for every other viewer; the pass is bounded (`k` is at
+    /// most [`crate::storage::MAX_K`]) and cached per payload, but bounded is
+    /// not free and it must not be serialised (CWE-407). The handle is an
+    /// `Arc`, so the table can be closed or the session dropped while it is
+    /// held; `emit_frames` re-checks the session on the way back.
+    ///
+    /// # Errors
+    ///
+    /// [`RevealGatewayError::UnknownSession`] for an unknown id.
+    pub fn session_handle(
+        &self,
+        id: u64,
+    ) -> Result<std::sync::Arc<RevealSession>, RevealGatewayError> {
+        self.sessions
+            .get(&id)
+            .map(|session| session.handle.session_handle())
             .ok_or(RevealGatewayError::UnknownSession(id))
     }
 

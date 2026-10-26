@@ -144,14 +144,25 @@ impl RevealSession {
         })
     }
 
-    /// Check the recipe's pinned stream id against the fold of the whole
-    /// one-shot pass, once per session.
+    /// Check the recipe's pinned stream id, once per session.
     ///
     /// The pin covers the complete pass, so it cannot be checked on a subset:
     /// a range a client later asks for is a slice of this pass. Building the
     /// pass is the expensive step, which is why it happens here and not in
-    /// [`Self::open`].
-    fn verify_stream_pin(&self) -> Result<(), RevealError> {
+    /// [`Self::open`] - and why a server that keeps its sessions behind a lock
+    /// calls this method BEFORE taking that lock
+    /// (`RevealGateway::session_handle` hands out the session itself for
+    /// exactly that). Held under the lock, one session holder's first frame
+    /// would stall every other viewer for the length of a carousel encode
+    /// (CWE-407).
+    ///
+    /// Public so the gateway can hoist it out of the critical section; the
+    /// check itself is idempotent and remembered on the session.
+    ///
+    /// # Errors
+    ///
+    /// [`RevealError::Reemit`] when a pinned stream id is not this stream's.
+    pub fn verify_stream_pin(&self) -> Result<(), RevealError> {
         use std::sync::atomic::Ordering;
         if self.verified.load(Ordering::Acquire) {
             return Ok(());
