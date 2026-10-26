@@ -437,3 +437,152 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
         "unlock error message must surface the forgery-gate rationale, got: {unlock_err}"
     );
 }
+
+/// The burn moves state in block, not on the request path.
+///
+/// `Blockchain::burn_bridge_transfer_with_event` used to debit the recipient
+/// and write `bridge_state` when the RPC was called. Both are folded into the
+/// state root, so a node that served the call and a node that did not disagreed
+/// until a state sync. The `BridgeBurn` transaction reaches the same body
+/// ([`crate::cross_domain::bridge::apply_burn_to_state`]) through the
+/// executor, and this test drives that exact path: build the signed
+/// transaction, apply it with the executor, and assert the debit landed and the
+/// relay request did not.
+#[test]
+fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
+    use crate::execution::executor::Executor;
+
+    // A PoS engine WITH a signer: the door this test exercises builds a signed
+    // transaction, and a node with no consensus signer cannot (the same rule
+    // `build_state_update_transaction` follows for the domain-commitment path).
+    let keypair = crate::crypto::primitives::KeyPair::generate().expect("a keypair");
+    let signer = Arc::new(crate::crypto::signer::KeyPairSigner::new(keypair));
+    let mut bc = Blockchain::new(
+        Arc::new(crate::consensus::pos::PoSEngine::with_signer(
+            crate::consensus::pos::PoSConfig::default(),
+            None,
+            signer,
+        )),
+        None,
+        45262,
+        None,
+    );
+    for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
+        d.operator = Some(operator);
+        d.operator_bond = 100_000;
+        d.bridge_enabled = true;
+        bc.register_consensus_domain(d).expect("domain");
+    }
+    bc.register_bridge_asset(asset_id(), 1).expect("asset");
+    let owner = addr(77);
+    let recipient = addr(12);
+    bc.state.add_balance(&owner, 1_000);
+
+    let (_transfer, lock_event) = bc
+        .lock_bridge_transfer(1, 2, 20, 0, asset_id(), owner, recipient, 400, 1_000)
+        .expect("lock");
+    let message_id = lock_event
+        .message
+        .as_ref()
+        .expect("lock message")
+        .message_id;
+    let params = *bc.state.registry.params();
+    let (held, fee) = crate::cross_domain::bridge::split_bridge_fee(
+        crate::core::money::Bud::new(400),
+        params.bridge_relayer_fee_ppm,
+        params.bridge_relayer_min_fee,
+    )
+    .expect("a 400 transfer covers the fee");
+    let (held, fee) = (held.get(), fee.get());
+    bc.state
+        .bridge_state
+        .mint(lock_event.message.as_ref().expect("lock message"), 20)
+        .expect("mint");
+    bc.state.get_or_create(&recipient).balance += held;
+    bc.state.get_or_create(&addr(99)).balance += fee;
+
+    // The signed transaction a node would gossip.
+    let tx = bc
+        .build_bridge_burn_transaction(crate::core::transaction::BridgeBurnTx {
+            message_id,
+            domain: 2,
+            domain_height: 40,
+            event_index: 0,
+            expiry_height: 0,
+            recipient_eth: [7u8; 20],
+        })
+        .expect("this node can sign");
+    assert!(
+        matches!(
+            tx.tx_type,
+            crate::core::transaction::TransactionType::BridgeBurn(_)
+        ),
+        "the door is a transaction, not a method call"
+    );
+
+    // The signer pays the fee, so the signer has to be able to.
+    let payer = tx.from;
+    bc.state.add_balance(&payer, 1_000);
+
+    let before = bc.state.get_balance(&recipient);
+    assert_eq!(before, held, "the recipient holds what the mint credited");
+
+    // In block: the executor applies it.
+    let mut state = bc.state.clone();
+    Executor::apply_transaction(&mut state, &tx).expect("the burn executes in block");
+
+    assert_eq!(
+        state.get_balance(&recipient),
+        before - held,
+        "the burn must take the minted units back inside block execution"
+    );
+    assert_eq!(
+        state
+            .bridge_state
+            .transfer(&message_id)
+            .map(|t| format!("{:?}", t.status)),
+        Some(format!(
+            "{:?}",
+            crate::cross_domain::bridge::BridgeStatus::Burned { domain: 2 }
+        )),
+        "the row flips inside block execution"
+    );
+    assert_eq!(
+        state.pending_bridge_burns.len(),
+        1,
+        "the relay request waits for the node, it is not written by the executor"
+    );
+    // The burn's OWN message is registered by the same body, inside the same
+    // execution - that is the half that must not wait for the node.
+    let burn_message = state
+        .pending_bridge_burns
+        .first()
+        .and_then(|event| event.message.as_ref())
+        .expect("the burn carries a message");
+    assert!(
+        state
+            .message_registry
+            .get(&burn_message.message_id)
+            .is_some(),
+        "the message the far side unlocks against is registered in block"
+    );
+    assert_ne!(
+        burn_message.message_id, message_id,
+        "the burn message is its own id, correlated with the lock's"
+    );
+
+    // Draining the queue performs the node-local half and nothing else.
+    let mut bc = bc;
+    bc.state = state;
+    assert_eq!(bc.drain_pending_bridge_burns(), 1);
+    assert!(
+        bc.state.pending_bridge_burns.is_empty(),
+        "the queue is drained once"
+    );
+    assert_eq!(
+        bc.state.get_balance(&recipient),
+        before - held,
+        "draining the relay queue must not move the balance again"
+    );
+}

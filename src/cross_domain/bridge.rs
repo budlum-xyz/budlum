@@ -653,6 +653,8 @@ impl BridgeState {
 
     /// Record the exact units debited at burn time so an expiry sweep refunds
     /// the recorded debit without re-deriving from live relayer fee params.
+    /// WIRING: called by `apply_burn_to_state` (the `BridgeBurn` transaction
+    /// body) and by the burn tests that assert the debit is recorded once.
     pub fn record_burn_debit(&mut self, message_id: &MessageId, burned: Bud) {
         if let Some(transfer) = self.transfers.get_mut(message_id) {
             transfer.burned_amount = burned.get();
@@ -1335,6 +1337,97 @@ mod tests {
             "Forged transfer amount must change bridge root"
         );
     }
+}
+
+/// The consensus half of a bridge burn: what block execution does.
+///
+/// `Blockchain::burn_bridge_transfer_with_event` used to run this against the
+/// live state from the RPC handler. The debit and `bridge_state` are both in
+/// the state root, so a node that served the call sealed blocks its peers
+/// rejected; the transaction type `BridgeBurn` reaches the same body through
+/// the executor instead, and this is that body.
+///
+/// Everything here is state-only. Persistence and the universal-relayer
+/// enqueue are node-local and stay outside consensus (see
+/// `Blockchain::drain_pending_bridge_burns`).
+///
+/// # Errors
+///
+/// The transfer's own refusals (unknown id, not minted here, bad expiry, the
+/// burner not holding what was minted) and the registry's registration
+/// refusal, which leaves the burn unapplied because the registration runs
+/// before the debit.
+pub fn apply_burn_to_state(
+    state: &mut crate::core::account::AccountState,
+    burn: &BridgeBurnParams,
+) -> Result<DomainEvent, String> {
+    let transfer = state
+        .bridge_state
+        .get_transfer(&burn.message_id)
+        .cloned()
+        .ok_or_else(|| "Unknown bridge transfer".to_string())?;
+    let params = *state.registry.params();
+    let (held, _relayer_fee) = split_bridge_fee(
+        transfer.amount,
+        params.bridge_relayer_fee_ppm,
+        params.bridge_relayer_min_fee,
+    )
+    .map_err(|e| e.to_string())?;
+    let amount = held.get();
+    let burner = transfer.recipient;
+    let burner_balance = state.get_balance(&burner);
+    if burner_balance < amount {
+        return Err(format!(
+            "Insufficient balance for bridge burn: burner has {burner_balance}, needed {amount}"
+        ));
+    }
+    // The message is registered BEFORE the row flips, so a refused
+    // registration leaves the transfer and the balance exactly as they were.
+    // `burn_with_event` is built once on a copy to learn the message without
+    // writing anything.
+    let mut trial = state.bridge_state.clone();
+    let trial_event = trial
+        .burn_with_event(
+            burn.message_id,
+            burn.domain,
+            burn.domain_height,
+            burn.event_index,
+            burn.expiry_height,
+            burn.recipient_eth,
+        )
+        .map_err(|e| e.to_string())?;
+    if let Some(message) = trial_event.message.clone() {
+        crate::cross_domain::message::register_cross_domain_on_state(state, &message)?;
+    }
+    let event = state
+        .bridge_state
+        .burn_with_event(
+            burn.message_id,
+            burn.domain,
+            burn.domain_height,
+            burn.event_index,
+            burn.expiry_height,
+            burn.recipient_eth,
+        )
+        .map_err(|e| e.to_string())?;
+    let burner_account = state.get_or_create(&burner);
+    burner_account.balance = burner_account.balance.saturating_sub(amount);
+    state.bridge_state.record_burn_debit(&burn.message_id, held);
+    Ok(event)
+}
+
+/// Everything a `BridgeBurn` transaction carries.
+///
+/// A struct rather than seven arguments: the fields are one row's worth of
+/// coordinates and the executor passes them straight through.
+#[derive(Debug, Clone, Copy)]
+pub struct BridgeBurnParams {
+    pub message_id: MessageId,
+    pub domain: DomainId,
+    pub domain_height: u64,
+    pub event_index: u32,
+    pub expiry_height: u64,
+    pub recipient_eth: [u8; 20],
 }
 
 #[cfg(test)]

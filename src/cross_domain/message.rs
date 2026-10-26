@@ -130,6 +130,9 @@ impl CrossDomainMessage {
     ///
     /// A message naming what failed: missing envelope, a signer that is
     /// not the sender, or a signature that does not open.
+    /// WIRING: called by `register_relayed_on_state`, the body of the
+    /// `CrossDomainMessage` transaction, and by the relayer suite that asserts
+    /// an unsigned or wrongly signed message is refused.
     pub fn verify_sender_signature(&self) -> Result<(), String> {
         if self.sender_public_key.is_empty() || self.sender_signature.is_empty() {
             return Err("cross-domain message carries no sender signature".into());
@@ -204,6 +207,78 @@ pub struct CrossDomainMessageParams {
     pub payload_hash: Hash32,
     pub kind: MessageKind,
     pub expiry_height: u64,
+}
+
+/// The consensus half of registering a cross-domain message: what block
+/// execution does.
+///
+/// Chain-built messages (lock, mint, burn, unlock) are the chain's own word and
+/// skip the relayer gate; a RELAYED message must clear two more gates first,
+/// and [`register_relayed_on_state`] is the one that applies them. Both halves
+/// live here so the gates and the insert cannot drift apart.
+///
+/// # Errors
+///
+/// The message's own refusals: an id that does not match its fields, a message
+/// addressed to its own source domain, one that has already expired, and the
+/// registry's duplicate and size limits.
+pub fn register_cross_domain_on_state(
+    state: &mut crate::core::account::AccountState,
+    message: &CrossDomainMessage,
+) -> Result<(), String> {
+    if !message.verify_id() {
+        return Err(
+            "Cross-domain message ID does not match canonical preimage (potential forgery)".into(),
+        );
+    }
+    if message.source_domain == message.target_domain {
+        return Err(format!(
+            "Cross-domain message source and target domains must differ (both={})",
+            message.source_domain
+        ));
+    }
+    // Expiry is judged against the block being executed, not against the
+    // request's idea of the height: the height is consensus state and the
+    // request has none.
+    let height = state.current_block_height;
+    if message.expiry_height > 0 && height > message.expiry_height {
+        return Err(format!(
+            "Cross-domain message expired (expiry={}, current={height})",
+            message.expiry_height
+        ));
+    }
+    state.message_registry.insert(message.clone())
+}
+
+/// Register a RELAYED message, with the relayer gate and the sender's
+/// signature.
+///
+/// `relayer` is the transaction's `from`. The message names its own sender and
+/// must prove it (`verify_sender_signature`); `relayer` is who pays for and
+/// carries the submission, and it must be an active relayer on this chain. The
+/// two are checked separately because they answer different questions: a
+/// message signed by an active relayer still has to be delivered by one, and
+/// the delivery is what this transaction is.
+///
+/// # Errors
+///
+/// [`register_cross_domain_on_state`]'s refusals, plus a relayer that is not
+/// active and a message whose sender signature does not verify.
+pub fn register_relayed_on_state(
+    state: &mut crate::core::account::AccountState,
+    message: &CrossDomainMessage,
+    relayer: crate::core::address::Address,
+) -> Result<(), String> {
+    state
+        .registry
+        .ensure_active_relayer(&relayer)
+        .map_err(|e| e.to_string())?;
+    // BLG-0113 (P05-F06): the sender must SIGN the message id. The
+    // self-declared field alone let anybody name an active relayer and
+    // register arbitrary messages - or pre-register a predictable lock id out
+    // from under the real one.
+    message.verify_sender_signature()?;
+    register_cross_domain_on_state(state, message)
 }
 
 #[cfg(test)]
