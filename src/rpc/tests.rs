@@ -815,13 +815,64 @@ mod rpc_tests {
         );
         cross_domain_msg.sign_sender_ed25519(&relayer_keys);
 
-        let msg_result = server
+        // The relay is a transaction now, and a transaction is signed by the
+        // node's consensus signer. This chain runs PoW with no signer (by
+        // design), so the door must refuse with that reason rather than
+        // half-register anything.
+        let signerless = server
             .submit_cross_domain_message(cross_domain_msg.clone())
             .await
-            .unwrap();
+            .expect_err("a node with no consensus signer cannot build a transaction");
+        assert!(
+            signerless.message().contains("No consensus signer"),
+            "the refusal names the missing signer: {}",
+            signerless.message()
+        );
+
+        // The same call on a chain whose node holds a signer answers with the
+        // TRANSACTION hash, not the message id: `message_registry` is in the
+        // state root, so nothing is registered until a block carries it.
+        let node_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let node_addr = Address::from(node_keys.public_key_bytes());
+        let node_signer = Arc::new(crate::crypto::signer::KeyPairSigner::new(node_keys));
+        let mut relay_bc = Blockchain::new(
+            Arc::new(crate::consensus::pos::PoSEngine::with_signer(
+                crate::consensus::pos::PoSConfig::default(),
+                None,
+                node_signer.clone(),
+            )),
+            None,
+            45262,
+            None,
+        );
+        relay_bc.state.add_balance(&relayer, 5_000);
+        relay_bc
+            .state
+            .bond_relayer(&relayer, 2_000)
+            .expect("the relayer bonds");
+        relay_bc.state.add_balance(&node_addr, 5_000);
+        let (relay_server, relay_chain) = setup_with_blockchain(relay_bc).await;
+        let msg_result = relay_server
+            .submit_cross_domain_message(cross_domain_msg.clone())
+            .await
+            .expect("a signed transaction is built and queued");
+        let hash_hex = msg_result
+            .strip_prefix("0x")
+            .expect("an RPC transaction hash is 0x-prefixed");
         assert_eq!(
+            hex::decode(hash_hex).expect("valid hex").len(),
+            32,
+            "the answer is the 32-byte transaction hash: {msg_result}"
+        );
+        assert_ne!(
             msg_result,
-            format!("0x{}", hex::encode(cross_domain_msg.message_id))
+            format!("0x{}", hex::encode(cross_domain_msg.message_id)),
+            "the message id is not a receipt: registration needs a block"
+        );
+        assert_eq!(
+            relay_chain.get_mempool_size().await,
+            1,
+            "the relay is queued as a transaction"
         );
 
         let asset_id = crate::cross_domain::AssetId([42u8; 32]);
