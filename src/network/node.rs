@@ -3432,32 +3432,29 @@ impl Node {
                                         continue;
                                     }
                                     NetworkMessage::VerifiedDomainCommitment(payload) => {
-                                        info!(
-                                            "Received VerifiedDomainCommitment from {} for domain {}",
+                                        // Consensus-state isolation, same rule as
+                                        // the raw `DomainCommitment` arm above:
+                                        // applying a commitment writes
+                                        // `external_roots`, which
+                                        // `AccountState::calculate_state_root`
+                                        // folds into the state root, and no
+                                        // block-execution path reproduces that
+                                        // write. A peer frame is a notification,
+                                        // not an authorized state transition -
+                                        // the operator listener is the only entry
+                                        // that carries the finality check plus the
+                                        // signed in-block StateUpdateTx, and a node
+                                        // that applied this one would seal blocks
+                                        // its peers reject.
+                                        warn!(
+                                            "Ignoring gossiped VerifiedDomainCommitment from {} for domain {}; a verified commitment enters through the operator path and its in-block state update, never from a peer",
                                             peer_id, payload.commitment.domain_id
                                         );
-                                        let payload_clone = payload.clone();
-                                        let chain = self.chain.clone();
-                                        let swarm_cmd_tx = self.command_tx.clone();
-                                        let pm_arc = self.peer_manager.clone();
-                                        tokio::spawn(async move {
-                                            match chain.submit_verified_domain_commitment(payload_clone.clone()).await {
-                                                Ok(_) => {
-                                                    if let Ok(mut pm) = pm_arc.lock() {
-                                                        pm.report_good_behavior(&peer_id);
-                                                    }
-                                                    let msg = NetworkMessage::VerifiedDomainCommitment(payload_clone);
-                                                    let _ = swarm_cmd_tx.send(NodeCommand::Broadcast("blocks".into(), msg)).await;
-                                                }
-                                                Err(e) => {
-                                                    warn!("Failed to process VerifiedDomainCommitment from {peer_id}: {e}");
-                                                    if let Ok(mut pm) = pm_arc.lock() {
-                                                        pm.report_invalid_block(&peer_id);
-                                                    }
-                                                }
-                                            }
-                                        });
-                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                        {
+                                            let mut pm = self.peer_manager_lock();
+                                            pm.report_bad_behavior(&peer_id);
+                                        }
+                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
                                         continue;
                                     }
                                     NetworkMessage::CrossDomainMessage(msg_obj) => {
