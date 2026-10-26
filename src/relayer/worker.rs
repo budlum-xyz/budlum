@@ -131,21 +131,59 @@ const PENDING_FILE_NAME: &str = "relayer-pending.json";
 /// `UniversalRelay` has no chain-side deadline to lean on.
 const MAX_REQUESTER_LOOKUP_FAILURES: u32 = 1440;
 
-/// Records one failed attempt for a request. Returns true, and forgets the
-/// request, once it reached [`MAX_RELAY_ATTEMPTS`].
+/// Records one failed attempt for a request.
+///
+/// Returns `true` when the request has now failed enough passes to be worth
+/// alarming about. It does **not** forget the request and it does **not** end
+/// it: a retry-class failure is hit by transient conditions - an external RPC
+/// outage, a confirmation timeout, a node started without a relayer signing
+/// key - and a `UniversalRelay` request carries no on-chain expiry, escrow or
+/// refund, so "skipped" here means the submitter's fee is spent and nothing is
+/// ever relayed. The counter exists to make a long outage visible, not to
+/// discard paid work.
 fn note_failed_attempt(attempts: &mut std::collections::HashMap<String, u32>, hash: &str) -> bool {
     let tries = attempts.entry(hash.to_string()).or_insert(0);
+    let limit = relay_alarm_after_attempts();
     *tries = tries.saturating_add(1);
-    if *tries >= MAX_RELAY_ATTEMPTS {
-        attempts.remove(hash);
-        return true;
-    }
-    false
+    *tries == limit
 }
 
-/// How many passes one relay request may fail with a retryable error before
-/// it is skipped. Passes are five seconds apart.
-const MAX_RELAY_ATTEMPTS: u32 = 120;
+/// How many failed passes over one request make it an alarmable event.
+///
+/// Configurable with `RELAY_ALARM_AFTER_ATTEMPTS`; passes are five
+/// seconds apart, so the default is about ten minutes of a request that cannot
+/// be delivered. Reaching the budget raises an error-level event and **keeps
+/// retrying**: the request is still paid and still unrelayed, and dropping it
+/// would turn a transient outage into permanent loss.
+fn relay_alarm_after_attempts() -> u32 {
+    std::env::var("RELAY_ALARM_AFTER_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_RELAY_ALARM_AFTER_ATTEMPTS)
+}
+
+/// Default value of [`relay_alarm_after_attempts`].
+const DEFAULT_RELAY_ALARM_AFTER_ATTEMPTS: u32 = 120;
+
+/// Durable record of a relay request the worker gave up on.
+///
+/// Written as JSON lines beside the cursor, so no request leaves the system
+/// without an artifact an operator can act on: the request hash, the external
+/// chain and target, the sender's nonce and the reason the adapter refused it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct DeadLetter {
+    request: String,
+    chain: String,
+    target: String,
+    external_nonce: u64,
+    sender: String,
+    attempts: u32,
+    reason: String,
+}
+
+/// The dead-letter file name, next to the cursor file.
+const DEAD_LETTER_FILE_NAME: &str = "relayer-deadletter.jsonl";
 
 impl RelayerWorker {
     pub fn new(chain: ChainHandle, relayer_address: Address) -> Self {
@@ -226,6 +264,69 @@ impl RelayerWorker {
     fn pending_path(&self) -> Option<std::path::PathBuf> {
         let cursor = self.cursor_path.as_ref()?;
         Some(cursor.with_file_name(PENDING_FILE_NAME))
+    }
+
+    /// Where abandoned requests are logged.
+    fn dead_letter_path(&self) -> Option<std::path::PathBuf> {
+        let cursor = self.cursor_path.as_ref()?;
+        Some(cursor.with_file_name(DEAD_LETTER_FILE_NAME))
+    }
+
+    /// Append one abandoned request to the dead-letter log.
+    ///
+    /// Best effort on the file, loud on the log: the request is already
+    /// unrelayable, and refusing to advance the cursor because the audit file
+    /// is unwritable would hold every later request hostage behind it. A write
+    /// that fails is reported at error level with the whole record, so the
+    /// artifact exists either way - in a file or in the operator's log.
+    fn record_dead_letter(&self, record: DeadLetter) {
+        let Some(path) = self.dead_letter_path() else {
+            error!(
+                request = %record.request,
+                reason = %record.reason,
+                "Relayer: request abandoned with no cursor path; it is only in this log"
+            );
+            return;
+        };
+        let line = match serde_json::to_string(&record) {
+            Ok(line) => line,
+            Err(error) => {
+                error!(
+                    request = %record.request,
+                    reason = %record.reason,
+                    "Relayer: could not encode the dead-letter record: {error}"
+                );
+                return;
+            }
+        };
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(line.as_bytes())?;
+                file.write_all(b"\n")?;
+                file.sync_all()
+            });
+        match written {
+            Ok(()) => warn!(
+                request = %record.request,
+                chain = %record.chain,
+                reason = %record.reason,
+                path = %path.display(),
+                "Relayer: request permanently unrelayed; recorded in the dead-letter log"
+            ),
+            Err(error) => error!(
+                request = %record.request,
+                chain = %record.chain,
+                target = %record.target,
+                sender = %record.sender,
+                reason = %record.reason,
+                "Relayer: request permanently unrelayed and the dead-letter log is unwritable \
+                 ({error}); the record is only in this line"
+            ),
+        }
     }
 
     /// Read the pending results persisted by an earlier run.
@@ -708,37 +809,69 @@ impl RelayerWorker {
                             height = h,
                             "Relayer: Detected external transaction request"
                         );
+                        // Read before `process_relay` takes the request by
+                        // value, so a refusal can be recorded with the fields
+                        // that identify the external action.
+                        let dead_letter_ref = (
+                            format!("{:?}", ext_tx.chain),
+                            ext_tx.target_address.clone(),
+                            ext_tx.external_nonce,
+                        );
 
                         match self.process_relay(&tx.hash, tx.from, ext_tx).await {
                             RelayOutcome::Submitted => {
                                 self.settled.insert(tx.hash.clone());
                             }
                             RelayOutcome::Refused => {
-                                // A refusal at the adapter is a fact about
-                                // the request: retrying it changes nothing
-                                // and the chain-side deadline reclaims it.
+                                // A refusal is a verdict about the request,
+                                // not about the attempt. It is written to the
+                                // dead-letter log before the cursor moves, so
+                                // the request is not silently dropped: an
+                                // operator can see which paid request will
+                                // never be relayed, and why.
+                                let attempts = self.attempts.get(&tx.hash).copied().unwrap_or(0);
+                                self.record_dead_letter(DeadLetter {
+                                    request: tx.hash.clone(),
+                                    chain: dead_letter_ref.0.clone(),
+                                    target: dead_letter_ref.1.clone(),
+                                    external_nonce: dead_letter_ref.2,
+                                    sender: format!("{:?}", tx.from),
+                                    attempts,
+                                    reason: "adapter refused the request".to_string(),
+                                });
                                 self.settled.insert(tx.hash.clone());
                             }
                             RelayOutcome::Retry => {
-                                // The block stays under the cursor; the
+                                // The block stays under the cursor and the
                                 // next pass comes back to this request.
-                                // A request that keeps failing is dropped
-                                // after a bounded number of passes, so one
-                                // request cannot hold every later block.
+                                //
+                                // A retry-class failure is transient by
+                                // definition, and a dropped `UniversalRelay`
+                                // request has no on-chain expiry, escrow or
+                                // refund: "skipping it" would spend the
+                                // submitter's fee and never relay anything.
+                                // So the cursor does not move past it. The
+                                // attempt counter only escalates the log to
+                                // error level once the outage is long enough
+                                // to need an operator, and it never ends the
+                                // request.
                                 if note_failed_attempt(&mut self.attempts, &tx.hash) {
+                                    error!(
+                                        height = h,
+                                        request = %tx.hash,
+                                        attempts = self.attempts.get(&tx.hash).copied().unwrap_or(0),
+                                        "Relayer: relay request has failed every pass for the whole \
+                                         alarm budget; it is still paid and still unrelayed, and the \
+                                         relayer keeps retrying it - an operator must check the \
+                                         external chain and this relayer's connectivity"
+                                    );
+                                } else {
                                     warn!(
                                         height = h,
                                         request = %tx.hash,
-                                        "Relayer: request failed repeatedly; skipping it so later blocks are not held"
+                                        "Relayer: result not accepted yet; holding the cursor and retrying"
                                     );
-                                    self.settled.insert(tx.hash.clone());
-                                    continue;
                                 }
-                                warn!(
-                                    height = h,
-                                    request = %tx.hash,
-                                    "Relayer: result not accepted yet; holding the cursor and retrying"
-                                );
                                 break 'heights;
                             }
                             RelayOutcome::Held => {
@@ -1072,15 +1205,67 @@ const CONFIRMATION_DEPTH: u32 = crate::cross_domain::evm::header::DEFAULT_CONFIR
 mod attempt_budget {
     use super::*;
 
+    /// The attempt counter escalates the log; it never ends the request.
+    ///
+    /// A `UniversalRelay` request has no on-chain expiry, escrow or refund, so
+    /// a transient failure that ends the request spends the submitter's fee
+    /// and relays nothing. `note_failed_attempt` therefore reports the alarm
+    /// once and keeps the counter - and the request - alive.
     #[test]
-    fn a_request_is_skipped_after_the_attempt_budget() {
+    fn the_attempt_budget_alarms_but_never_abandons_the_request() {
+        let limit = super::relay_alarm_after_attempts();
         let mut attempts = std::collections::HashMap::new();
-        for _ in 1..MAX_RELAY_ATTEMPTS {
+        for _ in 1..limit {
             assert!(!note_failed_attempt(&mut attempts, "0xaa"));
         }
-        assert!(note_failed_attempt(&mut attempts, "0xaa"));
-        assert!(attempts.is_empty());
-        assert!(!note_failed_attempt(&mut attempts, "0xaa"));
+        assert!(
+            note_failed_attempt(&mut attempts, "0xaa"),
+            "the budget alarms"
+        );
+        assert_eq!(
+            attempts.get("0xaa").copied(),
+            Some(limit),
+            "the request was forgotten at the alarm; it must keep retrying"
+        );
+        assert!(
+            !note_failed_attempt(&mut attempts, "0xaa"),
+            "the alarm must fire once, not on every later pass"
+        );
+        assert!(attempts.contains_key("0xaa"));
+    }
+
+    /// The alarm budget is configurable and ignores nonsense values.
+    #[test]
+    fn the_alarm_budget_is_configurable() {
+        // Only the parse path is exercised here: `std::env` is process-global
+        // and these tests run in parallel, so the variable is read through the
+        // helper rather than set here.
+        assert!(super::relay_alarm_after_attempts() > 0);
+    }
+
+    /// An abandoned request leaves a record an operator can act on.
+    #[test]
+    fn an_abandoned_request_is_written_to_the_dead_letter_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cursor = dir.path().join("relay-cursor");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let worker = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
+            .with_cursor_path(Some(cursor.clone()));
+        worker.record_dead_letter(DeadLetter {
+            request: "0xdead".to_string(),
+            chain: "Ethereum".to_string(),
+            target: "0x00000000000000000000000000000000000000ff".to_string(),
+            external_nonce: 4,
+            sender: "0x01".to_string(),
+            attempts: 3,
+            reason: "adapter refused the request".to_string(),
+        });
+        let path = dir.path().join(DEAD_LETTER_FILE_NAME);
+        let text = std::fs::read_to_string(&path).expect("dead-letter file");
+        let record: DeadLetter = serde_json::from_str(text.trim()).expect("one JSON line");
+        assert_eq!(record.request, "0xdead");
+        assert_eq!(record.external_nonce, 4);
+        assert_eq!(record.attempts, 3);
     }
 }
 

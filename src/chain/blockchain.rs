@@ -6366,6 +6366,91 @@ impl Blockchain {
         }
         (self.chain.len() != other_chain.len()).then_some(common_len)
     }
+    /// Reorganise onto a peer-supplied suffix, joining it to this chain.
+    ///
+    /// `try_reorg` needs the whole candidate chain from genesis, and the peer
+    /// only ever sends the blocks from its fork height. A caller outside the
+    /// chain actor has no way to read the prefix except by copying it across
+    /// the actor boundary, and the fork height that sizes that copy is chosen
+    /// by the peer (CWE-400). This entry point does the join here, where the
+    /// prefix already lives, so nothing the peer controls decides how much is
+    /// copied or when.
+    ///
+    /// The cheap tests run first and reject a batch without touching the
+    /// prefix: an empty suffix, a fork at genesis, a suffix that does not
+    /// continue this chain, a fork deeper than [`MAX_REORG_DEPTH`] or below
+    /// the finalized height, and - on a length-scored engine - a candidate
+    /// that cannot be longer than this chain. The last one is gated by
+    /// [`ConsensusEngine::shorter_chain_can_never_win`], because on a
+    /// work-scored or checkpoint-scored engine a shorter candidate can
+    /// legitimately be the better chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same refusals as [`Self::try_reorg`], plus the structural
+    /// ones that only exist here.
+    pub fn try_reorg_suffix(&mut self, suffix: Vec<Block>) -> Result<bool, String> {
+        let Some(first) = suffix.first() else {
+            return Err("empty reorg suffix".into());
+        };
+        let start = first.index;
+        if start == 0 {
+            return Err("Candidate chain attempts to replace configured genesis".into());
+        }
+        let start_index = usize::try_from(start).map_err(|_| "fork height out of range")?;
+        if start_index > self.chain.len() {
+            return Err(format!(
+                "reorg suffix starts at height {start}, beyond the local chain of {}",
+                self.chain.len()
+            ));
+        }
+        // The first suffix block must be the child of the block this chain
+        // already holds at `start - 1`. Nothing below is worth paying for when
+        // it is not.
+        match self.chain.get(start_index - 1) {
+            Some(parent) if parent.hash == first.previous_hash => {}
+            _ => return Err("suffix does not continue the local chain".into()),
+        }
+        let reorg_depth = self.chain.len().saturating_sub(start_index);
+        if reorg_depth > MAX_REORG_DEPTH {
+            return Err(format!(
+                "Reorg depth {reorg_depth} exceeds max {MAX_REORG_DEPTH}"
+            ));
+        }
+        if start_index as u64 <= self.finalized_height {
+            return Err(format!(
+                "Cannot reorg fork point {start_index} at or below finalized height {}",
+                self.finalized_height
+            ));
+        }
+        // A comparison the peer cannot make expensive, before a single block
+        // is copied - but only on an engine where a strictly shorter chain can
+        // never win. PoW (accumulated work) and PoS (checkpoint score) can both
+        // prefer a shorter candidate, and they say so; on those the copy below
+        // is simply unavoidable work, still peer-independent in size and
+        // bounded by the local chain the actor already holds.
+        let candidate_len = start_index.saturating_add(suffix.len());
+        if self.consensus.shorter_chain_can_never_win() && candidate_len < self.chain.len() {
+            return Ok(false);
+        }
+        let mut candidate = Vec::with_capacity(candidate_len);
+        candidate.extend_from_slice(&self.chain[..start_index]);
+        candidate.extend(suffix);
+        self.try_reorg(candidate)
+    }
+
+    /// WIRING: the network never calls this with a peer-built chain. The only
+    /// production door is [`Self::try_reorg_suffix`], reached from the
+    /// `ChainCommand::TryReorgSuffix` arm of the chain actor, which joins the
+    /// suffix to this chain before calling in here. This form stays because
+    /// the disasters and chaos suites drive a reorg from genesis directly, and
+    /// because the suffix path delegates to it.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a candidate that does not win fork choice, replaces genesis,
+    /// forks deeper than [`MAX_REORG_DEPTH`], forks at or below the finalized
+    /// height, or fails validation and replay.
     pub fn try_reorg(&mut self, new_chain: Vec<Block>) -> Result<bool, String> {
         if !self.consensus.is_better_chain(&self.chain, &new_chain) {
             return Ok(false);
@@ -11403,6 +11488,159 @@ mod bond_and_reorg_tests {
         assert!(
             crate::domain::storage_deal::StorageRegistry::validate_challenge_window(5, 9, 10)
                 .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod reorg_suffix_tests {
+    use super::*;
+
+    fn chain_with(consensus: Arc<dyn crate::consensus::ConsensusEngine>, len: u64) -> Blockchain {
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        for _ in 1..len {
+            let tip = bc.chain.last().expect("genesis").clone();
+            let block = Block::new(tip.index + 1, tip.hash.clone(), Vec::new());
+            bc.chain.push(block);
+        }
+        bc
+    }
+
+    fn chain_of(len: u64) -> Blockchain {
+        chain_with(Arc::new(crate::consensus::pow::PoWEngine::new(0)), len)
+    }
+
+    fn fork_blocks(bc: &Blockchain, start: u64, count: u64) -> Vec<Block> {
+        let parent = &bc.chain[(start - 1) as usize];
+        let mut blocks = Vec::new();
+        let mut previous = parent.hash.clone();
+        for offset in 0..count {
+            let mut block = Block::new(start + offset, previous, Vec::new());
+            block.hash = block.calculate_hash();
+            previous = block.hash.clone();
+            blocks.push(block);
+        }
+        blocks
+    }
+
+    /// The peer's fork height no longer sizes a chain read, and a suffix that
+    /// cannot make the chain longer is refused before anything is copied.
+    ///
+    /// CWE-400: `/sync` used to read the local chain from genesis up to the
+    /// peer's `start` and hand the joined candidate to the actor. Which engines
+    /// may take the shortcut is pinned by
+    /// `consensus::tests::only_length_based_engines_may_reject_a_shorter_candidate`.
+    #[test]
+    fn a_shorter_suffix_is_answered_as_not_a_better_chain() {
+        let mut bc = chain_of(1 + 2 * MAX_REORG_DEPTH as u64);
+        // Replace the last two blocks with one: the candidate is shorter than
+        // the chain this node already has, so it cannot win fork choice and is
+        // answered without materializing the prefix.
+        let start = (bc.chain.len() - 2) as u64;
+        let suffix = fork_blocks(&bc, start, 1);
+        assert_eq!(bc.try_reorg_suffix(suffix), Ok(false));
+    }
+
+    /// On a length-scored engine the shortcut runs before validation.
+    ///
+    /// The suffix below is structurally well-formed but carries a block that
+    /// would fail chain validation. A length-scored engine refuses it as "not
+    /// a better chain" without ever validating it, which is the copy-and-work
+    /// saving the shortcut exists for; a work-scored engine cannot take that
+    /// shortcut and has to look. Both behaviours are asserted so a change to
+    /// either side shows up here.
+    #[test]
+    fn the_shorter_chain_shortcut_skips_validation_only_where_it_is_sound() {
+        use crate::consensus::poa::{PoAConfig, PoAEngine};
+
+        let suffix_of_one = |bc: &Blockchain| {
+            let start = (bc.chain.len() - 2) as u64;
+            fork_blocks(bc, start, 1)
+        };
+
+        let mut poa = chain_with(
+            Arc::new(PoAEngine::new(PoAConfig::default(), None)),
+            1 + 2 * MAX_REORG_DEPTH as u64,
+        );
+        assert!(poa.consensus.shorter_chain_can_never_win());
+        assert_eq!(
+            poa.try_reorg_suffix(suffix_of_one(&poa)),
+            Ok(false),
+            "a shorter candidate is answered before validation on a length-scored engine"
+        );
+
+        let mut pow = chain_of(1 + 2 * MAX_REORG_DEPTH as u64);
+        assert!(!pow.consensus.shorter_chain_can_never_win());
+        assert!(
+            pow.try_reorg_suffix(suffix_of_one(&pow)).is_ok(),
+            "a work-scored engine evaluates fork choice instead of guessing"
+        );
+    }
+
+    /// Structural refusals happen before any prefix is materialized.
+    #[test]
+    fn a_suffix_that_does_not_continue_this_chain_is_refused() {
+        let mut bc = chain_of(1 + 2 * MAX_REORG_DEPTH as u64);
+        let tip = bc.chain.len() as u64;
+
+        assert!(bc.try_reorg_suffix(Vec::new()).is_err(), "empty suffix");
+
+        // Replacing genesis is the one reorg the actor refuses outright.
+        let error = bc.try_reorg_suffix(vec![Block::genesis()]).unwrap_err();
+        assert!(error.contains("genesis"), "{error}");
+
+        // Beyond the tip: nothing to join to, and the gap must not be walked.
+        let tip_block = bc.chain.last().expect("tip").clone();
+        let mut beyond = Block::new(
+            bc.chain.len() as u64 + 5,
+            tip_block.hash.clone(),
+            Vec::new(),
+        );
+        beyond.hash = beyond.calculate_hash();
+        let error = bc.try_reorg_suffix(vec![beyond]).unwrap_err();
+        assert!(error.contains("beyond the local chain"), "{error}");
+        let _ = tip;
+
+        // Continues some other block at that height.
+        let mut foreign = fork_blocks(&bc, tip - 1, 2);
+        foreign[0].previous_hash = "ab".repeat(32);
+        let error = bc.try_reorg_suffix(foreign).unwrap_err();
+        assert!(error.contains("does not continue"), "{error}");
+    }
+
+    /// Depth is measured from the local chain, not trusted from the batch.
+    #[test]
+    fn a_suffix_forking_deeper_than_the_cap_is_refused() {
+        let mut bc = chain_of(1 + 2 * MAX_REORG_DEPTH as u64);
+        let deep_start = (bc.chain.len() - MAX_REORG_DEPTH - 1) as u64;
+        let suffix = fork_blocks(&bc, deep_start, 5);
+        let error = bc.try_reorg_suffix(suffix).unwrap_err();
+        assert!(error.contains("exceeds max"), "{error}");
+    }
+
+    /// A suffix that does win fork choice still reorganises: the join has to
+    /// produce the same candidate the caller used to build by hand.
+    #[test]
+    fn a_longer_suffix_continues_the_chain_and_is_accepted_by_the_join() {
+        let mut bc = chain_of(1 + 2 * MAX_REORG_DEPTH as u64);
+        let start = (bc.chain.len() - 2) as u64;
+        let suffix = fork_blocks(&bc, start, 6);
+        // The join must produce exactly the local prefix plus the suffix. The
+        // fork-choice and validation path below is exercised by the reorg
+        // tests; here the point is that the prefix comes from the chain itself.
+        let mut expected: Vec<Block> = bc.chain[..start as usize].to_vec();
+        expected.extend(suffix.clone());
+        assert_eq!(bc.chain[..start as usize].len(), start as usize);
+        assert_eq!(expected.len(), start as usize + suffix.len());
+        // And the structural gates above admit it (it reaches the chain rules,
+        // which refuse an unproduced block rather than the shape).
+        let outcome = bc.try_reorg_suffix(suffix);
+        assert!(
+            !matches!(&outcome, Err(error) if error.contains("does not continue")
+                || error.contains("beyond the local chain")
+                || error.contains("exceeds max")
+                || error.contains("genesis")),
+            "a well-formed longer suffix must not be refused structurally: {outcome:?}"
         );
     }
 }

@@ -280,3 +280,82 @@ mod tests {
         );
     }
 }
+
+/// A boundary committed before a restart is still a fork-choice anchor after
+/// it.
+///
+/// Epoch boundaries stopped being written at commit time (P01-F04: a local
+/// write split the net at a boundary two leaders raced), and were parked in an
+/// in-memory list instead. Nothing persisted or reloaded that list, and no
+/// startup path replays committed blocks through the engine, so a boundary
+/// parked before a crash lost its revert limit permanently. `load_state` now
+/// rebuilds the parked set from the chain it restores, and promotes the
+/// boundaries the node had already certified as final.
+#[test]
+fn a_restart_keeps_the_epoch_boundary_checkpoint() {
+    use crate::consensus::pos::{Checkpoint, PoSConfig, PoSEngine};
+    use crate::consensus::ConsensusEngine;
+    use crate::core::address::Address;
+    use crate::storage::db::Storage;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("restart.cp");
+    let epoch_length = 8u64;
+    let config = PoSConfig {
+        epoch_length,
+        ..PoSConfig::default()
+    };
+
+    // A chain whose tip is one block past the first epoch boundary.
+    let producer = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let producer_addr = Address::from(producer.public_key_bytes());
+    let mut chain = vec![crate::core::block::Block::genesis()];
+    for i in 1..=epoch_length + 1 {
+        let previous = chain.last().unwrap().hash.clone();
+        let mut block = crate::core::block::Block::new(i, previous, vec![]);
+        block.slot = i;
+        block.producer = Some(producer_addr);
+        block.timestamp = 1_000 + u128::from(i) * 1_000;
+        block.hash = block.calculate_hash();
+        chain.push(block);
+    }
+    let boundary = chain[epoch_length as usize].clone();
+
+    {
+        let storage = Storage::new(path.to_str().expect("utf8 path")).expect("store");
+        for block in &chain {
+            storage
+                .commit_block(block, &block.state_root)
+                .expect("save block");
+        }
+        // The node finalised the boundary, so the checkpoint it would have
+        // promoted is in the store.
+        storage
+            .save_checkpoint(&Checkpoint {
+                block_index: boundary.index,
+                block_hash: boundary.hash.clone(),
+                timestamp: boundary.timestamp,
+            })
+            .expect("save checkpoint");
+    }
+
+    // Restart: a fresh engine over the same store.
+    let engine = PoSEngine::new(config, None);
+    let storage = Storage::new(path.to_str().expect("utf8 path")).expect("reopen");
+    engine.load_state(&storage).expect("load state");
+
+    let checkpoints = engine.get_checkpoints().expect("checkpoints");
+    assert!(
+        checkpoints
+            .iter()
+            .any(|c| c.block_index == boundary.index && c.block_hash == boundary.hash),
+        "the boundary committed before the restart must still bound fork choice: {checkpoints:?}"
+    );
+    assert_eq!(
+        engine.last_checkpoint().map(|(h, _)| h),
+        Some(boundary.index),
+        "the restored checkpoint is the revert limit the node had"
+    );
+    let _ = Arc::new(engine);
+}

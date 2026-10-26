@@ -305,6 +305,19 @@ pub trait ConsensusEngine: Send + Sync {
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
         self.fork_choice_score(candidate) > self.fork_choice_score(current)
     }
+
+    /// Whether `is_better_chain` can never prefer a candidate that is strictly
+    /// shorter than the current chain.
+    ///
+    /// `try_reorg_suffix` uses this to answer a peer batch that cannot win
+    /// before it materializes the local prefix (CWE-400). The default is the
+    /// length-based rule below, where a shorter chain scores strictly less.
+    /// Engines that score work or checkpoints - where a shorter chain can
+    /// legitimately be the better one - must report `false`, or the shortcut
+    /// would refuse a heavier fork.
+    fn shorter_chain_can_never_win(&self) -> bool {
+        true
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -366,6 +379,36 @@ mod tests {
             deep_new.push(block(h, &format!("{prev}-fork")));
         }
         assert!(!engine.can_reorg(&deep_current, &deep_new));
+    }
+
+    /// The suffix reorg shortcut is only applied where it is sound.
+    ///
+    /// `try_reorg_suffix` answers a batch that cannot win before it
+    /// materializes the local prefix, and it may only do that on an engine
+    /// where a strictly shorter chain can never win. Length-based PoA
+    /// qualifies; PoW (accumulated work) and PoS (checkpoint score) do not,
+    /// because a shorter chain can be heavier or carry a better checkpoint.
+    /// An engine that flips this without updating the shortcut would refuse
+    /// honest reorgs, and flipping the shortcut without the engine would let
+    /// a peer force the copy. Both directions are pinned here.
+    #[test]
+    fn only_length_based_engines_may_reject_a_shorter_candidate() {
+        use crate::consensus::poa::{PoAConfig, PoAEngine};
+        use crate::consensus::pos::{PoSConfig, PoSEngine};
+        use crate::consensus::pow::PoWEngine;
+
+        assert!(
+            PoAEngine::new(PoAConfig::default(), None).shorter_chain_can_never_win(),
+            "PoA scores chain length"
+        );
+        assert!(
+            !PoWEngine::new(0).shorter_chain_can_never_win(),
+            "accumulated work lets a shorter chain win; the shortcut must not apply"
+        );
+        assert!(
+            !PoSEngine::new(PoSConfig::default(), None).shorter_chain_can_never_win(),
+            "a checkpoint score lets a shorter chain win; the shortcut must not apply"
+        );
     }
 
     /// A longer candidate that shares no block with the current slice is a
