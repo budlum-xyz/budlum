@@ -839,15 +839,14 @@ impl ConsensusEngine for PoSEngine {
                                 block.timestamp, floor
                             )));
                         }
-                        let now_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis();
-                        if now_ms < floor {
-                            return Err(ConsensusError(format!(
-                                "PoS leader round {round} claimed ahead of wall clock: now {now_ms} < floor {floor}"
-                            )));
-                        }
+                        // The floor above is read off the parent, so every node computes
+                        // the same verdict for the same block. It must NOT be
+                        // re-checked against this node's clock: the verdict would then
+                        // vary by validator, two honest nodes could disagree about one
+                        // block, and the drift budget would collapse from the chain's
+                        // future-timestamp window to the leader-round spacing. The
+                        // absolute future bound stays in
+                        // `ConsensusEngine::validate_timestamp`.
                     }
                 }
                 let seed = self.calculate_seed_with_chain(

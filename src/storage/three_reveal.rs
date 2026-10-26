@@ -77,7 +77,17 @@ pub struct RevealSession {
 /// is bounded: past [`MAX_CACHED_PASSES`] the oldest key goes, which keeps the
 /// cost of a stream of distinct payloads from becoming unbounded memory.
 /// `(payload commitment, carousel width, repair permillage)`.
-type PassFoldKey = ([u8; 32], u16, u32);
+/// The A2 stream commitment is the cache key, not `(payload, k, permillage)`.
+///
+/// The fold of a frame pass is a function of the payload commitment AND every
+/// carousel parameter, block length included (`CarouselParams::
+/// stream_commitment` folds `k`, `block_len` and `total_len`). Two valid
+/// recipes over one body can share `k` and differ in block length, so a key
+/// that left the block length out let the first recipe's fold answer for the
+/// second - and the second session was then refused with `StreamMismatch`
+/// against another recipe's fold. The cache is filled by whoever holds the
+/// (public) body, so that was a way to break every viewer's reveal on a node.
+type PassFoldKey = [u8; 32];
 
 static PASS_FOLDS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::BTreeMap<PassFoldKey, [u8; 32]>>,
@@ -180,10 +190,14 @@ impl RevealSession {
             return Ok(());
         }
         // A frame-fold pin, so the fold is the only thing that can answer. It
-        // is a pure function of the payload and the carousel parameters, so it
+        // is a pure function of the payload and every carousel parameter, so it
         // is computed once per (payload, params) in this process rather than
-        // once per session - an RPC opens a session per request.
-        let key = (self.payload_commitment, self.k, ONESHOT_REPAIR_PERMILLAGE);
+        // once per session - an RPC opens a session per request. The A2 stream
+        // commitment names exactly that pair, block length included, so it is
+        // the key: a key of `(payload, k)` alone collided across recipes that
+        // share `k` and differ in block length, and the second recipe's
+        // sessions were refused against the first one's fold.
+        let key = self.emitter.stream_commitment();
         let cached = {
             let map = pass_folds()
                 .lock()
@@ -257,7 +271,16 @@ mod tests {
     use crate::storage::qr_recipe::ThreeRecipePublic;
 
     fn sample() -> (ThreeRecipePublic, Vec<u8>) {
-        let packed = pack_payload(PayloadKind::ContentBytes, b"reveal-body").unwrap();
+        sample_of(b"reveal-body")
+    }
+
+    /// The same fixture over a chosen body.
+    ///
+    /// The fold cache is process-wide, so two tests that used one body would
+    /// see each other's entries: each cache-sensitive test gets its own bytes
+    /// and asserts on its own key.
+    fn sample_of(body: &[u8]) -> (ThreeRecipePublic, Vec<u8>) {
+        let packed = pack_payload(PayloadKind::ContentBytes, body).unwrap();
         let commit = payload_commitment(&packed);
         let enc = CarouselEncoder::new(&packed, 32).unwrap();
         let stream = enc.params().stream_commitment(&commit);
@@ -271,6 +294,14 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+    }
+
+    /// Whether this exact stream's fold is cached.
+    fn cached_for(key: &[u8; 32]) -> bool {
+        pass_folds()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(key)
     }
 
     #[test]
@@ -287,7 +318,7 @@ mod tests {
     /// one reveal request used to buy a full carousel encode (CWE-407).
     #[test]
     fn an_a2_pin_is_answered_without_a_frame_pass() {
-        let (full, packed) = sample();
+        let (full, packed) = sample_of(b"a2-pin-body");
         assert_eq!(
             full.stream_id,
             CarouselEncoder::new(&packed, 32)
@@ -296,15 +327,94 @@ mod tests {
                 .stream_commitment(&full.payload_commitment),
             "the fixture must pin the A2 stream commitment"
         );
-        let before = cached_passes();
+        // The pinned id IS the A2 commitment for this fixture.
+        let key = full.stream_id;
         let recipe = ThreeRecipe::Public(full);
         let s = RevealSession::open(&recipe, None, &packed, false).unwrap();
         assert!(!s.frame_at(0).unwrap().is_empty());
+        assert!(!cached_for(&key), "an A2 pin must not build a frame pass");
+    }
+
+    /// Two valid recipes over ONE body that share `k` and differ only in block
+    /// length must not share a cached fold.
+    ///
+    /// The key used to be `(payload_commitment, k, permillage)`, which leaves
+    /// the block length out while the fold depends on it. A caller who holds
+    /// the (public) body could therefore fill the cache with the first
+    /// recipe's fold and make the second recipe's reveal sessions fail with
+    /// `StreamMismatch` for every viewer of that node. The key is the A2
+    /// stream commitment, which folds the block length in.
+    #[test]
+    fn two_recipes_sharing_k_do_not_share_a_cached_fold() {
+        let (base, packed) = sample_of(b"two-recipes-one-body");
+        let k = base.carousel.k;
+        // A block length that yields the same `k` over the same bytes.
+        let other_block_len = (base.carousel.block_len + 1..=base.carousel.block_len + 64)
+            .find(|bl| {
+                CarouselEncoder::new(&packed, *bl)
+                    .map(|e| e.params().k == k && e.params().block_len != base.carousel.block_len)
+                    .unwrap_or(false)
+            })
+            .expect("a neighbouring block length keeps k over the same payload");
+        let other_encoder = CarouselEncoder::new(&packed, other_block_len).unwrap();
         assert_eq!(
-            cached_passes(),
-            before,
-            "an A2 pin must not build a frame pass"
+            other_encoder.params().k,
+            k,
+            "the fixture must collide on `k` - that is the bug"
         );
+
+        let fold_for = |enc: &CarouselEncoder| {
+            let commit = base.payload_commitment;
+            let mut recipe = ThreeRecipePublic::new(
+                commit,
+                enc.params(),
+                enc.params().stream_commitment(&commit),
+            );
+            let emitter = RecipeEmitter::open(recipe.clone(), &packed).unwrap();
+            let n = oneshot_drop_count(enc.params().k, ONESHOT_REPAIR_PERMILLAGE);
+            let (_, fold) = emitter.emit_frames(0, n).unwrap();
+            let _ = &mut recipe;
+            fold
+        };
+        let first = fold_for(&CarouselEncoder::new(&packed, base.carousel.block_len).unwrap());
+        let second = fold_for(&other_encoder);
+        assert_ne!(
+            first, second,
+            "two recipes with different block lengths fold differently"
+        );
+
+        let pin = |fold: [u8; 32], enc: &CarouselEncoder| {
+            let commit = base.payload_commitment;
+            let recipe = ThreeRecipePublic::new(
+                commit,
+                enc.params(),
+                enc.params().stream_commitment(&commit),
+            );
+            let mut recipe = recipe;
+            recipe.stream_id = fold;
+            recipe
+        };
+        // The first recipe fills the cache...
+        let s = RevealSession::open(
+            &ThreeRecipe::Public(pin(
+                first,
+                &CarouselEncoder::new(&packed, base.carousel.block_len).unwrap(),
+            )),
+            None,
+            &packed,
+            false,
+        )
+        .expect("the first recipe's fold is its own");
+        assert!(!s.frame_at(0).unwrap().is_empty());
+        // ...and the second one must still be answered.
+        let s = RevealSession::open(
+            &ThreeRecipe::Public(pin(second, &other_encoder)),
+            None,
+            &packed,
+            false,
+        )
+        .expect("a sibling recipe sharing k must not be refused against another fold");
+        assert!(!s.frame_at(0).unwrap().is_empty());
     }
 
     /// A frame-fold pin is the one case that needs the pass. It is computed
@@ -312,7 +422,7 @@ mod tests {
     /// opens a session per request.
     #[test]
     fn a_frame_fold_pin_is_computed_once_per_payload() {
-        let (mut full, packed) = sample();
+        let (mut full, packed) = sample_of(b"frame-fold-body");
         let emitter = RecipeEmitter::open(full.clone(), &packed).unwrap();
         let n = oneshot_drop_count(full.carousel.k, ONESHOT_REPAIR_PERMILLAGE);
         let (_, fold) = emitter.emit_frames(0, n).unwrap();
@@ -323,10 +433,13 @@ mod tests {
             let s = RevealSession::open(&recipe, None, &packed, false).unwrap();
             assert!(!s.frame_at(0).unwrap().is_empty());
         }
+        // The cache is process-wide and the suite runs in parallel, so the
+        // claim is about THIS stream's key, not a global count.
         assert!(
-            cached_passes() <= before + 1,
-            "the fold is cached, not recomputed"
+            cached_for(&full.carousel.stream_commitment(&full.payload_commitment)),
+            "the pass is cached under this stream's own A2 commitment"
         );
+        let _ = before;
     }
 
     #[test]

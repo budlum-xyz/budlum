@@ -129,3 +129,52 @@ async fn test_p2p_topology_latency_drift_simulation() {
     let err = past_res.expect_err("clock-regressed block must be rejected");
     assert!(err.contains("not monotonic"), "unexpected rejection: {err}");
 }
+
+/// A peer frame is a notification, not an authorized state transition.
+///
+/// The gossip arm used to apply a peer-supplied `VerifiedDomainCommitment`
+/// through `Blockchain::submit_verified_domain_commitment`, which writes
+/// `AccountState::external_roots` - a field folded into the state root that no
+/// block-execution path reproduces. Any peer able to supply an acceptable
+/// finality proof could therefore move a state-root component on this node
+/// alone. The arm refuses the frame now, the same way its raw-commitment
+/// sibling does, and the operator listener is the only writer.
+#[test]
+fn a_gossiped_verified_commitment_cannot_move_the_external_root_anchor() {
+    // 1. The sink is consensus state: the write the arm used to make changes
+    //    the root every other node recomputes.
+    let mut state = crate::core::account::AccountState::new();
+    let before = state.calculate_state_root();
+    assert!(
+        state.anchor_external_root(7, [0x77; 32]),
+        "the anchor write itself still works"
+    );
+    assert_ne!(
+        before,
+        state.calculate_state_root(),
+        "external_roots is folded into the state root, which is why a peer \
+         frame must not be able to write it"
+    );
+
+    // 2. The arm no longer reaches that sink.
+    let node = include_str!("../network/node.rs");
+    let at = node
+        .find("NetworkMessage::VerifiedDomainCommitment(payload) =>")
+        .expect("the gossip arm exists");
+    let arm = &node[at..(at + 3_000).min(node.len())];
+    // Narrow before asserting on the slice: the arm ends at the next variant.
+    let arm = arm
+        .split("NetworkMessage::CrossDomainMessage(")
+        .next()
+        .unwrap_or(arm);
+    assert!(
+        !arm.contains("submit_verified_domain_commitment"),
+        "the P2P arm must not apply a peer-supplied commitment: it writes \
+         consensus state outside block execution"
+    );
+    assert!(
+        arm.contains("Ignoring gossiped VerifiedDomainCommitment")
+            && arm.contains("MessageAcceptance::Reject"),
+        "the frame must be refused, not silently queued"
+    );
+}
