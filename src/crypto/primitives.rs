@@ -1156,7 +1156,13 @@ fn keypair_generate_does_not_leak_public_key_via_println() {
             println!("{canary}");
         }
         _ => {
-            // nosemgrep: rust.lang.security.current-exe.current-exe - test-only re-exec of this test binary to capture its stdout; no security decision depends on the path.
+            // Test-only re-exec of this test binary to capture its stdout; no
+            // security decision depends on the path. The suppression carries
+            // the rule id alone: a trailing " - reason" after the id is not
+            // part of the recognised form in every semgrep version, and the
+            // alert this line exists to silence came back on the PR when it
+            // had one.
+            // nosemgrep: rust.lang.security.current-exe.current-exe
             let exe = std::env::current_exe().expect("test binary path");
             // `--exact` matches the full test path, which includes the module
             // (without the crate name). A bare function name matches nothing,
