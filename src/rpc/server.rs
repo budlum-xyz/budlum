@@ -2726,12 +2726,15 @@ impl BudlumApiServer for RpcServer {
         &self,
         msg: crate::cross_domain::CrossDomainMessage,
     ) -> Result<String, ErrorObjectOwned> {
-        let msg_id = hex::encode(msg.message_id);
         let msg_clone = msg.clone();
 
-        // Relayer-gated: the message sender must be an active relayer in the
-        // Permissionless registry (no whitelist, only stake).
-        self.chain
+        // Relayer-gated and in block. `message_registry` is in the state root,
+        // so the registration happens when a block carries this transaction
+        // and not when this call returns; the gates themselves (active
+        // relayer, sender signature) run in the executor against consensus
+        // state, where they can be replayed.
+        let hash = self
+            .chain
             .submit_relayed_cross_domain_message(msg)
             .await
             .map_err(|e| {
@@ -2743,7 +2746,7 @@ impl BudlumApiServer for RpcServer {
             })?;
 
         self.node.broadcast_cross_domain_message_sync(msg_clone);
-        Ok(format!("0x{msg_id}"))
+        Ok(format!("0x{hash}"))
     }
 
     async fn register_bridge_asset(
@@ -2834,7 +2837,10 @@ impl BudlumApiServer for RpcServer {
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         // Bridge burn with event requires operator auth
         self.require_operator("bud_burnBridgeTransferWithEvent")?;
-        let event = self
+        // The burn is a transaction now: it debits the burner, so it may only
+        // move state in block. This call answers with the transaction hash and
+        // the balance moves when a block carries it.
+        let hash = self
             .chain
             .burn_bridge_transfer_with_event(
                 message_id,
@@ -2853,7 +2859,8 @@ impl BudlumApiServer for RpcServer {
                 )
             })?;
         let mut roots = self.bridge_roots_json("burned").await;
-        roots["event"] = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+        roots["transactionHash"] = serde_json::Value::String(format!("0x{hash}"));
+        roots["appliedInBlock"] = serde_json::Value::Bool(true);
         Ok(roots)
     }
 
