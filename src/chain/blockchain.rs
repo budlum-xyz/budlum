@@ -1940,6 +1940,76 @@ impl Blockchain {
         Ok(tx)
     }
 
+    /// Sign a transaction for `tx_type` with the local consensus signer.
+    ///
+    /// The one place this file turns a transaction type into a signed
+    /// transaction. Read-only: it does not mutate state and does not enqueue;
+    /// the caller decides. `from` is the signer, so the transaction is an
+    /// ordinary V4 Ed25519 one paying the base fee.
+    fn build_signed_transaction(
+        &self,
+        tx_type: crate::core::transaction::TransactionType,
+    ) -> Result<Transaction, String> {
+        let signer = self
+            .consensus
+            .signer()
+            .ok_or_else(|| "No consensus signer available to build a transaction".to_string())?;
+        let from = signer.address();
+        let nonce = self.state.get_nonce(&from);
+        let mut tx = Transaction::new_with_chain_id(
+            from,
+            Address::zero(),
+            0,
+            self.state.base_fee,
+            nonce,
+            Vec::new(),
+            self.chain_id,
+            tx_type,
+        );
+        tx.signature_version = crate::core::transaction::SIGNATURE_VERSION_V4;
+        tx.signer_public_key = Vec::new();
+        tx.authorization = None;
+        let signing_hash = tx.signing_hash();
+        let signature = signer
+            .sign_block(&signing_hash)
+            .map_err(|e| format!("Transaction signing failed: {e}"))?;
+        tx.signature = Some(signature);
+        tx.hash = tx.calculate_hash();
+        Ok(tx)
+    }
+
+    /// Build the signed `BridgeBurn` transaction for a burn request.
+    ///
+    /// Read-only, like [`Self::build_state_update_transaction`]: the caller
+    /// enqueues it, and the burn itself happens in block. This is the door the
+    /// RPC uses; the state change no longer happens on the request path.
+    ///
+    /// # Errors
+    ///
+    /// When this node has no consensus signer to sign with.
+    pub fn build_bridge_burn_transaction(
+        &self,
+        burn: crate::core::transaction::BridgeBurnTx,
+    ) -> Result<Transaction, String> {
+        self.build_signed_transaction(crate::core::transaction::TransactionType::BridgeBurn(burn))
+    }
+
+    /// Build the signed `CrossDomainMessage` transaction for a relayed message.
+    ///
+    /// Read-only; the registration happens in block.
+    ///
+    /// # Errors
+    ///
+    /// When this node has no consensus signer to sign with.
+    pub fn build_cross_domain_message_transaction(
+        &self,
+        message: crate::cross_domain::CrossDomainMessage,
+    ) -> Result<Transaction, String> {
+        self.build_signed_transaction(
+            crate::core::transaction::TransactionType::CrossDomainMessage(message),
+        )
+    }
+
     pub fn verify_domain_commitment_finality(
         &self,
         commitment: &DomainCommitment,
@@ -2600,9 +2670,25 @@ impl Blockchain {
             )
             .map_err(|e| e.to_string())?;
         if let Some(message) = result.1.message.clone() {
-            if let Err(e) = self.submit_cross_domain_message(message.clone()) {
+            // The message is part of this operation, not a second door: it is
+            // registered here and rolled back with the lock if the registry
+            // refuses it.
+            if let Err(e) = crate::cross_domain::message::register_cross_domain_on_state(
+                &mut self.state,
+                &message,
+            ) {
                 self.state.bridge_state = bridge_before;
                 return Err(e);
+            }
+            // The lock is applied from the request path today (its own
+            // out-of-block gap, tracked separately): the message has to reach
+            // the durable store as well, or a restart loses a message that is
+            // in the state root.
+            if let Some(store) = &self.storage {
+                if let Err(e) = store.save_cross_domain_message(&message) {
+                    self.state.bridge_state = bridge_before;
+                    return Err(format!("Failed to persist cross-domain message: {e}"));
+                }
             }
         }
         let owner_account = self.state.get_or_create(&owner);
@@ -2623,39 +2709,18 @@ impl Blockchain {
         Ok(result)
     }
 
+    /// Register a chain-built cross-domain message.
+    ///
+    /// TEST-ONLY, for the same reason as the relayed door above. The bridge
+    /// bodies register their own messages inside block execution
+    /// (`cross_domain::message::register_cross_domain_on_state`), which is the
+    /// only path production takes.
+    #[cfg(test)]
     pub fn submit_cross_domain_message(
         &mut self,
         message: crate::cross_domain::CrossDomainMessage,
     ) -> Result<(), String> {
-        // CrossDomainMessage hardening.
-        // 1. verify_id: message_id must match the canonical preimage (a proof-forgery surface).
-        if !message.verify_id() {
-            return Err(
-                "Cross-domain message ID does not match canonical preimage (potential forgery)"
-                    .into(),
-            );
-        }
-        // 2. Domain spoofing: source_domain must differ from target_domain (no cross-message to the same domain).
-        if message.source_domain == message.target_domain {
-            return Err(format!(
-                "Cross-domain message source and target domains must differ (both={})",
-                message.source_domain
-            ));
-        }
-        // 3. Expiry check: reject the message if it has expired.
-        let current_height = self.chain.len() as u64;
-        if message.expiry_height > 0 && current_height > message.expiry_height {
-            return Err(format!(
-                "Cross-domain message expired (expiry={}, current={})",
-                message.expiry_height, current_height
-            ));
-        }
-        // 4. Message-registry duplicate protection (registration ≠ consumption).
-        // Bridge lock/burn *register* the message here; mint/unlock consume it
-        // And mark `bridge_state.replay` (V-replay). Marking replay at register
-        // Time made every subsequent mint fail with "already processed".
-        // 5. Message registry + persistence.
-        self.state.message_registry.insert(message.clone())?;
+        crate::cross_domain::message::register_cross_domain_on_state(&mut self.state, &message)?;
         if let Some(store) = &self.storage {
             store
                 .save_cross_domain_message(&message)
@@ -2664,6 +2729,11 @@ impl Blockchain {
         Ok(())
     }
 
+    /// The raw burn door, disabled since the burn became a transaction.
+    ///
+    /// TEST-ONLY: the suite that pinned "raw burn is refused" still runs
+    /// against the real method rather than a copy of its body.
+    #[cfg(test)]
     pub fn burn_bridge_transfer(
         &mut self,
         message_id: crate::cross_domain::MessageId,
@@ -2673,22 +2743,16 @@ impl Blockchain {
         Err("Raw bridge burn is disabled; use a target-domain burn event path".into())
     }
 
-    /// Burn the minted half of a bridge transfer, as the burn domain's event
-    /// path does.
+    /// Burn the minted half of a bridge transfer in one call.
     ///
-    /// Known structural gap, stated so it cannot be read past: this mutates
-    /// consensus state (the recipient's balance and `bridge_state`) from the
-    /// RPC path, outside block execution. A node whose RPC is called and a node
-    /// that never saw the call therefore disagree until the next state sync,
-    /// which is why the door that moves money has to become an in-block
-    /// transaction type (`TransactionType::BridgeBurn`) with the relayer as its
-    /// sender. That is an execution-layer change - a new signed variant, an
-    /// executor arm and the mempool path - not a fix that belongs in a
-    /// hardening round. What THIS function guarantees, so the gap cannot cost
-    /// units in the meantime: the burn is atomic. The message is registered
-    /// before the transfer is touched, so a refusal there leaves the balance
-    /// and the row exactly as they were; the debit can no longer outlive a
-    /// failed registration.
+    /// TEST-ONLY. Production reaches this body through the `BridgeBurn`
+    /// transaction: the debit and `bridge_state` are in the state root, and a
+    /// node that applied them from an RPC handler sealed blocks its peers
+    /// rejected. Kept for the bridge and relayer suites, which drive the body
+    /// directly and then assert on the event it returns; the body itself is
+    /// shared with the executor (`cross_domain::bridge::apply_burn_to_state`),
+    /// so a test here proves the same code the block path runs.
+    #[cfg(test)]
     pub fn burn_bridge_transfer_with_event(
         &mut self,
         message_id: crate::cross_domain::MessageId,
@@ -2698,90 +2762,24 @@ impl Blockchain {
         expiry_height: u64,
         recipient_eth: [u8; 20],
     ) -> Result<DomainEvent, String> {
-        // BLG-0108 (P05-F01): burn is the debit half of mint. The minted
-        // units sit with the transfer's recipient, so the burn takes them
-        // back before the row flips - without this, one lock/mint/burn/
-        // unlock cycle grows total balances by one transfer amount and the
-        // 100M supply invariant dies. Balance checked first: a refused burn
-        // must leave the transfer untouched.
-        let transfer = self
-            .state
-            .bridge_state
-            .get_transfer(&message_id)
-            .cloned()
-            .ok_or_else(|| "Unknown bridge transfer".to_string())?;
-        // The recipient holds what the mint credited to it: the transfer
-        // amount minus the relayer fee, which the mint paid to the relayer
-        // out of the arriving asset. Debiting the gross amount would demand
-        // units the recipient never received, so with any fee the burn could
-        // never succeed.
-        let params = *self.state.registry.params();
-        let (held, _relayer_fee) = crate::cross_domain::bridge::split_bridge_fee(
-            transfer.amount,
-            params.bridge_relayer_fee_ppm,
-            params.bridge_relayer_min_fee,
-        )
-        .map_err(|e| e.to_string())?;
-        let amount = held.get();
-        let burner = transfer.recipient;
-        let burner_balance = self.state.get_balance(&burner);
-        if burner_balance < amount {
-            return Err(format!(
-                "Insufficient balance for bridge burn: burner has {burner_balance}, needed {amount}"
-            ));
+        let event = crate::cross_domain::bridge::apply_burn_to_state(
+            &mut self.state,
+            &crate::cross_domain::bridge::BridgeBurnParams {
+                message_id,
+                domain,
+                domain_height,
+                event_index,
+                expiry_height,
+                recipient_eth,
+            },
+        )?;
+        if let Some(message) = event.message.clone() {
+            self.enqueue_bridge_relay(event.clone(), &message);
         }
-        // All or nothing. The message this burn produces is what the far side
-        // unlocks against, so a debit without a registered message is money
-        // taken for nothing - the old order wrote the debit first and left it
-        // standing when registration refused the message.
-        //
-        // The event is therefore built once on a COPY of the bridge state, to
-        // learn the message without writing anything, and the copy is thrown
-        // away. Registration runs next, on the real state, while the transfer
-        // and the balance are still exactly as they were. Only then is the same
-        // call made again for real; it cannot fail, because the run on the copy
-        // already succeeded against identical state (bridge state is the only
-        // input, and `submit_cross_domain_message` does not touch it).
-        let mut trial = self.state.bridge_state.clone();
-        let trial_event = trial
-            .burn_with_event(
-                message_id,
-                domain,
-                domain_height,
-                event_index,
-                expiry_height,
-                recipient_eth,
-            )
-            .map_err(|e| e.to_string())?;
-        let message = match trial_event.message.clone() {
-            Some(message) => {
-                self.submit_cross_domain_message(message.clone())?;
-                Some(message)
-            }
-            None => None,
-        };
-        let event = self
-            .state
-            .bridge_state
-            .burn_with_event(
-                message_id,
-                domain,
-                domain_height,
-                event_index,
-                expiry_height,
-                recipient_eth,
-            )
-            .map_err(|e| e.to_string())?;
-        let burner_account = self.state.get_or_create(&burner);
-        burner_account.balance = burner_account.balance.saturating_sub(amount);
-        self.state.bridge_state.record_burn_debit(&message_id, held);
         if let Some(store) = &self.storage {
             store
                 .save_bridge_state(&self.state.bridge_state)
                 .map_err(|e| format!("Failed to persist bridge state: {e}"))?;
-        }
-        if let Some(message) = message {
-            self.enqueue_bridge_relay(event.clone(), &message);
         }
         Ok(event)
     }
@@ -3354,41 +3352,27 @@ impl Blockchain {
 
     /// Permissionless entry-point for relayed cross-domain messages.
     ///
-    /// The `CrossDomainMessageRegistry` itself accepts any message, but the
-    /// Permissionless submission RPC must gate on the sender being an active
-    /// Relayer (registered with stake). The internal `submit_cross_domain_message`
-    /// Path used by the bridge lock/burn events is NOT gated - those messages
-    /// Come from authorized on-chain logic.
-    ///
-    /// Known structural gap, the same one [`Self::burn_bridge_transfer_with_event`]
-    /// states: this writes consensus-committed message state (the registry, and
-    /// through it the state root) from the RPC path rather than from block
-    /// execution, so two nodes that saw different RPC calls disagree until a
-    /// state sync. Closing it means one `TransactionType::CrossDomainMessage`
-    /// carrying the signed message, executed in `execution/executor.rs` with
-    /// the relayer as the sender - the message is already signed by its sender
-    /// (`verify_sender_signature` below), so it is the transaction body's
-    /// payload rather than a new authority. Decided as an execution-layer
-    /// change, not a hardening fix: the registry, the bridge pipeline and the
-    /// relay enqueue all have to move with it. Nothing else in this door
-    /// changes: the gate order (active relayer, then the sender's signature) is
-    /// what makes a relayed message a relayed message.
+    /// TEST-ONLY. Production reaches this body through the `CrossDomainMessage`
+    /// transaction: `message_registry` is in the state root, so inserting from
+    /// the request path made a node that served the call disagree with one that
+    /// did not. The gates and the insert are shared with the executor
+    /// (`cross_domain::message::register_relayed_on_state`).
+    #[cfg(test)]
     pub fn submit_relayed_cross_domain_message(
         &mut self,
         message: crate::cross_domain::CrossDomainMessage,
     ) -> Result<(), String> {
-        self.state
-            .registry
-            .ensure_active_relayer(&message.sender)
-            .map_err(|e| e.to_string())?;
-        // BLG-0113 (P05-F06): the sender must SIGN the message id. The
-        // self-declared field alone let anybody name an active relayer and
-        // register arbitrary messages - or pre-register a predictable lock
-        // id out from under the real one. Chain-built messages (lock/burn/
-        // mint/unlock) enter through `submit_cross_domain_message` and are
-        // already the chain's own word; this door is for everything else.
-        message.verify_sender_signature()?;
-        self.submit_cross_domain_message(message)
+        crate::cross_domain::message::register_relayed_on_state(
+            &mut self.state,
+            &message,
+            message.sender,
+        )?;
+        if let Some(store) = &self.storage {
+            store
+                .save_cross_domain_message(&message)
+                .map_err(|e| format!("Failed to persist cross-domain message: {e}"))?;
+        }
+        Ok(())
     }
 
     /// Process a bridge lock event through the Universal Relayer.
@@ -5835,6 +5819,9 @@ impl Blockchain {
         // (before `state_root` is computed) so replay and validation stay exact.
         self.flush_quarantine_ledger();
         self.sweep_retired_relays(block.index);
+        // Bridge burns this block applied: the relay requests are node-local
+        // and are enqueued after the commit, like the boost share above.
+        self.drain_pending_bridge_burns();
 
         self.record_validator_snapshot(self.state.epoch_index);
 
@@ -6166,6 +6153,11 @@ impl Blockchain {
         // PoA compliance requests are drained inside `apply_block_effects`
         // BEFORE `calculate_state_root`, so every replay path reproduces them.
         self.sweep_retired_relays(block.index);
+        // Bridge burns applied by this block: their relay requests are a
+        // node-local queue and are enqueued here, after the commit, exactly as
+        // `pending_bud_boost_share` is distributed. Nothing about the burn
+        // itself waits for this drain.
+        self.drain_pending_bridge_burns();
 
         self.record_validator_snapshot(self.state.epoch_index);
         self.mempool.set_min_fee(self.state.base_fee);
@@ -8068,6 +8060,33 @@ impl Blockchain {
             Ok(()) => self.state = prospective,
             Err(error) => tracing::error!("Boost distribution failed: {error}"),
         }
+    }
+
+    /// Enqueue the relay requests for the bridge burns this block applied.
+    ///
+    /// The burn is consensus state and was written by the `BridgeBurn`
+    /// transaction; what is left is the universal-relayer enqueue, which lives
+    /// in `self.universal_relayer` - node-local bookkeeping with its own
+    /// persistence, not part of the state root. The executor leaves the event in
+    /// `pending_bridge_burns` and this drains it once the block is applied, the
+    /// same handoff `pending_bud_boost_share` uses.
+    ///
+    /// Runs on every node that applies the block, so two nodes with the same
+    /// chain produce the same relay queue; a replayed block regenerates the
+    /// list from the same transactions.
+    ///
+    /// WIRING: called from `produce_block` and `validate_and_add_block` right
+    /// after `self.state` becomes the committed state, and from the bridge
+    /// suite that asserts the drain moves nothing twice.
+    pub fn drain_pending_bridge_burns(&mut self) -> usize {
+        let pending = std::mem::take(&mut self.state.pending_bridge_burns);
+        let count = pending.len();
+        for event in pending {
+            if let Some(message) = event.message.clone() {
+                self.enqueue_bridge_relay(event, &message);
+            }
+        }
+        count
     }
 
     /// Governance-controlled domain unfreeze
