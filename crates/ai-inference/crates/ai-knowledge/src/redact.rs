@@ -324,10 +324,6 @@ fn redact_key_value(line: &str, report: &mut RedactionReport) -> String {
 }
 
 /// Does the line open a PEM private key block?
-fn is_pem_private_begin(line: &str) -> bool {
-    line.contains("-----BEGIN ") && line.contains("PRIVATE KEY")
-}
-
 /// Width of the leading white space of a line.
 fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start().len()
@@ -407,12 +403,15 @@ pub fn redact_text(text: &str) -> RedactionResult {
     let mut lines: Vec<String> = Vec::new();
     // Indent of the key line of a secret block scalar we are inside.
     let mut block: Option<usize> = None;
-    // Are we inside a PEM private key block?
-    let mut in_pem = false;
+    // The label of the PEM block we are inside, not a flag: only that block's
+    // own footer closes it, so an unrelated or injected `-----END ...` line is
+    // body text like any other.
+    let mut in_pem: Option<String> = None;
     for line in text.lines() {
-        if in_pem {
-            if line.contains("-----END ") {
-                in_pem = false;
+        if let Some(label) = in_pem.clone() {
+            let footer = format!("-----END {label}-----");
+            if line.trim_end() == footer {
+                in_pem = None;
                 lines.push(line.to_string());
             } else {
                 report.add("pem_private_key");
@@ -420,14 +419,26 @@ pub fn redact_text(text: &str) -> RedactionResult {
             }
             continue;
         }
-        if is_pem_private_begin(line) {
+        if let Some(label) = pem_block_label(line) {
             // A one-line block (BEGIN and END together) is masked whole.
             if line.contains("-----END ") {
                 report.add("pem_private_key");
                 lines.push(REDACTION_TOKEN.to_string());
-            } else {
-                in_pem = true;
+            } else if line
+                .trim_end()
+                .ends_with(&format!("-----BEGIN {label}-----"))
+            {
+                // The header stands alone: keep it, mask what follows.
+                in_pem = Some(label);
                 lines.push(line.to_string());
+            } else {
+                // Anything else on the header line (key material, a comment
+                // that is really the body, a second header) is masked with the
+                // block: emitting the header verbatim kept whatever shared the
+                // line, which is exactly where a key can hide.
+                report.add("pem_private_key");
+                lines.push(REDACTION_TOKEN.to_string());
+                in_pem = Some(label);
             }
             continue;
         }
@@ -453,6 +464,23 @@ pub fn redact_text(text: &str) -> RedactionResult {
         text: lines.join("\n"),
         report,
     }
+}
+
+/// The label of a PEM block whose header is on this line.
+///
+/// `Some("RSA PRIVATE KEY")` for `-----BEGIN RSA PRIVATE KEY-----`, so the
+/// footer that closes it can be matched by NAME: any line containing `-----END `
+/// used to close the block, and a stray or deliberately injected footer inside
+/// the body then ended masking early and left the rest of the key in clear.
+fn pem_block_label(line: &str) -> Option<String> {
+    let at = line.find("-----BEGIN ")?;
+    let rest = &line[at + "-----BEGIN ".len()..];
+    let end = rest.find("-----")?;
+    let label = rest[..end].trim();
+    if !label.contains("PRIVATE KEY") {
+        return None;
+    }
+    Some(label.to_string())
 }
 
 /// Is a value likely to contain a secret?
@@ -792,6 +820,46 @@ mod tests {
         assert_eq!(r.text().lines().count(), input.lines().count());
         let one = format!("{begin}{b1}{end}");
         assert!(!redact_text(&one).text().contains(b1));
+    }
+
+    /// A key that shares its line with the header, or that carries an
+    /// injected footer, must not survive.
+    ///
+    /// The masker used to emit the `-----BEGIN ...` line verbatim and treat any
+    /// `-----END ` line as the end of the block. So key material placed on the
+    /// header line was kept, and a `-----END` line inside the body closed the
+    /// block early and left the rest of the key in clear - both of which are
+    /// then hashed into the index and quoted into model prompts.
+    #[test]
+    fn pem_material_on_the_header_line_or_before_a_fake_footer_is_masked() {
+        let body = "MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo";
+        let trailer = "4lgOEePzNm0tRgeLezV6ffAt0gunVTLw7onL";
+        let begin = "-----BEGIN RSA PRIVATE KEY-----";
+        let end = "-----END RSA PRIVATE KEY-----";
+
+        // 1. Body on the header line.
+        let inline = format!("{begin}{body}\n{trailer}\n{end}");
+        let r = redact_text(&inline);
+        assert!(
+            !r.text().contains(body),
+            "header-line key material survived"
+        );
+        assert!(!r.text().contains(trailer));
+        assert_eq!(r.text().lines().count(), inline.lines().count());
+
+        // 2. A `-----END` that is not this block's footer must not close it.
+        let injected = format!("{begin}\n{body}\n-----END SOMETHING ELSE-----\n{trailer}\n{end}");
+        let r = redact_text(&injected);
+        assert!(
+            !r.text().contains(body) && !r.text().contains(trailer),
+            "an injected footer ended masking early"
+        );
+
+        // 3. The honest shape still keeps both markers.
+        let honest = format!("{begin}\n{body}\n{end}");
+        let r = redact_text(&honest);
+        assert!(r.text().contains(begin) && r.text().contains(end));
+        assert!(!r.text().contains(body));
     }
 
     /// Wallet material under seed-like key names is masked.
