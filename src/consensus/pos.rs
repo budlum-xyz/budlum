@@ -425,15 +425,19 @@ impl PoSEngine {
         hasher.finalize().into()
     }
 
-    /// The round-widened leadership threshold (P01-F01).
+    /// The leadership threshold for a slot (P01-F01).
     ///
-    /// Round `r` multiplies the base threshold by `r + 1`, so eligibility
-    /// widens geometrically as a slot retries: by round `MAX_LEADER_ROUNDS`
-    /// any validator holding at least `1 / (MAX_LEADER_ROUNDS + 1)` of the
-    /// stake is guaranteed a turn. The base threshold alone left a slot dead
-    /// whenever the sampled leader was offline, because the retry drew the
-    /// same sample again.
-    fn calculate_vrf_threshold_for_round(&self, stake: u64, total_stake: u64, round: u64) -> u64 {
+    /// Stake-proportional and **round-independent**. The round term re-rolls
+    /// the election seed, which is what breaks a stalled slot's fixed draw; it
+    /// must not also widen eligibility, because the producer chooses the round
+    /// it claims (`block.nonce`) and the timestamp that prices it. A widening
+    /// factor of `round + 1` let any producer take the widest round in the
+    /// same second and be elected at up to 17x its stake share - a validator
+    /// holding 1/17 of the bond was then guaranteed a block in every slot, and
+    /// every per-slot election chance was inflated the same way. With the
+    /// factor removed, a retry buys a fresh draw at the base rate, which is
+    /// the liveness property the round term exists for, and nothing more.
+    fn calculate_leadership_threshold(&self, stake: u64, total_stake: u64) -> u64 {
         use crate::core::chain_config::{FIXED_POINT_SCALE, VRF_BASE_PROB};
         if total_stake == 0 || stake == 0 {
             return 0;
@@ -446,17 +450,16 @@ impl PoSEngine {
         let threshold = (base_threshold.saturating_mul(u128::from(VRF_BASE_PROB)))
             / u128::from(FIXED_POINT_SCALE);
 
-        // Round widening, saturating at u64::MAX: past that every key is
-        // eligible and the arithmetic has nothing left to say. The seed caps
-        // `round` at MAX_LEADER_ROUNDS, so the factor is at most 17.
-        let factor = u128::from(round.saturating_add(1));
-        let widened = threshold.saturating_mul(factor);
+        u64::try_from(threshold).unwrap_or(u64::MAX)
+    }
 
-        if widened >= u128::from(u64::MAX) {
-            u64::MAX
-        } else {
-            widened as u64
-        }
+    /// The leadership threshold, ignoring the round on purpose.
+    ///
+    /// Kept as a distinct name so a call site that still has a `round` in hand
+    /// reads correctly: the round selects the seed, not the bar.
+    fn calculate_vrf_threshold_for_round(&self, stake: u64, total_stake: u64, round: u64) -> u64 {
+        let _ = round;
+        self.calculate_leadership_threshold(stake, total_stake)
     }
 
     pub fn check_vrf_threshold(&self, vrf_output: &[u8], threshold: u64) -> bool {
@@ -976,6 +979,13 @@ impl ConsensusEngine for PoSEngine {
         chain.len() as u128
     }
 
+    /// A candidate that abandons the checkpoint scores zero, but a shorter
+    /// one that holds a *better* checkpoint can still win, so the suffix
+    /// shortcut must not refuse a shorter candidate here.
+    fn shorter_chain_can_never_win(&self) -> bool {
+        false
+    }
+
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
         // Fail closed on the candidate specifically. Scoring alone would let
         // a checkpoint-violating candidate win whenever the current chain
@@ -1250,13 +1260,70 @@ impl ConsensusEngine for PoSEngine {
         *self
             .checkpoints
             .write()
-            .map_err(|_| ConsensusError("PoS checkpoint lock is poisoned".into()))? = checkpoints;
+            .map_err(|_| ConsensusError("PoS checkpoint lock is poisoned".into()))? =
+            checkpoints.clone();
 
         let chain = storage.load_chain().map_err(|error| {
             ConsensusError(format!(
                 "Failed to load canonical chain for PoS randomness replay: {error}"
             ))
         })?;
+        // Rebuild the parked epoch-boundary checkpoints from the chain we just
+        // restored. `pending_checkpoints` is memory-only, so without this a
+        // boundary committed before a restart lost its fork-choice anchor for
+        // good: nothing else replays committed blocks through the engine, and
+        // the checkpoint is the revert limit against long-range forks. A
+        // boundary that already carries a finality certificate is a boundary
+        // the node itself acknowledged as final, so it is promoted here rather
+        // than parked; the rest wait for `note_finalized_height`.
+        if self.config.epoch_length != 0 {
+            let promote_from_chain = |checkpoint: Checkpoint| -> Option<Checkpoint> {
+                let certified = storage
+                    .get_finality_cert(checkpoint.block_index)
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if certified {
+                    None
+                } else {
+                    Some(checkpoint)
+                }
+            };
+            let mut parked: Vec<Checkpoint> = Vec::new();
+            let mut to_promote: Vec<Checkpoint> = Vec::new();
+            for block in &chain {
+                if block.index == 0 || !block.index.is_multiple_of(self.config.epoch_length) {
+                    continue;
+                }
+                let checkpoint = Checkpoint {
+                    block_index: block.index,
+                    block_hash: block.hash.clone(),
+                    timestamp: block.timestamp,
+                };
+                match promote_from_chain(checkpoint.clone()) {
+                    Some(pending) => parked.push(pending),
+                    None => to_promote.push(checkpoint),
+                }
+            }
+            for checkpoint in to_promote {
+                if !checkpoints
+                    .iter()
+                    .any(|c| c.block_index == checkpoint.block_index)
+                {
+                    if let Err(error) = self.commit_checkpoint(&checkpoint, Some(storage)) {
+                        warn!(
+                            "Failed to promote the finalised checkpoint at height {} while loading: {error}",
+                            checkpoint.block_index
+                        );
+                    }
+                }
+            }
+            *self
+                .pending_checkpoints
+                .write()
+                .map_err(|_| ConsensusError("PoS pending-checkpoint lock is poisoned".into()))? =
+                parked;
+        }
         if self.config.epoch_length == 0 {
             return Err(ConsensusError("PoS epoch length must be non-zero".into()));
         }
@@ -1685,21 +1752,37 @@ mod tests {
         assert_eq!(params.liveness_slash_ratio_fixed, FIXED_POINT_SCALE / 100);
         assert_eq!(params.malicious_slash_ratio_fixed, FIXED_POINT_SCALE);
     }
+    /// The election bar does not move with the round.
+    ///
+    /// It used to: the threshold was multiplied by `round + 1`, and the round
+    /// is a header field the winning producer chooses, so a validator holding
+    /// 1/17 of the bond could claim the widest round in the same second and be
+    /// guaranteed a block in every slot (up to 17x its stake share). The round
+    /// term still re-rolls the seed; it no longer widens the bar.
     #[test]
-    fn pos_vrf_threshold_widens_with_the_round() {
+    fn pos_vrf_threshold_is_round_independent() {
         let engine = PoSEngine::new(PoSConfig::default(), None);
-        let base = engine.calculate_vrf_threshold_for_round(1_000, 4_000, 0);
-        let round1 = engine.calculate_vrf_threshold_for_round(1_000, 4_000, 1);
-        let round_cap = engine.calculate_vrf_threshold_for_round(1_000, 4_000, MAX_LEADER_ROUNDS);
-        assert_eq!(
-            round1,
-            base.saturating_mul(2),
-            "round 1 must double the threshold (P01-F01)"
+        let base = engine.calculate_leadership_threshold(1_000, 4_000);
+        for round in [0, 1, 2, MAX_LEADER_ROUNDS] {
+            assert_eq!(
+                engine.calculate_vrf_threshold_for_round(1_000, 4_000, round),
+                base,
+                "round {round} must not widen the election threshold"
+            );
+        }
+        // Stake proportional, as it always was at round 0 (integer division
+        // truncates, so the double share lands within one unit of 2x).
+        let double = engine.calculate_leadership_threshold(2_000, 4_000);
+        assert!(
+            double.abs_diff(base.saturating_mul(2)) <= 1,
+            "the threshold is still linear in the stake share: {double} vs 2x {base}"
         );
-        assert_eq!(
-            round_cap,
-            base.saturating_mul(MAX_LEADER_ROUNDS + 1),
-            "the cap round must price at (cap + 1)x"
+        // The stake share a producer would need to win EVERY round if the
+        // barrier had widened is no longer enough for one extra draw.
+        let small = engine.calculate_leadership_threshold(1_000, 17_000);
+        assert!(
+            small < engine.calculate_leadership_threshold(17_000, 17_000),
+            "a 1/17 holder is not a certainty; it is a 1/17 chance"
         );
     }
 }
