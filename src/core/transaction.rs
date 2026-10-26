@@ -190,6 +190,10 @@ pub struct ExternalTransaction {
 /// the amount and the burner, `bridge_state.burn_with_event` re-checks the
 /// status and the expiry against the row it holds. The payload carries ids and
 /// heights only, never an amount or an actor.
+///
+/// WIRING: `executor.rs` destructures one from every `BridgeBurn` it applies
+/// and verifies the holder's authorization; `tests/bridge_lifecycle.rs` builds
+/// and signs one from the holder's side, theft and re-pointed payout included.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BridgeBurnTx {
     /// The transfer being burned back out of this domain.
@@ -205,6 +209,108 @@ pub struct BridgeBurnTx {
     /// The Ethereum destination the burner declares; committed in the burn
     /// payload hash.
     pub recipient_eth: [u8; 20],
+    /// The holder's key. The burn destroys the minted units of the transfer's
+    /// recipient and picks the address they leave to, so the payload has to
+    /// carry the holder's own consent: the executor verifies it against the
+    /// row's holder before anything moves. Without this, any funded account
+    /// could burn somebody else's minted balance.
+    pub holder_public_key: Vec<u8>,
+    /// The holder's signature over [`BridgeBurnTx::authorization_hash`].
+    pub holder_signature: Vec<u8>,
+}
+
+/// Domain tag for the holder's burn authorization.
+///
+/// A separate tag from the transaction preimage: the holder authorizes *the
+/// burn*, and the fee payer authorizes *the transaction*. One may be the other
+/// (a holder submitting their own transaction signs both) and neither is
+/// implied by the other.
+const BRIDGE_BURN_AUTHORIZATION_TAG: &[u8] = b"BDLM_BRIDGE_BURN_AUTHORIZATION_V1";
+
+impl BridgeBurnTx {
+    /// WIRING: read by `verify_holder_authorization` below, which the executor
+    /// calls on every `BridgeBurn` it applies.
+    ///
+    /// What the holder signs: every effect the burn will have, bound to the
+    /// chain it happens on.
+    ///
+    /// `holder_signature` itself is not in here (it is the result of signing
+    /// this value), and neither is an amount: the amount comes from the
+    /// transfer row, which the row's own id pins.
+    pub fn authorization_hash(&self, chain_id: u64) -> [u8; 32] {
+        crate::core::hash::hash_fields_bytes(&[
+            BRIDGE_BURN_AUTHORIZATION_TAG,
+            &chain_id.to_le_bytes(),
+            &self.message_id,
+            &self.domain.to_le_bytes(),
+            &self.domain_height.to_le_bytes(),
+            &self.event_index.to_le_bytes(),
+            &self.expiry_height.to_le_bytes(),
+            &self.recipient_eth,
+        ])
+    }
+
+    /// WIRING: the holder side of the door - `src/tests/bridge_lifecycle.rs`
+    /// and any client building a burn of its own.
+    ///
+    /// Signs the authorization with the holder's Ed25519 account key.
+    ///
+    /// The V4 derivation makes the key bytes the address itself, so the
+    /// authorization is self-identifying: the executor derives the address from
+    /// [`BridgeBurnTx::holder_public_key`] and requires it to be the row's
+    /// holder.
+    pub fn sign_holder_authorization(
+        &mut self,
+        keypair: &crate::crypto::primitives::KeyPair,
+        chain_id: u64,
+    ) {
+        self.holder_public_key = keypair.public_key_bytes().to_vec();
+        self.holder_signature = keypair.sign(&self.authorization_hash(chain_id)).to_vec();
+    }
+
+    /// Verifies that `holder` authorized this exact burn.
+    ///
+    /// # Errors
+    ///
+    /// A missing authorization, a key that is not the holder, or a signature
+    /// that does not open over the authorization hash.
+    pub fn verify_holder_authorization(
+        &self,
+        holder: crate::core::address::Address,
+        chain_id: u64,
+    ) -> Result<(), String> {
+        if self.holder_public_key.is_empty() || self.holder_signature.is_empty() {
+            return Err("a bridge burn carries no holder authorization".into());
+        }
+        if self.holder_public_key.len() == 32 {
+            let mut pk = [0u8; 32];
+            pk.copy_from_slice(&self.holder_public_key);
+            if crate::core::address::Address::from(pk) != holder {
+                return Err(
+                    "bridge burn authorization is not from the transfer's holder".to_string(),
+                );
+            }
+            return crate::crypto::primitives::verify_signature(
+                &self.authorization_hash(chain_id),
+                &self.holder_signature,
+                &self.holder_public_key,
+            )
+            .map_err(|e| format!("bridge burn holder signature does not verify: {e}"));
+        }
+        let addr = crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(
+            &self.holder_public_key,
+        )
+        .map_err(|e| format!("bridge burn holder key is invalid: {e}"))?;
+        if addr != holder {
+            return Err("bridge burn authorization is not from the transfer's holder".to_string());
+        }
+        crate::crypto::primitives::verify_ml_dsa_87_signature(
+            &self.authorization_hash(chain_id),
+            &self.holder_signature,
+            &self.holder_public_key,
+        )
+        .map_err(|e| format!("bridge burn holder signature does not verify: {e}"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2300,6 +2406,12 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u32(out, burn.event_index);
             put_u64(out, burn.expiry_height);
             put_fixed(out, &burn.recipient_eth);
+            // The holder's authorization is part of the preimage: the executor
+            // verifies it, so a relaying node that swapped it for another
+            // holder's - or for garbage the gate then rejects - would otherwise
+            // change the executed outcome under an unchanged transaction hash.
+            put_bytes(out, &burn.holder_public_key);
+            put_bytes(out, &burn.holder_signature);
         }
         TransactionType::CrossDomainMessage(message) => {
             put_u8(out, 51);

@@ -452,21 +452,9 @@ fn bridge_mint_forgery_gate_rejects_none_expected_block_hash() {
 fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
     use crate::execution::executor::Executor;
 
-    // A PoS engine WITH a signer: the door this test exercises builds a signed
-    // transaction, and a node with no consensus signer cannot (the same rule
-    // `build_state_update_transaction` follows for the domain-commitment path).
-    let keypair = crate::crypto::primitives::KeyPair::generate().expect("a keypair");
-    let signer = Arc::new(crate::crypto::signer::KeyPairSigner::new(keypair));
-    let mut bc = Blockchain::new(
-        Arc::new(crate::consensus::pos::PoSEngine::with_signer(
-            crate::consensus::pos::PoSConfig::default(),
-            None,
-            signer,
-        )),
-        None,
-        45262,
-        None,
-    );
+    // PoW: the node's own consensus key plays no part in a burn. The holder
+    // signs, and the node only carries the transaction.
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
     for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
         let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
         d.operator = Some(operator);
@@ -476,7 +464,10 @@ fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
     }
     bc.register_bridge_asset(asset_id(), 1).expect("asset");
     let owner = addr(77);
-    let recipient = addr(12);
+    // The recipient is the holder of the minted units, and the burn needs the
+    // holder's own signature, so this one is a real key.
+    let holder_keys = crate::crypto::primitives::KeyPair::generate().expect("holder key");
+    let recipient = Address::from(holder_keys.public_key_bytes());
     bc.state.add_balance(&owner, 1_000);
 
     let (_transfer, lock_event) = bc
@@ -501,18 +492,36 @@ fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
         .expect("mint");
     bc.state.get_or_create(&recipient).balance += held;
     bc.state.get_or_create(&addr(99)).balance += fee;
+    // The holder pays the fee out of the minted units.
+    bc.state.get_or_create(&recipient).balance += bc.state.base_fee;
 
-    // The signed transaction a node would gossip.
-    let tx = bc
-        .build_bridge_burn_transaction(crate::core::transaction::BridgeBurnTx {
-            message_id,
-            domain: 2,
-            domain_height: 40,
-            event_index: 0,
-            expiry_height: 0,
-            recipient_eth: [7u8; 20],
-        })
-        .expect("this node can sign");
+    // The transaction the HOLDER signs: they authorize the burn, and they pay
+    // the fee, so nobody has to act on their behalf (that was the HIGH: a door
+    // that let any funded account burn another holder's units).
+    let mut burn_tx = crate::core::transaction::BridgeBurnTx {
+        message_id,
+        domain: 2,
+        domain_height: 40,
+        event_index: 0,
+        expiry_height: 0,
+        recipient_eth: [7u8; 20],
+        holder_public_key: Vec::new(),
+        holder_signature: Vec::new(),
+    };
+    burn_tx.sign_holder_authorization(&holder_keys, bc.chain_id);
+    let mut tx = crate::core::transaction::Transaction::new_with_chain_id(
+        recipient,
+        Address::zero(),
+        0,
+        bc.state.base_fee,
+        0,
+        Vec::new(),
+        bc.chain_id,
+        crate::core::transaction::TransactionType::BridgeBurn(burn_tx.clone()),
+    );
+    tx.signature_version = crate::core::transaction::SIGNATURE_VERSION_V4;
+    tx.signature = Some(holder_keys.sign(&tx.signing_hash()).to_vec());
+    tx.hash = tx.calculate_hash();
     assert!(
         matches!(
             tx.tx_type,
@@ -520,13 +529,12 @@ fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
         ),
         "the door is a transaction, not a method call"
     );
-
-    // The signer pays the fee, so the signer has to be able to.
-    let payer = tx.from;
-    bc.state.add_balance(&payer, 1_000);
-
-    let before = bc.state.get_balance(&recipient);
-    assert_eq!(before, held, "the recipient holds what the mint credited");
+    let before: u64 = bc.state.get_balance(&recipient);
+    assert_eq!(
+        before,
+        held + bc.state.base_fee,
+        "the recipient holds what the mint credited, plus the fee it will pay"
+    );
 
     // In block: the executor applies it.
     let mut state = bc.state.clone();
@@ -534,8 +542,8 @@ fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
 
     assert_eq!(
         state.get_balance(&recipient),
-        before - held,
-        "the burn must take the minted units back inside block execution"
+        before - held - bc.state.base_fee,
+        "the burn takes the minted units AND the fee inside block execution"
     );
     assert_eq!(
         state
@@ -582,7 +590,147 @@ fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
     );
     assert_eq!(
         bc.state.get_balance(&recipient),
-        before - held,
+        before - held - bc.state.base_fee,
         "draining the relay queue must not move the balance again"
     );
+}
+
+/// A `BridgeBurn` is the holder's own act.
+///
+/// Review 8's follow-up found the first in-block version of this door: it only
+/// required the sender to pay the fee, so any funded account could name
+/// somebody else's `message_id`, destroy their minted balance and choose the
+/// Ethereum address the value left to. The authority is now the holder's
+/// signature over the burn's own preimage, checked by the executor before the
+/// shared body runs, and the body separately refuses a burner that is not the
+/// row's holder.
+#[test]
+fn a_bridge_burn_needs_the_holders_own_authorization() {
+    use crate::core::transaction::{BridgeBurnTx, Transaction, TransactionType};
+    use crate::execution::executor::Executor;
+
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    for (id, operator) in [(1u32, addr(11)), (2u32, addr(12))] {
+        let mut d = default_domain(id, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
+        d.operator = Some(operator);
+        d.operator_bond = 100_000;
+        d.bridge_enabled = true;
+        bc.register_consensus_domain(d).expect("domain");
+    }
+    bc.register_bridge_asset(asset_id(), 1).expect("asset");
+    let owner = addr(77);
+    let holder_keys = crate::crypto::primitives::KeyPair::generate().expect("holder key");
+    let holder = Address::from(holder_keys.public_key_bytes());
+    bc.state.add_balance(&owner, 1_000);
+
+    let (_transfer, lock_event) = bc
+        .lock_bridge_transfer(1, 2, 20, 0, asset_id(), owner, holder, 400, 1_000)
+        .expect("lock");
+    let lock_message = lock_event.message.as_ref().expect("lock message").clone();
+    let params = *bc.state.registry.params();
+    let (held, fee) = crate::cross_domain::bridge::split_bridge_fee(
+        crate::core::money::Bud::new(400),
+        params.bridge_relayer_fee_ppm,
+        params.bridge_relayer_min_fee,
+    )
+    .expect("a 400 transfer covers the fee");
+    let (held, fee) = (held.get(), fee.get());
+    bc.state.bridge_state.mint(&lock_message, 20).expect("mint");
+    // The holder pays the fee out of the same account the burn debits.
+    let start = held + bc.state.base_fee;
+    bc.state.get_or_create(&holder).balance += start;
+    bc.state.get_or_create(&addr(99)).balance += fee;
+
+    let mut burn = BridgeBurnTx {
+        message_id: lock_message.message_id,
+        domain: 2,
+        domain_height: 40,
+        event_index: 0,
+        expiry_height: 0,
+        recipient_eth: [7u8; 20],
+        holder_public_key: Vec::new(),
+        holder_signature: Vec::new(),
+    };
+    burn.sign_holder_authorization(&holder_keys, bc.chain_id);
+
+    let base_fee = bc.state.base_fee;
+    let chain_id = bc.chain_id;
+    let paying = |from: Address, burn: BridgeBurnTx| {
+        let mut tx = Transaction::new_with_chain_id(
+            from,
+            Address::zero(),
+            0,
+            base_fee,
+            0,
+            Vec::new(),
+            chain_id,
+            TransactionType::BridgeBurn(burn),
+        );
+        tx.signature_version = crate::core::transaction::SIGNATURE_VERSION_V4;
+        tx.signature = Some(holder_keys.sign(&tx.signing_hash()).to_vec());
+        tx.hash = tx.calculate_hash();
+        tx
+    };
+
+    // 1. An attacker who names the holder's transfer but signs the burn as
+    //    themselves is refused, and nothing moves.
+    let attacker_keys = crate::crypto::primitives::KeyPair::generate().expect("attacker key");
+    let attacker = Address::from(attacker_keys.public_key_bytes());
+    bc.state.add_balance(&attacker, 1_000);
+    let mut stolen = burn.clone();
+    stolen.sign_holder_authorization(&attacker_keys, bc.chain_id);
+    let mut theft = Transaction::new_with_chain_id(
+        attacker,
+        Address::zero(),
+        0,
+        bc.state.base_fee,
+        0,
+        Vec::new(),
+        bc.chain_id,
+        TransactionType::BridgeBurn(stolen),
+    );
+    theft.signature_version = crate::core::transaction::SIGNATURE_VERSION_V4;
+    theft.signature = Some(attacker_keys.sign(&theft.signing_hash()).to_vec());
+    theft.hash = theft.calculate_hash();
+
+    let mut state = bc.state.clone();
+    let err = Executor::apply_transaction(&mut state, &theft).unwrap_err();
+    assert!(
+        err.to_string().contains("not from the transfer's holder")
+            || err.to_string().contains("does not verify"),
+        "a third party's burn must be refused: {err}"
+    );
+    assert_eq!(
+        state.get_balance(&holder),
+        start,
+        "the holder's balance is untouched"
+    );
+    assert_eq!(state.pending_bridge_burns.len(), 0, "no burn was applied");
+    assert_eq!(
+        state.get_balance(&attacker),
+        1_000,
+        "the attacker pays nothing for a refused burn"
+    );
+
+    // 2. The same burn with the holder's authorization but a different payout
+    //    address is a different preimage, so the signature no longer opens.
+    let mut repointed = burn.clone();
+    repointed.recipient_eth = [9u8; 20];
+    let mut state = bc.state.clone();
+    let err = Executor::apply_transaction(&mut state, &paying(holder, repointed)).unwrap_err();
+    assert!(
+        err.to_string().contains("does not verify"),
+        "a rewritten payout address must not ride the holder's signature: {err}"
+    );
+
+    // 3. The holder's own burn goes through.
+    let mut state = bc.state.clone();
+    Executor::apply_transaction(&mut state, &paying(holder, burn.clone()))
+        .expect("the holder's burn executes");
+    assert_eq!(
+        state.get_balance(&holder),
+        0,
+        "the holder's units AND the fee are the ones that leave"
+    );
+    assert_eq!(state.pending_bridge_burns.len(), 1);
 }

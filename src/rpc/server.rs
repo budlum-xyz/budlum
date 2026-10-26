@@ -2824,46 +2824,6 @@ impl BudlumApiServer for RpcServer {
         Ok(self.bridge_roots_json("burned").await)
     }
 
-    async fn burn_bridge_transfer_with_event(
-        &self,
-        message_id: crate::cross_domain::MessageId,
-        domain: crate::domain::DomainId,
-        domain_height: u64,
-        event_index: u32,
-        expiry_height: u64,
-        // BLG-0116 (P05-F09): the burner declares the Ethereum destination
-        // here, at burn time - the claim cannot name a different one.
-        recipient_eth: [u8; 20],
-    ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Bridge burn with event requires operator auth
-        self.require_operator("bud_burnBridgeTransferWithEvent")?;
-        // The burn is a transaction now: it debits the burner, so it may only
-        // move state in block. This call answers with the transaction hash and
-        // the balance moves when a block carries it.
-        let hash = self
-            .chain
-            .burn_bridge_transfer_with_event(
-                message_id,
-                domain,
-                domain_height,
-                event_index,
-                expiry_height,
-                recipient_eth,
-            )
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid bridge burn transfer: {e}"),
-                    None::<()>,
-                )
-            })?;
-        let mut roots = self.bridge_roots_json("burned").await;
-        roots["transactionHash"] = serde_json::Value::String(format!("0x{hash}"));
-        roots["appliedInBlock"] = serde_json::Value::Bool(true);
-        Ok(roots)
-    }
-
     async fn unlock_bridge_transfer(
         &self,
         message_id: crate::cross_domain::MessageId,
