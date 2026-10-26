@@ -133,6 +133,57 @@ mod p01_consensus_rounds_tests {
         );
     }
 
+    /// The round floor is read off the parent only.
+    ///
+    /// Validation used to also require the *validating node's* clock to be
+    /// past the floor. That made the verdict for one fixed block depend on
+    /// local state: two honest nodes could disagree about the same block, the
+    /// disagreeing node would penalize an honest producer, and the chain's
+    /// future-timestamp drift budget collapsed to the leader-round spacing for
+    /// every retry-round block. The block below satisfies the header rule, so
+    /// it must validate on a node whose clock is nowhere near it.
+    #[test]
+    fn a_round_block_is_validated_from_the_header_not_the_local_clock() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let (state, address) = ready_validator_state(&keys);
+        let engine = PoSEngine::new(PoSConfig::default(), None);
+        let mut parent = Block::genesis();
+        // Far in the FUTURE relative to any node clock that runs this suite, so
+        // a wall-clock comparison would refuse the child outright; the header
+        // rule is still exactly satisfied by `floor`.
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        parent.timestamp = now_ms + 3_600_000;
+        parent.hash = parent.calculate_hash();
+
+        let round = 2u64;
+        let floor = parent
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.slot = block.index;
+        block.timestamp = floor;
+        block.producer = Some(address);
+        block.nonce = round;
+        block.validator_set_hash = state
+            .consensus_validator_set_hash(block.chain_id)
+            .expect("fixture keys are consensus-ready");
+        block.sign(&keys.sig_key);
+
+        // The round-pricing verdict must be reached: not "claimed too early",
+        // and not any wall-clock message.
+        match engine.validate_block(&block, &[parent], &state) {
+            Ok(()) => {}
+            Err(error) => assert!(
+                !error.0.contains("claimed too early") && !error.0.contains("wall clock"),
+                "the header rule is satisfied, so only non-clock checks may refuse: {error:?}"
+            ),
+        }
+    }
+
     #[test]
     fn pos_round_floor_matches_the_pricing_formula() {
         // The floor is part of consensus now: parent + MIN_BLOCK_INTERVAL_MS +
