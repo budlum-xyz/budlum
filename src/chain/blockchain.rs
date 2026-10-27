@@ -2658,7 +2658,7 @@ impl Blockchain {
     /// not exist in a release build.
     pub fn enqueue_bridge_relay(
         &mut self,
-        source_event: DomainEvent,
+        source_event: crate::cross_domain::DomainEvent,
         message: &crate::cross_domain::CrossDomainMessage,
     ) {
         let height = self.harness_height();
