@@ -124,6 +124,11 @@ impl RelayLedger {
         self.relayed.get(message_id)
     }
 
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.relayed.len()
+    }
+
     /// Drop records of relays that completed at or before `cutoff`.
     ///
     /// The ledger is replay protection for `process_relay`, and a relay can
@@ -179,7 +184,7 @@ pub struct RelayerConfig {}
 ///
 /// Permissionless: any staked RELAYER role holder can submit relays.
 /// Slashing: invalid proofs or missed deadlines trigger economic penalties.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UniversalRelayer {
     pub config: RelayerConfig,
     pub ledger: RelayLedger,
@@ -189,11 +194,11 @@ pub struct UniversalRelayer {
     pending: BTreeMap<MessageId, PendingRelay>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 ///
-/// Convenience: pub because the pending queue is persisted state
-/// the chain saves and restores with the relayer; the queue itself
-/// stays private to `UniversalRelayer`.
+/// Convenience: pub because the pending queue is consensus state the
+/// settlement registries carry with the relayer; the queue itself stays
+/// private to `UniversalRelayer`.
 pub struct PendingRelay {
     pub message_id: MessageId,
     pub source_domain: DomainId,
@@ -201,6 +206,12 @@ pub struct PendingRelay {
     pub source_event: DomainEvent,
     pub created_height: u64,
     pub expiry_height: u64,
+}
+
+impl Default for UniversalRelayer {
+    fn default() -> Self {
+        Self::new(RelayerConfig::default())
+    }
 }
 
 impl UniversalRelayer {
@@ -363,6 +374,12 @@ impl UniversalRelayer {
         self.pending.len()
     }
 
+    /// Number of retained successful relay records.
+    #[must_use]
+    pub fn relayed_count(&self) -> usize {
+        self.ledger.len()
+    }
+
     /// Get expired relays that should be slashed.
     pub fn expired_relays(&self, current_height: u64) -> Vec<&PendingRelay> {
         self.pending
@@ -407,6 +424,34 @@ impl UniversalRelayer {
     /// Merkle root of the relay ledger (for on-chain commitment).
     pub fn ledger_root(&self) -> Hash32 {
         self.ledger.root()
+    }
+
+    /// True when no relay is pending and the ledger holds no record.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty() && self.ledger.relayed.is_empty()
+    }
+
+    /// The commitment the settlement registries fold into the state root:
+    /// the ledger root and every pending relay in key order. The relayer is
+    /// consensus state, so two nodes that disagree
+    /// on the queue must disagree on the root.
+    pub fn state_root(&self) -> Hash32 {
+        let mut pending = Vec::new();
+        for relay in self.pending.values() {
+            pending.extend_from_slice(&relay.message_id);
+            pending.extend_from_slice(&relay.source_domain.to_le_bytes());
+            pending.extend_from_slice(&relay.target_domain.to_le_bytes());
+            pending.extend_from_slice(&relay.source_event.leaf_hash());
+            pending.extend_from_slice(&relay.created_height.to_le_bytes());
+            pending.extend_from_slice(&relay.expiry_height.to_le_bytes());
+        }
+        let count = u64::try_from(self.pending.len()).unwrap_or(u64::MAX);
+        hash_fields_bytes(&[
+            b"BDLM_RELAYER_STATE_V1",
+            &self.ledger.root(),
+            &count.to_le_bytes(),
+            &pending,
+        ])
     }
 }
 
