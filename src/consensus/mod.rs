@@ -55,10 +55,105 @@ pub fn now_millis() -> u128 {
         .as_millis()
 }
 
+/// Arrival times of recently validated blocks, as this node observed them.
+///
+/// The round price is "how long ago did the parent land", and a header cannot
+/// answer that: production stamps blocks from the slot schedule
+/// (`genesis_time + index * slot_ms`), so a chain that has fallen behind its
+/// schedule carries parent stamps that are minutes older than the moment the
+/// parent actually landed. Pricing straight off the stamp let the gate
+/// saturate - at 49 s of lag every round up to [`MAX_LEADER_ROUNDS`] was
+/// affordable at once (CWE-807) - while capping the stamp instead froze the
+/// retry ladder for genuinely stalled slots.
+///
+/// A node does know when it first saw a block, and that fact cannot be
+/// inflated: a peer can delay delivery, which only makes this node stricter
+/// (and self-heals, because `now` keeps moving while the sighting does not),
+/// but it can never backdate it. The book is bounded and per-engine, so two
+/// nodes price the same block against their own observation times.
+pub struct RoundPriceBook {
+    seen: std::sync::Mutex<std::collections::VecDeque<(String, u128)>>,
+}
+
+/// How many parent arrival times [`RoundPriceBook`] remembers.
+///
+/// Two entries would cover a parent and its child; the rest is slack for
+/// short forks and out-of-order gossip. Beyond this the book forgets the
+/// oldest sighting, and a price falls back to the header stamp.
+const ROUND_PRICE_MEMORY: usize = 64;
+
+impl Default for RoundPriceBook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RoundPriceBook {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            seen: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(
+                ROUND_PRICE_MEMORY,
+            )),
+        }
+    }
+
+    /// Record that `block_hash` was first seen by this node at `now_ms`.
+    ///
+    /// Idempotent: the first sighting wins. A later call cannot shorten the
+    /// elapsed time, and a poisoned lock is treated as "no observation
+    /// recorded" rather than as a panicking consensus path.
+    pub fn note_seen(&self, block_hash: &str, now_ms: u128) {
+        let Ok(mut seen) = self.seen.lock() else {
+            return;
+        };
+        if seen.iter().any(|(hash, _)| hash == block_hash) {
+            return;
+        }
+        if seen.len() == ROUND_PRICE_MEMORY {
+            seen.pop_front();
+        }
+        seen.push_back((block_hash.to_string(), now_ms));
+    }
+
+    /// When this node first saw `block_hash`, if it is still remembered.
+    #[must_use]
+    pub fn seen_at(&self, block_hash: &str) -> Option<u128> {
+        let Ok(seen) = self.seen.lock() else {
+            return None;
+        };
+        seen.iter()
+            .find(|(hash, _)| hash == block_hash)
+            .map(|(_, at)| *at)
+    }
+
+    /// The highest round this node may *claim*, from the producer's side.
+    ///
+    /// A producer only claims time it has watched pass: with no sighting of
+    /// the parent the ladder starts at round 0 rather than trusting a header
+    /// stamp, which is the direction that cannot produce a block its peers
+    /// refuse. A node that restarts therefore proposes round 0 for one slot
+    /// instead of over-claiming on a lagging chain, and every later slot has
+    /// its parent in the book again.
+    #[must_use]
+    pub fn claimable_round_for(
+        &self,
+        parent_hash: &str,
+        parent_timestamp_ms: u128,
+        now_ms: u128,
+    ) -> u64 {
+        affordable_leader_round(
+            parent_timestamp_ms,
+            Some(self.seen_at(parent_hash).unwrap_or(now_ms)),
+            now_ms,
+        )
+    }
+}
+
 /// The highest leader round a slot can have reached by `now_ms`.
 ///
 /// Round `r` is affordable once `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
-/// has elapsed since the parent block's timestamp; the result is capped at
+/// has elapsed since the parent block was published; the result is capped at
 /// [`MAX_LEADER_ROUNDS`].
 ///
 /// This is the *pricing* half of the round rule, and it is deliberately
@@ -77,31 +172,30 @@ pub fn now_millis() -> u128 {
 /// block; round 0 - the ordinary case - is unaffected, so a skewed node still
 /// follows the chain, and the next round's leader can produce instead.
 ///
-/// # Why the parent's timestamp is clamped
+/// # The anchor
 ///
-/// A parent's timestamp is not always the moment the parent was published.
-/// Production stamps blocks from the slot schedule
-/// (`genesis_time + index * slot_ms`), so on a chain that has fallen behind
-/// its schedule the newest header can be minutes older than the moment it
-/// actually landed. Pricing the round straight off that stamp made the gate
-/// saturate: once the lag reached
-/// `MIN_BLOCK_INTERVAL_MS + MAX_LEADER_ROUNDS * ROUND_TIMEOUT_MS` (49 s), every
-/// round up to [`MAX_LEADER_ROUNDS`] was affordable at once, and every
-/// authority or validator elected in one of them could publish a valid
-/// competing block for a slot it does not lead. The gate then priced nothing
-/// exactly when the chain was least healthy (CWE-807).
+/// `parent_seen_ms` is when this node first saw the parent, and it is what
+/// keeps the price honest. The anchor is the later of the two facts available:
+/// the parent's own stamp (a producer's claim, bounded by
+/// [`MAX_FUTURE_BLOCK_TIME_MS`]) and the sighting (this node's observation,
+/// which no peer can backdate). A schedule-lagged chain therefore prices from
+/// the sighting and grants nothing for its lag, while a genuinely stalled slot
+/// still walks the whole ladder up to [`MAX_LEADER_ROUNDS`], because real time
+/// passes and the sighting stays where it was - the two cases the stamp alone
+/// cannot tell apart.
 ///
-/// The anchor is therefore clamped to a window the chain already agrees on:
-/// a parent stamp older than `now - MAX_FUTURE_BLOCK_TIME_MS` stops buying
-/// rounds. That is the mirror image of the future bound - a header may be at
-/// most [`MAX_FUTURE_BLOCK_TIME_MS`] ahead of a verifier - so the most a stale
-/// parent can ever grant is
-/// `(MAX_FUTURE_BLOCK_TIME_MS - MIN_BLOCK_INTERVAL_MS) / ROUND_TIMEOUT_MS`
-/// (4) rounds, however far behind the schedule the chain has drifted. A real
-/// stall still advances rounds, because a real stall moves the parent into
-/// the window by elapsed time, not by schedule arithmetic.
-pub fn affordable_leader_round(parent_timestamp_ms: u128, now_ms: u128) -> u64 {
-    let anchor = parent_timestamp_ms.max(now_ms.saturating_sub(MAX_FUTURE_BLOCK_TIME_MS));
+/// Without a sighting - a block this node never observed live, such as a
+/// historical replay - the stamp is the only fact there is, and the rule falls
+/// back to it. That is the strict direction for a producer (it cannot claim
+/// more than its header pays for) and the permissive one for a replay, which
+/// is what a node catching up on history needs.
+#[must_use]
+pub fn affordable_leader_round(
+    parent_timestamp_ms: u128,
+    parent_seen_ms: Option<u128>,
+    now_ms: u128,
+) -> u64 {
+    let anchor = parent_seen_ms.map_or(parent_timestamp_ms, |seen| parent_timestamp_ms.max(seen));
     let spaced = now_ms
         .saturating_sub(anchor)
         .saturating_sub(MIN_BLOCK_INTERVAL_MS);
@@ -178,6 +272,16 @@ pub trait ConsensusEngine: Send + Sync {
         chain: &[Block],
         state: &AccountState,
     ) -> Result<(), ConsensusError>;
+
+    /// Record when this node first saw a block, which is what prices the
+    /// leader rounds of its children.
+    ///
+    /// Engines that price rounds (PoA, PoS) keep the observation; the default
+    /// does nothing, because an engine with no round term has nothing to
+    /// price. The chain restore path calls this for a tip it adopts without
+    /// re-validating, so a restarted node does not price its next slot from a
+    /// header timestamp that a lagging schedule left in the past.
+    fn note_block_seen(&self, _block_hash: &str, _at_ms: u128) {}
 
     /// The kind of chain this engine produces blocks for.
     ///
@@ -393,38 +497,80 @@ pub trait ConsensusEngine: Send + Sync {
 mod tests {
     use super::*;
 
-    /// Schedule lag must not buy rounds.
+    /// The two cases a header stamp cannot tell apart, priced apart.
     ///
     /// Production stamps blocks from the slot schedule, so a chain that has
-    /// fallen behind its schedule carries parent timestamps that are much
-    /// older than the moment the parent landed. Pricing straight off that
-    /// stamp let the gate saturate: at 49 s of lag every round up to
-    /// `MAX_LEADER_ROUNDS` was affordable at once and any authority could
-    /// produce for a slot it does not lead. The anchor is clamped to the same
-    /// window the future bound already allows, so the price flattens out.
+    /// fallen behind carries parent stamps much older than the moment the
+    /// parent landed. Pricing off the stamp alone let the gate saturate - at
+    /// 49 s of lag every round up to `MAX_LEADER_ROUNDS` was affordable at
+    /// once - and capping the stamp instead froze the ladder for genuinely
+    /// stalled slots, so a slot whose leaders were offline could never be
+    /// refilled. The sighting separates them: lag buys nothing, a stall pays
+    /// in real time.
     #[test]
-    fn a_stale_parent_cannot_buy_more_rounds_than_a_stalled_one() {
+    fn a_stale_parent_cannot_buy_rounds_while_a_stall_still_walks_the_ladder() {
         let now = 1_700_000_000_000u128;
-        // A parent on time: nothing but round 0 is affordable.
-        assert_eq!(affordable_leader_round(now - 1_500, now), 0);
-        // A genuinely stalled slot: rounds advance with real elapsed time.
-        assert_eq!(affordable_leader_round(now - 13_500, now), 4);
-        // A parent ten minutes behind its schedule prices exactly the same as
-        // one inside the window: the lag stops paying.
-        let stale = affordable_leader_round(now - 600_000, now);
-        assert_eq!(stale, 4, "schedule lag must not raise the price");
-        assert!(
-            stale < MAX_LEADER_ROUNDS,
-            "the gate must never saturate to MAX_LEADER_ROUNDS on lag alone"
+        let stale_stamp = now - 600_000; // ten minutes behind the schedule
+
+        // The verifier saw this parent a moment ago: the lag is not elapsed
+        // time anyone observed, so no round above 0 is affordable.
+        assert_eq!(
+            affordable_leader_round(stale_stamp, Some(now - 200), now),
+            0
         );
-        // The most a stale parent can grant is the future window, minus the
-        // minimum block interval, in round timeouts.
-        let ceiling =
-            u64::try_from((MAX_FUTURE_BLOCK_TIME_MS - MIN_BLOCK_INTERVAL_MS) / ROUND_TIMEOUT_MS)
-                .unwrap();
-        assert_eq!(stale, ceiling.min(MAX_LEADER_ROUNDS));
-        // A future-dated parent still prices at zero: it buys nothing.
-        assert_eq!(affordable_leader_round(now + 60_000, now), 0);
+
+        // The same parent, ten minutes after this node saw it land: a real
+        // stall, and the whole ladder is walkable - the retry term still
+        // refills a slot whose leaders are offline.
+        assert_eq!(
+            affordable_leader_round(stale_stamp, Some(stale_stamp), now),
+            MAX_LEADER_ROUNDS
+        );
+        // One round per `ROUND_TIMEOUT_MS`, as the constant says.
+        assert_eq!(
+            affordable_leader_round(stale_stamp, Some(stale_stamp), stale_stamp + 7_500),
+            2
+        );
+
+        // A first sighting later than the stamp wins: a producer cannot
+        // backdate the anchor with its header.
+        assert_eq!(
+            affordable_leader_round(now - 5_000, Some(now - 1_000), now),
+            0
+        );
+
+        // A future-dated parent still prices at zero, however it was seen.
+        assert_eq!(affordable_leader_round(now + 60_000, None, now), 0);
+
+        // With no sighting at all - a historical block - the stamp is the
+        // only fact there is, and the rule falls back to it.
+        assert_eq!(
+            affordable_leader_round(stale_stamp, None, now),
+            MAX_LEADER_ROUNDS
+        );
+    }
+
+    /// The book remembers first sightings, and never lets one be moved back.
+    #[test]
+    fn the_round_price_book_keeps_first_sightings_and_stays_bounded() {
+        let book = RoundPriceBook::new();
+        assert_eq!(book.seen_at("aa"), None);
+        book.note_seen("aa", 1_000);
+        book.note_seen("aa", 9_000);
+        assert_eq!(book.seen_at("aa"), Some(1_000), "the first sighting wins");
+
+        for i in 0..ROUND_PRICE_MEMORY + 10 {
+            book.note_seen(&format!("b{i}"), 2_000 + i as u128);
+        }
+        let remembered = (0..ROUND_PRICE_MEMORY + 10)
+            .filter(|i| book.seen_at(&format!("b{i}")).is_some())
+            .count();
+        assert_eq!(remembered, ROUND_PRICE_MEMORY, "the book is bounded");
+        assert_eq!(
+            book.seen_at("aa"),
+            None,
+            "the oldest sighting is the one dropped"
+        );
     }
 
     #[test]

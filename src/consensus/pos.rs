@@ -1,6 +1,6 @@
 use super::{
-    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS,
-    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, RoundPriceBook,
+    MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
 };
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -107,6 +107,14 @@ pub struct PoSEngine {
     validator_keys: Option<ValidatorKeys>,
     signer: Option<Arc<dyn ConsensusSigner>>,
     epoch_seed: RwLock<[u8; 32]>,
+    /// When this node first saw each recently validated block.
+    ///
+    /// A leader round is priced by "how long ago did the parent land", and the
+    /// parent's header timestamp is not that: production stamps blocks from the
+    /// slot schedule, so a lagging chain carries stamps far older than the
+    /// moment the block landed. The observation time is the fact only this node
+    /// has, and no peer can backdate it.
+    round_prices: RoundPriceBook,
 }
 impl PoSEngine {
     /// `PoSConfig::epoch_length` is a public field and nothing rejects zero
@@ -129,6 +137,7 @@ impl PoSEngine {
             validator_keys,
             signer: None,
             epoch_seed: RwLock::new([0u8; 32]),
+            round_prices: RoundPriceBook::new(),
         }
     }
 
@@ -146,6 +155,7 @@ impl PoSEngine {
             validator_keys,
             signer: Some(signer),
             epoch_seed: RwLock::new([0u8; 32]),
+            round_prices: RoundPriceBook::new(),
         }
     }
 
@@ -550,7 +560,11 @@ impl PoSEngine {
                         // The same pricing function validation enforces, so
                         // propose and verify cannot drift apart.
                         let round_cap = chain.last().map_or(MAX_LEADER_ROUNDS, |prev| {
-                            affordable_leader_round(prev.timestamp, now_millis())
+                            self.round_prices.claimable_round_for(
+                                &prev.hash,
+                                prev.timestamp,
+                                now_millis(),
+                            )
                         });
                         let mut elected = false;
                         for round in 0..=round_cap {
@@ -845,7 +859,14 @@ impl ConsensusEngine for PoSEngine {
                         // block for the slot (CWE-807). Price the claim against
                         // this node's clock, with the function the producer
                         // clamps itself with.
-                        let affordable = affordable_leader_round(prev.timestamp, now_millis());
+                        // Priced from when this node saw the parent land: a
+                        // schedule-lagged stamp cannot buy a round, and a
+                        // genuine stall still walks the ladder in real time.
+                        let affordable = affordable_leader_round(
+                            prev.timestamp,
+                            self.round_prices.seen_at(&prev.hash),
+                            now_millis(),
+                        );
                         if round > affordable {
                             return Err(ConsensusError(format!(
                                 "PoS leader round {round} claimed before it elapsed: only \
@@ -929,7 +950,14 @@ impl ConsensusEngine for PoSEngine {
                 "No active consensus-ready validators; refusing unsigned PoS block".into(),
             ));
         }
+        // This block can now be priced as a parent: the round its child may
+        // claim is measured from the moment this node saw it land, not from a
+        // header stamp a lagging schedule put in the past.
+        self.round_prices.note_seen(&block.hash, now_millis());
         Ok(())
+    }
+    fn note_block_seen(&self, block_hash: &str, at_ms: u128) {
+        self.round_prices.note_seen(block_hash, at_ms);
     }
     fn consensus_type(&self) -> &'static str {
         "PoS"
@@ -1330,6 +1358,12 @@ impl ConsensusEngine for PoSEngine {
             return Err(ConsensusError("PoS epoch length must be non-zero".into()));
         }
         if let Some(tip) = chain.last() {
+            // The restored tip has no sighting in the round price book, and
+            // its header may be a schedule artifact from before the restart.
+            // The moment this node loaded it is the only honest observation
+            // time: round 0 is claimable for the next slot, and the ladder
+            // starts walking from here instead of from a stamp in the past.
+            self.round_prices.note_seen(&tip.hash, now_millis());
             let next_slot = tip.index.saturating_add(1);
             let next_epoch = next_slot / self.config.epoch_length;
             let randomness = self.epoch_randomness_from_chain(tip.chain_id, next_epoch, &chain)?;
