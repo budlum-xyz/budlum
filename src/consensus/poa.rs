@@ -1,5 +1,6 @@
 use super::{
-    ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS,
+    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
 };
 use crate::core::account::{AccountState, Validator};
 use crate::core::address::Address;
@@ -300,17 +301,11 @@ impl PoAEngine {
         // same floor validation applies. A slot whose round-0 leader is
         // offline therefore advances one round per timeout instead of
         // stalling forever.
+        // One pricing rule for both sides: `affordable_leader_round` is what
+        // validation enforces, so a producer can never claim a round this node
+        // would not itself accept.
         let round_cap = parent_timestamp.map_or(MAX_LEADER_ROUNDS, |prev_ts| {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            let spaced = now_ms
-                .saturating_sub(prev_ts)
-                .saturating_sub(MIN_BLOCK_INTERVAL_MS);
-            u64::try_from(spaced / ROUND_TIMEOUT_MS)
-                .unwrap_or(u64::MAX)
-                .min(MAX_LEADER_ROUNDS)
+            affordable_leader_round(prev_ts, now_millis())
         });
 
         for round in 0..=round_cap {
@@ -517,14 +512,21 @@ impl ConsensusEngine for PoAEngine {
                             block.timestamp, floor
                         )));
                     }
-                    // The floor above is read off the parent, so every node computes
-                    // the same verdict for the same block. It must NOT be
-                    // re-checked against this node's clock: the verdict would then
-                    // vary by validator, two honest nodes could disagree about one
-                    // block, and the drift budget would collapse from the chain's
-                    // future-timestamp window to the leader-round spacing. The
-                    // absolute future bound stays in
-                    // `ConsensusEngine::validate_timestamp`.
+                    // The floor above compares two numbers the producer
+                    // writes, so on its own it prices nothing: the timestamp
+                    // may sit up to `MAX_FUTURE_BLOCK_TIME_MS` ahead of this
+                    // node, which makes rounds 0..=5 affordable the moment the
+                    // parent lands (CWE-807). Price the claim against this
+                    // node's clock with the same function the producer clamps
+                    // itself with, so an authority cannot publish a valid block
+                    // for a round another authority leads.
+                    let affordable = affordable_leader_round(prev.timestamp, now_millis());
+                    if round > affordable {
+                        return Err(ConsensusError(format!(
+                            "PoA leader round {round} claimed before it elapsed: only round \
+                             {affordable} has been reached since the parent"
+                        )));
+                    }
                 }
             }
             // V5-SECURITY-12: Use previous block hash as entropy for leader verification.

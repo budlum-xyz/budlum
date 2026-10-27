@@ -1,5 +1,6 @@
 use super::{
-    ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS,
+    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
 };
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -546,17 +547,10 @@ impl PoSEngine {
                         // `ROUND_TIMEOUT_MS` - and validation re-prices the
                         // claim against the block timestamp floor
                         // `parent + MIN_BLOCK_INTERVAL_MS + round * ROUND_TIMEOUT_MS`.
+                        // The same pricing function validation enforces, so
+                        // propose and verify cannot drift apart.
                         let round_cap = chain.last().map_or(MAX_LEADER_ROUNDS, |prev| {
-                            let now_ms = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis();
-                            let spaced = now_ms
-                                .saturating_sub(prev.timestamp)
-                                .saturating_sub(MIN_BLOCK_INTERVAL_MS);
-                            u64::try_from(spaced / ROUND_TIMEOUT_MS)
-                                .unwrap_or(u64::MAX)
-                                .min(MAX_LEADER_ROUNDS)
+                            affordable_leader_round(prev.timestamp, now_millis())
                         });
                         let mut elected = false;
                         for round in 0..=round_cap {
@@ -842,14 +836,22 @@ impl ConsensusEngine for PoSEngine {
                                 block.timestamp, floor
                             )));
                         }
-                        // The floor above is read off the parent, so every node computes
-                        // the same verdict for the same block. It must NOT be
-                        // re-checked against this node's clock: the verdict would then
-                        // vary by validator, two honest nodes could disagree about one
-                        // block, and the drift budget would collapse from the chain's
-                        // future-timestamp window to the leader-round spacing. The
-                        // absolute future bound stays in
-                        // `ConsensusEngine::validate_timestamp`.
+                        // The floor compares two values the producer writes
+                        // (`block.timestamp` against `parent.timestamp`), so it
+                        // does not price the round: a timestamp up to
+                        // `MAX_FUTURE_BLOCK_TIME_MS` ahead makes rounds 0..=5
+                        // affordable at once, and every validator elected in
+                        // one of those rounds could publish a valid competing
+                        // block for the slot (CWE-807). Price the claim against
+                        // this node's clock, with the function the producer
+                        // clamps itself with.
+                        let affordable = affordable_leader_round(prev.timestamp, now_millis());
+                        if round > affordable {
+                            return Err(ConsensusError(format!(
+                                "PoS leader round {round} claimed before it elapsed: only \
+                                 round {affordable} has been reached since the parent"
+                            )));
+                        }
                     }
                 }
                 let seed = self.calculate_seed_with_chain(
