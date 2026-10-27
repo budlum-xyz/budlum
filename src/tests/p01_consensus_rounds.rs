@@ -133,54 +133,69 @@ mod p01_consensus_rounds_tests {
         );
     }
 
-    /// The round floor is read off the parent only.
+    /// A round claim costs wall time, and a header cannot buy it.
     ///
-    /// Validation used to also require the *validating node's* clock to be
-    /// past the floor. That made the verdict for one fixed block depend on
-    /// local state: two honest nodes could disagree about the same block, the
-    /// disagreeing node would penalize an honest producer, and the chain's
-    /// future-timestamp drift budget collapsed to the leader-round spacing for
-    /// every retry-round block. The block below satisfies the header rule, so
-    /// it must validate on a node whose clock is nowhere near it.
+    /// The floor rule ("the block timestamp sits `MIN + r * ROUND_TIMEOUT_MS`
+    /// after the parent") compares two numbers the producer writes, so it
+    /// prices nothing on its own: a timestamp up to `MAX_FUTURE_BLOCK_TIME_MS`
+    /// ahead of the verifier makes rounds 0..=5 affordable the instant the
+    /// parent lands, and every validator elected in one of those rounds could
+    /// publish a valid competing block for a slot it does not lead (CWE-807).
+    /// The claim is now priced against the verifier's clock, with the same
+    /// `affordable_leader_round` the producer clamps itself with.
+    ///
+    /// Both directions are pinned here: a future-dated parent plus a header
+    /// that satisfies the floor is refused, and an old-enough parent lets the
+    /// same claim through the pricing gate.
     #[test]
-    fn a_round_block_is_validated_from_the_header_not_the_local_clock() {
+    fn a_round_claim_is_priced_by_wall_time_not_by_the_header_alone() {
         let keys = ValidatorKeys::generate().unwrap();
         let (state, address) = ready_validator_state(&keys);
         let engine = PoSEngine::new(PoSConfig::default(), None);
-        let mut parent = Block::genesis();
-        // Far in the FUTURE relative to any node clock that runs this suite, so
-        // a wall-clock comparison would refuse the child outright; the header
-        // rule is still exactly satisfied by `floor`.
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        parent.timestamp = now_ms + 3_600_000;
-        parent.hash = parent.calculate_hash();
-
+        let now_ms = crate::consensus::now_millis();
         let round = 2u64;
-        let floor = parent
-            .timestamp
-            .saturating_add(MIN_BLOCK_INTERVAL_MS)
-            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
-        let mut block = Block::new(1, parent.hash.clone(), vec![]);
-        block.slot = block.index;
-        block.timestamp = floor;
-        block.producer = Some(address);
-        block.nonce = round;
-        block.validator_set_hash = state
-            .consensus_validator_set_hash(block.chain_id)
-            .expect("fixture keys are consensus-ready");
-        block.sign(&keys.sig_key);
 
-        // The round-pricing verdict must be reached: not "claimed too early",
-        // and not any wall-clock message.
-        match engine.validate_block(&block, &[parent], &state) {
-            Ok(()) => {}
-            Err(error) => assert!(
-                !error.0.contains("claimed too early") && !error.0.contains("wall clock"),
-                "the header rule is satisfied, so only non-clock checks may refuse: {error:?}"
-            ),
+        let fixture = |parent_ts: u128| {
+            let mut parent = Block::genesis();
+            parent.timestamp = parent_ts;
+            parent.hash = parent.calculate_hash();
+            let floor = parent
+                .timestamp
+                .saturating_add(MIN_BLOCK_INTERVAL_MS)
+                .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+            let mut block = Block::new(1, parent.hash.clone(), vec![]);
+            block.slot = block.index;
+            block.timestamp = floor;
+            block.producer = Some(address);
+            block.nonce = round;
+            block.validator_set_hash = state
+                .consensus_validator_set_hash(block.chain_id)
+                .expect("fixture keys are consensus-ready");
+            block.sign(&keys.sig_key);
+            (parent, block)
+        };
+
+        // The producer's own header rule is satisfied by `floor`, but the
+        // parent is an hour in the future: round 2 has not elapsed anywhere.
+        let (parent, block) = fixture(now_ms + 3_600_000);
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("a future-dated parent must not buy an unearned round");
+        assert!(
+            error.0.contains("claimed before it elapsed"),
+            "the refusal must be the wall-clock price of the round, got: {error:?}"
+        );
+
+        // Same claim, a parent old enough that round 2 has genuinely elapsed:
+        // the pricing gate lets it through and any later refusal is about
+        // something else.
+        let (parent, block) = fixture(now_ms.saturating_sub(60_000));
+        if let Err(error) = engine.validate_block(&block, &[parent], &state) {
+            assert!(
+                !error.0.contains("claimed before it elapsed")
+                    && !error.0.contains("claimed too early"),
+                "an elapsed round must clear the pricing gates, got: {error:?}"
+            );
         }
     }
 
@@ -429,5 +444,58 @@ mod p01_consensus_rounds_tests {
                 block.nonce
             );
         }
+    }
+}
+
+/// PoA applies the same round pricing as PoS (CWE-807).
+///
+/// The two engines duplicate the round rule; a fix in one of them is not a
+/// fix. An authority that leads round 0 must not be able to publish a valid
+/// block for round 2 just because it dated the parent an hour ahead.
+#[cfg(test)]
+mod p01_poa_round_pricing_tests {
+    use crate::consensus::poa::{PoAConfig, PoAEngine};
+    use crate::consensus::ConsensusEngine;
+    use crate::consensus::{MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS};
+    use crate::core::account::{AccountState, Validator};
+    use crate::core::address::Address;
+    use crate::core::block::Block;
+
+    fn single_authority_state() -> (AccountState, Address) {
+        let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let address = Address::from(keys.public_key_bytes());
+        let mut state = AccountState::new();
+        state
+            .validators
+            .insert(address, Validator::new(address, 1_000));
+        state.validators.get_mut(&address).unwrap().active = true;
+        (state, address)
+    }
+
+    #[test]
+    fn poa_refuses_a_round_the_verifier_clock_has_not_reached() {
+        let (state, address) = single_authority_state();
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        let now_ms = crate::consensus::now_millis();
+        let round = 2u64;
+
+        let mut parent = Block::genesis();
+        parent.timestamp = now_ms + 3_600_000;
+        parent.hash = parent.calculate_hash();
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.timestamp = parent
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        block.producer = Some(address);
+        block.nonce = round;
+
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("a future-dated parent must not buy an unearned PoA round");
+        assert!(
+            error.0.contains("claimed before it elapsed"),
+            "the PoA refusal must be the wall-clock price of the round, got: {error:?}"
+        );
     }
 }
