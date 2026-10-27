@@ -587,6 +587,13 @@ impl LightClient {
     ///
     /// # Errors
     ///
+    /// `epoch_randomness` is the epoch randomness the caller independently
+    /// obtained for each epoch on the way; the certificate's own `randomness`
+    /// field seats the handoff committee, so a certificate cannot be allowed to
+    /// name it (see [`crate::consensus::handoff::HandoffCertificate::verify_in`]).
+    ///
+    /// # Errors
+    ///
     /// [`LightClientError::TrustBinding`] when `outgoing` is not the trusted
     /// set or a snapshot is not self-consistent, and
     /// [`LightClientError::VerificationFailed`] when the chain does not verify.
@@ -599,6 +606,7 @@ impl LightClient {
             crate::consensus::handoff::HandoffCertificate,
             ValidatorSetSnapshot,
         )],
+        epoch_randomness: &dyn Fn(u64) -> [u8; 32],
     ) -> Result<u64, LightClientError> {
         use crate::consensus::handoff::{follow_handoffs, HandoffMember};
         if outgoing.set_hash != self.trusted.set_hash {
@@ -626,6 +634,7 @@ impl LightClient {
             outgoing.epoch,
             &trusted_members,
             &member_steps,
+            epoch_randomness,
         )
         .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
         self.trusted.set_hash = last.set_hash.clone();

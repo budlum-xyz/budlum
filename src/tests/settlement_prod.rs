@@ -203,6 +203,7 @@ mod settlement_prod_tests {
     // Ed25519 keypairs whose public key == address (chain-wide convention).
     fn poa_proof_for(
         commitment: &DomainCommitment,
+        chain_id: u64,
         domain_id: u32,
         total: usize,
         signers: usize,
@@ -211,6 +212,7 @@ mod settlement_prod_tests {
 
         let (keypairs, authorities) = poa_test_keys(total);
         let msg = poa_commit_signing_message(
+            chain_id,
             domain_id,
             commitment.domain_height,
             &commitment.domain_block_hash,
@@ -592,7 +594,7 @@ mod settlement_prod_tests {
 
         // Below quorum: 2 of 4 authorities sign (need ceil(4*2/3)=3).
         let base = commitment_for(&poa, 3, 0, 3);
-        let weak_proof = poa_proof_for(&base, poa.id, 4, 2);
+        let weak_proof = poa_proof_for(&base, poa.domain_chain_id, poa.id, 4, 2);
         let weak_commitment = commitment_with_proof(&poa, 3, 0, 3, &weak_proof);
         let err = blockchain
             .submit_verified_domain_commitment(weak_commitment, weak_proof)
@@ -600,7 +602,7 @@ mod settlement_prod_tests {
         assert!(err.contains("not finalized"));
 
         // At quorum: 3 of 4 real signatures.
-        let quorum_proof = poa_proof_for(&base, poa.id, 4, 3);
+        let quorum_proof = poa_proof_for(&base, poa.domain_chain_id, poa.id, 4, 3);
         let quorum_commitment = commitment_with_proof(&poa, 3, 0, 3, &quorum_proof);
         blockchain
             .submit_verified_domain_commitment(quorum_commitment, quorum_proof)
@@ -618,7 +620,7 @@ mod settlement_prod_tests {
 
         let base = commitment_for(&poa, 3, 0, 31);
         // Start from a valid quorum proof, then corrupt each signature.
-        let mut proof = poa_proof_for(&base, poa.id, 4, 3);
+        let mut proof = poa_proof_for(&base, poa.domain_chain_id, poa.id, 4, 3);
         if let FinalityProof::PoA { signatures, .. } = &mut proof {
             for s in signatures.iter_mut() {
                 s.signature = vec![0u8; 64]; // invalid ed25519 signature
@@ -639,7 +641,7 @@ mod settlement_prod_tests {
         blockchain.register_consensus_domain(poa.clone()).unwrap();
 
         let base = commitment_for(&poa, 3, 0, 32);
-        let mut proof = poa_proof_for(&base, poa.id, 4, 3);
+        let mut proof = poa_proof_for(&base, poa.domain_chain_id, poa.id, 4, 3);
         // Replace one signer's identity with an outsider (but keep a signature).
         if let FinalityProof::PoA { signatures, .. } = &mut proof {
             signatures[0].authority = Address::from([0xEE; 32]);
@@ -661,7 +663,7 @@ mod settlement_prod_tests {
 
         // Sign over a different height's commitment...
         let other = commitment_for(&poa, 99, 0, 33);
-        let proof = poa_proof_for(&other, poa.id, 4, 3);
+        let proof = poa_proof_for(&other, poa.domain_chain_id, poa.id, 4, 3);
         // ...but attach it to height-3 commitment.
         let c = commitment_with_proof(&poa, 3, 0, 33, &proof);
         let err = blockchain
