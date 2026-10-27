@@ -1,6 +1,6 @@
 //! Content-key delivery for view grants.
 //!
-//! A [`ViewGrant`](super::ViewGrant) says who may open content and names a
+//! A [`ViewGrant`](crate::storage::view_grant::ViewGrant) says who may open content and names a
 //! `key_id`, never the key. This module is the delivery that was left "out of
 //! band": the content key is encrypted to the grantee's HPKE public key
 //! (KEM 0x647a, see [`crate::crypto::hpke`]), the sealed package travels off
@@ -14,7 +14,7 @@
 //! content's grant does not hash to that `key_id` and is refused before any
 //! decryption runs.
 //!
-//! Packages are for [`ViewPolicy::NamedGrantee`](super::ViewPolicy): the key
+//! Packages are for [`ViewPolicy::NamedGrantee`](crate::storage::view_grant::ViewPolicy): the key
 //! is sealed to one recipient. A public-link grant has no recipient, so its
 //! key travels in the link and this module does not apply.
 

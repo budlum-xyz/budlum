@@ -1027,7 +1027,7 @@ pub const QC_WIRE_MAX_SIGNATURE: usize = 4_627;
 /// Bytes of an entry besides its signature at the string bound: index, address
 /// length and bytes, signature length.
 const QC_ENTRY_OVERHEAD: usize = 4 + 2 + QC_WIRE_MAX_STRING + 4;
-/// Largest wire size of one entry: [`QC_ENTRY_OVERHEAD`] plus the longest signature.
+/// Largest wire size of one entry: the fixed overhead plus the longest signature.
 pub const QC_ENTRY_MAX_BYTES: usize = QC_ENTRY_OVERHEAD + QC_WIRE_MAX_SIGNATURE;
 /// Largest wire size of the blob header at the string bounds.
 const QC_HEADER_MAX_BYTES: usize = 1 + 8 + 8 + (2 + QC_WIRE_MAX_STRING) * 2 + 8 + 4;
