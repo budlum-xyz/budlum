@@ -55,6 +55,15 @@ fn relayed_message(sender: Address, nonce: u64) -> CrossDomainMessage {
     })
 }
 
+/// The message `keypair` relays: the sender is the keypair's own address, so
+/// the relayer gate names the account that signs the transaction around it.
+fn signed_relayed_message(
+    keypair: &crate::crypto::primitives::KeyPair,
+    nonce: u64,
+) -> CrossDomainMessage {
+    relayed_message(Address::from(keypair.public_key_bytes()), nonce)
+}
+
 /// A V4 transaction from `keypair` that carries `message` through the
 /// `RelayCrossDomainMessage` door.
 fn relay_tx(
@@ -785,7 +794,7 @@ fn a_relayed_message_is_registered_by_the_executor_inside_a_block() {
     let relayer = Address::from(keypair.public_key_bytes());
     bc.state.add_balance(&relayer, 5_000);
     bc.state.bond_relayer(&relayer, 2_000).unwrap();
-    let message = relayed_message(&keypair, 1);
+    let message = signed_relayed_message(&keypair, 1);
     let mut state = bc.state.clone();
     // The transaction is signed by the relayer: it pays the fee and it is the
     // actor the gate names, while the message carries its own sender signature.
@@ -821,7 +830,7 @@ fn a_relayed_message_is_registered_by_the_executor_inside_a_block() {
         0,
         Vec::new(),
         45262,
-        TransactionType::CrossDomainMessage(relayed_message(&stranger, 2)),
+        TransactionType::CrossDomainMessage(signed_relayed_message(&stranger, 2)),
     );
     let err = Executor::apply_transaction(&mut unsigned_state, &bad).unwrap_err();
     assert!(err.contains("not an active relayer"), "{err}");
@@ -841,7 +850,7 @@ fn a_relayed_message_is_registered_by_the_executor_inside_a_block() {
         0,
         Vec::new(),
         45262,
-        TransactionType::CrossDomainMessage(relayed_message(&keypair, 3)),
+        TransactionType::CrossDomainMessage(signed_relayed_message(&keypair, 3)),
     );
     carrying.amount = 1;
     let err = Executor::apply_transaction(&mut value_state, &carrying).unwrap_err();
