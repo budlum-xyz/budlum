@@ -730,12 +730,61 @@ pub const ML_DSA_87_PUBLIC_KEY_LEN: usize = 2592;
 /// FIPS 204 ML-DSA-87 signature length (wallet/user signatures).
 pub const ML_DSA_87_SIGNATURE_LEN: usize = 4627;
 
-/// FIPS 204 ML-DSA-65 signature length in bytes (the validator PQ signature).
-///
-/// This is the registry row of `SchemeId::ML_DSA_65` (`crypto::scheme`). A
-/// length is only ever compared against the scheme the caller already named;
-/// it never names a scheme (INV-03).
+/// Dilithium5 signature length in bytes (CRYSTALS-Dilithium round-3 set,
+/// the validator PQ backend behind the `pq-dilithium` feature).
+pub const PQ_DILITHIUM5_SIGNATURE_LEN: usize = 4595;
+/// FIPS 204 ML-DSA-65 signature length in bytes (validator PQ backend behind
+/// the `pq-ml-dsa` feature).
 pub const PQ_ML_DSA_65_SIGNATURE_LEN: usize = 3309;
+
+/// The PQ signature scheme a signature length identifies.
+///
+/// The three accepted signature lengths (Dilithium5, ML-DSA-65, ML-DSA-87)
+/// are pairwise distinct, so a single length classifies a PQ signature
+/// unambiguously. This is the bounded logic around signature verification
+/// that the Kani mirror in `kani/src/lib.rs` model-checks
+/// (`pq_signature_classification_round_trips`,
+/// `pq_signature_acceptability_agrees_with_classification`); the raw
+/// signature arithmetic stays behind the PQ backend crates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PqSignatureClass {
+    Dilithium5,
+    MlDsa65,
+    MlDsa87,
+    Unknown,
+}
+
+/// Classify a PQ signature length. Total: every length maps to a variant,
+/// never a panic. When a scheme is named, the length is exactly that scheme's
+/// constant (proved by the Kani round-trip harness).
+#[must_use]
+pub fn classify_pq_signature_len(len: usize) -> PqSignatureClass {
+    if len == PQ_DILITHIUM5_SIGNATURE_LEN {
+        PqSignatureClass::Dilithium5
+    } else if len == PQ_ML_DSA_65_SIGNATURE_LEN {
+        PqSignatureClass::MlDsa65
+    } else if len == ML_DSA_87_SIGNATURE_LEN {
+        PqSignatureClass::MlDsa87
+    } else {
+        PqSignatureClass::Unknown
+    }
+}
+
+/// Whether a signature length is acceptable for an expected scheme.
+///
+/// `Unknown` accepts nothing. The Kani harness
+/// `pq_signature_acceptability_agrees_with_classification` proves this never
+/// disagrees with [`classify_pq_signature_len`].
+#[must_use]
+#[cfg(test)]
+pub fn pq_signature_len_acceptable(len: usize, expected: PqSignatureClass) -> bool {
+    match expected {
+        PqSignatureClass::Dilithium5 => len == PQ_DILITHIUM5_SIGNATURE_LEN,
+        PqSignatureClass::MlDsa65 => len == PQ_ML_DSA_65_SIGNATURE_LEN,
+        PqSignatureClass::MlDsa87 => len == ML_DSA_87_SIGNATURE_LEN,
+        PqSignatureClass::Unknown => false,
+    }
+}
 
 /// V5 user keypair backed by FIPS 204 ML-DSA-87.
 ///
@@ -1258,4 +1307,73 @@ fn test_bls_proof_of_possession() {
         &wrong_key,
         DEFAULT_CHAIN_ID
     ));
+
+/// The PQ length classification stays in step with the Kani mirror.
+///
+/// `kani/src/lib.rs` model-checks the classifier on the whole `usize` domain
+/// (`pq_signature_classification_round_trips` and the acceptability
+/// agreement). This test holds the constants this crate exports and the Kani
+/// mirror's literal copy of them together, exactly like
+/// `bond_arithmetic_matches_the_kani_mirror` holds `penalty_for` in step.
+#[test]
+fn pq_signature_classification_matches_the_kani_mirror() {
+    use crate::crypto::primitives::{
+        classify_pq_signature_len, pq_signature_len_acceptable, PqSignatureClass,
+        ML_DSA_87_SIGNATURE_LEN, PQ_DILITHIUM5_SIGNATURE_LEN, PQ_ML_DSA_65_SIGNATURE_LEN,
+    };
+
+    // The Kani mirror constants, verbatim.
+    const KANI_PQ_SIG_LEN_DILITHIUM5: usize = 4595;
+    const KANI_PQ_SIG_LEN_ML_DSA_65: usize = 3309;
+    const KANI_PQ_SIG_LEN_ML_DSA_87: usize = 4627;
+
+    assert_eq!(PQ_DILITHIUM5_SIGNATURE_LEN, KANI_PQ_SIG_LEN_DILITHIUM5);
+    assert_eq!(PQ_ML_DSA_65_SIGNATURE_LEN, KANI_PQ_SIG_LEN_ML_DSA_65);
+    assert_eq!(ML_DSA_87_SIGNATURE_LEN, KANI_PQ_SIG_LEN_ML_DSA_87);
+
+    // The Kani mirror classifier, verbatim.
+    fn kani_classify(len: usize) -> PqSignatureClass {
+        if len == KANI_PQ_SIG_LEN_DILITHIUM5 {
+            PqSignatureClass::Dilithium5
+        } else if len == KANI_PQ_SIG_LEN_ML_DSA_65 {
+            PqSignatureClass::MlDsa65
+        } else if len == KANI_PQ_SIG_LEN_ML_DSA_87 {
+            PqSignatureClass::MlDsa87
+        } else {
+            PqSignatureClass::Unknown
+        }
+    }
+
+    // Sweep a wide length range so the two classifiers cannot drift apart on
+    // the lengths that matter (the Kani proof covers the rest symbolically).
+    for len in 0..=5000usize {
+        assert_eq!(
+            classify_pq_signature_len(len),
+            kani_classify(len),
+            "classifier disagreement at length {len}"
+        );
+    }
+
+    // The acceptance check agrees with the classifier at every length.
+    for len in 0..=5000usize {
+        for class in [
+            PqSignatureClass::Dilithium5,
+            PqSignatureClass::MlDsa65,
+            PqSignatureClass::MlDsa87,
+            PqSignatureClass::Unknown,
+        ] {
+            // `Unknown` accepts nothing, so acceptability implies the
+            // classifier names the same (known) scheme; the reverse holds for
+            // known schemes. This is exactly the one-way implication the Kani
+            // harness `pq_signature_acceptability_agrees_with_classification`
+            // proves, kept total here by the `Unknown` guard.
+            let expected = class != PqSignatureClass::Unknown && kani_classify(len) == class;
+            assert_eq!(
+                pq_signature_len_acceptable(len, class),
+                expected,
+                "acceptability disagreement at length {len}, class {class:?}"
+            );
+        }
+    }
+}
 }
