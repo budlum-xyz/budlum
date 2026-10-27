@@ -36,6 +36,9 @@ pub mod sharding_e2e;
 // + §4 acceptance criteria).
 #[cfg(test)]
 pub mod bud_e2e;
+// Restarts from its own store: the restart tests write through it (K4).
+#[cfg(test)]
+pub mod block_door_harness;
 #[cfg(test)]
 pub mod byzantine_settlement;
 #[cfg(test)]
