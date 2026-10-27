@@ -306,11 +306,15 @@ pub fn build_poa_commitment(
     authorities: &[crate::domain::finality_adapter::PoAAuthorityKey],
     signers: &[crate::crypto::composite::CompositeKeypair],
 ) -> Result<VerifiedDomainCommitment, String> {
+    // The producer signs the same state-updates map the verifier will fold in.
+    // A commitment built here carries none: the writes it would attest are the
+    // relayer's claim and belong to the settlement door, not to this builder.
     let digest = crate::domain::finality_adapter::poa_commit_digest(
         spec.domain.domain_chain_id,
         spec.domain.id,
         spec.height,
         &spec.block_hash,
+        &std::collections::BTreeMap::new(),
     );
     let mut signatures = Vec::with_capacity(signers.len());
     for keypair in signers {

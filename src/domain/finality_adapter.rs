@@ -182,12 +182,14 @@ pub fn poa_commit_digest(
     domain_id: DomainId,
     domain_height: u64,
     domain_block_hash: &Hash32,
+    state_updates: &std::collections::BTreeMap<crate::core::address::Address, u64>,
 ) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[&poa_commit_signing_message(
         chain_id,
         domain_id,
         domain_height,
         domain_block_hash,
+        state_updates,
     )])
 }
 
@@ -285,13 +287,24 @@ pub fn poa_commit_signing_message(
     domain_id: DomainId,
     domain_height: u64,
     domain_block_hash: &Hash32,
+    state_updates: &std::collections::BTreeMap<crate::core::address::Address, u64>,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(24 + 8 + 8 + 32);
-    msg.extend_from_slice(b"BUDLUM_POA_COMMIT_V2");
+    let mut msg = Vec::with_capacity(24 + 8 + 8 + 32 + 8 + state_updates.len() * 40);
+    msg.extend_from_slice(b"BUDLUM_POA_COMMIT_V3");
     msg.extend_from_slice(&chain_id.to_le_bytes());
     msg.extend_from_slice(&domain_id.to_le_bytes());
     msg.extend_from_slice(&domain_height.to_le_bytes());
     msg.extend_from_slice(domain_block_hash);
+    // The nonce writes the commitment carries are consensus state: the
+    // settlement door applies them to accounts on this chain. A digest that
+    // did not cover them attested only the block hash, so a relayer could
+    // append writes to an honestly signed commitment and they would land. The
+    // map is a `BTreeMap`, so this order is canonical.
+    msg.extend_from_slice(&(state_updates.len() as u64).to_le_bytes());
+    for (address, nonce) in state_updates {
+        msg.extend_from_slice(address.as_bytes());
+        msg.extend_from_slice(&nonce.to_le_bytes());
+    }
     msg
 }
 
@@ -778,6 +791,7 @@ impl PoAFinalityAdapter {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.state_updates,
         );
         let mut valid_signers = std::collections::BTreeSet::new();
         for sig in signatures {
@@ -1026,6 +1040,7 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.state_updates,
         );
 
         // Count DISTINCT authorities with a valid signature over `msg`.
@@ -1410,6 +1425,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                     domain.id,
                     commitment.domain_height,
                     &commitment.domain_block_hash,
+                    &commitment.state_updates,
                 );
                 let mut valid_signers = std::collections::BTreeSet::new();
                 for sig in signatures {
@@ -1967,6 +1983,7 @@ mod tests {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.state_updates,
         );
         let sig = |i: usize| PoAAuthoritySignature {
             authority: authorities[i],
@@ -2050,6 +2067,7 @@ mod tests {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.state_updates,
         );
         let proof = FinalityProof::PoA {
             authorities: authorities.clone(),
@@ -2074,6 +2092,66 @@ mod tests {
             adapter
                 .verify_finality(&elsewhere, &commitment, &proof)
                 .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+    }
+
+    /// A PoA attestation covers the nonce writes the commitment carries.
+    ///
+    /// The settlement door applies `state_updates` to accounts on this chain
+    /// once a commitment advances, and the PoA digest used to attest only
+    /// `(chain, domain, height, hash)`. A relayer could therefore take an
+    /// honestly signed commitment and append writes of its choosing; the
+    /// signatures still verified and the writes landed. Here the same signature
+    /// is checked against a commitment whose map grew, and must fail.
+    #[test]
+    fn a_poa_attestation_covers_the_commitments_nonce_writes() {
+        use crate::crypto::primitives::KeyPair;
+        let mut domain = default_domain(9, ConsensusKind::PoA, 45262, "poa-authority-quorum", 0);
+        let mut commitment = commitment(ConsensusKind::PoA);
+        commitment.domain_id = domain.id;
+        let adapter = PoAFinalityAdapter::default();
+
+        let mut kps = Vec::new();
+        let mut authorities = Vec::new();
+        for i in 0..3u8 {
+            let mut seed = [0u8; 32];
+            seed[0] = 0xD0 + i;
+            let kp = KeyPair::from_seed(&seed).unwrap();
+            authorities.push(crate::core::address::Address::from(kp.public_key_bytes()));
+            kps.push(kp);
+        }
+        domain.validator_set_hash = poa_authority_set_hash(&domain, &authorities).unwrap();
+        let msg = poa_commit_signing_message(
+            domain.domain_chain_id,
+            domain.id,
+            commitment.domain_height,
+            &commitment.domain_block_hash,
+            &commitment.state_updates,
+        );
+        let proof = FinalityProof::PoA {
+            authorities: authorities.clone(),
+            signatures: authorities
+                .iter()
+                .enumerate()
+                .map(|(i, authority)| PoAAuthoritySignature {
+                    authority: *authority,
+                    signature: kps[i].sign(&msg).to_vec(),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            adapter.verify_finality(&domain, &commitment, &proof).unwrap(),
+            FinalityStatus::Finalized
+        );
+
+        // The same signed commitment with one nonce write added.
+        let mut grown = commitment.clone();
+        grown
+            .state_updates
+            .insert(crate::core::address::Address::from([0x5C; 32]), 1);
+        assert!(matches!(
+            adapter.verify_finality(&domain, &grown, &proof).unwrap(),
             FinalityStatus::Rejected(_)
         ));
     }
@@ -2537,6 +2615,7 @@ mod tests {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.state_updates,
         );
         let real_sig = kp.sign(&msg);
         let real_proof = FinalityProof::PoA {
