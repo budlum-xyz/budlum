@@ -142,7 +142,7 @@ contract MikorizaTest is Harness {
         // without the other's test failing.
         bytes memory expected =
             hex"4255444c554d5f505245434f4d4d49545f5632424c535f5349475f424c53313233383147315f584d443a5348412d3235365f535357555f524f5f504f505fcdb0000000000000030000000000000028000000000000006162";
-        assertEq(message, expected, "checkpoint_signing_message");
+        assertEq(keccak256(message), keccak256(expected), "checkpoint_signing_message");
     }
 
     function test_a_compressed_key_without_the_compression_flag_does_not_match() public pure {
