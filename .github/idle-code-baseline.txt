@@ -44,7 +44,6 @@ bud/src/bud_format.rs	fn	k_bud_image_revolutionary
 bud/src/bud_format.rs	fn	k_bud_pdf_revolutionary
 bud/src/bud_format.rs	fn	k_bud_video_revolutionary
 bud/src/bud_format.rs	fn	sign_pq
-bud/src/bud_format.rs	fn	verify_pq_signature
 bud/src/bud_format.rs	struct	BudChunk
 bud/src/bud_format.rs	struct	BudFileEntry
 bud/src/bud_format.rs	struct	BudHeader
