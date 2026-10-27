@@ -727,11 +727,11 @@ pub fn emit_anchor_node_local(
 
 /// The cold-committee reserve-anchor channel (decision record 2026-09-17,
 /// item 4): when the anchor key is compromised, the 3-of-6 cold committee
-/// (SLH-DSA-SHAKE-256s devices) rotates the cold wallet's key epoch directly
-/// - no on-chain vote stalls the response. The rotation certificate signed
-/// by the committee is domain-separated (`BDLM_PQ_ANCHOR_ROTATION_V2`) and
-/// binds the height and the reason, so a rotation nobody can explain
-/// afterwards is as impossible here as it is in the cold wallet itself.
+///   (SLH-DSA-SHAKE-256s devices) rotates the cold wallet's key epoch directly
+///   - no on-chain vote stalls the response. The rotation certificate signed
+///   by the committee is domain-separated (`BDLM_PQ_ANCHOR_ROTATION_V2`) and
+///   binds the height and the reason, so a rotation nobody can explain
+///   afterwards is as impossible here as it is in the cold wallet itself.
 ///
 /// WIRING: this call is where `cold_wallet::ColdWalletState::rotate_key`
 /// stops being merely pinned by its own tests and gains its named caller.
