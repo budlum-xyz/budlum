@@ -534,13 +534,20 @@ mod tests {
             }
             .encode(),
         ];
-        // A path of 64 zero siblings under key 0, so the memory image is the
-        // all-zero default and the root is the chain from the leaf.
-        let leaf = 0xBEEFu64;
-        let root = (0..64).fold(leaf, |cur, _| bud_vm::merkle_poseidon_round(cur, 0));
-        let mut vm = bud_vm::Vm::new(1024);
-        vm.registers[2] = root;
-        vm.registers[3] = leaf;
+        // A path of 64 zero siblings under key 0: the window holds the key, the leaf, the
+        // siblings and the root the walk reaches, and its memory image is what the proof
+        // commits to.
+        let leaf = [0xBEEFu64, 0, 0, 0];
+        let root = (0..64).fold(leaf, |cur, _| bud_vm::merkle_node(cur, [0; 4]));
+        let mut vm = bud_vm::Vm::new(4096);
+        let mut words = vec![0u64];
+        words.extend_from_slice(&leaf);
+        words.extend(std::iter::repeat(0u64).take(64 * 4));
+        words.extend_from_slice(&root);
+        for (i, word) in words.iter().enumerate() {
+            let at = 256 + i * 8;
+            vm.memory[at..at + 8].copy_from_slice(&word.to_le_bytes());
+        }
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
 
@@ -704,11 +711,27 @@ mod tests {
                 "row `{name}` is mislabeled"
             );
             let evidence = honest_evidence(&adapter, program);
-            let got = adapter.verify(&evidence, &VerificationPolicy::proven(10));
+            let mut facts = crate::crypto::facts::CryptoFacts::new();
+            let got =
+                adapter.verify_observed(&evidence, &VerificationPolicy::proven(10), &mut facts);
             if canonical {
                 let attestation = got.unwrap_or_else(|e| panic!("row `{name}`: {e:?}"));
                 assert_eq!(attestation.height, 1, "row `{name}`");
+                //: the ZK adapter shows a hash assumption and nothing else.
+                assert_eq!(
+                    facts.count(crate::crypto::facts::ObservedScheme::Proof(
+                        crate::crypto::facts::AssumptionClass::Hash
+                    )),
+                    1,
+                    "row `{name}`"
+                );
+                assert_eq!(
+                    facts.quantum_class(),
+                    Some(crate::crypto::facts::QuantumClass::Hash),
+                    "row `{name}`"
+                );
             } else {
+                assert!(facts.is_empty(), "row `{name}`: a refusal observes nothing");
                 match got {
                     Err(AdapterError::Crypto { what }) => assert!(
                         what.contains("not in the canonical set") && what.contains(&hex32(&hash)),

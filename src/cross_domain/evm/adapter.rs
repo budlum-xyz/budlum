@@ -40,6 +40,8 @@ use crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
 use crate::cross_domain::evm::verify::{
     verify_evm_receipt, DepositProofPackage, EvmDepositProof, VerifiedDeposit, VerifyError,
 };
+use crate::crypto::facts::{CryptoObserver, ObservedScheme};
+use crate::crypto::scheme::SchemeId;
 use crate::domain::types::Hash32;
 use bincode::Options;
 
@@ -455,6 +457,43 @@ impl EvmChainAdapter {
         // interim finality anchor when the proof carries no sync attestation.
         verify_evm_receipt(proof, self.trusted_checkpoint.as_ref())
     }
+
+    /// [`Self::verify_deposit`], naming the schemes the proven deposit rests
+    /// on.
+    ///
+    /// A deposit that verified is a receipt in a chain whose transactions are
+    /// authorised by secp256k1 account signatures, so that scheme is a fact of
+    /// the claim even though this adapter never checks one signature itself.
+    /// BLS12-381 is named only when the proof carried a sync-committee
+    /// attestation, which is the one place a BLS aggregate was verified. A
+    /// proof finalised by the operator's trusted checkpoint alone has no BLS
+    /// fact, and the profile shows that too.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::verify_deposit`] refuses with; nothing is observed
+    /// then.
+    pub fn verify_deposit_observed(
+        &self,
+        proof: &EvmDepositProof<'_>,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<VerifiedDeposit, VerifyError> {
+        let verified = self.verify_deposit(proof)?;
+        for scheme in deposit_schemes(proof.sync_attestation.is_some()) {
+            observer.observe(scheme);
+        }
+        Ok(verified)
+    }
+}
+
+/// The schemes a verified EVM deposit rests on: secp256k1 always, BLS12-381
+/// when a sync-committee attestation finalised the block.
+fn deposit_schemes(attested: bool) -> Vec<ObservedScheme> {
+    let mut schemes = vec![ObservedScheme::Secp256k1];
+    if attested {
+        schemes.push(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
+    }
+    schemes
 }
 
 /// Derives the receipt proof leaf from `tx_hash + bridge_address`.
@@ -653,6 +692,65 @@ mod tests {
             VerifyError::Header(m) => assert!(!m.contains("adapter floor"), "got: {m}"),
             other => panic!("expected a header decode error, got {other:?}"),
         }
+    }
+
+    ///: a verified EVM deposit names secp256k1; BLS12-381 joins it when
+    /// a sync-committee attestation finalised the block. A refused proof
+    /// names nothing.
+    #[test]
+    fn a_verified_deposit_reports_secp256k1_and_bls_when_attested() {
+        use crate::crypto::facts::{CryptoFacts, QuantumClass};
+        let adapter = floor_three();
+        let f = fixtures::build_fixture(
+            &adapter.bridge_address,
+            adapter.deposit_topic0,
+            b"deposit-payload",
+            true,
+            3,
+        );
+        let confirmations = fixtures::conf_refs(&f);
+        let proof = EvmDepositProof {
+            target_header: &f.target_header,
+            confirmation_headers: &confirmations,
+            required_confirmations: 3,
+            proof_nodes: &f.proof_nodes,
+            receipt_key: &f.receipt_key,
+            tx_hash: "0xabc123",
+            emitter_address: &adapter.bridge_address,
+            deposit_topic0: &adapter.deposit_topic0,
+            sync_attestation: None,
+        };
+        let mut facts = CryptoFacts::new();
+        adapter
+            .verify_deposit_observed(&proof, &mut facts)
+            .expect("the anchored fixture verifies");
+        assert_eq!(facts.count(ObservedScheme::Secp256k1), 1);
+        assert_eq!(
+            facts.count(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG)),
+            0,
+            "no attestation, no BLS fact"
+        );
+        assert_eq!(facts.quantum_class(), Some(QuantumClass::Classical));
+
+        let mut attested = CryptoFacts::new();
+        for scheme in deposit_schemes(true) {
+            crate::crypto::facts::CryptoObserver::observe(&mut attested, scheme);
+        }
+        assert_eq!(attested.count(ObservedScheme::Secp256k1), 1);
+        assert_eq!(
+            attested.count(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG)),
+            1
+        );
+
+        let mut refused = CryptoFacts::new();
+        let below_floor = EvmDepositProof {
+            required_confirmations: 1,
+            ..proof
+        };
+        assert!(adapter
+            .verify_deposit_observed(&below_floor, &mut refused)
+            .is_err());
+        assert!(refused.is_empty(), "a refused proof observes nothing");
     }
 
     #[test]

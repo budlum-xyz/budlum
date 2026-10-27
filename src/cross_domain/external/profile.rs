@@ -21,6 +21,7 @@
 use crate::cross_domain::external::spec::{
     AdapterDescriptor, DomainKey, FinalityKind, SecurityBacking, TrustModel,
 };
+use crate::crypto::facts::{CryptoFacts, QuantumClass};
 use serde::{Deserialize, Serialize};
 
 /// The domain's lifecycle. Every transition is recorded, because "was this
@@ -39,6 +40,11 @@ pub enum DomainState {
     /// An attestation was refused after admission. Not a judgement about the
     /// chain - a record that the adapter and the evidence disagreed.
     Faulted,
+    /// The quantum alarm reached Isolate (Zemheri) while the domain's observed
+    /// schemes were classical. The domain takes no attestation:
+    /// its signatures no longer bind anything on a chain whose curves fell.
+    /// Appended last so the serialized codes of the older states stay put.
+    QuantumIsolated,
 }
 
 impl DomainState {
@@ -50,6 +56,7 @@ impl DomainState {
             Self::Active => "active",
             Self::Retired => "retired",
             Self::Faulted => "faulted",
+            Self::QuantumIsolated => "quantum-isolated",
         }
     }
 
@@ -120,6 +127,15 @@ pub struct DomainProfile {
     pub last_backing: Option<SecurityBacking>,
     /// The full state history.
     pub history: Vec<StateEvent>,
+
+    // --- Which cryptography the verified claims rested on ---
+    /// The schemes the adapter observed while verifying, with counts. A fact
+    /// about what was checked, not a rating of it.
+    pub crypto_facts: CryptoFacts,
+    /// The assumption family of the weakest observed scheme, `None` while
+    /// nothing has been observed. Not a score: classical means a quantum
+    /// attacker could forge what rests on it, and that is all it means.
+    pub quantum_class: Option<QuantumClass>,
 }
 
 impl DomainProfile {
@@ -154,7 +170,7 @@ impl DomainProfile {
     pub fn summary_line(&self) -> String {
         let (refused, attempts) = self.refusal_ratio();
         format!(
-            "{} | consensus={} | finality={:?} | depth>={} | bond={} {} from {} poster(s) | accepted={} refused={}/{} | forks={}",
+            "{} | consensus={} | finality={:?} | depth>={} | bond={} {} from {} poster(s) | accepted={} refused={}/{} | forks={} | crypto={} | quantum_class={}",
             self.state.as_str(),
             self.consensus_kind,
             self.finality_kind,
@@ -166,6 +182,12 @@ impl DomainProfile {
             refused,
             attempts,
             self.evidence_forks,
+            if self.crypto_facts.is_empty() {
+                "none observed".to_string()
+            } else {
+                self.crypto_facts.summary()
+            },
+            self.quantum_class.map_or("unknown", QuantumClass::as_str),
         )
     }
 }
@@ -187,6 +209,9 @@ pub struct DomainRecord {
     pub last_verified_at: Option<u64>,
     pub last_backing: Option<SecurityBacking>,
     pub history: Vec<StateEvent>,
+    /// What the adapter observed across every accepted attestation.
+    #[serde(default)]
+    pub crypto_facts: CryptoFacts,
 }
 
 /// Builds the profile. Reads the record and nothing else - the signature is
@@ -212,6 +237,8 @@ pub fn profile_of(record: &DomainRecord) -> DomainProfile {
         last_verified_at: record.last_verified_at,
         last_backing: record.last_backing,
         history: record.history.clone(),
+        crypto_facts: record.crypto_facts.clone(),
+        quantum_class: record.crypto_facts.quantum_class(),
     }
 }
 
