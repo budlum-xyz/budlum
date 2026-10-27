@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 pub const DEFAULT_CHAIN_ID: u64 = 45262;
+/// First byte of `producer_public_key` for a composite (validator suite)
+/// block signature. `0x05` is the ML-DSA-87 producer form.
+pub const PRODUCER_KEY_COMPOSITE: u8 = 0x06;
 use crate::consensus::pos::SlashingEvidence;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -28,6 +31,12 @@ pub struct BlockHeader {
     pub previous_hash: String,
     pub hash: String,
     pub producer: Option<Address>,
+    /// The producer key of a composite or ML-DSA-87 block signature, as the
+    /// block carries it: evidence over two headers needs it to
+    /// verify a composite signature. Empty for an Ed25519 block. Not part of
+    /// the hash preimage, like the signature.
+    #[serde(default)]
+    pub producer_public_key: Vec<u8>,
     pub chain_id: u64,
     pub state_root: String,
     pub tx_root: String,
@@ -46,6 +55,13 @@ pub struct BlockHeader {
     /// into the block hash, so the BLS finality certificate seals it.
     #[serde(default)]
     pub shards_root: Option<[u8; 32]>,
+    /// Commitment to the witnesses of the block's transactions: the
+    /// `witness_root` over `(txid, witness bytes)` in block order. The
+    /// transaction root commits only the txids (the bodies), so this root is
+    /// what makes a changed witness a different block. `None` only on
+    /// devnet and testnet blocks built before; mainnet requires it.
+    #[serde(default)]
+    pub witness_root: Option<[u8; 32]>,
 }
 
 /// Stand-in bytes hashed when slashing evidence cannot be serialized.
@@ -76,6 +92,7 @@ struct BlockPreimage<'a> {
     validator_set_hash: &'a str,
     storage_root: Option<crate::domain::types::Hash32>,
     shards_root: Option<&'a [u8; 32]>,
+    witness_root: Option<&'a [u8; 32]>,
 }
 
 fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
@@ -147,6 +164,12 @@ fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
     if let Some(ref rb) = report_bytes {
         fields.push(rb.as_slice());
     }
+    // Tagged so a witness root never reads as a shards root or a report
+    // (each of the three is optional).
+    if let Some(witness_root) = &p.witness_root {
+        fields.push(b"BDLM_WITNESS_ROOT_V1");
+        fields.push(witness_root.as_slice());
+    }
     hash_fields_bytes(&fields)
 }
 
@@ -158,6 +181,7 @@ impl BlockHeader {
             previous_hash: block.previous_hash.clone(),
             hash: block.hash.clone(),
             producer: block.producer,
+            producer_public_key: block.producer_public_key.clone(),
             chain_id: block.chain_id,
             state_root: block.state_root.clone(),
             tx_root: block.tx_root.clone(),
@@ -171,6 +195,7 @@ impl BlockHeader {
             validator_set_hash: block.validator_set_hash.clone(),
             storage_root: block.storage_root,
             shards_root: block.shards_root,
+            witness_root: block.witness_root,
         }
     }
 
@@ -197,6 +222,7 @@ impl BlockHeader {
             validator_set_hash: &self.validator_set_hash,
             storage_root: self.storage_root,
             shards_root: self.shards_root.as_ref(),
+            witness_root: self.witness_root.as_ref(),
         })
     }
 
@@ -205,13 +231,24 @@ impl BlockHeader {
             Some(p) => p,
             None => return false,
         };
-        let public_key = producer_addr.as_bytes();
         let binary_hash = self.calculate_hash_bytes();
         let calculated_hash = hex::encode(binary_hash);
         if calculated_hash != self.hash {
             return false;
         }
-        verify_signature(&binary_hash, signature, public_key).is_ok()
+        // A composite block signature verifies with the key the
+        // header carries; its Ed25519 half must be the producer.
+        if self.producer_public_key.first() == Some(&PRODUCER_KEY_COMPOSITE) {
+            return crate::consensus::block_signature::verify_block(
+                &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+                producer_addr.as_bytes(),
+                &self.producer_public_key[1..],
+                &binary_hash,
+                signature,
+            )
+            .is_ok();
+        }
+        verify_signature(&binary_hash, signature, producer_addr.as_bytes()).is_ok()
     }
 }
 
@@ -252,6 +289,13 @@ pub struct Block {
     /// into the block hash, so the BLS finality certificate seals it.
     #[serde(default)]
     pub shards_root: Option<[u8; 32]>,
+    /// Commitment to the witnesses of the block's transactions: the
+    /// `witness_root` over `(txid, witness bytes)` in block order. The
+    /// transaction root commits only the txids (the bodies), so this root is
+    /// what makes a changed witness a different block. `None` only on
+    /// devnet and testnet blocks built before; mainnet requires it.
+    #[serde(default)]
+    pub witness_root: Option<[u8; 32]>,
 }
 
 impl Block {
@@ -292,6 +336,7 @@ impl Block {
             validator_set_hash: String::new(),
             storage_root: None,
             shards_root: None,
+            witness_root: None,
         };
         block.tx_root = block.calculate_tx_root();
         block.hash = block.calculate_hash();
@@ -302,6 +347,67 @@ impl Block {
         block.timestamp = 0;
         block.hash = block.calculate_hash();
         block
+    }
+
+    /// The witness root of this block's transactions: each
+    /// transaction's id (its body hash; a malformed id folds to all zeros,
+    /// which no body hashes to) and the bincode bytes of its witness.
+    #[must_use]
+    pub fn calculate_witness_root(&self) -> [u8; 32] {
+        let ids: Vec<[u8; 32]> = self
+            .transactions
+            .iter()
+            .map(|tx| hex_32(&tx.hash).unwrap_or([0u8; 32]))
+            .collect();
+        let witnesses: Vec<Vec<u8>> = self
+            .transactions
+            .iter()
+            .map(Transaction::witness_bytes)
+            .collect();
+        crate::network::witness_protocol::witness_root(&ids, &witnesses)
+    }
+
+    /// Whether every transaction's witness was pruned: the body is
+    /// complete, the signatures are gone. Such a block is admitted only
+    /// inside a segment that a finality certificate and its QC end
+    ///.
+    #[must_use]
+    pub fn witness_is_stripped(&self) -> bool {
+        !self.transactions.is_empty()
+            && self
+                .transactions
+                .iter()
+                .all(|tx| tx.witness() == crate::core::transaction::TxWitness::default())
+    }
+
+    /// This block with every transaction witness removed. The block hash
+    /// and the witness root stay: neither covers the witnesses themselves.
+    #[must_use]
+    pub fn without_witnesses(&self) -> Self {
+        let mut block = self.clone();
+        block.transactions = block
+            .transactions
+            .into_iter()
+            .map(|tx| tx.split_witness().0)
+            .collect();
+        block
+    }
+
+    /// Whether the block's witness root is the one its transactions give.
+    /// An absent root is admitted off mainnet only (blocks built before
+    ///); mainnet requires it.
+    #[must_use]
+    pub fn witness_root_is_valid(&self) -> bool {
+        match &self.witness_root {
+            Some(root) => *root == self.calculate_witness_root(),
+            None => {
+                self.index == 0
+                    || self.chain_id
+                        != crate::core::chain_config::Network::Mainnet
+                            .chain_id()
+                            .value()
+            }
+        }
     }
 
     pub fn calculate_tx_root(&self) -> String {
@@ -414,6 +520,7 @@ impl Block {
             validator_set_hash: &self.validator_set_hash,
             storage_root: self.storage_root,
             shards_root: self.shards_root.as_ref(),
+            witness_root: self.witness_root.as_ref(),
         })
     }
     pub fn sign(&mut self, keypair: &KeyPair) {
@@ -443,7 +550,97 @@ impl Block {
         );
     }
 
+    /// Sign with the validator suite (`0x0002`, ML-DSA-65 and Ed25519) under
+    /// the `BDLM/BLOCK/V6` context. The producer stays the
+    /// Ed25519 half; `producer_public_key` carries
+    /// [`PRODUCER_KEY_COMPOSITE`] then the composite public key.
+    ///
+    /// # Errors
+    ///
+    /// A key that is not of the validator suite or cannot sign.
+    pub fn sign_composite(
+        &mut self,
+        keypair: &crate::crypto::composite::CompositeKeypair,
+        rnd: &[u8; 32],
+    ) -> Result<(), String> {
+        if keypair.suite() != crate::crypto::scheme::SuiteId::VALIDATOR {
+            return Err("a block is signed with the validator suite".into());
+        }
+        let public = keypair.public_key().map_err(|e| e.to_string())?;
+        self.producer = Some(Address::from(public.ed));
+        let mut key = vec![PRODUCER_KEY_COMPOSITE];
+        key.extend_from_slice(&public.encode());
+        self.producer_public_key = key;
+        let binary_hash = self.calculate_hash_bytes();
+        self.hash = hex::encode(binary_hash);
+        let signature = crate::consensus::block_signature::sign_block(keypair, &binary_hash, rnd)
+            .map_err(|e| e.to_string())?;
+        self.signature = Some(signature);
+        Ok(())
+    }
+
+    /// [`Self::sign_composite`] through a signer backend (an HSM): the
+    /// secrets stay in the backend.
+    ///
+    /// # Errors
+    ///
+    /// The backend has no PQ key or cannot sign a component.
+    pub fn sign_composite_with_signer(
+        &mut self,
+        signer: &dyn ConsensusSigner,
+    ) -> Result<(), String> {
+        let public = crate::crypto::signer::composite_public_key(signer)
+            .ok_or("the signer holds no ML-DSA-65 key")?;
+        self.producer = Some(Address::from(public.ed));
+        let mut key = vec![PRODUCER_KEY_COMPOSITE];
+        key.extend_from_slice(&public.encode());
+        self.producer_public_key = key;
+        let binary_hash = self.calculate_hash_bytes();
+        self.hash = hex::encode(binary_hash);
+        let signature = crate::crypto::signer::sign_composite_with(
+            signer,
+            crate::crypto::ctx::BLOCK_V6,
+            &binary_hash,
+        )
+        .map_err(|e| format!("composite block signing failed: {e}"))?;
+        self.signature = Some(signature.encode());
+        Ok(())
+    }
+
+    /// The ML-DSA-65 half of a composite block signature's key, for the
+    /// consensus check against the producer's registered key.
+    #[must_use]
+    pub fn composite_pq_key(&self) -> Option<Vec<u8>> {
+        let (version, key) = self.producer_public_key.split_first()?;
+        if *version != PRODUCER_KEY_COMPOSITE {
+            return None;
+        }
+        crate::crypto::composite::CompositePublicKey::decode(key)
+            .ok()
+            .map(|public| public.pq)
+    }
+
     pub fn sign_with_signer(&mut self, signer: &dyn ConsensusSigner) -> Result<(), String> {
+        // A backend that holds the validator's ML-DSA-65 key signs the
+        // composite form, the only one mainnet admits. Off mainnet a
+        // backend that cannot assemble it keeps the Ed25519 form.
+        if signer.has_pq_key() {
+            match self.sign_composite_with_signer(signer) {
+                Ok(()) => return Ok(()),
+                Err(e)
+                    if self.chain_id
+                        == crate::core::chain_config::Network::Mainnet
+                            .chain_id()
+                            .value() =>
+                {
+                    return Err(e);
+                }
+                Err(e) => {
+                    tracing::warn!("composite block signing unavailable, signing Ed25519: {e}");
+                    self.producer_public_key = Vec::new();
+                }
+            }
+        }
         self.producer = Some(signer.address());
         let binary_hash = self.calculate_hash_bytes();
         self.hash = hex::encode(binary_hash);
@@ -463,7 +660,16 @@ impl Block {
         Ok(())
     }
 
+    /// Verify under the scheme statuses of a fresh genesis. Consensus calls
+    /// [`Self::verify_signature_in`] with the chain-state registry.
     pub fn verify_signature(&self) -> bool {
+        self.verify_signature_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
+    }
+
+    pub fn verify_signature_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    ) -> bool {
         let producer_addr = match &self.producer {
             Some(p) => p,
             None => {
@@ -488,6 +694,31 @@ impl Block {
         // where it will carry the 2592-byte ML-DSA-87 key and producer will
         // become a hash. For an unsigned/legacy block the producer bytes are
         // the public key, matching the prior consensus behavior.
+        // Mainnet admits only the composite block signature.
+        if self.chain_id
+            == crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value()
+            && self.producer_public_key.first() != Some(&PRODUCER_KEY_COMPOSITE)
+        {
+            warn!("Mainnet refuses a block without the composite signature");
+            return false;
+        }
+        if self.producer_public_key.first() == Some(&PRODUCER_KEY_COMPOSITE) {
+            return match crate::consensus::block_signature::verify_block(
+                registry,
+                producer_addr.as_bytes(),
+                &self.producer_public_key[1..],
+                &binary_hash,
+                signature,
+            ) {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!("Composite block signature refused: {e:?}");
+                    false
+                }
+            };
+        }
         if self.producer_public_key.is_empty() {
             match crate::crypto::primitives::verify_signature(
                 &binary_hash,
@@ -516,7 +747,9 @@ impl Block {
                 Ok(addr) if &addr == producer_addr => {}
                 _ => return false,
             }
-            match crate::crypto::primitives::verify_ml_dsa_87_signature(
+            match crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+                registry,
+                crate::crypto::ctx::BLOCK_V6,
                 &binary_hash,
                 signature,
                 public_key,
@@ -533,6 +766,17 @@ impl Block {
         }
     }
     pub fn verify_signature_with_pubkey(&self, expected_pubkey: &Address) -> bool {
+        self.verify_signature_with_pubkey_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            expected_pubkey,
+        )
+    }
+
+    pub fn verify_signature_with_pubkey_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        expected_pubkey: &Address,
+    ) -> bool {
         let producer = match &self.producer {
             Some(p) => p,
             None => return false,
@@ -541,7 +785,7 @@ impl Block {
             warn!("Wrong producer. Expected: {expected_pubkey}, Got: {producer}");
             return false;
         }
-        self.verify_signature()
+        self.verify_signature_in(registry)
     }
     /// Searches nonces until the hash has `difficulty` leading zero hex digits.
     ///
@@ -907,5 +1151,104 @@ mod merkle_duplicate_leaf_locks {
                 "a {n}-leaf tree accepts a duplicated last leaf"
             );
         }
+    }
+
+    fn block_with_signed_transfer(chain_id: u64) -> Block {
+        let key = KeyPair::generate().expect("key");
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from(key.public_key_bytes()),
+            Address::from([2u8; 32]),
+            5,
+            1,
+            0,
+            Vec::new(),
+            chain_id,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.sign(&key);
+        let mut block = Block::new_with_chain_id(1, "0".repeat(64), vec![tx], chain_id);
+        block.witness_root = Some(block.calculate_witness_root());
+        block.hash = block.calculate_hash();
+        block
+    }
+
+    #[test]
+    fn a_changed_witness_changes_the_witness_root_but_not_the_tx_root() {
+        let mut block = block_with_signed_transfer(DEFAULT_CHAIN_ID);
+        assert!(block.witness_root_is_valid());
+        let tx_root = block.calculate_tx_root();
+        let mut signature = block.transactions[0].signature.clone().expect("signed");
+        signature[0] ^= 1;
+        block.transactions[0].signature = Some(signature);
+        assert_eq!(block.calculate_tx_root(), tx_root, "the body is unchanged");
+        assert!(
+            !block.witness_root_is_valid(),
+            "the witness root catches it"
+        );
+    }
+
+    #[test]
+    fn the_witness_root_is_part_of_the_block_hash() {
+        let block = block_with_signed_transfer(DEFAULT_CHAIN_ID);
+        let mut other = block.clone();
+        other.witness_root = Some([7u8; 32]);
+        assert_ne!(block.calculate_hash(), other.calculate_hash());
+        other.witness_root = None;
+        assert_ne!(block.calculate_hash(), other.calculate_hash());
+    }
+
+    #[test]
+    fn mainnet_requires_a_witness_root() {
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let mut block = block_with_signed_transfer(mainnet);
+        assert!(block.witness_root_is_valid());
+        block.witness_root = None;
+        assert!(!block.witness_root_is_valid());
+        let mut devnet = block_with_signed_transfer(DEFAULT_CHAIN_ID);
+        devnet.witness_root = None;
+        assert!(devnet.witness_root_is_valid());
+    }
+
+    fn composite_key(tag: u8) -> crate::crypto::composite::CompositeKeypair {
+        crate::crypto::composite::CompositeKeypair::from_seeds(
+            crate::crypto::scheme::SuiteId::VALIDATOR,
+            &[tag; crate::crypto::pq::ML_DSA_SEED_LEN],
+            &[tag.wrapping_add(1); 32],
+        )
+        .expect("validator suite seeds")
+    }
+
+    #[test]
+    fn a_composite_block_signature_verifies_on_the_block_and_its_header() {
+        let mut block = Block::new(4, "ab".repeat(32), vec![]);
+        block
+            .sign_composite(&composite_key(3), &[0u8; 32])
+            .expect("signs");
+        assert!(block.verify_signature());
+        assert!(block.composite_pq_key().is_some());
+        let header = BlockHeader::from_block(&block);
+        let signature = block.signature.clone().expect("signed");
+        assert!(header.verify_signature(&signature));
+        let mut other = block.clone();
+        other.nonce += 1;
+        assert!(!other.verify_signature(), "the hash no longer matches");
+    }
+
+    #[test]
+    fn mainnet_refuses_an_ed25519_only_block() {
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let key = KeyPair::generate().expect("key");
+        let mut classical = Block::new_with_chain_id(4, "ab".repeat(32), vec![], mainnet);
+        classical.sign(&key);
+        assert!(!classical.verify_signature());
+        let mut composite = Block::new_with_chain_id(4, "ab".repeat(32), vec![], mainnet);
+        composite
+            .sign_composite(&composite_key(3), &[0u8; 32])
+            .expect("signs");
+        assert!(composite.verify_signature());
     }
 }

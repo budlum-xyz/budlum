@@ -5,6 +5,14 @@
 // `apply_bridge_sweep` expiry-sweep.
 #[cfg(test)]
 pub mod bridge_lifecycle;
+// A funded chain that applies door transactions in produced blocks and
+// restarts from its own store: the restart tests write through it (K4).
+#[cfg(test)]
+pub mod block_door_harness;
+//: four nodes build the same global header sequence; a restart
+// rebuilds it.
+#[cfg(test)]
+pub mod global_header_sequence;
 pub mod v95_v98_canaries;
 // QcBlob quorum-check unit tests (security audit §4). The
 // `import_qc_blob` minimum-signature count contract is verified by
@@ -152,6 +160,8 @@ pub mod bridge_negatives;
 pub mod domain_edge_cases;
 #[cfg(test)]
 pub mod encryption_dao;
+#[cfg(test)]
+pub mod evm_finality_contract;
 // The PoA participant onboarding lifecycle, the whitelist requirement and the
 // KYC expiry test matrix. The isolation seal lives in poa_isolation.rs.
 pub mod poa_onboarding_matrix;

@@ -166,6 +166,11 @@ pub struct ConstitutionRegistry {
 }
 
 impl ConstitutionRegistry {
+    #[must_use]
+    pub fn parameter_count(&self) -> usize {
+        self.parameters.len()
+    }
+
     pub fn new() -> Self {
         let mut parameters = BTreeMap::new();
         for key in [

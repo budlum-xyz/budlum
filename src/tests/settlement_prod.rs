@@ -281,10 +281,10 @@ mod settlement_prod_tests {
 
         let after = blockchain.build_global_header(None);
         assert_ne!(before.domain_commitment_root, after.domain_commitment_root);
-        assert_eq!(blockchain.domain_commitment_registry.len(), 3);
+        assert_eq!(blockchain.state.settlement.commitments.len(), 3);
         assert_eq!(
             after.domain_registry_root,
-            blockchain.domain_registry.root()
+            blockchain.state.settlement.domains.root()
         );
     }
 
@@ -301,7 +301,7 @@ mod settlement_prod_tests {
 
         let err = blockchain.submit_domain_commitment(commitment).unwrap_err();
         assert!(err.contains("consensus kind mismatch"));
-        assert!(blockchain.domain_commitment_registry.is_empty());
+        assert!(blockchain.state.settlement.commitments.is_empty());
     }
 
     #[test]
@@ -310,7 +310,9 @@ mod settlement_prod_tests {
         let poa = domain(3, ConsensusKind::PoA);
         blockchain.register_consensus_domain(poa.clone()).unwrap();
         blockchain
-            .domain_registry
+            .state
+            .settlement
+            .domains
             .set_status(poa.id, DomainStatus::Frozen)
             .unwrap();
 
@@ -318,7 +320,7 @@ mod settlement_prod_tests {
             .submit_domain_commitment(commitment_for(&poa, 1, 0, 8))
             .unwrap_err();
         assert!(err.contains("frozen"));
-        assert!(blockchain.domain_commitment_registry.is_empty());
+        assert!(blockchain.state.settlement.commitments.is_empty());
     }
 
     #[test]
@@ -344,101 +346,54 @@ mod settlement_prod_tests {
         assert_ne!(first.calculate_hash(), second.calculate_hash());
     }
 
+    ///: the domains, their commitments and the proof claims are
+    /// settlement registries in the account state. Blocks write them and a
+    /// restart replays the blocks; a node that syncs from a snapshot gets
+    /// them from the snapshot, whose schema-10 digest commits them. No side
+    /// store holds a copy a restart could prefer over the replay.
     #[test]
-    fn multi_consensus_settlement_state_round_trips_through_storage() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("multi-consensus-settlement");
-        let path = path.to_str().unwrap();
+    fn multi_consensus_settlement_state_round_trips_through_a_snapshot() {
+        use crate::chain::snapshot::{StateSnapshotV2, StateSnapshotV2Params};
 
-        {
-            let storage = Storage::new(path).unwrap();
-            let mut blockchain =
-                Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
-            for (id, kind, seed) in [
-                (1, ConsensusKind::PoW, 1u8),
-                (2, ConsensusKind::PoS, 2u8),
-                (3, ConsensusKind::PoA, 3u8),
-            ] {
-                let domain = domain(id, kind);
-                blockchain
-                    .register_consensus_domain(domain.clone())
-                    .unwrap();
-                blockchain
-                    .submit_domain_commitment(commitment_for(&domain, id as u64, 0, seed))
-                    .unwrap();
-            }
-            blockchain.seal_global_header(None).unwrap();
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        for (id, kind, seed) in [
+            (1, ConsensusKind::PoW, 1u8),
+            (2, ConsensusKind::PoS, 2u8),
+            (3, ConsensusKind::PoA, 3u8),
+        ] {
+            let domain = domain(id, kind);
+            blockchain
+                .register_consensus_domain(domain.clone())
+                .unwrap();
+            blockchain
+                .submit_domain_commitment(commitment_for(&domain, u64::from(id), 0, seed))
+                .unwrap();
         }
 
-        let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
+        let mut snapshot = StateSnapshotV2::from_state(
+            &blockchain.state,
+            StateSnapshotV2Params {
+                height: 1,
+                block_hash: "block-digest".into(),
+                genesis_hash: "genesis-digest".into(),
+                chain_id: 45262,
+                finalized_height: 0,
+                finalized_hash: "fin-digest".into(),
+                finality_certificates: vec![],
+            },
+        );
+        snapshot.snapshot_hash = hex::encode(snapshot.calculate_digest());
+        let restored = StateSnapshotV2::from_bytes(&snapshot.to_bytes()).unwrap();
+        assert!(restored.verify());
+        let settlement = restored
+            .settlement
+            .expect("schema 10 carries the registries");
 
-        assert!(blockchain.domain_registry.get(1).is_some());
-        assert!(blockchain.domain_registry.get(2).is_some());
-        assert!(blockchain.domain_registry.get(3).is_some());
-        assert_eq!(blockchain.domain_commitment_registry.len(), 3);
-        assert_eq!(blockchain.global_headers.len(), 1);
-    }
-
-    #[test]
-    fn storage_reload_skips_malformed_consensus_domains() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("malformed-domain-reload");
-        let path = path.to_str().unwrap();
-
-        {
-            let storage = Storage::new(path).unwrap();
-            storage
-                .save_consensus_domain(&domain(1, ConsensusKind::PoW))
-                .unwrap();
-
-            let mut malformed = domain(2, ConsensusKind::PoS);
-            malformed.finality_adapter = "pow-header-chain-v1".into();
-            storage.save_consensus_domain(&malformed).unwrap();
-        }
-
-        let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
-
-        assert!(blockchain.domain_registry.get(1).is_some());
-        assert!(blockchain.domain_registry.get(2).is_none());
-    }
-
-    #[test]
-    fn storage_reload_skips_commitments_for_unknown_or_mismatched_domains() {
-        let tempdir = tempfile::tempdir().unwrap();
-        let path = tempdir.path().join("malformed-commitment-reload");
-        let path = path.to_str().unwrap();
-
-        {
-            let storage = Storage::new(path).unwrap();
-            let pow = domain(1, ConsensusKind::PoW);
-            storage.save_consensus_domain(&pow).unwrap();
-            storage
-                .save_domain_commitment(&commitment_for(&pow, 1, 0, 1))
-                .unwrap();
-
-            let phantom = domain(99, ConsensusKind::PoW);
-            storage
-                .save_domain_commitment(&commitment_for(&phantom, 1, 0, 99))
-                .unwrap();
-
-            let mut wrong_kind = commitment_for(&pow, 2, 0, 2);
-            wrong_kind.consensus_kind = ConsensusKind::PoS;
-            storage.save_domain_commitment(&wrong_kind).unwrap();
-        }
-
-        let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
-
-        assert!(blockchain.domain_registry.get(1).is_some());
-        assert_eq!(blockchain.domain_commitment_registry.len(), 1);
-        assert!(blockchain.domain_commitment_registry.get(1, 1, 0).is_some());
-        assert!(blockchain
-            .domain_commitment_registry
-            .get(99, 1, 0)
-            .is_none());
-        assert!(blockchain.domain_commitment_registry.get(1, 2, 0).is_none());
+        assert!(settlement.domains.get(1).is_some());
+        assert!(settlement.domains.get(2).is_some());
+        assert!(settlement.domains.get(3).is_some());
+        assert_eq!(settlement.commitments.len(), 3);
+        assert_eq!(settlement.root(), blockchain.state.settlement.root());
     }
 
     #[test]
@@ -525,7 +480,7 @@ mod settlement_prod_tests {
             .submit_verified_domain_commitment(pending_commitment, pending_proof)
             .unwrap_err();
         assert!(err.contains("not finalized"));
-        assert!(blockchain.domain_commitment_registry.is_empty());
+        assert!(blockchain.state.settlement.commitments.is_empty());
 
         // Finalized-depth proof (2 headers), correctly bound and hashed.
         let finalized_proof = FinalityProof::PoWHeaderChain {
@@ -546,7 +501,7 @@ mod settlement_prod_tests {
         blockchain
             .submit_verified_domain_commitment(finalized_commitment, finalized_proof)
             .unwrap();
-        assert_eq!(blockchain.domain_commitment_registry.len(), 1);
+        assert_eq!(blockchain.state.settlement.commitments.len(), 1);
     }
 
     #[test]
@@ -626,7 +581,7 @@ mod settlement_prod_tests {
             .unwrap_err();
         assert!(err.contains("leading zero bits"));
 
-        assert!(blockchain.domain_commitment_registry.is_empty());
+        assert!(blockchain.state.settlement.commitments.is_empty());
     }
 
     #[test]
@@ -650,7 +605,7 @@ mod settlement_prod_tests {
         blockchain
             .submit_verified_domain_commitment(quorum_commitment, quorum_proof)
             .unwrap();
-        assert_eq!(blockchain.domain_commitment_registry.len(), 1);
+        assert_eq!(blockchain.state.settlement.commitments.len(), 1);
     }
 
     #[test]
@@ -898,10 +853,6 @@ mod settlement_prod_tests {
                 .is_err(),
             "verified messages still replay-protect at bridge state"
         );
-        assert!(blockchain.burn_bridge_transfer(message_id, pos.id).is_err());
-        assert!(blockchain
-            .unlock_bridge_transfer(message_id, pow.id)
-            .is_err());
 
         let burn_event = blockchain
             .burn_bridge_transfer_with_event(message_id, pos.id, 56, 0, 2_000, [7u8; 20])
@@ -1056,103 +1007,65 @@ mod settlement_prod_tests {
         assert_ne!(after_lock.calculate_hash(), after_mint.calculate_hash());
     }
 
+    /// K4: a lock applied in a block is rebuilt by the block replay after a
+    /// restart, with the same bridge and replay-nonce roots.
     #[test]
     fn bridge_state_roots_round_trip_through_storage_after_lock() {
+        use crate::tests::block_door_harness::BlockHarness;
+
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("bridge-state-round-trip");
         let path = path.to_str().unwrap();
 
-        let expected_bridge_root;
-        let expected_replay_root;
-        {
-            let storage = Storage::new(path).unwrap();
-            let mut blockchain =
-                Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
-            let pow = domain(1, ConsensusKind::PoW);
-            let pos = domain(2, ConsensusKind::PoS);
-            blockchain.register_consensus_domain(pow.clone()).unwrap();
-            blockchain.register_consensus_domain(pos).unwrap();
+        let mut harness = BlockHarness::open(path);
+        let asset_id = AssetId(hash_fields_bytes(&[b"stored-bridge-asset"]));
+        harness.lock_through_blocks(asset_id, Address::from([0x42; 32]), 100);
+        let header = harness.chain.build_global_header(None);
+        let expected_bridge_root = header.bridge_state_root;
+        let expected_replay_root = header.replay_nonce_root;
 
-            let asset_id = AssetId(hash_fields_bytes(&[b"stored-bridge-asset"]));
-            blockchain.register_bridge_asset(asset_id, pow.id).unwrap();
-            blockchain
-                .state
-                .add_balance(&Address::from([0x41; 32]), 1_000);
-            blockchain
-                .lock_bridge_transfer(
-                    pow.id,
-                    2,
-                    10,
-                    0,
-                    asset_id,
-                    Address::from([0x41; 32]),
-                    Address::from([0x42; 32]),
-                    100,
-                    1_000,
-                )
-                .unwrap();
-            let header = blockchain.build_global_header(None);
-            expected_bridge_root = header.bridge_state_root;
-            expected_replay_root = header.replay_nonce_root;
-        }
-
-        let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
-        let reloaded = blockchain.build_global_header(None);
+        let harness = harness.restart();
+        let reloaded = harness.chain.build_global_header(None);
         assert_eq!(reloaded.bridge_state_root, expected_bridge_root);
         assert_eq!(reloaded.replay_nonce_root, expected_replay_root);
     }
 
+    /// K4: the cross-domain message a lock registers is account state. The
+    /// lock is applied in a block, so the restart (a replay of the stored
+    /// blocks) brings the message and the message root back.
     #[test]
     fn bridge_lock_registers_and_persists_cross_domain_message() {
+        use crate::tests::block_door_harness::BlockHarness;
+
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("bridge-message-round-trip");
         let path = path.to_str().unwrap();
 
-        let expected_message_root;
-        let message_id;
-        {
-            let storage = Storage::new(path).unwrap();
-            let mut blockchain =
-                Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
-            let pow = domain(1, ConsensusKind::PoW);
-            let pos = domain(2, ConsensusKind::PoS);
-            blockchain.register_consensus_domain(pow.clone()).unwrap();
-            blockchain.register_consensus_domain(pos).unwrap();
+        let mut harness = BlockHarness::open(path);
+        let baseline = harness.chain.build_global_header(None);
+        let asset_id = AssetId(hash_fields_bytes(&[b"bridge-lock-message-root"]));
+        harness.lock_through_blocks(asset_id, Address::from([0x52; 32]), 100);
+        let after_lock = harness.chain.build_global_header(None);
+        assert_ne!(baseline.message_root, after_lock.message_root);
+        let message_id = harness
+            .chain
+            .state
+            .message_registry
+            .messages()
+            .next()
+            .expect("the lock registered its message")
+            .message_id;
 
-            let baseline = blockchain.build_global_header(None);
-            let asset_id = AssetId(hash_fields_bytes(&[b"bridge-lock-message-root"]));
-            blockchain.register_bridge_asset(asset_id, pow.id).unwrap();
-            blockchain
-                .state
-                .add_balance(&Address::from([0x51; 32]), 1_000);
-            let (_transfer, event) = blockchain
-                .lock_bridge_transfer(
-                    pow.id,
-                    2,
-                    10,
-                    0,
-                    asset_id,
-                    Address::from([0x51; 32]),
-                    Address::from([0x52; 32]),
-                    100,
-                    1_000,
-                )
-                .unwrap();
-            message_id = event.message.as_ref().unwrap().message_id;
-
-            let after_lock = blockchain.build_global_header(None);
-            assert_ne!(baseline.message_root, after_lock.message_root);
-            assert!(blockchain.state.message_registry.get(&message_id).is_some());
-            expected_message_root = after_lock.message_root;
-        }
-
-        let storage = Storage::new(path).unwrap();
-        let blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), Some(storage), 45262, None);
-        assert!(blockchain.state.message_registry.get(&message_id).is_some());
+        let harness = harness.restart();
+        assert!(harness
+            .chain
+            .state
+            .message_registry
+            .get(&message_id)
+            .is_some());
         assert_eq!(
-            blockchain.build_global_header(None).message_root,
-            expected_message_root
+            harness.chain.build_global_header(None).message_root,
+            after_lock.message_root
         );
     }
 
@@ -1191,7 +1104,7 @@ mod settlement_prod_tests {
         let proof = bft_proof_for(&c);
         c.finality_proof_hash = hash_finality_proof(&proof).expect("finality proof hashes");
         bc.submit_verified_domain_commitment(c, proof).unwrap();
-        assert_eq!(bc.domain_commitment_registry.len(), 1);
+        assert_eq!(bc.state.settlement.commitments.len(), 1);
     }
 
     #[test]
@@ -1435,7 +1348,9 @@ mod settlement_prod_tests {
         let mut bc = test_chain();
         let pow = domain(1, ConsensusKind::PoW);
         bc.register_consensus_domain(pow.clone()).unwrap();
-        bc.domain_registry
+        bc.state
+            .settlement
+            .domains
             .set_status(1, DomainStatus::Retired)
             .unwrap();
 
@@ -1724,7 +1639,7 @@ mod settlement_prod_tests {
         }
         let after = bc.build_global_header(None);
         assert_ne!(before.domain_commitment_root, after.domain_commitment_root);
-        assert_eq!(bc.domain_commitment_registry.len(), 5);
+        assert_eq!(bc.state.settlement.commitments.len(), 5);
     }
 
     #[test]
@@ -1919,7 +1834,7 @@ mod settlement_prod_tests {
             &burn_proof,
         )
         .unwrap();
-        // Decision K4-A: the unlock returns what the recipient burned - the
+        // Decision: the unlock returns what the recipient burned - the
         // 1000 transfer minus the 10 relayer fee that stays with the relayer.
         assert_eq!(bc.state.get_balance(&bob), 0, "the burn took bob's 990");
         assert_eq!(
@@ -1968,12 +1883,6 @@ mod settlement_prod_tests {
             Address::zero(),
         )
         .unwrap();
-
-        assert!(
-            bc.unlock_bridge_transfer(transfer.message_id, pow.id)
-                .is_err(),
-            "direct unlock must still reject before a burn transition exists"
-        );
 
         let burn_event = bc
             .burn_bridge_transfer_with_event(transfer.message_id, pos.id, 201, 0, 9000, [7u8; 20])
@@ -2215,7 +2124,7 @@ mod zk_finality_real_proof {
         bc.submit_verified_domain_commitment(c, fproof).unwrap();
         // The tip the proof already recorded is the one the finality proof names, so
         // the verified step is a no-op on the domain tip, not a second commitment.
-        let tip = bc.domain_registry.get(DOMAIN_ID).unwrap();
+        let tip = bc.state.settlement.domains.get(DOMAIN_ID).unwrap();
         assert_eq!(tip.last_committed_height, HEIGHT);
         assert_eq!(tip.last_committed_hash, pi.final_state_root);
     }

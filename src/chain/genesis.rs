@@ -193,6 +193,15 @@ pub struct GenesisConfig {
     /// empty, for devnet and testnet backward compatibility.
     #[serde(default)]
     pub bootstrap_domains: Vec<BootstrapDomainConfig>,
+
+    /// The PQ anchor key ledger of the ceremony: three
+    /// ML-DSA-87 anchor keys across at least two HSM vendors and the Root Seal
+    /// keys. A signature names a key by its slot here and carries no public
+    /// key. Absent until the anchor key ceremony; a mainnet or testnet node
+    /// cannot enter anchor production mode without it, and devnet derives its
+    /// own public development ledger (`AnchorEmission::devnet`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_ledger: Option<crate::settlement::AnchorKeyLedger>,
 }
 
 impl Default for GenesisConfig {
@@ -211,6 +220,7 @@ impl Default for GenesisConfig {
             pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
             bootstrap_domains: vec![],
             poa_authorities: Vec::new(),
+            anchor_ledger: None,
         }
     }
 }
@@ -305,11 +315,23 @@ impl GenesisConfig {
                     }
                 }
 
+                let poa_authorities: Vec<String> =
+                    if matches!(domain.kind, crate::domain::ConsensusKind::PoA)
+                        && cfg.poa_authorities.is_empty()
+                        && !self.poa_authorities.is_empty()
+                    {
+                        self.poa_authorities
+                            .iter()
+                            .map(|address| address.to_hex())
+                            .collect()
+                    } else {
+                        cfg.poa_authorities.clone()
+                    };
                 if matches!(domain.kind, crate::domain::ConsensusKind::PoA)
-                    && !cfg.poa_authorities.is_empty()
+                    && !poa_authorities.is_empty()
                 {
-                    let mut entries = Vec::with_capacity(cfg.poa_authorities.len());
-                    for authority in &cfg.poa_authorities {
+                    let mut entries = Vec::with_capacity(poa_authorities.len());
+                    for authority in &poa_authorities {
                         let address = Address::from_hex(authority).map_err(|e| {
                             format!(
                                 "Invalid PoA authority '{}' in bootstrap domain {}: {}",
@@ -382,7 +404,23 @@ impl GenesisConfig {
             .bud_tokenomics
             .as_ref()
             .map_or(0, |params| u128::from(params.total()));
-        let total = allocations + distribution;
+        // Genesis validator stake is supply too. With a tokenomics
+        // distribution it is drawn from the ecosystem share (`build_state`),
+        // which therefore has to cover it; without one it adds to the total.
+        let stake = u128::from(self.genesis_stake_total());
+        let total = match &self.bud_tokenomics {
+            Some(params) => {
+                let pool = u128::from(self.genesis_reward_pool());
+                if stake + pool > u128::from(params.ecosystem) {
+                    return Err(format!(
+                        "Genesis validator stake {stake} and reward pool {pool} exceed the ecosystem share {} they are drawn from",
+                        params.ecosystem
+                    ));
+                }
+                allocations + distribution
+            }
+            None => allocations + distribution + stake,
+        };
         if total > u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY) {
             return Err(format!(
                 "Genesis mints {total} base units, above the fixed supply of {}",
@@ -461,8 +499,28 @@ impl GenesisConfig {
         Ok(())
     }
 
+    /// The anchor key ledger, when genesis carries one, is well formed and is
+    /// the ledger of this chain. Absence is allowed here: the ledger
+    /// arrives with the anchor key ceremony, and production anchoring refuses
+    /// to start without it.
+    pub fn validate_anchor_ledger(&self) -> Result<(), String> {
+        let Some(ledger) = &self.anchor_ledger else {
+            return Ok(());
+        };
+        if ledger.chain_id != self.chain_id {
+            return Err(format!(
+                "Genesis anchor ledger is for chain {}, this genesis is chain {}",
+                ledger.chain_id, self.chain_id
+            ));
+        }
+        ledger
+            .validate()
+            .map_err(|e| format!("Genesis anchor ledger refused: {e}"))
+    }
+
     pub fn validate_consensus_ceremony(&self, network: Network) -> Result<(), String> {
         self.validate_pq_scheme()?;
+        self.validate_anchor_ledger()?;
         if self.chain_id != network.chain_id().value() {
             return Err(format!(
                 "Genesis chain ID {} does not match {} profile chain ID {}",
@@ -541,14 +599,17 @@ impl GenesisConfig {
             }
             self.validate_mainnet_poa_authorities()?;
             self.validate_mainnet_pow_parameters()?;
+        }
+        // The testnet is the mainnet rehearsal: the same validator ceremony.
+        if matches!(network, Network::Mainnet | Network::Testnet) {
             if self.validators.len() < 4 {
-                return Err(
-                    "Mainnet genesis requires at least four ceremony validators (3f+1)".into(),
-                );
+                return Err(format!(
+                    "{network} genesis requires at least four ceremony validators (3f+1)"
+                ));
             }
             if registered.len() != self.validators.len() {
                 return Err(format!(
-                    "Mainnet genesis has {} validators but only {} complete consensus-key records",
+                    "{network} genesis has {} validators but only {} complete consensus-key records",
                     self.validators.len(),
                     registered.len()
                 ));
@@ -659,6 +720,7 @@ impl GenesisConfig {
             validator_set_hash,
             storage_root: None,
             shards_root: None,
+            witness_root: None,
         };
 
         block.tx_root = block.calculate_tx_root();
@@ -668,6 +730,15 @@ impl GenesisConfig {
 
     pub fn build_state(&self) -> AccountState {
         let mut state = AccountState::new();
+        // TESTNET-DEFAULT: fee rates belong to genesis state, not
+        // a node-local config overlay, so every testnet replay commits the same
+        // economic profile. Mainnet and development chains keep their explicit
+        // zero-rate defaults until their own genesis decisions land.
+        if self.chain_id == Network::Testnet.chain_id().value() {
+            state
+                .registry
+                .set_params(crate::registry::RegistryParams::testnet_defaults());
+        }
         state.base_fee = self.base_fee;
         // `block_reward` now lives under `state.tokenomics` (tokenomics
         // Refactor). The top-level `state.block_reward` field was removed.
@@ -706,18 +777,6 @@ impl GenesisConfig {
             }
         }
 
-        // Address-only PoA authorities (P01-F09): active stake-1 entries with
-        // no consensus keys, matching what start-up code used to add after the
-        // chain was built - which left `validate_candidate_chain` replaying
-        // against an empty authority set and failing every reorg and full
-        // sync on a PoA chain.
-        for authority in &self.poa_authorities {
-            state.ensure_validator(*authority, 1);
-            if let Some(entry) = state.get_validator_mut(authority) {
-                entry.active = true;
-                entry.slashed = false;
-            }
-        }
         // P01-F07 (BLG-0012): seed the PoA onboarding trust root from the
         // ceremony-declared bootstrap PoA domain authorities when top-level
         // `poa_authorities` is empty, keeping `poa_authorities` as an explicit
@@ -737,23 +796,41 @@ impl GenesisConfig {
         } else {
             self.poa_authorities.clone()
         };
+        // Address-only PoA authorities (P01-F09): active stake-1 entries with
+        // no consensus keys. Bootstrap-domain authorities must enter the same
+        // consensus state as top-level authorities; otherwise a restart has
+        // an authority hash but no producer set to replay against.
+        for authority in &declared {
+            state.ensure_validator(*authority, 1);
+            if let Some(entry) = state.get_validator_mut(authority) {
+                entry.active = true;
+                entry.slashed = false;
+            }
+        }
         if let Some((admin, rest)) = declared.split_first() {
-            const GENESIS_POA_DOMAIN: crate::domain::types::DomainId = 0;
+            // A bootstrap domain owns its own admission namespace. Domain 0 is
+            // retained only for custom genesis configurations without a PoA
+            // bootstrap record.
+            let poa_domain = self
+                .bootstrap_domains
+                .iter()
+                .find(|domain| domain.kind == "poa")
+                .map_or(0, |domain| domain.id);
             const GENESIS_KYC_COMMITMENT: [u8; 32] = [0x01; 32];
-            state.poa_onboarding.add_admin(GENESIS_POA_DOMAIN, *admin);
+            state.poa_onboarding.add_admin(poa_domain, *admin);
             for authority in std::iter::once(admin).chain(rest.iter()) {
                 // Both steps cannot refuse on a fresh registry (a distinct
                 // address, a non-zero commitment, a horizon at the ceiling);
                 // a refusal here would leave the authority un-admitted and
                 // the chain would fail closed at its first block.
                 let _ = state.poa_onboarding.submit_application(
-                    GENESIS_POA_DOMAIN,
+                    poa_domain,
                     *authority,
                     GENESIS_KYC_COMMITMENT,
                     0,
                 );
                 let _ = state.poa_onboarding.approve(
-                    GENESIS_POA_DOMAIN,
+                    poa_domain,
                     *admin,
                     *authority,
                     0,
@@ -781,8 +858,56 @@ impl GenesisConfig {
                     for (address, amount) in allocations {
                         state.add_balance(&address, amount);
                     }
+                    // The genesis validators' stake comes out of the
+                    // ecosystem share, so the genesis holds exactly the
+                    // fixed supply (`validate_total_issuance` checks the
+                    // share covers it).
+                    let stake = self.genesis_stake_total();
+                    if stake > 0 {
+                        let ecosystem = state.get_or_create(&addrs.ecosystem);
+                        ecosystem.balance = ecosystem.balance.saturating_sub(stake);
+                        state.mark_dirty(&addrs.ecosystem);
+                    }
+                    // The validation reward pool also comes out of the
+                    // ecosystem share, into the keyless pool account the
+                    // epoch transition pays from.
+                    let pool = self.genesis_reward_pool();
+                    if pool > 0 {
+                        let ecosystem = state.get_or_create(&addrs.ecosystem);
+                        ecosystem.balance = ecosystem.balance.saturating_sub(pool);
+                        state.mark_dirty(&addrs.ecosystem);
+                        state.add_balance(
+                            &crate::tokenomics::reward_pool::reward_pool_account(),
+                            pool,
+                        );
+                    }
                     state.burn_reserve_address = Some(addrs.burn_reserve);
                     state.team_vesting = Some((addrs.team, params.team_vesting(0)));
+                }
+            }
+        }
+
+        // The bootstrap consensus domains are genesis state, written into
+        // the settlement registry here and nowhere else (
+        //): every node that builds this genesis holds the same domains,
+        // and a restart replays them instead of rewriting their status. A PoA
+        // domain with a ceremony authority set is ready at genesis; a PoA
+        // domain without one starts frozen and opens only through governance,
+        // in block. A configuration the bootstrap builder refuses is refused
+        // at chain construction, before this state is used.
+        if let Ok(domains) = self.bootstrap_consensus_domains() {
+            for domain in domains {
+                let id = domain.id;
+                let poa = matches!(domain.kind, crate::domain::ConsensusKind::PoA);
+                let poa_ready = poa && !declared.is_empty();
+                if crate::settlement::domains::register_domain(&mut state, domain).is_ok()
+                    && poa
+                    && !poa_ready
+                {
+                    let _ = state
+                        .settlement
+                        .domains
+                        .transition_status_checked(id, crate::domain::DomainStatus::Frozen);
                 }
             }
         }
@@ -807,6 +932,21 @@ impl GenesisConfig {
 
     fn validator_stake(&self) -> u64 {
         Network::from_chain_id(self.chain_id).map_or(1, |network| network.min_stake())
+    }
+
+    /// The validation reward pool the profile funds at genesis; 0 without one
+    /// or with an invalid schedule.
+    fn genesis_reward_pool(&self) -> u64 {
+        crate::core::chain_config::reward_pool_for_chain_id(self.chain_id)
+            .filter(|schedule| schedule.validate().is_ok())
+            .map_or(0, |schedule| schedule.validation_reward_pool)
+    }
+
+    /// The stake every genesis validator is bonded with, summed.
+    fn genesis_stake_total(&self) -> u64 {
+        u64::try_from(self.validators.len())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(self.validator_stake())
     }
 }
 
@@ -836,11 +976,18 @@ fn address(byte: u8) -> Address {
 /// - Validator APY: 5%
 /// - Metabolic burn: 1% of tx fees
 pub fn mainnet_genesis() -> GenesisConfig {
+    let tokenomics = mainnet_tokenomics();
+    mainnet_genesis_with(tokenomics)
+}
+
+/// The mainnet economic parameters: the 100M fixed-supply distribution, the
+/// burns, the team schedule and the reward settings on the mainnet calendar.
+pub fn mainnet_tokenomics() -> crate::tokenomics::TokenomicsParams {
     use crate::core::chain_config::FIXED_POINT_SCALE;
     use crate::tokenomics::bud;
 
     // Full tokenomics params - 100M fixed supply
-    let tokenomics = crate::tokenomics::TokenomicsParams {
+    crate::tokenomics::TokenomicsParams {
         community: bud(10_000_000),    // 10M - community/dev
         liquidity: bud(10_000_000),    // 10M - liquidity provisioning
         ecosystem: bud(20_000_000),    // 20M - ecosystem growth
@@ -867,8 +1014,10 @@ pub fn mainnet_genesis() -> GenesisConfig {
         // 600 s, so `epochs_per_year` (52 560) is a calendar year.
         slot_duration_secs: 6,
         epoch_length_slots: 100,
-    };
+    }
+}
 
+fn mainnet_genesis_with(tokenomics: crate::tokenomics::TokenomicsParams) -> GenesisConfig {
     GenesisConfig {
         chain_id: Network::Mainnet.chain_id().value(),
 
@@ -898,28 +1047,57 @@ pub fn mainnet_genesis() -> GenesisConfig {
         pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: BootstrapDomainConfig::mainnet_defaults(),
         poa_authorities: Vec::new(),
+        anchor_ledger: None,
     }
 }
 
+/// The testnet ceremony template.
+///
+/// The testnet is the mainnet rehearsal: the same 100M distribution, the
+/// same validator ceremony (at least four validators with complete consensus
+/// keys, `validate_consensus_ceremony`), on the testnet calendar (3 s slots,
+/// 50-slot epochs). The template holds no validator and no destination: the
+/// ceremony (`cargo run --manifest-path xtask/tools/Cargo.toml --
+/// testnet-genesis`) fills both from the operators' public records and
+/// writes the launch file. A node refuses the template itself, which has no
+/// validators.
 pub fn testnet_genesis() -> GenesisConfig {
+    let tokenomics = testnet_tokenomics();
     GenesisConfig {
         chain_id: Network::Testnet.chain_id().value(),
-        allocations: vec![
-            (address(0x30), 1_000_000_000),
-            (address(0x31), 1_000_000_000),
-        ],
-        validators: vec![address(0x40), address(0x41), address(0x42)],
+        allocations: vec![],
+        validators: vec![],
         validator_consensus_keys: vec![],
-        block_reward: 50,
+        block_reward: tokenomics.block_reward,
         base_fee: Network::Testnet.gas_schedule().base_fee,
         gas_schedule: Network::Testnet.gas_schedule(),
         timestamp: 1_735_689_600_000,
-        bud_tokenomics: None,
+        bud_tokenomics: Some(tokenomics),
         tokenomics_addresses: None,
         pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: vec![],
         poa_authorities: Vec::new(),
+        anchor_ledger: None,
     }
+}
+
+/// The mainnet distribution on the testnet calendar: 3 s slots and 50-slot
+/// epochs make a 150 s epoch, so 210 240 epochs are a calendar year. Testnet
+/// block emission remains disabled; the compatibility field is zero.
+/// TESTNET-DEFAULT: every economic value equals the mainnet template's.
+pub fn testnet_tokenomics() -> crate::tokenomics::TokenomicsParams {
+    const EPOCHS_PER_YEAR: u64 = 210_240;
+    let mut params = mainnet_tokenomics();
+    params.epochs_per_year = EPOCHS_PER_YEAR;
+    params.team_cliff_epochs = EPOCHS_PER_YEAR;
+    params.team_vesting_epochs = EPOCHS_PER_YEAR.saturating_mul(4);
+    params.slot_duration_secs = 3;
+    params.epoch_length_slots = 50;
+    // TESTNET-DEFAULT: block execution does not mint emission; the field is
+    // retained only for snapshot/wire compatibility and must not advertise a
+    // live reward on the testnet template.
+    params.block_reward = 0;
+    params
 }
 
 pub fn devnet_genesis() -> GenesisConfig {
@@ -937,6 +1115,7 @@ pub fn devnet_genesis() -> GenesisConfig {
         pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: vec![],
         poa_authorities: Vec::new(),
+        anchor_ledger: None,
     }
 }
 
@@ -1296,16 +1475,34 @@ mod tests {
 
         assert_ne!(mainnet.chain_id, testnet.chain_id);
         assert_ne!(mainnet.chain_id, devnet.chain_id);
-        // Mainnet uses full tokenomics; testnet/devnet do not.
+        // Mainnet and its testnet rehearsal use the full tokenomics; devnet
+        // does not.
         assert!(mainnet.bud_tokenomics.is_some());
-        assert!(testnet.bud_tokenomics.is_none());
+        assert!(testnet.bud_tokenomics.is_some());
         assert!(devnet.bud_tokenomics.is_none());
-        // Mainnet is permissionless (empty validators); testnet/devnet seed validators.
+        // Mainnet and testnet are ceremony templates (no validators); devnet
+        // seeds one.
         assert!(mainnet.validators.is_empty());
-        assert!(!testnet.validators.is_empty());
+        assert!(testnet.validators.is_empty());
         assert!(!devnet.validators.is_empty());
         assert_ne!(mainnet.gas_schedule, testnet.gas_schedule);
         assert_ne!(mainnet.gas_schedule, devnet.gas_schedule);
+    }
+
+    #[test]
+    fn testnet_genesis_commits_the_published_fee_profile() {
+        let testnet = GenesisConfig::for_network(Network::Testnet).build_state();
+        let params = testnet.registry.params();
+        assert_eq!(params.transfer_fee_ppm, 200);
+        assert_eq!(params.swap_fee_ppm, 400);
+        assert_eq!(params.bridge_fee_ppm, 800);
+        assert_eq!(params.app_fee_share_ppm, 400_000);
+
+        let devnet = GenesisConfig::for_network(Network::Devnet).build_state();
+        assert_eq!(
+            devnet.registry.params(),
+            &crate::registry::RegistryParams::default()
+        );
     }
 
     #[test]
@@ -1575,8 +1772,14 @@ mod tests {
     fn mainnet_genesis_seeds_permissioned_poa_onboarding_gate() {
         let from_json = load_genesis_json("config/mainnet-genesis.json");
         let state = from_json.build_state();
+        let poa_domain_id = from_json
+            .bootstrap_domains
+            .iter()
+            .find(|domain| domain.kind == "poa")
+            .map(|domain| domain.id)
+            .expect("mainnet genesis must declare a PoA bootstrap domain");
         assert!(
-            state.poa_is_permissioned(0),
+            state.poa_is_permissioned(poa_domain_id),
             "mainnet genesis must seed the PoA onboarding gate from bootstrap_domains"
         );
         let expected: std::collections::BTreeSet<Address> = from_json
@@ -1588,9 +1791,15 @@ mod tests {
             .iter()
             .map(|a| Address::from_hex(a).unwrap())
             .collect();
-        let admitted: std::collections::BTreeSet<Address> =
-            state.poa_admitted_addresses(0).into_iter().collect();
+        let admitted: std::collections::BTreeSet<Address> = state
+            .poa_admitted_addresses(poa_domain_id)
+            .into_iter()
+            .collect();
         assert_eq!(admitted, expected);
+        assert_eq!(
+            state.settlement.domains.get(poa_domain_id).unwrap().status,
+            crate::domain::DomainStatus::Active
+        );
 
         let mut mismatch = from_json;
         mismatch.poa_authorities = vec![Address::from([0x22; 32])];
