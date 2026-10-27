@@ -1,10 +1,10 @@
 # Budlum Wallet Core
 
-BIP39 mnemonic + FIPS 204 ML-DSA-87 post-quantum key derivation and transaction signing for Budlum.
+BIP39 mnemonic + FIPS 204 ML-DSA-87 key derivation and transaction signing for Budlum. <!-- claim:L-WALLET-01 -->
 
 ML-DSA-87 (NIST Category 5, formerly CRYSTALS-Dilithium5) replaces the retired
-Ed25519 scheme so a Shor-capable adversary cannot recover a wallet key from a
-public key. Public keys are 2592 bytes; signatures are 4627 bytes (FIPS 204
+Ed25519 scheme: ML-DSA rests on module lattices, not on factoring or discrete
+logarithms, so Shor's algorithm does not apply to the wallet key. <!-- claim:L-WALLET-01 --> Public keys are 2592 bytes; signatures are 4627 bytes (FIPS 204
 final). The 32-byte seed is expanded through FIPS 204 `KeyGen_internal` after a
 domain-separated SHA3-256 of the BIP39 entropy.
 
@@ -35,4 +35,12 @@ assert_eq!(sig.len(), ML_DSA_87_SIGNATURE_LEN);
 - Transaction signing (ML-DSA-87)
 - M-of-N multisig (up to 16 owners, independent signatures)
 - Guardian-based social recovery
-- Planned: UniFFI (Kotlin/Swift), wasm-bindgen (JS)
+- V5 transfer signing the node accepts (`transfer::signed_transfer_json`;
+  the signing hash is pinned by the same vector in the node's tests)
+- JSON-RPC bodies and answers for the node's public listener (`rpc`
+  feature; transport-free)
+- Browser: `wasm` feature exports `BrowserWallet` (24-word mnemonic, address,
+  V5 transfer signing) and the RPC helpers; `web/index.html` is a test page
+  that signs and sends. Built for `wasm32-unknown-unknown` in CI.
+- Planned: UniFFI (Kotlin/Swift). Not built yet; the binding descriptor's
+  `bindings_are_wired` stays false until it is.
