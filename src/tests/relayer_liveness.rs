@@ -61,7 +61,11 @@ fn signed_relayed_message(
     keypair: &crate::crypto::primitives::KeyPair,
     nonce: u64,
 ) -> CrossDomainMessage {
-    relayed_message(Address::from(keypair.public_key_bytes()), nonce)
+    let mut message = relayed_message(Address::from(keypair.public_key_bytes()), nonce);
+    // The door verifies the sender envelope, so the fixture signs what the
+    // sender side signs: an empty envelope is a refusal, not a pass.
+    message.sign_sender_ed25519(keypair);
+    message
 }
 
 /// A V4 transaction from `keypair` that carries `message` through the

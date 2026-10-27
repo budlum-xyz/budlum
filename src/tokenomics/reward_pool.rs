@@ -348,7 +348,10 @@ mod tests {
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
-        let mut state = funded_state(&[(1, 300, false), (2, 100, false), (3, 100, true)]);
+        // Above the registry's `min_stake`, because a validator that is too
+        // small to register is not an active member and earns nothing - the
+        // payout reads the registry, not the validator table.
+        let mut state = funded_state(&[(1, 3_000, false), (2, 1_000, false), (3, 1_000, true)]);
         let before = state.get_balance(&reward_pool_account())
             + state.get_balance(&addr(1))
             + state.get_balance(&addr(2))

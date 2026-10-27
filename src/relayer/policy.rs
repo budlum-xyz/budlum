@@ -317,14 +317,13 @@ impl SolverBid {
         if self.expires_at_block <= current_block {
             return Err("SolverBid expired".into());
         }
-        // A bid is a commitment to fulfil until the intent's deadline. One that
-        // lapses earlier can never be honoured at the moment the deadline is
-        // tested, so accepting it only creates slashable material: the expiry
-        // path would take the bond for a window the solver never promised to
-        // keep.
-        if self.expires_at_block < intent.deadline_block {
-            return Err("SolverBid must stay live until the intent deadline".into());
-        }
+        // A bid may lapse before the intent's deadline. `expire_intent` only
+        // hands back - and the settlement only slashes - the bids still live
+        // at the deadline (`expires_at_block >= intent.deadline_block`), so a
+        // solver that signed a shorter window is dropped from the auction
+        // rather than punished for a block it never promised. Refusing the bid
+        // here would instead make a long-deadline intent unservable whenever
+        // the deadline outlives the bid lifetime a solver is willing to sign.
         Ok(())
     }
 }

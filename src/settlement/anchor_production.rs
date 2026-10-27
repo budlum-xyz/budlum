@@ -1400,8 +1400,10 @@ mod tests {
             .expect("the seal log exists");
         assert_eq!(text.lines().count(), 1);
 
-        // A restart resumes from the last logged seal.
-        let mut restarted = fixture_emission("seal-3600");
+        // A restart resumes from the last logged seal. The restart fixture
+        // brings its own scratch directory (`fixture_emission` wipes whatever
+        // directory it is handed), then reads the log this run wrote.
+        let mut restarted = fixture_emission("seal-3600-restart");
         restarted.log_path = emission.log_path.clone();
         restarted
             .resume_seal_log()

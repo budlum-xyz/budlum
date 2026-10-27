@@ -359,6 +359,23 @@ pub(crate) fn finalize_expired_deals(
                 }
                 continue;
             }
+            Err(
+                crate::domain::storage_deal::StorageError::OpenChallengeBlocksExpiry {
+                    open_challenges,
+                    ..
+                },
+            ) => {
+                // The term is over but a question about these bytes is still
+                // open. The missed-answer slash settles only an `Active` deal,
+                // so the row is held and the next sweep expires it. Expected,
+                // not a fault: no warning, and no reallocation ticket until
+                // the deal actually expires.
+                tracing::debug!(
+                    "B.U.D. deal {deal_id} reached its term with {open_challenges} challenge(s) \
+                     still open; held Active at epoch {epoch}"
+                );
+                continue;
+            }
             Err(error) => {
                 tracing::warn!("Storage deal {deal_id} could not be expired: {error}");
                 continue;

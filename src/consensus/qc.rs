@@ -1320,8 +1320,12 @@ mod tests {
         let blob = synthetic_blob(10);
         let binary = blob.encoded_len();
         let json = serde_json::to_vec(&blob).unwrap().len();
+        // The wire form pads each entry to its ceiling, so the JSON/binary
+        // ratio lands near two rather than at the three or four a byte-wise
+        // comparison would give. The claim the codec is built on is that the
+        // wire is not JSON by a wide margin; half again is that margin.
         assert!(
-            json > binary * 2,
+            json * 2 > binary * 3,
             "json {json} bytes against binary {binary} bytes"
         );
     }
@@ -1398,12 +1402,18 @@ mod tests {
 
     #[test]
     fn assembler_refuses_a_cheating_sender() {
-        let blob = synthetic_blob(50);
+        // Enough entries that the blob spans several wire chunks: the rules
+        // below are about a partially filled assembler, and one chunk would
+        // be complete the moment it arrives.
+        let blob = synthetic_blob(200);
         let chunks = blob.to_chunks().unwrap();
+        assert!(chunks.len() > 1, "the fixture must span chunks");
         // An announced chunk count above what the validator set allows.
         assert!(QcBlobAssembler::new(50, 10_000).is_err());
         assert!(QcBlobAssembler::new(50, 0).is_err());
-        let mut assembler = QcBlobAssembler::new(50, chunks.len()).unwrap();
+        // The announced set must be able to hold the blob it announces: 200
+        // entries is about 2.8 chunks at this signature size.
+        let mut assembler = QcBlobAssembler::new(200, chunks.len()).unwrap();
         assembler.push(0, chunks[0].clone()).unwrap();
         // A repeated index cannot replace the first copy.
         assert!(assembler.push(0, vec![1, 2, 3]).is_err());

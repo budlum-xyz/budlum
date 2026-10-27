@@ -7583,7 +7583,11 @@ mod tests {
             45262,
             None,
         );
-        let domain = default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
+        // Domain id 1 is Ethereum's slot in the external-root map, and a
+        // domain may anchor under a claimed id only when it declares the chain
+        // that id names (`accept_verified_commitment`). The fixture is a real
+        // Ethereum domain, not a domain that happens to sit on id 1.
+        let domain = default_domain(1, ConsensusKind::PoW, 1, "pow-header-chain-v1", 1);
         bc.register_consensus_domain(domain.clone()).unwrap();
 
         let mut block1 = Block::new(1, "00".repeat(32), vec![]);
