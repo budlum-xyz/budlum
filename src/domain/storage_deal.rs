@@ -982,6 +982,18 @@ pub enum StorageError {
     },
     /// Caller referenced a deal that does not exist.
     UnknownDeal(u64),
+    /// A retrieval challenge whose deadline runs past the deal's own term.
+    ///
+    /// The missed-challenge slash settles only an `Active` deal, and a deal
+    /// leaves `Active` at its `deal_end_epoch`. A deadline beyond that term is
+    /// therefore a question that can never be answered with a slash: the
+    /// operator stays silent, the deal expires, and `finalize_missed_challenge`
+    /// refuses - the opener's bond is stuck and the failure is unpunished.
+    ChallengeOutlivesDeal {
+        deal_id: u64,
+        deadline_epoch: u64,
+        deal_end_epoch: u64,
+    },
     /// Caller referenced a challenge that does not exist.
     UnknownChallenge(u64),
     /// Caller referenced a deal that is not `Active` (e.g. tried to
@@ -1187,6 +1199,15 @@ impl std::fmt::Display for StorageError {
             Self::UnknownDeal(id) => write!(f, "unknown deal {id}"),
             Self::UnknownChallenge(id) => write!(f, "unknown challenge {id}"),
             Self::DealNotActive(id) => write!(f, "deal {id} is not Active"),
+            Self::ChallengeOutlivesDeal {
+                deal_id,
+                deadline_epoch,
+                deal_end_epoch,
+            } => write!(
+                f,
+                "retrieval challenge on deal {deal_id} has deadline {deadline_epoch}, \
+                 past the deal term ({deal_end_epoch}): a missed answer could never be slashed"
+            ),
             Self::ExpiryWouldStrandContent {
                 deal_id,
                 manifest_id,
@@ -3287,6 +3308,18 @@ impl StorageRegistry {
             .ok_or(StorageError::UnknownDeal(deal_id))?;
         if !deal.is_active() {
             return Err(StorageError::DealNotActive(deal_id));
+        }
+        // The missed-challenge slash settles only an `Active` deal, and this
+        // deal leaves `Active` at `deal_end_epoch`. A deadline past the term
+        // is a challenge no answer - and no silence - can settle: it would
+        // sit open past the deal, the operator would keep the bond, and the
+        // opener's bond would stay locked with it.
+        if deadline_epoch > deal.deal_end_epoch {
+            return Err(StorageError::ChallengeOutlivesDeal {
+                deal_id,
+                deadline_epoch,
+                deal_end_epoch: deal.deal_end_epoch,
+            });
         }
 
         let operator = deal.operator;
@@ -6457,6 +6490,30 @@ mod tests {
             reg.open_challenge(deal_id, 0, 1, 5, 2, opener(), 100),
             Err(StorageError::InvalidEpochRange { .. })
         ));
+    }
+
+    #[test]
+    fn a_challenge_may_not_outlive_the_deal_it_asks_about() {
+        // The missed-challenge slash settles only an `Active` deal, and the
+        // deal leaves `Active` at `deal_end_epoch` (open_one opens 100..200).
+        // A deadline past the term is a question nothing can settle: the
+        // operator stays silent, the deal expires, `finalize_missed_challenge`
+        // refuses with DealNotActive, and both bonds stay locked.
+        let m = good_manifest();
+        let mut reg = StorageRegistry::new();
+        let (deal_id, _) = open_one(&mut reg, &m);
+        assert!(matches!(
+            reg.open_challenge(deal_id, 0, 4, 110, 201, opener(), 50),
+            Err(StorageError::ChallengeOutlivesDeal {
+                deal_id: 1,
+                deadline_epoch: 201,
+                deal_end_epoch: 200,
+            })
+        ));
+        // A deadline inside the term is still accepted.
+        assert!(reg
+            .open_challenge(deal_id, 0, 4, 110, 200, opener(), 50)
+            .is_ok());
     }
 
     #[test]
