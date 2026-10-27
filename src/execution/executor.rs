@@ -2610,79 +2610,29 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
-            TransactionType::StateUpdate {
-                domain_id,
-                domain_height,
-                ref state_updates,
-            } => {
-                // BLG-0286 (P18-F01): the arm moves OTHER accounts' nonces,
-                // so "paid the fee" is not an authority - the builder is
-                // `Blockchain::build_state_update_transaction`, which signs
-                // with the local consensus signer, and every such signer is
-                // an eligible validator in this very state. Demanding that
-                // the sender hold that seat is the same fact the builder
-                // relies on, checked from the other side: without it any
-                // funded account could push a victim's nonce next to
-                // u64::MAX and freeze the account below the ceiling.
-                // The domain_id/domain_height-to-commitment binding stays
-                // with the registry: the commitment was already finality-
-                // verified before the builder existed (accept path in
-                // `blockchain.rs`), and the state carries no second ledger
-                // of heights for the executor to re-check against - inventing
-                // one to re-validate what the accept path already validated
-                // would be a weaker copy of the same fact.
-                let committer_authority = state
-                    .get_validator(&tx.from)
-                    .is_some_and(|v| v.is_eligible(state.epoch_index));
-                if !committer_authority {
-                    return Err(BudlumError::validation(
-                        "state_update_authority",
-                        format!(
-                            "state update for domain {domain_id} from a sender outside the eligible validator set"
-                        ),
-                    ));
-                }
-                // The rules that used to guard the out-of-block commitment
-                // nonce writes now run here, inside block execution (C3,
-                // decision 50): ceiling, monotonicity, near-u64::MAX.
-                if state_updates.len() > crate::domain::types::MAX_STATE_UPDATES {
-                    return Err(BudlumError::validation(
-                        "state_update_ceiling",
-                        format!(
-                            "domain {domain_id} height {domain_height}: {} state updates exceed {}",
-                            state_updates.len(),
-                            crate::domain::types::MAX_STATE_UPDATES
-                        ),
-                    ));
-                }
-                for (addr, new_nonce) in state_updates {
-                    let current = state.get_nonce(addr);
-                    if *new_nonce <= current {
-                        return Err(BudlumError::validation(
-                            "state_update_nonce",
-                            format!(
-                                "domain {domain_id} height {domain_height}: non-monotonic nonce for {addr}"
-                            ),
-                        ));
-                    }
-                    if *new_nonce >= u64::MAX - 1000 {
-                        return Err(BudlumError::validation(
-                            "state_update_nonce_ceiling",
-                            format!(
-                                "domain {domain_id} height {domain_height}: nonce near u64::MAX for {addr}"
-                            ),
-                        ));
-                    }
-                }
-                for (addr, new_nonce) in state_updates {
-                    let account = state.get_or_create(addr);
-                    account.nonce = *new_nonce;
-                }
-                let sender = state.get_or_create(&tx.from);
-                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
-                    BudlumError::validation("balance_underflow", "balance underflow")
-                })?;
-                sender.nonce = sender.nonce.saturating_add(1);
+            TransactionType::StateUpdate { domain_id, .. } => {
+                // The tag stays decodable so old blocks keep their meaning,
+                // but no new block may carry one. The arm moves OTHER
+                // accounts' nonces from data the transaction itself carries,
+                // and nothing beside it proves that data came from a
+                // commitment this node verified: the eligible-validator seat
+                // says who may carry a commitment, not that these writes are
+                // the commitment's. A bonded validator could therefore push a
+                // victim's nonce next to the ceiling and freeze the account
+                // below it, which is exactly the freeze the near-`u64::MAX`
+                // guard claims to prevent (BLG-0286, P18-F01).
+                //
+                // The writes a commitment actually carries are applied by the
+                // settlement door (`SettlementTx::SubmitCommitment`), in the
+                // same call that verifies the commitment's finality, so the
+                // nonce a block applies is the nonce the quorum attested to.
+                return Err(BudlumError::validation(
+                    "state_update_retired",
+                    format!(
+                        "state update for domain {domain_id} refused: commitment nonce writes \
+                         are applied by the settlement door (SettlementTx::SubmitCommitment)"
+                    ),
+                ));
             }
             TransactionType::Identity(identity_tx) => {
                 // The single arm, delegating to the one body
