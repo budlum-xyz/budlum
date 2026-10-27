@@ -129,6 +129,12 @@ impl RelayLedger {
         self.relayed.len()
     }
 
+    /// Whether the ledger holds no relay record at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.relayed.is_empty()
+    }
+
     /// Drop records of relays that completed at or before `cutoff`.
     ///
     /// The ledger is replay protection for `process_relay`, and a relay can
