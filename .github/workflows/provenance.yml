@@ -73,9 +73,36 @@ jobs:
         with:
           subject-path: sbom.cdx.json
 
+      # The second signature: post-quantum, SLH-DSA-SHAKE-256s over a
+      # SHA3-256 manifest of the SBOM (release/README.md). Sigstore stays as it
+      # was; the two signatures are published together. The seed is the
+      # repository secret PQ_RELEASE_SEED (hex); without it the step says so and
+      # the artifact carries the Sigstore attestation alone, which is stated in
+      # the log instead of being skipped silently.
+      - name: Sign the SBOM with SLH-DSA-SHAKE-256s
+        env:
+          PQ_RELEASE_SEED: ${{ secrets.PQ_RELEASE_SEED }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PQ_RELEASE_SEED}" ]; then
+            echo "::warning::PQ_RELEASE_SEED is not set: the SBOM carries the Sigstore attestation only"
+            exit 0
+          fi
+          umask 077
+          printf '%s\n' "${PQ_RELEASE_SEED}" > /tmp/pq-release-seed.hex
+          cargo run -q --release --manifest-path xtask/release/Cargo.toml -- \
+            sign-release /tmp/pq-release-seed.hex . pq-signature sbom.cdx.json
+          rm -f /tmp/pq-release-seed.hex
+          cargo run -q --release --manifest-path xtask/release/Cargo.toml -- \
+            verify-release release/RELEASE_PUBKEY.hex pq-signature/RELEASE.manifest pq-signature/RELEASE.manifest.sig \
+            || { echo "::error::the SBOM signature does not verify under the pinned release key"; exit 1; }
+
       - name: SBOM artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-attested-${{ github.sha }}
-          path: sbom.cdx.json
+          path: |
+            sbom.cdx.json
+            pq-signature/
+          if-no-files-found: warn
           retention-days: 90
