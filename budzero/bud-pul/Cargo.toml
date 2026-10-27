@@ -10,7 +10,6 @@ workspace = true
 
 [dependencies]
 bud-proof = { path = "../bud-proof" }
-p3-air = "=0.7.0"
 p3-matrix = "=0.7.0"
 p3-field = "=0.7.0"
 p3-goldilocks = "=0.7.0"
