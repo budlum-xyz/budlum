@@ -8,14 +8,15 @@ rust-version = "1.97.1"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
 
 [features]
-# NIST FIPS 204 FINAL: the default PQ backend is ML-DSA-65 (validator) + ML-DSA-87 (wallet).
-# Dilithium5 (round-3, legacy) compiles only when `pq-dilithium` is chosen explicitly -
-# it is NOT a default: only the NIST final schemes are enabled.
+# NIST FIPS 204 FINAL: the PQ backend is ML-DSA-65 (validator) + ML-DSA-87 (wallet).
+# The round-3 Dilithium5 path (PQClean) was removed by: only the NIST final
+# schemes exist. The ML-DSA crates themselves are unconditional dependencies (the
+# verification facade in `src/crypto/pq.rs` always links them); these two features
+# only choose which key-pair types are compiled.
 default = ["pq-ml-dsa", "wallet-ml-dsa"]
-pq-dilithium = ["dep:pqcrypto-dilithium", "dep:pqcrypto-traits"]
-pq-ml-dsa = ["dep:ml-dsa"]
+pq-ml-dsa = []
 # User/wallet ML-DSA-87 signatures are always required (FIPS 204 Category 5).
-wallet-ml-dsa = ["dep:ml-dsa"]
+wallet-ml-dsa = []
 p2p-mdns = ["libp2p/mdns"]
 # F2 research line (2026-09-19 decisions, workspace ARASTIRMA doc): the
 # Budlum-BPQS reference implementation. Non-default on purpose: the anchor's
@@ -35,6 +36,8 @@ sha2 = "0.11"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # G1 payload AEAD (T11): content bytes encrypted before A1 pack.
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+#: HPKE RFC 9180 with KEM 0x647a (X-Wing), HKDF-SHA256, ChaCha20-Poly1305.
+hpke = { version = "=0.15.0", default-features = false, features = ["alloc", "getrandom", "chacha", "mlkem", "x25519", "hkdfsha2"] }
 # ISO QR encode for Three optical frames (K-QR: EC=L, mask pin). MIT/Apache.
 qrcode = { version = "0.14", default-features = false, features = [] }
 # Decode QR modules from our deterministic PNGs (MIT/Apache).
@@ -81,6 +84,10 @@ libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf69
     # configures a hostname peer instead of a raw IP.
     "dns",
     "noise",
+    #: TLS 1.3 next to Noise on TCP, and QUIC (TLS 1.3 by design).
+    # The mainnet profile offers TLS only.
+    "tls",
+    "quic",
     "yamux",
     "macros",
     "ping",
@@ -128,15 +135,39 @@ bls12_381 = { version = "0.9.0", features = ["experimental"] }
 # bls12_381 0.9's RFC 9380 API uses digest 0.10. Keep this explicit alias
 # separate from the application's sha2 0.11 dependency.
 sha2_010 = { package = "sha2", version = "0.10" }
-pqcrypto-dilithium = { version = "0.5.0", optional = true }
-pqcrypto-traits = { version = "0.3.5", optional = true }
-# ML-DSA is linked either as the optional validator PQ backend (`pq-ml-dsa`
-# feature) or as the always-on user/wallet signature crate. The same crate is
-# used by both, so the feature gates `dep:ml-dsa` and we mark it optional and
-# pull it in from `default` to keep it always present.
-ml-dsa = { version = "0.1.1", optional = true, features = ["alloc", "rand_core"] }
+# Post-quantum signatures. Exact versions: a consensus verifier
+# must not move because a lock file was regenerated.
+#
+# ML-DSA is verified by TWO independent libraries and a signature is valid only if
+# both accept it: RustCrypto `ml-dsa` (primary, carries
+# the CVE-2026-24850 and RUSTSEC-2025-0144 fixes) and `libcrux-ml-dsa` (portable
+# backend only: `simd128` and `simd256` stay off, so the AVX2 advisories
+# RUSTSEC-2026-0125 and RUSTSEC-2026-0126 have no code path here).
+ml-dsa = { version = "=0.1.1", features = ["alloc", "rand_core", "zeroize"] }
+libcrux-ml-dsa = { version = "=0.0.11", default-features = false, features = ["std", "mldsa65", "mldsa87"] }
+# SLH-DSA (FIPS 205): recovery key, Root Seal, cold committee. One library, so
+# the ACVP vectors in `tests/vectors/pq` are mandatory.
+slh-dsa = { version = "=0.2.0-rc.5", features = ["zeroize"] }
+# Secret seeds are wiped on drop. 1.9 is the floor libcrux-ml-dsa asks for
+# (through tls_codec), so one pin serves the PQ core and the HPKE module.
+zeroize = { version = "=1.9.1", features = ["alloc"] }
+#: the wallet password is NFKD normalized before it enters the
+# root derivation. No default features: the crate needs no std or table extras.
+unicode-normalization = { version = "=0.1.24", default-features = false }
+#: quantum canary puzzles. Classical curves appear only as puzzles whose
+# solution proves a break; none of them is on an acceptance path.
+shake = "=0.1.0"
+p192 = { version = "=0.13.0", default-features = false, features = ["arithmetic"] }
+p224 = { version = "=0.13.2", default-features = false, features = ["arithmetic"] }
+k256 = { version = "=0.13.4", default-features = false, features = ["arithmetic", "hash2curve"] }
+p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic", "hash2curve"] }
+curve25519-dalek = { version = "=4.1.3", default-features = false, features = ["alloc"] }
 jsonrpsee = { version = "0.26", features = ["server", "macros"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# The TLS provider is installed by `crypto::tls` (aws-lc-rs, X25519MLKEM768 only),
+# so reqwest takes the provider-less rustls feature.
+reqwest = { version = "0.12", features = ["json", "rustls-tls-webpki-roots-no-provider"], default-features = false }
+tokio-rustls = { version = "=0.26.4", default-features = false }
+rustls = { version = "=0.23.46", default-features = false, features = ["aws-lc-rs", "prefer-post-quantum", "std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 prometheus = "0.14"
 toml = "1.1"
@@ -169,6 +200,7 @@ budlum-bpqs = { path = "crates/bpqs", optional = true }
 prost-build = "0.14.3"
 
 [dev-dependencies]
+rcgen = { version = "=0.13.2", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
 tempfile = "3.10"
 proptest = "1.5"
 tokio = { version = "1", features = ["full"] }
@@ -180,6 +212,31 @@ criterion = { version = "0.8", features = ["html_reports"] }
 # happen". The consensus engine holds four locks and nests two pairs of them;
 # see `src/tests/consensus_lock_order_loom.rs`.
 loom = "0.7"
+
+# The CLI's wallet signs V5 (ML-DSA-87) transactions.
+[[bin]]
+name = "bud"
+path = "src/bin/bud.rs"
+required-features = ["wallet-ml-dsa"]
+
+# The faucet signs V5 (ML-DSA-87) transfers; without the wallet backend it
+# has nothing to sign with, so a `--no-default-features` build leaves it out.
+[[bin]]
+name = "budlum-faucet"
+path = "src/bin/budlum-faucet.rs"
+required-features = ["wallet-ml-dsa"]
+
+# Domain adapters produce verified commitment payloads; these two small
+# transaction clients sign and submit them through the block-only doors.
+[[bin]]
+name = "budlum-domain-producer"
+path = "src/bin/budlum-domain-producer.rs"
+required-features = ["wallet-ml-dsa"]
+
+[[bin]]
+name = "budlum-domain-reporter"
+path = "src/bin/budlum-domain-reporter.rs"
+required-features = ["wallet-ml-dsa"]
 
 [[bin]]
 name = "bench_sig_verify"
@@ -290,6 +347,17 @@ expect_used = "deny"
 # unmeasured deny would turn CI red on a count nobody has read. The money
 # boundary stopped casting altogether when the bridge amount became u64;
 # each lint moves to deny when its ratchet count reaches zero.
+
+# SLH-DSA-SHAKE-256s signs with a few million SHAKE-256 calls. The cold
+# committee and Root Seal tests sign, and an unoptimized hash core would make
+# one signature take minutes. Only the hashing crates are optimized; the node
+# code under test keeps the debug profile.
+[profile.dev.package.keccak]
+opt-level = 3
+[profile.dev.package.sha3]
+opt-level = 3
+[profile.dev.package.slh-dsa]
+opt-level = 3
 
 [profile.release]
 # Release hardening (research #196): panic=abort + overflow-checks + LTO +
