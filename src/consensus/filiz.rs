@@ -175,7 +175,11 @@ impl FilizChain {
         length: u64,
         interval: u64,
     ) -> Result<Self, FilizError> {
-        if length == 0 || length > FILIZ_CHAIN_LENGTH || interval == 0 || length % interval != 0 {
+        if length == 0
+            || length > FILIZ_CHAIN_LENGTH
+            || interval == 0
+            || !length.is_multiple_of(interval)
+        {
             return Err(FilizError::BadLength);
         }
         let mut checkpoints = Vec::new();

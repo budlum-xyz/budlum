@@ -1066,10 +1066,8 @@ impl Node {
                 self.stash_reverted_transactions(reversion.height_after, live)
                     .await;
             }
-            TickOutcome::Healthy => {
-                if self.regen_health.held_stage() == Stage::Medusa {
-                    self.rebroadcast_stashed_transactions(live).await;
-                }
+            TickOutcome::Healthy if self.regen_health.held_stage() == Stage::Medusa => {
+                self.rebroadcast_stashed_transactions(live).await;
             }
             _ => {}
         }

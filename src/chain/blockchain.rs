@@ -5015,8 +5015,9 @@ impl Blockchain {
             .last()
             .map(|tip| tip.hash.clone())
             .ok_or("no tip to continue")?;
-        let mut height = self.chain.len() as u64;
-        for block in &blocks {
+        let base_height = self.chain.len() as u64;
+        for (offset, block) in blocks.iter().enumerate() {
+            let height = base_height + offset as u64;
             if block.index != height
                 || block.previous_hash != parent_hash
                 || block.hash != block.calculate_hash()
@@ -5028,7 +5029,6 @@ impl Blockchain {
                 ));
             }
             parent_hash = block.hash.clone();
-            height += 1;
         }
         let mut added = 0;
         for block in blocks {
