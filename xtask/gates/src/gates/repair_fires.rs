@@ -1,7 +1,8 @@
 //! The repair trigger must actually fire on loss.
 //!
 //! Ported from `scripts/check-repair-fires-on-loss.sh`. A set of presence
-//! claims over four source files: the maintenance sweep reads the repair
+//! claims over four source files: the maintenance sweep (run inside the
+//! block transition, `src/chain/storage_maintenance.rs`) reads the repair
 //! band, the margin scales with the erasure scheme, unrecoverable objects are
 //! surfaced separately, and expiry opens a reallocation ticket. Each claim is
 //! a `grep` over one file's source with `//` comments stripped.
@@ -29,15 +30,14 @@ macro_rules! claim {
 ///
 /// Returns the first violated claim.
 pub fn run(root: &Path) -> Result<String, String> {
-    let actor = code_of(root, "src/chain/chain_actor.rs")?;
+    let sweep = code_of(root, "src/chain/storage_maintenance.rs")?;
     let registry = code_of(root, "src/domain/storage_deal.rs")?;
     let manifest = code_of(root, "src/storage/manifest.rs")?;
-    let blockchain = code_of(root, "src/chain/blockchain.rs")?;
 
     // 1. The sweep reads the band.
     claim!(
-        actor.contains("objects_below_own_repair_margin"),
-        "the maintenance sweep does not read the repair band.\n  `objects_below_own_repair_margin` is not called from chain_actor.rs, so\n  the repair trigger is unwired and the effective repair window is unbounded."
+        sweep.contains("objects_below_own_repair_margin"),
+        "the maintenance sweep does not read the repair band.\n  `objects_below_own_repair_margin` is not called from storage_maintenance.rs, so\n  the repair trigger is unwired and the effective repair window is unbounded."
     );
 
     // 2. The margin scales with the scheme.
@@ -84,13 +84,13 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     // 3. Unrecoverable objects are surfaced separately.
     claim!(
-        actor.contains("unrecoverable_objects"),
+        sweep.contains("unrecoverable_objects"),
         "the sweep does not surface unrecoverable objects.\n  Without a separate unrecoverable class, a shard that has fallen below the\n  code's loss tolerance is treated as repairable until repair simply fails."
     );
 
     // 4. Expiry opens a reallocation ticket.
     claim!(
-        blockchain.contains("open_expiry_reallocation"),
+        sweep.contains("open_expiry_reallocation"),
         "expiring a deal does not open a reallocation ticket.\n  The slash path opens one. Without this, an operator that serves its whole\n  term and leaves drops a shard with nothing arranged to replace it."
     );
     claim!(
@@ -115,7 +115,7 @@ pub fn self_test() -> Result<String, String> {
         || std::env::current_dir().unwrap_or_default(),
         std::path::PathBuf::from,
     );
-    if !root.join("src/chain/chain_actor.rs").is_file() {
+    if !root.join("src/chain/storage_maintenance.rs").is_file() {
         return Err(String::from(
             "canary: real tree not found (run from the repo root)",
         ));
@@ -125,8 +125,10 @@ pub fn self_test() -> Result<String, String> {
         std::fs::create_dir_all(tmp.join(sub)).map_err(|e| e.to_string())?;
     }
     for (rel, from) in [
-        ("src/chain/chain_actor.rs", "src/chain/chain_actor.rs"),
-        ("src/chain/blockchain.rs", "src/chain/blockchain.rs"),
+        (
+            "src/chain/storage_maintenance.rs",
+            "src/chain/storage_maintenance.rs",
+        ),
         ("src/domain/storage_deal.rs", "src/domain/storage_deal.rs"),
         ("src/storage/manifest.rs", "src/storage/manifest.rs"),
     ] {
@@ -137,10 +139,10 @@ pub fn self_test() -> Result<String, String> {
         return Err(String::from("canary: an unmodified copy was refused"));
     }
     // Break one claim: remove the sweep's band read.
-    let actor = tmp.join("src/chain/chain_actor.rs");
-    let text = std::fs::read_to_string(&actor).map_err(|e| e.to_string())?;
+    let sweep = tmp.join("src/chain/storage_maintenance.rs");
+    let text = std::fs::read_to_string(&sweep).map_err(|e| e.to_string())?;
     std::fs::write(
-        &actor,
+        &sweep,
         text.replace("objects_below_own_repair_margin", "CANARY_REMOVED_scan"),
     )
     .map_err(|e| e.to_string())?;

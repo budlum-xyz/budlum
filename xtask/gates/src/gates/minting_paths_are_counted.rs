@@ -53,10 +53,10 @@ const MOVE_FN: &str = "try_add_balance";
 const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     (
         "src/chain/blockchain.rs",
-        10,
-        "ten calls, each one puts back or splits money this ledger already \
+        9,
+        "nine calls, each one puts back or splits money this ledger already \
          took from another place. \
-         One in the verified-burn unlock (decision K4-A): the owner gets back \
+         One in the verified-burn unlock: the owner gets back \
          the burned amount, which the lock debited from the owner less the \
          relayer fee the mint paid out of the arriving asset. \
          One in the relay unlock of a burned bridge transfer: the owner share \
@@ -70,8 +70,6 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          the rounding dust of the 4 percent share that the NFT boost carved \
          out of the booster's debit, and the shares plus dust equal exactly \
          that pending amount. \
-         One in `refund_opener_bond`: the challenge bond that \
-         `debit_opener_bond` took from the opener. \
          One in the storage deal expiry sweep: the operator bond that \
          `open_deal` debited. \
          One in the block-application storage prune: the operator bond that \

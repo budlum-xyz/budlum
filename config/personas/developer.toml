@@ -49,7 +49,5 @@ type = "poa"
 min_stake = 1000
 
 [features]
-# Enable for local experiments; keep false for mainnet-shaped dress rehearsals.
-governance = true
-zkvm_contracts = true
+# Governance and contract execution are protocol behavior, not local switches.
 pruning = false

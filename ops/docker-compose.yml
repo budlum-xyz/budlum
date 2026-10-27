@@ -1,5 +1,12 @@
 # ── Budlum Core Multi-Node Devnet ──────────────────────────
-# 4-node devnet with PoS consensus, metrics, and RPC
+# 4-node devnet with PoS consensus, metrics, and RPC, plus a fifth node
+# that joins the validator set while the chain runs
+#
+# Four validators produce blocks by VRF leadership and vote finality (testnet
+#,). Their keys and the genesis come from the same
+# ceremony the testnet uses: the one-shot `ceremony` service runs
+# `bud validator init` four times and `bud genesis assemble`, into a shared
+# volume, before any node starts.
 #
 # Usage:
 #   docker compose up -d
@@ -18,6 +25,46 @@
 # and a default that is only safe while nobody copies it is not a default.
 
 services:
+  ceremony:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: budlum-core:devnet
+    container_name: budlum-ceremony
+    volumes:
+      - ceremony:/home/budlum/ceremony
+    entrypoint: ["/bin/sh", "-c"]
+    # Idempotent: a second `up` keeps the keys and the genesis the chain
+    # already runs on. The destinations are reserved devnet markers; the
+    # devnet genesis carries no distribution.
+    command:
+      - |
+        set -eu
+        dir=/home/budlum/ceremony
+        [ -f "$$dir/genesis.json" ] && exit 0
+        mkdir -p "$$dir/operators"
+        for i in 1 2 3 4; do
+          bud validator init --chain-id 45262 --moniker "node$$i" \
+            --key-file "$$dir/node$$i.key" --record-out "$$dir/operators/node$$i.json"
+        done
+        # node5 is not a genesis validator: it joins while the chain runs
+        # (`bud validator join`, smoke step 9). Its record stays outside the
+        # operators directory, and the devnet genesis funds its stake.
+        joiner=$$(bud validator init --chain-id 45262 --moniker node5 \
+          --key-file "$$dir/node5.key" --record-out "$$dir/node5.json" \
+          | sed -n 's/^validator address: //p')
+        bud genesis assemble --network devnet --operators "$$dir/operators" \
+          --fund "$$joiner:10000000" \
+          --community b0d0000000000000000000000000000000000000000000000000000000000001 \
+          --liquidity b0d0000000000000000000000000000000000000000000000000000000000002 \
+          --ecosystem b0d0000000000000000000000000000000000000000000000000000000000003 \
+          --team b0d0000000000000000000000000000000000000000000000000000000000004 \
+          --burn-reserve b0d0000000000000000000000000000000000000000000000000000000000005 \
+          --out "$$dir/genesis.json"
+    networks:
+      - budlum-net
+    restart: "no"
+
   node1:
     build:
       context: ..
@@ -34,6 +81,7 @@ services:
     volumes:
       - node1_data:/home/budlum/data
       - node1_secrets:/home/budlum/secrets
+      - ceremony:/home/budlum/ceremony:ro
     environment:
       - RUST_LOG=info
       # Authenticated by default. Set BUDLUM_RPC_API_KEY before exposing this
@@ -43,9 +91,9 @@ services:
     command:
       - "--network=devnet"
       - "--port=4001"
-      - "--consensus=pow"
-      - "--difficulty=0"
-      - "--validator-address=0202020202020202020202020202020202020202020202020202020202020202"
+      - "--consensus=pos"
+      - "--genesis-file=/home/budlum/ceremony/genesis.json"
+      - "--validator-key-file=/home/budlum/ceremony/node1.key"
       - "--rpc-public-listener=0.0.0.0:8545"
       - "--rpc-operator-listener=127.0.0.1:8546"
       - "--metrics-port=9090"
@@ -72,6 +120,9 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
+    depends_on:
+      ceremony:
+        condition: service_completed_successfully
     networks:
       - budlum-net
     restart: unless-stopped
@@ -88,13 +139,15 @@ services:
     volumes:
       - node2_data:/home/budlum/data
       - node2_secrets:/home/budlum/secrets
+      - ceremony:/home/budlum/ceremony:ro
     environment:
       - RUST_LOG=info
     command:
       - "--network=devnet"
       - "--port=4002"
-      - "--consensus=pow"
-      - "--difficulty=0"
+      - "--consensus=pos"
+      - "--genesis-file=/home/budlum/ceremony/genesis.json"
+      - "--validator-key-file=/home/budlum/ceremony/node2.key"
       - "--db-path=/home/budlum/data/devnet-node2"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
       - "--metrics-listener=0.0.0.0:9090"
@@ -102,6 +155,8 @@ services:
     networks:
       - budlum-net
     depends_on:
+      ceremony:
+        condition: service_completed_successfully
       node1:
         condition: service_healthy
     restart: unless-stopped
@@ -117,13 +172,15 @@ services:
     volumes:
       - node3_data:/home/budlum/data
       - node3_secrets:/home/budlum/secrets
+      - ceremony:/home/budlum/ceremony:ro
     environment:
       - RUST_LOG=info
     command:
       - "--network=devnet"
       - "--port=4003"
-      - "--consensus=pow"
-      - "--difficulty=0"
+      - "--consensus=pos"
+      - "--genesis-file=/home/budlum/ceremony/genesis.json"
+      - "--validator-key-file=/home/budlum/ceremony/node3.key"
       - "--db-path=/home/budlum/data/devnet-node3"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
       - "--metrics-listener=0.0.0.0:9090"
@@ -131,6 +188,8 @@ services:
     networks:
       - budlum-net
     depends_on:
+      ceremony:
+        condition: service_completed_successfully
       node1:
         condition: service_healthy
     restart: unless-stopped
@@ -146,13 +205,15 @@ services:
     volumes:
       - node4_data:/home/budlum/data
       - node4_secrets:/home/budlum/secrets
+      - ceremony:/home/budlum/ceremony:ro
     environment:
       - RUST_LOG=info
     command:
       - "--network=devnet"
       - "--port=4004"
-      - "--consensus=pow"
-      - "--difficulty=0"
+      - "--consensus=pos"
+      - "--genesis-file=/home/budlum/ceremony/genesis.json"
+      - "--validator-key-file=/home/budlum/ceremony/node4.key"
       - "--db-path=/home/budlum/data/devnet-node4"
       - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
       - "--metrics-listener=0.0.0.0:9090"
@@ -160,6 +221,41 @@ services:
     networks:
       - budlum-net
     depends_on:
+      ceremony:
+        condition: service_completed_successfully
+      node1:
+        condition: service_healthy
+    restart: unless-stopped
+
+  node5:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    image: budlum-core:devnet
+    container_name: budlum-node5
+    ports:
+      - "4005:4005"
+    volumes:
+      - node5_data:/home/budlum/data
+      - node5_secrets:/home/budlum/secrets
+      - ceremony:/home/budlum/ceremony:ro
+    environment:
+      - RUST_LOG=info
+    command:
+      - "--network=devnet"
+      - "--port=4005"
+      - "--consensus=pos"
+      - "--genesis-file=/home/budlum/ceremony/genesis.json"
+      - "--validator-key-file=/home/budlum/ceremony/node5.key"
+      - "--db-path=/home/budlum/data/devnet-node5"
+      - "--p2p-identity-file=/home/budlum/secrets/node-id.key"
+      - "--metrics-listener=0.0.0.0:9090"
+      - "--dial=/dns4/node1/tcp/4001"
+    networks:
+      - budlum-net
+    depends_on:
+      ceremony:
+        condition: service_completed_successfully
       node1:
         condition: service_healthy
     restart: unless-stopped
@@ -177,6 +273,7 @@ services:
       - "127.0.0.1:9091:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml
       - prometheus_data:/prometheus
     networks:
       - budlum-net
@@ -186,6 +283,7 @@ services:
       - "--storage.tsdb.retention.time=30d"
 
 volumes:
+  ceremony:
   node1_data:
   node1_secrets:
   node2_data:
@@ -194,6 +292,8 @@ volumes:
   node3_secrets:
   node4_data:
   node4_secrets:
+  node5_data:
+  node5_secrets:
   prometheus_data:
 
 networks:
