@@ -140,18 +140,26 @@ pub struct PoAAuthoritySignature {
 }
 
 /// Canonical message a PoA authority signs to attest a commitment. Binds the
-/// Signature to the specific (domain, height, block hash), so a signature cannot
-/// Be replayed for a different commitment.
+/// signature to the specific (domain, height, block hash) **and to the roots
+/// the commitment claims**: a quorum captured over one commitment must not be
+/// replayable under a different `state_root`/`tx_root`/`event_root`, or a
+/// fabricated external root can be anchored with a genuine set of signatures.
 pub fn poa_commit_signing_message(
     domain_id: DomainId,
     domain_height: u64,
     domain_block_hash: &Hash32,
+    state_root: &Hash32,
+    tx_root: &Hash32,
+    event_root: &Hash32,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(8 + 8 + 32 + 16);
-    msg.extend_from_slice(b"BUDLUM_POA_COMMIT_V1");
+    let mut msg = Vec::with_capacity(8 + 8 + 32 + 32 + 32 + 32 + 32);
+    msg.extend_from_slice(b"BUDLUM_POA_COMMIT_V2");
     msg.extend_from_slice(&domain_id.to_le_bytes());
     msg.extend_from_slice(&domain_height.to_le_bytes());
     msg.extend_from_slice(domain_block_hash);
+    msg.extend_from_slice(state_root);
+    msg.extend_from_slice(tx_root);
+    msg.extend_from_slice(event_root);
     msg
 }
 
@@ -614,6 +622,9 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.state_root,
+            &commitment.tx_root,
+            &commitment.event_root,
         );
 
         // Count DISTINCT authorities with a valid signature over `msg`.
@@ -931,6 +942,9 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                     domain.id,
                     commitment.domain_height,
                     &commitment.domain_block_hash,
+                    &commitment.state_root,
+                    &commitment.tx_root,
+                    &commitment.event_root,
                 );
                 let mut valid_signers = std::collections::BTreeSet::new();
                 for sig in signatures {
@@ -1487,6 +1501,9 @@ mod tests {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.state_root,
+            &commitment.tx_root,
+            &commitment.event_root,
         );
         let sig = |i: usize| PoAAuthoritySignature {
             authority: authorities[i],
@@ -1538,6 +1555,87 @@ mod tests {
                 .unwrap(),
             FinalityStatus::Rejected(_)
         ));
+    }
+
+    /// A quorum's signatures cover the roots the commitment claims. Without
+    /// them a genuine set of signatures captured over one commitment could be
+    /// replayed under a commitment whose `state_root` (and tx/event roots)
+    /// were swapped, and the fabricated external root would be anchored with
+    /// real signatures (Review 9 - finality proofs do not bind the roots).
+    #[test]
+    fn poa_signatures_do_not_replay_under_swapped_roots() {
+        use crate::crypto::primitives::KeyPair;
+        let mut domain = default_domain(2, ConsensusKind::PoA, 45262, "poa-authority-quorum", 0);
+        let honest = commitment(ConsensusKind::PoA);
+        let mut forged = honest.clone();
+        forged.domain_id = domain.id;
+        let mut commitment = honest;
+        commitment.domain_id = domain.id;
+
+        let mut kps = Vec::new();
+        let mut authorities = Vec::new();
+        for i in 0..4u8 {
+            let mut seed = [0u8; 32];
+            seed[0] = 0xC0 + i;
+            let kp = KeyPair::from_seed(&seed).unwrap();
+            authorities.push(crate::core::address::Address::from(kp.public_key_bytes()));
+            kps.push(kp);
+        }
+        domain.validator_set_hash = poa_authority_set_hash(&domain, &authorities).unwrap();
+        let adapter = PoAFinalityAdapter::default();
+
+        // The quorum signed THIS commitment, roots included.
+        let msg = poa_commit_signing_message(
+            domain.id,
+            commitment.domain_height,
+            &commitment.domain_block_hash,
+            &commitment.state_root,
+            &commitment.tx_root,
+            &commitment.event_root,
+        );
+        let signatures: Vec<_> = kps
+            .iter()
+            .zip(authorities.iter())
+            .map(|(kp, authority)| PoAAuthoritySignature {
+                authority: *authority,
+                signature: kp.sign(&msg).to_vec(),
+            })
+            .collect();
+
+        assert_eq!(
+            adapter
+                .verify_finality(
+                    &domain,
+                    &commitment,
+                    &FinalityProof::PoA {
+                        authorities: authorities.clone(),
+                        signatures: signatures.clone(),
+                    },
+                )
+                .unwrap(),
+            FinalityStatus::Finalized,
+            "the commitment the quorum signed finalizes"
+        );
+
+        // Same height, same block hash, different claimed roots: the very
+        // signatures that proved the honest commitment must not open this one.
+        forged.state_root = [0xEE; 32];
+        assert!(
+            matches!(
+                adapter
+                    .verify_finality(
+                        &domain,
+                        &forged,
+                        &FinalityProof::PoA {
+                            authorities,
+                            signatures,
+                        },
+                    )
+                    .unwrap(),
+                FinalityStatus::Rejected(_)
+            ),
+            "a replay under swapped roots must be refused"
+        );
     }
 
     /// The snapshot's `set_hash` arrives inside the proof, and the two checks
@@ -1836,6 +1934,9 @@ mod tests {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.state_root,
+            &commitment.tx_root,
+            &commitment.event_root,
         );
         let real_sig = kp.sign(&msg);
         let real_proof = FinalityProof::PoA {
