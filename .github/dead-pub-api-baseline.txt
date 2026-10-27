@@ -76,7 +76,6 @@ src/chain/finality.rs:is_checkpoint_height
 src/chain/genesis.rs:with_bud_tokenomics_params
 src/chain/genesis.rs:with_validator
 src/chain/snapshot.rs:save_snapshot
-src/consensus/poa.rs:active_validator_count
 src/core/account.rs:add_role
 src/core/account.rs:clear_dirty
 src/core/account.rs:dirty_account_count
@@ -209,3 +208,4 @@ src/tokenomics/mod.rs:amount_of
 src/tokenomics/mod.rs:calculate_epoch_reward
 src/tokenomics/reward_pool.rs:reward_for_epoch
 src/tokenomics/reward_pool.rs:total_epoch_payout
+src/consensus/poa.rs:active_validator_count
