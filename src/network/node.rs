@@ -161,7 +161,6 @@ impl NodeClient {
             NetworkMessage::DomainCommitment(commitment),
         ));
     }
-    /// WIRING: the sync broadcast of verified commitments rides the settlement rollout; production callers land with that wave.
     pub fn broadcast_verified_domain_commitment_sync(
         &self,
         payload: crate::domain::VerifiedDomainCommitment,
