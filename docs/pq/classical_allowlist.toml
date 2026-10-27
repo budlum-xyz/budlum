@@ -1,0 +1,66 @@
+# allow list for the `classical-crypto-is-paired` gate.
+#
+#: no object is accepted on a classical signature alone. The only
+# classical components allowed are
+#   a  the Ed25519 half of a composite signature,
+#   b  the BLS12-381 finality peer, required together with the ML-DSA-65 QC,
+#   c  X25519 inside a hybrid KEM,
+#   d  proofs of external networks, marked in the domain profile,
+#   e  TEE attestation, which is not on a security path.
+#
+# The gate (xtask/gates/src/gates/classical_crypto_is_paired.rs) turns every use of
+# ed25519_dalek, schnorrkel, bls12_381, x25519 and libp2p::noise in production code
+# into a site (file + enclosing function; a `use` line is the site `(imports)`).
+# Every site needs an entry below: path, function (`*` = every site in the file),
+# the post-quantum component that pairs the use, and the item.
+#
+# `unregistered_baseline` is the number of sites with no entry today (count mode).
+# It only falls: a higher count fails (a new classical use with no entry), a lower
+# count fails too and names the number to write. Phases 2 and 3 replace the
+# remaining classical-only uses (V4 transactions, Ed25519 block and snapshot
+# signatures, the sr25519 VRF, the cold committee, the libp2p identity); the
+# baseline is locked at zero when Phase 3 ends.
+
+unregistered_baseline = 10
+
+[[entry]]
+path = "src/crypto/composite.rs"
+function = "*"
+pq_companion = "ML-DSA-87 (suite 0x0001), ML-DSA-65 (suite 0x0002) or SLH-DSA-SHAKE-128s (suite 0x0004) over the same message representative"
+k02 = "a"
+
+[[entry]]
+path = "src/chain/finality.rs"
+function = "*"
+pq_companion = "ML-DSA-65 QC blob of the same signers (consensus/qc.rs); finality needs both"
+k02 = "b"
+
+[[entry]]
+path = "src/consensus/mod.rs"
+function = "bls_secret_key"
+pq_companion = "ML-DSA-65 key of the same validator key set"
+k02 = "b"
+
+[[entry]]
+path = "src/consensus/pos.rs"
+function = "bls_secret_key"
+pq_companion = "ML-DSA-65 key of the same validator key set"
+k02 = "b"
+
+[[entry]]
+path = "src/core/account.rs"
+function = "consensus_validator_set_hash"
+pq_companion = "the key-set preimage binds the ML-DSA-65 key beside the BLS key (crypto/key_set_preimage.rs)"
+k02 = "b"
+
+[[entry]]
+path = "src/cross_domain/evm/sync_committee.rs"
+function = "*"
+pq_companion = "none: an Ethereum sync committee proof of an external network, shown as classical in the domain profile"
+k02 = "d"
+
+[[entry]]
+path = "src/cross_domain/external/intake.rs"
+function = "*"
+pq_companion = "none: an external network quorum, shown as classical in the domain profile"
+k02 = "d"
