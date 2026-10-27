@@ -52,7 +52,7 @@ so value moves between domains without trusting an intermediary.
 | --- | --- |
 | **Fragmentation.** Thousands of isolated chains, each with its own finality, none of which the others can verify. | A settlement layer that verifies *any* domain's finality proof and records the result in one global header. |
 | **Bridge risk.** Custodial and multisig bridges have lost billions; the failures are almost always missing verification, not broken cryptography. | A `lock → mint → burn → unlock` lifecycle where every mint recomputes a bounded proof and re-derives the payload hash from `(asset_id, amount)` before crediting anything. |
-| **The quantum horizon.** Ed25519 and ECDSA are expected to be breakable within the lifetime of a chain launched today. | Hybrid finality: BLS12-381 aggregate signatures alongside a post-quantum scheme (ML-DSA-65 by default - FIPS 204 NIST final; legacy Dilithium5 available only for migration). |
+| **The quantum horizon.** Ed25519 and ECDSA are expected to be breakable within the lifetime of a chain launched today. | Hybrid finality: BLS12-381 aggregate signatures alongside a post-quantum scheme (ML-DSA-65 by default - FIPS 204 NIST final; legacy Dilithium5 available only for migration). <!-- claim:L-FINALITY-01 --> |
 | **Operator custody of user data.** "Decentralized" networks whose storage, RPC and inference all terminate at one company. | No admin key, no pause hook, no whitelist. Storage, RPC and AI endpoints run on any node; participation is stake-gated, not permission-gated. |
 | **Unverifiable off-chain compute.** AI output presented as fact with nothing behind it. | An in-tree zkVM (BudZero) that produces STARK proofs of execution. Inference proof *verification* is not yet enabled, the transaction path [fails closed](docs/AI_VERIFICATION_STATUS.md) rather than trusting an unverified result. |
 
@@ -186,7 +186,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | **B.U.D.** | [`bud/`](bud) · [`src/storage/`](src/storage) | Broad Universal Database: `bud/` is the 1.0/2.0/3.0 implementation (tarif / QR / receipt / settlement modules, [bud README](bud/README.md)); `src/storage/` is the settlement layer's storage engine (content addressing, deals, challenge/response proofs) |
 | **AI inference layer** | [`src/ai_inference/`](src/ai_inference) | Closed-circuit AI layer: model registry, operator compute-bond, effort tiers, Pollen-gated data access, perception declarations (V3), SocialFi output bridge. Off-chain workspace: [`crates/ai-inference/`](crates/ai-inference) |
 | **Pollen** | [`src/pollen/`](src/pollen) | Consent-gated data marketplace, grants, encryption, and the gate the AI layer must pass |
-| **BNS** | [`src/bns/`](src/bns) | `.bud` naming: registration, subdomains, content and storage records |
+| **BNS** | [`src/bns/`](src/bns) | `.bud` naming: registration, renewal, transfer, subdomains, content and storage records |
 | **Wallet Core** | [`crates/wallet-core/`](crates/wallet-core), [README](crates/wallet-core/README.md) | BIP39 + SLIP-0010 Ed25519 derivation and transaction signing. A wallet, not a relayer |
 
 ### Supporting trees
@@ -259,7 +259,6 @@ cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push   # fmt + clippy, p
 | Feature | Default | Effect |
 | --- | --- | --- |
 | `pq-ml-dsa` | OK | FIPS 204 ML-DSA (NIST final) - ML-DSA-65 validator signatures (`ml-dsa`). Scheme is written into genesis; a node whose build disagrees with the chain refuses to start |
-| `pq-dilithium` | - | Legacy Dilithium5 (round-3, pre-NIST-final) signatures (`pqcrypto-dilithium`). Retained only for migration; not the default |
 | `p2p-mdns` | - | Devnet-only local peer discovery. Deliberately excluded from release builds so mDNS advisories stay unreachable |
 
 `cargo build --all-features` is **expected to fail**: the PQ backends are mutually exclusive
@@ -305,7 +304,7 @@ public listener.
 
 > [!IMPORTANT]
 > **Mainnet validators must sign through PKCS#11.** Disk-backed `ValidatorKeys`, BLS and
-> post-quantum material sitting in a file, are rejected on the mainnet profile. This is not
+> ML-DSA key material sitting in a file, are rejected on the mainnet profile. This is not
 > advisory; the node refuses to start.
 
 ### Operating
@@ -430,18 +429,21 @@ claim is made anywhere in this repository.
 
 ## Project status
 
-**Implemented and tested:** Heterogeneous Consensus on the Universal Settlement Layer (PoW/PoS/PoA/BFT) · BLS + post-quantum hybrid
-finality · domain registry and finality adapters · cross-domain bridge lifecycle with forgery
+**Quantum security, current rung (I-0):** Budlum approaches the quantum threat with a complete plan. Every layer has a defined solution, a metric and a completion gate. The Budlum wallet core signs today with NIST FIPS 204 ML-DSA-87. <!-- claim:S-I0 -->
+The register of claims, the evidence behind each and the rung each one needs is [`docs/pq/CLAIMS.md`](docs/pq/CLAIMS.md); only the sentence of the rung that has been reached is used.
+
+**Implemented and tested:** Heterogeneous Consensus on the Universal Settlement Layer (PoW/PoS/PoA/BFT) · BLS + post-quantum hybrid finality <!-- claim:L-FINALITY-01 -->
+· domain registry and finality adapters · cross-domain bridge lifecycle with forgery
 gates · permissionless stake registry with slashing and unbonding · in-tree BudZKVM with
 STARK proving · B.U.D. storage with deal and challenge economy · BNS `.bud` names · Pollen
 data marketplace · SocialFi primitives · AI inference layer · EVM chain adapter
 (RLP + MPT + receipt verification) · `$BUD` tokenomics · validator governance · snapshot V2
-with chunk-session binding.
+with chunk-session binding · block-only relayer intents with escrowed solver fees,
+anchored receipt verification and expiry slashing.
 
 **Deliberately not enabled, and pinned by tests that break if that changes:** on-chain AI
 inference proof *verification* ([status](docs/AI_VERIFICATION_STATUS.md)) · BudZKVM
-`VerifyMerkle` at production depth · BNS renewal and transfer (no transaction type reaches
-them) · the solver-economics module.
+`VerifyMerkle` at production depth.
 
 **Not claimed:** TLA+ formal verification of the protocol · a complete ZK privacy layer ·
 full on-chain AI execution · vendor-native BLS/PQ HSM support beyond Ed25519 PKCS#11 ·
