@@ -1608,8 +1608,10 @@ mod tests {
     #[test]
     fn a_delegation_moves_between_validators_in_one_step() {
         let mut reg = PermissionlessRegistry::new();
-        reg.register_validator(addr(1), MIN_REGISTRATION_STAKE, 0).unwrap();
-        reg.register_validator(addr(2), MIN_REGISTRATION_STAKE, 0).unwrap();
+        reg.register_validator(addr(1), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
+        reg.register_validator(addr(2), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
         reg.delegate(addr(9), addr(1), 100).unwrap();
 
         reg.move_delegation(addr(9), addr(1), addr(2), 40).unwrap();
@@ -1628,8 +1630,10 @@ mod tests {
     #[test]
     fn a_redelegation_refuses_more_than_the_position_and_the_same_validator() {
         let mut reg = PermissionlessRegistry::new();
-        reg.register_validator(addr(1), MIN_REGISTRATION_STAKE, 0).unwrap();
-        reg.register_validator(addr(2), MIN_REGISTRATION_STAKE, 0).unwrap();
+        reg.register_validator(addr(1), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
+        reg.register_validator(addr(2), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
         reg.delegate(addr(9), addr(1), 100).unwrap();
         assert!(reg.move_delegation(addr(9), addr(1), addr(2), 101).is_err());
         assert!(reg.move_delegation(addr(9), addr(1), addr(1), 10).is_err());

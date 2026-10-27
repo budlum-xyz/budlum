@@ -250,7 +250,6 @@ pub struct ExternalTransaction {
     pub external_nonce: u64,
 }
 
-
 /// Payload of [`TransactionType::BridgeBurn`].
 ///
 /// The burn is the debit half of a bridge mint: it takes the minted units back
@@ -2116,7 +2115,9 @@ impl Transaction {
             }
             TransactionType::Redelegate { .. } => {
                 if self.amount == 0 || self.to != Address::zero() || !self.data.is_empty() {
-                    debug!("redelegation requires a positive amount, zero recipient, and empty data");
+                    debug!(
+                        "redelegation requires a positive amount, zero recipient, and empty data"
+                    );
                     return false;
                 }
             }
@@ -3727,18 +3728,6 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u8(out, 58);
             put_fixed(out, commitment);
             put_u64(out, *length);
-        }
-        TransactionType::Redelegate {
-            from_validator,
-            to_validator,
-        } => {
-            put_u8(out, 59);
-            put_fixed(out, from_validator.as_bytes());
-            put_fixed(out, to_validator.as_bytes());
-        }
-        TransactionType::ClaimRewards { validator } => {
-            put_u8(out, 60);
-            put_fixed(out, validator.as_bytes());
         }
         TransactionType::BridgeBurn(burn) => {
             put_u8(out, 50);

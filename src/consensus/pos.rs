@@ -1,6 +1,6 @@
 use super::{
-    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, RoundPriceBook,
-    MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    now_millis, ConsensusEngine, ConsensusError, RoundPriceBook, MAX_LEADER_ROUNDS,
+    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
 };
 use crate::core::account::AccountState;
 use crate::core::address::Address;

@@ -176,6 +176,16 @@ pub struct Blockchain {
 /// advances by one checkpoint interval at a time, which this covers.
 const WITNESS_PRUNE_WINDOW: u64 = 1024;
 
+/// The storage-economics ledger as it is persisted on its own row
+/// (`STORAGE_ECONOMICS_STATE`).
+///
+/// The same value the storage registry root folds, so a row written here and
+/// the live ledger cannot disagree about what was accounted. It carries the
+/// ledger's own serde shape: `encode`/`decode` above are the only readers and
+/// writers, and a row that does not decode as this shape is refused rather
+/// than patched.
+pub type StorageEconomicsStateSnapshot = crate::domain::storage_deal::StorageEconomicsLedger;
+
 impl Blockchain {
     pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
         self.metrics = Some(metrics);
@@ -616,6 +626,7 @@ impl Blockchain {
                     state_root: genesis.state_root.clone(),
                     finality_cert: None,
                     global_headers: Vec::new(),
+                    bridge_state: Some(state.bridge_state.clone()),
                     accounts: accounts_to_save,
                 };
                 if let Err(e) = store.commit_durable_batch(&batch) {
@@ -2272,9 +2283,8 @@ impl Blockchain {
         .map_err(|e| format!("anchor key rotation: {e}"))
     }
 
-    /// The height of the block this chain would apply next, the height the
-    /// test harness below runs the bridge door bodies at.
-    #[cfg(test)]
+    /// The height of the block this chain would apply next: the height the
+    /// bridge door bodies run at (harness and `drain_pending_bridge_burns`).
     fn harness_height(&self) -> u64 {
         u64::try_from(self.chain.len()).unwrap_or(u64::MAX)
     }
@@ -2640,8 +2650,12 @@ impl Blockchain {
         reports.len()
     }
 
-    /// Test harness only: the relay enqueue the lock and burn doors run.
-    #[cfg(test)]
+    /// The relay enqueue the lock and burn doors run.
+    ///
+    /// WIRING: `drain_pending_bridge_burns` calls it after every applied
+    /// block, and the bridge suite calls it directly. It used to be
+    /// `cfg(test)` only, which left the drain path calling a method that did
+    /// not exist in a release build.
     pub fn enqueue_bridge_relay(
         &mut self,
         source_event: DomainEvent,
@@ -4155,6 +4169,7 @@ impl Blockchain {
                 state_root: block.state_root.clone(),
                 finality_cert,
                 global_headers,
+                bridge_state: Some(committed_state.bridge_state.clone()),
                 accounts: accounts_to_save,
             };
 

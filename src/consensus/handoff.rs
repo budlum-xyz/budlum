@@ -378,8 +378,8 @@ mod tests {
         let cert = signed(&keys, &outgoing, &incoming, &[0, 1, 2]);
         assert_eq!(cert.verify_in(&registry, &outgoing, [3; 32]), Ok(()));
         let steps = vec![(cert.clone(), incoming.clone())];
-        let (epoch, reached) = follow_handoffs(&registry, 7, 4, &outgoing, &steps, &|_| [3; 32])
-            .expect("follows");
+        let (epoch, reached) =
+            follow_handoffs(&registry, 7, 4, &outgoing, &steps, &|_| [3; 32]).expect("follows");
         assert_eq!(epoch, 5);
         assert_eq!(reached, incoming.as_slice());
 
@@ -407,7 +407,8 @@ mod tests {
         let mut forged_set = incoming.clone();
         forged_set[1].stake = 99;
         assert_eq!(
-            follow_handoffs(&registry, 7, 4, &outgoing, &[(cert, forged_set)], &|_| [3; 32]),
+            follow_handoffs(&registry, 7, 4, &outgoing, &[(cert, forged_set)], &|_| [3;
+                32]),
             Err(HandoffError::IncomingSet)
         );
     }
