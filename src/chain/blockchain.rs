@@ -5844,6 +5844,11 @@ impl Blockchain {
         // Made the producer's `liveness` root unreproducible by replay.
 
         self.chain.push(block.clone());
+        // The block is the tip now, and the leader rounds of its children are
+        // priced from this moment rather than from a header stamp that a
+        // lagging slot schedule may have put minutes in the past.
+        self.consensus
+            .note_block_seen(&block.hash, crate::consensus::now_millis());
         // The external-domain registry's clock is the local chain height, and
         // block commit is the only place that may advance it: a clock driven
         // from anywhere else would let sunset windows drift between replay
@@ -6183,8 +6188,13 @@ impl Blockchain {
         // Counter and tx-type metrics must be read before `push` consumes the block.
         let applied_tx_count = block.transactions.len() as u64;
         let committed_index = block.index;
+        let committed_hash = block.hash.clone();
         self.emit_applied_tx_metrics(&block.transactions, ai_outcomes_before);
         self.chain.push(block);
+        // Same rule as the other commit path: adoption is what prices the
+        // next slot's leader rounds.
+        self.consensus
+            .note_block_seen(&committed_hash, crate::consensus::now_millis());
         // Same clock rule as the other commit path: block commit drives the
         // external-domain registry height, nothing else does.
         self.external_intake.on_block_committed(committed_index);
