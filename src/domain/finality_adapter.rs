@@ -1,5 +1,7 @@
 use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use crate::core::block::Block;
+use crate::crypto::facts::{AssumptionClass, CryptoObserver, ObservedScheme};
+use crate::crypto::scheme::SchemeId;
 use crate::domain::types::{ConsensusDomain, DomainCommitment, DomainId, Hash32};
 use serde::{Deserialize, Serialize};
 
@@ -128,6 +130,132 @@ pub enum FinalityProof {
     PoWHeaderChain {
         headers: Vec<PoWHeader>,
     },
+    /// PoS finality with the post-quantum half: the BLS
+    /// certificate and the ML-DSA-65 QC blob of the same signers over the
+    /// same checkpoint. Appended so earlier bincode indices stay stable.
+    PoSPq {
+        cert: FinalityCert,
+        validator_snapshot: ValidatorSetSnapshot,
+        qc: crate::consensus::qc::QcBlob,
+    },
+    /// PoA finality with composite authority signatures: each
+    /// authority signs with the validator suite (`0x0002`, ML-DSA-65 and
+    /// Ed25519, context `BDLM/POA/V2`), and the registered set hash commits
+    /// to every authority's composite key.
+    PoAPq {
+        authorities: Vec<PoAAuthorityKey>,
+        signatures: Vec<PoAAuthoritySignature>,
+    },
+    /// BFT finality with the post-quantum half, as [`Self::PoSPq`].
+    BftPq {
+        round: u64,
+        commit_hash: Hash32,
+        cert: FinalityCert,
+        validator_snapshot: ValidatorSetSnapshot,
+        qc: crate::consensus::qc::QcBlob,
+    },
+}
+
+impl FinalityProof {
+    /// A quorum proof that carries only classical signatures: the BLS-only
+    /// PoS and BFT certificates and the Ed25519-only PoA signatures. Mainnet
+    /// refuses these.
+    #[must_use]
+    pub const fn is_classical_only_quorum(&self) -> bool {
+        matches!(self, Self::PoS { .. } | Self::Bft { .. } | Self::PoA { .. })
+    }
+}
+
+/// A PoA authority with its composite key. The address is the
+/// Ed25519 half of the key, as for a validator.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PoAAuthorityKey {
+    pub authority: crate::core::address::Address,
+    /// `CompositePublicKey::encode` of the authority's validator-suite key.
+    pub public_key: Vec<u8>,
+}
+
+/// The digest a PoA authority signs with its composite key.
+#[must_use]
+pub fn poa_commit_digest(
+    domain_id: DomainId,
+    domain_height: u64,
+    domain_block_hash: &Hash32,
+) -> Hash32 {
+    crate::core::hash::hash_fields_bytes(&[&poa_commit_signing_message(
+        domain_id,
+        domain_height,
+        domain_block_hash,
+    )])
+}
+
+/// The set hash a PoA domain with composite authorities registers: the
+/// same derivation as [`poa_authority_set_hash`] with each authority's
+/// composite key in the entry's PQ key field.
+///
+/// # Errors
+///
+/// None today; the signature matches [`poa_authority_set_hash`].
+pub fn poa_pq_authority_set_hash(
+    domain: &ConsensusDomain,
+    authorities: &[PoAAuthorityKey],
+) -> Result<Hash32, FinalityError> {
+    use crate::chain::finality::ValidatorEntry;
+    let entries: Vec<ValidatorEntry> = authorities
+        .iter()
+        .map(|key| ValidatorEntry {
+            address: key.authority,
+            stake: 1,
+            bls_public_key: Vec::new(),
+            pop_signature: Vec::new(),
+            pq_public_key: key.public_key.clone(),
+        })
+        .collect();
+    Ok(crate::domain::types::validator_set_commitment(
+        b"bootstrap_validator_set_hash",
+        domain.id,
+        &crate::domain::types::RootScheme::Sha3_256,
+        ValidatorSetSnapshot::compute_hash(&entries).as_bytes(),
+    ))
+}
+
+/// Check the post-quantum half of a quorum proof.
+///
+/// The QC blob must attest the checkpoint the BLS certificate attests (epoch,
+/// height and hash), and every BLS signer must have a verified ML-DSA-65
+/// signature in it, under the scheme statuses of `registry`.
+///
+/// # Errors
+///
+/// A message naming the first mismatch or the first missing or invalid
+/// signature.
+pub fn verify_pq_quorum(
+    registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    cert: &FinalityCert,
+    snapshot: &ValidatorSetSnapshot,
+    qc: &crate::consensus::qc::QcBlob,
+) -> Result<(), String> {
+    if qc.epoch != cert.epoch {
+        return Err(format!(
+            "QC epoch {} does not match the certificate epoch {}",
+            qc.epoch, cert.epoch
+        ));
+    }
+    if qc.checkpoint_height != cert.checkpoint_height {
+        return Err(format!(
+            "QC height {} does not match the certificate height {}",
+            qc.checkpoint_height, cert.checkpoint_height
+        ));
+    }
+    if qc.checkpoint_hash != cert.checkpoint_hash {
+        return Err("QC checkpoint hash does not match the certificate".into());
+    }
+    let signers = cert.signer_indices(snapshot.validators.len());
+    if signers.is_empty() {
+        return Err("the certificate names no signer".into());
+    }
+    qc.verify_against_snapshot_in(registry, snapshot, Some(&signers), None)
+        .map(|_| ())
 }
 
 /// A single PoA authority's ed25519 signature over a commitment binding message.
@@ -175,6 +303,108 @@ pub trait DomainFinalityAdapter: Send + Sync {
         commitment: &DomainCommitment,
         proof: &FinalityProof,
     ) -> Result<FinalityStatus, FinalityError>;
+
+    /// [`Self::verify_finality`] under the scheme statuses of a chain
+    ///. An adapter that verifies no post-quantum signature ignores
+    /// the registry.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::verify_finality`] refuses with.
+    fn verify_finality_in(
+        &self,
+        _registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        self.verify_finality(domain, commitment, proof)
+    }
+
+    /// The schemes a finalized `proof` of this adapter's kind was checked
+    /// under. Empty for an adapter that names none.
+    fn observed_schemes(&self, _proof: &FinalityProof) -> Vec<ObservedScheme> {
+        Vec::new()
+    }
+
+    /// Reports [`Self::observed_schemes`] to `observer` when `status` is
+    /// final. A refused or pending proof reports nothing.
+    fn observe_finalized(
+        &self,
+        status: &FinalityStatus,
+        proof: &FinalityProof,
+        observer: &mut dyn CryptoObserver,
+    ) {
+        if matches!(status, FinalityStatus::Finalized) {
+            for scheme in self.observed_schemes(proof) {
+                observer.observe(scheme);
+            }
+        }
+    }
+
+    /// [`Self::verify_finality`], reporting what the verification checked.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::verify_finality`] refuses with.
+    fn verify_finality_observed(
+        &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<FinalityStatus, FinalityError> {
+        let status = self.verify_finality(domain, commitment, proof)?;
+        self.observe_finalized(&status, proof, observer);
+        Ok(status)
+    }
+
+    /// [`Self::verify_finality_observed`] under the scheme statuses of a
+    /// chain.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::verify_finality_in`] refuses with.
+    fn verify_finality_observed_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<FinalityStatus, FinalityError> {
+        let status = self.verify_finality_in(registry, domain, commitment, proof)?;
+        self.observe_finalized(&status, proof, observer);
+        Ok(status)
+    }
+}
+
+/// The schemes a BLS finality certificate rests on: the BLS12-381 aggregate
+/// always, and ML-DSA-65 when every signer's validator entry binds a PQ key
+///. The QC blob that carries the ML-DSA signatures themselves is
+/// checked on the chain's own import path, not here; what this adapter has
+/// verified is the set hash, which commits to both keys of each validator.
+fn certificate_schemes(
+    cert: &FinalityCert,
+    snapshot: &ValidatorSetSnapshot,
+) -> Vec<ObservedScheme> {
+    let mut schemes = vec![ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG)];
+    let mut signers = snapshot
+        .validators
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            cert.bitmap
+                .get(index / 8)
+                .is_some_and(|byte| byte & (1 << (index % 8)) != 0)
+        })
+        .peekable();
+    let all_bound = signers.peek().is_some()
+        && signers.all(|(_, validator)| !validator.pq_public_key.is_empty());
+    if all_bound {
+        schemes.push(ObservedScheme::Scheme(SchemeId::ML_DSA_65));
+    }
+    schemes
 }
 
 /// Count leading zero bits in a 32-byte block hash (big-endian byte order).
@@ -332,90 +562,144 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
         "pos-qc-finality"
     }
 
+    fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
+        match proof {
+            FinalityProof::PoS {
+                cert,
+                validator_snapshot,
+            }
+            | FinalityProof::PoSPq {
+                cert,
+                validator_snapshot,
+                ..
+            } => certificate_schemes(cert, validator_snapshot),
+            _ => Vec::new(),
+        }
+    }
+
     fn verify_finality(
         &self,
         domain: &ConsensusDomain,
         commitment: &DomainCommitment,
         proof: &FinalityProof,
     ) -> Result<FinalityStatus, FinalityError> {
-        let FinalityProof::PoS {
-            cert,
-            validator_snapshot,
-        } = proof
-        else {
-            return Err(FinalityError("Expected PoS finality proof".into()));
-        };
-
-        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
-            return Ok(rejected);
-        }
-
-        // Before the certificate is read: a bridge-enabled domain with no
-        // registered set has nothing a certificate could be checked against.
-        if let Some(rejected) = reject_unregistered_set_for_bridge(domain, "PoS") {
-            return Ok(rejected);
-        }
-
-        if cert.checkpoint_height != commitment.domain_height {
-            return Ok(FinalityStatus::Rejected(
-                "PoS cert height does not match commitment".into(),
-            ));
-        }
-
-        let commitment_hash = hex::encode(commitment.domain_block_hash);
-        if cert.checkpoint_hash != commitment_hash {
-            return Ok(FinalityStatus::Rejected(
-                "PoS cert hash does not match commitment".into(),
-            ));
-        }
-
-        if validator_snapshot.set_hash != cert.set_hash {
-            return Ok(FinalityStatus::Rejected(
-                "PoS cert set hash does not match validator snapshot".into(),
-            ));
-        }
-        // A set hash that cannot be decoded is a refusal, not a step to fall
-        // Through. These two checks are the only things binding the proof's
-        // Validator set to the one the domain registered and the one the
-        // Commitment names; `FinalityCertificate::verify` compares the cert's
-        // String to the snapshot's and never re-derives either, so a proof
-        // Whose set hash parses to nothing would otherwise name its own
-        // Validator set. The string arrives inside the proof.
-        let decoded_set_hash = hex::decode(&validator_snapshot.set_hash)
-            .ok()
-            .filter(|bytes| bytes.len() == 32)
-            .ok_or_else(|| {
-                FinalityError(format!(
-                    "PoS finality proof validator set hash is not 32 bytes of hex: {:?}",
-                    validator_snapshot.set_hash
-                ))
-            })?;
-        let mut snapshot_set_hash = [0u8; 32];
-        snapshot_set_hash.copy_from_slice(&decoded_set_hash);
-        if let Err(e) = validator_snapshot.validate_metadata() {
-            return Ok(FinalityStatus::Rejected(format!(
-                "PoS validator snapshot metadata invalid: {e}"
-            )));
-        }
-        if domain.validator_set_hash != [0u8; 32] && snapshot_set_hash != domain.validator_set_hash
-        {
-            return Ok(FinalityStatus::Rejected(
-                "PoS validator snapshot does not match registered domain set".into(),
-            ));
-        }
-        if commitment.validator_set_hash != [0u8; 32]
-            && commitment.validator_set_hash != snapshot_set_hash
-        {
-            return Ok(FinalityStatus::Rejected(
-                "PoS commitment validator set does not match finality proof".into(),
-            ));
-        }
-
-        cert.verify(validator_snapshot)
-            .map_err(|e| FinalityError(format!("Invalid PoS finality cert: {e}")))?;
-
-        Ok(FinalityStatus::Finalized)
+        self.verify_finality_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            domain,
+            commitment,
+            proof,
+        )
     }
+
+    fn verify_finality_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        match proof {
+            FinalityProof::PoS {
+                cert,
+                validator_snapshot,
+            } => verify_pos_cert(domain, commitment, cert, validator_snapshot),
+            FinalityProof::PoSPq {
+                cert,
+                validator_snapshot,
+                qc,
+            } => {
+                let status = verify_pos_cert(domain, commitment, cert, validator_snapshot)?;
+                if status != FinalityStatus::Finalized {
+                    return Ok(status);
+                }
+                Ok(
+                    match verify_pq_quorum(registry, cert, validator_snapshot, qc) {
+                        Ok(()) => FinalityStatus::Finalized,
+                        Err(e) => FinalityStatus::Rejected(format!("PoS PQ quorum: {e}")),
+                    },
+                )
+            }
+            _ => Err(FinalityError("Expected PoS finality proof".into())),
+        }
+    }
+}
+
+/// The BLS half of a PoS proof: binding to the commitment, the registered
+/// set and the certificate itself.
+fn verify_pos_cert(
+    domain: &ConsensusDomain,
+    commitment: &DomainCommitment,
+    cert: &FinalityCert,
+    validator_snapshot: &ValidatorSetSnapshot,
+) -> Result<FinalityStatus, FinalityError> {
+    if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+        return Ok(rejected);
+    }
+
+    // Before the certificate is read: a bridge-enabled domain with no
+    // registered set has nothing a certificate could be checked against.
+    if let Some(rejected) = reject_unregistered_set_for_bridge(domain, "PoS") {
+        return Ok(rejected);
+    }
+
+    if cert.checkpoint_height != commitment.domain_height {
+        return Ok(FinalityStatus::Rejected(
+            "PoS cert height does not match commitment".into(),
+        ));
+    }
+
+    let commitment_hash = hex::encode(commitment.domain_block_hash);
+    if cert.checkpoint_hash != commitment_hash {
+        return Ok(FinalityStatus::Rejected(
+            "PoS cert hash does not match commitment".into(),
+        ));
+    }
+
+    if validator_snapshot.set_hash != cert.set_hash {
+        return Ok(FinalityStatus::Rejected(
+            "PoS cert set hash does not match validator snapshot".into(),
+        ));
+    }
+    // A set hash that cannot be decoded is a refusal, not a step to fall
+    // Through. These two checks are the only things binding the proof's
+    // Validator set to the one the domain registered and the one the
+    // Commitment names; `FinalityCertificate::verify` compares the cert's
+    // String to the snapshot's and never re-derives either, so a proof
+    // Whose set hash parses to nothing would otherwise name its own
+    // Validator set. The string arrives inside the proof.
+    let decoded_set_hash = hex::decode(&validator_snapshot.set_hash)
+        .ok()
+        .filter(|bytes| bytes.len() == 32)
+        .ok_or_else(|| {
+            FinalityError(format!(
+                "PoS finality proof validator set hash is not 32 bytes of hex: {:?}",
+                validator_snapshot.set_hash
+            ))
+        })?;
+    let mut snapshot_set_hash = [0u8; 32];
+    snapshot_set_hash.copy_from_slice(&decoded_set_hash);
+    if let Err(e) = validator_snapshot.validate_metadata() {
+        return Ok(FinalityStatus::Rejected(format!(
+            "PoS validator snapshot metadata invalid: {e}"
+        )));
+    }
+    if domain.validator_set_hash != [0u8; 32] && snapshot_set_hash != domain.validator_set_hash {
+        return Ok(FinalityStatus::Rejected(
+            "PoS validator snapshot does not match registered domain set".into(),
+        ));
+    }
+    if commitment.validator_set_hash != [0u8; 32]
+        && commitment.validator_set_hash != snapshot_set_hash
+    {
+        return Ok(FinalityStatus::Rejected(
+            "PoS commitment validator set does not match finality proof".into(),
+        ));
+    }
+
+    cert.verify(validator_snapshot)
+        .map_err(|e| FinalityError(format!("Invalid PoS finality cert: {e}")))?;
+
+    Ok(FinalityStatus::Finalized)
 }
 
 #[derive(Debug, Clone)]
@@ -441,6 +725,78 @@ impl PoAFinalityAdapter {
     pub fn required_signatures(&self, authority_count: usize) -> usize {
         ((authority_count as u64 * self.quorum_numerator).div_ceil(self.quorum_denominator))
             as usize
+    }
+
+    /// The composite path: the declared keys must hash to the
+    /// registered set, every signature must be a composite signature by a
+    /// declared authority's key over [`poa_commit_digest`], and distinct
+    /// signers must reach the count quorum.
+    fn verify_poa_pq(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        authorities: &[PoAAuthorityKey],
+        signatures: &[PoAAuthoritySignature],
+    ) -> Result<FinalityStatus, FinalityError> {
+        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+            return Ok(rejected);
+        }
+        let keys: std::collections::BTreeMap<crate::core::address::Address, &[u8]> = authorities
+            .iter()
+            .map(|key| (key.authority, key.public_key.as_slice()))
+            .collect();
+        if keys.is_empty() || keys.len() != authorities.len() {
+            return Ok(FinalityStatus::Rejected(
+                "PoA composite authority set is empty or repeats an authority".into(),
+            ));
+        }
+        if domain.validator_set_hash == [0u8; 32] {
+            if let Some(rejected) = reject_unregistered_set_for_bridge(domain, "PoA") {
+                return Ok(rejected);
+            }
+        } else if poa_pq_authority_set_hash(domain, authorities)? != domain.validator_set_hash {
+            return Ok(FinalityStatus::Rejected(format!(
+                "PoA composite authority set does not match the set registered for domain {}",
+                domain.id
+            )));
+        }
+        let digest = poa_commit_digest(
+            domain.id,
+            commitment.domain_height,
+            &commitment.domain_block_hash,
+        );
+        let mut valid_signers = std::collections::BTreeSet::new();
+        for sig in signatures {
+            let Some(public_key) = keys.get(&sig.authority) else {
+                return Ok(FinalityStatus::Rejected(
+                    "PoA signature from a non-authority".into(),
+                ));
+            };
+            if crate::consensus::block_signature::verify_poa(
+                registry,
+                sig.authority.as_bytes(),
+                public_key,
+                &digest,
+                &sig.signature,
+            )
+            .is_err()
+            {
+                return Ok(FinalityStatus::Rejected(
+                    "PoA composite signature verification failed".into(),
+                ));
+            }
+            valid_signers.insert(sig.authority);
+        }
+        let required = self.required_signatures(keys.len());
+        if valid_signers.len() >= required {
+            Ok(FinalityStatus::Finalized)
+        } else {
+            Ok(FinalityStatus::Pending {
+                required_depth: required as u64,
+                observed_depth: valid_signers.len() as u64,
+            })
+        }
     }
 }
 
@@ -567,12 +923,54 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
         "poa-authority-quorum"
     }
 
+    /// The authority signatures this adapter checks are Ed25519 today. The
+    /// composite PoA signature (suite 0x0002) adds ML-DSA-65 when lands.
+    fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
+        match proof {
+            FinalityProof::PoA { .. } => vec![ObservedScheme::Scheme(SchemeId::ED25519)],
+            FinalityProof::PoAPq { .. } => vec![
+                ObservedScheme::Scheme(SchemeId::ED25519),
+                ObservedScheme::Scheme(SchemeId::ML_DSA_65),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    fn verify_finality_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        match proof {
+            FinalityProof::PoAPq {
+                authorities,
+                signatures,
+            } => self.verify_poa_pq(registry, domain, commitment, authorities, signatures),
+            _ => self.verify_finality(domain, commitment, proof),
+        }
+    }
+
     fn verify_finality(
         &self,
         domain: &ConsensusDomain,
         commitment: &DomainCommitment,
         proof: &FinalityProof,
     ) -> Result<FinalityStatus, FinalityError> {
+        if let FinalityProof::PoAPq {
+            authorities,
+            signatures,
+        } = proof
+        {
+            return self.verify_poa_pq(
+                &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+                domain,
+                commitment,
+                authorities,
+                signatures,
+            );
+        }
         // PoA finality now verifies REAL ed25519 signatures from the
         // Approved authority set (count-based quorum), instead of trusting a
         // Self-reported signer_count. `domain` and `commitment` are genuinely
@@ -677,112 +1075,169 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
         "bft-quorum-commit"
     }
 
+    fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
+        match proof {
+            FinalityProof::Bft {
+                cert,
+                validator_snapshot,
+                ..
+            }
+            | FinalityProof::BftPq {
+                cert,
+                validator_snapshot,
+                ..
+            } => certificate_schemes(cert, validator_snapshot),
+            _ => Vec::new(),
+        }
+    }
+
     fn verify_finality(
         &self,
         domain: &ConsensusDomain,
         commitment: &DomainCommitment,
         proof: &FinalityProof,
     ) -> Result<FinalityStatus, FinalityError> {
-        // BFT now verifies a REAL commit certificate (BLS aggregate over
-        // The validator set) using the same primitive as PoS
-        // (`FinalityCert::verify`), instead of trusting a self-reported
-        // `signer_count`. `domain` and `commitment` are genuinely used.
-        let FinalityProof::Bft {
-            round: _,
-            commit_hash,
-            cert,
-            validator_snapshot,
-        } = proof
-        else {
-            return Err(FinalityError("Expected BFT finality proof".into()));
-        };
-
-        if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
-            return Ok(rejected);
-        }
-
-        // Before the certificate is read: a bridge-enabled domain with no
-        // registered set has nothing a certificate could be checked against.
-        if let Some(rejected) = reject_unregistered_set_for_bridge(domain, "BFT") {
-            return Ok(rejected);
-        }
-
-        if validator_snapshot.validators.is_empty() {
-            return Ok(FinalityStatus::Rejected(
-                "BFT validator set is empty".into(),
-            ));
-        }
-
-        // Bind the commit hash to THIS commitment's block hash.
-        if *commit_hash != commitment.domain_block_hash {
-            return Ok(FinalityStatus::Rejected(
-                "BFT commit hash does not match commitment block hash".into(),
-            ));
-        }
-
-        // Bind the certificate to THIS commitment (height + hash).
-        if cert.checkpoint_height != commitment.domain_height {
-            return Ok(FinalityStatus::Rejected(
-                "BFT cert height does not match commitment".into(),
-            ));
-        }
-        let commitment_hash = hex::encode(commitment.domain_block_hash);
-        if cert.checkpoint_hash != commitment_hash {
-            return Ok(FinalityStatus::Rejected(
-                "BFT cert hash does not match commitment".into(),
-            ));
-        }
-
-        // Bind cert/snapshot together and to the registered domain set.
-        if validator_snapshot.set_hash != cert.set_hash {
-            return Ok(FinalityStatus::Rejected(
-                "BFT cert set hash does not match validator snapshot".into(),
-            ));
-        } // A set hash that cannot be decoded is a refusal, not a step to fall
-          // through. These two comparisons are the only things binding the
-          // proof's validator set to the one the domain registered and the one
-          // the commitment names; `FinalityCert::verify` compares the cert's
-          // string to the snapshot's and never re-derives either, so a proof
-          // whose set hash parses to nothing would otherwise name its own
-          // validator set and sign with it. The PoS adapter and both branches
-          // of the storage attestation adapter already refuse here; this was
-          // the one remaining fall-through.
-        let decoded_set_hash = hex::decode(&validator_snapshot.set_hash)
-            .ok()
-            .filter(|bytes| bytes.len() == 32)
-            .ok_or_else(|| {
-                FinalityError(format!(
-                    "BFT finality proof validator set hash is not 32 bytes of hex: {:?}",
-                    validator_snapshot.set_hash
-                ))
-            })?;
-        let mut snapshot_set_hash = [0u8; 32];
-        snapshot_set_hash.copy_from_slice(&decoded_set_hash);
-        if let Err(e) = validator_snapshot.validate_metadata() {
-            return Ok(FinalityStatus::Rejected(format!(
-                "BFT validator snapshot metadata invalid: {e}"
-            )));
-        }
-        if domain.validator_set_hash != [0u8; 32] && snapshot_set_hash != domain.validator_set_hash
-        {
-            return Ok(FinalityStatus::Rejected(
-                "BFT validator snapshot does not match registered domain set".into(),
-            ));
-        }
-        if commitment.validator_set_hash != [0u8; 32]
-            && commitment.validator_set_hash != snapshot_set_hash
-        {
-            return Ok(FinalityStatus::Rejected(
-                "BFT commitment validator set does not match finality proof".into(),
-            ));
-        }
-
-        // Cryptographic quorum + aggregate-signature verification.
-        cert.verify(validator_snapshot)
-            .map_err(|e| FinalityError(format!("Invalid BFT finality cert: {e}")))?;
-
-        Ok(FinalityStatus::Finalized)
+        self.verify_finality_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            domain,
+            commitment,
+            proof,
+        )
     }
+
+    fn verify_finality_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+    ) -> Result<FinalityStatus, FinalityError> {
+        match proof {
+            FinalityProof::Bft {
+                round: _,
+                commit_hash,
+                cert,
+                validator_snapshot,
+            } => verify_bft_cert(domain, commitment, commit_hash, cert, validator_snapshot),
+            FinalityProof::BftPq {
+                round: _,
+                commit_hash,
+                cert,
+                validator_snapshot,
+                qc,
+            } => {
+                let status =
+                    verify_bft_cert(domain, commitment, commit_hash, cert, validator_snapshot)?;
+                if status != FinalityStatus::Finalized {
+                    return Ok(status);
+                }
+                Ok(
+                    match verify_pq_quorum(registry, cert, validator_snapshot, qc) {
+                        Ok(()) => FinalityStatus::Finalized,
+                        Err(e) => FinalityStatus::Rejected(format!("BFT PQ quorum: {e}")),
+                    },
+                )
+            }
+            _ => Err(FinalityError("Expected BFT finality proof".into())),
+        }
+    }
+}
+
+/// The BLS half of a BFT proof. BFT verifies a real commit certificate (BLS
+/// aggregate over the validator set) with the same primitive as PoS
+/// (`FinalityCert::verify`), instead of trusting a self-reported
+/// `signer_count`.
+fn verify_bft_cert(
+    domain: &ConsensusDomain,
+    commitment: &DomainCommitment,
+    commit_hash: &Hash32,
+    cert: &FinalityCert,
+    validator_snapshot: &ValidatorSetSnapshot,
+) -> Result<FinalityStatus, FinalityError> {
+    if let Some(rejected) = reject_commitment_domain_mismatch(domain, commitment) {
+        return Ok(rejected);
+    }
+
+    // Before the certificate is read: a bridge-enabled domain with no
+    // registered set has nothing a certificate could be checked against.
+    if let Some(rejected) = reject_unregistered_set_for_bridge(domain, "BFT") {
+        return Ok(rejected);
+    }
+
+    if validator_snapshot.validators.is_empty() {
+        return Ok(FinalityStatus::Rejected(
+            "BFT validator set is empty".into(),
+        ));
+    }
+
+    // Bind the commit hash to THIS commitment's block hash.
+    if *commit_hash != commitment.domain_block_hash {
+        return Ok(FinalityStatus::Rejected(
+            "BFT commit hash does not match commitment block hash".into(),
+        ));
+    }
+
+    // Bind the certificate to THIS commitment (height + hash).
+    if cert.checkpoint_height != commitment.domain_height {
+        return Ok(FinalityStatus::Rejected(
+            "BFT cert height does not match commitment".into(),
+        ));
+    }
+    let commitment_hash = hex::encode(commitment.domain_block_hash);
+    if cert.checkpoint_hash != commitment_hash {
+        return Ok(FinalityStatus::Rejected(
+            "BFT cert hash does not match commitment".into(),
+        ));
+    }
+
+    // Bind cert/snapshot together and to the registered domain set.
+    if validator_snapshot.set_hash != cert.set_hash {
+        return Ok(FinalityStatus::Rejected(
+            "BFT cert set hash does not match validator snapshot".into(),
+        ));
+    } // A set hash that cannot be decoded is a refusal, not a step to fall
+      // through. These two comparisons are the only things binding the
+      // proof's validator set to the one the domain registered and the one
+      // the commitment names; `FinalityCert::verify` compares the cert's
+      // string to the snapshot's and never re-derives either, so a proof
+      // whose set hash parses to nothing would otherwise name its own
+      // validator set and sign with it. The PoS adapter and both branches
+      // of the storage attestation adapter already refuse here; this was
+      // the one remaining fall-through.
+    let decoded_set_hash = hex::decode(&validator_snapshot.set_hash)
+        .ok()
+        .filter(|bytes| bytes.len() == 32)
+        .ok_or_else(|| {
+            FinalityError(format!(
+                "BFT finality proof validator set hash is not 32 bytes of hex: {:?}",
+                validator_snapshot.set_hash
+            ))
+        })?;
+    let mut snapshot_set_hash = [0u8; 32];
+    snapshot_set_hash.copy_from_slice(&decoded_set_hash);
+    if let Err(e) = validator_snapshot.validate_metadata() {
+        return Ok(FinalityStatus::Rejected(format!(
+            "BFT validator snapshot metadata invalid: {e}"
+        )));
+    }
+    if domain.validator_set_hash != [0u8; 32] && snapshot_set_hash != domain.validator_set_hash {
+        return Ok(FinalityStatus::Rejected(
+            "BFT validator snapshot does not match registered domain set".into(),
+        ));
+    }
+    if commitment.validator_set_hash != [0u8; 32]
+        && commitment.validator_set_hash != snapshot_set_hash
+    {
+        return Ok(FinalityStatus::Rejected(
+            "BFT commitment validator set does not match finality proof".into(),
+        ));
+    }
+
+    // Cryptographic quorum + aggregate-signature verification.
+    cert.verify(validator_snapshot)
+        .map_err(|e| FinalityError(format!("Invalid BFT finality cert: {e}")))?;
+
+    Ok(FinalityStatus::Finalized)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -867,6 +1322,15 @@ impl ZkFinalityAdapter {
 impl DomainFinalityAdapter for ZkFinalityAdapter {
     fn adapter_name(&self) -> &'static str {
         "zk-proof-verification"
+    }
+
+    /// The claim the proof refers to was verified as a BudZero STARK, which
+    /// rests on a hash function only.
+    fn observed_schemes(&self, proof: &FinalityProof) -> Vec<ObservedScheme> {
+        match proof {
+            FinalityProof::Zk { .. } => vec![ObservedScheme::Proof(AssumptionClass::Hash)],
+            _ => Vec::new(),
+        }
     }
 
     /// The generic trait entry point cannot reach the `ProofClaimRegistry`, so
@@ -1700,6 +2164,168 @@ mod tests {
         ));
     }
 
+    fn snapshot_with_pq_keys(bound: &[bool]) -> ValidatorSetSnapshot {
+        use crate::chain::finality::ValidatorEntry;
+        let validators = bound
+            .iter()
+            .enumerate()
+            .map(|(i, has_pq)| ValidatorEntry {
+                address: crate::core::address::Address::from([i as u8 + 1; 32]),
+                stake: 100,
+                bls_public_key: vec![i as u8 + 1; 96],
+                pop_signature: Vec::new(),
+                pq_public_key: if *has_pq { vec![9u8; 8] } else { Vec::new() },
+            })
+            .collect();
+        ValidatorSetSnapshot::new(0, validators)
+    }
+
+    fn cert_with_bitmap(snapshot: &ValidatorSetSnapshot, bitmap: Vec<u8>) -> FinalityCert {
+        FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: hex::encode([1u8; 32]),
+            agg_sig_bls: vec![],
+            bitmap,
+            set_hash: snapshot.set_hash.clone(),
+        }
+    }
+
+    ///: the native PoS and BFT adapters name BLS12-381 and ML-DSA-65.
+    /// ML-DSA-65 is named only when every signer's entry binds a PQ key; a
+    /// signer without one leaves BLS as the only fact.
+    #[test]
+    fn native_certificates_report_bls_and_ml_dsa_65() {
+        use crate::crypto::facts::{CryptoFacts, ObservedScheme, QuantumClass};
+        let bls = ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG);
+        let ml_dsa = ObservedScheme::Scheme(SchemeId::ML_DSA_65);
+
+        let bound = snapshot_with_pq_keys(&[true, true, true]);
+        let cert = cert_with_bitmap(&bound, vec![0b0000_0111]);
+        let pos = FinalityProof::PoS {
+            cert: cert.clone(),
+            validator_snapshot: bound.clone(),
+        };
+        let bft = FinalityProof::Bft {
+            round: 0,
+            commit_hash: [1u8; 32],
+            cert,
+            validator_snapshot: bound,
+        };
+        let mut facts = CryptoFacts::new();
+        PoSFinalityAdapter.observe_finalized(&FinalityStatus::Finalized, &pos, &mut facts);
+        assert_eq!(facts.count(bls), 1);
+        assert_eq!(facts.count(ml_dsa), 1);
+        assert_eq!(facts.quantum_class(), Some(QuantumClass::Classical));
+
+        let mut facts = CryptoFacts::new();
+        BftFinalityAdapter::default().observe_finalized(
+            &FinalityStatus::Finalized,
+            &bft,
+            &mut facts,
+        );
+        assert_eq!(facts.count(bls), 1);
+        assert_eq!(facts.count(ml_dsa), 1);
+
+        let mut facts = CryptoFacts::new();
+        PoSFinalityAdapter.observe_finalized(&FinalityStatus::Finalized, &bft, &mut facts);
+        assert!(facts.is_empty(), "an adapter reads only its own proof kind");
+
+        // One signer with no PQ key: BLS only.
+        let partial = snapshot_with_pq_keys(&[true, false, true]);
+        let cert = cert_with_bitmap(&partial, vec![0b0000_0111]);
+        let mut facts = CryptoFacts::new();
+        PoSFinalityAdapter.observe_finalized(
+            &FinalityStatus::Finalized,
+            &FinalityProof::PoS {
+                cert,
+                validator_snapshot: partial.clone(),
+            },
+            &mut facts,
+        );
+        assert_eq!(facts.count(bls), 1);
+        assert_eq!(facts.count(ml_dsa), 0);
+
+        // A validator outside the bitmap does not count against the binding.
+        let cert = cert_with_bitmap(&partial, vec![0b0000_0101]);
+        let mut facts = CryptoFacts::new();
+        PoSFinalityAdapter.observe_finalized(
+            &FinalityStatus::Finalized,
+            &FinalityProof::PoS {
+                cert,
+                validator_snapshot: partial,
+            },
+            &mut facts,
+        );
+        assert_eq!(facts.count(ml_dsa), 1);
+    }
+
+    /// A refused or pending proof reports nothing: a fact is a check that
+    /// passed.
+    #[test]
+    fn a_refused_proof_observes_nothing() {
+        use crate::crypto::facts::CryptoFacts;
+        let domain = default_domain(3, ConsensusKind::PoS, 45262, "pos-qc-finality", 0);
+        let mut commitment = commitment(ConsensusKind::PoS);
+        commitment.domain_id = domain.id;
+        let snapshot = snapshot_with_pq_keys(&[true]);
+        let mut cert = cert_with_bitmap(&snapshot, vec![1]);
+        cert.checkpoint_height = 9;
+        let mut facts = CryptoFacts::new();
+        let status = PoSFinalityAdapter
+            .verify_finality_observed(
+                &domain,
+                &commitment,
+                &FinalityProof::PoS {
+                    cert,
+                    validator_snapshot: snapshot,
+                },
+                &mut facts,
+            )
+            .unwrap();
+        assert!(matches!(status, FinalityStatus::Rejected(_)));
+        assert!(facts.is_empty());
+    }
+
+    ///: the ZK adapter shows a hash assumption, and the PoA adapter the
+    /// Ed25519 signatures it verifies today.
+    #[test]
+    fn zk_and_poa_adapters_report_their_assumptions() {
+        use crate::crypto::facts::{AssumptionClass, CryptoFacts, ObservedScheme, QuantumClass};
+        let mut facts = CryptoFacts::new();
+        let zk = FinalityProof::Zk {
+            domain_id: 4,
+            target_height: 1,
+            final_state_root: [0u8; 32],
+        };
+        ZkFinalityAdapter.observe_finalized(&FinalityStatus::Finalized, &zk, &mut facts);
+        assert_eq!(facts.count(ObservedScheme::Proof(AssumptionClass::Hash)), 1);
+        assert_eq!(facts.quantum_class(), Some(QuantumClass::Hash));
+
+        let mut facts = CryptoFacts::new();
+        let poa = FinalityProof::PoA {
+            authorities: Vec::new(),
+            signatures: Vec::new(),
+        };
+        let adapter = PoAFinalityAdapter::default();
+        adapter.observe_finalized(&FinalityStatus::Finalized, &poa, &mut facts);
+        assert_eq!(facts.count(ObservedScheme::Scheme(SchemeId::ED25519)), 1);
+        adapter.observe_finalized(
+            &FinalityStatus::Pending {
+                required_depth: 3,
+                observed_depth: 2,
+            },
+            &poa,
+            &mut facts,
+        );
+        assert_eq!(
+            facts.count(ObservedScheme::Scheme(SchemeId::ED25519)),
+            1,
+            "a pending proof adds nothing"
+        );
+    }
+
     /// The two certificate branches of the storage-attestation adapter carry
     /// The same silent fall-through as
     /// `pos_finality_refuses_a_set_hash_it_cannot_decode`: the checks that bind
@@ -1851,5 +2477,110 @@ mod tests {
                 .unwrap(),
             FinalityStatus::Finalized
         );
+    }
+
+    /// Three validators with ML-DSA-65 keys, a certificate whose bitmap names
+    /// the first two, and a QC with their signatures over the same checkpoint.
+    fn pq_quorum_fixture() -> (
+        FinalityCert,
+        ValidatorSetSnapshot,
+        Vec<crate::crypto::primitives::PqKeyPair>,
+    ) {
+        use crate::chain::finality::ValidatorEntry;
+        let mut validators = Vec::new();
+        let mut keys = Vec::new();
+        for i in 0..3u8 {
+            let key = crate::crypto::primitives::PqKeyPair::generate();
+            validators.push(ValidatorEntry {
+                address: crate::core::address::Address::from([i + 1; 32]),
+                stake: 1_000,
+                bls_public_key: Vec::new(),
+                pop_signature: Vec::new(),
+                pq_public_key: key.public_key_bytes().to_vec(),
+            });
+            keys.push(key);
+        }
+        let snapshot = ValidatorSetSnapshot::new(4, validators);
+        let cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 4,
+            checkpoint_height: 40,
+            checkpoint_hash: hex::encode([9u8; 32]),
+            agg_sig_bls: vec![],
+            bitmap: vec![0b011],
+            set_hash: snapshot.set_hash.clone(),
+        };
+        (cert, snapshot, keys)
+    }
+
+    fn qc_signed_by(
+        cert: &FinalityCert,
+        snapshot: &ValidatorSetSnapshot,
+        keys: &[crate::crypto::primitives::PqKeyPair],
+        signers: &[usize],
+    ) -> crate::consensus::qc::QcBlob {
+        let entries = signers
+            .iter()
+            .map(|&i| {
+                crate::consensus::qc::sign_attestation(
+                    &keys[i],
+                    cert.epoch,
+                    cert.checkpoint_height,
+                    &cert.checkpoint_hash,
+                    u32::try_from(i).expect("small index"),
+                    snapshot.validators[i].address.to_string(),
+                )
+                .expect("signs")
+            })
+            .collect();
+        crate::consensus::qc::QcBlob::new(
+            cert.epoch,
+            cert.checkpoint_height,
+            cert.checkpoint_hash.clone(),
+            entries,
+        )
+    }
+
+    #[test]
+    fn a_qc_of_every_bls_signer_completes_the_pq_quorum() {
+        let (cert, snapshot, keys) = pq_quorum_fixture();
+        let qc = qc_signed_by(&cert, &snapshot, &keys, &[0, 1]);
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        assert_eq!(verify_pq_quorum(&registry, &cert, &snapshot, &qc), Ok(()));
+    }
+
+    #[test]
+    fn a_qc_missing_a_bls_signer_is_refused() {
+        let (cert, snapshot, keys) = pq_quorum_fixture();
+        let qc = qc_signed_by(&cert, &snapshot, &keys, &[0]);
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        assert!(verify_pq_quorum(&registry, &cert, &snapshot, &qc).is_err());
+    }
+
+    #[test]
+    fn a_qc_over_another_checkpoint_is_refused() {
+        let (cert, snapshot, keys) = pq_quorum_fixture();
+        let mut other = cert.clone();
+        other.checkpoint_height += 10;
+        let qc = qc_signed_by(&other, &snapshot, &keys, &[0, 1]);
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        assert!(verify_pq_quorum(&registry, &cert, &snapshot, &qc).is_err());
+    }
+
+    #[test]
+    fn only_the_bls_only_quorum_variants_are_classical_only() {
+        let (cert, snapshot, keys) = pq_quorum_fixture();
+        let qc = qc_signed_by(&cert, &snapshot, &keys, &[0, 1]);
+        assert!(FinalityProof::PoS {
+            cert: cert.clone(),
+            validator_snapshot: snapshot.clone(),
+        }
+        .is_classical_only_quorum());
+        assert!(!FinalityProof::PoSPq {
+            cert,
+            validator_snapshot: snapshot,
+            qc,
+        }
+        .is_classical_only_quorum());
     }
 }

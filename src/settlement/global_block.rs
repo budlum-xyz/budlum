@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// Tamper-evident at the global settlement layer.
 ///
 /// **Backward compatibility:** the domain-separation tag is
-/// `BDLM_GLOBAL_BLOCK_V5`. V2 separated pre- and post-storage-root headers,
+/// `BDLM_GLOBAL_BLOCK_V7`. V2 separated pre- and post-storage-root headers,
 /// V3 added `ai_root`, V4 encodes each optional root behind a presence byte
 /// so `None` and `Some([0; 32])` hash differently, and V5 added
 /// `identity_root`. Old serialized headers (without the fields) still
@@ -22,6 +22,18 @@ use serde::{Deserialize, Serialize};
 /// V4->V5 follows the same pre-launch rule as V3->V4: there is no launched
 /// global-chain state to migrate, so the bump itself is the activation and
 /// one hash domain covers everything from the USL genesis forward.
+///
+/// V6: the header is a consensus object. Every node
+/// builds it inside the transition of each finality checkpoint block from the
+/// state at the end of that block, so every node produces the same bytes; the
+/// state root commits its hash through `global_header_summary`, and the
+/// finality certificate of the checkpoint covers the block that commits the
+/// state root. V6 adds the checkpoint height and the external intake root.
+///
+/// V7: the Graft registry root
+/// and the delegation root join the header, each presence-tagged. The
+/// testnet starts from a new genesis, so the bump is the activation; the
+/// mainnet activation-height scheme is 's.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GlobalBlockHeader {
     pub version: u16,
@@ -81,6 +93,89 @@ pub struct GlobalBlockHeader {
     /// against the finalized root without re-executing authority blocks.
     #[serde(default)]
     pub identity_root: Option<Hash32>,
+
+    /// The height of the finality checkpoint block whose transition built
+    /// this header (V6).
+    #[serde(default)]
+    pub checkpoint_height: u64,
+
+    /// The external-domain intake digest (V6), when the intake holds any
+    /// record: the registrations, prover bonds, quorum rounds and accepted
+    /// attestations a light client checks external finality against.
+    #[serde(default)]
+    pub external_intake_root: Option<Hash32>,
+
+    /// The Graft registry root (V7), when the registry holds any row:
+    /// applications, the payment window, open intents. A payment proof opens
+    /// it ([`crate::settlement::graft::GraftRootOpening`]).
+    #[serde(default)]
+    pub graft_root: Option<Hash32>,
+
+    /// The delegation root (V7), when any delegation, exit or commission
+    /// exists: [`crate::registry::PermissionlessRegistry::delegation_root`].
+    #[serde(default)]
+    pub delegation_root: Option<Hash32>,
+}
+
+/// How many checkpoint headers the account state keeps. Older headers stay
+/// committed through the `previous_global_hash` chain; nodes keep them in a
+/// node-local archive for the read RPC.
+pub const GLOBAL_HEADER_WINDOW: usize = 64;
+
+/// The most recent checkpoint headers, by global height. Part of the
+/// settlement registries, so the state root commits it and every path that
+/// applies a block rebuilds it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GlobalHeaderWindow {
+    headers: std::collections::BTreeMap<u64, GlobalBlockHeader>,
+}
+
+impl GlobalHeaderWindow {
+    /// The latest header, if a checkpoint has passed.
+    #[must_use]
+    pub fn latest(&self) -> Option<&GlobalBlockHeader> {
+        self.headers.values().next_back()
+    }
+
+    /// The header at `global_height`, if the window still holds it.
+    #[must_use]
+    pub fn get(&self, global_height: u64) -> Option<&GlobalBlockHeader> {
+        self.headers.get(&global_height)
+    }
+
+    /// The headers in global-height order.
+    pub fn iter(&self) -> impl Iterator<Item = &GlobalBlockHeader> {
+        self.headers.values()
+    }
+
+    /// Append a header, dropping the oldest past the window.
+    pub fn push(&mut self, header: GlobalBlockHeader) {
+        self.headers.insert(header.global_height, header);
+        while self.headers.len() > GLOBAL_HEADER_WINDOW {
+            self.headers.pop_first();
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty()
+    }
+
+    /// The fold the settlement root takes: every held header's hash in
+    /// global-height order.
+    #[must_use]
+    pub fn root(&self) -> Hash32 {
+        let mut hashes = Vec::with_capacity(self.headers.len() * 32);
+        for header in self.headers.values() {
+            hashes.extend_from_slice(&header.calculate_hash_bytes());
+        }
+        let count = u64::try_from(self.headers.len()).unwrap_or(u64::MAX);
+        hash_fields_bytes(&[
+            b"BDLM_GLOBAL_HEADER_WINDOW_V1",
+            &count.to_le_bytes(),
+            &hashes,
+        ])
+    }
 }
 
 impl GlobalBlockHeader {
@@ -105,9 +200,12 @@ impl GlobalBlockHeader {
         let storage_root_bytes = presence_tagged(self.storage_root);
         let ai_root_bytes = presence_tagged(self.ai_root);
         let identity_root_bytes = presence_tagged(self.identity_root);
+        let external_intake_root_bytes = presence_tagged(self.external_intake_root);
+        let graft_root_bytes = presence_tagged(self.graft_root);
+        let delegation_root_bytes = presence_tagged(self.delegation_root);
 
         hash_fields_bytes(&[
-            b"BDLM_GLOBAL_BLOCK_V5",
+            b"BDLM_GLOBAL_BLOCK_V7",
             &self.version.to_le_bytes(),
             &self.global_height.to_le_bytes(),
             &self.previous_global_hash,
@@ -123,6 +221,10 @@ impl GlobalBlockHeader {
             &storage_root_bytes,
             &ai_root_bytes,
             &identity_root_bytes,
+            &self.checkpoint_height.to_le_bytes(),
+            &external_intake_root_bytes,
+            &graft_root_bytes,
+            &delegation_root_bytes,
         ])
     }
 
@@ -152,6 +254,10 @@ mod tests {
             storage_root: None,
             ai_root: None,
             identity_root: None,
+            checkpoint_height: 0,
+            external_intake_root: None,
+            graft_root: None,
+            delegation_root: None,
         }
     }
 

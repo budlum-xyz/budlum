@@ -144,6 +144,16 @@ impl PoaMembershipRegistry {
         }
     }
 
+    #[must_use]
+    pub fn admin_count(&self) -> usize {
+        self.admins.len()
+    }
+
+    #[must_use]
+    pub fn member_count(&self) -> usize {
+        self.members.len()
+    }
+
     /// Bootstrap an admin for a PoA domain. In production this is expected to be
     /// Wired through governance; here it is the trust root of the permissioned
     /// Sub-domain.

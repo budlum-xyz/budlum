@@ -245,6 +245,35 @@ pub struct SlashOutcome {
     pub remaining_stake: u64,
 }
 
+/// Maximum active delegation positions and pending exits retained in live state.
+pub const MAX_DELEGATIONS: usize = 100_000;
+// The unbonding period, the commission cap and the per-epoch commission
+// change limit are economic values (K9): they live in `RegistryParams`
+// (`delegation_unbonding_epochs`, `max_validator_commission_ppm`,
+// `max_commission_change_ppm_per_epoch`), not here.
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationPosition {
+    pub delegator: Address,
+    pub validator: Address,
+    pub amount: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegationUnbonding {
+    pub delegator: Address,
+    pub validator: Address,
+    pub amount: u64,
+    pub release_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ValidatorCommission {
+    pub validator: Address,
+    pub commission_ppm: u32,
+    pub last_change_epoch: u64,
+}
+
 /// The permissionless registry itself.
 ///
 /// Keyed by `(role, account)` so the same account may hold several roles
@@ -268,6 +297,16 @@ pub struct PermissionlessRegistry {
     slashing_history: Vec<SlashingRecord>,
     #[serde(default)]
     charged_offences: BTreeMap<String, std::collections::BTreeSet<(u8, u64, u64)>>,
+    /// Active validator delegation positions. These are consensus state and
+    /// therefore participate in the registry root and snapshot serde.
+    #[serde(default)]
+    delegations: Vec<DelegationPosition>,
+    /// Delegations that left voting stake but remain locked until release.
+    #[serde(default)]
+    delegation_unbonding: Vec<DelegationUnbonding>,
+    /// Validator reward commission schedule, also consensus state.
+    #[serde(default)]
+    validator_commissions: Vec<ValidatorCommission>,
 }
 
 fn permissionless_member_key(role: RoleId, account: Address) -> String {
@@ -339,6 +378,9 @@ impl PermissionlessRegistry {
             params: RegistryParams::default(),
             slashing_history: Vec::new(),
             charged_offences: BTreeMap::new(),
+            delegations: Vec::new(),
+            delegation_unbonding: Vec::new(),
+            validator_commissions: Vec::new(),
         }
     }
 
@@ -348,6 +390,9 @@ impl PermissionlessRegistry {
             params,
             slashing_history: Vec::new(),
             charged_offences: BTreeMap::new(),
+            delegations: Vec::new(),
+            delegation_unbonding: Vec::new(),
+            validator_commissions: Vec::new(),
         }
     }
 
@@ -990,16 +1035,366 @@ impl PermissionlessRegistry {
             })
     }
 
+    /// Add an active delegation position. The account layer performs the
+    /// validator and liquid-balance checks; this method owns the canonical
+    /// position mutation and its bounded-state checks.
+    pub fn delegate(
+        &mut self,
+        delegator: Address,
+        validator: Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        if amount == 0 {
+            return Err("delegation amount must be non-zero".into());
+        }
+        if delegator == validator {
+            return Err("a validator cannot delegate to itself".into());
+        }
+        if let Some(position) = self
+            .delegations
+            .iter_mut()
+            .find(|position| position.delegator == delegator && position.validator == validator)
+        {
+            position.amount = position
+                .amount
+                .checked_add(amount)
+                .ok_or_else(|| "delegation amount overflow".to_string())?;
+            return Ok(());
+        }
+        if self.delegations.len() >= MAX_DELEGATIONS {
+            return Err("delegation position limit reached".into());
+        }
+        self.delegations.push(DelegationPosition {
+            delegator,
+            validator,
+            amount,
+        });
+        Ok(())
+    }
+
+    pub fn delegated_amount(&self, delegator: Address, validator: Address) -> u64 {
+        self.delegations
+            .iter()
+            .find(|position| position.delegator == delegator && position.validator == validator)
+            .map_or(0, |position| position.amount)
+    }
+
+    pub fn delegated_stake(&self, validator: &Address) -> u64 {
+        self.delegations
+            .iter()
+            .filter(|position| position.validator == *validator)
+            .fold(0u64, |total, position| {
+                total.saturating_add(position.amount)
+            })
+    }
+
+    pub fn delegations_for(&self, validator: &Address) -> Vec<DelegationPosition> {
+        self.delegations
+            .iter()
+            .filter(|position| position.validator == *validator)
+            .cloned()
+            .collect()
+    }
+
+    /// Move an active position into the canonical unbonding queue. The
+    /// validator's consensus stake is adjusted by the account layer only
+    /// after this operation succeeds.
+    pub fn begin_delegation_unbonding(
+        &mut self,
+        delegator: Address,
+        validator: Address,
+        amount: u64,
+        current_epoch: u64,
+    ) -> Result<(), String> {
+        if amount == 0 {
+            return Err("delegation unbond amount must be non-zero".into());
+        }
+        let available = self
+            .delegations
+            .iter()
+            .find(|position| position.delegator == delegator && position.validator == validator)
+            .map_or(0, |position| position.amount);
+        if available < amount {
+            return Err(format!(
+                "delegation unbond exceeds position: requested {amount}, available {available}"
+            ));
+        }
+        let release_epoch = current_epoch.saturating_add(self.params.delegation_unbonding_epochs);
+        let has_release_entry = self.delegation_unbonding.iter().any(|entry| {
+            entry.delegator == delegator
+                && entry.validator == validator
+                && entry.release_epoch == release_epoch
+        });
+        if !has_release_entry && self.delegation_unbonding.len() >= MAX_DELEGATIONS {
+            return Err("delegation unbonding limit reached".into());
+        }
+        let position_index = self
+            .delegations
+            .iter()
+            .position(|position| position.delegator == delegator && position.validator == validator)
+            .ok_or_else(|| "delegation position not found".to_string())?;
+        let release_index = self.delegation_unbonding.iter().position(|entry| {
+            entry.delegator == delegator
+                && entry.validator == validator
+                && entry.release_epoch == release_epoch
+        });
+        if let Some(index) = release_index {
+            self.delegation_unbonding[index].amount = self.delegation_unbonding[index]
+                .amount
+                .checked_add(amount)
+                .ok_or_else(|| "delegation unbonding overflow".to_string())?;
+        } else {
+            self.delegation_unbonding.push(DelegationUnbonding {
+                delegator,
+                validator,
+                amount,
+                release_epoch,
+            });
+        }
+        self.delegations[position_index].amount -= amount;
+        self.delegations.retain(|position| position.amount > 0);
+        Ok(())
+    }
+
+    pub fn withdrawable_delegation(
+        &self,
+        delegator: Address,
+        validator: Address,
+        current_epoch: u64,
+    ) -> u64 {
+        self.delegation_unbonding
+            .iter()
+            .filter(|entry| {
+                entry.delegator == delegator
+                    && entry.validator == validator
+                    && entry.release_epoch <= current_epoch
+            })
+            .fold(0u64, |total, entry| total.saturating_add(entry.amount))
+    }
+
+    pub fn withdraw_delegation(
+        &mut self,
+        delegator: Address,
+        validator: Address,
+        current_epoch: u64,
+    ) -> Result<u64, String> {
+        let mut withdrawn = 0u64;
+        for entry in self.delegation_unbonding.iter().filter(|entry| {
+            entry.delegator == delegator
+                && entry.validator == validator
+                && entry.release_epoch <= current_epoch
+        }) {
+            withdrawn = withdrawn
+                .checked_add(entry.amount)
+                .ok_or_else(|| "delegation withdrawal overflow".to_string())?;
+        }
+        if withdrawn == 0 {
+            return Err("delegation is still unbonding or does not exist".into());
+        }
+        self.delegation_unbonding.retain(|entry| {
+            !(entry.delegator == delegator
+                && entry.validator == validator
+                && entry.release_epoch <= current_epoch)
+        });
+        Ok(withdrawn)
+    }
+
+    pub fn total_delegation_unbonding_supply(&self) -> u128 {
+        self.delegation_unbonding
+            .iter()
+            .fold(0u128, |total, entry| {
+                total.saturating_add(u128::from(entry.amount))
+            })
+    }
+
+    pub fn delegation_count(&self) -> usize {
+        self.delegations.len()
+    }
+
+    pub fn delegation_unbonding_count(&self) -> usize {
+        self.delegation_unbonding.len()
+    }
+
+    pub fn delegation_unbonding_for(&self, validator: &Address) -> Vec<DelegationUnbonding> {
+        self.delegation_unbonding
+            .iter()
+            .filter(|entry| entry.validator == *validator)
+            .cloned()
+            .collect()
+    }
+
+    pub fn validator_commission_count(&self) -> usize {
+        self.validator_commissions.len()
+    }
+
+    #[must_use]
+    pub fn slashing_history_count(&self) -> usize {
+        self.slashing_history.len()
+    }
+
+    /// The commission row of `validator`, if it ever set one.
+    pub fn validator_commission(&self, validator: &Address) -> Option<&ValidatorCommission> {
+        self.validator_commissions
+            .iter()
+            .find(|commission| commission.validator == *validator)
+    }
+
+    pub fn validator_commission_ppm(&self, validator: &Address) -> u32 {
+        self.validator_commissions
+            .iter()
+            .find(|commission| commission.validator == *validator)
+            .map_or(0, |commission| commission.commission_ppm)
+    }
+
+    pub fn set_validator_commission(
+        &mut self,
+        validator: Address,
+        commission_ppm: u32,
+        current_epoch: u64,
+    ) -> Result<(), String> {
+        let max_commission = self.params.max_validator_commission_ppm;
+        let max_change = self.params.max_commission_change_ppm_per_epoch;
+        if u64::from(commission_ppm) > max_commission {
+            return Err(format!(
+                "commission exceeds maximum of {max_commission} ppm"
+            ));
+        }
+        if let Some(existing) = self
+            .validator_commissions
+            .iter_mut()
+            .find(|existing| existing.validator == validator)
+        {
+            if existing.last_change_epoch == current_epoch {
+                return Err("commission can change only once per epoch".into());
+            }
+            let change = existing.commission_ppm.abs_diff(commission_ppm);
+            if u64::from(change) > max_change {
+                return Err(format!(
+                    "commission change exceeds {max_change} ppm per epoch"
+                ));
+            }
+            existing.commission_ppm = commission_ppm;
+            existing.last_change_epoch = current_epoch;
+        } else {
+            self.validator_commissions.push(ValidatorCommission {
+                validator,
+                commission_ppm,
+                last_change_epoch: current_epoch,
+            });
+        }
+        Ok(())
+    }
+
+    /// Burn active delegated stake proportionally to a validator slash. The
+    /// caller has already reduced the validator's aggregate bond by
+    /// `penalty`; this cuts the positions by the delegated part of it,
+    /// `penalty * delegated / stake_before`, split by amount, so the
+    /// positions and the aggregate stake stay in the same state.
+    ///
+    /// Every position is cut by its own proportional share; the rounding
+    /// remainder of the delegated part goes to the positions in order, one
+    /// unit each, never more than a position holds. An earlier version gave
+    /// the last position everything the others did not take, up to the
+    /// whole penalty, so one delegator paid the validator's own share.
+    pub fn reduce_delegated_for_slash(
+        &mut self,
+        validator: &Address,
+        penalty: u64,
+        stake_before: u64,
+    ) {
+        let delegated = self.delegated_stake(validator);
+        if penalty == 0 || delegated == 0 || stake_before == 0 {
+            return;
+        }
+        let scale = |amount: u64| -> u64 {
+            u64::try_from(u128::from(penalty) * u128::from(amount) / u128::from(stake_before))
+                .unwrap_or(u64::MAX)
+                .min(amount)
+        };
+        let target = scale(delegated);
+        let mut cut_total = 0u64;
+        for position in self
+            .delegations
+            .iter_mut()
+            .filter(|position| position.validator == *validator)
+        {
+            let cut = scale(position.amount);
+            position.amount -= cut;
+            cut_total = cut_total.saturating_add(cut);
+        }
+        // The per-position floors can fall short of the delegated share by
+        // at most one unit per position.
+        for position in self
+            .delegations
+            .iter_mut()
+            .filter(|position| position.validator == *validator)
+        {
+            if cut_total >= target {
+                break;
+            }
+            if position.amount > 0 {
+                position.amount -= 1;
+                cut_total += 1;
+            }
+        }
+        self.delegations.retain(|position| position.amount > 0);
+    }
+
+    /// Pending delegation exits remain slashable until they are withdrawn.
+    pub fn slash_delegation_unbonding(
+        &mut self,
+        validator: &Address,
+        slash_ratio_fixed: u64,
+    ) -> u64 {
+        let mut cut_total = 0u64;
+        for entry in self
+            .delegation_unbonding
+            .iter_mut()
+            .filter(|entry| entry.validator == *validator)
+        {
+            let cut = crate::core::chain_config::slash_penalty(entry.amount, slash_ratio_fixed);
+            entry.amount = entry.amount.saturating_sub(cut);
+            cut_total = cut_total.saturating_add(cut);
+        }
+        self.delegation_unbonding.retain(|entry| entry.amount > 0);
+        cut_total
+    }
+
+    /// The delegation state on its own (the global header carries it, V7):
+    /// positions, exits and commissions. `None` when there is none, so an
+    /// empty delegation state claims no root.
+    #[must_use]
+    pub fn delegation_root(&self) -> Option<[u8; 32]> {
+        if self.delegations.is_empty()
+            && self.delegation_unbonding.is_empty()
+            && self.validator_commissions.is_empty()
+        {
+            return None;
+        }
+        Some(crate::core::hash::hash_fields_bytes(&[
+            b"BDLM_DELEGATION_ROOT_V1",
+            &bincode::serialize(&self.delegations)
+                .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
+            &bincode::serialize(&self.delegation_unbonding)
+                .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
+            &bincode::serialize(&self.validator_commissions)
+                .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
+        ]))
+    }
+
     pub fn len(&self) -> usize {
         self.registrations.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.registrations.is_empty()
+            && self.delegations.is_empty()
+            && self.delegation_unbonding.is_empty()
+            && self.validator_commissions.is_empty()
     }
 
     pub fn has_non_default_state(&self) -> bool {
-        !self.registrations.is_empty()
+        !self.is_empty()
             || !self.slashing_history.is_empty()
             || !self.charged_offences.is_empty()
             || self.params != RegistryParams::default()
@@ -1021,6 +1416,23 @@ impl PermissionlessRegistry {
         for record in &self.slashing_history {
             hasher.update(
                 bincode::serialize(record).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
+            );
+        }
+        for delegation in &self.delegations {
+            hasher.update(
+                bincode::serialize(delegation)
+                    .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
+            );
+        }
+        for entry in &self.delegation_unbonding {
+            hasher.update(
+                bincode::serialize(entry).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
+            );
+        }
+        for commission in &self.validator_commissions {
+            hasher.update(
+                bincode::serialize(commission)
+                    .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
             );
         }
         if !self.charged_offences.is_empty() {
@@ -1842,5 +2254,70 @@ mod tests {
             MemberStatus::Active
         );
         assert!(reg.is_active(&addr, roles::VALIDATOR));
+    }
+
+    #[test]
+    fn delegation_lifecycle_keeps_exit_locked_and_rooted() {
+        let mut reg = PermissionlessRegistry::new();
+        let validator = Address::from([0x11; 32]);
+        let delegator = Address::from([0x22; 32]);
+        reg.register_validator(validator, 10_000, 0).unwrap();
+        reg.delegate(delegator, validator, 2_000).unwrap();
+        assert_eq!(reg.delegated_stake(&validator), 2_000);
+        assert_eq!(reg.delegated_amount(delegator, validator), 2_000);
+        assert_ne!(reg.root(), PermissionlessRegistry::new().root());
+
+        reg.begin_delegation_unbonding(delegator, validator, 750, 0)
+            .unwrap();
+        assert_eq!(reg.delegated_stake(&validator), 1_250);
+        assert_eq!(reg.withdrawable_delegation(delegator, validator, 99), 0);
+        assert!(reg.withdraw_delegation(delegator, validator, 99).is_err());
+        assert_eq!(
+            reg.withdraw_delegation(
+                delegator,
+                validator,
+                reg.params().delegation_unbonding_epochs
+            )
+            .unwrap(),
+            750
+        );
+        assert_eq!(reg.total_delegation_unbonding_supply(), 0);
+    }
+
+    #[test]
+    fn a_slash_cuts_every_delegation_by_its_own_share() {
+        let mut reg = PermissionlessRegistry::new();
+        let validator = Address::from([0x11; 32]);
+        reg.register_validator(validator, 9_000, 0).unwrap();
+        reg.delegate(Address::from([0x21; 32]), validator, 500)
+            .unwrap();
+        reg.delegate(Address::from([0x22; 32]), validator, 500)
+            .unwrap();
+        // Stake before the slash: 9,000 self + 1,000 delegated; a 5 percent
+        // penalty is 500, of which the delegated tenth is 50.
+        reg.reduce_delegated_for_slash(&validator, 500, 10_000);
+        assert_eq!(
+            reg.delegated_amount(Address::from([0x21; 32]), validator),
+            475
+        );
+        assert_eq!(
+            reg.delegated_amount(Address::from([0x22; 32]), validator),
+            475
+        );
+        assert_eq!(reg.delegated_stake(&validator), 950);
+    }
+
+    #[test]
+    fn commission_is_capped_and_rate_limited() {
+        let mut reg = PermissionlessRegistry::new();
+        let validator = Address::from([0x33; 32]);
+        reg.register_validator(validator, 10_000, 0).unwrap();
+        reg.set_validator_commission(validator, 100_000, 0).unwrap();
+        assert_eq!(reg.validator_commission_ppm(&validator), 100_000);
+        assert!(reg.set_validator_commission(validator, 111_000, 0).is_err());
+        assert!(reg.set_validator_commission(validator, 111_000, 1).is_err());
+        reg.set_validator_commission(validator, 110_000, 1).unwrap();
+        assert_eq!(reg.validator_commission_ppm(&validator), 110_000);
+        assert!(reg.set_validator_commission(validator, 200_001, 2).is_err());
     }
 }

@@ -201,6 +201,21 @@ impl PoAOnboarding {
         &self.audit
     }
 
+    #[must_use]
+    pub fn audit_event_count(&self) -> usize {
+        self.audit.len()
+    }
+
+    #[must_use]
+    pub fn membership_count(&self) -> usize {
+        self.registry.member_count()
+    }
+
+    #[must_use]
+    pub fn admin_count(&self) -> usize {
+        self.registry.admin_count()
+    }
+
     // ---- lifecycle -------------------------------------------------------
 
     /// Bootstrap an admin for a domain (trust root of the permissioned
