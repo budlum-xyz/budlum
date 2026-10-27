@@ -185,14 +185,11 @@ impl InvalidVoteTracker {
         if within_ceiling && entry.len() < sample_cap {
             let retained: usize = entry
                 .iter()
-                .map(|existing| {
-                    existing
-                        .iter()
-                        .map(Vec::len)
-                        .fold(0usize, usize::saturating_add)
+                .map(|(auth_msg, auth_sig, vote_msg, bad_sig)| {
+                    auth_msg.len() + auth_sig.len() + vote_msg.len() + bad_sig.len()
                 })
                 .fold(0usize, usize::saturating_add);
-            let incoming = sample.iter().map(Vec::len).sum::<usize>();
+            let incoming = sample.0.len() + sample.1.len() + sample.2.len() + sample.3.len();
             if retained.saturating_add(incoming) <= MAX_SAMPLES_BYTES_PER_VALIDATOR {
                 entry.push(sample);
             }

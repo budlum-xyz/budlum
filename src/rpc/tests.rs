@@ -452,7 +452,10 @@ mod rpc_tests {
             .social_delete(crate::storage::ContentId::of(b"x"), auth, 1)
             .await
             .unwrap_err();
-        assert!(err.contains("block transaction"), "{err}");
+        assert!(
+            err.contains("state-root") && err.contains("bud_sendRawTransaction"),
+            "the refusal must name the diverging root and the door that does work, got: {err}"
+        );
     }
 
     #[tokio::test]
