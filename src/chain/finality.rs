@@ -1134,6 +1134,21 @@ impl FinalityCert {
 
 #[cfg(test)]
 mod tests {
+
+    /// The bytes the Mikoriza slasher (`contracts/mikoriza/BudlumSlasher.sol`)
+    /// verifies must be the bytes this node signs. The Solidity test
+    /// `test_the_slasher_signs_the_rust_checkpoint_message` asserts the same
+    /// literal, so a change to the domain, the scheme name or the field order
+    /// on either side fails the other side's test instead of silently
+    /// stranding every restaked operator.
+    #[test]
+    fn the_checkpoint_preimage_is_the_one_the_slasher_golden_vector_pins() {
+        let message = checkpoint_signing_message(45_261, 3, 40, "ab");
+        assert_eq!(
+            hex::encode(&message),
+            "4255444c554d5f505245434f4d4d49545f5632424c535f5349475f424c53313233383147315f584d443a5348412d3235365f535357555f524f5f504f505fcdb0000000000000030000000000000028000000000000006162"
+        );
+    }
     use super::*;
 
     fn make_test_key(seed: u8) -> (Scalar, Vec<u8>, Vec<u8>) {
