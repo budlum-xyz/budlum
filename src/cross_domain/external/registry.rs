@@ -25,6 +25,7 @@ use crate::cross_domain::external::spec::{
     RawConsensusEvidence, SecurityBacking, VerificationPolicy,
 };
 use crate::cross_domain::external::versioning::VersionPolicy;
+use crate::crypto::facts::CryptoFacts;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -113,8 +114,8 @@ impl DomainRegistration {
     /// The most recent accepted attestation, by height then version.
     #[must_use]
     /// WIRING: wired - the consensus binding (`intake`) owns this registry
-    /// as `Blockchain::external_intake`; the newest accepted attestation is
-    /// part of the persisted, digest-committed state.
+    /// inside `AccountState::settlement`; the newest accepted attestation is
+    /// part of the state the block root commits.
     pub fn latest_attestation(&self) -> Option<&FinalityAttestation> {
         self.attestations
             .keys()
@@ -257,6 +258,7 @@ impl ExternalDomainRegistry {
             last_accepted_height: None,
             last_verified_at: None,
             last_backing: None,
+            crypto_facts: CryptoFacts::new(),
             history: vec![StateEvent {
                 at_height: self.height,
                 from: DomainState::Registered,
@@ -381,6 +383,38 @@ impl ExternalDomainRegistry {
         Ok(())
     }
 
+    /// Isolate every domain whose observed schemes are classical: the
+    /// quantum alarm reached Zemheri. A domain with no observation is left
+    /// alone (nothing is known about it), one already outside the serving
+    /// states keeps its state. Returns how many moved.
+    pub fn isolate_classical_domains(&mut self) -> usize {
+        let height = self.height;
+        let mut moved = 0;
+        for reg in self.domains.values_mut() {
+            let classical = reg.record.crypto_facts.quantum_class()
+                == Some(crate::crypto::facts::QuantumClass::Classical);
+            if !classical
+                || !matches!(
+                    reg.record.state,
+                    DomainState::Registered | DomainState::Admitted | DomainState::Active
+                )
+            {
+                continue;
+            }
+            let from = reg.record.state;
+            reg.record.state = DomainState::QuantumIsolated;
+            reg.record.history.push(StateEvent {
+                at_height: height,
+                from,
+                to: DomainState::QuantumIsolated,
+                reason: "quantum alarm Isolate: the domain's observed schemes are classical"
+                    .to_string(),
+            });
+            moved += 1;
+        }
+        moved
+    }
+
     /// The intake path. Runs the version gate, the adapter, the policy, the
     /// prover's bond and the duplicate check - in that order, because the
     /// cheapest and most structural refusals come first.
@@ -432,7 +466,7 @@ impl ExternalDomainRegistry {
         );
 
         match refusal {
-            Ok(attestation) => {
+            Ok((attestation, observed)) => {
                 if let Some(reg) = self.domains.get_mut(&domain) {
                     reg.attestations.insert(
                         (attestation.height, attestation.evidence_version),
@@ -445,6 +479,7 @@ impl ExternalDomainRegistry {
                     reg.record.last_accepted_height = Some(attestation.height);
                     reg.record.last_verified_at = Some(height);
                     reg.record.last_backing = Some(attestation.security);
+                    reg.record.crypto_facts.merge(&observed);
                     if reg.record.state == DomainState::Admitted {
                         reg.record.state = DomainState::Active;
                         reg.record.history.push(StateEvent {
@@ -511,6 +546,7 @@ impl ExternalDomainRegistry {
             evidence,
             policy,
         )
+        .map(|(attestation, _observed)| attestation)
     }
 
     /// Commits a round-winning attestation to the domain's book. The quorum
@@ -563,6 +599,12 @@ impl ExternalDomainRegistry {
         reg.record.last_accepted_height = Some(attestation.height);
         reg.record.last_verified_at = Some(height);
         reg.record.last_backing = Some(attestation.security);
+        // The quorum path verified this attestation when its evidence arrived
+        // (`evaluate`); the scheme its backing names is what that
+        // verification observed.
+        if let Some(scheme) = attestation.security.observed_scheme() {
+            reg.record.crypto_facts.record(scheme);
+        }
         if reg.record.state == DomainState::Admitted {
             reg.record.state = DomainState::Active;
             reg.record.history.push(StateEvent {
@@ -664,7 +706,7 @@ impl ExternalDomainRegistry {
         prover: Option<&ProverBond>,
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
-    ) -> Result<FinalityAttestation, RegistryError> {
+    ) -> Result<(FinalityAttestation, CryptoFacts), RegistryError> {
         // 1. The adapter must be the one this domain is bound to. Without this
         //    an adapter could be swapped under a domain that already has a
         //    bond and a history.
@@ -737,8 +779,9 @@ impl ExternalDomainRegistry {
         }
 
         // 6. The adapter itself.
+        let mut observed = CryptoFacts::new();
         let attestation = adapter
-            .verify(evidence, policy)
+            .verify_observed(evidence, policy, &mut observed)
             .map_err(RegistryError::Adapter)?;
 
         // The adapter output is bound back to the registered domain before
@@ -786,7 +829,7 @@ impl ExternalDomainRegistry {
             }));
         }
 
-        Ok(attestation)
+        Ok((attestation, observed))
     }
 
     /// Slashes a prover whose attestation was contradicted. Returns the amount

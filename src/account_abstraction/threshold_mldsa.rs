@@ -51,7 +51,7 @@
 //! that does not meet the threshold is refused.
 
 use crate::crypto::primitives::{
-    verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
+    verify_ml_dsa_87_signature_in, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
 };
 
 /// The largest number of owners an account can carry.
@@ -211,6 +211,24 @@ impl MultisigPolicy {
         message: &[u8],
         signatures: &[OwnerSignature],
     ) -> Result<(), ThresholdError> {
+        self.verify_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            message,
+            signatures,
+        )
+    }
+
+    /// [`Self::verify`] under the scheme statuses of a chain.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::verify`].
+    pub fn verify_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        message: &[u8],
+        signatures: &[OwnerSignature],
+    ) -> Result<(), ThresholdError> {
         let mut seen: Vec<&[u8; ML_DSA_87_PUBLIC_KEY_LEN]> = Vec::with_capacity(signatures.len());
         for (index, entry) in signatures.iter().enumerate() {
             if !self.owners.contains(&entry.public_key) {
@@ -219,8 +237,14 @@ impl MultisigPolicy {
             if seen.contains(&&entry.public_key) {
                 return Err(ThresholdError::RepeatedSigner { index });
             }
-            verify_ml_dsa_87_signature(message, &entry.signature, &entry.public_key)
-                .map_err(|_| ThresholdError::InvalidSignature { index })?;
+            verify_ml_dsa_87_signature_in(
+                registry,
+                crate::crypto::ctx::TX_V6,
+                message,
+                &entry.signature,
+                &entry.public_key,
+            )
+            .map_err(|_| ThresholdError::InvalidSignature { index })?;
             seen.push(&entry.public_key);
         }
         if seen.len() < self.threshold {
@@ -278,7 +302,7 @@ mod tests {
     fn sign_with(kp: &WalletKeyPair, msg: &[u8]) -> OwnerSignature {
         OwnerSignature {
             public_key: kp.public_key_bytes(),
-            signature: kp.sign(msg),
+            signature: kp.sign(crate::crypto::ctx::TX_V6, msg),
         }
     }
 
