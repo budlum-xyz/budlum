@@ -533,9 +533,19 @@ mod tests {
                 .map_err(|_| crate::crypto::primitives::CryptoError::Signing("slh".into()))
             }
         }
-        let signed = sign_with_seal_key(cert, 0, &SealKey(key)).expect("signs");
-        assert!(
-            source.accept_reseal(&signed, &ledger, &registry).is_err(),
+        // A certificate whose range reaches past the anchors it hashes is
+        // refused: the range must be fully covered, or the tail of the range
+        // would pass as resealed on one anchor's proof.
+        let lying = crate::settlement::reseal::ResealCertificate {
+            to_height: unsealed[1].0,
+            ..cert
+        };
+        let signed = sign_with_seal_key(lying, 0, &SealKey(key)).expect("signs");
+        assert_eq!(
+            source.accept_reseal(&signed, &ledger, &registry),
+            Err(SourceError::Reseal(
+                crate::settlement::reseal::ResealError::CoveredMismatch,
+            )),
             "the range holds both anchors, the certificate covers one"
         );
         // Covering both works, and the anchors are a live source again.
