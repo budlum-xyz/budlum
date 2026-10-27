@@ -434,6 +434,22 @@ impl PqKeyPair {
             "PQ verification not available: enable the `pq-ml-dsa` feature".to_string(),
         ))
     }
+
+    /// The registry-aware verifier the consensus paths call. Present here for
+    /// the same reason the others are: `cargo-hack` builds every feature
+    /// combination, and a chain path that compiles with the feature on must
+    /// still compile - and fail closed - with it off.
+    pub fn verify_in(
+        _registry: &super::scheme::SchemeStatusRegistry,
+        _public_key: &[u8],
+        _ctx: &[u8],
+        _message: &[u8],
+        _signature: &[u8],
+    ) -> Result<(), CryptoError> {
+        Err(CryptoError::Verification(
+            "PQ verification not available: enable the `pq-ml-dsa` feature".to_string(),
+        ))
+    }
 }
 
 impl ValidatorKeys {
