@@ -1045,6 +1045,15 @@ impl Blockchain {
                 tracing::error!(error = %e, "Failed to load consensus state from store during startup");
             }
         }
+        // The restored tip is a block this node never watched land. Give the
+        // leader-round price an observation time for it: the moment it was
+        // loaded is the only honest one, and without it the next slot would be
+        // priced from a header stamp that a lagging schedule left in the past -
+        // which is exactly the round this node would then over-claim.
+        if let Some(tip) = bc.chain.last() {
+            bc.consensus
+                .note_block_seen(&tip.hash, crate::consensus::now_millis());
+        }
 
         if !bc.state.governance.applied_domain_unfreezes.is_empty() {
             let applied = bc.state.governance.applied_domain_unfreezes.clone();
