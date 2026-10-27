@@ -36,6 +36,4 @@ trusted_proxies = []
 listener = "127.0.0.1:9090"
 
 [features]
-governance = false
-zkvm_contracts = false
 pruning = false

@@ -1,0 +1,247 @@
+# Full local testnet rehearsal.
+#
+# The testnet profile (chain 45261, the mainnet distribution, the
+# four-validator ceremony) on one machine: four validators, one RPC node,
+# the faucet, the explorer API, Prometheus and Grafana. Every service uses the
+# one image ops/Dockerfile builds; the role is the entrypoint.
+#
+#   docker compose -f ops/testnet-local.yml up -d --build
+#
+# The `ceremony` service runs once: four `bud validator init`, one
+# `budlum-faucet keygen`, and `bud genesis assemble --network testnet` with
+# the faucet as the community destination. The other
+# destinations are local stand-ins. Keys stay in the `ceremony` volume.
+#
+# Published on loopback only: RPC 28545 (no API key, A-06), faucet 28600,
+# explorer API 28700, Prometheus 29091, Grafana 23000.
+
+x-node: &node
+  build:
+    context: ..
+    dockerfile: ops/Dockerfile
+  image: budlum-core:testnet-local
+  environment:
+    - RUST_LOG=info
+  networks:
+    - testnet-local
+  restart: unless-stopped
+
+services:
+  ceremony:
+    <<: *node
+    container_name: testnet-ceremony
+    volumes:
+      - ceremony:/home/budlum/ceremony
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        dir=/home/budlum/ceremony
+        [ -f "$$dir/genesis.json" ] && exit 0
+        mkdir -p "$$dir/operators"
+        for i in 1 2 3 4; do
+          bud validator init --chain-id 45261 --moniker "validator$$i" \
+            --key-file "$$dir/validator$$i.key" --record-out "$$dir/operators/validator$$i.json"
+        done
+        for i in 1 2 3 4; do
+          bud node identity --identity-file "$$dir/validator$$i.p2p" --host "validator$$i" --port 5001 \
+            | sed -n 's/^bootnode (config \[p2p\] bootnodes): "\(.*\)"$$/\1/p' > "$$dir/validator$$i.bootnode"
+        done
+        faucet=$$(budlum-faucet keygen --out "$$dir/faucet.seed" | sed -n 's/^faucet address: 0x//p')
+        bud genesis assemble --network testnet --operators "$$dir/operators" \
+          --community "$$faucet" \
+          --liquidity 5151515151515151515151515151515151515151515151515151515151515151 \
+          --ecosystem 5252525252525252525252525252525252525252525252525252525252525252 \
+          --team 5353535353535353535353535353535353535353535353535353535353535353 \
+          --burn-reserve 5454545454545454545454545454545454545454545454545454545454545454 \
+          --out "$$dir/genesis.json"
+    restart: "no"
+
+  validator1:
+    <<: *node
+    container_name: testnet-validator1
+    volumes:
+      - validator1_data:/home/budlum/data
+      - ceremony:/home/budlum/ceremony:ro
+    # The bootnode multiaddr (with the peer id) comes from the ceremony.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        exec budlum-core --network=testnet
+        --genesis-file=/home/budlum/ceremony/genesis.json
+        --consensus=pos --role=validator
+        --validator-key-file=/home/budlum/ceremony/validator1.key
+        --p2p-identity-file=/home/budlum/ceremony/validator1.p2p
+        --port=5001 --db-path=/home/budlum/data/db
+        --rpc-public-listener=127.0.0.1:8545 --rpc-operator-listener=127.0.0.1:8546
+        --metrics-listener=0.0.0.0:9090
+        --bootstrap="$$(cat /home/budlum/ceremony/validator2.bootnode)"
+    depends_on:
+      ceremony:
+        condition: service_completed_successfully
+
+  validator2:
+    <<: *node
+    container_name: testnet-validator2
+    volumes:
+      - validator2_data:/home/budlum/data
+      - ceremony:/home/budlum/ceremony:ro
+    # The bootnode multiaddr (with the peer id) comes from the ceremony.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        exec budlum-core --network=testnet
+        --genesis-file=/home/budlum/ceremony/genesis.json
+        --consensus=pos --role=validator
+        --validator-key-file=/home/budlum/ceremony/validator2.key
+        --p2p-identity-file=/home/budlum/ceremony/validator2.p2p
+        --port=5001 --db-path=/home/budlum/data/db
+        --rpc-public-listener=127.0.0.1:8545 --rpc-operator-listener=127.0.0.1:8546
+        --metrics-listener=0.0.0.0:9090
+        --bootstrap="$$(cat /home/budlum/ceremony/validator1.bootnode)"
+    depends_on:
+      ceremony:
+        condition: service_completed_successfully
+
+  validator3:
+    <<: *node
+    container_name: testnet-validator3
+    volumes:
+      - validator3_data:/home/budlum/data
+      - ceremony:/home/budlum/ceremony:ro
+    # The bootnode multiaddr (with the peer id) comes from the ceremony.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        exec budlum-core --network=testnet
+        --genesis-file=/home/budlum/ceremony/genesis.json
+        --consensus=pos --role=validator
+        --validator-key-file=/home/budlum/ceremony/validator3.key
+        --p2p-identity-file=/home/budlum/ceremony/validator3.p2p
+        --port=5001 --db-path=/home/budlum/data/db
+        --rpc-public-listener=127.0.0.1:8545 --rpc-operator-listener=127.0.0.1:8546
+        --metrics-listener=0.0.0.0:9090
+        --bootstrap="$$(cat /home/budlum/ceremony/validator1.bootnode)"
+    depends_on:
+      ceremony:
+        condition: service_completed_successfully
+
+  validator4:
+    <<: *node
+    container_name: testnet-validator4
+    volumes:
+      - validator4_data:/home/budlum/data
+      - ceremony:/home/budlum/ceremony:ro
+    # The bootnode multiaddr (with the peer id) comes from the ceremony.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        exec budlum-core --network=testnet
+        --genesis-file=/home/budlum/ceremony/genesis.json
+        --consensus=pos --role=validator
+        --validator-key-file=/home/budlum/ceremony/validator4.key
+        --p2p-identity-file=/home/budlum/ceremony/validator4.p2p
+        --port=5001 --db-path=/home/budlum/data/db
+        --rpc-public-listener=127.0.0.1:8545 --rpc-operator-listener=127.0.0.1:8546
+        --metrics-listener=0.0.0.0:9090
+        --bootstrap="$$(cat /home/budlum/ceremony/validator1.bootnode)"
+    depends_on:
+      ceremony:
+        condition: service_completed_successfully
+
+  rpc:
+    <<: *node
+    container_name: testnet-rpc
+    ports:
+      - "127.0.0.1:28545:8545"
+    volumes:
+      - rpc_data:/home/budlum/data
+      - ceremony:/home/budlum/ceremony:ro
+    environment:
+      - RUST_LOG=info
+      # A-06: the public listener serves reads and signed transactions
+      # without an API key; the method class table bounds what it can do.
+      - BUDLUM_RPC_AUTH_REQUIRED=0
+      - BUDLUM_RPC_ALLOWED_IPS=
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        exec budlum-core --network=testnet
+        --genesis-file=/home/budlum/ceremony/genesis.json
+        --consensus=pos --role=rpc
+        --port=5001 --db-path=/home/budlum/data/db
+        --p2p-identity-file=/home/budlum/data/node-id.key
+        --rpc-public-listener=0.0.0.0:8545 --rpc-operator-listener=127.0.0.1:8546
+        --metrics-listener=0.0.0.0:9090
+        --bootstrap="$$(cat /home/budlum/ceremony/validator1.bootnode)"
+    depends_on:
+      ceremony:
+        condition: service_completed_successfully
+
+  faucet:
+    <<: *node
+    container_name: testnet-faucet
+    ports:
+      - "127.0.0.1:28600:18600"
+    volumes:
+      - ceremony:/home/budlum/ceremony:ro
+    entrypoint: ["budlum-faucet"]
+    command:
+      - "serve"
+      - "--rpc-url=http://rpc:8545"
+      - "--key-file=/home/budlum/ceremony/faucet.seed"
+      - "--listen=0.0.0.0:18600"
+    depends_on:
+      - rpc
+
+  indexer:
+    <<: *node
+    container_name: testnet-indexer
+    ports:
+      - "127.0.0.1:28700:18700"
+    volumes:
+      - indexer_data:/home/budlum/data
+    entrypoint: ["budlum-indexer"]
+    command:
+      - "--rpc-url=http://rpc:8545"
+      - "--db=/home/budlum/data/indexer"
+      - "--listen=0.0.0.0:18700"
+    depends_on:
+      - rpc
+
+  prometheus:
+    image: prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
+    container_name: testnet-prometheus
+    ports:
+      - "127.0.0.1:29091:9090"
+    volumes:
+      - ./monitoring/testnet-local-prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    networks:
+      - testnet-local
+
+  grafana:
+    # Tag pin; move it to a reviewed digest before this file serves anything
+    # beyond a local rehearsal (the Prometheus pin above is the model).
+    image: grafana/grafana:11.2.0
+    container_name: testnet-grafana
+    ports:
+      - "127.0.0.1:23000:3000"
+    volumes:
+      - ./monitoring/grafana:/var/lib/grafana/dashboards:ro
+      - ./monitoring/grafana-provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - testnet-local
+
+volumes:
+  ceremony:
+  validator1_data:
+  validator2_data:
+  validator3_data:
+  validator4_data:
+  rpc_data:
+  indexer_data:
+
+networks:
+  testnet-local:
+    driver: bridge
