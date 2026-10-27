@@ -40,7 +40,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-use super::anchor_ledger::{AnchorKeyLedger, LedgerKey, ANCHOR_KEY_COUNT};
+#[cfg(feature = "wallet-ml-dsa")]
+use super::anchor_ledger::ANCHOR_KEY_COUNT;
+use super::anchor_ledger::{AnchorKeyLedger, LedgerKey};
 use super::cold_quorum::{verify_quorum, DeviceSignature};
 use super::cold_wallet::ColdWalletState;
 use super::pq_anchor::{
