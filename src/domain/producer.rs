@@ -307,6 +307,7 @@ pub fn build_poa_commitment(
     signers: &[crate::crypto::composite::CompositeKeypair],
 ) -> Result<VerifiedDomainCommitment, String> {
     let digest = crate::domain::finality_adapter::poa_commit_digest(
+        spec.domain.domain_chain_id,
         spec.domain.id,
         spec.height,
         &spec.block_hash,

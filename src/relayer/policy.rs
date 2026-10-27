@@ -183,6 +183,17 @@ pub struct UserIntent {
     pub deadline_block: u64,
     pub replay_nonce: u64,
     pub policy_hash: [u8; 32],
+    /// The only address on the target chain whose `intent-executed` event may
+    /// settle this intent.
+    ///
+    /// The settlement receipt proves a root the chain anchored; it does not
+    /// prove who emitted the event under it. Without this field every account
+    /// on the target chain could emit an event naming the intent id, repeating
+    /// the action's payload hash and carrying the right kind, and collect the
+    /// escrow without doing the work. The owner names the emitter it expects
+    /// when it locks the fee, and the id commits to it.
+    #[serde(default)]
+    pub expected_emitter: Address,
 }
 
 impl UserIntent {
@@ -196,6 +207,7 @@ impl UserIntent {
         deadline_block: u64,
         replay_nonce: u64,
         policy_hash: [u8; 32],
+        expected_emitter: Address,
     ) -> Self {
         let mut intent = Self {
             intent_id: [0u8; 32],
@@ -207,6 +219,7 @@ impl UserIntent {
             deadline_block,
             replay_nonce,
             policy_hash,
+            expected_emitter,
         };
         intent.intent_id = intent.calculate_id();
         intent
@@ -214,7 +227,9 @@ impl UserIntent {
 
     pub fn calculate_id(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_RELAYER_USER_INTENT_V1");
+        // V2: the emitter is part of the id. A `V1` id did not commit to one,
+        // so it could name a different emitter than the owner chose.
+        hasher.update(b"BDLM_RELAYER_USER_INTENT_V2");
         hasher.update(self.owner.as_bytes());
         hasher.update(self.source_domain.to_le_bytes());
         hasher.update(self.target_domain.to_le_bytes());
@@ -223,6 +238,7 @@ impl UserIntent {
         hasher.update(self.deadline_block.to_le_bytes());
         hasher.update(self.replay_nonce.to_le_bytes());
         hasher.update(self.policy_hash);
+        hasher.update(self.expected_emitter.as_bytes());
         hasher.finalize().into()
     }
 
@@ -233,6 +249,9 @@ impl UserIntent {
     pub fn validate(&self, policy: &PolicyEnvelope, current_block: u64) -> Result<(), String> {
         if !self.verify_id() {
             return Err("UserIntent id mismatch".into());
+        }
+        if self.expected_emitter == Address::zero() {
+            return Err("UserIntent expected_emitter cannot be zero".into());
         }
         if self.owner == Address::zero() {
             return Err("UserIntent owner cannot be zero".into());
@@ -297,6 +316,14 @@ impl SolverBid {
         }
         if self.expires_at_block <= current_block {
             return Err("SolverBid expired".into());
+        }
+        // A bid is a commitment to fulfil until the intent's deadline. One that
+        // lapses earlier can never be honoured at the moment the deadline is
+        // tested, so accepting it only creates slashable material: the expiry
+        // path would take the bond for a window the solver never promised to
+        // keep.
+        if self.expires_at_block < intent.deadline_block {
+            return Err("SolverBid must stay live until the intent deadline".into());
         }
         Ok(())
     }
@@ -411,6 +438,16 @@ pub fn verify_intent_result(
     {
         return Err("relayer intent result does not prove this intent was executed".into());
     }
+    // Who emitted it. The message's `sender` is the emitting account on the
+    // source chain, and the owner fixed which one counts when it opened the
+    // intent. Without this an id, a payload hash and a kind are enough for any
+    // account on the target chain to claim the work.
+    if message.sender != intent.expected_emitter {
+        return Err(format!(
+            "relayer intent result was emitted by {} and not by the intent's emitter {}",
+            message.sender, intent.expected_emitter
+        ));
+    }
     Ok(())
 }
 
@@ -520,7 +557,17 @@ impl RelayerPolicyRegistry {
             .escrowed
             .remove(&intent_id)
             .ok_or_else(|| "RelayerPolicyRegistry intent has no escrow".to_string())?;
-        let bids = self.bids.remove(&intent_id).unwrap_or_default();
+        // A bid whose own window closed before the intent's deadline was never a
+        // commitment the deadline could test: it leaves with the intent but it
+        // is not slashable. `submit_bid` now refuses such a bid, so this filter
+        // matters for rows written before that rule existed.
+        let bids: Vec<SolverBid> = self
+            .bids
+            .remove(&intent_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|bid| bid.expires_at_block >= intent.deadline_block)
+            .collect();
         self.intents.remove(&intent_id);
         self.settled_intents.insert(intent_id);
         let settlement = IntentSettlement {
@@ -790,6 +837,7 @@ mod tests {
             50,
             7,
             policy.policy_hash(),
+            addr(9),
         )
     }
 
@@ -817,6 +865,7 @@ mod tests {
             50,
             7,
             policy.policy_hash(),
+            addr(9),
         );
         let result_for = |correlation: [u8; 32], payload: [u8; 32]| {
             let message = CrossDomainMessage::new_correlated(
@@ -871,6 +920,46 @@ mod tests {
 
         // Nor an unanchored root.
         assert!(verify_intent_result(&BTreeMap::new(), &intent, &good).is_err());
+
+        // Nor an event naming the intent, its payload and its kind but emitted
+        // by somebody else: the owner fixed the emitter when it locked the fee.
+        let impostor = {
+            let message = CrossDomainMessage::new_correlated(
+                CrossDomainMessageParams {
+                    source_domain: chain.domain_id(),
+                    target_domain: 1,
+                    source_height: 9,
+                    event_index: 0,
+                    nonce: 0,
+                    sender: addr(0xAB),
+                    recipient: owner,
+                    payload_hash,
+                    kind: MessageKind::Custom(INTENT_EXECUTED_KIND.to_vec()),
+                    expiry_height: 0,
+                },
+                intent.intent_id,
+            );
+            let mut result = RelayerExternalResult {
+                chain,
+                tx_hash: "0x02".into(),
+                success: true,
+                message: Some(message),
+                receipt_proof: Vec::new(),
+                external_state_root: [0u8; 32],
+            };
+            let leaf = result.result_leaf();
+            result.receipt_proof =
+                bincode::serialize(&crate::cross_domain::event_tree::MerkleProof {
+                    leaf,
+                    index: 0,
+                    siblings: Vec::new(),
+                })
+                .unwrap();
+            result.external_state_root = leaf;
+            result
+        };
+        let roots = BTreeMap::from([(chain.domain_id(), impostor.external_state_root)]);
+        assert!(verify_intent_result(&roots, &intent, &impostor).is_err());
     }
 
     #[test]
