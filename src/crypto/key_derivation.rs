@@ -273,7 +273,10 @@ mod tests {
         assert_ne!(root("").as_bytes(), root("x").as_bytes());
         // U+00EF and "i" + U+0308 are canonically equivalent; U+FB01 (fi
         // ligature) decomposes under NFKD only.
-        assert_eq!(root("na\u{ef}ve").as_bytes(), root("nai\u{308}ve").as_bytes());
+        assert_eq!(
+            root("na\u{ef}ve").as_bytes(),
+            root("nai\u{308}ve").as_bytes()
+        );
         assert_eq!(root("\u{fb01}").as_bytes(), root("fi").as_bytes());
     }
 
