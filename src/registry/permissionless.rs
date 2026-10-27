@@ -395,6 +395,7 @@ impl PermissionlessRegistry {
             delegations: Vec::new(),
             delegation_unbonding: Vec::new(),
             validator_commissions: Vec::new(),
+            claimable_rewards: Vec::new(),
         }
     }
 
@@ -407,6 +408,7 @@ impl PermissionlessRegistry {
             delegations: Vec::new(),
             delegation_unbonding: Vec::new(),
             validator_commissions: Vec::new(),
+            claimable_rewards: Vec::new(),
         }
     }
 

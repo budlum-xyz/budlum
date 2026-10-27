@@ -1945,7 +1945,7 @@ impl AccountState {
                 if from_validator == to_validator {
                     return Err("Redelegation needs two different validators".into());
                 }
-                if tx.from == *to_validator {
+                if tx.from == to_validator {
                     return Err("A validator cannot delegate to itself".into());
                 }
             }
@@ -1956,7 +1956,7 @@ impl AccountState {
                             .into(),
                     );
                 }
-                if *validator == Address::zero() {
+                if validator == Address::zero() {
                     return Err("Claiming rewards needs a validator".into());
                 }
             }
