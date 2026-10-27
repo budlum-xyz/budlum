@@ -1429,7 +1429,7 @@ mod tests {
         state: &AccountState,
         encoded: &crate::storage::EncodedObject,
         audit_id: u64,
-    ) -> (Address, Vec<u8>, u8) {
+    ) -> (Address, Vec<u8>, u8, Vec<[u8; 32]>) {
         let stored = state
             .storage_registry
             .coding_audit(audit_id)
@@ -1437,15 +1437,25 @@ mod tests {
         let column = stored.audit.column as usize;
         let k = encoded.scheme.k as usize;
         let data_column = (0..k).map(|j| encoded.shards[j][column]).collect();
-        let parity_byte = encoded.shards[k + stored.audit.parity_index as usize][column];
-        (stored.operator, data_column, parity_byte)
+        let parity_shard = &encoded.shards[k + stored.audit.parity_index as usize];
+        let parity_byte = parity_shard[column];
+        let column_proof =
+            crate::storage::column_commitment::column_proof(parity_shard, stored.audit.column)
+                .expect("a real column has a proof");
+        (stored.operator, data_column, parity_byte, column_proof)
     }
 
-    fn answer(audit_id: u64, data_column: Vec<u8>, parity_byte: u8) -> StorageTx {
+    fn answer(
+        audit_id: u64,
+        data_column: Vec<u8>,
+        parity_byte: u8,
+        column_proof: Vec<[u8; 32]>,
+    ) -> StorageTx {
         StorageTx::AnswerCodingAudit {
             audit_id,
             data_column,
             parity_byte,
+            column_proof,
         }
     }
 
@@ -1468,9 +1478,13 @@ mod tests {
     fn an_operator_answers_its_audit_in_block_and_passes() {
         let mut state = AccountState::new();
         let (encoded, id) = audited(&mut state);
-        let (operator, column, parity) = honest_answer(&state, &encoded, id);
-        execute_storage_tx(&mut state, &ctx(operator), &answer(id, column, parity))
-            .expect("an honest answer is accepted");
+        let (operator, column, parity, proof) = honest_answer(&state, &encoded, id);
+        execute_storage_tx(
+            &mut state,
+            &ctx(operator),
+            &answer(id, column, parity, proof.clone()),
+        )
+        .expect("an honest answer is accepted");
         assert_eq!(outcome(&state, id), CodingAuditOutcome::Passed);
         assert!(!in_cooldown(&state, &operator));
     }
@@ -1479,8 +1493,8 @@ mod tests {
     fn a_wrong_parity_answer_is_accepted_and_fails_with_a_cooldown() {
         let mut state = AccountState::new();
         let (encoded, id) = audited(&mut state);
-        let (operator, column, parity) = honest_answer(&state, &encoded, id);
-        let wrong = answer(id, column, parity ^ 0x01);
+        let (operator, column, parity, proof) = honest_answer(&state, &encoded, id);
+        let wrong = answer(id, column, parity ^ 0x01, proof.clone());
         execute_storage_tx(&mut state, &ctx(operator), &wrong)
             .expect("a wrong answer is a recorded outcome");
         assert_eq!(outcome(&state, id), CodingAuditOutcome::Failed);
@@ -1491,11 +1505,15 @@ mod tests {
     fn an_answer_from_the_wrong_signer_is_refused() {
         let mut state = AccountState::new();
         let (encoded, id) = audited(&mut state);
-        let (_, column, parity) = honest_answer(&state, &encoded, id);
+        let (_, column, parity, proof) = honest_answer(&state, &encoded, id);
         let stranger = Address::from([99u8; 32]);
         let root = state.storage_registry.root();
-        let err = execute_storage_tx(&mut state, &ctx(stranger), &answer(id, column, parity))
-            .unwrap_err();
+        let err = execute_storage_tx(
+            &mut state,
+            &ctx(stranger),
+            &answer(id, column, parity, proof.clone()),
+        )
+        .unwrap_err();
         assert!(matches!(err, StorageTxError::CodingAuditRefused(_)));
         assert_eq!(outcome(&state, id), CodingAuditOutcome::Open);
         assert_eq!(state.storage_registry.root(), root);
@@ -1505,11 +1523,15 @@ mod tests {
     fn an_answer_after_the_deadline_is_refused() {
         let mut state = AccountState::new();
         let (encoded, id) = audited(&mut state);
-        let (operator, column, parity) = honest_answer(&state, &encoded, id);
+        let (operator, column, parity, proof) = honest_answer(&state, &encoded, id);
         state.epoch_index = AUDIT_DEADLINE + 1;
         let root = state.storage_registry.root();
-        let err = execute_storage_tx(&mut state, &ctx(operator), &answer(id, column, parity))
-            .unwrap_err();
+        let err = execute_storage_tx(
+            &mut state,
+            &ctx(operator),
+            &answer(id, column, parity, proof.clone()),
+        )
+        .unwrap_err();
         assert!(matches!(err, StorageTxError::CodingAuditRefused(_)));
         assert_eq!(outcome(&state, id), CodingAuditOutcome::Open);
         assert_eq!(state.storage_registry.root(), root);
@@ -1519,23 +1541,35 @@ mod tests {
     fn an_oversized_data_column_is_refused() {
         let mut state = AccountState::new();
         let (encoded, id) = audited(&mut state);
-        let (operator, mut column, parity) = honest_answer(&state, &encoded, id);
+        let (operator, mut column, parity, proof) = honest_answer(&state, &encoded, id);
         let k = encoded.scheme.k as usize;
         let root = state.storage_registry.root();
 
         column.push(0);
         let len = column.len();
-        let err = execute_storage_tx(&mut state, &ctx(operator), &answer(id, column, parity))
-            .unwrap_err();
+        let err = execute_storage_tx(
+            &mut state,
+            &ctx(operator),
+            &answer(id, column, parity, proof.clone()),
+        )
+        .unwrap_err();
         assert_eq!(err, StorageTxError::DataColumnTooLong { len, max: k });
 
         let huge = vec![0u8; MAX_CODING_AUDIT_DATA_COLUMN_BYTES + 1];
-        let err =
-            execute_storage_tx(&mut state, &ctx(operator), &answer(id, huge, parity)).unwrap_err();
+        let err = execute_storage_tx(
+            &mut state,
+            &ctx(operator),
+            &answer(id, huge, parity, proof.clone()),
+        )
+        .unwrap_err();
         assert!(matches!(err, StorageTxError::DataColumnTooLong { .. }));
 
-        let err = execute_storage_tx(&mut state, &ctx(operator), &answer(id, Vec::new(), parity))
-            .unwrap_err();
+        let err = execute_storage_tx(
+            &mut state,
+            &ctx(operator),
+            &answer(id, Vec::new(), parity, proof.clone()),
+        )
+        .unwrap_err();
         assert_eq!(err, StorageTxError::EmptyDataColumn);
 
         assert_eq!(outcome(&state, id), CodingAuditOutcome::Open);
