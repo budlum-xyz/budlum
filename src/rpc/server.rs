@@ -3,9 +3,7 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
-use crate::domain::storage_deal::{
-    RetrievalChallenge, RetrievalChallengeRequest, RetrievalResponse, StorageDeal,
-};
+use crate::domain::storage_deal::{RetrievalChallengeRequest, RetrievalResponse, StorageDeal};
 use crate::network::node::NodeClient;
 use crate::storage::content_id::ContentId;
 use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
@@ -300,6 +298,35 @@ where
     }
 }
 
+/// Completes the TLS handshake inside the connection task, so one slow client
+/// cannot hold up the accept loop, then serves the connection like a plain one.
+async fn serve_tls_connection<S, B>(
+    acceptor: tokio_rustls::TlsAcceptor,
+    socket: tokio::net::TcpStream,
+    remote_addr: SocketAddr,
+    service: S,
+    stopped: impl std::future::Future<Output = ()>,
+) where
+    S: tower::Service<HttpRequest<hyper::body::Incoming>, Response = hyper::Response<B>>
+        + Clone
+        + Send
+        + 'static,
+    S::Future: Send,
+    S::Response: Send,
+    S::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    B: hyper::body::Body<Data = hyper::body::Bytes> + Send + 'static,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    match acceptor.accept(socket).await {
+        Ok(stream) => {
+            let _ = jsonrpsee::server::serve_with_graceful_shutdown(stream, service, stopped).await;
+        }
+        Err(error) => {
+            tracing::debug!("RPC TLS handshake from {remote_addr} failed: {error}");
+        }
+    }
+}
+
 pub struct RpcServer {
     chain: ChainHandle,
     node: NodeClient,
@@ -313,6 +340,9 @@ pub struct RpcServer {
     /// If `None`, metrics are silently skipped (e.g. in tests without a
     /// Global registry).
     metrics: Option<Arc<crate::core::metrics::Metrics>>,
+    /// In-process TLS acceptor. `None` serves plain HTTP, which the
+    /// mainnet config check allows on loopback only.
+    tls: Option<tokio_rustls::TlsAcceptor>,
 }
 
 impl RpcServer {
@@ -324,6 +354,7 @@ impl RpcServer {
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
+            tls: None,
         }
     }
 
@@ -339,6 +370,7 @@ impl RpcServer {
             mode: RpcMode::Public,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
+            tls: None,
         }
     }
 
@@ -355,11 +387,18 @@ impl RpcServer {
             mode,
             reveal_gateway: Arc::new(Mutex::new(crate::storage::RevealGateway::new())),
             metrics: None,
+            tls: None,
         }
     }
 
     pub fn with_metrics(mut self, metrics: Arc<crate::core::metrics::Metrics>) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    /// Serves this listener over TLS 1.3 with X25519MLKEM768.
+    pub fn with_tls(mut self, acceptor: tokio_rustls::TlsAcceptor) -> Self {
+        self.tls = Some(acceptor);
         self
     }
 
@@ -371,6 +410,7 @@ impl RpcServer {
         };
 
         validate_rpc_security_config(&self.security)?;
+        let tls = self.tls.clone();
         let http_middleware = ServiceBuilder::new().layer(RpcSecurityLayer::new(
             self.security.clone(),
             self.metrics.clone(),
@@ -404,11 +444,21 @@ impl RpcServer {
             RpcMode::Operator => "operator",
         };
         validate_operator_bind_address(&self.mode, &addr)?;
+        // Every served method must be classified (`src/rpc/method_class.rs`).
         let methods: Methods = self.into_rpc().into();
+        crate::rpc::method_class::check_served_methods(methods.method_names()).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("RPC method classification refused this listener: {e}"),
+            )
+        })?;
         let svc_builder = builder.to_service_builder();
         let listener = tokio::net::TcpListener::bind(addr.clone()).await?;
         let (stop_handle, server_handle) = stop_channel();
-        info!("RPC Server ({mode_label}) started on {addr}");
+        info!(
+            "RPC Server ({mode_label}) started on {addr} ({})",
+            if tls.is_some() { "tls" } else { "plain" }
+        );
 
         tokio::spawn(async move {
             let _keep_server_alive = server_handle;
@@ -437,11 +487,21 @@ impl RpcServer {
                     async move { svc.call(req).await }
                 });
 
-                tokio::spawn(serve_with_graceful_shutdown(
-                    socket,
-                    svc,
-                    stop_handle.clone().shutdown(),
-                ));
+                let shutdown = stop_handle.clone().shutdown();
+                match tls.clone() {
+                    Some(acceptor) => {
+                        tokio::spawn(serve_tls_connection(
+                            acceptor,
+                            socket,
+                            remote_addr,
+                            svc,
+                            shutdown,
+                        ));
+                    }
+                    None => {
+                        tokio::spawn(serve_with_graceful_shutdown(socket, svc, shutdown));
+                    }
+                }
             }
         });
 
@@ -515,6 +575,13 @@ impl RpcServer {
         Ok(crate::cross_domain::external::DomainKey(key_bytes))
     }
 
+    /// The answer of a method whose state change moved to a transaction
+    /// door. The method stays declared so a client
+    /// gets the name of the door instead of "method not found".
+    fn door_refusal(message: &'static str) -> ErrorObjectOwned {
+        ErrorObjectOwned::owned(-32602, message, None::<()>)
+    }
+
     fn to_0x_hash(h: String) -> String {
         if h.is_empty() {
             "0x0000000000000000000000000000000000000000000000000000000000000000".to_string()
@@ -526,8 +593,12 @@ impl RpcServer {
     }
 
     fn block_to_json(b: Block) -> serde_json::Value {
+        //: a block whose witnesses were pruned says so, so a client
+        // does not read an empty signature as an unsigned transaction.
+        let witness_pruned = b.witness_is_stripped();
         serde_json::json!({
             "number": Self::to_hex(b.index),
+            "witnessPruned": witness_pruned,
             "hash": Self::to_0x_hash(b.hash),
             "parentHash": Self::to_0x_hash(b.previous_hash),
             "timestamp": Self::to_hex(b.timestamp as u64),
@@ -585,6 +656,32 @@ impl RpcServer {
             // that drift.
             "aiRoot": h.ai_root.map(Self::bytes32_to_0x),
             "identityRoot": h.identity_root.map(Self::bytes32_to_0x),
+            "checkpointHeight": Self::to_hex(h.checkpoint_height),
+            "externalIntakeRoot": h.external_intake_root.map(Self::bytes32_to_0x),
+            "graftRoot": h.graft_root.map(Self::bytes32_to_0x),
+            "delegationRoot": h.delegation_root.map(Self::bytes32_to_0x),
+        })
+    }
+
+    /// The value of one named root of a header, as the JSON view names it.
+    fn global_header_root(
+        h: &crate::settlement::GlobalBlockHeader,
+        name: &str,
+    ) -> Option<Option<crate::domain::Hash32>> {
+        Some(match name {
+            "domainRegistryRoot" => Some(h.domain_registry_root),
+            "domainCommitmentRoot" => Some(h.domain_commitment_root),
+            "messageRoot" => Some(h.message_root),
+            "bridgeStateRoot" => Some(h.bridge_state_root),
+            "replayNonceRoot" => Some(h.replay_nonce_root),
+            "settlementFinalityRoot" => Some(h.settlement_finality_root),
+            "storageRoot" => h.storage_root,
+            "aiRoot" => h.ai_root,
+            "identityRoot" => h.identity_root,
+            "externalIntakeRoot" => h.external_intake_root,
+            "graftRoot" => h.graft_root,
+            "delegationRoot" => h.delegation_root,
+            _ => return None,
         })
     }
 
@@ -645,15 +742,6 @@ impl RpcServer {
             "blockHashScheme": format!("{:?}", d.block_hash_scheme),
             "stateRootScheme": format!("{:?}", d.state_root_scheme),
             "txRootScheme": format!("{:?}", d.tx_root_scheme),
-        })
-    }
-
-    async fn bridge_roots_json(&self, label: &str) -> serde_json::Value {
-        let info = self.chain.get_settlement_info().await;
-        serde_json::json!({
-            "status": label,
-            "bridgeStateRoot": info["bridgeStateRoot"].clone(),
-            "replayNonceRoot": info["replayNonceRoot"].clone(),
         })
     }
 }
@@ -1410,20 +1498,6 @@ fn storage_deal_to_json(deal: &StorageDeal) -> serde_json::Value {
     })
 }
 
-fn retrieval_challenge_to_json(challenge: &RetrievalChallenge) -> serde_json::Value {
-    serde_json::json!({
-        "challengeId": challenge.challenge_id,
-        "dealId": challenge.deal_id,
-        "shardId": format!("0x{}", hex::encode(challenge.shard_id.0)),
-        "byteStart": challenge.byte_start,
-        "byteEnd": challenge.byte_end,
-        "challengeEpoch": challenge.challenge_epoch,
-        "deadlineEpoch": challenge.deadline_epoch,
-        "opener": format!("0x{}", challenge.opener.to_hex()),
-        "openerBond": challenge.opener_bond,
-    })
-}
-
 fn storage_economics_event_to_json(
     event: &crate::chain::blockchain::StorageEconomicsEvent,
 ) -> serde_json::Value {
@@ -1641,6 +1715,35 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
+    async fn get_global_header_proof(
+        &self,
+        root: String,
+        key: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let Some(proof) = self.chain.get_global_header_proof(key).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        let value = Self::global_header_root(&proof.header, &root).ok_or_else(|| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("unknown global header root {root}"),
+                None::<()>,
+            )
+        })?;
+        Ok(serde_json::json!({
+            "root": root,
+            "value": value.map(Self::bytes32_to_0x),
+            "header": Self::global_header_to_json(proof.header),
+            "blockHeight": Self::to_hex(proof.block_height),
+            "blockHash": Self::to_0x_hash(proof.block_hash),
+            "stateRoot": Self::to_0x_hash(proof.state_root),
+            // The state root reopens with this body and the header hash
+            // (`AccountState::root_from_opening`); null when this node did
+            // not record it.
+            "stateRootBody": proof.state_root_body.map(Self::bytes32_to_0x),
+        }))
+    }
+
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let commitments = self.chain.get_domain_commitments().await;
         Ok(serde_json::Value::Array(
@@ -1661,136 +1764,118 @@ impl BudlumApiServer for RpcServer {
         ))
     }
 
+    async fn graft_payment_proof(
+        &self,
+        payment_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = payment_id_hex.strip_prefix("0x").unwrap_or(&payment_id_hex);
+        let payment_id: [u8; 32] = hex::decode(clean)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(-32602, "a Graft payment id is 32 bytes of hex", None::<()>)
+            })?;
+        match self.chain.get_graft_payment_proof(payment_id).await {
+            None => Ok(serde_json::Value::Null),
+            Some(proof) => serde_json::to_value(proof).map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("cannot encode the Graft payment proof: {e}"),
+                    None::<()>,
+                )
+            }),
+        }
+    }
+
+    async fn get_restaked_validators(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let (rows, weights) = self.chain.get_restaked_validators().await;
+        let rows: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|row| {
+                serde_json::json!({
+                    "validator": format!("0x{}", row.budlum_validator.to_hex()),
+                    "ethOperator": format!("0x{}", hex::encode(row.eth_operator)),
+                    "allocatedUnits": row.allocated_units,
+                    "source": format!("{:?}", row.source),
+                    "observedEpoch": row.observed_epoch,
+                    "status": format!("{:?}", row.status),
+                    "weight": weights.get(&row.budlum_validator).copied().unwrap_or(0),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "validators": rows }))
+    }
+
+    async fn get_graft_application(
+        &self,
+        graft_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = graft_id_hex.strip_prefix("0x").unwrap_or(&graft_id_hex);
+        let bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("invalid Graft id: {e}"), None::<()>)
+        })?;
+        let graft_id: [u8; 32] = bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "Graft id must be 32 bytes", None::<()>)
+        })?;
+        let Some(app) = self.chain.get_graft_application(graft_id).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        Ok(serde_json::json!({
+            "graftId": format!("0x{}", hex::encode(app.graft_id)),
+            "owner": format!("0x{}", app.owner.to_hex()),
+            "domainKey": app.domain_key,
+            "originApp": format!("0x{}", hex::encode(app.origin_app)),
+            "manifestHash": format!("0x{}", hex::encode(app.manifest_hash)),
+            "mirrorAccount": format!("0x{}", app.mirror_account.to_hex()),
+            "status": format!("{:?}", app.status),
+            "registeredAtBlock": app.registered_at_block,
+        }))
+    }
+
     async fn register_consensus_domain(
         &self,
         domain: crate::domain::ConsensusDomain,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        //: domain registration is a signed `Settlement` transaction
+        // (`SettlementTx::RegisterDomain`) from the domain's operator.
         self.require_operator("bud_registerConsensusDomain")?;
-        let domain_id = domain.id;
-        self.chain
-            .register_consensus_domain(domain)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid consensus domain: {e}"),
-                    None::<()>,
-                )
-            })?;
-
-        let info = self.chain.get_settlement_info().await;
-        let registry_root = info["domainRegistryRoot"]
-            .as_str()
-            .map_or_else(|| "0x".to_string(), |root| format!("0x{root}"));
-        Ok(serde_json::json!({
-            "domainId": domain_id,
-            "domainRegistryRoot": registry_root,
-        }))
+        let _ = domain;
+        Err(Self::door_refusal(
+            "Out-of-block domain registration is refused: it wrote the domain registry on this \
+             node alone. The domain's operator sends a signed Settlement transaction \
+             (SettlementTx::RegisterDomain) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn register_external_domain(
         &self,
         registration: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: only the operator may declare the terms. BLG-0155
-        // (P07-F10): the bond itself is no longer a declared number - the
-        // registration debits the poster's balance into escrow before the
-        // registry sees it (Blockchain::register_external_domain).
+        // /: registration is a signed `ExternalDomain` transaction
+        // (`ExternalDomainTx::Register`) from the poster, applied in block.
         self.require_operator("bud_registerExternalDomain")?;
-        #[derive(serde::Deserialize)]
-        struct Params {
-            spec: crate::cross_domain::external::AdapterSpec,
-            policy: crate::cross_domain::external::VerificationPolicy,
-            /// Omitted economics default to the intake's conservative shape
-            /// at the given ceiling; explicit economics are taken as sent.
-            economics: Option<crate::cross_domain::external::DomainEconomics>,
-            routing_ceiling_atoms: Option<u128>,
-            versions: crate::cross_domain::external::VersionPolicy,
-            bond_atoms: u128,
-            poster: String,
-            golden: crate::cross_domain::external::RawConsensusEvidence,
-        }
-        let params: Params = serde_json::from_value(registration).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid registration: {e}"), None::<()>)
-        })?;
-        let clean = params.poster.strip_prefix("0x").unwrap_or(&params.poster);
-        let poster = Address::from_hex(clean).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid poster address: {e}"), None::<()>)
-        })?;
-        let economics = match (params.economics, params.routing_ceiling_atoms) {
-            (Some(e), _) => e,
-            (None, Some(ceiling)) => {
-                crate::cross_domain::external::IntakeState::conservative_economics(ceiling)
-            }
-            (None, None) => {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    "Provide either economics or routing_ceiling_atoms",
-                    None::<()>,
-                ))
-            }
-        };
-        let key = self
-            .chain
-            .register_external_domain(crate::cross_domain::external::RegistrationRequest {
-                spec: params.spec,
-                policy: params.policy,
-                economics,
-                versions: params.versions,
-                bond_atoms: params.bond_atoms,
-                poster,
-                golden: params.golden,
-            })
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("External domain registration refused: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(serde_json::json!({
-            "domainKey": format!("0x{}", hex::encode(key.as_bytes())),
-        }))
+        let _ = registration;
+        Err(Self::door_refusal(
+            "Out-of-block external domain registration is refused: it would escrow a bond and \
+             write the intake on this node alone. The poster sends a signed ExternalDomain \
+             transaction (ExternalDomainTx::Register) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn submit_external_evidence(
         &self,
         evidence: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: `submitter` is an unsigned field, so a public caller
-        // could vote under any bonded prover's name.
+        //: evidence is a signed `ExternalDomain` transaction from the
+        // submitter it names, applied in block.
         self.require_operator("bud_submitExternalEvidence")?;
-        let evidence: crate::cross_domain::external::RawConsensusEvidence =
-            serde_json::from_value(evidence).map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Invalid evidence: {e}"), None::<()>)
-            })?;
-        let outcome = self
-            .chain
-            .submit_external_evidence(evidence)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("External evidence refused: {e}"),
-                    None::<()>,
-                )
-            })?;
-        match outcome {
-            Some(attestation) => serde_json::to_value(&attestation).map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32603,
-                    format!("Attestation serialization failed: {e}"),
-                    None::<()>,
-                )
-            }),
-            // The answer entered a quorum round that has not decided yet.
-            // Pending is a state, not an error: the watcher reads the round
-            // through bud_getExternalQuorumRound.
-            None => Ok(serde_json::json!({
-                "roundPending": true,
-            })),
-        }
+        let _ = evidence;
+        Err(Self::door_refusal(
+            "Out-of-block external evidence is refused: it wrote the intake on this node \
+             alone. The submitter sends a signed ExternalDomain transaction \
+             (ExternalDomainTx::SubmitEvidence) through bud_sendRawTransaction; \
+             bud_encodeExternalEvidence builds the payload.",
+        ))
     }
 
     async fn get_external_domain_profile(
@@ -1852,14 +1937,12 @@ impl BudlumApiServer for RpcServer {
         reason: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_readmitExternalDomain")?;
-        let key = Self::parse_external_domain_key(&domain_key_hex)?;
-        self.chain
-            .readmit_external_domain(key, reason)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Readmission refused: {e}"), None::<()>)
-            })?;
-        Ok(serde_json::json!({ "readmitted": true }))
+        let _ = (domain_key_hex, reason);
+        Err(Self::door_refusal(
+            "Out-of-block readmission is refused: it wrote the intake on this node alone. The \
+             domain's registrant sends a signed ExternalDomain transaction \
+             (ExternalDomainTx::Readmit) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn schedule_external_fork(
@@ -1871,62 +1954,35 @@ impl BudlumApiServer for RpcServer {
         grace_heights: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_scheduleExternalFork")?;
-        let key = Self::parse_external_domain_key(&domain_key_hex)?;
-        self.chain
-            .schedule_external_fork(key, old_version, new_version, fork_height, grace_heights)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Fork refused: {e}"), None::<()>)
-            })?;
-        Ok(serde_json::json!({ "scheduled": true }))
+        let _ = (
+            domain_key_hex,
+            old_version,
+            new_version,
+            fork_height,
+            grace_heights,
+        );
+        Err(Self::door_refusal(
+            "Out-of-block fork scheduling is refused: it wrote the domain's version policy on \
+             this node alone. The domain's registrant sends a signed ExternalDomain transaction \
+             (ExternalDomainTx::ScheduleFork) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn slash_external_prover(
         &self,
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Gated: the registry's slash takes the challenger's word that an
+        // accepted attestation was wrong, and no contradiction proof format
+        // exists yet. A door that slashes on a claim would let anyone take
+        // any carrier's bond, so there is no transaction for it either.
         self.require_operator("bud_slashExternalProver")?;
-        #[derive(serde::Deserialize)]
-        struct Params {
-            domain_key_hex: String,
-            prover: String,
-            evidence_digest_hex: String,
-            value_atoms: u128,
-            challenger: String,
-        }
-        let params: Params = serde_json::from_value(request).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid slash request: {e}"), None::<()>)
-        })?;
-        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
-        let parse_addr = |s: &str, what: &str| -> Result<Address, ErrorObjectOwned> {
-            let clean = s.strip_prefix("0x").unwrap_or(s);
-            Address::from_hex(clean).map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Invalid {what}: {e}"), None::<()>)
-            })
-        };
-        let prover = parse_addr(&params.prover, "prover address")?;
-        let challenger = parse_addr(&params.challenger, "challenger address")?;
-        let digest_clean = params
-            .evidence_digest_hex
-            .strip_prefix("0x")
-            .unwrap_or(&params.evidence_digest_hex);
-        let digest_bytes = hex::decode(digest_clean).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid evidence digest: {e}"), None::<()>)
-        })?;
-        let evidence_digest: [u8; 32] = digest_bytes.try_into().map_err(|_| {
-            ErrorObjectOwned::owned(-32602, "Evidence digest must be 32 bytes", None::<()>)
-        })?;
-        let (taken, reward) = self
-            .chain
-            .slash_external_prover(key, prover, evidence_digest, params.value_atoms, challenger)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Slash refused: {e}"), None::<()>)
-            })?;
-        Ok(serde_json::json!({
-            "slashedAtoms": taken.to_string(),
-            "challengerRewardAtoms": reward.to_string(),
-        }))
+        let _ = request;
+        Err(Self::door_refusal(
+            "External prover slashing is closed: no proof that an accepted attestation was \
+             false is defined yet, and a slash on a challenger's word would let anyone take a \
+             bond. It opens as a transaction when that proof format lands.",
+        ))
     }
 
     async fn bond_external_prover(
@@ -1934,31 +1990,12 @@ impl BudlumApiServer for RpcServer {
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_bondExternalProver")?;
-        #[derive(serde::Deserialize)]
-        struct Params {
-            domain_key_hex: String,
-            prover: String,
-            bond_atoms: u128,
-        }
-        let params: Params = serde_json::from_value(request).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid bond request: {e}"), None::<()>)
-        })?;
-        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
-        let clean = params.prover.strip_prefix("0x").unwrap_or(&params.prover);
-        let prover = Address::from_hex(clean).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid prover address: {e}"), None::<()>)
-        })?;
-        self.chain
-            .bond_external_prover(key, prover, params.bond_atoms)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Bond refused: {e}"), None::<()>)
-            })?;
-        Ok(serde_json::json!({
-            "bonded": true,
-            "prover": format!("0x{}", hex::encode(prover.as_bytes())),
-            "bondAtoms": params.bond_atoms.to_string(),
-        }))
+        let _ = request;
+        Err(Self::door_refusal(
+            "Out-of-block prover bonding is refused: it would escrow a bond on this node alone. \
+             The prover sends a signed ExternalDomain transaction (ExternalDomainTx::BondProver) \
+             through bud_sendRawTransaction.",
+        ))
     }
 
     async fn set_external_quorum_policy(
@@ -1966,57 +2003,12 @@ impl BudlumApiServer for RpcServer {
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_setExternalQuorumPolicy")?;
-        #[derive(serde::Deserialize)]
-        struct Params {
-            domain_key_hex: String,
-            /// Optional full policy. When absent, `agreement_threshold` and
-            /// `max_participants` build the strict form - refuse on dispute,
-            /// refuse on low participation - which is the only form fit for
-            /// a state root that will be committed to.
-            policy: Option<crate::cross_domain::external::QuorumPolicy>,
-            agreement_threshold: Option<usize>,
-            max_participants: Option<usize>,
-        }
-        let params: Params = serde_json::from_value(request).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid quorum policy request: {e}"),
-                None::<()>,
-            )
-        })?;
-        let key = Self::parse_external_domain_key(&params.domain_key_hex)?;
-        let policy = match (params.policy, params.agreement_threshold) {
-            (Some(policy), _) => policy,
-            (None, Some(threshold)) => {
-                let max = params.max_participants.unwrap_or(threshold);
-                crate::cross_domain::external::QuorumPolicy::strict(threshold, max)
-            }
-            (None, None) => {
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    "Provide either `policy` or `agreement_threshold`",
-                    None::<()>,
-                ));
-            }
-        };
-        if policy.agreement_threshold == 0 || policy.max_participants < policy.agreement_threshold {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "Quorum policy must have threshold >= 1 and max_participants >= threshold",
-                None::<()>,
-            ));
-        }
-        self.chain
-            .set_external_quorum_policy(key, policy)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Quorum policy refused: {e}"), None::<()>)
-            })?;
-        Ok(serde_json::json!({
-            "installed": true,
-            "agreementThreshold": policy.agreement_threshold,
-            "maxParticipants": policy.max_participants,
-        }))
+        let _ = request;
+        Err(Self::door_refusal(
+            "Out-of-block quorum policy changes are refused: they wrote the intake on this node \
+             alone. The domain's registrant sends a signed ExternalDomain transaction \
+             (ExternalDomainTx::SetQuorumPolicy) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn get_external_quorum_round(
@@ -2618,18 +2610,28 @@ impl BudlumApiServer for RpcServer {
         template: crate::domain::SovereignDomainTemplate,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_registerSovereignTemplate")?;
-        let domain_id = template.domain_id;
-        self.chain
-            .register_sovereign_template(template)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid sovereign template: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(serde_json::json!({ "domainId": domain_id }))
+        let _ = template;
+        Err(Self::door_refusal(
+            "Out-of-block template registration is refused: it wrote the sovereign registry on \
+             this node alone. The domain's operator sends a signed Settlement transaction \
+             (SettlementTx::RegisterSovereignTemplate) through bud_sendRawTransaction.",
+        ))
+    }
+
+    async fn get_sovereign_template(
+        &self,
+        domain_id: crate::domain::types::DomainId,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let Some(template) = self.chain.get_sovereign_template(domain_id).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        serde_json::to_value(template).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("cannot encode sovereign template: {e}"),
+                None::<()>,
+            )
+        })
     }
 
     async fn validate_sovereign_audit_export(
@@ -2665,88 +2667,171 @@ impl BudlumApiServer for RpcServer {
         &self,
         payload: crate::domain::VerifiedDomainCommitment,
     ) -> Result<String, ErrorObjectOwned> {
-        // Consensus-state isolation: `submit_verified_domain_commitment` writes
-        // to `external_roots` and `domain_registry`, so public listeners must
-        // not reach it directly, and the signed in-block StateUpdateTx carrier
-        // must be verified and enqueued fail-closed before applying state.
+        //: a commitment is a signed `Settlement` transaction
+        // (`SettlementTx::SubmitCommitment`) from a bonded RELAYER, applied in
+        // block. It used to advance the domain registry and the external
+        // roots on this node, then gossip the payload so every peer applied
+        // it again whenever it arrived.
         self.require_operator("bud_submitVerifiedDomainCommitment")?;
-        let hash = hex::encode(payload.leaf_hash());
-        let payload_clone = payload.clone();
-        let commitment = payload.commitment.clone();
-
-        self.chain
-            .verify_verified_domain_commitment(payload.clone())
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid verified domain commitment: {e}"),
-                    None::<()>,
-                )
-            })?;
-
-        let tx = self
-            .chain
-            .build_state_update_transaction(commitment)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32603,
-                    format!("Could not build state update transaction: {e}"),
-                    None::<()>,
-                )
-            })?;
-        let tx_clone = tx.clone();
-        self.chain.add_transaction(tx).await.map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32603,
-                format!("State update transaction rejected: {e}"),
-                None::<()>,
-            )
-        })?;
-
-        self.chain
-            .submit_verified_domain_commitment(payload)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid verified domain commitment: {e}"),
-                    None::<()>,
-                )
-            })?;
-
-        self.node.broadcast_tx_sync(tx_clone);
-        self.node
-            .broadcast_verified_domain_commitment_sync(payload_clone);
-        Ok(format!("0x{hash}"))
+        let _ = payload;
+        Err(Self::door_refusal(
+            "Out-of-block domain commitments are refused: they advanced the domain registry on \
+             this node alone. A bonded RELAYER sends a signed Settlement transaction \
+             (SettlementTx::SubmitCommitment) carrying the commitment and its finality proof \
+             through bud_sendRawTransaction.",
+        ))
     }
 
     async fn submit_cross_domain_message(
         &self,
         msg: crate::cross_domain::CrossDomainMessage,
     ) -> Result<String, ErrorObjectOwned> {
-        let msg_clone = msg.clone();
+        //: this method used to insert the message into the message
+        // registry (folded into the state root) on the serving node alone,
+        // from the public listener, and gossip it to peers that did the
+        // same at whatever moment it reached them. The registration is a
+        // transaction door now; the method stays so a client gets a pointer
+        // instead of "method not found".
+        let _ = msg;
+        Err(ErrorObjectOwned::owned(
+            -32602,
+            "Out-of-block cross-domain message registration is refused: it changed the \
+             message registry on this node alone. Send a signed RelayCrossDomainMessage \
+             transaction (signer = message sender, an active relayer) through \
+             bud_sendRawTransaction.",
+            None::<()>,
+        ))
+    }
 
-        // Relayer-gated and in block. `message_registry` is in the state root,
-        // so the registration happens when a block carries this transaction
-        // and not when this call returns; the gates themselves (active
-        // relayer, sender signature) run in the executor against consensus
-        // state, where they can be replayed.
-        let hash = self
-            .chain
-            .submit_relayed_cross_domain_message(msg)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid cross domain message: {e}"),
-                    None::<()>,
-                )
-            })?;
+    async fn get_cross_domain_message(
+        &self,
+        message_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = message_id_hex.strip_prefix("0x").unwrap_or(&message_id_hex);
+        let bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("invalid cross-domain message id: {e}"),
+                None::<()>,
+            )
+        })?;
+        let message_id: [u8; 32] = bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(
+                -32602,
+                "cross-domain message id must be 32 bytes",
+                None::<()>,
+            )
+        })?;
+        let Some(message) = self.chain.get_cross_domain_message(message_id).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        let kind = serde_json::to_value(&message.kind).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("cannot encode message kind: {e}"),
+                None::<()>,
+            )
+        })?;
+        Ok(serde_json::json!({
+            "messageId": format!("0x{}", hex::encode(message.message_id)),
+            "correlationId": message.correlation_id.map(|id| format!("0x{}", hex::encode(id))),
+            "sourceDomain": message.source_domain,
+            "targetDomain": message.target_domain,
+            "sourceHeight": message.source_height,
+            "eventIndex": message.event_index,
+            "nonce": message.nonce,
+            "sender": format!("0x{}", message.sender.to_hex()),
+            "recipient": format!("0x{}", message.recipient.to_hex()),
+            "payloadHash": format!("0x{}", hex::encode(message.payload_hash)),
+            "kind": kind,
+            "expiryHeight": message.expiry_height,
+            "senderPublicKey": format!("0x{}", hex::encode(message.sender_public_key)),
+            "senderSignature": format!("0x{}", hex::encode(message.sender_signature)),
+        }))
+    }
 
-        self.node.broadcast_cross_domain_message_sync(msg_clone);
-        Ok(format!("0x{hash}"))
+    async fn get_bridge_transfer(
+        &self,
+        message_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = message_id_hex.strip_prefix("0x").unwrap_or(&message_id_hex);
+        let bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("invalid bridge transfer id: {e}"),
+                None::<()>,
+            )
+        })?;
+        let message_id: [u8; 32] = bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "bridge transfer id must be 32 bytes", None::<()>)
+        })?;
+        let Some(transfer) = self.chain.get_bridge_transfer(message_id).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        let status = serde_json::to_value(&transfer.status).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("cannot encode bridge transfer status: {e}"),
+                None::<()>,
+            )
+        })?;
+        Ok(serde_json::json!({
+            "messageId": format!("0x{}", hex::encode(transfer.message_id)),
+            "assetId": format!("0x{}", transfer.asset_id.to_hex()),
+            "sourceDomain": transfer.source_domain,
+            "targetDomain": transfer.target_domain,
+            "owner": format!("0x{}", transfer.owner.to_hex()),
+            "recipient": format!("0x{}", transfer.recipient.to_hex()),
+            "amount": transfer.amount.get(),
+            "status": status,
+            "sourceEventHash": format!("0x{}", hex::encode(transfer.source_event_hash)),
+            "expiryHeight": transfer.expiry_height,
+            "recipientEth": transfer
+                .recipient_eth
+                .map(|address| format!("0x{}", hex::encode(address))),
+            "burnedAmount": transfer.burned_amount,
+        }))
+    }
+
+    async fn get_relayer_status(
+        &self,
+        message_id_hex: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let message_id = match message_id_hex {
+            Some(value) => {
+                let clean = value.strip_prefix("0x").unwrap_or(&value);
+                let bytes = hex::decode(clean).map_err(|e| {
+                    ErrorObjectOwned::owned(
+                        -32602,
+                        format!("invalid relay message id: {e}"),
+                        None::<()>,
+                    )
+                })?;
+                Some(bytes.try_into().map_err(|_| {
+                    ErrorObjectOwned::owned(-32602, "relay message id must be 32 bytes", None::<()>)
+                })?)
+            }
+            None => None,
+        };
+        Ok(self.chain.get_relayer_status(message_id).await)
+    }
+
+    async fn get_relayer_intent(
+        &self,
+        intent_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean = intent_id_hex.strip_prefix("0x").unwrap_or(&intent_id_hex);
+        let bytes = hex::decode(clean).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("invalid relayer intent id: {e}"),
+                None::<()>,
+            )
+        })?;
+        let intent_id: [u8; 32] = bytes.try_into().map_err(|_| {
+            ErrorObjectOwned::owned(-32602, "relayer intent id must be 32 bytes", None::<()>)
+        })?;
+        Ok(self.chain.get_relayer_intent(intent_id).await)
     }
 
     async fn register_bridge_asset(
@@ -2754,18 +2839,15 @@ impl BudlumApiServer for RpcServer {
         asset_id: crate::cross_domain::AssetId,
         domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // /: asset registration is a signed `Bridge` transaction
+        // (`BridgeTx::RegisterAsset`) from the home domain's operator.
         self.require_operator("bud_registerBridgeAsset")?;
-        self.chain
-            .register_bridge_asset(asset_id, domain)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid bridge asset registration: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(self.bridge_roots_json("registered").await)
+        let _ = (asset_id, domain);
+        Err(Self::door_refusal(
+            "Out-of-block bridge asset registration is refused: it wrote the bridge state on \
+             this node alone. The home domain's operator sends a signed Bridge transaction \
+             (BridgeTx::RegisterAsset) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn mint_bridge_transfer(
@@ -2778,30 +2860,24 @@ impl BudlumApiServer for RpcServer {
         proof: crate::cross_domain::MerkleProof,
         relayer: crate::core::address::Address,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Bridge mint requires operator auth
-        self.require_operator("bud_mintBridgeTransfer")
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32000, format!("auth required: {e}"), None::<()>)
-            })?;
-        self.chain
-            .mint_bridge_transfer_from_verified_event(
-                source_domain,
-                source_height,
-                sequence,
-                expected_block_hash,
-                event,
-                proof,
-                relayer,
-            )
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid bridge mint transfer: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(self.bridge_roots_json("minted").await)
+        // /: a mint is a signed `Bridge` transaction
+        // (`BridgeTx::Mint`) from a bonded RELAYER, applied in block.
+        self.require_operator("bud_mintBridgeTransfer")?;
+        let _ = (
+            source_domain,
+            source_height,
+            sequence,
+            expected_block_hash,
+            event,
+            proof,
+            relayer,
+        );
+        Err(Self::door_refusal(
+            "Out-of-block bridge mints are refused: they wrote the bridge state and balances on \
+             this node alone. A bonded RELAYER sends a signed Bridge transaction \
+             (BridgeTx::Mint) carrying the lock event and its inclusion proof through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn burn_bridge_transfer(
@@ -2809,19 +2885,40 @@ impl BudlumApiServer for RpcServer {
         message_id: crate::cross_domain::MessageId,
         domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Bridge burn requires operator auth
         self.require_operator("bud_burnBridgeTransfer")?;
-        self.chain
-            .burn_bridge_transfer(message_id, domain)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid bridge burn transfer: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(self.bridge_roots_json("burned").await)
+        let _ = (message_id, domain);
+        Err(Self::door_refusal(
+            "Raw bridge burn is disabled; the holder sends a signed Bridge transaction \
+             (BridgeTx::BurnWithEvent) through bud_sendRawTransaction.",
+        ))
+    }
+
+    async fn burn_bridge_transfer_with_event(
+        &self,
+        message_id: crate::cross_domain::MessageId,
+        domain: crate::domain::DomainId,
+        domain_height: u64,
+        event_index: u32,
+        expiry_height: u64,
+        recipient_eth: [u8; 20],
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // /: a burn is a signed `Bridge` transaction
+        // (`BridgeTx::BurnWithEvent`) from the transfer's recipient.
+        self.require_operator("bud_burnBridgeTransferWithEvent")?;
+        let _ = (
+            message_id,
+            domain,
+            domain_height,
+            event_index,
+            expiry_height,
+            recipient_eth,
+        );
+        Err(Self::door_refusal(
+            "Out-of-block bridge burns are refused: they debited a balance without its owner's \
+             signature and wrote the bridge state on this node alone. The transfer's recipient \
+             sends a signed Bridge transaction (BridgeTx::BurnWithEvent) through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn unlock_bridge_transfer(
@@ -2829,19 +2926,12 @@ impl BudlumApiServer for RpcServer {
         message_id: crate::cross_domain::MessageId,
         source_domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Bridge unlock requires operator auth
         self.require_operator("bud_unlockBridgeTransfer")?;
-        self.chain
-            .unlock_bridge_transfer(message_id, source_domain)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid bridge unlock transfer: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(self.bridge_roots_json("unlocked").await)
+        let _ = (message_id, source_domain);
+        Err(Self::door_refusal(
+            "Raw bridge unlock is disabled; a bonded RELAYER sends a signed Bridge transaction \
+             (BridgeTx::Unlock) carrying the verified burn event through bud_sendRawTransaction.",
+        ))
     }
 
     async fn unlock_bridge_transfer_verified(
@@ -2853,26 +2943,23 @@ impl BudlumApiServer for RpcServer {
         event: crate::cross_domain::DomainEvent,
         proof: crate::cross_domain::MerkleProof,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Bridge unlock verified requires operator auth
+        // /: an unlock is a signed `Bridge` transaction
+        // (`BridgeTx::Unlock`) from a bonded RELAYER, applied in block.
         self.require_operator("bud_unlockBridgeTransferVerified")?;
-        self.chain
-            .unlock_bridge_transfer_from_verified_event(
-                target_domain,
-                target_height,
-                sequence,
-                expected_block_hash,
-                event,
-                proof,
-            )
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid bridge unlock transfer: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(self.bridge_roots_json("unlocked").await)
+        let _ = (
+            target_domain,
+            target_height,
+            sequence,
+            expected_block_hash,
+            event,
+            proof,
+        );
+        Err(Self::door_refusal(
+            "Out-of-block bridge unlocks are refused: they wrote the bridge state and balances \
+             on this node alone. A bonded RELAYER sends a signed Bridge transaction \
+             (BridgeTx::Unlock) carrying the burn event and its inclusion proof through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn submit_relay_proof(
@@ -2882,49 +2969,29 @@ impl BudlumApiServer for RpcServer {
         proof: crate::cross_domain::event_tree::MerkleProof,
         source_domain: crate::domain::types::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Audit 2026-09-09 (E-7): this RPC applies consensus state changes
-        // OUTSIDE block execution (bridge mint/unlock + balance credits via
-        // Blockchain::submit_relay_proof), so a public-listener caller would
-        // fork the node against the network. All five sibling bridge-mutating
-        // RPCs (mint/burn/unlock x3) carry this operator gate; this one did
-        // not. The consensus-correct rework (verify + ledger record only, with
-        // settlement via the on-chain RelayerResult transaction) is logged as
-        // an open design item; until it lands the gate is the minimum.
+        // /: a relay proof is a signed
+        // `Bridge` transaction (`BridgeTx::RelayProof`) from the bonded
+        // RELAYER it pays, applied in block. It used to record the relay and
+        // mint or unlock on this node alone.
         self.require_operator("bud_submitRelayProof")?;
-        let clean_addr = relayer.strip_prefix("0x").unwrap_or(&relayer);
-        let relayer_addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid relayer address: {e}"), None::<()>)
-        })?;
-
-        let message = self
-            .chain
-            .submit_relay_proof(message_id, relayer_addr, proof, source_domain)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Relay proof submission failed: {e}"),
-                    None::<()>,
-                )
-            })?;
-
-        Ok(serde_json::json!({
-            "status": "success",
-            "message_id": hex::encode(message.message_id),
-            "kind": format!("{:?}", message.kind),
-        }))
+        let _ = (message_id, relayer, proof, source_domain);
+        Err(Self::door_refusal(
+            "Out-of-block relay proofs are refused: they wrote the relayer ledger, the bridge \
+             state and balances on this node alone. The bonded RELAYER sends a signed Bridge \
+             transaction (BridgeTx::RelayProof) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn seal_global_header(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // /: the global header is a consensus object, built by the
+        // transition of every finality checkpoint block. Sealing one on this
+        // node appended to a sequence no peer shared.
         self.require_operator("bud_sealGlobalHeader")?;
-        let header = self.chain.seal_global_header().await.map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Unable to seal global header: {e}"),
-                None::<()>,
-            )
-        })?;
-        Ok(Self::global_header_to_json(header))
+        Err(Self::door_refusal(
+            "Sealing a global header is refused: headers are built in block at every finality \
+             checkpoint, the same bytes on every node. Read them with bud_getGlobalHeader and \
+             bud_getGlobalHeaderProof.",
+        ))
     }
 
     async fn registry_register(
@@ -2970,28 +3037,16 @@ impl BudlumApiServer for RpcServer {
         address: String,
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // This legacy helper mutates stake without a signed transaction. Keep
-        // It operator-only; permissionless users use `bud_registryRegister`
-        // With a signed Stake transaction.
+        //: this helper bonded any address into the relayer role outside
+        // a block, on this node alone. The method stays so a client gets a
+        // pointer instead of "method not found".
         self.require_operator("bud_registryBondRelayer")?;
-        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
-        let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
-        })?;
-        self.chain.bond_relayer(addr, amount).await.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Relayer bond failed: {e}"), None::<()>)
-        })?;
-        let role = crate::registry::role::roles::RELAYER;
-        let active = self
-            .chain
-            .get_registry_member(addr, role)
-            .await
-            .is_some_and(|r| r.is_active());
-        Ok(serde_json::json!({
-            "address": Self::to_0x_hash(addr.to_hex()),
-            "role": "relayer",
-            "active": active,
-        }))
+        let _ = (address, amount);
+        Err(Self::door_refusal(
+            "Out-of-block relayer bonding is refused: it changed the registry on this node \
+             alone. Send a signed RoleBond transaction with role 3 (RELAYER) through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn registry_bond_prover(
@@ -3000,24 +3055,12 @@ impl BudlumApiServer for RpcServer {
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_registryBondProver")?;
-        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
-        let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
-        })?;
-        self.chain.bond_prover(addr, amount).await.map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Prover bond failed: {e}"), None::<()>)
-        })?;
-        let role = crate::registry::role::roles::PROVER;
-        let active = self
-            .chain
-            .get_registry_member(addr, role)
-            .await
-            .is_some_and(|r| r.is_active());
-        Ok(serde_json::json!({
-            "address": Self::to_0x_hash(addr.to_hex()),
-            "role": "prover",
-            "active": active,
-        }))
+        let _ = (address, amount);
+        Err(Self::door_refusal(
+            "Out-of-block prover bonding is refused: it changed the registry on this node \
+             alone. Send a signed RoleBond transaction with role 4 (PROVER) through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn registry_begin_role_bond_unbonding(
@@ -3025,31 +3068,13 @@ impl BudlumApiServer for RpcServer {
         address: String,
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // The exit for a bond posted through the legacy operator helpers must
-        // Sit behind the same listener as the entry.
         self.require_operator("bud_registryBeginRoleBondUnbonding")?;
-        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
-        let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
-        })?;
-        let role = crate::registry::RoleId::new(role_id);
-        let release_epoch = self
-            .chain
-            .begin_role_bond_unbonding(addr, role)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Role bond unbonding failed: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(serde_json::json!({
-            "address": Self::to_0x_hash(addr.to_hex()),
-            "roleId": role_id,
-            "status": "unbonding",
-            "releaseEpoch": release_epoch,
-        }))
+        let _ = (address, role_id);
+        Err(Self::door_refusal(
+            "Out-of-block role unbonding is refused: it changed the registry on this node \
+             alone. The bonded account sends a signed RoleUnbond transaction through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn registry_withdraw_role_bond(
@@ -3058,61 +3083,28 @@ impl BudlumApiServer for RpcServer {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
         self.require_operator("bud_registryWithdrawRoleBond")?;
-        let clean_addr = address.strip_prefix("0x").unwrap_or(&address);
-        let addr = Address::from_hex(clean_addr).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid address: {e}"), None::<()>)
-        })?;
-        let role = crate::registry::RoleId::new(role_id);
-        let withdrawn = self
-            .chain
-            .withdraw_role_bond(addr, role)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Role bond withdrawal failed: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(serde_json::json!({
-            "address": Self::to_0x_hash(addr.to_hex()),
-            "roleId": role_id,
-            "status": "withdrawn",
-            "amount": withdrawn,
-        }))
+        let _ = (address, role_id);
+        Err(Self::door_refusal(
+            "Out-of-block role bond withdrawal is refused: it changed balances on this node \
+             alone. The bonded account sends a signed RoleWithdraw transaction through \
+             bud_sendRawTransaction.",
+        ))
     }
 
     async fn submit_zk_proof(
         &self,
         submission: crate::prover::ZkProofSubmission,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: `submission.message.sender` is an unsigned field and
-        // the proof fee is burned from that address when verification fails,
-        // so a public caller could burn the fee balance of any address
-        // (P18-F02). Until submissions carry a sender signature, the endpoint
-        // is restricted like its sibling domain-registration methods.
+        //: a ZK proof is a signed `Settlement` transaction
+        // (`SettlementTx::SubmitZkProof`) from the submitter the proof names,
+        // which also closes P18-F02 (the submitter is the signer now).
         self.require_operator("bud_submitZkProof")?;
-        match self.chain.submit_zk_proof(submission).await {
-            Ok(crate::prover::ProofAcceptance::Accepted { rewarded, reward }) => {
-                Ok(serde_json::json!({
-                    "accepted": true,
-                    "status": "accepted",
-                    "rewarded": rewarded,
-                    "reward": reward,
-                }))
-            }
-            Ok(crate::prover::ProofAcceptance::Idempotent) => Ok(serde_json::json!({
-                "accepted": true,
-                "status": "idempotent",
-                "rewarded": false,
-                "reward": 0,
-            })),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                -32602,
-                format!("Proof rejected: {e}"),
-                None::<()>,
-            )),
-        }
+        let _ = submission;
+        Err(Self::door_refusal(
+            "Out-of-block ZK proofs are refused: they wrote the proof claims and the domain \
+             registry on this node alone. The submitter sends a signed Settlement transaction \
+             (SettlementTx::SubmitZkProof) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn registry_query(
@@ -3166,6 +3158,76 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn validator_profile(
+        &self,
+        validator: Address,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(self
+            .chain
+            .get_validator_profiles(Some(validator))
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                serde_json::json!({
+                    "address": Self::to_0x_hash(validator.to_hex()),
+                    "found": false,
+                })
+            }))
+    }
+
+    async fn validator_list(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let profiles = self.chain.get_validator_profiles(None).await;
+        let total = profiles.len();
+        let profiles = cap_list_response(profiles);
+        Ok(serde_json::json!({
+            "total": total,
+            "validators": profiles,
+        }))
+    }
+
+    async fn get_validator_delegations(
+        &self,
+        validator: Address,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let positions = self.chain.get_delegations(validator).await;
+        let exits = self.chain.get_delegation_exits(validator).await;
+        let total: u64 = positions
+            .iter()
+            .fold(0u64, |sum, position| sum.saturating_add(position.amount));
+        let pending_total: u64 = exits
+            .iter()
+            .fold(0u64, |sum, entry| sum.saturating_add(entry.amount));
+        let positions: Vec<serde_json::Value> = positions
+            .into_iter()
+            .map(|position| {
+                serde_json::json!({
+                    "delegator": Self::to_0x_hash(position.delegator.to_hex()),
+                    "validator": Self::to_0x_hash(position.validator.to_hex()),
+                    "amount": position.amount,
+                })
+            })
+            .collect();
+        let exits: Vec<serde_json::Value> = exits
+            .into_iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "delegator": Self::to_0x_hash(entry.delegator.to_hex()),
+                    "validator": Self::to_0x_hash(entry.validator.to_hex()),
+                    "amount": entry.amount,
+                    "releaseEpoch": entry.release_epoch,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "validator": Self::to_0x_hash(validator.to_hex()),
+            "activeDelegatedStake": total,
+            "pendingDelegationExit": pending_total,
+            "positions": positions,
+            "exits": exits,
+        }))
+    }
+
     async fn submit_slashing_report(
         &self,
         mut report: crate::registry::SlashingReport,
@@ -3186,26 +3248,19 @@ impl BudlumApiServer for RpcServer {
         }
         // A caller-supplied report stays `Unverified`: two signatures over two
         // bare block hashes do not bind `height`, so this endpoint must never
-        // promote caller-supplied evidence to `ConsensusVerified`. The chain
-        // guard (`submit_registry_slashing_report`) refuses `Unverified`
-        // reports fail-closed; slashing travels the consensus path only.
-        match self.chain.submit_registry_slashing_report(report).await {
-            Ok(Some(outcome)) => Ok(serde_json::json!({
-                "slashed": true,
-                "condition": format!("{:?}", outcome.condition),
-                "penalty": outcome.penalty,
-                "remainingStake": outcome.remaining_stake,
-            })),
-            Ok(None) => Ok(serde_json::json!({
-                "slashed": false,
-                "note": "report accepted but offender not registered for that role",
-            })),
-            Err(e) => Err(ErrorObjectOwned::owned(
-                -32602,
-                format!("Rejected slashing report: {e}"),
-                None::<()>,
-            )),
-        }
+        // promote caller-supplied evidence to `ConsensusVerified`, and an
+        // unverified report is refused before any fee is charged. Slashing
+        // travels the consensus path only, in block: this endpoint no
+        // longer reaches the chain at all.
+        let _ = report;
+        Err(ErrorObjectOwned::owned(
+            -32602,
+            "Rejected slashing report: unverified slashing reports are refused: this node \
+             cannot verify that the two hashes in a double-sign proof belong to two blocks at \
+             the same height, because it does not hold the rival block. Reports reach the \
+             registry through consensus, not this endpoint.",
+            None::<()>,
+        ))
     }
 
     async fn submit_qc_fault_proof(
@@ -3320,29 +3375,17 @@ impl BudlumApiServer for RpcServer {
         &self,
         manifest: crate::storage::ContentManifest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: this call changes node-local state outside a block.
+        //: this method registered a manifest into the storage registry
+        // (folded into the state root) on this node alone, outside a block.
+        // The method stays so a client gets a pointer instead of "method not
+        // found".
         self.require_operator("bud_storageRegisterManifest")?;
-        let manifest_id = self
-            .chain
-            .register_storage_manifest(manifest.clone())
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("register_manifest failed: {e}"),
-                    None::<()>,
-                )
-            })?;
-        Ok(serde_json::json!({
-            "manifestId": format!("0x{}", hex::encode(manifest_id.0)),
-            "totalSize": manifest.total_size,
-            "shardCount": manifest.shard_count,
-            // Echoed back so the caller can see what the chain committed to,
-            // rather than what it believes it sent. The declaration is inside
-            // `manifestId`, so a mismatch here means the manifest that
-            // registered is not the one the caller built.
-            "encryption": manifest.encryption.to_string(),
-        }))
+        let _ = manifest;
+        Err(Self::door_refusal(
+            "Out-of-block manifest registration is refused: it changed the storage registry \
+             on this node alone. The manifest owner sends a signed Storage transaction \
+             (StorageTx::RegisterManifest) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn storage_verify_encoding(
@@ -3825,37 +3868,15 @@ impl BudlumApiServer for RpcServer {
         // read under the lock, the chain is asked without it, and the answer
         // is applied under the lock again; a session closed in between is
         // reported as unknown, which is what it is.
-        let (scope, generation, session): (
-            Option<crate::storage::GrantScope>,
-            u64,
-            std::sync::Arc<crate::storage::RevealSession>,
-        ) = {
+        let (scope, generation): (Option<crate::storage::GrantScope>, u64) = {
             let gw = self.reveal_gateway.lock().map_err(|_| {
                 ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
             })?;
             let scope = gw
                 .grant_scope(session_id)
                 .map_err(reveal_gateway_rpc_error)?;
-            // The session is taken OUT of the table here so the stream-pin
-            // check below can run with the lock released. That check is the
-            // only part of serving a frame that scales with the stream: a
-            // recipe pinning a frame fold makes it build the whole one-shot
-            // carousel pass. Run under the table lock, one caller's first frame
-            // stalls every other viewer for the length of an encode (CWE-407).
-            // The session is an `Arc`, so `emit_frames` still re-checks it -
-            // expiry, grant and budget - on the way back.
-            (
-                scope,
-                gw.revoke_generation(),
-                gw.session_handle(session_id)
-                    .map_err(reveal_gateway_rpc_error)?,
-            )
+            (scope, gw.revoke_generation())
         };
-        // Outside the lock. The answer is remembered on the session, so the
-        // emit below never repeats it.
-        session
-            .verify_stream_pin()
-            .map_err(|e| ErrorObjectOwned::owned(-32602, e.to_string(), None::<()>))?;
         let grant_allows = match scope {
             None => true,
             Some(scope) => self
@@ -4030,134 +4051,31 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: this call changes node-local state outside a block.
+        //: this method opened a deal and moved the payer escrow and the
+        // operator bond on this node alone, outside a block.
         self.require_operator("bud_storageOpenDeal")?;
-        let clean_shard = shard_id.strip_prefix("0x").unwrap_or(&shard_id);
-        let s_bytes = hex::decode(clean_shard).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid shard_id hex: {e}"), None::<()>)
-        })?;
-        if s_bytes.len() != 32 {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "shard_id must be 32 bytes",
-                None::<()>,
-            ));
-        }
-        let mut s_arr = [0u8; 32];
-        s_arr.copy_from_slice(&s_bytes);
-        let s_id = ContentId(s_arr);
-
-        let op_addr = Address::from_hex(&operator).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid operator hex: {e}"), None::<()>)
-        })?;
-
-        let payer_addr = Address::from_hex(&payer).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid payer hex: {e}"), None::<()>)
-        })?;
-
-        // The caller must prove control of BOTH addresses this call debits:
-        // the payer's escrow and the operator's bond. Without this, any
-        // caller that can reach the RPC listener can spend another user's
-        // balance and lock another operator's bond. The signed message binds
-        // every deal parameter that changes the debit, so a signature cannot
-        // be replayed against a different deal. This is the same pattern the
-        // challenge RPCs use (BUD_OPEN_CHALLENGE_V1 / BUD_ANSWER_CHALLENGE_V1),
-        // which is what makes the escrow and bond gates economically
-        // meaningful.
-        let payer_sig = hex::decode(payer_signature).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid payer_signature hex: {e}"),
-                None::<()>,
-            )
-        })?;
-        let operator_sig = hex::decode(operator_signature).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid operator_signature hex: {e}"),
-                None::<()>,
-            )
-        })?;
-
-        // The chain prices the payer escrow from the manifest entry for this
-        // shard (manifest.shard(&shard_id).size), so the signed preimage must
-        // bind that size and the manifest identity as well. Without them, a
-        // valid signature could be replayed with a forged manifest that
-        // declares a larger shard for the same shard_id and debits more than
-        // either signer authorized (HIGH, CWE-347).
-        let shard_bytes = manifest
-            .shard(&s_id)
-            .ok_or_else(|| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("shard {s_id:?} is not part of the manifest"),
-                    None::<()>,
-                )
-            })
-            .map(|shard| u64::from(shard.size))?;
-
-        // The signed preimage binds a caller-chosen `request_id` so one
-        // signed authorization cannot be replayed to open the same deal
-        // repeatedly and debit escrow and bond again (MEDIUM, CWE-294).
-        // The chain also refuses a second active deal over the same
-        // (manifest, shard, operator, replica, range), so replay is closed on
-        // both layers.
-        let chain_id = self.chain.get_chain_id().await;
-        let deal_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_OPEN_DEAL_V2",
-            &chain_id.to_le_bytes(),
-            &domain_id.to_le_bytes(),
-            s_id.as_bytes(),
-            op_addr.as_bytes(),
-            payer_addr.as_bytes(),
-            &replica_index.to_le_bytes(),
-            &start_epoch.to_le_bytes(),
-            &end_epoch.to_le_bytes(),
-            &shard_bytes.to_le_bytes(),
-            manifest.manifest_id.as_bytes(),
-            &economics.fee_per_byte_epoch.to_le_bytes(),
-            &economics.operator_bond.to_le_bytes(),
-            &request_id.to_le_bytes(),
-        ]);
-        crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
-            .map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
-        })?;
-        crate::crypto::primitives::verify_signature(&deal_msg, &operator_sig, op_addr.as_bytes())
-            .map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid operator signature: {e}"),
-                None::<()>,
-            )
-        })?;
-
-        let deal_id = self
-            .chain
-            .open_storage_deal(
-                domain_id,
-                manifest.clone(),
-                s_id,
-                op_addr,
-                payer_addr,
-                replica_index,
-                start_epoch,
-                end_epoch,
-                economics.clone(),
-                domain_params,
-                merkle_proof.clone(),
-                storage_root,
-            )
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("open_deal failed: {e}"), None::<()>)
-            })?;
-
-        Ok(serde_json::json!({
-            "dealId": deal_id,
-            "status": "Active",
-            "operator": operator,
-        }))
+        let _ = (
+            domain_id,
+            manifest,
+            shard_id,
+            operator,
+            payer,
+            replica_index,
+            start_epoch,
+            end_epoch,
+            economics,
+            domain_params,
+            merkle_proof,
+            storage_root,
+            request_id,
+            payer_signature,
+            operator_signature,
+        );
+        Err(Self::door_refusal(
+            "Out-of-block deal opening is refused: it moved escrow and bond on this node \
+             alone. The payer sends a signed Storage transaction (StorageTx::OpenDeal, \
+             carrying the operator's consent) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn storage_accept_reallocation(
@@ -4175,93 +4093,30 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: this call changes node-local state outside a block.
+        //: this method filled a repair ticket and moved the payer escrow
+        // and the replacement operator bond on this node alone, outside a
+        // block.
         self.require_operator("bud_storageAcceptReallocation")?;
-        let op_addr = Address::from_hex(&replacement_operator).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid replacement operator hex: {e}"),
-                None::<()>,
-            )
-        })?;
-        let payer_addr = Address::from_hex(&payer).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid payer hex: {e}"), None::<()>)
-        })?;
-
-        // The caller must prove control of BOTH addresses this call debits:
-        // the payer's escrow and the replacement operator's bond. The
-        // signed message binds every parameter that changes the debit; the
-        // placement (manifest, shard, replica, bytes) is derived by the
-        // chain from the ticket, so a signature cannot be replayed against
-        // a different slot. Same pattern as BUD_OPEN_DEAL_V2.
-        let chain_id = self.chain.get_chain_id().await;
-        let deal_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_ACCEPT_REALLOCATION_V2",
-            &chain_id.to_le_bytes(),
-            &ticket_id.to_le_bytes(),
-            op_addr.as_bytes(),
-            payer_addr.as_bytes(),
-            &start_epoch.to_le_bytes(),
-            &end_epoch.to_le_bytes(),
-            &economics.fee_per_byte_epoch.to_le_bytes(),
-            &economics.operator_bond.to_le_bytes(),
-            &request_id.to_le_bytes(),
-        ]);
-        let payer_sig = hex::decode(payer_signature).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid payer_signature hex: {e}"),
-                None::<()>,
-            )
-        })?;
-        let op_sig = hex::decode(operator_signature).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid operator_signature hex: {e}"),
-                None::<()>,
-            )
-        })?;
-        crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
-            .map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
-        })?;
-        crate::crypto::primitives::verify_signature(&deal_msg, &op_sig, op_addr.as_bytes())
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid operator signature: {e}"),
-                    None::<()>,
-                )
-            })?;
-
-        let replacement_deal_id = self
-            .chain
-            .accept_storage_reallocation(
-                ticket_id,
-                op_addr,
-                payer_addr,
-                start_epoch,
-                end_epoch,
-                economics,
-                domain_params,
-                merkle_proof,
-                storage_root,
-            )
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("accept_reallocation failed: {e}"),
-                    None::<()>,
-                )
-            })?;
-
-        Ok(serde_json::json!({
-            "ticketId": ticket_id,
-            "replacementDealId": replacement_deal_id,
-            "status": "ActiveReplacement",
-            "operator": replacement_operator,
-        }))
+        let _ = (
+            ticket_id,
+            replacement_operator,
+            payer,
+            start_epoch,
+            end_epoch,
+            economics,
+            domain_params,
+            merkle_proof,
+            storage_root,
+            request_id,
+            payer_signature,
+            operator_signature,
+        );
+        Err(Self::door_refusal(
+            "Out-of-block repair acceptance is refused: it moved escrow and bond on this node \
+             alone. The payer sends a signed Storage transaction \
+             (StorageTx::AcceptReallocation, carrying the replacement operator's consent) \
+             through bud_sendRawTransaction.",
+        ))
     }
 
     async fn storage_get_manifest(
@@ -4408,115 +4263,67 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
-    async fn storage_open_challenge(
+    async fn storage_get_challenges(
         &self,
-        request: RetrievalChallengeRequest,
+        deal_id: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: this call changes node-local state outside a block.
-        self.require_operator("bud_storageOpenChallenge")?;
-        // + the opener is required and must be non-zero
-        let opener = request
-            .opener
-            .ok_or_else(|| ErrorObjectOwned::owned(-32602, "opener is required", None::<()>))?;
-        if opener == crate::core::address::Address::zero() {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "opener must not be zero address (H1)",
-                None::<()>,
-            ));
-        }
-
-        // Opener must cryptographically prove ownership of the
-        // Declared address. Without this, any caller can self-report any
-        // Address as the opener, rendering the opener_bond anti-spam gate
-        // Economically meaningless.
-        let opener_sig = request.opener_signature.as_deref().ok_or_else(|| {
-            ErrorObjectOwned::owned(-32602, "opener_signature is required", None::<()>)
-        })?;
-        let msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_OPEN_CHALLENGE_V1",
-            &request.deal_id.to_le_bytes(),
-            &request.byte_start.to_le_bytes(),
-            &request.byte_end.to_le_bytes(),
-            &request.challenge_epoch.to_le_bytes(),
-            &request.deadline_epoch.to_le_bytes(),
-            &request.opener_bond.to_le_bytes(),
-            opener.as_bytes(),
-        ]);
-        crate::crypto::primitives::verify_signature(&msg, opener_sig, opener.as_bytes()).map_err(
-            |e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid opener signature: {e}"),
-                    None::<()>,
-                )
-            },
-        )?;
-
-        let challenge_id = self
-            .chain
-            .open_storage_challenge(request)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Invalid challenge: {e}"), None::<()>)
-            })?;
-        let challenge = self
+        let mut challenges: Vec<_> = self
             .chain
             .get_storage_challenges()
             .await
             .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?
             .into_iter()
-            .find(|challenge| challenge.challenge_id == challenge_id);
+            .filter(|challenge| challenge.deal_id == deal_id)
+            .collect();
+        challenges.sort_by_key(|challenge| challenge.challenge_id);
         Ok(serde_json::json!({
-            "challengeId": challenge_id,
-            "challenge": challenge.as_ref().map(retrieval_challenge_to_json),
+            "dealId": deal_id,
+            "count": challenges.len(),
+            "challenges": challenges
+                .iter()
+                .map(|challenge| serde_json::json!({
+                    "challengeId": challenge.challenge_id,
+                    "byteStart": challenge.byte_start,
+                    "byteEnd": challenge.byte_end,
+                    "challengeEpoch": challenge.challenge_epoch,
+                    "deadlineEpoch": challenge.deadline_epoch,
+                    "opener": format!("0x{}", challenge.opener.to_hex()),
+                    "openerBond": challenge.opener_bond,
+                }))
+                .collect::<Vec<_>>(),
         }))
+    }
+
+    async fn storage_open_challenge(
+        &self,
+        request: RetrievalChallengeRequest,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        //: this method opened a challenge and debited the opener bond on
+        // this node alone, outside a block, with a range drawn from this
+        // node's tip.
+        self.require_operator("bud_storageOpenChallenge")?;
+        let _ = request;
+        Err(Self::door_refusal(
+            "Out-of-block challenge opening is refused: it changed the storage registry and \
+             a balance on this node alone. The opener sends a signed Storage transaction \
+             (StorageTx::OpenChallenge) through bud_sendRawTransaction; the block draws the \
+             byte range.",
+        ))
     }
 
     async fn storage_answer_challenge(
         &self,
         response: RetrievalResponse,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: this call changes node-local state outside a block.
+        //: this method settled a challenge (and its slash) on this node
+        // alone, outside a block.
         self.require_operator("bud_storageAnswerChallenge")?;
-        let responder = response.responder;
-
-        // Responder must cryptographically prove ownership of the
-        // Declared address. Without this, any caller can set responder to the
-        // Deal's operator address and bypass the NotTheOperator registry check.
-        let responder_sig = response.responder_signature.as_deref().ok_or_else(|| {
-            ErrorObjectOwned::owned(-32602, "responder_signature is required", None::<()>)
-        })?;
-        let msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_ANSWER_CHALLENGE_V1",
-            &response.challenge_id.to_le_bytes(),
-            &response._range_hash.0,
-            responder.as_bytes(),
-            &response.response_epoch.to_le_bytes(),
-        ]);
-        crate::crypto::primitives::verify_signature(&msg, responder_sig, responder.as_bytes())
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid responder signature: {e}"),
-                    None::<()>,
-                )
-            })?;
-
-        let result = self
-            .chain
-            .answer_storage_challenge(response)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("Invalid response: {e}"), None::<()>)
-            })?;
-        Ok(serde_json::json!({
-            "challengeId": result.challenge_id,
-            "dealId": result.deal_id,
-            "outcome": format!("{:?}", result.outcome),
-            "finalizedEpoch": result.finalized_epoch,
-            "slashedBond": result.slashed_bond,
-        }))
+        let _ = response;
+        Err(Self::door_refusal(
+            "Out-of-block challenge answers are refused: they settled a challenge and its \
+             slash on this node alone. The deal's operator sends a signed Storage transaction \
+             (StorageTx::AnswerChallenge) through bud_sendRawTransaction.",
+        ))
     }
 
     async fn storage_get_economics_summary(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
@@ -4745,6 +4552,27 @@ impl BudlumApiServer for RpcServer {
         }
     }
 
+    async fn subscribe(
+        &self,
+        pending: jsonrpsee::PendingSubscriptionSink,
+        kind: String,
+        address: Option<String>,
+    ) -> jsonrpsee::core::SubscriptionResult {
+        let feed = match crate::rpc::subscriptions::Feed::parse(&kind, address.as_deref()) {
+            Ok(feed) => feed,
+            Err(message) => {
+                pending
+                    .reject(ErrorObjectOwned::owned(-32602, message, None::<()>))
+                    .await;
+                return Ok(());
+            }
+        };
+        let sink = pending.accept().await?;
+        let chain = self.chain.clone();
+        tokio::spawn(feed.run(chain, sink, Self::block_to_json));
+        Ok(())
+    }
+
     async fn bns_resolve_subdomain(
         &self,
         parent_name: String,
@@ -4902,6 +4730,112 @@ impl BudlumApiServer for RpcServer {
             "name": name,
             "owner": owner,
             "cid": cid,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_prepare_renew(
+        &self,
+        name: String,
+        owner: String,
+        duration: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        if duration == 0 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "Renewal duration must be greater than zero",
+                None::<()>,
+            ));
+        }
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+        let data = bincode::serialize(&(name.clone(), duration))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+        let cost = self.chain.bns_calculate_cost(name.clone(), duration).await;
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: cost,
+            fee: 1000,
+            max_fee: 1000,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsRenew,
+        };
+        Ok(serde_json::json!({
+            "name": name,
+            "owner": owner,
+            "duration": duration,
+            "cost": cost,
+            "tx_template": tx,
+        }))
+    }
+
+    async fn bns_prepare_transfer(
+        &self,
+        name: String,
+        owner: String,
+        new_owner: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let clean_owner = owner.strip_prefix("0x").unwrap_or(&owner);
+        let owner_addr = Address::from_hex(clean_owner).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid owner address: {e}"), None::<()>)
+        })?;
+        let clean_new_owner = new_owner.strip_prefix("0x").unwrap_or(&new_owner);
+        let new_owner_addr = Address::from_hex(clean_new_owner).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid new owner address: {e}"),
+                None::<()>,
+            )
+        })?;
+        if new_owner_addr == Address::zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "New owner address cannot be zero",
+                None::<()>,
+            ));
+        }
+        let data = bincode::serialize(&(name.clone(), new_owner_addr))
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e.to_string(), None::<()>))?;
+        let tx = crate::core::transaction::Transaction {
+            from: owner_addr,
+            to: Address::zero(),
+            amount: 0,
+            fee: 500,
+            max_fee: 500,
+            priority_fee: 0,
+            nonce: self.chain.get_nonce(&owner_addr).await,
+            data,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+            hash: String::new(),
+            signature: None,
+            signer_public_key: Vec::new(),
+            authorization: None,
+            chain_id: self.chain.get_chain_id().await,
+            signature_version: crate::core::transaction::SIGNATURE_VERSION_V5,
+            tx_type: crate::core::transaction::TransactionType::BnsTransfer,
+        };
+        Ok(serde_json::json!({
+            "name": name,
+            "owner": owner,
+            "new_owner": new_owner,
             "tx_template": tx,
         }))
     }
@@ -5426,6 +5360,11 @@ impl BudlumApiServer for RpcServer {
 
     async fn budlumxyz_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let apps = self.chain.budlumxyz_get_apps().await;
+        Ok(serde_json::json!(apps))
+    }
+
+    async fn budlumxyz_get_graft_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let apps = self.chain.budlumxyz_get_graft_apps().await;
         Ok(serde_json::json!(apps))
     }
 
@@ -6134,6 +6073,24 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn ai_open_requests(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        let list: Vec<serde_json::Value> = self
+            .chain
+            .get_ai_open_requests()
+            .await
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "request_id": hex::encode(r.request_id.0),
+                    "model_id": hex::encode(r.model_id.0),
+                    "input_commitment": hex::encode(r.input_commitment),
+                    "deadline_block": r.deadline_block,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!(list))
+    }
+
     async fn ai_get_outcome(
         &self,
         request_id: String,
@@ -6739,6 +6696,35 @@ impl BudlumApiServer for RpcServer {
         })
     }
 
+    async fn get_state_snapshot(
+        &self,
+        height: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // A full snapshot is every account and registry the state holds: an
+        // unbounded response, far too expensive to hand to any caller of the
+        // public listener. Operators read it on the loopback listener.
+        self.require_operator("bud_getStateSnapshot")?;
+        let height = match height {
+            Some(height) => height,
+            None => self.chain.get_height().await,
+        };
+        let Some(snapshot) = self.chain.get_state_snapshot_data(height).await else {
+            return Ok(serde_json::Value::Null);
+        };
+        let verified = snapshot.verify();
+        let mut value = serde_json::to_value(snapshot).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("cannot encode state snapshot: {e}"),
+                None::<()>,
+            )
+        })?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert("verified".into(), serde_json::Value::Bool(verified));
+        }
+        Ok(value)
+    }
+
     async fn request_prune(
         &self,
         min_blocks_to_keep: Option<u64>,
@@ -6765,8 +6751,11 @@ impl BudlumApiServer for RpcServer {
         let mempool = self.chain.get_mempool_size().await;
         let base_fee = self.chain.get_base_fee().await;
         let validator_set_hash = self.chain.get_validator_set_hash().await;
+        // item 4: the height the finality certificates have reached.
+        let finalized = self.chain.get_finalized_height().await;
         Ok(serde_json::json!({
             "blockNumber": height,
+            "finalizedHeight": finalized,
             "chainId": chain_id,
             "mempoolSize": mempool,
             "baseFee": base_fee,
@@ -6783,7 +6772,26 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
+    async fn get_quantum_alarm(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
+        Ok(self.chain.quantum_view().await)
+    }
+
     async fn get_domain_info(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned> {
+        //: the facts the chain observed for the domain and the class
+        // derived from them, next to the registry record.
+        let facts = self
+            .chain
+            .quantum_view()
+            .await
+            .get("domains")
+            .and_then(|domains| domains.as_array())
+            .and_then(|domains| {
+                domains
+                    .iter()
+                    .find(|entry| entry["domainId"] == domain_id)
+                    .cloned()
+            })
+            .unwrap_or(serde_json::Value::Null);
         let domain = self
             .chain
             .get_consensus_domains()
@@ -6805,6 +6813,8 @@ impl BudlumApiServer for RpcServer {
                 "lastCommittedHeight": Self::to_hex(domain.last_committed_height),
                 "lastCommittedHash": Self::bytes32_to_0x(domain.last_committed_hash),
                 "validatorSetHash": Self::bytes32_to_0x(domain.validator_set_hash),
+                "quantumClass": facts["quantumClass"].clone(),
+                "observedSchemes": facts["observedSchemes"].clone(),
             })),
             None => Ok(serde_json::json!({
                 "domainId": domain_id,
@@ -7544,7 +7554,7 @@ mod view_claim_tests {
         );
         serde_json::json!({
             "viewerPublicKey": format!("0x{}", hex::encode(kp.public_key_bytes())),
-            "signature": format!("0x{}", hex::encode(kp.sign(&digest))),
+            "signature": format!("0x{}", hex::encode(kp.sign(crate::crypto::ctx::STORAGE_V2, &digest))),
             "issuedAt": issued_at,
         })
     }
@@ -7607,7 +7617,7 @@ mod view_claim_tests {
         );
         let claim = serde_json::json!({
             "viewerPublicKey": format!("0x{}", hex::encode(stranger.public_key_bytes())),
-            "signature": format!("0x{}", hex::encode(stranger.sign(&digest))),
+            "signature": format!("0x{}", hex::encode(stranger.sign(crate::crypto::ctx::STORAGE_V2, &digest))),
             "issuedAt": NOW,
         });
         let err = verify_view_claim(&claim, &content, &key, &owner, &packed, NOW).unwrap_err();

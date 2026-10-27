@@ -1,54 +1,24 @@
-//! WIRING: unwired - no transaction type carries an intent, no settlement path
-//! moves `paid_fee` to a winning solver, and no slash path punishes a bid that
-//! was committed and not honoured. Each of the three is a consensus change.
-//! The section below has said so in prose since this module was written; the
-//! marker makes the gate agree, because prose is not something a gate reads.
+//! WIRING: wired - `SettlementTx::RelayerIntent` carries intent, bid,
+//! fulfilment and expiry writes through the consensus settlement door.
 //!
 //! Relayer Policy Layer primitives.
 //!
-//! This module models user intents and solver bids without introducing a
-//! Whitelist. Relayers remain permissionless; safety comes from signed intent
-//! Bounds, deadlines, replay ids, fee caps and slashable bid commitments.
+//! Relayers remain permissionless; safety comes from signed intent bounds,
+//! deadlines, replay ids, fee caps, explicit owner escrow, anchored receipt
+//! proofs and slashable RELAYER bonds. The settlement door pays the winning
+//! solver from the locked maximum fee and refunds the remainder. An overdue
+//! intent cannot be pruned silently: its owner is refunded and every
+//! unhonoured bid is slashed before the rows leave consensus state.
 //!
-//! # Nothing on the chain reaches this module
-//!
-//! `UserIntent`, `SolverBid` and `IntentSettlement` have **zero** callers
-//! Outside this file and the `pub use` in `relayer/mod.rs`. There is no
-//! Transaction type that carries an intent, no `ChainCommand` that accepts a
-//! Bid, no RPC method that settles one. The 768 lines below are a complete
-//! Economic design with no edge into consensus.
-//!
-//! What actually happens today, in `executor.rs`:
-//!
-//! ```text
-//! TransactionType::UniversalRelay(ext_tx) => {
-//!     let sender = state.get_or_create(&tx.from);
-//!     sender.balance = sender.balance.checked_sub(tx.fee)?;
-//!     sender.nonce = sender.nonce.saturating_add(1);
-//! }
-//! ```
-//!
-//! The sender pays `tx.fee`, and that fee is credited to the **block
-//! Producer**, not to the relayer that will spend external gas executing the
-//! Request. So relaying is unpaid work: a relayer bonds (`RoleId` 3), burns gas
-//! On Ethereum, and earns nothing from the chain for it. `max_fee` is not
-//! Consulted - the flat-fee protocol requires `max_fee == fee` - so a user
-//! Cannot express a ceiling either, and nothing binds the relayer to a price
-//! Before it acts.
-//!
-//! The inbound direction *is* wired: `split_bridge_fee` pays the relayer out
-//! Of the arriving asset when a bridge transfer lands on Budlum. The outbound
-//! Direction, where this module would apply, is not.
-//!
-//! This is a design that has not been connected, not a design that failed.
-//! Wiring it means a transaction type, a settlement path that moves `paid_fee`
-//! From the user to the winning solver, and a slash path for a bid that is
-//! Committed and not honoured - each of which is a consensus change. Recorded
-//! Here so the gap is visible at the definition rather than inferred from a
-//! Grep returning nothing.
+//! The inbound bridge direction remains separate: `split_bridge_fee` pays the
+//! relayer out of an arriving asset. This module is the outbound intent layer,
+//! and it deliberately accepts only externally anchored receipt proofs for the
+//! settlement operation; unsupported action adapters fail closed rather than
+//! claiming that a request completed.
 
 use crate::core::address::Address;
-use crate::core::transaction::ExternalChain;
+use crate::core::transaction::{ExternalChain, RelayerExternalResult};
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +26,33 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_RELAYER_INTENTS: usize = 10_000;
 pub const MAX_RELAYER_BIDS_PER_INTENT: usize = 64;
 pub const MAX_RELAYER_SETTLEMENTS: usize = 10_000;
+/// Consensus accepts a bounded Merkle receipt for an external intent. The
+/// bridge result path uses the same ceiling, so an intent cannot smuggle a
+/// larger proof through a different transaction door.
+pub const MAX_RELAYER_INTENT_PROOF_BYTES: u64 = 4 * 1024;
+
+/// A block-only intent-layer write. The signed transaction sender is the actor:
+/// the intent owner opens, the relayer bids and fulfills, and anyone may expire
+/// an overdue intent to return its escrow and slash unhonoured bids.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RelayerIntentTx {
+    /// Open an intent and lock `intent.max_fee` from its owner.
+    Open {
+        intent: Box<UserIntent>,
+        policy: Box<PolicyEnvelope>,
+    },
+    /// Commit a solver quote and slashable proof commitment.
+    Bid(Box<SolverBid>),
+    /// Fulfil the sender's bid with an anchored external receipt proof.
+    Settle {
+        intent_id: [u8; 32],
+        paid_fee: u64,
+        result: Box<RelayerExternalResult>,
+    },
+    /// Expire an intent after its deadline, refunding its owner and slashing
+    /// every bid that was committed but not honoured.
+    Expire { intent_id: [u8; 32] },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RelayerActionKind {
@@ -322,12 +319,111 @@ pub struct IntentSettlement {
     pub status: IntentSettlementStatus,
 }
 
+/// Verify that `result` is anchored, and hand back the message it proves.
+///
+/// The checks every message-carrying external result needs before anyone
+/// reads its message: success, a bounded transaction hash and proof, a
+/// non-zero root that is the one anchored in consensus state for the
+/// result's chain, a well-formed message id with no sender envelope, and a
+/// Merkle path from the result leaf (which commits to the message fields)
+/// to that root. What the message must say is the caller's question.
+pub fn verify_anchored_result<'a>(
+    external_roots: &BTreeMap<u32, [u8; 32]>,
+    result: &'a RelayerExternalResult,
+) -> Result<&'a crate::cross_domain::message::CrossDomainMessage, String> {
+    if !result.success {
+        return Err("external result reports failure".into());
+    }
+    if result.tx_hash.is_empty() || result.tx_hash.len() > 256 {
+        return Err("external result tx_hash length invalid".into());
+    }
+    if result.external_state_root == [0u8; 32] {
+        return Err("external result root cannot be zero".into());
+    }
+    if result.receipt_proof.len() as u64 > MAX_RELAYER_INTENT_PROOF_BYTES {
+        return Err("external result receipt proof exceeds the consensus bound".into());
+    }
+    let message = result
+        .message
+        .as_ref()
+        .ok_or_else(|| "external result carries no message".to_string())?;
+    if !message.verify_id() {
+        return Err("external result message id is invalid".into());
+    }
+    if !message.sender_public_key.is_empty() || !message.sender_signature.is_empty() {
+        return Err("external result message carries a sender envelope".into());
+    }
+    if message.source_domain != result.chain.domain_id() {
+        return Err("external result message comes from another domain than its chain".into());
+    }
+    match external_roots.get(&result.chain.domain_id()) {
+        Some(root) if *root == result.external_state_root => {}
+        _ => return Err("external result root is not anchored for its chain".into()),
+    }
+    let proof: crate::cross_domain::event_tree::MerkleProof = bincode::options()
+        .with_fixint_encoding()
+        .with_limit(MAX_RELAYER_INTENT_PROOF_BYTES)
+        .deserialize(&result.receipt_proof)
+        .map_err(|e| format!("invalid external result receipt proof: {e}"))?;
+    if proof.siblings.len() > 64 || proof.leaf != result.result_leaf() {
+        return Err("external result receipt proof leaf/path is invalid".into());
+    }
+    if !proof.verify(result.external_state_root) {
+        return Err("external result receipt proof does not reach the anchored root".into());
+    }
+    Ok(message)
+}
+
+/// The message kind an external executor emits when it has carried out an
+/// intent: the adapter turns that event into the cross-domain message a
+/// settlement result carries.
+pub const INTENT_EXECUTED_KIND: &[u8] = b"budlum/relayer/intent-executed/v1";
+
+/// Verify an external receipt used to fulfil a relayer intent.
+///
+/// The result has to prove that *this* intent was carried out, not merely
+/// that something happened on the target chain: on top of
+/// [`verify_anchored_result`], its message must name the intent
+/// (`correlation_id`), repeat the action's payload hash and carry the
+/// intent-executed kind. A solver cannot settle with a self-signed receipt,
+/// with a root nobody anchored, or with a real but unrelated event.
+pub fn verify_intent_result(
+    external_roots: &BTreeMap<u32, [u8; 32]>,
+    intent: &UserIntent,
+    result: &RelayerExternalResult,
+) -> Result<(), String> {
+    let RelayerActionKind::ExternalTransaction {
+        chain,
+        payload_hash,
+        ..
+    } = &intent.action
+    else {
+        return Err("only externally anchored relayer intents have a settlement verifier".into());
+    };
+    if result.chain != *chain {
+        return Err("relayer intent result names another chain than the intent".into());
+    }
+    let message = verify_anchored_result(external_roots, result)?;
+    if message.correlation_id != Some(intent.intent_id)
+        || message.payload_hash != *payload_hash
+        || message.kind
+            != crate::cross_domain::message::MessageKind::Custom(INTENT_EXECUTED_KIND.to_vec())
+    {
+        return Err("relayer intent result does not prove this intent was executed".into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RelayerPolicyRegistry {
     #[serde(with = "crate::core::map_keys")]
     pub intents: BTreeMap<[u8; 32], UserIntent>,
     #[serde(with = "crate::core::map_keys")]
     pub bids: BTreeMap<[u8; 32], Vec<SolverBid>>,
+    /// Maximum fee locked by the intent owner. This is explicit consensus
+    /// state: it is debited from the owner and cannot disappear in a prune.
+    #[serde(default, with = "crate::core::map_keys")]
+    pub escrowed: BTreeMap<[u8; 32], u64>,
     #[serde(with = "crate::core::map_keys")]
     pub settlements: BTreeMap<[u8; 32], IntentSettlement>,
     /// Every intent id that was ever settled. Settlement rows are pruned by
@@ -341,6 +437,15 @@ pub struct RelayerPolicyRegistry {
 impl RelayerPolicyRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.intents.is_empty()
+            && self.bids.is_empty()
+            && self.escrowed.is_empty()
+            && self.settlements.is_empty()
+            && self.settled_intents.is_empty()
     }
 
     pub fn submit_intent(
@@ -360,6 +465,76 @@ impl RelayerPolicyRegistry {
         let id = intent.intent_id;
         self.intents.insert(id, intent);
         Ok(id)
+    }
+
+    pub fn lock_escrow(&mut self, intent_id: [u8; 32], amount: u64) -> Result<(), String> {
+        if amount == 0 {
+            return Err("RelayerPolicyRegistry cannot lock zero escrow".into());
+        }
+        if !self.intents.contains_key(&intent_id) {
+            return Err("RelayerPolicyRegistry intent not found".into());
+        }
+        if self.escrowed.contains_key(&intent_id) {
+            return Err("RelayerPolicyRegistry intent escrow already exists".into());
+        }
+        self.escrowed.insert(intent_id, amount);
+        Ok(())
+    }
+
+    /// Intent fees locked from their owners and not yet paid or refunded.
+    #[must_use]
+    pub fn total_escrowed_supply(&self) -> u128 {
+        self.escrowed.values().fold(0u128, |total, amount| {
+            total.saturating_add(u128::from(*amount))
+        })
+    }
+
+    pub fn escrowed_amount(&self, intent_id: &[u8; 32]) -> u64 {
+        self.escrowed.get(intent_id).copied().unwrap_or(0)
+    }
+
+    pub fn take_escrow(&mut self, intent_id: &[u8; 32]) -> Option<u64> {
+        self.escrowed.remove(intent_id)
+    }
+
+    /// Remove an overdue intent and mark it settled as expired. The returned
+    /// bids are the exact commitments that the transaction door must slash;
+    /// pruning cannot silently erase an unhonoured bid or its owner's refund.
+    pub fn expire_intent(
+        &mut self,
+        intent_id: [u8; 32],
+        current_block: u64,
+    ) -> Result<(Address, u64, Vec<SolverBid>), String> {
+        let intent = self
+            .intents
+            .get(&intent_id)
+            .ok_or_else(|| "RelayerPolicyRegistry intent not found".to_string())?;
+        if self.is_settled(&intent_id) {
+            return Err("RelayerPolicyRegistry intent already settled".into());
+        }
+        if intent.deadline_block > current_block {
+            return Err("RelayerPolicyRegistry intent is not expired".into());
+        }
+        let owner = intent.owner;
+        let escrow = self
+            .escrowed
+            .remove(&intent_id)
+            .ok_or_else(|| "RelayerPolicyRegistry intent has no escrow".to_string())?;
+        let bids = self.bids.remove(&intent_id).unwrap_or_default();
+        self.intents.remove(&intent_id);
+        self.settled_intents.insert(intent_id);
+        let settlement = IntentSettlement {
+            intent_id,
+            relayer: Address::zero(),
+            paid_fee: 0,
+            settled_at_block: current_block,
+            status: IntentSettlementStatus::Expired,
+        };
+        if self.settlements.len() >= MAX_RELAYER_SETTLEMENTS {
+            self.prune_settlements(MAX_RELAYER_SETTLEMENTS.saturating_sub(1));
+        }
+        self.settlements.insert(intent_id, settlement);
+        Ok((owner, escrow, bids))
     }
 
     pub fn submit_bid(&mut self, bid: SolverBid, current_block: u64) -> Result<(), String> {
@@ -445,15 +620,17 @@ impl RelayerPolicyRegistry {
         self.settled_intents.contains(intent_id) || self.settlements.contains_key(intent_id)
     }
 
-    /// Drop intents past their deadline together with their bids. The replay
-    /// guard of an expired intent goes with it: once the deadline has passed,
-    /// `settle_intent` refuses the intent on its own, so the guard has
-    /// nothing left to protect.
+    /// Drop only legacy/unescrowed intents past their deadline. Escrowed
+    /// intents must go through the block-only `Expire` door so the owner is
+    /// refunded and every unhonoured bid is slashed before the rows vanish.
     pub fn prune_expired(&mut self, current_block: u64) -> usize {
         let expired: Vec<[u8; 32]> = self
             .intents
             .iter()
-            .filter_map(|(id, intent)| (intent.deadline_block <= current_block).then_some(*id))
+            .filter_map(|(id, intent)| {
+                (intent.deadline_block <= current_block && !self.escrowed.contains_key(id))
+                    .then_some(*id)
+            })
             .collect();
         for id in &expired {
             self.intents.remove(id);
@@ -491,6 +668,11 @@ impl RelayerPolicyRegistry {
             hasher.update(b"intent");
             hasher.update(id);
             hasher.update(intent.calculate_id());
+        }
+        for (intent_id, amount) in &self.escrowed {
+            hasher.update(b"escrow");
+            hasher.update(intent_id);
+            hasher.update(amount.to_le_bytes());
         }
         for (intent_id, bids) in &self.bids {
             hasher.update(b"bids");
@@ -609,6 +791,86 @@ mod tests {
             7,
             policy.policy_hash(),
         )
+    }
+
+    /// An anchored, well-formed result settles an intent only when its
+    /// message names that intent and repeats its payload hash.
+    #[test]
+    fn an_intent_result_must_prove_this_intent() {
+        use crate::cross_domain::message::{
+            CrossDomainMessage, CrossDomainMessageParams, MessageKind,
+        };
+        let owner = addr(1);
+        let policy = make_policy(owner);
+        let chain = ExternalChain::Custom(2);
+        let payload_hash = [0x5A; 32];
+        let intent = UserIntent::new(
+            owner,
+            1,
+            2,
+            RelayerActionKind::ExternalTransaction {
+                chain,
+                target_address: "0xabc".into(),
+                payload_hash,
+            },
+            50,
+            50,
+            7,
+            policy.policy_hash(),
+        );
+        let result_for = |correlation: [u8; 32], payload: [u8; 32]| {
+            let message = CrossDomainMessage::new_correlated(
+                CrossDomainMessageParams {
+                    source_domain: chain.domain_id(),
+                    target_domain: 1,
+                    source_height: 9,
+                    event_index: 0,
+                    nonce: 0,
+                    sender: addr(9),
+                    recipient: owner,
+                    payload_hash: payload,
+                    kind: MessageKind::Custom(INTENT_EXECUTED_KIND.to_vec()),
+                    expiry_height: 0,
+                },
+                correlation,
+            );
+            let mut result = RelayerExternalResult {
+                chain,
+                tx_hash: "0x01".into(),
+                success: true,
+                message: Some(message),
+                receipt_proof: Vec::new(),
+                external_state_root: [0u8; 32],
+            };
+            // A one-leaf tree: the anchored root is the leaf itself.
+            let leaf = result.result_leaf();
+            result.receipt_proof =
+                bincode::serialize(&crate::cross_domain::event_tree::MerkleProof {
+                    leaf,
+                    index: 0,
+                    siblings: Vec::new(),
+                })
+                .unwrap();
+            result.external_state_root = leaf;
+            result
+        };
+
+        let good = result_for(intent.intent_id, payload_hash);
+        let roots = BTreeMap::from([(chain.domain_id(), good.external_state_root)]);
+        assert!(verify_intent_result(&roots, &intent, &good).is_ok());
+
+        // A real, anchored event about another intent settles nothing.
+        let other = result_for([0x77; 32], payload_hash);
+        let roots = BTreeMap::from([(chain.domain_id(), other.external_state_root)]);
+        assert!(verify_intent_result(&roots, &intent, &other).is_err());
+
+        // Nor does one with another payload.
+        let wrong = result_for(intent.intent_id, [0x5B; 32]);
+        let roots = BTreeMap::from([(chain.domain_id(), wrong.external_state_root)]);
+        assert!(verify_intent_result(&roots, &intent, &wrong).is_err());
+
+        // Nor an unanchored root.
+        assert!(verify_intent_result(&BTreeMap::new(), &intent, &good).is_err());
     }
 
     #[test]
@@ -928,58 +1190,33 @@ mod tests {
             .contains("not found"));
     }
 
-    /// The policy layer is unreachable from consensus, and the relay fee goes
-    /// To the block producer rather than the relayer.
-    ///
-    /// `UserIntent`, `SolverBid` and `IntentSettlement` have no callers outside
-    /// This module. No transaction type carries an intent, no `ChainCommand`
-    /// Accepts a bid, no RPC settles one. Meanwhile `TransactionType::UniversalRelay`
-    /// Debits `tx.fee` from the sender and stops, and that fee is credited to
-    /// The block producer, so a relayer that spends external gas on the request
-    /// Earns nothing from the chain for it.
-    ///
-    /// This pins the gap so it cannot be half-closed by accident. When a real
-    /// Settlement path lands, this test fails and whoever wired it has to
-    /// Delete it deliberately - having also moved `paid_fee` to the winning
-    /// Solver and given a committed-but-unhonoured bid something to lose.
     #[test]
-    fn the_policy_layer_is_still_unwired_and_relaying_is_still_unpaid() {
-        let executor_src = include_str!("../execution/executor.rs");
-
-        for kind in ["UserIntent", "SolverBid", "IntentSettlement"] {
-            assert!(
-                !executor_src.contains(kind),
-                "{kind} now reaches the executor - settle it to the solver and \
-                 give an unhonoured bid something to lose, then drop this test"
-            );
-        }
-
-        // The relay arm still only takes the flat fee. If it grew a credit to
-        // anyone, this window would no longer look like this.
-        let at = executor_src
-            .find("TransactionType::UniversalRelay(ext_tx)")
-            .expect("the relay arm must still exist");
-        // A bounded window that stops at the next arm; the end is clamped to
-        // the source length and moved back onto a char boundary, so a short
-        // tail or a multi-byte character cannot turn this into a slice panic.
-        let tail = &executor_src[at..];
-        let mut window_end = tail.len().min(600);
-        while !tail.is_char_boundary(window_end) {
-            window_end -= 1;
-        }
-        let arm = &tail[..window_end];
-        let end = arm
-            .find("TransactionType::RelayerResult")
-            .unwrap_or(arm.len());
-        let arm = &arm[..end];
-        assert!(
-            arm.contains("checked_sub(tx.fee)"),
-            "the relay arm no longer debits a flat fee - re-read this test"
-        );
-        assert!(
-            !arm.contains("try_add_balance") && !arm.contains("checked_add"),
-            "the relay arm now credits someone - if that is the relayer, this \
-             gap is closed and the test should go"
-        );
+    fn escrowed_expiry_returns_owner_value_and_marks_intent_settled() {
+        let owner = addr(1);
+        let policy = make_policy(owner);
+        let intent = intent(owner, &policy);
+        let mut registry = RelayerPolicyRegistry::new();
+        let intent_id = registry.submit_intent(intent, &policy, 10).unwrap();
+        registry.lock_escrow(intent_id, 50).unwrap();
+        registry
+            .submit_bid(
+                SolverBid {
+                    intent_id,
+                    relayer: addr(9),
+                    quoted_fee: 40,
+                    proof_commitment: [3u8; 32],
+                    bond: 10,
+                    expires_at_block: 80,
+                },
+                10,
+            )
+            .unwrap();
+        assert_eq!(registry.prune_expired(50), 0);
+        let (returned_owner, escrow, bids) = registry.expire_intent(intent_id, 50).unwrap();
+        assert_eq!(returned_owner, owner);
+        assert_eq!(escrow, 50);
+        assert_eq!(bids.len(), 1);
+        assert!(registry.is_settled(&intent_id));
+        assert!(registry.escrowed.is_empty());
     }
 }

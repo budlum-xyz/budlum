@@ -612,7 +612,6 @@ mod rpc_tests {
 
     #[tokio::test]
     async fn test_rpc_settlement_methods() {
-        let (server, chain) = setup().await;
         let domain = crate::domain::plugin::default_domain(
             1,
             crate::domain::ConsensusKind::PoW,
@@ -620,10 +619,13 @@ mod rpc_tests {
             "pow-header-chain-v1",
             1,
         );
-        chain
+        //: a domain registers in block (`SettlementTx::RegisterDomain`);
+        // the fixture writes the registry before the actor starts.
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        blockchain
             .register_consensus_domain(domain.clone())
-            .await
             .unwrap();
+        let (server, chain) = setup_with_blockchain(blockchain).await;
 
         let mut block = crate::core::block::Block::new(1, "aa".repeat(32), vec![]);
         block.timestamp = 1234;
@@ -637,19 +639,26 @@ mod rpc_tests {
             .submit_domain_commitment(commitment.clone())
             .await
             .unwrap();
-        let sealed = chain.seal_global_header().await.unwrap();
+        // A commitment accepted through the test-only compatibility shim is
+        // not a checkpoint block. The preview is readable, but it must not be
+        // exposed as a committed global header or survive as one in the RPC.
+        let preview = chain.build_global_header(None).await.unwrap();
 
         let info = server.get_settlement_info().await.unwrap();
-        assert_eq!(info["globalHeight"], 1);
+        assert_eq!(info["globalHeight"], 0);
         assert_eq!(info["domainCommitmentCount"], 1);
-        assert!(info["latestGlobalHash"].as_str().unwrap().len() == 64);
+        assert_eq!(info["proofMarketActiveTasks"], 0);
+        assert_eq!(info["proofMarketPendingReceipts"], 0);
+        assert_eq!(info["proofMarketEscrowedCreators"], 0);
+        assert!(info["proofMarketRoot"].is_string());
+        assert!(info["latestGlobalHash"].is_null());
+        assert_eq!(
+            info["pendingGlobalHash"],
+            format!("0x{}", preview.calculate_hash())
+        );
 
         let header = server.get_global_header(0).await.unwrap();
-        assert_eq!(header["globalHeight"], "0x0");
-        assert_eq!(
-            header["hash"].as_str().unwrap(),
-            format!("0x{}", sealed.calculate_hash())
-        );
+        assert!(header.is_null(), "uncommitted previews must not be served");
 
         let missing = server.get_global_header(999).await.unwrap();
         assert!(missing.is_null());
@@ -674,16 +683,15 @@ mod rpc_tests {
             "poa-authority-quorum",
             0,
         );
-        let registration = server
-            .register_consensus_domain(poa_domain.clone())
+        let refused = server
+            .register_consensus_domain(poa_domain)
             .await
-            .unwrap();
-        assert_eq!(registration["domainId"], 2);
-        assert!(registration["domainRegistryRoot"]
-            .as_str()
-            .unwrap()
-            .starts_with("0x"));
-        assert!(server.register_consensus_domain(poa_domain).await.is_err());
+            .expect_err("out-of-block domain registration is refused");
+        assert!(
+            refused.message().contains("SettlementTx::RegisterDomain"),
+            "the refusal names the transaction door: {}",
+            refused.message()
+        );
         assert_eq!(
             server
                 .get_consensus_domains()
@@ -692,7 +700,7 @@ mod rpc_tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            1
         );
 
         let mut block2 = block.clone();
@@ -876,34 +884,120 @@ mod rpc_tests {
         );
 
         let asset_id = crate::cross_domain::AssetId([42u8; 32]);
-        let bridge_registration = server.register_bridge_asset(asset_id, 1).await.unwrap();
-        assert_eq!(bridge_registration["status"], "registered");
+        let refused = server
+            .register_bridge_asset(asset_id, 1)
+            .await
+            .expect_err("out-of-block bridge asset registration is refused");
+        assert!(
+            refused.message().contains("BridgeTx::RegisterAsset"),
+            "the refusal names the transaction door: {}",
+            refused.message()
+        );
 
         // (security audit §3) the bridge-lock → mint → burn → unlock
         // Happy path is exercised by `src/tests/bridge_lifecycle.rs` (an
-        // Integration test against the internal `Blockchain` API), not via
-        // RPC. The RPC `bud_lockBridgeTransfer` is REMOVED because it
-        // Allowed unauthenticated permanent DoS of any `asset_id`.
+        // integration test against the internal `Blockchain` API), not via
+        // RPC. The RPC `bud_lockBridgeTransfer` is removed because it
+        // allowed unauthenticated permanent DoS of any `asset_id`.
         //
         // What this RPC test still proves: domain registration, weak-proof
-        // Rejection, relayed submit path with active-relayer gate, and
-        // Global-header sealing - i.e. the full settlement surface minus
-        // The deprecated `lock_bridge_transfer` flow.
+        // rejection, the relayed submit path with its active-relayer gate,
+        // and the global-header refusal/read surface - the full settlement
+        // surface minus the deprecated `lock_bridge_transfer` flow.
         let _ = Address::from([11u8; 32]);
         let _ = Address::from([12u8; 32]);
 
-        // Re-seal the global header to confirm the RPC surface still
-        // Accepts new headers after the bridge-lock removal.
-        let rpc_sealed = server.seal_global_header().await.unwrap();
-        assert_eq!(rpc_sealed["globalHeight"], "0x1");
-        assert!(rpc_sealed["domainRegistryRoot"]
-            .as_str()
-            .unwrap()
-            .starts_with("0x"));
+        // /: the global header is built in block at every
+        // finality checkpoint. Sealing one from RPC is refused and names the
+        // read methods, and the read method answers.
+        let refused = server
+            .seal_global_header()
+            .await
+            .expect_err("sealing a global header out of block is refused");
+        assert!(
+            refused.message().contains("bud_getGlobalHeader"),
+            "the refusal names the read method: {}",
+            refused.message()
+        );
+        assert!(server.get_global_header(1).await.is_ok());
     }
 
+    /// /: the external-domain writes are `ExternalDomain`
+    /// transactions applied in block. Their operator RPCs refuse and name
+    /// the transaction; prover slashing is closed and says why. Nothing is
+    /// registered.
     #[tokio::test]
-    async fn test_storage_rpc_full_lifecycle_register_deal_challenge_answer() {
+    async fn the_external_domain_write_rpcs_refuse_and_name_their_doors() {
+        let (server, _bc) = setup().await;
+        let key = format!("0x{}", "11".repeat(32));
+        let refusals = [
+            (
+                server
+                    .register_external_domain(serde_json::json!({}))
+                    .await
+                    .expect_err("registration is a transaction"),
+                "ExternalDomainTx::Register",
+            ),
+            (
+                server
+                    .submit_external_evidence(serde_json::json!({}))
+                    .await
+                    .expect_err("evidence is a transaction"),
+                "ExternalDomainTx::SubmitEvidence",
+            ),
+            (
+                server
+                    .readmit_external_domain(key.clone(), "recovered".to_string())
+                    .await
+                    .expect_err("readmission is a transaction"),
+                "ExternalDomainTx::Readmit",
+            ),
+            (
+                server
+                    .schedule_external_fork(key.clone(), 2, 3, 500, 10)
+                    .await
+                    .expect_err("a fork is a transaction"),
+                "ExternalDomainTx::ScheduleFork",
+            ),
+            (
+                server
+                    .bond_external_prover(serde_json::json!({}))
+                    .await
+                    .expect_err("a prover bond is a transaction"),
+                "ExternalDomainTx::BondProver",
+            ),
+            (
+                server
+                    .set_external_quorum_policy(serde_json::json!({}))
+                    .await
+                    .expect_err("a quorum policy is a transaction"),
+                "ExternalDomainTx::SetQuorumPolicy",
+            ),
+            (
+                server
+                    .slash_external_prover(serde_json::json!({}))
+                    .await
+                    .expect_err("prover slashing is closed"),
+                "no proof that an accepted attestation was false",
+            ),
+        ];
+        for (err, needle) in refusals {
+            assert!(
+                err.message().contains(needle),
+                "the refusal names {needle}: {}",
+                err.message()
+            );
+        }
+        let domains = server.get_external_domains().await.unwrap();
+        assert_eq!(domains["domains"], serde_json::json!([]));
+    }
+
+    ///: the five storage writes are `StorageTx` transactions applied in
+    /// block (covered in `src/domain/storage_tx.rs`). Their operator RPCs
+    /// refuse every call, name the transaction door, and change nothing:
+    /// the manifest stays unregistered and no balance moves.
+    #[tokio::test]
+    async fn the_storage_write_rpcs_refuse_and_name_their_transaction_doors() {
         let (server, bc) = setup().await;
         let manifest = crate::storage::ContentManifest::from_bytes_sliced(
             b"hello storage rpc lifecycle test",
@@ -911,283 +1005,115 @@ mod rpc_tests {
         )
         .unwrap();
         let s_id = manifest.shards[0].shard_id;
-
-        let reg_res = server
-            .storage_register_manifest(manifest.clone())
+        let op = Address::from([31u8; 32]);
+        let payer = Address::from([32u8; 32]);
+        bc.credit_development_account(&payer, 100_000_000)
             .await
-            .unwrap();
-        assert_eq!(reg_res["shardCount"], manifest.shard_count);
+            .expect("devnet credit");
+        let payer_before = bc.get_balance(&payer).await;
+        let economics = crate::domain::storage_deal::StorageEconomicsParams {
+            operator_bond: 2_000_000,
+            fee_per_byte_epoch: 10,
+        };
+
+        let refusals = [
+            (
+                server
+                    .storage_register_manifest(manifest.clone())
+                    .await
+                    .expect_err("manifest registration is a transaction"),
+                "StorageTx::RegisterManifest",
+            ),
+            (
+                server
+                    .storage_open_deal(
+                        1,
+                        manifest.clone(),
+                        format!("0x{}", hex::encode(s_id.0)),
+                        format!("0x{}", op.to_hex()),
+                        format!("0x{}", payer.to_hex()),
+                        0,
+                        10,
+                        100,
+                        economics.clone(),
+                        crate::domain::storage_params::StorageDomainParams::default(),
+                        Some(valid_merkle_proof()),
+                        Some([0x42u8; 32]),
+                        7,
+                        String::new(),
+                        String::new(),
+                    )
+                    .await
+                    .expect_err("deal opening is a transaction"),
+                "StorageTx::OpenDeal",
+            ),
+            (
+                server
+                    .storage_accept_reallocation(
+                        0,
+                        format!("0x{}", op.to_hex()),
+                        format!("0x{}", payer.to_hex()),
+                        0,
+                        10,
+                        economics,
+                        crate::domain::storage_params::StorageDomainParams::default(),
+                        None,
+                        None,
+                        7,
+                        String::new(),
+                        String::new(),
+                    )
+                    .await
+                    .expect_err("repair acceptance is a transaction"),
+                "StorageTx::AcceptReallocation",
+            ),
+            (
+                server
+                    .storage_open_challenge(
+                        crate::domain::storage_deal::RetrievalChallengeRequest {
+                            deal_id: 0,
+                            byte_start: 0,
+                            byte_end: 15,
+                            challenge_epoch: 0,
+                            deadline_epoch: 25,
+                            opener_bond: 50,
+                            opener: Some(payer),
+                            opener_signature: None,
+                        },
+                    )
+                    .await
+                    .expect_err("challenge opening is a transaction"),
+                "StorageTx::OpenChallenge",
+            ),
+            (
+                server
+                    .storage_answer_challenge(crate::domain::storage_deal::RetrievalResponse {
+                        challenge_id: 0,
+                        _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
+                        responder: op,
+                        response_epoch: 18,
+                        responder_signature: None,
+                        proof_bytes: None,
+                    })
+                    .await
+                    .expect_err("challenge answers are transactions"),
+                "StorageTx::AnswerChallenge",
+            ),
+        ];
+        for (err, door) in refusals {
+            assert!(
+                err.message().contains(door) && err.message().contains("bud_sendRawTransaction"),
+                "the refusal names {door}: {}",
+                err.message()
+            );
+        }
 
         let get_man = server
             .storage_get_manifest(format!("0x{}", hex::encode(manifest.manifest_id.0)))
             .await
             .unwrap();
-        assert_eq!(get_man["found"], true);
-
-        let op_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let op = Address::from(op_keypair.public_key_bytes());
-        let payer_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let payer = Address::from(payer_keypair.public_key_bytes());
-
-        // Give payer and operator enough balance for deal fees and bond
-        bc.credit_development_account(&payer, 100_000_000)
-            .await
-            .expect("devnet credit");
-        bc.credit_development_account(&op, 100_000_000)
-            .await
-            .expect("devnet credit");
-
-        // The deal-open RPC now requires both the payer and the operator to
-        // sign the exact deal parameters. Without these, an unsigned call
-        // could spend any account the caller names (HIGH, CWE-862).
-        // The preimage also binds the manifest-derived shard size and the
-        // manifest id, because the chain prices the escrow from the manifest
-        // entry; a signature must not survive a forged manifest (HIGH,
-        // CWE-347). A caller-chosen request_id is bound too, so one signed
-        // authorization cannot be replayed (MEDIUM, CWE-294).
-        let request_id: u64 = 7;
-        let chain_id = bc.get_chain_id().await;
-        let deal_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_OPEN_DEAL_V2",
-            &chain_id.to_le_bytes(),
-            &1u32.to_le_bytes(),
-            s_id.as_bytes(),
-            op.as_bytes(),
-            payer.as_bytes(),
-            &0u8.to_le_bytes(),
-            &10u64.to_le_bytes(),
-            &100u64.to_le_bytes(),
-            &u64::from(manifest.shards[0].size).to_le_bytes(),
-            manifest.manifest_id.as_bytes(),
-            &10u64.to_le_bytes(),
-            &2_000_000u64.to_le_bytes(),
-            &request_id.to_le_bytes(),
-        ]);
-        let payer_sig = payer_keypair.sign(&deal_msg).to_vec();
-        let op_sig = op_keypair.sign(&deal_msg).to_vec();
-
-        let deal_res = server
-            .storage_open_deal(
-                1,
-                manifest.clone(),
-                format!("0x{}", hex::encode(s_id.0)),
-                format!("0x{}", op.to_hex()),
-                format!("0x{}", payer.to_hex()),
-                0,
-                10,
-                100,
-                crate::domain::storage_deal::StorageEconomicsParams {
-                    operator_bond: 2_000_000,
-                    fee_per_byte_epoch: 10,
-                },
-                crate::domain::storage_params::StorageDomainParams::default(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-                request_id,
-                hex::encode(payer_sig.clone()),
-                hex::encode(op_sig.clone()),
-            )
-            .await
-            .unwrap();
-        let deal_id = deal_res["dealId"].as_u64().unwrap();
-
-        let watcher_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let watcher = Address::from(watcher_keypair.public_key_bytes());
-        // The opener bond is now really debited from the opener's balance, so
-        // The watcher requires one. The field was previously documented as
-        // Debited and never was, which let a freshly generated key with a zero
-        // Balance open a challenge - exactly what this test was doing.
-        bc.credit_development_account(&watcher, 100_000)
-            .await
-            .expect("devnet credit");
-        // The challenge window is validated against the chain's current
-        // epoch (a far-future challenge_epoch would push the rate-limit
-        // minimum out for good); this fresh chain sits at epoch 0.
-        let open_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_OPEN_CHALLENGE_V1",
-            &deal_id.to_le_bytes(),
-            &0u64.to_le_bytes(),
-            &15u64.to_le_bytes(),
-            &0u64.to_le_bytes(),
-            &25u64.to_le_bytes(),
-            &50u64.to_le_bytes(),
-            watcher.as_bytes(),
-        ]);
-        let open_sig = watcher_keypair.sign(&open_msg).to_vec();
-
-        let chal_res = server
-            .storage_open_challenge(crate::domain::storage_deal::RetrievalChallengeRequest {
-                deal_id,
-                byte_start: 0,
-                byte_end: 15,
-                challenge_epoch: 0,
-                deadline_epoch: 25,
-                opener_bond: 50,
-                opener: Some(watcher),
-                opener_signature: Some(open_sig),
-            })
-            .await
-            .unwrap();
-        let challenge_id = chal_res["challengeId"].as_u64().unwrap();
-
-        let answer_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_ANSWER_CHALLENGE_V1",
-            &challenge_id.to_le_bytes(),
-            &[0xAA; 32],
-            op.as_bytes(),
-            &18u64.to_le_bytes(),
-        ]);
-        let answer_sig = op_keypair.sign(&answer_msg).to_vec();
-
-        let ans_res = server
-            .storage_answer_challenge(crate::domain::storage_deal::RetrievalResponse {
-                challenge_id,
-                _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
-                responder: op,
-                response_epoch: 18,
-                responder_signature: Some(answer_sig),
-                proof_bytes: Some(b"test-mock-proof".to_vec()),
-            })
-            .await
-            .unwrap();
-        assert_eq!(ans_res["outcome"], "Answered");
-
-        let outcome = server.storage_get_outcome(challenge_id).await.unwrap();
-        assert_eq!(outcome["challengeId"], serde_json::json!(challenge_id));
-        assert_eq!(outcome["outcome"], "Answered");
-        assert_eq!(
-            outcome["proofKind"], "interim_availability_only",
-            "retrieval results must not be presented as full Proof-of-Storage"
-        );
-        assert_eq!(outcome["proof_kind"], "interim_availability_only");
-
-        // HIGH (CWE-862) regression: an unsigned deal open must be
-        // refused before any balance changes. The signatures are required,
-        // so an empty/forged pair is rejected by the RPC, never reaching the
-        // chain path that debits escrow and locks bond.
-        let unsigned = server
-            .storage_open_deal(
-                1,
-                manifest.clone(),
-                format!("0x{}", hex::encode(s_id.0)),
-                format!("0x{}", op.to_hex()),
-                format!("0x{}", payer.to_hex()),
-                0,
-                10,
-                100,
-                crate::domain::storage_deal::StorageEconomicsParams {
-                    operator_bond: 2_000_000,
-                    fee_per_byte_epoch: 10,
-                },
-                crate::domain::storage_params::StorageDomainParams::default(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-                request_id,
-                String::new(),
-                String::new(),
-            )
-            .await;
-        assert!(
-            unsigned.is_err(),
-            "an unsigned deal open must be refused, not debit arbitrary accounts"
-        );
-
-        // A signature from the wrong key must also be refused.
-        let wrong_key = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let wrong_sig = hex::encode(wrong_key.sign(&deal_msg));
-        let wrong_payer = server
-            .storage_open_deal(
-                1,
-                manifest.clone(),
-                format!("0x{}", hex::encode(s_id.0)),
-                format!("0x{}", op.to_hex()),
-                format!("0x{}", payer.to_hex()),
-                0,
-                10,
-                100,
-                crate::domain::storage_deal::StorageEconomicsParams {
-                    operator_bond: 2_000_000,
-                    fee_per_byte_epoch: 10,
-                },
-                crate::domain::storage_params::StorageDomainParams::default(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-                request_id,
-                wrong_sig,
-                hex::encode(op_sig.clone()),
-            )
-            .await;
-        assert!(
-            wrong_payer.is_err(),
-            "a payer signature from the wrong key must be refused"
-        );
-
-        // HIGH (CWE-347) regression: the signed preimage binds the
-        // manifest-derived shard size and the manifest id, so a valid
-        // signature cannot be replayed against a forged manifest that
-        // declares a larger shard for the same shard_id. The chain prices
-        // the escrow from that size, so without this binding the forgery
-        // would debit more than either signer authorized.
-        let mut forged = manifest.clone();
-        forged.shards[0].size = 999_999;
-        let forged_res = server
-            .storage_open_deal(
-                1,
-                forged,
-                format!("0x{}", hex::encode(s_id.0)),
-                format!("0x{}", op.to_hex()),
-                format!("0x{}", payer.to_hex()),
-                0,
-                10,
-                100,
-                crate::domain::storage_deal::StorageEconomicsParams {
-                    operator_bond: 2_000_000,
-                    fee_per_byte_epoch: 10,
-                },
-                crate::domain::storage_params::StorageDomainParams::default(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-                request_id,
-                hex::encode(payer_sig.clone()),
-                hex::encode(op_sig.clone()),
-            )
-            .await;
-        assert!(
-            forged_res.is_err(),
-            "a signature must not survive a manifest that changes the escrow size"
-        );
-
-        // MEDIUM (CWE-294) regression: the same signed deal-open must
-        // not be replayable. The first call above opened an ACTIVE deal over
-        // (manifest, shard, operator, replica 0, epochs 10..100); resending
-        // the same signed request must be refused by the chain's duplicate
-        // active-deal guard before any escrow or bond moves again.
-        let replay = server
-            .storage_open_deal(
-                1,
-                manifest.clone(),
-                format!("0x{}", hex::encode(s_id.0)),
-                format!("0x{}", op.to_hex()),
-                format!("0x{}", payer.to_hex()),
-                0,
-                10,
-                100,
-                crate::domain::storage_deal::StorageEconomicsParams {
-                    operator_bond: 2_000_000,
-                    fee_per_byte_epoch: 10,
-                },
-                crate::domain::storage_params::StorageDomainParams::default(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-                request_id,
-                hex::encode(payer_sig.clone()),
-                hex::encode(op_sig.clone()),
-            )
-            .await;
-        assert!(
-            replay.is_err(),
-            "the same signed deal-open must not be replayable for a second escrow debit"
-        );
+        assert_eq!(get_man["found"], false, "a refused call registers nothing");
+        assert_eq!(bc.get_balance(&payer).await, payer_before);
     }
 
     #[tokio::test]
@@ -1218,18 +1144,17 @@ mod rpc_tests {
     /// Registered STORAGE_OPERATOR appears in RPC listing.
     #[tokio::test]
     async fn storage_active_operators_lists_registered() {
-        let (server, chain) = setup().await;
-
         let operator = Address::from_hex(&"0a".repeat(32)).unwrap();
         let min_stake = 1_000u64; // PermissionlessRegistry default floor
-        chain
-            .credit_development_account(&operator, min_stake * 2)
-            .await
-            .expect("devnet credit");
-        chain
-            .bond_storage_operator(operator, min_stake)
-            .await
+                                  //: a bond is a `RoleBond` transaction applied in block; the
+                                  // fixture writes the registry before the actor starts.
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        blockchain.state.add_balance(&operator, min_stake * 2);
+        blockchain
+            .state
+            .bond_storage_operator(&operator, min_stake)
             .expect("bond_storage_operator must succeed with sufficient balance");
+        let (server, _) = setup_with_blockchain(blockchain).await;
 
         let res = server.storage_active_operators().await.unwrap();
         assert_eq!(res["roleId"], serde_json::json!(5));
