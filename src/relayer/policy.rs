@@ -635,11 +635,23 @@ impl RelayerPolicyRegistry {
         if intent.deadline_block <= current_block {
             return Err("RelayerPolicyRegistry intent expired".into());
         }
+        // The auction pays the winning solver, not whichever bidder presents
+        // the receipt first. An anchored receipt proof is public, so any
+        // bonded relayer could otherwise reuse the winner's proof, settle
+        // against its own (higher) quote and leave the solver that did the
+        // external work unpaid for the gas it burned. `best_bid` is the one
+        // price ordering the door documents: lowest quote, then highest bond,
+        // then address for a deterministic tie-break.
         let bid = self
-            .bids
-            .get(&intent_id)
-            .and_then(|bids| bids.iter().find(|bid| bid.relayer == relayer))
+            .best_bid(&intent_id)
             .ok_or_else(|| "RelayerPolicyRegistry relayer bid not found".to_string())?;
+        if bid.relayer != relayer {
+            return Err(format!(
+                "RelayerPolicyRegistry settlement names {relayer}, but the winning bid is \
+                 {} at {} (lowest quote first)",
+                bid.relayer, bid.quoted_fee
+            ));
+        }
         if bid.expires_at_block <= current_block {
             return Err("RelayerPolicyRegistry selected bid expired".into());
         }
