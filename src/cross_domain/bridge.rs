@@ -144,6 +144,20 @@ pub struct BridgeTransfer {
     /// to relayer fee or minimum fee floor cannot mint or destroy units.
     #[serde(default)]
     pub burned_amount: u64,
+    /// Height at which the burn message was delivered - `unlock` paid the
+    /// owner - or `None` while it has not been delivered.
+    ///
+    /// Delivery and the expiry refund pay the same bridged amount to two
+    /// different parties: `unlock` credits `owner`, the sweep credits
+    /// `recipient`. Only one of them may ever happen, and the row used to
+    /// record nothing that told them apart: the sweep decided from `status`
+    /// alone, so any delivery path that paid the owner without reaching the
+    /// status flip (a new entry point, a relayer error tolerated somewhere)
+    /// would leave a `Burned` row behind and the expiry would pay the amount a
+    /// second time. The signal is written by the only delivery path there is
+    /// and read by the only refund path there is.
+    #[serde(default)]
+    pub delivered_height: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,6 +212,17 @@ pub struct BridgeState {
 /// are inventory, not history.
 pub(crate) const SETTLED_RETENTION_BLOCKS: u64 =
     10 * crate::cross_domain::nonce::FINALITY_PRUNE_DEPTH;
+
+/// Longest burn expiry a burner may declare, in blocks past the burn height.
+///
+/// The expiry was entirely the burner's to choose: any height above the burn
+/// height was accepted, so a caller could pick one no sweep in the chain's
+/// lifetime would reach, or one so far ahead that the row outlives every
+/// retention rule the bridge has. The window belongs to the protocol - a burn
+/// message is a refund claim on the bridge, not a lease the burner sets - and
+/// this bounds it. A burn with no expiry (`0`) is unaffected: that is the
+/// "never refunded" case the state machine already understands.
+const MAX_BURN_EXPIRY_BLOCKS: u64 = 100_000;
 
 /// Split an inbound bridge amount into the recipient's share and the relayer's.
 ///
@@ -433,6 +458,7 @@ impl BridgeState {
             expiry_height,
             recipient_eth: None,
             burned_amount: 0,
+            delivered_height: None,
         };
 
         self.asset_locations.insert(
@@ -587,6 +613,18 @@ impl BridgeState {
                 "Burn expiry must be above the burn domain height".into(),
             ));
         }
+        // The upper bound is the protocol's, not the burner's. Above the
+        // window the expiry stops being a deadline and becomes a choice: the
+        // refund would fire at a height the burner picked, and the row would
+        // outlive the retention rules every other settled transfer obeys.
+        if expiry_height != 0
+            && expiry_height > domain_height.saturating_add(MAX_BURN_EXPIRY_BLOCKS)
+        {
+            return Err(BridgeError(format!(
+                "Burn expiry is beyond the protocol window (burn height {domain_height}, \
+                 expiry {expiry_height}, window {MAX_BURN_EXPIRY_BLOCKS} blocks)"
+            )));
+        }
         let transfer = self
             .transfers
             .get(&message_id)
@@ -685,6 +723,18 @@ impl BridgeState {
                 "Transfer is not burned on target domain".into(),
             ));
         }
+        // The other half of the expiry rule. `sweep_expired_locks_with_fee`
+        // refunds a burn once its `expiry_height` has passed, so a delivery
+        // that lands after the same height would pay the owner as well and the
+        // bridged amount would leave twice. The boundary is strict and the
+        // same one `mint` uses: the expiry block itself is still live.
+        if transfer.expiry_height > 0 && settled_height > transfer.expiry_height {
+            return Err(BridgeError(format!(
+                "burn message expired before delivery (expiry={}, delivery height={}); \
+                 the expiry refund owns this transfer now",
+                transfer.expiry_height, settled_height
+            )));
+        }
         // The cross_domain unlock message arrives from the burn domain,
         // which is `transfer.target_domain`. The earlier code checked
         // `transfer.source_domain != source_domain`; in production
@@ -703,6 +753,10 @@ impl BridgeState {
         transfer.status = BridgeStatus::Unlocked {
             domain: original_source,
         };
+        // The burn was delivered: `owner` is paid by the caller. Recording the
+        // height is what stops the expiry sweep from paying `recipient` for the
+        // same units, even if a later edit moves this row back to `Burned`.
+        transfer.delivered_height = Some(settled_height);
         let asset_id = transfer.asset_id;
         self.asset_locations.insert(
             asset_id,
@@ -751,6 +805,11 @@ impl BridgeState {
                 &transfer.expiry_height.to_le_bytes(),
                 &transfer.burned_amount.to_le_bytes(),
                 recipient_eth.as_slice(),
+                // Delivery is the one fact that decides whether the expiry
+                // sweep may refund the row, so it is committed: a node that
+                // delivered and a node that did not must not agree on the
+                // bridge root while disagreeing about who is owed the money.
+                &transfer.delivered_height.unwrap_or(u64::MAX).to_le_bytes(),
             ]));
         }
         // The settled queue decides when a transfer leaf above disappears,
@@ -907,8 +966,16 @@ impl BridgeState {
                             // than re-deriving from live fee parameters.
                             // `expiry_height == 0` means "no expiry", so stale lock
                             // buckets never cancel a zero-expiry burn.
+                            //
+                            // The delivery signal is the guard that keeps the
+                            // refund from being a second payout: a burn whose
+                            // message reached the source domain has already paid
+                            // `owner` through `unlock`, and refunding `recipient`
+                            // here would pay the same bridged units twice.
                             BridgeStatus::Burned { domain }
-                                if t.expiry_height > 0 && t.expiry_height <= h =>
+                                if t.expiry_height > 0
+                                    && t.expiry_height <= h
+                                    && t.delivered_height.is_none() =>
                             {
                                 let _ = (fee_ppm, min_fee);
                                 let returned = Bud::new(t.burned_amount);
@@ -1451,7 +1518,7 @@ pub struct BridgeBurnParams {
 mod bridge_fee_split {
     use super::{
         check_burn_matches_lock_domain, hash_fields_bytes, split_bridge_fee, split_bridge_fee_u128,
-        Address, AssetId, BridgeState, BridgeStatus, Bud,
+        Address, AssetId, BridgeState, BridgeStatus, Bud, MAX_BURN_EXPIRY_BLOCKS,
     };
 
     const PPM_1_PCT: u64 = 10_000;
@@ -1636,6 +1703,117 @@ mod bridge_fee_split {
                 .unwrap(),
             vec![(recipient, Bud::new(97))]
         );
+    }
+
+    /// A burn that was delivered must never also be refunded.
+    ///
+    /// Delivery (`unlock`) pays `owner`; the expiry refund pays `recipient`.
+    /// Both are the same bridged amount, so a row that reached both paths pays
+    /// it out twice - the burner keeps the destination payout and gets the
+    /// burned units back. The row now records the delivery, and the sweep
+    /// refuses a delivered burn for the whole of its retention window, not
+    /// only while the status happens to say `Unlocked`.
+    #[test]
+    fn a_delivered_burn_is_never_refunded_by_the_expiry_sweep() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"delivered-burn"]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 50)
+            .unwrap();
+        let id = transfer.message_id;
+        bridge.mint(&event.message.unwrap(), 0).unwrap();
+        bridge
+            .burn_with_event(id, 2, 20, 0, 200, [7u8; 20])
+            .unwrap();
+        bridge.record_burn_debit(&id, Bud::new(100));
+
+        // The relayer delivers: the owner is paid on the source domain.
+        bridge.unlock(id, 2, 120).unwrap();
+        assert_eq!(
+            bridge.transfer(&id).unwrap().delivered_height,
+            Some(120),
+            "delivery must be recorded on the row"
+        );
+
+        // The expiry passes. Nothing is refunded: the amount already left.
+        assert!(
+            bridge.sweep_expired_locks(200).is_empty(),
+            "a delivered burn must not be refunded as well"
+        );
+        assert_eq!(
+            bridge.transfer(&id).unwrap().status,
+            BridgeStatus::Unlocked { domain: 1 }
+        );
+    }
+
+    /// Delivery and the refund cannot both reach a burn, in either order.
+    ///
+    /// The sweep refunds at `expiry_height`; a delivery that would land after
+    /// the same height is refused, so the refund is the last word and the
+    /// owner is not paid a second time through a late message.
+    #[test]
+    fn a_burn_cannot_be_delivered_after_its_expiry() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"late-delivery"]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 50)
+            .unwrap();
+        let id = transfer.message_id;
+        bridge.mint(&event.message.unwrap(), 0).unwrap();
+        bridge
+            .burn_with_event(id, 2, 20, 0, 200, [7u8; 20])
+            .unwrap();
+        bridge.record_burn_debit(&id, Bud::new(100));
+
+        let error = bridge
+            .unlock(id, 2, 201)
+            .expect_err("a message past its expiry must not unlock");
+        assert!(
+            error.0.contains("expired before delivery"),
+            "the refusal must name the expiry, got: {error:?}"
+        );
+        // The refund owns the transfer, and it is the only payout.
+        assert_eq!(
+            bridge.sweep_expired_locks(201),
+            vec![(recipient, Bud::new(100))]
+        );
+        assert!(bridge.transfer(&id).unwrap().delivered_height.is_none());
+    }
+
+    /// The expiry window is the protocol's, not the burner's.
+    #[test]
+    fn a_burn_expiry_beyond_the_protocol_window_is_refused() {
+        let mut bridge = BridgeState::new();
+        let asset = AssetId(hash_fields_bytes(&[b"expiry-window"]));
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        bridge.register_asset(asset, 1).unwrap();
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, asset, owner, recipient, 100, 50)
+            .unwrap();
+        let id = transfer.message_id;
+        bridge.mint(&event.message.unwrap(), 0).unwrap();
+
+        let beyond = 20 + MAX_BURN_EXPIRY_BLOCKS + 1;
+        let error = bridge
+            .burn_with_event(id, 2, 20, 0, beyond, [7u8; 20])
+            .expect_err("an expiry outside the window must be refused");
+        assert!(
+            error.0.contains("protocol window"),
+            "the refusal must name the window, got: {error:?}"
+        );
+
+        // At the edge it is still accepted, so the bound is a window and not
+        // a ban on long-lived burns.
+        bridge
+            .burn_with_event(id, 2, 20, 0, 20 + MAX_BURN_EXPIRY_BLOCKS, [7u8; 20])
+            .unwrap();
     }
 
     /// BLG-0120 (P05-F13): the state machine refuses a lock with no expiry
