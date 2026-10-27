@@ -2081,7 +2081,9 @@ mod tests {
                 .collect(),
         };
         assert_eq!(
-            adapter.verify_finality(&domain, &commitment, &proof).unwrap(),
+            adapter
+                .verify_finality(&domain, &commitment, &proof)
+                .unwrap(),
             FinalityStatus::Finalized
         );
 
@@ -2141,7 +2143,9 @@ mod tests {
                 .collect(),
         };
         assert_eq!(
-            adapter.verify_finality(&domain, &commitment, &proof).unwrap(),
+            adapter
+                .verify_finality(&domain, &commitment, &proof)
+                .unwrap(),
             FinalityStatus::Finalized
         );
 
