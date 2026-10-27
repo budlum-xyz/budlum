@@ -167,6 +167,39 @@ pub struct RegistryParams {
     /// the two are not interchangeable: one is compensation for work done, the
     /// other is revenue.
     pub bridge_fee_ppm: u64,
+    /// Share of an application's eligible protocol fee, in parts-per-million.
+    ///
+    /// The remainder stays on the existing protocol path. A zero value keeps
+    /// the application share disabled until a network profile explicitly opts
+    /// in. The testnet profile uses 400,000 ppm (40 percent). Governance can
+    /// change it as the application fee policy evolves.
+    pub app_fee_share_ppm: u64,
+    /// Fixed fee charged in addition to the base transaction fee when an
+    /// account registers a Graft application. A non-zero fee keeps application
+    /// identity rows from being a free state-growth vector; the testnet
+    /// profile uses one base unit.
+    pub graft_registration_fee: u64,
+    /// Number of blocks used when a Graft intent leaves its deadline at zero.
+    /// The testnet profile fixes this default at 600 blocks; an explicit
+    /// deadline can still be chosen by the intent owner within policy.
+    pub graft_default_intent_deadline_blocks: u64,
+    /// Highest commission a validator may take from its delegators' rewards,
+    /// in parts-per-million. TESTNET-DEFAULT: 200,000 (20 percent).
+    pub max_validator_commission_ppm: u64,
+    /// Largest commission change a validator may make in one epoch, in
+    /// parts-per-million. TESTNET-DEFAULT: 10,000 (one point).
+    pub max_commission_change_ppm_per_epoch: u64,
+    /// Epochs an undelegated amount stays locked, and slashable, before it
+    /// can be withdrawn. TESTNET-DEFAULT: 100 epochs.
+    pub delegation_unbonding_epochs: u64,
+}
+
+/// Deterministic split of an eligible protocol fee between an application and
+/// the existing protocol destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplicationFeeSplit {
+    pub application: u64,
+    pub protocol: u64,
 }
 
 impl RegistryParams {
@@ -228,6 +261,40 @@ impl RegistryParams {
         base_fee.saturating_add(self.proportional_fee(amount, self.transfer_fee_ppm))
     }
 
+    /// Split an eligible protocol fee without losing or creating a unit.
+    ///
+    /// The application share is rounded down and the existing protocol path
+    /// receives the remainder. This makes the conservation rule explicit even
+    /// for dust fees and avoids a second rounding decision at each caller.
+    #[must_use]
+    pub fn split_application_fee(&self, fee: u64) -> ApplicationFeeSplit {
+        let application = u64::try_from(
+            u128::from(fee).saturating_mul(u128::from(self.app_fee_share_ppm))
+                / u128::from(PPM_DENOMINATOR),
+        )
+        .unwrap_or(u64::MAX);
+        ApplicationFeeSplit {
+            application,
+            protocol: fee.saturating_sub(application),
+        }
+    }
+
+    /// Testnet economic profile from and defaults.
+    ///
+    /// Production and development chains retain [`Default::default`] until
+    /// their own genesis decision supplies rates. These values are committed
+    /// into the testnet genesis state, not applied as a node-local override.
+    #[must_use]
+    pub fn testnet_defaults() -> Self {
+        Self {
+            transfer_fee_ppm: 200,
+            swap_fee_ppm: 400,
+            bridge_fee_ppm: 800,
+            app_fee_share_ppm: 400_000,
+            ..Self::default()
+        }
+    }
+
     /// Protocol-level bounds for governance-tunable registry params.
     /// Prevents extreme values (e.g. zero unbonding, >100% slash ratios).
     ///
@@ -258,6 +325,25 @@ impl RegistryParams {
         if self.ai_model_register_fee > MAX_PARAM_AMOUNT {
             return Err("ai_model_register_fee exceeds the maximum parameter amount".into());
         }
+        if self.graft_registration_fee > MAX_PARAM_AMOUNT {
+            return Err("graft_registration_fee exceeds the maximum parameter amount".into());
+        }
+        if self.graft_default_intent_deadline_blocks == 0
+            || self.graft_default_intent_deadline_blocks > 100_000
+        {
+            return Err(
+                "graft_default_intent_deadline_blocks must be between 1 and 100,000".into(),
+            );
+        }
+        if self.delegation_unbonding_epochs == 0 || self.delegation_unbonding_epochs > 100_000 {
+            return Err("delegation_unbonding_epochs must be between 1 and 100,000".into());
+        }
+        if self.max_commission_change_ppm_per_epoch > self.max_validator_commission_ppm {
+            return Err(
+                "max_commission_change_ppm_per_epoch cannot exceed max_validator_commission_ppm"
+                    .into(),
+            );
+        }
         if self.unbonding_epochs == 0 || self.unbonding_epochs > 100_000 {
             return Err("unbonding_epochs must be between 1 and 100,000".into());
         }
@@ -284,6 +370,11 @@ impl RegistryParams {
             ("transfer_fee_ppm", self.transfer_fee_ppm),
             ("swap_fee_ppm", self.swap_fee_ppm),
             ("bridge_fee_ppm", self.bridge_fee_ppm),
+            ("app_fee_share_ppm", self.app_fee_share_ppm),
+            (
+                "max_validator_commission_ppm",
+                self.max_validator_commission_ppm,
+            ),
         ] {
             if rate >= PPM_DENOMINATOR {
                 return Err(format!("{name} must be below 100%"));
@@ -365,6 +456,19 @@ impl Default for RegistryParams {
             transfer_fee_ppm: 0,
             swap_fee_ppm: 0,
             bridge_fee_ppm: 0,
+            // Application revenue sharing is profile-controlled. Keeping the
+            // generic default at zero avoids silently repricing non-testnet
+            // chains; testnet genesis opts into explicitly.
+            app_fee_share_ppm: 0,
+            // One base unit makes Graft registration cheap for real apps while
+            // ensuring an unbounded registration flood is not free.
+            graft_registration_fee: 1,
+            // Ten-minute-at-testnet-slot-scale default from the Graft profile.
+            graft_default_intent_deadline_blocks: 600,
+            // TESTNET-DEFAULT. The self-bond floor is `min_stake`.
+            max_validator_commission_ppm: 200_000,
+            max_commission_change_ppm_per_epoch: 10_000,
+            delegation_unbonding_epochs: 100,
         }
     }
 }
@@ -383,8 +487,8 @@ mod tests {
     fn registry_params_serialized_shape_is_pinned() {
         let encoded =
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
-        // 16 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
-        // (BLG-0102/P04-F20: the comment said 15; the pin has counted 16.)
+        // 22 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        // (BLG-0102/P04-F20: the comment said 15; the pin now counts 22.)
         //
         // The count moved from 12 when the three proportional rates were
         // added: a state-format change the `# Adding a field` note describes,
@@ -405,7 +509,7 @@ mod tests {
         // would never fail, so it would not be a pin at all.
         assert_eq!(
             encoded.len(),
-            16 * 8 + 1,
+            22 * 8 + 1,
             "RegistryParams changed shape: old snapshots can no longer be \
              deserialized and the state root moves. See the type's docs."
         );
@@ -423,13 +527,13 @@ mod tests {
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
         assert_ne!(
             encoded.len(),
-            17 * 8 + 1,
-            "a seventeenth u64 field would have to update the pin above, \
+            23 * 8 + 1,
+            "a twenty-third u64 field would have to update the pin above, \
              which is the signal that snapshot compatibility broke"
         );
         assert_ne!(
             encoded.len(),
-            15 * 8 + 1,
+            21 * 8 + 1,
             "removing a field is equally a state-format change"
         );
     }
@@ -596,6 +700,42 @@ mod tests {
                 7,
                 "a zero rate must charge exactly the flat floor"
             );
+        }
+    }
+
+    #[test]
+    fn testnet_defaults_apply_the_published_fee_profile() {
+        let p = RegistryParams::testnet_defaults();
+        assert_eq!(p.transfer_fee_ppm, 200);
+        assert_eq!(p.swap_fee_ppm, 400);
+        assert_eq!(p.bridge_fee_ppm, 800);
+        assert_eq!(p.app_fee_share_ppm, 400_000);
+        assert_eq!(p.graft_registration_fee, 1);
+        assert_eq!(p.graft_default_intent_deadline_blocks, 600);
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn application_fee_split_conserves_value_at_the_testnet_share() {
+        let p = RegistryParams::testnet_defaults();
+        let split = p.split_application_fee(1_000);
+        assert_eq!(split.application, 400);
+        assert_eq!(split.protocol, 600);
+        assert_eq!(split.application + split.protocol, 1_000);
+
+        let dust = p.split_application_fee(1);
+        assert_eq!(dust.application, 0);
+        assert_eq!(dust.protocol, 1);
+    }
+
+    #[test]
+    fn application_fee_share_cannot_reach_or_exceed_one_hundred_percent() {
+        for rate in [PPM_DENOMINATOR, PPM_DENOMINATOR + 1] {
+            let p = RegistryParams {
+                app_fee_share_ppm: rate,
+                ..RegistryParams::default()
+            };
+            assert!(p.validate().is_err(), "invalid application rate: {rate}");
         }
     }
 

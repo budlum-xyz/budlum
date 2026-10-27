@@ -244,6 +244,9 @@ pub enum ProofAcceptance {
     Accepted { rewarded: bool, reward: u64 },
     /// A previously-accepted, identical claim (same final state root). No-op.
     Idempotent,
+    /// The STARK did not verify. The proof fee is burned and no claim is
+    /// recorded: the submitter asked the chain to verify a false proof.
+    Rejected,
 }
 
 /// Errors from proof submission.
@@ -333,6 +336,27 @@ impl ProofClaimRegistry {
 
     pub fn len(&self) -> usize {
         self.claims.len()
+    }
+
+    /// A commitment to every accepted claim, in key order. Empty folds the
+    /// empty-tree root.
+    #[must_use]
+    pub fn root(&self) -> Hash32 {
+        let leaves: Vec<Hash32> = self
+            .claims
+            .values()
+            .map(|claim| {
+                crate::core::hash::hash_fields_bytes(&[
+                    b"BDLM_PROOF_CLAIM_LEAF_V1",
+                    &claim.key.domain_id.to_le_bytes(),
+                    &claim.key.target_height.to_le_bytes(),
+                    &claim.final_state_root,
+                    claim.prover.as_bytes(),
+                    &[u8::from(claim.rewarded)],
+                ])
+            })
+            .collect();
+        crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 
     pub fn is_empty(&self) -> bool {

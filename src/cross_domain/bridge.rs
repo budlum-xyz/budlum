@@ -1642,9 +1642,9 @@ mod bridge_fee_split {
         // picks the entry point. This test reads the two call sites rather
         // than the behaviour, because the defect was structural: the logic
         // was correct wherever it existed, and absent where it did not.
-        let chain = include_str!("../chain/blockchain.rs");
+        let chain = include_str!("bridge_tx.rs");
         let executor = include_str!("../execution/executor.rs");
-        for (name, src) in [("blockchain.rs", chain), ("executor.rs", executor)] {
+        for (name, src) in [("bridge_tx.rs", chain), ("executor.rs", executor)] {
             assert!(
                 src.contains("check_burn_matches_lock_domain"),
                 "{name} unlocks a bridge transfer without calling the shared domain rule"

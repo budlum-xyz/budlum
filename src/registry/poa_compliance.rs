@@ -130,6 +130,11 @@ impl PoaComplianceRegistry {
         Self::default()
     }
 
+    #[must_use]
+    pub fn frozen_count(&self) -> usize {
+        self.freezes.len()
+    }
+
     fn ensure_poa(domain: ComplianceDomainKind) -> Result<(), PoaComplianceError> {
         match domain {
             ComplianceDomainKind::PoA => Ok(()),

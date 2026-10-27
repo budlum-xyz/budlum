@@ -24,6 +24,7 @@ pub mod adapter;
 pub mod bud_to_eth;
 pub mod header;
 pub mod mpt;
+pub mod outbound;
 pub mod receipt;
 pub mod rlp;
 pub mod sync_committee;
