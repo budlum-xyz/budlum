@@ -869,6 +869,7 @@ mod tests {
 
     /// A software key behind the HSM trait: the production code path sees an
     /// `HsmPqKey`, the token is the only thing replaced.
+    #[allow(clippy::type_complexity)] // a test double of the HSM trait
     struct TokenDouble {
         public: Vec<u8>,
         signer: Box<dyn Fn(&[u8], &[u8]) -> Result<Vec<u8>, CryptoError> + Send + Sync>,

@@ -162,6 +162,7 @@ impl DeviceSigner {
     /// signature is deterministic, so a cached copy is the same bytes.
     #[cfg(test)]
     fn sign_bytes(&self, payload: &[u8]) -> Option<Vec<u8>> {
+        #[allow(clippy::type_complexity)] // (device, message, signature)
         static CACHE: std::sync::Mutex<Vec<(u32, Vec<u8>, Vec<u8>)>> =
             std::sync::Mutex::new(Vec::new());
         let device = self.identity.device_id;

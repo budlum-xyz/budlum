@@ -516,6 +516,7 @@ impl SchemeStatusRegistry {
     /// The statuses as `(identifier, status byte)` pairs, schemes then suites,
     /// each in ascending identifier order. The snapshot stores this form.
     #[must_use]
+    #[allow(clippy::type_complexity)] // schemes then suites, the snapshot's shape
     pub fn entries(&self) -> (Vec<(u16, u8)>, Vec<(u16, u8)>) {
         let schemes = self
             .schemes
