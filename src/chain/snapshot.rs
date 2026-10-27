@@ -545,7 +545,15 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 ///. A status decides whether a signature family still
 /// verifies, so a node that dropped a `Disabled` mark would accept signatures
 /// the chain refuses; at 10 and below the field cannot affect the digest.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 11;
+///
+/// Schema 12 carries and digests the reward-pool flag (testnet item 8). It
+/// decides whether the epoch transition pays from the pre-funded pool, which
+/// moves balances: a node that dropped the flag would either pay rewards the
+/// chain does not pay or withhold rewards it does, and either way fork on the
+/// next epoch boundary. At 11 and below the field cannot affect the digest,
+/// and a snapshot without it restores the network profile's answer - what the
+/// chain did before the flag existed.
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -685,6 +693,10 @@ pub struct StateSnapshotV2 {
     /// genesis statuses, which is what a chain that never moved one had.
     #[serde(default)]
     pub scheme_registry: Option<SchemeRegistrySnapshot>,
+    /// The reward-pool flag (schema-12 wave). `None` reads as the network
+    /// profile's answer, which is what a chain that predates the flag did.
+    #[serde(default)]
+    pub reward_pool_enabled: Option<bool>,
     /// Proof tasks and unpaid receipts.
     ///
     /// `#[serde(default)]` like its neighbours: a snapshot taken before this
@@ -923,6 +935,7 @@ impl StateSnapshotV2 {
             external_bond_escrow: Some(account_state.external_bond_escrow.clone()),
             settlement: Some(account_state.settlement.clone()),
             scheme_registry: Some(SchemeRegistrySnapshot::of(&account_state.scheme_registry)),
+            reward_pool_enabled: Some(account_state.reward_pool_enabled),
             proof_market: Some(account_state.proof_market.clone()),
             identity: Some(account_state.identity.clone()),
             vault: Some(account_state.vault.clone()),
@@ -1154,6 +1167,10 @@ impl StateSnapshotV2 {
         // Schema 11: the scheme and suite statuses, gated the same way.
         if self.schema_version >= 11 {
             hash_opt_serializable(&mut hasher, &self.scheme_registry);
+        }
+        // Schema 12: the reward-pool flag, gated the same way.
+        if self.schema_version >= 12 {
+            hash_opt_serializable(&mut hasher, &self.reward_pool_enabled);
         }
 
         hasher.finalize().into()
@@ -2510,6 +2527,9 @@ mod tests {
     /// Only the keys of the schema-11 wave.
     const SCHEMA11_KEYS: &[&str] = &["scheme_registry"];
 
+    /// Only the keys of the schema-12 wave.
+    const SCHEMA12_KEYS: &[&str] = &["reward_pool_enabled"];
+
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
     /// the seal is recomputed because the version changed.
@@ -2664,6 +2684,8 @@ mod tests {
             "settlement",
             // scheme and suite statuses (schema-11 wave: default-filled AND digested)
             "scheme_registry",
+            // the reward-pool flag (schema-12 wave: default-filled AND digested)
+            "reward_pool_enabled",
             // identity registry (schema-5 wave: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 wave: same discipline)
@@ -2705,6 +2727,7 @@ mod tests {
                 SCHEMA9_KEYS,
                 SCHEMA10_KEYS,
                 SCHEMA11_KEYS,
+                SCHEMA12_KEYS,
             ]
             .concat(),
             2,
@@ -2721,6 +2744,7 @@ mod tests {
             SCHEMA9_KEYS,
             SCHEMA10_KEYS,
             SCHEMA11_KEYS,
+            SCHEMA12_KEYS,
         ]
         .concat()
         {
@@ -2835,6 +2859,7 @@ mod tests {
                 SCHEMA9_KEYS,
                 SCHEMA10_KEYS,
                 SCHEMA11_KEYS,
+                SCHEMA12_KEYS,
             ]
             .concat(),
             3,
@@ -2849,6 +2874,7 @@ mod tests {
             SCHEMA9_KEYS,
             SCHEMA10_KEYS,
             SCHEMA11_KEYS,
+            SCHEMA12_KEYS,
         ]
         .concat()
         {
@@ -2939,6 +2965,7 @@ mod tests {
                 SCHEMA6_KEYS,
                 SCHEMA10_KEYS,
                 SCHEMA11_KEYS,
+                SCHEMA12_KEYS,
             ]
             .concat(),
             4,
@@ -2952,6 +2979,7 @@ mod tests {
             SCHEMA6_KEYS,
             SCHEMA10_KEYS,
             SCHEMA11_KEYS,
+            SCHEMA12_KEYS,
         ]
         .concat()
         {
