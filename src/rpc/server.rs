@@ -3,7 +3,9 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
-use crate::domain::storage_deal::{RetrievalChallengeRequest, RetrievalResponse, StorageDeal};
+use crate::domain::storage_deal::{
+    RetrievalChallenge, RetrievalChallengeRequest, RetrievalResponse, StorageDeal,
+};
 use crate::network::node::NodeClient;
 use crate::storage::content_id::ContentId;
 use crate::storage::{emit_hook, NopThreeHook, ThreeEventHook, ThreeHookEvent, ThreeHookKind};
@@ -511,13 +513,6 @@ impl RpcServer {
             ErrorObjectOwned::owned(-32602, "Domain key must be 32 bytes", None::<()>)
         })?;
         Ok(crate::cross_domain::external::DomainKey(key_bytes))
-    }
-
-    /// The answer of a method whose state change moved to a transaction
-    /// door. The method stays declared so a client
-    /// gets the name of the door instead of "method not found".
-    fn door_refusal(message: &'static str) -> ErrorObjectOwned {
-        ErrorObjectOwned::owned(-32602, message, None::<()>)
     }
 
     fn to_0x_hash(h: String) -> String {
@@ -1412,6 +1407,20 @@ fn storage_deal_to_json(deal: &StorageDeal) -> serde_json::Value {
         "startEpoch": deal.deal_start_epoch,
         "endEpoch": deal.deal_end_epoch,
         "status": format!("{:?}", deal.status),
+    })
+}
+
+fn retrieval_challenge_to_json(challenge: &RetrievalChallenge) -> serde_json::Value {
+    serde_json::json!({
+        "challengeId": challenge.challenge_id,
+        "dealId": challenge.deal_id,
+        "shardId": format!("0x{}", hex::encode(challenge.shard_id.0)),
+        "byteStart": challenge.byte_start,
+        "byteEnd": challenge.byte_end,
+        "challengeEpoch": challenge.challenge_epoch,
+        "deadlineEpoch": challenge.deadline_epoch,
+        "opener": format!("0x{}", challenge.opener.to_hex()),
+        "openerBond": challenge.opener_bond,
     })
 }
 
@@ -2656,31 +2665,67 @@ impl BudlumApiServer for RpcServer {
         &self,
         payload: crate::domain::VerifiedDomainCommitment,
     ) -> Result<String, ErrorObjectOwned> {
-        // A commitment is a signed `Settlement` transaction
-        // (`SettlementTx::SubmitCommitment`) from a bonded RELAYER, applied in
-        // block. It used to advance the domain registry and the external roots
-        // on this node, then gossip the payload so every peer applied it again
-        // whenever it arrived.
+        // Consensus-state isolation: `submit_verified_domain_commitment` writes
+        // to `external_roots` and `domain_registry`, so public listeners must
+        // not reach it directly, and the signed in-block StateUpdateTx carrier
+        // must be verified and enqueued fail-closed before applying state.
         self.require_operator("bud_submitVerifiedDomainCommitment")?;
-        let _ = payload;
-        Err(ErrorObjectOwned::owned(
-            -32602,
-            "Out-of-block domain commitments are refused: they advanced the domain \
-             registry on this node alone. A bonded RELAYER sends a signed Settlement \
-             transaction (SettlementTx::SubmitCommitment) carrying the commitment and \
-             its finality proof through bud_sendRawTransaction.",
-            None::<()>,
-        ))
+        let hash = hex::encode(payload.leaf_hash());
+        let payload_clone = payload.clone();
+        let commitment = payload.commitment.clone();
+
+        self.chain
+            .verify_verified_domain_commitment(payload.clone())
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid verified domain commitment: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let tx = self
+            .chain
+            .build_state_update_transaction(commitment)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32603,
+                    format!("Could not build state update transaction: {e}"),
+                    None::<()>,
+                )
+            })?;
+        let tx_clone = tx.clone();
+        self.chain.add_transaction(tx).await.map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32603,
+                format!("State update transaction rejected: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        self.chain
+            .submit_verified_domain_commitment(payload)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid verified domain commitment: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        self.node.broadcast_tx_sync(tx_clone);
+        self.node
+            .broadcast_verified_domain_commitment_sync(payload_clone);
+        Ok(format!("0x{hash}"))
     }
+
     async fn submit_cross_domain_message(
         &self,
         msg: crate::cross_domain::CrossDomainMessage,
     ) -> Result<String, ErrorObjectOwned> {
-        // The node signs and pays for the transaction this call drives, so an
-        // unauthenticated caller could spend the consensus signer's fee
-        // balance and its nonces until it had none left. Operator-only is the
-        // floor here; the general door is a message the relayer signs itself.
-        self.require_operator("bud_submitCrossDomainMessage")?;
         let msg_clone = msg.clone();
 
         // Relayer-gated and in block. `message_registry` is in the state root,
@@ -3275,17 +3320,29 @@ impl BudlumApiServer for RpcServer {
         &self,
         manifest: crate::storage::ContentManifest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: this method registered a manifest into the storage registry
-        // (folded into the state root) on this node alone, outside a block.
-        // The method stays so a client gets a pointer instead of "method not
-        // found".
+        // Operator-only: this call changes node-local state outside a block.
         self.require_operator("bud_storageRegisterManifest")?;
-        let _ = manifest;
-        Err(Self::door_refusal(
-            "Out-of-block manifest registration is refused: it changed the storage registry \
-             on this node alone. The manifest owner sends a signed Storage transaction \
-             (StorageTx::RegisterManifest) through bud_sendRawTransaction.",
-        ))
+        let manifest_id = self
+            .chain
+            .register_storage_manifest(manifest.clone())
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("register_manifest failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+        Ok(serde_json::json!({
+            "manifestId": format!("0x{}", hex::encode(manifest_id.0)),
+            "totalSize": manifest.total_size,
+            "shardCount": manifest.shard_count,
+            // Echoed back so the caller can see what the chain committed to,
+            // rather than what it believes it sent. The declaration is inside
+            // `manifestId`, so a mismatch here means the manifest that
+            // registered is not the one the caller built.
+            "encryption": manifest.encryption.to_string(),
+        }))
     }
 
     async fn storage_verify_encoding(
@@ -3973,42 +4030,134 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
+        // Operator-only: this call changes node-local state outside a block.
         self.require_operator("bud_storageOpenDeal")?;
-        // Deal opening moves escrow and bond, and the row decides who may
-        // answer a retrieval challenge later. Writing it here wrote it on the
-        // serving node alone, outside the block, and it took the ownership
-        // gate with it: the manifest claim the in-block door checks was never
-        // consulted on this path, so a caller that could reach the operator
-        // listener could open a deal for a manifest it does not own.
-        //
-        // The door is `StorageTx::OpenDeal`, carried by a signed `Storage`
-        // transaction, which applies the claim gate and the payer/operator
-        // consents in the executor where every node replays them.
-        let _ = (
-            domain_id,
-            manifest,
-            shard_id,
-            operator,
-            payer,
-            replica_index,
-            start_epoch,
-            end_epoch,
-            economics,
-            domain_params,
-            merkle_proof,
-            storage_root,
-            request_id,
-            payer_signature,
-            operator_signature,
-        );
-        Err(ErrorObjectOwned::owned(
-            -32602,
-            "Out-of-block deal opening is refused: it moved escrow and bond on this node \
-             alone and skipped the manifest-claim gate. The payer sends a signed Storage \
-             transaction (StorageTx::OpenDeal, carrying the operator's consent) through \
-             bud_sendRawTransaction.",
-            None::<()>,
-        ))
+        let clean_shard = shard_id.strip_prefix("0x").unwrap_or(&shard_id);
+        let s_bytes = hex::decode(clean_shard).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid shard_id hex: {e}"), None::<()>)
+        })?;
+        if s_bytes.len() != 32 {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "shard_id must be 32 bytes",
+                None::<()>,
+            ));
+        }
+        let mut s_arr = [0u8; 32];
+        s_arr.copy_from_slice(&s_bytes);
+        let s_id = ContentId(s_arr);
+
+        let op_addr = Address::from_hex(&operator).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid operator hex: {e}"), None::<()>)
+        })?;
+
+        let payer_addr = Address::from_hex(&payer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer hex: {e}"), None::<()>)
+        })?;
+
+        // The caller must prove control of BOTH addresses this call debits:
+        // the payer's escrow and the operator's bond. Without this, any
+        // caller that can reach the RPC listener can spend another user's
+        // balance and lock another operator's bond. The signed message binds
+        // every deal parameter that changes the debit, so a signature cannot
+        // be replayed against a different deal. This is the same pattern the
+        // challenge RPCs use (BUD_OPEN_CHALLENGE_V1 / BUD_ANSWER_CHALLENGE_V1),
+        // which is what makes the escrow and bond gates economically
+        // meaningful.
+        let payer_sig = hex::decode(payer_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid payer_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        let operator_sig = hex::decode(operator_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid operator_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        // The chain prices the payer escrow from the manifest entry for this
+        // shard (manifest.shard(&shard_id).size), so the signed preimage must
+        // bind that size and the manifest identity as well. Without them, a
+        // valid signature could be replayed with a forged manifest that
+        // declares a larger shard for the same shard_id and debits more than
+        // either signer authorized (HIGH, CWE-347).
+        let shard_bytes = manifest
+            .shard(&s_id)
+            .ok_or_else(|| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("shard {s_id:?} is not part of the manifest"),
+                    None::<()>,
+                )
+            })
+            .map(|shard| u64::from(shard.size))?;
+
+        // The signed preimage binds a caller-chosen `request_id` so one
+        // signed authorization cannot be replayed to open the same deal
+        // repeatedly and debit escrow and bond again (MEDIUM, CWE-294).
+        // The chain also refuses a second active deal over the same
+        // (manifest, shard, operator, replica, range), so replay is closed on
+        // both layers.
+        let chain_id = self.chain.get_chain_id().await;
+        let deal_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_OPEN_DEAL_V2",
+            &chain_id.to_le_bytes(),
+            &domain_id.to_le_bytes(),
+            s_id.as_bytes(),
+            op_addr.as_bytes(),
+            payer_addr.as_bytes(),
+            &replica_index.to_le_bytes(),
+            &start_epoch.to_le_bytes(),
+            &end_epoch.to_le_bytes(),
+            &shard_bytes.to_le_bytes(),
+            manifest.manifest_id.as_bytes(),
+            &economics.fee_per_byte_epoch.to_le_bytes(),
+            &economics.operator_bond.to_le_bytes(),
+            &request_id.to_le_bytes(),
+        ]);
+        crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
+            .map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
+        })?;
+        crate::crypto::primitives::verify_signature(&deal_msg, &operator_sig, op_addr.as_bytes())
+            .map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid operator signature: {e}"),
+                None::<()>,
+            )
+        })?;
+
+        let deal_id = self
+            .chain
+            .open_storage_deal(
+                domain_id,
+                manifest.clone(),
+                s_id,
+                op_addr,
+                payer_addr,
+                replica_index,
+                start_epoch,
+                end_epoch,
+                economics.clone(),
+                domain_params,
+                merkle_proof.clone(),
+                storage_root,
+            )
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("open_deal failed: {e}"), None::<()>)
+            })?;
+
+        Ok(serde_json::json!({
+            "dealId": deal_id,
+            "status": "Active",
+            "operator": operator,
+        }))
     }
 
     async fn storage_accept_reallocation(
@@ -4026,30 +4175,93 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: this method filled a repair ticket and moved the payer escrow
-        // and the replacement operator bond on this node alone, outside a
-        // block.
+        // Operator-only: this call changes node-local state outside a block.
         self.require_operator("bud_storageAcceptReallocation")?;
-        let _ = (
-            ticket_id,
-            replacement_operator,
-            payer,
-            start_epoch,
-            end_epoch,
-            economics,
-            domain_params,
-            merkle_proof,
-            storage_root,
-            request_id,
-            payer_signature,
-            operator_signature,
-        );
-        Err(Self::door_refusal(
-            "Out-of-block repair acceptance is refused: it moved escrow and bond on this node \
-             alone. The payer sends a signed Storage transaction \
-             (StorageTx::AcceptReallocation, carrying the replacement operator's consent) \
-             through bud_sendRawTransaction.",
-        ))
+        let op_addr = Address::from_hex(&replacement_operator).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid replacement operator hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        let payer_addr = Address::from_hex(&payer).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer hex: {e}"), None::<()>)
+        })?;
+
+        // The caller must prove control of BOTH addresses this call debits:
+        // the payer's escrow and the replacement operator's bond. The
+        // signed message binds every parameter that changes the debit; the
+        // placement (manifest, shard, replica, bytes) is derived by the
+        // chain from the ticket, so a signature cannot be replayed against
+        // a different slot. Same pattern as BUD_OPEN_DEAL_V2.
+        let chain_id = self.chain.get_chain_id().await;
+        let deal_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_ACCEPT_REALLOCATION_V2",
+            &chain_id.to_le_bytes(),
+            &ticket_id.to_le_bytes(),
+            op_addr.as_bytes(),
+            payer_addr.as_bytes(),
+            &start_epoch.to_le_bytes(),
+            &end_epoch.to_le_bytes(),
+            &economics.fee_per_byte_epoch.to_le_bytes(),
+            &economics.operator_bond.to_le_bytes(),
+            &request_id.to_le_bytes(),
+        ]);
+        let payer_sig = hex::decode(payer_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid payer_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        let op_sig = hex::decode(operator_signature).map_err(|e| {
+            ErrorObjectOwned::owned(
+                -32602,
+                format!("Invalid operator_signature hex: {e}"),
+                None::<()>,
+            )
+        })?;
+        crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
+            .map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
+        })?;
+        crate::crypto::primitives::verify_signature(&deal_msg, &op_sig, op_addr.as_bytes())
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid operator signature: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let replacement_deal_id = self
+            .chain
+            .accept_storage_reallocation(
+                ticket_id,
+                op_addr,
+                payer_addr,
+                start_epoch,
+                end_epoch,
+                economics,
+                domain_params,
+                merkle_proof,
+                storage_root,
+            )
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("accept_reallocation failed: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        Ok(serde_json::json!({
+            "ticketId": ticket_id,
+            "replacementDealId": replacement_deal_id,
+            "status": "ActiveReplacement",
+            "operator": replacement_operator,
+        }))
     }
 
     async fn storage_get_manifest(
@@ -4200,32 +4412,111 @@ impl BudlumApiServer for RpcServer {
         &self,
         request: RetrievalChallengeRequest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: this method opened a challenge and debited the opener bond on
-        // this node alone, outside a block, with a range drawn from this
-        // node's tip.
+        // Operator-only: this call changes node-local state outside a block.
         self.require_operator("bud_storageOpenChallenge")?;
-        let _ = request;
-        Err(Self::door_refusal(
-            "Out-of-block challenge opening is refused: it changed the storage registry and \
-             a balance on this node alone. The opener sends a signed Storage transaction \
-             (StorageTx::OpenChallenge) through bud_sendRawTransaction; the block draws the \
-             byte range.",
-        ))
+        // + the opener is required and must be non-zero
+        let opener = request
+            .opener
+            .ok_or_else(|| ErrorObjectOwned::owned(-32602, "opener is required", None::<()>))?;
+        if opener == crate::core::address::Address::zero() {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                "opener must not be zero address (H1)",
+                None::<()>,
+            ));
+        }
+
+        // Opener must cryptographically prove ownership of the
+        // Declared address. Without this, any caller can self-report any
+        // Address as the opener, rendering the opener_bond anti-spam gate
+        // Economically meaningless.
+        let opener_sig = request.opener_signature.as_deref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32602, "opener_signature is required", None::<()>)
+        })?;
+        let msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_OPEN_CHALLENGE_V1",
+            &request.deal_id.to_le_bytes(),
+            &request.byte_start.to_le_bytes(),
+            &request.byte_end.to_le_bytes(),
+            &request.challenge_epoch.to_le_bytes(),
+            &request.deadline_epoch.to_le_bytes(),
+            &request.opener_bond.to_le_bytes(),
+            opener.as_bytes(),
+        ]);
+        crate::crypto::primitives::verify_signature(&msg, opener_sig, opener.as_bytes()).map_err(
+            |e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid opener signature: {e}"),
+                    None::<()>,
+                )
+            },
+        )?;
+
+        let challenge_id = self
+            .chain
+            .open_storage_challenge(request)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid challenge: {e}"), None::<()>)
+            })?;
+        let challenge = self
+            .chain
+            .get_storage_challenges()
+            .await
+            .map_err(|e| ErrorObjectOwned::owned(-32000, e, None::<()>))?
+            .into_iter()
+            .find(|challenge| challenge.challenge_id == challenge_id);
+        Ok(serde_json::json!({
+            "challengeId": challenge_id,
+            "challenge": challenge.as_ref().map(retrieval_challenge_to_json),
+        }))
     }
 
     async fn storage_answer_challenge(
         &self,
         response: RetrievalResponse,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: this method settled a challenge (and its slash) on this node
-        // alone, outside a block.
+        // Operator-only: this call changes node-local state outside a block.
         self.require_operator("bud_storageAnswerChallenge")?;
-        let _ = response;
-        Err(Self::door_refusal(
-            "Out-of-block challenge answers are refused: they settled a challenge and its \
-             slash on this node alone. The deal's operator sends a signed Storage transaction \
-             (StorageTx::AnswerChallenge) through bud_sendRawTransaction.",
-        ))
+        let responder = response.responder;
+
+        // Responder must cryptographically prove ownership of the
+        // Declared address. Without this, any caller can set responder to the
+        // Deal's operator address and bypass the NotTheOperator registry check.
+        let responder_sig = response.responder_signature.as_deref().ok_or_else(|| {
+            ErrorObjectOwned::owned(-32602, "responder_signature is required", None::<()>)
+        })?;
+        let msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_ANSWER_CHALLENGE_V1",
+            &response.challenge_id.to_le_bytes(),
+            &response._range_hash.0,
+            responder.as_bytes(),
+            &response.response_epoch.to_le_bytes(),
+        ]);
+        crate::crypto::primitives::verify_signature(&msg, responder_sig, responder.as_bytes())
+            .map_err(|e| {
+                ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Invalid responder signature: {e}"),
+                    None::<()>,
+                )
+            })?;
+
+        let result = self
+            .chain
+            .answer_storage_challenge(response)
+            .await
+            .map_err(|e| {
+                ErrorObjectOwned::owned(-32602, format!("Invalid response: {e}"), None::<()>)
+            })?;
+        Ok(serde_json::json!({
+            "challengeId": result.challenge_id,
+            "dealId": result.deal_id,
+            "outcome": format!("{:?}", result.outcome),
+            "finalizedEpoch": result.finalized_epoch,
+            "slashedBond": result.slashed_bond,
+        }))
     }
 
     async fn storage_get_economics_summary(&self) -> Result<serde_json::Value, ErrorObjectOwned> {

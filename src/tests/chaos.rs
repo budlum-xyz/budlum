@@ -260,49 +260,31 @@ mod chaos_tests {
         );
         assert_eq!(
             after.domain_registry_root,
-            blockchain.domain_registry.root(),
+            blockchain.state.settlement.domains.root(),
             "global header must bind the active domain registry root"
         );
     }
 
+    /// K4: the settlement registries are account state. A domain registered
+    /// by a `SettlementTx` in a block is rebuilt by the block replay after a
+    /// restart, and the settlement root comes back byte for byte.
     #[test]
     fn test_chaos_settlement_state_survives_storage_reload() {
-        use crate::core::block::Block;
-        use crate::domain::plugin::default_domain;
-        use crate::domain::{ConsensusKind, DomainCommitment};
-        use crate::storage::db::Storage;
+        use crate::tests::block_door_harness::BlockHarness;
 
         let tempdir = tempfile::tempdir().unwrap();
         let db_path = tempdir.path().join("settlement-state");
         let db_path = db_path.to_str().unwrap();
 
-        {
-            let storage = Storage::new(db_path).unwrap();
-            let consensus = Arc::new(PoWEngine::new(0));
-            let mut blockchain = Blockchain::new(consensus, Some(storage), 45262, None);
-            let domain = default_domain(7, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
-            blockchain
-                .register_consensus_domain(domain.clone())
-                .unwrap();
+        let mut harness = BlockHarness::open(db_path);
+        let domain = harness.operated_domain(7);
+        harness.register_domain(domain);
+        assert!(harness.chain.state.settlement.domains.get(7).is_some());
+        let live_root = harness.chain.state.settlement.root();
 
-            let mut block = Block::new(1, blockchain.last_block().hash.clone(), vec![]);
-            block.state_root = "22".repeat(32);
-            block.tx_root = block.calculate_tx_root();
-            block.hash = block.calculate_hash();
-
-            let commitment =
-                DomainCommitment::from_block(&domain, &block, [4u8; 32], [5u8; 32], 0).unwrap();
-            blockchain.submit_domain_commitment(commitment).unwrap();
-            blockchain.seal_global_header(None).unwrap();
-        }
-
-        let storage = Storage::new(db_path).unwrap();
-        let consensus = Arc::new(PoWEngine::new(0));
-        let blockchain = Blockchain::new(consensus, Some(storage), 45262, None);
-
-        assert!(blockchain.domain_registry.get(7).is_some());
-        assert_eq!(blockchain.global_headers.len(), 1);
-        assert_eq!(blockchain.domain_commitment_registry.len(), 1);
+        let harness = harness.restart();
+        assert!(harness.chain.state.settlement.domains.get(7).is_some());
+        assert_eq!(harness.chain.state.settlement.root(), live_root);
     }
 
     #[test]
@@ -349,7 +331,7 @@ mod chaos_tests {
         blockchain
             .submit_domain_commitment(make_commitment(&poa, 104, 5))
             .unwrap();
-        assert_eq!(blockchain.domain_commitment_registry.len(), 3);
+        assert_eq!(blockchain.state.settlement.commitments.len(), 3);
     }
 
     #[test]
@@ -396,7 +378,10 @@ mod chaos_tests {
         let a = fill(&[1, 2, 3]);
         let b = fill(&[3, 1, 2]);
 
-        assert_eq!(a.domain_registry.root(), b.domain_registry.root());
+        assert_eq!(
+            a.state.settlement.domains.root(),
+            b.state.settlement.domains.root()
+        );
         assert_eq!(
             a.build_global_header(None).domain_commitment_root,
             b.build_global_header(None).domain_commitment_root
@@ -673,7 +658,7 @@ mod chaos_tests {
 
         assert_eq!(global_header.global_height, 0);
         assert_eq!(
-            settlement_node.domain_commitment_registry.len(),
+            settlement_node.state.settlement.commitments.len(),
             (num_blocks * 3) as usize
         );
         assert_eq!(
@@ -769,7 +754,7 @@ mod chaos_tests {
         let global_header = settlement_node.seal_global_header(None).unwrap();
         assert_eq!(
             global_header.domain_commitment_root,
-            settlement_node.domain_commitment_registry.root()
+            settlement_node.state.settlement.commitments.root()
         );
         assert_eq!(
             global_header.message_root,
