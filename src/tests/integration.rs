@@ -570,7 +570,7 @@ mod integration_tests {
                 sign_attestation(&pq_key, 1, 10, &checkpoint_hash, 0, pubkey.to_string()).unwrap(),
             ],
         );
-        blob.pq_signatures[0].dilithium_signature[0] ^= 0x5A;
+        blob.pq_signatures[0].pq_signature[0] ^= 0x5A;
         blob.merkle_root = QcBlob::compute_merkle_root(&blob.pq_signatures);
 
         let result = blockchain.import_qc_blob(blob);
@@ -741,7 +741,7 @@ mod integration_tests {
         );
 
         let mut invalid_blob = valid_blob.clone();
-        invalid_blob.pq_signatures[0].dilithium_signature[0] ^= 0x5A;
+        invalid_blob.pq_signatures[0].pq_signature[0] ^= 0x5A;
         invalid_blob.merkle_root = QcBlob::compute_merkle_root(&invalid_blob.pq_signatures);
         let proof = invalid_blob.detect_fault_proofs(&snapshot).pop().unwrap();
 

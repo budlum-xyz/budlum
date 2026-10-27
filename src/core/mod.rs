@@ -12,3 +12,4 @@ pub mod map_keys;
 pub mod metrics;
 pub mod money;
 pub mod transaction;
+pub mod tx_bundle;

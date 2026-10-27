@@ -123,6 +123,16 @@ pub struct Mempool {
     /// `resident_bytes_are_exact` re-derives it from scratch to prove the two
     /// have not drifted.
     resident_bytes: usize,
+
+    /// The scheme statuses admission verifies under. The chain copies its
+    /// state registry in through [`Mempool::sync_scheme_registry`] before it
+    /// admits, so a family the chain disabled is refused at the pool door in
+    /// the same block it stops verifying in the executor.
+    scheme_registry: crate::crypto::scheme::SchemeStatusRegistry,
+
+    /// Authorizations this pool already verified under the current registry. A transaction that
+    /// comes back (re-gossip, a block replay) is not verified twice.
+    authority_cache: crate::mempool::authority_cache::AuthorityCache,
 }
 
 /// How many bytes one transaction occupies, by the transport's own measure.
@@ -130,7 +140,7 @@ pub struct Mempool {
 /// Reuses the protobuf `encoded_len` that `validate_tx_size` refuses on, so a
 /// transaction charged here is charged the number it was admitted against.
 /// The serialization is discarded; only the length is wanted.
-fn charged_bytes(tx: &Transaction) -> usize {
+pub fn charged_bytes(tx: &Transaction) -> usize {
     use prost::Message;
     let proto = crate::network::proto_conversions::pb::ProtoTransaction::from(tx);
     proto.encoded_len()
@@ -144,6 +154,15 @@ impl Mempool {
             by_sender: HashMap::new(),
             by_fee: BTreeMap::new(),
             resident_bytes: 0,
+            scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            authority_cache: crate::mempool::authority_cache::AuthorityCache::default(),
+        }
+    }
+
+    /// Adopt the chain-state scheme registry for admission checks.
+    pub fn sync_scheme_registry(&mut self, registry: &crate::crypto::scheme::SchemeStatusRegistry) {
+        if self.scheme_registry != *registry {
+            self.scheme_registry = registry.clone();
         }
     }
 
@@ -182,10 +201,22 @@ impl Mempool {
         // every other zero-address sender, so no special case is needed
         // here. A blanket zero-address exemption would let an attacker mint
         // unsigned transactions from 0x00..00 (BUDLUM finding #19/#26).
-        if !tx.verify() {
-            return Err(MempoolError::InvalidTransaction(
-                "Invalid transaction signature".into(),
-            ));
+        let registry_commitment = self.scheme_registry.commitment();
+        let authorization = bincode::serialize(&tx.authorization).unwrap_or_default();
+        let digest = crate::mempool::authority_cache::authorization_digest(&[
+            &tx.signing_hash(),
+            tx.signature.as_deref().unwrap_or_default(),
+            &tx.signer_public_key,
+            &authorization,
+        ]);
+        if !self.authority_cache.contains(&digest, &registry_commitment) {
+            if !tx.verify_in(&self.scheme_registry) {
+                return Err(MempoolError::InvalidTransaction(
+                    "Invalid transaction signature".into(),
+                ));
+            }
+            self.authority_cache
+                .insert_accepted(digest, registry_commitment);
         }
 
         // Eviction is a side effect on somebody else's transaction, so it may

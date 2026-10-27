@@ -534,7 +534,18 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// and the field shipped outside the digest was exactly the forgery surface
 /// the note-registry lesson closed. Pre-schema-7 pinned digests stay
 /// byte-exact: at 6 and below the two fields cannot affect the digest.
-pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 9;
+///
+/// Schema 10 carries and digests the settlement registries (testnet
+///): state that moved from `Blockchain` into the account
+/// state when its writes became transaction doors. A node that dropped a
+/// registration would serve a chain that is not the chain's; at 9 and below
+/// the field cannot affect the digest.
+///
+/// Schema 11 carries and digests the scheme and suite statuses of the chain
+///. A status decides whether a signature family still
+/// verifies, so a node that dropped a `Disabled` mark would accept signatures
+/// the chain refuses; at 10 and below the field cannot affect the digest.
+pub const CURRENT_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateSnapshotV2MigrationReport {
@@ -665,6 +676,15 @@ pub struct StateSnapshotV2 {
     /// chain had: declared numbers, no escrow.
     #[serde(default)]
     pub external_bond_escrow: Option<BTreeMap<Address, u64>>,
+    /// The settlement registries (schema-10 wave). `None` on a snapshot
+    /// taken before they were consensus state, which is what such a chain
+    /// had in its state: nothing.
+    #[serde(default)]
+    pub settlement: Option<crate::settlement::SettlementRegistries>,
+    /// The scheme and suite statuses (schema-11 wave). `None` reads as the
+    /// genesis statuses, which is what a chain that never moved one had.
+    #[serde(default)]
+    pub scheme_registry: Option<SchemeRegistrySnapshot>,
     /// Proof tasks and unpaid receipts.
     ///
     /// `#[serde(default)]` like its neighbours: a snapshot taken before this
@@ -726,10 +746,39 @@ pub enum SnapshotTrustPolicy {
     RequireSigned,
 }
 
+/// The scheme registry as a snapshot stores it: `(identifier, status byte)`
+/// pairs for schemes and for suites, in ascending identifier order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemeRegistrySnapshot {
+    pub schemes: Vec<(u16, u8)>,
+    pub suites: Vec<(u16, u8)>,
+}
+
+impl SchemeRegistrySnapshot {
+    /// The snapshot form of a registry.
+    #[must_use]
+    pub fn of(registry: &crate::crypto::scheme::SchemeStatusRegistry) -> Self {
+        let (schemes, suites) = registry.entries();
+        Self { schemes, suites }
+    }
+
+    /// The registry these entries describe.
+    ///
+    /// # Errors
+    ///
+    /// A message when the entries are not exactly the scheme and suite tables.
+    pub fn restore(&self) -> Result<crate::crypto::scheme::SchemeStatusRegistry, String> {
+        crate::crypto::scheme::SchemeStatusRegistry::from_entries(&self.schemes, &self.suites)
+    }
+}
+
 /// C4 manifest authenticity error (loader quarantine class).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotAuthError {
     DigestMismatch,
+    /// The scheme registry entries do not restore to a registry (an unknown
+    /// row or status byte): refused, never repaired to genesis.
+    SchemeRegistryInvalid,
     MissingSigner,
     MissingSignature,
     SignerNotTrusted,
@@ -744,6 +793,12 @@ impl std::fmt::Display for SnapshotAuthError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SnapshotAuthError::DigestMismatch => write!(f, "snapshot digest mismatch"),
+            SnapshotAuthError::SchemeRegistryInvalid => {
+                write!(
+                    f,
+                    "snapshot scheme registry entries are not a valid registry"
+                )
+            }
             SnapshotAuthError::MissingSigner => write!(f, "RequireSigned: manifest_signer missing"),
             SnapshotAuthError::MissingSignature => {
                 write!(f, "RequireSigned: manifest_signature missing")
@@ -866,6 +921,8 @@ impl StateSnapshotV2 {
             message_registry: Some(account_state.message_registry.clone()),
             external_roots: Some(account_state.external_roots.clone()),
             external_bond_escrow: Some(account_state.external_bond_escrow.clone()),
+            settlement: Some(account_state.settlement.clone()),
+            scheme_registry: Some(SchemeRegistrySnapshot::of(&account_state.scheme_registry)),
             proof_market: Some(account_state.proof_market.clone()),
             identity: Some(account_state.identity.clone()),
             vault: Some(account_state.vault.clone()),
@@ -1089,6 +1146,15 @@ impl StateSnapshotV2 {
             hash_opt_serializable(&mut hasher, &self.external_bond_escrow);
             hasher.update(self.burned_total.to_le_bytes());
         }
+        // Schema 10: the settlement registries, gated the same way so a
+        // pre-schema-10 digest stays byte-exact.
+        if self.schema_version >= 10 {
+            hash_opt_serializable(&mut hasher, &self.settlement);
+        }
+        // Schema 11: the scheme and suite statuses, gated the same way.
+        if self.schema_version >= 11 {
+            hash_opt_serializable(&mut hasher, &self.scheme_registry);
+        }
 
         hasher.finalize().into()
     }
@@ -1127,6 +1193,11 @@ impl StateSnapshotV2 {
     ) -> Result<(), SnapshotAuthError> {
         if !self.verify() {
             return Err(SnapshotAuthError::DigestMismatch);
+        }
+        if let Some(registry) = &self.scheme_registry {
+            registry
+                .restore()
+                .map_err(|_| SnapshotAuthError::SchemeRegistryInvalid)?;
         }
         match self.trust_policy {
             SnapshotTrustPolicy::AllowUnsigned => Ok(()),
@@ -2433,6 +2504,12 @@ mod tests {
     /// was ever recorded burned", which under-counts rather than fabricates.
     const SCHEMA9_KEYS: &[&str] = &["burned_total"];
 
+    /// Only the keys of the schema-10 wave.
+    const SCHEMA10_KEYS: &[&str] = &["settlement"];
+
+    /// Only the keys of the schema-11 wave.
+    const SCHEMA11_KEYS: &[&str] = &["scheme_registry"];
+
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
     /// the fields it must not lose. `snapshot_hash` is deliberately outside:
     /// the seal is recomputed because the version changed.
@@ -2583,6 +2660,10 @@ mod tests {
             "poa_compliance",
             // lifetime burned total (schema-9 wave: default-filled AND digested)
             "burned_total",
+            // settlement registries (schema-10 wave: default-filled AND digested)
+            "settlement",
+            // scheme and suite statuses (schema-11 wave: default-filled AND digested)
+            "scheme_registry",
             // identity registry (schema-5 wave: default-filled AND digested)
             "identity",
             // vault folder registry (schema-6 wave: same discipline)
@@ -2617,7 +2698,15 @@ mod tests {
 
         let blob = as_legacy_blob(
             &full,
-            &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat(),
+            &[
+                SCHEMA3_AND_4_KEYS,
+                SCHEMA5_KEYS,
+                SCHEMA6_KEYS,
+                SCHEMA9_KEYS,
+                SCHEMA10_KEYS,
+                SCHEMA11_KEYS,
+            ]
+            .concat(),
             2,
         );
         // Premise: the blob really behaves like a schema-2 record - the new
@@ -2625,7 +2714,16 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 2);
-        for key in &[SCHEMA3_AND_4_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat() {
+        for key in &[
+            SCHEMA3_AND_4_KEYS,
+            SCHEMA5_KEYS,
+            SCHEMA6_KEYS,
+            SCHEMA9_KEYS,
+            SCHEMA10_KEYS,
+            SCHEMA11_KEYS,
+        ]
+        .concat()
+        {
             assert!(
                 !obj.contains_key(*key),
                 "the source blob contains a key it must not have: {key}"
@@ -2661,6 +2759,7 @@ mod tests {
                 && restored.proof_market.is_none()
                 && restored.identity.is_none()
                 && restored.vault.is_none()
+                && restored.settlement.is_none()
                 && restored.manifest_signer.is_none()
                 && restored.manifest_signature.is_none(),
             "a field never present in the blob came back as data; that is not loss, it is fabrication"
@@ -2729,13 +2828,30 @@ mod tests {
 
         let blob = as_legacy_blob(
             &full,
-            &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat(),
+            &[
+                SCHEMA4_ONLY_KEYS,
+                SCHEMA5_KEYS,
+                SCHEMA6_KEYS,
+                SCHEMA9_KEYS,
+                SCHEMA10_KEYS,
+                SCHEMA11_KEYS,
+            ]
+            .concat(),
             3,
         );
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 3);
-        for key in &[SCHEMA4_ONLY_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS, SCHEMA9_KEYS].concat() {
+        for key in &[
+            SCHEMA4_ONLY_KEYS,
+            SCHEMA5_KEYS,
+            SCHEMA6_KEYS,
+            SCHEMA9_KEYS,
+            SCHEMA10_KEYS,
+            SCHEMA11_KEYS,
+        ]
+        .concat()
+        {
             assert!(
                 !obj.contains_key(*key),
                 "the source blob carries a v4 key it must not: {key}"
@@ -2758,6 +2874,10 @@ mod tests {
         assert_eq!(
             restored.burned_total, 0,
             "the schema-9 burned total was fabricated from a blob that never carried it"
+        );
+        assert!(
+            restored.settlement.is_none(),
+            "the schema-10 settlement registries were fabricated from a blob that never carried them"
         );
         // v2 + v3 alanlarinin tumu verisiyle tasindi.
         let mut preserved = SCHEMA2_FIELDS.to_vec();
@@ -2813,13 +2933,28 @@ mod tests {
 
         let blob = as_legacy_blob(
             &full,
-            &[POA_ADMISSION_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat(),
+            &[
+                POA_ADMISSION_KEYS,
+                SCHEMA5_KEYS,
+                SCHEMA6_KEYS,
+                SCHEMA10_KEYS,
+                SCHEMA11_KEYS,
+            ]
+            .concat(),
             4,
         );
         let value: serde_json::Value = serde_json::from_slice(&blob).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("schema_version").unwrap().as_u64().unwrap(), 4);
-        for key in &[POA_ADMISSION_KEYS, SCHEMA5_KEYS, SCHEMA6_KEYS].concat() {
+        for key in &[
+            POA_ADMISSION_KEYS,
+            SCHEMA5_KEYS,
+            SCHEMA6_KEYS,
+            SCHEMA10_KEYS,
+            SCHEMA11_KEYS,
+        ]
+        .concat()
+        {
             assert!(
                 !obj.contains_key(*key),
                 "the source blob carries an acceptance key it must not: {key}"
@@ -2911,6 +3046,33 @@ mod tests {
             digest_a,
             s8_b.calculate_digest(),
             "pre-schema-9 snapshots must ignore external_bond_escrow so stored digests remain valid"
+        );
+    }
+
+    #[test]
+    fn schema10_gates_the_settlement_digest_without_breaking_legacy_snapshots() {
+        let state = AccountState::new();
+        let mut s10_empty = StateSnapshotV2::from_state(&state, legacy_params(1));
+        s10_empty.snapshot_hash = hex::encode(s10_empty.calculate_digest());
+
+        let mut registries = crate::settlement::SettlementRegistries::new();
+        registries.on_block_end(7);
+        let mut s10_changed = s10_empty.clone();
+        s10_changed.settlement = Some(registries);
+        assert!(
+            !s10_changed.verify(),
+            "schema 10 digest must commit the settlement registries"
+        );
+
+        let mut s9_a = s10_empty;
+        s9_a.schema_version = 9;
+        let digest_a = s9_a.calculate_digest();
+        let mut s9_b = s10_changed;
+        s9_b.schema_version = 9;
+        assert_eq!(
+            digest_a,
+            s9_b.calculate_digest(),
+            "pre-schema-10 snapshots must ignore the settlement registries so stored digests remain valid"
         );
     }
 }
