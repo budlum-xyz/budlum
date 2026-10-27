@@ -3541,7 +3541,12 @@ impl Blockchain {
                 {
                     reasons.push("redelegation_target_not_validator".to_string());
                 }
-                if self.state.registry.delegated_amount(tx.from, from_validator) < tx.amount {
+                if self
+                    .state
+                    .registry
+                    .delegated_amount(tx.from, from_validator)
+                    < tx.amount
+                {
                     reasons.push("redelegation_exceeds_position".to_string());
                 }
             }
@@ -3549,12 +3554,7 @@ impl Blockchain {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
                     reasons.push("invalid_claim_rewards_shape".to_string());
                 }
-                if self
-                    .state
-                    .registry
-                    .claimable_reward(tx.from, validator)
-                    == 0
-                {
+                if self.state.registry.claimable_reward(tx.from, validator) == 0 {
                     reasons.push("no_claimable_reward".to_string());
                 }
             }
@@ -3963,8 +3963,31 @@ impl Blockchain {
     /// the validation reward pool, when the chain's profile has one. Runs in
     /// the block transition, so every node pays the same validators the same
     /// amounts.
+    /// The schedule this block may pay from, if any.
+    ///
+    /// Both conditions have to hold, and neither implies the other: the
+    /// genesis flag (`reward_pool.enabled`, testnet item 8) is the chain's
+    /// permission to pay at all, and the profile's schedule is the pot it
+    /// pays from. A chain that turned the pool off pays nothing even if
+    /// someone transferred BUD to the pool account later - the flag, not the
+    /// balance, is the permission - and a chain whose profile has no schedule
+    /// (mainnet until D-04, devnet) has nothing to pay from whatever the flag
+    /// says. Genesis refuses the one combination that disagrees
+    /// (`GenesisConfig::validate_reward_pool_flag`).
+    fn payable_reward_pool(
+        chain_id: u64,
+        enabled: bool,
+    ) -> Option<crate::tokenomics::reward_pool::RewardPoolSchedule> {
+        if !enabled {
+            return None;
+        }
+        crate::core::chain_config::reward_pool_for_chain_id(chain_id)
+    }
+
     fn apply_epoch_reward_pool(state: &mut AccountState, block: &Block) {
-        let Some(schedule) = crate::core::chain_config::reward_pool_for_chain_id(block.chain_id)
+        // The flag is read from consensus state so a replay and a peer gate
+        // identically.
+        let Some(schedule) = Self::payable_reward_pool(block.chain_id, state.reward_pool_enabled)
         else {
             return;
         };
@@ -7187,6 +7210,25 @@ impl Clone for Blockchain {
 mod tests {
     use super::*;
     use crate::consensus::poa::{PoAConfig, PoAEngine};
+
+    /// testnet item 8: the reward pool is paid only when the genesis flag
+    /// says so AND the profile has a schedule. Neither condition implies the
+    /// other, and a chain that fails either pays nothing.
+    #[test]
+    fn the_genesis_flag_is_the_permission_to_pay_the_reward_pool() {
+        use crate::core::chain_config::Network;
+
+        let testnet = Network::Testnet.chain_id().value();
+        let mainnet = Network::Mainnet.chain_id().value();
+        let devnet = Network::Devnet.chain_id().value();
+        // Testnet: the profile has a schedule, so the flag alone decides.
+        assert!(Blockchain::payable_reward_pool(testnet, true).is_some());
+        assert!(Blockchain::payable_reward_pool(testnet, false).is_none());
+        // Mainnet (no schedule yet, D-04) and devnet (no distribution to fund
+        // one): a flag saying yes still pays nothing.
+        assert!(Blockchain::payable_reward_pool(mainnet, true).is_none());
+        assert!(Blockchain::payable_reward_pool(devnet, true).is_none());
+    }
 
     /// BLG-0181: a QC blob of another fork must not back a certificate.
     #[test]
