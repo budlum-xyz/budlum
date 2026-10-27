@@ -63,7 +63,7 @@
 //! stand behind it.
 
 use crate::crypto::primitives::{
-    verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
+    verify_ml_dsa_87_signature_in, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
 };
 
 /// The largest number of bytes a quote may carry.
@@ -110,6 +110,9 @@ pub enum TeeError {
     UnexpectedKey,
     /// The ML-DSA-87 signature did not verify.
     InvalidSignature,
+    /// The quantum alarm is at Watch or above: TEE shortcuts are closed
+    ///.
+    ClosedByAlarm,
 }
 
 impl core::fmt::Display for TeeError {
@@ -128,6 +131,12 @@ impl core::fmt::Display for TeeError {
                 write!(f, "KQ-WALLET-TEE: attestation key is not the expected one")
             }
             Self::InvalidSignature => write!(f, "KQ-WALLET-TEE: quote signature does not verify"),
+            Self::ClosedByAlarm => {
+                write!(
+                    f,
+                    "KQ-WALLET-TEE: shortcuts are closed by the quantum alarm"
+                )
+            }
         }
     }
 }
@@ -181,6 +190,22 @@ impl TeeAttestation {
         &self,
         expected_key: &[u8; ML_DSA_87_PUBLIC_KEY_LEN],
     ) -> Result<(), TeeError> {
+        self.verify_signed_by_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            expected_key,
+        )
+    }
+
+    /// [`Self::verify_signed_by`] under the scheme statuses of a chain.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::verify_signed_by`].
+    pub fn verify_signed_by_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        expected_key: &[u8; ML_DSA_87_PUBLIC_KEY_LEN],
+    ) -> Result<(), TeeError> {
         if self.backend == TeeBackendKind::Unavailable {
             return Err(TeeError::BackendUnavailable);
         }
@@ -196,8 +221,14 @@ impl TeeAttestation {
             return Err(TeeError::UnexpectedKey);
         }
         let payload = attestation_signing_payload(self.backend, &self.quote);
-        verify_ml_dsa_87_signature(&payload, &self.signature, &self.public_key)
-            .map_err(|_| TeeError::InvalidSignature)
+        verify_ml_dsa_87_signature_in(
+            registry,
+            crate::crypto::ctx::TEE_V1,
+            &payload,
+            &self.signature,
+            &self.public_key,
+        )
+        .map_err(|_| TeeError::InvalidSignature)
     }
 }
 
@@ -237,6 +268,25 @@ impl TeeGates {
         att.verify_signed_by(expected_key)
     }
 
+    /// The attestation check under the quantum alarm: the TEE is
+    /// not on the security path, and at Watch its shortcuts close, so nothing
+    /// is accepted on a TEE attestation once the alarm is raised.
+    ///
+    /// # Errors
+    ///
+    /// [`TeeError::ClosedByAlarm`] at Watch and above, else every error
+    /// [`TeeAttestation::verify_signed_by`] returns.
+    pub fn kq_wallet_tee_shortcut(
+        att: &TeeAttestation,
+        expected_key: &[u8; ML_DSA_87_PUBLIC_KEY_LEN],
+        alarm: &crate::security::quantum_canary::QuantumAlarmState,
+    ) -> Result<(), TeeError> {
+        if !crate::security::alarm_effects::tee_shortcuts_open(alarm) {
+            return Err(TeeError::ClosedByAlarm);
+        }
+        att.verify_signed_by(expected_key)
+    }
+
     /// # Errors
     ///
     /// Every error [`TeeRuntime::ensure_available`] returns.
@@ -256,7 +306,7 @@ mod tests {
             backend,
             quote: quote.to_vec(),
             public_key: kp.public_key_bytes(),
-            signature: kp.sign(&payload),
+            signature: kp.sign(crate::crypto::ctx::TEE_V1, &payload),
         }
     }
 
@@ -265,6 +315,33 @@ mod tests {
         let kp = WalletKeyPair::generate();
         let att = attest(&kp, TeeBackendKind::Sgx, b"quote bytes");
         assert_eq!(att.verify_signed_by(&kp.public_key_bytes()), Ok(()));
+    }
+
+    /// /: a valid attestation is accepted while the alarm is clear
+    /// and refused from Watch on.
+    #[test]
+    fn the_tee_shortcut_closes_at_watch() {
+        use crate::security::quantum_canary::{CanaryBook, CanaryClaim, CanaryId};
+        let kp = WalletKeyPair::generate();
+        let att = attest(&kp, TeeBackendKind::Sgx, b"quote bytes");
+        let key = kp.public_key_bytes();
+        let mut book = CanaryBook::new();
+        assert_eq!(
+            TeeGates::kq_wallet_tee_shortcut(&att, &key, book.alarm()),
+            Ok(())
+        );
+        book.force_solved(
+            CanaryId::Ecc192,
+            CanaryClaim {
+                commit_height: 1,
+                claimer: crate::core::address::Address([1; 32]),
+                accepted_height: 2,
+            },
+        );
+        assert_eq!(
+            TeeGates::kq_wallet_tee_shortcut(&att, &key, book.alarm()),
+            Err(TeeError::ClosedByAlarm)
+        );
     }
 
     /// What the skeleton missed: if a digest is put in place of a signature,

@@ -26,6 +26,8 @@ pub mod emit;
 pub mod erasure;
 pub mod fixed_point;
 pub mod generated;
+/// Content-key delivery for view grants: HPKE package, hash as `key_id`.
+pub mod key_package;
 pub mod lifecycle;
 pub mod living_threshold;
 pub mod lrc;
@@ -68,6 +70,7 @@ pub mod three_visibility;
 pub mod traits;
 pub mod transformed;
 pub mod view_grant;
+pub mod witness_retention;
 
 pub use assignment::{
     assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,

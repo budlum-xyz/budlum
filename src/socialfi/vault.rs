@@ -283,6 +283,16 @@ impl VaultRegistry {
         self.folders.is_empty()
     }
 
+    #[must_use]
+    pub fn folder_count(&self) -> usize {
+        self.folders.len()
+    }
+
+    #[must_use]
+    pub fn membership_count(&self) -> usize {
+        self.members.values().map(Vec::len).sum()
+    }
+
     /// The vault's anchor - `BDLM_VAULT_V1`, the `NftRegistry::root` family
     /// of conventions: counts beside contents, one parse of the stream.
     /// Membership order is hashed as stored (registration order): the root
