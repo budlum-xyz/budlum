@@ -164,11 +164,10 @@ mod byzantine_settlement_tests {
 
         let poa_domain_id = poa_domain.id;
         node_a
-            .state
-            .settlement
-            .domains
-            .set_status(poa_domain_id, DomainStatus::Frozen)
-            .unwrap();
+            .domain_registry
+            .get_mut(poa_domain_id)
+            .unwrap()
+            .status = DomainStatus::Frozen;
         let mut com_poa_new = poa_commitments[0].0.clone();
         com_poa_new.domain_height = 999;
         com_poa_new.sequence = 999;
@@ -227,7 +226,13 @@ mod byzantine_settlement_tests {
             "First commitment should be accepted: {:?}",
             pow_res.err()
         );
-        assert_eq!(node.state.get_nonce(&alice), 1);
+        // The accept path applies no writes: a commitment's nonce writes
+        // travel in a signed StateUpdateTx executed in block. This test drives
+        // the accept path alone, so the write the first commitment carries is
+        // applied here by hand - the state the second claim then meets is the
+        // one the carrier would have produced.
+        assert_eq!(node.state.get_nonce(&alice), 0);
+        node.state.get_or_create(&alice).nonce = 1;
 
         let res2 = node.submit_domain_commitment(com_pos);
         assert!(
@@ -237,7 +242,7 @@ mod byzantine_settlement_tests {
         assert_eq!(
             node.state.get_nonce(&alice),
             1,
-            "Nonce must not be double-spent"
+            "the refused claim must not move the nonce the first claim spent"
         );
     }
 
@@ -281,8 +286,10 @@ mod byzantine_settlement_tests {
         // each node the first claim spends the nonce and the second is
         // refused, so the nonce is the same whichever claim won.
         assert!(node_a.submit_domain_commitment(com_pow).is_ok());
+        node_a.state.get_or_create(&alice_a).nonce = 1;
         assert!(node_a.submit_domain_commitment(com_pos).is_err());
         assert!(node_b.submit_domain_commitment(com_pos_b).is_ok());
+        node_b.state.get_or_create(&alice_b).nonce = 1;
         assert!(node_b.submit_domain_commitment(com_pow_b).is_err());
 
         assert_eq!(node_a.state.get_nonce(&alice_a), 1);
@@ -372,8 +379,8 @@ mod byzantine_settlement_tests {
         assert!(node.submit_domain_commitment(com_pow).is_ok());
         assert!(node.submit_domain_commitment(com_pos).is_ok());
 
-        assert_eq!(node.state.get_nonce(&alice), 1);
-        assert_eq!(node.state.get_nonce(&bob), 1);
+        assert_eq!(node.state.get_nonce(&alice), 0);
+        assert_eq!(node.state.get_nonce(&bob), 0);
     }
 
     #[tokio::test]
@@ -407,13 +414,7 @@ mod byzantine_settlement_tests {
         let accounts: Vec<Address> = (0..100u8).map(|i| Address::from([i; 32])).collect();
         let mut commitments = Vec::new();
         for domain_id in 1..=5u32 {
-            let domain = node_a
-                .state
-                .settlement
-                .domains
-                .get(domain_id)
-                .unwrap()
-                .clone();
+            let domain = node_a.domain_registry.get(domain_id).unwrap().clone();
             let mut parent = format!("parent_{domain_id}_0");
             for height in 1..=200u64 {
                 let mut block = Block::new(height, parent.clone(), vec![]);
@@ -454,9 +455,7 @@ mod byzantine_settlement_tests {
         for domain_id in 1..=5u32 {
             for node in [&node_a, &node_b] {
                 assert_eq!(
-                    node.state
-                        .settlement
-                        .domains
+                    node.domain_registry
                         .get(domain_id)
                         .unwrap()
                         .last_committed_height,
@@ -472,7 +471,7 @@ mod byzantine_settlement_tests {
             );
             assert_eq!(
                 node_a.state.get_nonce(addr),
-                10,
+                0,
                 "claims must have been applied for account {addr:?}"
             );
         }
@@ -645,10 +644,10 @@ mod byzantine_settlement_tests {
         node_a.submit_domain_commitment(com2).unwrap();
         node_b.submit_domain_commitment(com1).unwrap();
 
-        assert_eq!(node_a.state.get_nonce(&alice), 1);
-        assert_eq!(node_a.state.get_nonce(&bob), 1);
-        assert_eq!(node_b.state.get_nonce(&alice), 1);
-        assert_eq!(node_b.state.get_nonce(&bob), 1);
+        assert_eq!(node_a.state.get_nonce(&alice), 0);
+        assert_eq!(node_a.state.get_nonce(&bob), 0);
+        assert_eq!(node_b.state.get_nonce(&alice), 0);
+        assert_eq!(node_b.state.get_nonce(&bob), 0);
         let mut h_a = node_a.build_global_header(None);
         h_a.timestamp_ms = 0;
         let mut h_b = node_b.build_global_header(None);
@@ -922,10 +921,7 @@ mod byzantine_settlement_tests {
         let alice = Address::from([0xA1u8; 32]);
         node.state.add_balance(&alice, 1000);
 
-        let c8 = make_commitment_for_account(&node, 1, alice, 8, 8);
-        let c9 = make_commitment_for_account(&node, 1, alice, 9, 9);
         let c10 = make_commitment_for_account(&node, 1, alice, 10, 10);
-
         let r10 = node.submit_domain_commitment(c10);
         assert!(r10.is_ok(), "height 10 should be buffered in registry");
         assert_eq!(node.state.get_nonce(&alice), 0);
@@ -934,24 +930,33 @@ mod byzantine_settlement_tests {
             let ci = make_commitment_for_account(&node, 1, alice, i, i);
             node.submit_domain_commitment(ci).unwrap();
         }
-        // Heights 1..=7 are contiguous and applied; 10 waits for 8 and 9.
-        assert_eq!(node.state.get_nonce(&alice), 7);
+        // Heights 1..=7 are contiguous, so the registry advanced to 7; 10
+        // still waits for 8 and 9.
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            7,
+            "the contiguous prefix must advance the registry"
+        );
 
+        let c8 = make_commitment_for_account(&node, 1, alice, 8, 8);
         node.submit_domain_commitment(c8).unwrap();
-        assert_eq!(node.state.get_nonce(&alice), 8);
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            8
+        );
+        let c9 = make_commitment_for_account(&node, 1, alice, 9, 9);
         node.submit_domain_commitment(c9).unwrap();
 
         // Height 9 closed the gap: the buffered height 10 applied after it.
-        assert_eq!(node.state.get_nonce(&alice), 10);
         assert_eq!(
-            node.state
-                .settlement
-                .domains
-                .get(1)
-                .unwrap()
-                .last_committed_height,
+            node.domain_registry.get(1).unwrap().last_committed_height,
             10
         );
+        // The writes these commitments carry are applied by the executor's
+        // StateUpdate carrier, which requires the eligible-validator seat and
+        // runs inside a block. This test executes no transaction, so the
+        // nonce has not moved - the accept path applies no writes.
+        assert_eq!(node.state.get_nonce(&alice), 0);
     }
 
     fn make_node() -> Blockchain {
