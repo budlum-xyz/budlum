@@ -269,13 +269,13 @@ const BUDGETS: &[Budget] = &[
     Budget {
         file: "src/chain/blockchain.rs",
         lint: "clippy::too_many_arguments",
-        count: 4,
-        reason: "consensus or storage entry points whose arguments are all required and none of which groups into a meaningful struct; the fourth is `accept_storage_reallocation_with_escrow`, whose ticket/operator/payer/epoch-window/economics/proof arguments each come from a different authority and bundling them would hide which fields a caller must supply",
+        count: 2,
+        reason: "the bridge lock and verified-mint entry points, whose arguments are all required and none of which groups into a meaningful struct; the storage escrow wrappers that made up the other two were removed when deal opening and repair acceptance became `StorageTx` transactions",
     },
     Budget {
         file: "src/chain/chain_actor.rs",
         lint: "clippy::too_many_arguments",
-        count: 4,
+        count: 2,
         reason: "actor-boundary mirrors of the bridge lock/mint entry points; each argument crosses the channel as part of one message and none groups into a meaningful struct, so bundling them would hide which fields a caller must supply",
     },
     Budget {
@@ -433,12 +433,6 @@ const BUDGETS: &[Budget] = &[
         lint: "clippy::expect_used",
         count: 1,
         reason: "`WalletKeyPair::address` derives from a generated ML-DSA-87 public key, and derivation only rejects malformed keys, so the panic path is unreachable; the expect beats the previous silent zero-address fallback, which would have let a malformed key spend as `[0u8; 32]`",
-    },
-    Budget {
-        file: "src/settlement/pq_anchor.rs",
-        lint: "clippy::too_many_arguments",
-        count: 1,
-        reason: "the node-local emission driver mirrors assemble_anchor's seven-argument shape and adds only the two knobs it uniquely owns (the log path and the mode gate); bundling them into a params struct would hide from the seam wiring which values the consensus caller must supply",
     },
     Budget {
         file: "crates/ai-inference/crates/ai-ops/src/logparse.rs",

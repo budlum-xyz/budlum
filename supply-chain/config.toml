@@ -112,3 +112,162 @@ audit-as-crates-io = true
 
 [policy."rw-stream-sink"]
 audit-as-crates-io = true
+
+# --- the post-quantum core ---
+#
+# Exemptions, not audits: the repository has not reviewed these crates line by
+# line, and writing "safe-to-deploy" under an auditor name would claim that it
+# had. An exemption says "accepted into the dependency set under the reasons
+# below"; each one is a version that `Cargo.lock` pins exactly. The crates that
+# only exist for cfg(hax) or valgrind builds are listed because `cargo vet`
+# walks every target of the graph.
+
+[[exemptions.libcrux-ml-dsa]]
+version = "0.0.11"
+criteria = "safe-to-deploy"
+notes = "Second ML-DSA verifier (portable backend only),. Formally verified (hax/F*) Cryspen code; pinned exactly. The AVX2 advisories RUSTSEC-2026-0125 and RUSTSEC-2026-0126 need simd256, which is off."
+
+[[exemptions.libcrux-intrinsics]]
+version = "0.0.9"
+criteria = "safe-to-deploy"
+notes = "Dependency of libcrux-ml-dsa; the SIMD features that use it are off."
+
+[[exemptions.libcrux-macros]]
+version = "0.0.4"
+criteria = "safe-to-deploy"
+notes = "Proc macros of libcrux-ml-dsa."
+
+[[exemptions.libcrux-platform]]
+version = "0.0.4"
+criteria = "safe-to-deploy"
+notes = "CPU feature detection of libcrux-ml-dsa."
+
+[[exemptions.libcrux-secrets]]
+version = "0.0.7"
+criteria = "safe-to-deploy"
+notes = "Secret-integer wrappers of libcrux-ml-dsa."
+
+[[exemptions.libcrux-sha3]]
+version = "0.0.11"
+criteria = "safe-to-deploy"
+notes = "SHA-3 and SHAKE of libcrux-ml-dsa, portable backend."
+
+[[exemptions.libcrux-traits]]
+version = "0.0.9"
+criteria = "safe-to-deploy"
+notes = "Traits crate of libcrux."
+
+[[exemptions.slh-dsa]]
+version = "0.2.0-rc.5"
+criteria = "safe-to-deploy"
+notes = "RustCrypto SLH-DSA (FIPS 205),; ACVP vectors in tests/vectors/pq are mandatory. A release candidate because 0.1.0 needs signature 2.3.0-pre.4, which cannot be unified with ed25519 2.2 under libp2p."
+
+[[exemptions.tls_codec]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+notes = "Required by libcrux-ml-dsa; its `codec` feature is off, so no code of it is linked."
+
+[[exemptions.tls_codec_derive]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+notes = "Proc macro of tls_codec, never expanded here."
+
+[[exemptions.hax-lib]]
+version = "0.3.7"
+criteria = "safe-to-deploy"
+notes = "Verification annotations of libcrux; compiled only under cfg(hax)."
+
+[[exemptions.hax-lib]]
+version = "0.4.2"
+criteria = "safe-to-deploy"
+notes = "Verification annotations of libcrux; compiled only under cfg(hax)."
+
+[[exemptions.hax-lib-macros]]
+version = "0.3.7"
+criteria = "safe-to-deploy"
+notes = "Proc macros of hax-lib; compiled only under cfg(hax)."
+
+[[exemptions.hax-lib-macros]]
+version = "0.4.2"
+criteria = "safe-to-deploy"
+notes = "Proc macros of hax-lib; compiled only under cfg(hax)."
+
+[[exemptions.hax-lib-macros-types]]
+version = "0.3.7"
+criteria = "safe-to-deploy"
+notes = "Types of hax-lib-macros; compiled only under cfg(hax)."
+
+[[exemptions.hax-lib-macros-types]]
+version = "0.4.2"
+criteria = "safe-to-deploy"
+notes = "Types of hax-lib-macros; compiled only under cfg(hax)."
+
+[[exemptions.core-models]]
+version = "0.0.7"
+criteria = "safe-to-deploy"
+notes = "Models of core used by libcrux under cfg(hax) only."
+
+[[exemptions.crabgrind]]
+version = "0.3.1"
+criteria = "safe-to-deploy"
+notes = "Valgrind client requests of libcrux-secrets, constant-time testing only (cfg valgrind_ct_test)."
+
+[[exemptions.bindgen]]
+version = "0.72.1"
+criteria = "safe-to-deploy"
+notes = "Build-time dependency of crabgrind; never part of a shipped binary."
+
+[[exemptions.cexpr]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+notes = "Build-time dependency of bindgen."
+
+[[exemptions.clang-sys]]
+version = "1.9.1"
+criteria = "safe-to-deploy"
+notes = "Build-time dependency of bindgen."
+
+[[exemptions.pkg-config]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "Build-time dependency of bindgen and crabgrind."
+
+[[exemptions.shlex]]
+version = "1.3.0"
+criteria = "safe-to-deploy"
+notes = "Build-time dependency of bindgen."
+
+[[exemptions.pastey]]
+version = "0.2.3"
+criteria = "safe-to-deploy"
+notes = "Proc macro dependency of libcrux-sha3."
+
+[[exemptions.proc-macro-error2]]
+version = "2.0.1"
+criteria = "safe-to-deploy"
+notes = "Proc macro helper of hax-lib-macros."
+
+[[exemptions.proc-macro-error-attr2]]
+version = "2.0.0"
+criteria = "safe-to-deploy"
+notes = "Proc macro helper of proc-macro-error2."
+
+[[exemptions.hmac]]
+version = "0.13.0"
+criteria = "safe-to-deploy"
+notes = "Dependency of slh-dsa 0.2 (HMAC for the randomized signing path)."
+
+[[exemptions.sha3]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+notes = "Dependency of slh-dsa 0.2 (SHAKE hash functions)."
+
+[[exemptions.zeroize]]
+version = "1.9.1"
+criteria = "safe-to-deploy"
+notes = "One pin for the PQ core and the HPKE module; libcrux-ml-dsa asks for 1.9 through tls_codec."
+
+[[exemptions.zeroize_derive]]
+version = "1.5.0"
+criteria = "safe-to-deploy"
+notes = "Proc macro of zeroize 1.9."
