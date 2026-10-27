@@ -27,9 +27,17 @@ import {BudlumOutboundEmitter} from "../lib/BudlumOutbound.sol";
 contract GraftExecutor is BudlumOutboundEmitter {
     bytes internal constant FULFILLED_KIND = "budlum/graft/fulfilled/v1";
 
-    /// One fulfilment per intent: a second call for the same intent would be
-    /// a second event a solver could try to collect on.
-    mapping(bytes32 => bool) public fulfilled;
+    /// One fulfilment per intent *per solver*: a second call for the same
+    /// intent by the same account would be a second event it could try to
+    /// collect on.
+    ///
+    /// Scoped by `msg.sender` because this contract is permissionless. A
+    /// global flag made the id first-come-first-served, so any account could
+    /// burn an intent id with an empty call to a benign target and leave the
+    /// real solver unable to fulfil - a griefing attack that costs the
+    /// attacker one transaction. A slot per (intent, caller) means one account
+    /// can only ever use up its own.
+    mapping(bytes32 => mapping(address => bool)) public fulfilled;
 
     event BudlumGraftFulfilled(
         bytes32 indexed intentId,
@@ -57,13 +65,18 @@ contract GraftExecutor is BudlumOutboundEmitter {
         bytes calldata data,
         bytes calldata beneficiary
     ) external payable returns (bytes memory result) {
-        if (fulfilled[intentId]) {
+        if (fulfilled[intentId][msg.sender]) {
             revert AlreadyFulfilled(intentId);
         }
         if (msg.value > type(uint64).max) {
             revert ValueTooLarge(msg.value);
         }
-        fulfilled[intentId] = true;
+        // A call to an address with no code "succeeds" and proves nothing, and
+        // it is what a griefer would use to burn an id cheaply.
+        if (target.code.length == 0) {
+            revert CallFailed(intentId, "target has no code");
+        }
+        fulfilled[intentId][msg.sender] = true;
         bool ok;
         (ok, result) = target.call{value: msg.value}(data);
         if (!ok) {
