@@ -44,6 +44,7 @@ pub enum ChainCommand {
     /// is why a per-batch cap was placed on the fork height in the first
     /// place; with a single read the only real bounds are the suffix length
     /// and the fork depth, both already checked by the caller.
+    GetBlocksRange(u64, usize, oneshot::Sender<Vec<Block>>),
     GetBlockByHash(String, oneshot::Sender<Option<Block>>),
     GetBalance(Address, oneshot::Sender<u64>),
     GetNonce(Address, oneshot::Sender<u64>),
@@ -68,6 +69,14 @@ pub enum ChainCommand {
     /// Whether the mempool still holds the transaction with this hash.
     MempoolContains(String, oneshot::Sender<bool>),
     HandleFinalityCert(FinalityCert, oneshot::Sender<Result<(), String>>),
+    /// Sync over a pruned window: blocks, the certificate that ends
+    /// them and its ML-DSA-65 QC.
+    ImportPrunedSegment(
+        Vec<Block>,
+        Box<FinalityCert>,
+        Box<crate::consensus::qc::QcBlob>,
+        oneshot::Sender<Result<usize, String>>,
+    ),
     HandlePrevote(Prevote, oneshot::Sender<Result<(), String>>),
     HandlePrecommit(
         Precommit,
@@ -79,10 +88,6 @@ pub enum ChainCommand {
         crate::consensus::pos::SlashingEvidence,
         oneshot::Sender<Result<(), String>>,
     ),
-    SubmitRegistrySlashingReport(
-        crate::registry::SlashingReport,
-        oneshot::Sender<Result<Option<crate::registry::SlashOutcome>, String>>,
-    ),
     GetRegistryMember(
         crate::core::address::Address,
         crate::registry::RoleId,
@@ -92,13 +97,23 @@ pub enum ChainCommand {
         crate::registry::RoleId,
         oneshot::Sender<Vec<crate::registry::Registration>>,
     ),
+    GetDelegations(
+        crate::core::address::Address,
+        oneshot::Sender<Vec<crate::registry::permissionless::DelegationPosition>>,
+    ),
+    GetDelegationExits(
+        crate::core::address::Address,
+        oneshot::Sender<Vec<crate::registry::permissionless::DelegationUnbonding>>,
+    ),
+    /// One validator's profile (`Some(address)`) or every validator's.
+    GetValidatorProfiles(
+        Option<crate::core::address::Address>,
+        oneshot::Sender<Vec<serde_json::Value>>,
+    ),
     GetSlashingHistory(oneshot::Sender<Vec<crate::registry::permissionless::SlashingRecord>>),
     DrainSlashingEvidence(oneshot::Sender<Vec<crate::consensus::pos::SlashingEvidence>>),
     CleanupMempool(oneshot::Sender<usize>),
-    /// Join this actor's own chain with a peer-supplied suffix and evaluate a
-    /// reorg (CWE-400). The prefix never leaves the actor: the caller sends
-    /// only the fork blocks, whatever height the peer claims to fork at.
-    TryReorgSuffix(Vec<Block>, oneshot::Sender<Result<bool, String>>),
+    TryReorg(Vec<Block>, oneshot::Sender<Result<bool, String>>),
     GetChainInfo(oneshot::Sender<String>),
     GetLocator(oneshot::Sender<Vec<String>>),
     FindCommonHeight(Vec<String>, oneshot::Sender<Option<u64>>),
@@ -107,6 +122,13 @@ pub enum ChainCommand {
         u64,
         oneshot::Sender<Option<crate::chain::finality::FinalityCert>>,
     ),
+    GetPqStageObservation(
+        crate::domain::regeneration_stage::Stage,
+        u64,
+        oneshot::Sender<crate::chain::blockchain::PqStageObservation>,
+    ),
+    GetPqSealedHeights(u64, oneshot::Sender<(Option<u64>, Option<u64>)>),
+    GetQuantumView(oneshot::Sender<serde_json::Value>),
     GetValidatorAddress(oneshot::Sender<Option<Address>>),
     GetAggregatorState(oneshot::Sender<crate::chain::finality::AggregatorState>),
     GetStateRoot(u64, oneshot::Sender<Option<String>>),
@@ -127,13 +149,33 @@ pub enum ChainCommand {
     ),
     GetDomainCommitments(oneshot::Sender<Vec<crate::domain::DomainCommitment>>),
     GetConsensusDomains(oneshot::Sender<Vec<crate::domain::ConsensusDomain>>),
-    RegisterConsensusDomain(
-        crate::domain::ConsensusDomain,
-        oneshot::Sender<Result<(), String>>,
+    GetGraftApplication(
+        [u8; 32],
+        oneshot::Sender<Option<crate::settlement::graft::GraftApp>>,
     ),
-    RegisterSovereignTemplate(
-        Box<crate::domain::SovereignDomainTemplate>,
-        oneshot::Sender<Result<(), String>>,
+    GetRestakedValidators(
+        oneshot::Sender<(
+            Vec<crate::settlement::shared_security::RestakedValidator>,
+            std::collections::BTreeMap<crate::core::address::Address, u64>,
+        )>,
+    ),
+    GetGraftPaymentProof(
+        [u8; 32],
+        oneshot::Sender<Option<crate::settlement::graft::GraftPaymentProof>>,
+    ),
+    GetCrossDomainMessage(
+        [u8; 32],
+        oneshot::Sender<Option<crate::cross_domain::CrossDomainMessage>>,
+    ),
+    GetBridgeTransfer(
+        [u8; 32],
+        oneshot::Sender<Option<crate::cross_domain::BridgeTransfer>>,
+    ),
+    GetRelayerStatus(Option<[u8; 32]>, oneshot::Sender<serde_json::Value>),
+    GetRelayerIntent([u8; 32], oneshot::Sender<serde_json::Value>),
+    GetSovereignTemplate(
+        crate::domain::types::DomainId,
+        oneshot::Sender<Option<crate::domain::SovereignDomainTemplate>>,
     ),
     ValidateSovereignAuditExport(
         Box<crate::domain::sovereign::AuditExportBundle>,
@@ -150,39 +192,6 @@ pub enum ChainCommand {
         crate::domain::DomainCommitment,
         oneshot::Sender<Result<(), String>>,
     ),
-    VerifyVerifiedDomainCommitment(
-        crate::domain::VerifiedDomainCommitment,
-        oneshot::Sender<Result<(), String>>,
-    ),
-    SubmitVerifiedDomainCommitment(
-        crate::domain::VerifiedDomainCommitment,
-        oneshot::Sender<Result<(), String>>,
-    ),
-    BuildStateUpdateTransaction(
-        crate::domain::DomainCommitment,
-        oneshot::Sender<Result<Transaction, String>>,
-    ),
-    SubmitCrossDomainMessage(
-        crate::cross_domain::CrossDomainMessage,
-        oneshot::Sender<Result<(), String>>,
-    ),
-    SubmitRelayedCrossDomainMessage(
-        crate::cross_domain::CrossDomainMessage,
-        oneshot::Sender<Result<String, String>>,
-    ),
-    BondRelayer(
-        crate::core::address::Address,
-        u64,
-        oneshot::Sender<Result<(), String>>,
-    ),
-    RegisterExternalDomain(
-        Box<crate::cross_domain::external::RegistrationRequest>,
-        oneshot::Sender<Result<crate::cross_domain::external::DomainKey, String>>,
-    ),
-    SubmitExternalEvidence(
-        Box<crate::cross_domain::external::RawConsensusEvidence>,
-        oneshot::Sender<Result<Option<crate::cross_domain::external::FinalityAttestation>, String>>,
-    ),
     GetExternalDomainProfile(
         crate::cross_domain::external::DomainKey,
         oneshot::Sender<
@@ -197,38 +206,6 @@ pub enum ChainCommand {
         oneshot::Sender<Vec<(crate::cross_domain::external::DomainProfile, String)>>,
     ),
     GetExternalIntakeDigest(oneshot::Sender<Result<[u8; 32], String>>),
-    ReadmitExternalDomain(
-        crate::cross_domain::external::DomainKey,
-        String,
-        oneshot::Sender<Result<(), String>>,
-    ),
-    ScheduleExternalFork {
-        key: crate::cross_domain::external::DomainKey,
-        old_version: u32,
-        new_version: u32,
-        fork_height: u64,
-        grace_heights: u64,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    SlashExternalProver {
-        key: crate::cross_domain::external::DomainKey,
-        prover: crate::core::address::Address,
-        evidence_digest: [u8; 32],
-        value_atoms: u128,
-        challenger: crate::core::address::Address,
-        response: oneshot::Sender<Result<(u128, u128), String>>,
-    },
-    SetExternalQuorumPolicy(
-        crate::cross_domain::external::DomainKey,
-        crate::cross_domain::external::QuorumPolicy,
-        oneshot::Sender<Result<(), String>>,
-    ),
-    BondExternalProver(
-        crate::cross_domain::external::DomainKey,
-        crate::core::address::Address,
-        u128,
-        oneshot::Sender<Result<(), String>>,
-    ),
     GetExternalQuorumRound(
         crate::cross_domain::external::DomainKey,
         u64,
@@ -245,41 +222,6 @@ pub enum ChainCommand {
         crate::cross_domain::external::DomainKey,
         oneshot::Sender<Option<(crate::cross_domain::external::DomainRegistration, u64)>>,
     ),
-    BondProver(
-        crate::core::address::Address,
-        u64,
-        oneshot::Sender<Result<(), String>>,
-    ),
-    BondStorageOperator(
-        crate::core::address::Address,
-        u64,
-        oneshot::Sender<Result<(), String>>,
-    ),
-    /// Begin unbonding an independently-debited role bond (`RELAYER`,
-    /// `PROVER`, `STORAGE_OPERATOR`). Returns the release epoch.
-    BeginRoleBondUnbonding(
-        crate::core::address::Address,
-        crate::registry::RoleId,
-        oneshot::Sender<Result<u64, String>>,
-    ),
-    /// Withdraw a matured role bond back into the account balance. Returns the
-    /// Withdrawn amount.
-    WithdrawRoleBond(
-        crate::core::address::Address,
-        crate::registry::RoleId,
-        oneshot::Sender<Result<u64, String>>,
-    ),
-    SubmitZkProof(
-        crate::prover::ZkProofSubmission,
-        oneshot::Sender<Result<crate::prover::ProofAcceptance, String>>,
-    ),
-    SubmitRelayProof {
-        message_id: crate::cross_domain::message::MessageId,
-        relayer: crate::core::address::Address,
-        proof: crate::cross_domain::event_tree::MerkleProof,
-        source_domain: crate::domain::types::DomainId,
-        response: oneshot::Sender<Result<crate::cross_domain::message::CrossDomainMessage, String>>,
-    },
     GetAiModel(
         crate::ai::types::AiModelId,
         oneshot::Sender<Option<crate::ai::types::AiModelSpec>>,
@@ -292,6 +234,9 @@ pub enum ChainCommand {
         crate::ai::types::AiRequestId,
         oneshot::Sender<Option<crate::ai::types::AiInferenceRequest>>,
     ),
+    /// Requests with no outcome whose deadline has not passed (test
+    /// verifier harness).
+    GetAiOpenRequests(oneshot::Sender<Vec<crate::ai::types::AiInferenceRequest>>),
     GetAiFeeReclaimStatus(
         crate::ai::types::AiRequestId,
         oneshot::Sender<Result<(crate::core::address::Address, u64), String>>,
@@ -358,94 +303,15 @@ pub enum ChainCommand {
         crate::domain::DomainId,
         oneshot::Sender<Result<u64, String>>,
     ),
-    RegisterBridgeAsset {
-        asset_id: crate::cross_domain::AssetId,
-        domain: crate::domain::DomainId,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    LockBridgeTransfer {
-        source_domain: crate::domain::DomainId,
-        target_domain: crate::domain::DomainId,
-        source_height: u64,
-        event_index: u32,
-        asset_id: crate::cross_domain::AssetId,
-        owner: crate::core::address::Address,
-        recipient: crate::core::address::Address,
-        amount: u64,
-        expiry_height: u64,
-        response: oneshot::Sender<
-            Result<
-                (
-                    crate::cross_domain::BridgeTransfer,
-                    crate::cross_domain::DomainEvent,
-                ),
-                String,
-            >,
-        >,
-    },
-    MintBridgeTransferFromVerifiedEvent {
-        source_domain: crate::domain::DomainId,
-        source_height: u64,
-        sequence: u64,
-        expected_block_hash: Option<crate::domain::Hash32>,
-        event: crate::cross_domain::DomainEvent,
-        proof: crate::cross_domain::MerkleProof,
-        relayer: crate::core::address::Address,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    BurnBridgeTransfer {
-        message_id: crate::cross_domain::MessageId,
-        domain: crate::domain::DomainId,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    UnlockBridgeTransfer {
-        message_id: crate::cross_domain::MessageId,
-        source_domain: crate::domain::DomainId,
-        response: oneshot::Sender<Result<(), String>>,
-    },
-    UnlockBridgeTransferFromVerifiedEvent {
-        target_domain: crate::domain::DomainId,
-        target_height: u64,
-        sequence: u64,
-        expected_block_hash: Option<crate::domain::Hash32>,
-        event: crate::cross_domain::DomainEvent,
-        proof: crate::cross_domain::MerkleProof,
-        response: oneshot::Sender<Result<(), String>>,
-    },
+    #[cfg(test)]
     SealGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
+    ///: a committed checkpoint header with the material a light client
+    /// checks it against: the checkpoint block and the state root opening.
+    GetGlobalHeaderProof(
+        u64,
+        oneshot::Sender<Option<crate::chain::blockchain::GlobalHeaderProof>>,
+    ),
     FlushStorage(oneshot::Sender<Result<usize, String>>),
-    /// B.U.D.: Open a storage deal with proper escrow locking.
-    OpenStorageDeal {
-        domain_id: u32,
-        manifest: crate::storage::ContentManifest,
-        shard_id: crate::storage::ContentId,
-        operator: crate::core::address::Address,
-        payer: crate::core::address::Address,
-        replica_index: u8,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        response: oneshot::Sender<Result<u64, String>>,
-    },
-    AcceptStorageReallocation {
-        ticket_id: u64,
-        replacement_operator: crate::core::address::Address,
-        payer: crate::core::address::Address,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-        response: oneshot::Sender<Result<u64, String>>,
-    },
-    RegisterStorageManifest {
-        manifest: crate::storage::ContentManifest,
-        response: oneshot::Sender<Result<crate::storage::ContentId, String>>,
-    },
     /// View-key permission book (Classic private body or Three encrypted recipe).
     IssueViewGrant {
         content_id: crate::storage::ContentId,
@@ -496,10 +362,6 @@ pub enum ChainCommand {
         content_id: crate::storage::ContentId,
         response: oneshot::Sender<Option<crate::core::address::Address>>,
     },
-    OpenStorageChallenge {
-        request: crate::domain::storage_deal::RetrievalChallengeRequest,
-        response: oneshot::Sender<Result<u64, String>>,
-    },
     /// Derive a coding audit for a manifest against chain entropy.
     ///
     /// A retrieval challenge asks whether the operator still holds the bytes.
@@ -520,14 +382,7 @@ pub enum ChainCommand {
         audit: crate::domain::storage_deal::CodingAudit,
         data_column: Vec<u8>,
         parity_byte: u8,
-        /// Merkle path for `parity_byte` against the shard's column commitment;
-        /// see `StorageRegistry::verify_coding_audit`.
-        column_proof: Vec<[u8; 32]>,
         response: oneshot::Sender<Result<(), String>>,
-    },
-    AnswerStorageChallenge {
-        response_data: crate::domain::storage_deal::RetrievalResponse,
-        response: oneshot::Sender<Result<crate::domain::storage_deal::ChallengeResult, String>>,
     },
     GetStorageManifest {
         manifest_id: crate::storage::ContentId,
@@ -558,14 +413,6 @@ pub enum ChainCommand {
         margin: u32,
         response: oneshot::Sender<StorageRepairBand>,
     },
-    /// B.U.D.: Issue retrieval challenges for active storage
-    /// Deals whose challenge_interval has elapsed.
-    IssueStorageChallenges(u64, oneshot::Sender<Result<u32, String>>),
-    /// B.U.D.: Finalize missed challenges and slash operators.
-    FinalizeMissedStorageChallenges(u64, oneshot::Sender<Result<(u32, u64), String>>),
-    /// B.U.D.: Submit a verified storage proof hash for
-    /// Accumulation into pending_storage_root.
-    SubmitStorageProof(crate::domain::Hash32, oneshot::Sender<Result<(), String>>),
     /// B.U.D.: Query all active storage deals.
     GetStorageDeals(oneshot::Sender<Vec<crate::domain::storage_deal::StorageDeal>>),
     /// B.U.D.: Query storage economics event log.
@@ -627,13 +474,6 @@ pub enum ChainCommand {
         document: String,
         response: oneshot::Sender<Result<(), String>>,
     },
-    BnsSetStorage {
-        name: String,
-        owner: Address,
-        storage_root: [u8; 32],
-        storage_domain_id: u32,
-        response: oneshot::Sender<Result<(), String>>,
-    },
     BnsCalculateCost {
         name: String,
         duration: u64,
@@ -682,6 +522,10 @@ pub enum ChainCommand {
     HubGetApps {
         response: oneshot::Sender<Vec<crate::budlumxyz::types::AppRecord>>,
     },
+    /// The Graft applications, listed beside the native apps.
+    HubGetGraftApps {
+        response: oneshot::Sender<Vec<crate::settlement::graft::GraftApp>>,
+    },
 }
 
 #[derive(Clone)]
@@ -714,6 +558,17 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetBlock(height, tx)).await;
         rx.await.unwrap_or(None)
+    }
+
+    /// Read `count` contiguous local blocks starting at `from`, in one
+    /// round trip. Returns fewer than `count` when the chain is shorter.
+    pub async fn get_blocks_range(&self, from: u64, count: usize) -> Vec<Block> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetBlocksRange(from, count, tx))
+            .await;
+        rx.await.unwrap_or_default()
     }
 
     pub async fn get_block_by_hash(&self, hash: String) -> Option<Block> {
@@ -863,6 +718,27 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    pub async fn import_pruned_segment(
+        &self,
+        blocks: Vec<Block>,
+        cert: FinalityCert,
+        qc: crate::consensus::qc::QcBlob,
+    ) -> Result<usize, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::ImportPrunedSegment(
+                blocks,
+                Box::new(cert),
+                Box::new(qc),
+                res_tx,
+            ))
+            .await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
     pub async fn handle_prevote(&self, vote: Prevote) -> Result<(), String> {
         let (res_tx, res_rx) = oneshot::channel();
         let _ = self
@@ -976,20 +852,6 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
-    pub async fn submit_registry_slashing_report(
-        &self,
-        report: crate::registry::SlashingReport,
-    ) -> Result<Option<crate::registry::SlashOutcome>, String> {
-        let (res_tx, res_rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SubmitRegistrySlashingReport(report, res_tx))
-            .await;
-        res_rx
-            .await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
     pub async fn get_registry_member(
         &self,
         account: crate::core::address::Address,
@@ -1015,6 +877,42 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    pub async fn get_delegations(
+        &self,
+        validator: crate::core::address::Address,
+    ) -> Vec<crate::registry::permissionless::DelegationPosition> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetDelegations(validator, tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_validator_profiles(
+        &self,
+        validator: Option<crate::core::address::Address>,
+    ) -> Vec<serde_json::Value> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetValidatorProfiles(validator, tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_delegation_exits(
+        &self,
+        validator: crate::core::address::Address,
+    ) -> Vec<crate::registry::permissionless::DelegationUnbonding> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetDelegationExits(validator, tx))
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
     pub async fn get_slashing_history(
         &self,
     ) -> Vec<crate::registry::permissionless::SlashingRecord> {
@@ -1023,18 +921,9 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
-    /// Reorg onto a suffix the peer sent, without copying the local chain.
-    ///
-    /// The join happens inside the actor, so the peer's fork height no longer
-    /// sizes a chain read on the caller's side: the only blocks that cross the
-    /// boundary are the ones the peer actually sent, already capped by the
-    /// sync batch limit.
-    pub async fn try_reorg_suffix(&self, suffix: Vec<Block>) -> Result<bool, String> {
+    pub async fn try_reorg(&self, fork: Vec<Block>) -> Result<bool, String> {
         let (res_tx, res_rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::TryReorgSuffix(suffix, res_tx))
-            .await;
+        let _ = self.tx.send(ChainCommand::TryReorg(fork, res_tx)).await;
         res_rx
             .await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -1044,97 +933,6 @@ impl ChainHandle {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetChainInfo(tx)).await;
         rx.await.unwrap_or_default()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    /// WIRING: the chain-actor surface behind the `StorageTx::OpenDeal` door (the refusals name that transaction); production callers land with the settlement rollout that reaches back into these.
-    pub async fn open_storage_deal(
-        &self,
-        domain_id: u32,
-        manifest: crate::storage::ContentManifest,
-        shard_id: crate::storage::ContentId,
-        operator: crate::core::address::Address,
-        payer: crate::core::address::Address,
-        replica_index: u8,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-    ) -> Result<u64, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::OpenStorageDeal {
-                domain_id,
-                manifest,
-                shard_id,
-                operator,
-                payer,
-                replica_index,
-                start_epoch,
-                end_epoch,
-                economics,
-                domain_params,
-                merkle_proof,
-                storage_root,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    /// WIRING: the chain-actor surface behind the `StorageTx::AcceptReallocation` door (the refusals name that transaction); production callers land with the settlement rollout that reaches back into these.
-    pub async fn accept_storage_reallocation(
-        &self,
-        ticket_id: u64,
-        replacement_operator: crate::core::address::Address,
-        payer: crate::core::address::Address,
-        start_epoch: u64,
-        end_epoch: u64,
-        economics: crate::domain::storage_deal::StorageEconomicsParams,
-        domain_params: crate::domain::storage_params::StorageDomainParams,
-        merkle_proof: Option<Vec<u8>>,
-        storage_root: Option<crate::domain::Hash32>,
-    ) -> Result<u64, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::AcceptStorageReallocation {
-                ticket_id,
-                replacement_operator,
-                payer,
-                start_epoch,
-                end_epoch,
-                economics,
-                domain_params,
-                merkle_proof,
-                storage_root,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// WIRING: the chain-actor surface behind the `StorageTx::RegisterManifest` door (the refusals name that transaction); production callers land with the settlement rollout that reaches back into these.
-    pub async fn register_storage_manifest(
-        &self,
-        manifest: crate::storage::ContentManifest,
-    ) -> Result<crate::storage::ContentId, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::RegisterStorageManifest {
-                manifest,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
     pub async fn issue_view_grant(
@@ -1325,7 +1123,6 @@ impl ChainHandle {
         audit: crate::domain::storage_deal::CodingAudit,
         data_column: Vec<u8>,
         parity_byte: u8,
-        column_proof: Vec<[u8; 32]>,
     ) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -1334,41 +1131,6 @@ impl ChainHandle {
                 audit,
                 data_column,
                 parity_byte,
-                column_proof,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// WIRING: the chain-actor surface behind the `StorageTx::OpenChallenge` door (the refusals name that transaction); production callers land with the settlement rollout that reaches back into these.
-    pub async fn open_storage_challenge(
-        &self,
-        request: crate::domain::storage_deal::RetrievalChallengeRequest,
-    ) -> Result<u64, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::OpenStorageChallenge {
-                request,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// WIRING: the chain-actor surface behind the `StorageTx::AnswerChallenge` door (the refusals name that transaction); production callers land with the settlement rollout that reaches back into these.
-    pub async fn answer_storage_challenge(
-        &self,
-        response_data: crate::domain::storage_deal::RetrievalResponse,
-    ) -> Result<crate::domain::storage_deal::ChallengeResult, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::AnswerStorageChallenge {
-                response_data,
                 response: tx,
             })
             .await;
@@ -1485,6 +1247,44 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// The commitment this node holds and the post-quantum canonical
+    /// commitment with its seal, for one regeneration stage and height.
+    pub async fn pq_stage_observation(
+        &self,
+        stage: crate::domain::regeneration_stage::Stage,
+        height: u64,
+    ) -> crate::chain::blockchain::PqStageObservation {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetPqStageObservation(stage, height, tx))
+            .await;
+        rx.await
+            .unwrap_or(crate::chain::blockchain::PqStageObservation {
+                local: None,
+                canonical: None,
+                seal: None,
+            })
+    }
+
+    /// The quantum alarm and the observed crypto facts of the native domains.
+    pub async fn quantum_view(&self) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetQuantumView(tx)).await;
+        rx.await.unwrap_or(serde_json::Value::Null)
+    }
+
+    /// The latest Root Seal height and the latest verified anchor at or below
+    /// `live`.
+    pub async fn pq_sealed_heights(&self, live: u64) -> (Option<u64>, Option<u64>) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetPqSealedHeights(live, tx))
+            .await;
+        rx.await.unwrap_or((None, None))
+    }
+
     pub async fn get_state_root(&self, height: u64) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetStateRoot(height, tx)).await;
@@ -1495,9 +1295,10 @@ impl ChainHandle {
     ///
     /// # Errors
     ///
-    /// Refuses on mainnet. The old signature returned `()` and logged, so a
-    /// caller could not tell a credit from a no-op; a faucet that silently
-    /// does nothing is as misleading as one that silently works.
+    /// Refuses on every chain id except devnet (testnet included). The old
+    /// signature returned `()` and logged, so a caller could not tell a
+    /// credit from a no-op; a faucet that silently does nothing is as
+    /// misleading as one that silently works.
     pub async fn credit_development_account(
         &self,
         address: &Address,
@@ -1522,7 +1323,7 @@ impl ChainHandle {
     ///
     /// # Errors
     ///
-    /// Refuses on mainnet.
+    /// Refuses on every chain id except devnet (testnet included).
     pub async fn fund_development_account(&self, address: &Address) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         if let Err(e) = self
@@ -1584,6 +1385,19 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
+    /// A committed checkpoint header with its proof material.
+    pub async fn get_global_header_proof(
+        &self,
+        global_height: u64,
+    ) -> Option<crate::chain::blockchain::GlobalHeaderProof> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetGlobalHeaderProof(global_height, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
     pub async fn get_domain_commitments(&self) -> Vec<crate::domain::DomainCommitment> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::GetDomainCommitments(tx)).await;
@@ -1619,37 +1433,96 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
-    pub async fn register_consensus_domain(
+    pub async fn get_graft_payment_proof(
         &self,
-        domain: crate::domain::ConsensusDomain,
-    ) -> Result<(), String> {
+        payment_id: [u8; 32],
+    ) -> Option<crate::settlement::graft::GraftPaymentProof> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ChainCommand::RegisterConsensusDomain(domain, tx))
+            .send(ChainCommand::GetGraftPaymentProof(payment_id, tx))
             .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+        rx.await.unwrap_or(None)
     }
 
-    /// Register a sovereign domain template.
-    ///
-    /// The template is bound to the consensus domain it names: the domain has
-    /// to be registered and the kind and operator have to match.
-    pub async fn register_sovereign_template(
+    pub async fn get_graft_application(
         &self,
-        template: crate::domain::SovereignDomainTemplate,
-    ) -> Result<(), String> {
+        graft_id: [u8; 32],
+    ) -> Option<crate::settlement::graft::GraftApp> {
         let (tx, rx) = oneshot::channel();
         let _ = self
             .tx
-            .send(ChainCommand::RegisterSovereignTemplate(
-                Box::new(template),
-                tx,
-            ))
+            .send(ChainCommand::GetGraftApplication(graft_id, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    /// The Mikoriza rows and the capped restaked weight of each validator.
+    pub async fn get_restaked_validators(
+        &self,
+    ) -> (
+        Vec<crate::settlement::shared_security::RestakedValidator>,
+        std::collections::BTreeMap<crate::core::address::Address, u64>,
+    ) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(ChainCommand::GetRestakedValidators(tx)).await;
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn get_cross_domain_message(
+        &self,
+        message_id: [u8; 32],
+    ) -> Option<crate::cross_domain::CrossDomainMessage> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetCrossDomainMessage(message_id, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_bridge_transfer(
+        &self,
+        message_id: [u8; 32],
+    ) -> Option<crate::cross_domain::BridgeTransfer> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetBridgeTransfer(message_id, tx))
+            .await;
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_relayer_status(&self, message_id: Option<[u8; 32]>) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetRelayerStatus(message_id, tx))
             .await;
         rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+            .unwrap_or_else(|_| serde_json::json!({"error": "chain actor unavailable"}))
+    }
+
+    pub async fn get_relayer_intent(&self, intent_id: [u8; 32]) -> serde_json::Value {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetRelayerIntent(intent_id, tx))
+            .await;
+        rx.await
+            .unwrap_or_else(|_| serde_json::json!({"error": "chain actor unavailable"}))
+    }
+
+    pub async fn get_sovereign_template(
+        &self,
+        domain_id: crate::domain::types::DomainId,
+    ) -> Option<crate::domain::SovereignDomainTemplate> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::GetSovereignTemplate(domain_id, tx))
+            .await;
+        rx.await.unwrap_or(None)
     }
 
     /// Verify an audit export against the registered template.
@@ -1678,80 +1551,6 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::SubmitDomainCommitment(commitment, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    pub async fn submit_verified_domain_commitment(
-        &self,
-        payload: crate::domain::VerifiedDomainCommitment,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SubmitVerifiedDomainCommitment(payload, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Convenience: the StateUpdate carrier builder - callers land with the settlement rollout whose doors name it.
-    pub async fn build_state_update_transaction(
-        &self,
-        commitment: crate::domain::DomainCommitment,
-    ) -> Result<Transaction, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BuildStateUpdateTransaction(commitment, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    pub async fn submit_cross_domain_message(
-        &self,
-        message: crate::cross_domain::CrossDomainMessage,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SubmitCrossDomainMessage(message, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Registers an external domain through the actor. The BLS verifier is
-    /// installed inside the actor (`IntakeState::production_bls`), never
-    /// carried over the channel: crypto configuration is the node's, not the
-    /// caller's.
-    pub async fn register_external_domain(
-        &self,
-        registration: crate::cross_domain::external::RegistrationRequest,
-    ) -> Result<crate::cross_domain::external::DomainKey, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::RegisterExternalDomain(
-                Box::new(registration),
-                tx,
-            ))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Submits external-finality evidence through the actor.
-    pub async fn submit_external_evidence(
-        &self,
-        evidence: crate::cross_domain::external::RawConsensusEvidence,
-    ) -> Result<Option<crate::cross_domain::external::FinalityAttestation>, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SubmitExternalEvidence(Box::new(evidence), tx))
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -1794,106 +1593,6 @@ impl ChainHandle {
         let _ = self
             .tx
             .send(ChainCommand::GetExternalIntakeDigest(tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Re-runs admission for a faulted external domain.
-    pub async fn readmit_external_domain(
-        &self,
-        key: crate::cross_domain::external::DomainKey,
-        reason: String,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::ReadmitExternalDomain(key, reason, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Schedules an evidence-format fork for an external domain.
-    pub async fn schedule_external_fork(
-        &self,
-        key: crate::cross_domain::external::DomainKey,
-        old_version: u32,
-        new_version: u32,
-        fork_height: u64,
-        grace_heights: u64,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::ScheduleExternalFork {
-                key,
-                old_version,
-                new_version,
-                fork_height,
-                grace_heights,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Slashes the prover behind an accepted external attestation.
-    pub async fn slash_external_prover(
-        &self,
-        key: crate::cross_domain::external::DomainKey,
-        prover: crate::core::address::Address,
-        evidence_digest: [u8; 32],
-        value_atoms: u128,
-        challenger: crate::core::address::Address,
-    ) -> Result<(u128, u128), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SlashExternalProver {
-                key,
-                prover,
-                evidence_digest,
-                value_atoms,
-                challenger,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Installs a multi-prover quorum policy for a registered external
-    /// domain. Evidence for that domain then goes through rounds: nothing
-    /// commits until enough bonded provers carry the same claim.
-    pub async fn set_external_quorum_policy(
-        &self,
-        key: crate::cross_domain::external::DomainKey,
-        policy: crate::cross_domain::external::QuorumPolicy,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SetExternalQuorumPolicy(key, policy, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Bonds an additional prover to a registered external domain.
-    pub async fn bond_external_prover(
-        &self,
-        key: crate::cross_domain::external::DomainKey,
-        prover: crate::core::address::Address,
-        bond_atoms: u128,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BondExternalProver(
-                key, prover, bond_atoms, tx,
-            ))
             .await;
         rx.await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -1943,155 +1642,6 @@ impl ChainHandle {
         rx.await.unwrap_or(None)
     }
 
-    /// Relayer-gated cross-domain message submission (RPC / p2p entry points).
-    /// Submit a relayed cross-domain message as an in-block transaction.
-    ///
-    /// Returns the transaction hash. The registration lands when a block
-    /// carries it, not when this call returns: `message_registry` is in the
-    /// state root and may not be written from a request path.
-    pub async fn submit_relayed_cross_domain_message(
-        &self,
-        message: crate::cross_domain::CrossDomainMessage,
-    ) -> Result<String, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SubmitRelayedCrossDomainMessage(message, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Bond stake to register as a relayer.
-    pub async fn bond_relayer(
-        &self,
-        address: crate::core::address::Address,
-        amount: u64,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BondRelayer(address, amount, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Bond stake to register as a prover (optional; for reward eligibility).
-    pub async fn bond_prover(
-        &self,
-        address: crate::core::address::Address,
-        amount: u64,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BondProver(address, amount, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Bond stake for STORAGE_OPERATOR (permissionless).
-    pub async fn bond_storage_operator(
-        &self,
-        address: crate::core::address::Address,
-        amount: u64,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BondStorageOperator(address, amount, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Begin unbonding a `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
-    ///
-    /// These three bonds debit the account balance at bond time and had no exit
-    /// Path at all, so the debit was one-way. Returns the release epoch, which
-    /// Follows the `unbonding_epochs` governance parameter.
-    ///
-    /// # Errors
-    ///
-    /// Returns the registry error as a string when the role carries no
-    /// Independently debited bond, the account is not registered for it, or
-    /// The bond is not `Active`. Also errors if the chain actor has stopped.
-    pub async fn begin_role_bond_unbonding(
-        &self,
-        address: crate::core::address::Address,
-        role: crate::registry::RoleId,
-    ) -> Result<u64, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BeginRoleBondUnbonding(address, role, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Withdraw a matured `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond.
-    ///
-    /// # Errors
-    ///
-    /// Returns the registry error as a string when the bond is still inside
-    /// Its unbonding window, was already withdrawn, or belongs to a role this
-    /// Path does not own. Also errors if the chain actor has stopped.
-    pub async fn withdraw_role_bond(
-        &self,
-        address: crate::core::address::Address,
-        role: crate::registry::RoleId,
-    ) -> Result<u64, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::WithdrawRoleBond(address, role, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Submit a ZK proof (permissionless; chain ↔ BudZKVM bridge).
-    pub async fn submit_zk_proof(
-        &self,
-        submission: crate::prover::ZkProofSubmission,
-    ) -> Result<crate::prover::ProofAcceptance, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SubmitZkProof(submission, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    pub async fn submit_relay_proof(
-        &self,
-        message_id: crate::cross_domain::message::MessageId,
-        relayer: crate::core::address::Address,
-        proof: crate::cross_domain::event_tree::MerkleProof,
-        source_domain: crate::domain::types::DomainId,
-    ) -> Result<crate::cross_domain::message::CrossDomainMessage, String> {
-        let (tx, rx) = oneshot::channel();
-        if let Err(e) = self
-            .tx
-            .send(ChainCommand::SubmitRelayProof {
-                message_id,
-                relayer,
-                proof,
-                source_domain,
-                response: tx,
-            })
-            .await
-        {
-            return Err(format!("Actor dropped: {e}"));
-        }
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
     pub async fn get_ai_model(
         &self,
         id: crate::ai::types::AiModelId,
@@ -2122,6 +1672,19 @@ impl ChainHandle {
             return None;
         }
         rx.await.unwrap_or(None)
+    }
+
+    pub async fn get_ai_open_requests(&self) -> Vec<crate::ai::types::AiInferenceRequest> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ChainCommand::GetAiOpenRequests(tx))
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
     }
 
     pub async fn get_ai_request(
@@ -2432,154 +1995,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    pub async fn register_bridge_asset(
-        &self,
-        asset_id: crate::cross_domain::AssetId,
-        domain: crate::domain::DomainId,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::RegisterBridgeAsset {
-                asset_id,
-                domain,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn lock_bridge_transfer(
-        &self,
-        source_domain: crate::domain::DomainId,
-        target_domain: crate::domain::DomainId,
-        source_height: u64,
-        event_index: u32,
-        asset_id: crate::cross_domain::AssetId,
-        owner: crate::core::address::Address,
-        recipient: crate::core::address::Address,
-        amount: u64,
-        expiry_height: u64,
-    ) -> Result<
-        (
-            crate::cross_domain::BridgeTransfer,
-            crate::cross_domain::DomainEvent,
-        ),
-        String,
-    > {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::LockBridgeTransfer {
-                source_domain,
-                target_domain,
-                source_height,
-                event_index,
-                asset_id,
-                owner,
-                recipient,
-                amount,
-                expiry_height,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn mint_bridge_transfer_from_verified_event(
-        &self,
-        source_domain: crate::domain::DomainId,
-        source_height: u64,
-        sequence: u64,
-        expected_block_hash: Option<crate::domain::Hash32>,
-        event: crate::cross_domain::DomainEvent,
-        proof: crate::cross_domain::MerkleProof,
-        relayer: crate::core::address::Address,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::MintBridgeTransferFromVerifiedEvent {
-                source_domain,
-                source_height,
-                sequence,
-                expected_block_hash,
-                event,
-                proof,
-                relayer,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    pub async fn burn_bridge_transfer(
-        &self,
-        message_id: crate::cross_domain::MessageId,
-        domain: crate::domain::DomainId,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BurnBridgeTransfer {
-                message_id,
-                domain,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    pub async fn unlock_bridge_transfer(
-        &self,
-        message_id: crate::cross_domain::MessageId,
-        source_domain: crate::domain::DomainId,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::UnlockBridgeTransfer {
-                message_id,
-                source_domain,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    pub async fn unlock_bridge_transfer_from_verified_event(
-        &self,
-        target_domain: crate::domain::DomainId,
-        target_height: u64,
-        sequence: u64,
-        expected_block_hash: Option<crate::domain::Hash32>,
-        event: crate::cross_domain::DomainEvent,
-        proof: crate::cross_domain::MerkleProof,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::UnlockBridgeTransferFromVerifiedEvent {
-                target_domain,
-                target_height,
-                sequence,
-                expected_block_hash,
-                event,
-                proof,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
+    #[cfg(test)]
     pub async fn seal_global_header(&self) -> Result<crate::settlement::GlobalBlockHeader, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::SealGlobalHeader(tx)).await;
@@ -2596,45 +2012,6 @@ impl ChainHandle {
 
     // ─── B.U.D.: Storage operations public API ─────
 
-    /// Issue retrieval challenges for active deals at the given epoch.
-    pub async fn issue_storage_challenges(&self, epoch: u64) -> Result<u32, String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::IssueStorageChallenges(epoch, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Finalize missed challenges and slash operators.
-    pub async fn finalize_missed_storage_challenges(
-        &self,
-        epoch: u64,
-    ) -> Result<(u32, u64), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::FinalizeMissedStorageChallenges(epoch, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Submit a verified storage proof hash.
-    pub async fn submit_storage_proof(
-        &self,
-        proof_hash: crate::domain::Hash32,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::SubmitStorageProof(proof_hash, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
     /// Query all storage deals.
     pub async fn get_storage_deals(
         &self,
@@ -2644,7 +2021,6 @@ impl ChainHandle {
         rx.await.map_err(|_| "Actor dropped".to_string())
     }
 
-    /// WIRING: the read-side companion of the challenge doors; the callers land with the settlement rollout that reaches back into these.
     /// Query all storage challenges.
     pub async fn get_storage_challenges(
         &self,
@@ -2789,28 +2165,6 @@ impl ChainHandle {
         rx.await.map_err(|_| "chain actor closed".to_string())?
     }
 
-    pub async fn bns_set_storage(
-        &self,
-        name: String,
-        owner: Address,
-        storage_root: [u8; 32],
-        storage_domain_id: u32,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::BnsSetStorage {
-                name,
-                owner,
-                storage_root,
-                storage_domain_id,
-                response: tx,
-            })
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
     pub async fn bns_calculate_cost(&self, name: String, duration: u64) -> u64 {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2933,6 +2287,15 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
+    pub async fn budlumxyz_get_graft_apps(&self) -> Vec<crate::settlement::graft::GraftApp> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::HubGetGraftApps { response: tx })
+            .await;
+        rx.await.unwrap_or_default()
+    }
+
     pub async fn budlumxyz_get_apps(&self) -> Vec<crate::budlumxyz::types::AppRecord> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -2972,28 +2335,6 @@ pub struct ChainActor {
 }
 
 impl ChainActor {
-    /// BLG-0195 (P10-F05): after a successful reorg the old tip's finality
-    /// round is dead (0186 invalidated it), but nobody restarted voting - the
-    /// node just sat there and the post-fork chain finalized nothing until the
-    /// NEXT checkpoint block happened to arrive through AddBlock. Resume the
-    /// prevote task on the new tip when it is itself a checkpoint height,
-    /// mirroring ValidateAndAddBlock. Shared by both reorg entry points.
-    fn resume_finality_after_reorg(&mut self, outcome: &Result<bool, String>) {
-        if !matches!(outcome, Ok(true)) {
-            return;
-        }
-        let tip = self.blockchain.chain.last().cloned();
-        if let Some(tip) = tip {
-            if crate::chain::finality::is_checkpoint_height_for_chain(
-                tip.index,
-                self.blockchain.chain_id,
-            ) {
-                self.blockchain
-                    .start_prevote_task(tip.index, tip.hash.clone());
-            }
-        }
-    }
-
     pub fn new(blockchain: Blockchain) -> (Self, ChainHandle) {
         let (tx, rx) = mpsc::channel(1000);
         (
@@ -3073,348 +2414,11 @@ impl ChainActor {
     /// local root from every peer that did not see the RPC call. The refusal
     /// is chain-independent until grant changes ride a block transaction.
     fn view_grant_rpc_mutation_error() -> String {
-        "view grants are state-root bearing and cannot be mutated over RPC; grant changes must ride a block transaction".into()
+        "view grants are state-root bearing and cannot be mutated over RPC; submit StorageTx::IssueViewGrant or StorageTx::RevokeViewGrant through bud_sendRawTransaction".into()
     }
 
     fn social_delete_rpc_mutation_error() -> String {
         "social delete changes state-root bearing rows and cannot be applied over RPC; submit StorageTx::SocialDelete through bud_sendRawTransaction".into()
-    }
-
-    fn run_storage_maintenance(&mut self, block_height: u64) {
-        if self.storage_economics_disabled_on_mainnet() {
-            return;
-        }
-        let current_epoch = block_height
-            / crate::core::chain_config::epoch_len_for_chain_id(self.blockchain.chain_id);
-        match self
-            .blockchain
-            .accrue_storage_operator_rewards(current_epoch)
-        {
-            Ok((rewarded, reward_total)) if rewarded > 0 => tracing::info!("B.U.D. storage maintenance accrued rewards for {rewarded} deals at epoch {current_epoch} (amount={reward_total})"),
-            Ok(_) => {}
-            Err(error) => tracing::warn!("B.U.D. reward accrual failed at height {block_height}: {error}"),
-        }
-
-        match self.blockchain.issue_storage_challenges(current_epoch) {
-            Ok(issued) if issued > 0 => tracing::info!("B.U.D. storage maintenance issued {issued} retrieval challenges at epoch {current_epoch}"),
-            Ok(_) => {}
-            Err(error) => tracing::warn!("B.U.D. storage challenge issuance failed at epoch {current_epoch}: {error}"),
-        }
-
-        match self.blockchain.finalize_missed_storage_challenges(current_epoch) {
-            Ok((finalized, slashed)) if finalized > 0 => tracing::info!("B.U.D. storage maintenance finalized {finalized} missed challenges at epoch {current_epoch} (slashed_bond={slashed})"),
-            Ok(_) => {}
-            Err(error) => tracing::warn!("B.U.D. missed-challenge finalization failed at height {block_height}: {error}"),
-        }
-
-        // The settle counterpart to the slash above. Without it, maintenance
-        // Only ever took bonds: a deal served to term stayed `Active` forever
-        // And its bond stayed debited.
-        match self.blockchain.finalize_expired_storage_deals(current_epoch) {
-            Ok((expired, returned)) if expired > 0 => tracing::info!("B.U.D. storage maintenance expired {expired} matured deals at epoch {current_epoch} (returned_bond={returned})"),
-            Ok(_) => {}
-            Err(error) => tracing::warn!("B.U.D. expired-deal finalization failed at height {block_height}: {error}"),
-        }
-
-        // The repair band. `objects_needing_repair` has existed since erasure
-        // coding landed and nothing called it, which meant the real repair
-        // window was unbounded: an object could sit one shard above `k` for as
-        // long as it liked and no maintenance pass would notice. The sweep now
-        // reads it, per object, against that object's own scheme.
-        let repair_band = self
-            .blockchain
-            .state
-            .storage_registry
-            .objects_below_own_repair_margin();
-        for (manifest_id, live, k, margin) in &repair_band {
-            tracing::warn!(
-                "B.U.D. object {} is in the repair band at epoch {current_epoch}: {live} shards live, k={k}, margin={margin}",
-                hex::encode(manifest_id.0)
-            );
-            // F-16: a repair band that only logs is not a repair. A live
-            // deal must not get an expiry ticket: accepting that ticket
-            // would open a second Active deal on the same
-            // (manifest, shard, replica_index) and pay two operators for
-            // one slot. Tickets are only for shards that currently have
-            // zero active replicas, keyed off a historic deal if one
-            // exists. A shard the registry never placed cannot be
-            // ticketed with the current type; that gap is logged.
-            let Some(manifest) = self
-                .blockchain
-                .state
-                .storage_registry
-                .get_manifest(manifest_id)
-                .cloned()
-            else {
-                continue;
-            };
-            for shard in &manifest.shards {
-                if self
-                    .blockchain
-                    .state
-                    .storage_registry
-                    .active_replica_count(manifest_id, &shard.shard_id)
-                    > 0
-                {
-                    continue;
-                }
-                let historic: Vec<u64> = self
-                    .blockchain
-                    .state
-                    .storage_registry
-                    .deals_for_shard(manifest_id, &shard.shard_id)
-                    .into_iter()
-                    .filter(|deal| !deal.is_active())
-                    .map(|deal| deal.deal_id)
-                    .collect();
-                if let Some(deal_id) = historic.last().copied() {
-                    if let Some(ticket_id) = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .open_expiry_reallocation(deal_id, current_epoch)
-                    {
-                        tracing::info!(
-                            "B.U.D. opened repair ticket {ticket_id} for missing shard {} (historic deal {deal_id}) on {}",
-                            hex::encode(shard.shard_id.0),
-                            hex::encode(manifest_id.0)
-                        );
-                    }
-                } else {
-                    // Bootstrap path: the shard is on the manifest and has never
-                    // held a deal. domain_id comes from any sibling deal on the
-                    // same object when one exists; otherwise the storage domain
-                    // this node is configured for (0 on a fresh registry).
-                    let domain_id = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .deals_for_manifest(manifest_id)
-                        .first()
-                        .map_or(0, |d| d.domain_id);
-                    if let Some(ticket_id) = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .open_never_placed_ticket(
-                            domain_id,
-                            *manifest_id,
-                            shard.shard_id,
-                            0,
-                            current_epoch,
-                        )
-                    {
-                        tracing::info!(
-                            "B.U.D. opened never-placed ticket {ticket_id} for shard {} on {}",
-                            hex::encode(shard.shard_id.0),
-                            hex::encode(manifest_id.0)
-                        );
-                    }
-                }
-            }
-        }
-
-        // F-15: schedule one coding audit per erasure-coded manifest each
-        // epoch. The column is derived from chain entropy; the operator
-        // still has to answer. An unanswered audit is visible, which is
-        // the part that was missing.
-        let last_hash = self.blockchain.last_block().hash.as_bytes().to_vec();
-        let mut scheduled = 0u32;
-        let manifests: Vec<_> = self
-            .blockchain
-            .state
-            .storage_registry
-            .manifests
-            .values()
-            .cloned()
-            .collect();
-        for manifest in manifests {
-            if manifest.erasure.parity_count() == 0 {
-                continue;
-            }
-            let entropy = crate::core::hash::hash_fields_bytes(&[
-                b"BDLM_MAINTENANCE_CODING_AUDIT_V1",
-                &self.blockchain.chain_id.to_le_bytes(),
-                &last_hash,
-                &current_epoch.to_le_bytes(),
-                manifest.manifest_id.as_bytes(),
-            ]);
-            match crate::domain::storage_deal::StorageRegistry::derive_coding_audit(
-                &entropy,
-                &manifest,
-                current_epoch,
-            ) {
-                Ok(audit) => {
-                    scheduled += 1;
-                    tracing::info!(
-                        "B.U.D. coding audit scheduled for {} parity={} column={}",
-                        hex::encode(audit.manifest_id.0),
-                        audit.parity_index,
-                        audit.column
-                    );
-                }
-                Err(error) => tracing::debug!("coding audit not scheduled: {error}"),
-            }
-        }
-        if scheduled > 0 {
-            tracing::info!(
-                "B.U.D. storage maintenance scheduled {scheduled} coding audits at epoch {current_epoch}"
-            );
-        }
-
-        // Objects already past saving are logged separately and loudly. Left
-        // inside the band above they would read as "a repair is coming", and
-        // no repair is coming: below `k` there is nothing to rebuild from.
-        let unrecoverable = self
-            .blockchain
-            .state
-            .storage_registry
-            .unrecoverable_objects();
-        for (manifest_id, live, k) in &unrecoverable {
-            tracing::error!(
-                "B.U.D. object {} is UNRECOVERABLE at epoch {current_epoch}: {live} shards live, k={k}; no repair can restore it",
-                hex::encode(manifest_id.0)
-            );
-        }
-
-        // The placement advice. Every pending repair ticket records the holder
-        // the rendezvous placement chose for that shard. Whoever accepts the
-        // ticket still gets it; what is written is a measurement, not a rule,
-        // and `placements_that_diverged` makes the divergence visible.
-        //
-        // The entropy comes from the last block's hash: every node finds the
-        // same answer, and the choice cannot be predicted an epoch ahead.
-        let placement_candidates: Vec<crate::storage::assignment::ShardCandidate> = self
-            .blockchain
-            .state
-            .get_active_validators()
-            .into_iter()
-            .map(|validator| crate::storage::assignment::ShardCandidate {
-                address: validator.address,
-                stake: validator.stake,
-            })
-            .collect();
-        let annotated = if placement_candidates.is_empty() {
-            0
-        } else {
-            let entropy = crate::core::hash::hash_fields_bytes(&[
-                b"BDLM_MAINTENANCE_PLACEMENT_V1",
-                &self.blockchain.chain_id.to_le_bytes(),
-                self.blockchain.last_block().hash.as_bytes(),
-                &current_epoch.to_le_bytes(),
-            ]);
-            self.blockchain
-                .state
-                .storage_registry
-                .annotate_expected_holders(&entropy, &placement_candidates)
-        };
-        if annotated > 0 {
-            tracing::info!(
-                "B.U.D. storage maintenance wrote {annotated} placement advisories at epoch {current_epoch}"
-            );
-        }
-        for (ticket_id, expected, actual) in self
-            .blockchain
-            .state
-            .storage_registry
-            .placements_that_diverged()
-        {
-            tracing::info!(
-                "B.U.D. repair ticket {ticket_id} was taken by {} while placement chose {}",
-                hex::encode(actual.0),
-                hex::encode(expected.0)
-            );
-        }
-
-        // The demand band. If an object that received a regime discount starts
-        // being read heavily, its target rises again; the scan below
-        // re-measures that every epoch. `under_replicated_shards` now takes an
-        // epoch, so the discount is not fixed but bound to proven reads.
-        let demand_gap = self
-            .blockchain
-            .state
-            .storage_registry
-            .under_replicated_shards(current_epoch);
-        for (manifest_id, shard_id, active) in &demand_gap {
-            let target = self
-                .blockchain
-                .state
-                .storage_registry
-                .required_replicas_with_demand(manifest_id, current_epoch);
-            tracing::warn!(
-                "B.U.D. shard {} of {} is below its demand-adjusted target at epoch {current_epoch}: {active} active, target={target}",
-                hex::encode(shard_id.0),
-                hex::encode(manifest_id.0)
-            );
-        }
-
-        // The action the demand band was missing. Each shard under its target
-        // gets a replacement ticket for every replica slot that is actually
-        // free, which is the same repair the zero-replica path performs; the
-        // guard is per slot, not per shard, because "the shard has an active
-        // deal" and "this slot has one" are different statements and only the
-        // second one means paying two operators for one slot. Tickets are
-        // registry state, so the count below feeds the persist decision.
-        let repair_tickets = self
-            .blockchain
-            .state
-            .storage_registry
-            .open_repair_tickets_for_free_slots(current_epoch);
-        if repair_tickets > 0 {
-            tracing::warn!(
-                "B.U.D. storage maintenance opened {repair_tickets} repair tickets for free replica slots at epoch {current_epoch}"
-            );
-        }
-
-        let under_replicated = self
-            .blockchain
-            .state
-            .storage_registry
-            .mark_overdue_reallocations_under_replicated(current_epoch);
-        // The delete half of the ticket lifecycle. A ticket whose replacement
-        // deal opened long enough ago is a record, not an obligation; the map
-        // had no delete path and grew by one row per slash or expiry forever.
-        let swept = self
-            .blockchain
-            .state
-            .storage_registry
-            .sweep_settled_reallocations(current_epoch);
-        if swept > 0 {
-            tracing::info!("B.U.D. storage maintenance dropped {swept} settled reallocation tickets at epoch {current_epoch}");
-        }
-        if under_replicated > 0 {
-            tracing::warn!("B.U.D. storage maintenance marked {under_replicated} reallocation tickets under-replicated at epoch {current_epoch}");
-        }
-        // An advisory written into a pending ticket is registry state too: a
-        // tick that only annotated used to skip the write, and a crash before
-        // the next persisting tick dropped every advisory of this epoch.
-        let registry_changed = annotated > 0
-            || under_replicated > 0
-            || swept > 0
-            || repair_tickets > 0
-            || !repair_band.is_empty();
-        if registry_changed {
-            if let Err(error) = self.blockchain.persist_storage_registry() {
-                tracing::error!("Failed to persist storage reallocation status: {error}");
-            }
-        }
-    }
-
-    /// AI registry maintenance: expired requests, results, refunded fee
-    /// records and dispute window records are evicted here.
-    ///
-    /// The eviction itself lives in
-    /// `Blockchain::apply_ai_registry_maintenance`, which the startup replay,
-    /// the reorg rebuilds and `rebuild_state` also run, so a restarted node
-    /// reconstructs exactly the state its live peers carry (P10-F02).
-    fn run_ai_maintenance(&mut self, block_height: u64) {
-        let (pruned, expired) = crate::chain::blockchain::Blockchain::apply_ai_registry_maintenance(
-            &mut self.blockchain.state,
-            block_height,
-        );
-        if pruned > 0 || expired > 0 {
-            tracing::info!(%pruned, %expired, "AI registry maintenance at height {block_height}");
-        }
     }
 
     pub async fn run(mut self) {
@@ -3430,6 +2434,18 @@ impl ChainActor {
                 ChainCommand::GetBlock(height, tx) => {
                     let block = self.blockchain.chain.get(height as usize).cloned();
                     let _ = tx.send(block);
+                }
+                ChainCommand::GetBlocksRange(from, count, tx) => {
+                    let start = usize::try_from(from).unwrap_or(usize::MAX);
+                    let blocks = self
+                        .blockchain
+                        .chain
+                        .iter()
+                        .skip(start)
+                        .take(count)
+                        .cloned()
+                        .collect();
+                    let _ = tx.send(blocks);
                 }
                 ChainCommand::GetBlockByHash(hash, tx) => {
                     let block = self
@@ -3462,8 +2478,6 @@ impl ChainActor {
                 ChainCommand::ProduceBlock(producer, tx) => {
                     let result = self.blockchain.produce_block(producer);
                     if let Some((ref b, ref cids)) = result {
-                        self.run_storage_maintenance(b.index);
-                        self.run_ai_maintenance(b.index);
                         if crate::chain::finality::is_checkpoint_height_for_chain(
                             b.index,
                             self.blockchain.chain_id,
@@ -3480,8 +2494,6 @@ impl ChainActor {
                     let height = block.index;
                     let res = self.blockchain.validate_and_add_block(block);
                     if let Ok(ref cids) = res {
-                        self.run_storage_maintenance(height);
-                        self.run_ai_maintenance(height);
                         if crate::chain::finality::is_checkpoint_height_for_chain(
                             height,
                             self.blockchain.chain_id,
@@ -3541,6 +2553,10 @@ impl ChainActor {
                 ChainCommand::GetAggregatorState(tx) => {
                     let state = self.blockchain.get_aggregator_state();
                     let _ = tx.send(state);
+                }
+                ChainCommand::ImportPrunedSegment(blocks, cert, qc, res_tx) => {
+                    let res = self.blockchain.import_pruned_segment(blocks, &cert, &qc);
+                    let _ = res_tx.send(res);
                 }
                 ChainCommand::HandleFinalityCert(cert, res_tx) => {
                     let _ = res_tx.send(
@@ -3604,9 +2620,6 @@ impl ChainActor {
                 ChainCommand::SubmitSlashingEvidence(evidence, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_slashing_evidence(evidence));
                 }
-                ChainCommand::SubmitRegistrySlashingReport(report, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.submit_registry_slashing_report(report));
-                }
                 ChainCommand::GetRegistryMember(account, role, res_tx) => {
                     let _ =
                         res_tx.send(self.blockchain.state.registry.get(&account, role).cloned());
@@ -3622,6 +2635,29 @@ impl ChainActor {
                             .collect(),
                     );
                 }
+                ChainCommand::GetDelegations(validator, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.state.registry.delegations_for(&validator));
+                }
+                ChainCommand::GetValidatorProfiles(validator, res_tx) => {
+                    let state = &self.blockchain.state;
+                    let profiles = match validator {
+                        Some(address) => {
+                            crate::registry::validator_profile::validator_profile(state, &address)
+                                .into_iter()
+                                .collect()
+                        }
+                        None => crate::registry::validator_profile::validator_profiles(state),
+                    };
+                    let _ = res_tx.send(profiles);
+                }
+                ChainCommand::GetDelegationExits(validator, res_tx) => {
+                    let _ = res_tx.send(
+                        self.blockchain
+                            .state
+                            .registry
+                            .delegation_unbonding_for(&validator),
+                    );
+                }
                 ChainCommand::GetSlashingHistory(res_tx) => {
                     let _ = res_tx.send(self.blockchain.state.registry.slashing_history().to_vec());
                 }
@@ -3632,12 +2668,27 @@ impl ChainActor {
                     let removed = self.blockchain.mempool.cleanup_expired();
                     let _ = tx.send(removed);
                 }
-                ChainCommand::TryReorgSuffix(suffix, res_tx) => {
-                    let outcome = self
-                        .blockchain
-                        .try_reorg_suffix(suffix)
-                        .map_err(|e| e.to_string());
-                    self.resume_finality_after_reorg(&outcome);
+                ChainCommand::TryReorg(fork, res_tx) => {
+                    let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.to_string());
+                    // BLG-0195 (P10-F05): after a successful reorg the old tip's
+                    // finality round is dead (0186 invalidated it), but nobody
+                    // restarted voting - the node just sat there and the post-
+                    // fork chain finalized nothing until the NEXT checkpoint
+                    // block happened to arrive through AddBlock. Resume the
+                    // prevote task on the new tip when it is itself a
+                    // checkpoint height, mirroring ValidateAndAddBlock.
+                    if matches!(outcome, Ok(true)) {
+                        let tip = self.blockchain.chain.last().cloned();
+                        if let Some(tip) = tip {
+                            if crate::chain::finality::is_checkpoint_height_for_chain(
+                                tip.index,
+                                self.blockchain.chain_id,
+                            ) {
+                                self.blockchain
+                                    .start_prevote_task(tip.index, tip.hash.clone());
+                            }
+                        }
+                    }
                     let _ = res_tx.send(outcome);
                 }
                 ChainCommand::GetChainInfo(tx) => {
@@ -3685,6 +2736,17 @@ impl ChainActor {
                         .and_then(|s| s.get_finality_cert(height).unwrap_or(None));
                     let _ = tx.send(res);
                 }
+                ChainCommand::GetPqStageObservation(stage, height, tx) => {
+                    let res = self.blockchain.pq_stage_observation(stage, height);
+                    let _ = tx.send(res);
+                }
+                ChainCommand::GetQuantumView(tx) => {
+                    let _ = tx.send(self.blockchain.quantum_view());
+                }
+                ChainCommand::GetPqSealedHeights(live, tx) => {
+                    let res = self.blockchain.pq_sealed_heights(live);
+                    let _ = tx.send(res);
+                }
                 ChainCommand::GetStateRoot(height, tx) => {
                     let res = self.blockchain.get_state_root(height);
                     let _ = tx.send(res);
@@ -3707,37 +2769,142 @@ impl ChainActor {
                 }
                 ChainCommand::GetSettlementInfo(tx) => {
                     let header = self.blockchain.build_global_header(None);
+                    let latest = self
+                        .blockchain
+                        .state
+                        .settlement
+                        .global_headers
+                        .latest()
+                        .cloned()
+                        .or_else(|| self.blockchain.global_headers.last().cloned());
+                    let global_height = latest
+                        .as_ref()
+                        .map_or(0, |h| h.global_height.saturating_add(1));
                     let info = serde_json::json!({
-                        "globalHeight": self.blockchain.global_headers.len(),
-                        "latestGlobalHash": self.blockchain.global_headers.last().map(super::super::settlement::global_block::GlobalBlockHeader::calculate_hash),
+                        "globalHeight": global_height,
+                        "latestGlobalHash": latest.as_ref().map(super::super::settlement::global_block::GlobalBlockHeader::calculate_hash),
                         "pendingGlobalHash": header.calculate_hash(),
                         "domainRegistryRoot": hex::encode(header.domain_registry_root),
                         "domainCommitmentRoot": hex::encode(header.domain_commitment_root),
                         "bridgeStateRoot": hex::encode(header.bridge_state_root),
                         "replayNonceRoot": hex::encode(header.replay_nonce_root),
-                        "domainCommitmentCount": self.blockchain.domain_commitment_registry.len(),
+                        "domainCommitmentCount": self.blockchain.state.settlement.commitments.len(),
+                        "proofMarketRoot": hex::encode(self.blockchain.state.proof_market.root()),
+                        "proofMarketActiveTasks": self.blockchain.state.proof_market.active_tasks.len(),
+                        "proofMarketPendingReceipts": self.blockchain.state.proof_market.pending_receipts.len(),
+                        "proofMarketEscrowedCreators": self.blockchain.state.proof_market.escrowed.len(),
+                        "graftRoot": hex::encode(self.blockchain.state.settlement.graft.root()),
+                        "graftApplications": self.blockchain.state.settlement.graft.apps.len(),
+                        "graftPayments": self.blockchain.state.settlement.graft.payments.len(),
+                        "graftIntents": self.blockchain.state.settlement.graft.intents.len(),
+                        "graftClaims": self.blockchain.state.settlement.graft.used_messages.len(),
                     });
                     let _ = tx.send(info);
                 }
                 ChainCommand::GetGlobalHeader(height, tx) => {
-                    let header = self.blockchain.global_headers.get(height as usize).cloned();
+                    let header = self.blockchain.global_header(height);
                     let _ = tx.send(header);
                 }
                 ChainCommand::GetDomainCommitments(tx) => {
                     let commitments = self
                         .blockchain
-                        .domain_commitment_registry
+                        .state
+                        .settlement
+                        .commitments
                         .commitments_for_global_block();
                     let _ = tx.send(commitments);
                 }
                 ChainCommand::GetConsensusDomains(tx) => {
-                    let _ = tx.send(self.blockchain.domain_registry.domains());
+                    let _ = tx.send(self.blockchain.state.settlement.domains.domains());
                 }
-                ChainCommand::RegisterConsensusDomain(domain, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.register_consensus_domain(domain));
+                ChainCommand::GetGraftPaymentProof(payment_id, tx) => {
+                    let _ = tx.send(self.blockchain.graft_payment_proof(&payment_id));
                 }
-                ChainCommand::RegisterSovereignTemplate(template, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.register_sovereign_template(*template));
+                ChainCommand::GetRestakedValidators(tx) => {
+                    let state = &self.blockchain.state;
+                    let rows = state
+                        .settlement
+                        .shared_security
+                        .validators
+                        .values()
+                        .cloned()
+                        .collect();
+                    let weights = state
+                        .validators
+                        .values()
+                        .filter(|v| v.restaked_weight > 0)
+                        .map(|v| (v.address, v.restaked_weight))
+                        .collect();
+                    let _ = tx.send((rows, weights));
+                }
+                ChainCommand::GetGraftApplication(graft_id, tx) => {
+                    let _ = tx.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .graft
+                            .get(&graft_id)
+                            .cloned(),
+                    );
+                }
+                ChainCommand::GetCrossDomainMessage(message_id, tx) => {
+                    let _ = tx.send(
+                        self.blockchain
+                            .state
+                            .message_registry
+                            .get(&message_id)
+                            .cloned(),
+                    );
+                }
+                ChainCommand::GetBridgeTransfer(message_id, tx) => {
+                    let _ = tx.send(
+                        self.blockchain
+                            .state
+                            .bridge_state
+                            .get_transfer(&message_id)
+                            .cloned(),
+                    );
+                }
+                ChainCommand::GetRelayerStatus(message_id, tx) => {
+                    let relayer = &self.blockchain.state.settlement.relayer;
+                    let pending = message_id.and_then(|id| relayer.pending_relay(&id));
+                    let record = message_id.and_then(|id| relayer.ledger.get_record(&id));
+                    let _ = tx.send(serde_json::json!({
+                        "messageId": message_id.map(|id| format!("0x{}", hex::encode(id))),
+                        "pendingCount": relayer.pending_count(),
+                        "relayedCount": relayer.relayed_count(),
+                        "ledgerRoot": format!("0x{}", hex::encode(relayer.ledger_root())),
+                        "pending": pending,
+                        "record": record,
+                    }));
+                }
+                ChainCommand::GetRelayerIntent(intent_id, tx) => {
+                    let policy = &self.blockchain.state.settlement.relayer_policy;
+                    let intent = policy.intents.get(&intent_id);
+                    let bids = policy.bids.get(&intent_id);
+                    let escrowed = policy.escrowed.get(&intent_id).copied();
+                    let settlement = policy.settlements.get(&intent_id);
+                    let _ = tx.send(serde_json::json!({
+                        "intentId": format!("0x{}", hex::encode(intent_id)),
+                        "found": intent.is_some() || bids.is_some() || settlement.is_some(),
+                        "intent": intent,
+                        "bids": bids,
+                        "escrowed": escrowed,
+                        "settlement": settlement,
+                        "settled": policy.settled_intents.contains(&intent_id),
+                        "policyRoot": format!("0x{}", hex::encode(policy.root())),
+                    }));
+                }
+                ChainCommand::GetSovereignTemplate(domain_id, tx) => {
+                    let _ = tx.send(
+                        self.blockchain
+                            .state
+                            .settlement
+                            .sovereign
+                            .templates
+                            .get(&domain_id)
+                            .cloned(),
+                    );
                 }
                 ChainCommand::ValidateSovereignAuditExport(bundle, res_tx) => {
                     let _ = res_tx.send(
@@ -3749,78 +2916,6 @@ impl ChainActor {
                 ChainCommand::SubmitDomainCommitment(commitment, res_tx) => {
                     let _ = res_tx.send(self.blockchain.submit_domain_commitment(commitment));
                 }
-                ChainCommand::VerifyVerifiedDomainCommitment(payload, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .verify_domain_commitment_finality(&payload.commitment, &payload.proof),
-                    );
-                }
-                ChainCommand::SubmitVerifiedDomainCommitment(payload, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .submit_verified_domain_commitment(payload.commitment, payload.proof),
-                    );
-                }
-                ChainCommand::BuildStateUpdateTransaction(commitment, res_tx) => {
-                    let _ =
-                        res_tx.send(self.blockchain.build_state_update_transaction(&commitment));
-                }
-                ChainCommand::SubmitCrossDomainMessage(_message, res_tx) => {
-                    // Registration is consensus state and happens in block; a
-                    // chain-built message reaches the registry through the
-                    // bridge transaction that produced it.
-                    let _ = res_tx.send(Err(
-                        "Cross-domain messages are registered in block; submit the bridge transaction instead"
-                            .to_string(),
-                    ));
-                }
-                ChainCommand::SubmitRelayedCrossDomainMessage(message, res_tx) => {
-                    let res = self
-                        .blockchain
-                        .build_cross_domain_message_transaction(message)
-                        .and_then(|tx| {
-                            let hash = tx.hash.clone();
-                            self.blockchain.add_transaction(tx).map(|()| hash)
-                        });
-                    let _ = res_tx.send(res);
-                }
-                ChainCommand::BondRelayer(address, amount, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .state
-                            .bond_relayer(&address, amount)
-                            .map(|_| ())
-                            .map_err(|e| e.to_string()),
-                    );
-                }
-                ChainCommand::RegisterExternalDomain(registration, res_tx) => {
-                    let request = *registration;
-                    let bls = matches!(
-                        request.spec,
-                        crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
-                    )
-                    .then(crate::cross_domain::external::IntakeState::production_bls);
-                    let _ = res_tx.send(self.blockchain.register_external_domain(request, bls));
-                }
-                ChainCommand::SubmitExternalEvidence(evidence, res_tx) => {
-                    let needs_bls = self
-                        .blockchain
-                        .external_intake
-                        .entries
-                        .get(&crate::cross_domain::external::DomainKey::from_parts(
-                            &evidence.adapter,
-                            &evidence.network,
-                        ))
-                        .is_some_and(|entry| {
-                            matches!(
-                                entry.spec,
-                                crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
-                            )
-                        });
-                    let bls =
-                        needs_bls.then(crate::cross_domain::external::IntakeState::production_bls);
-                    let _ = res_tx.send(self.blockchain.submit_external_evidence(&evidence, bls));
-                }
                 ChainCommand::GetExternalDomainProfile(key, res_tx) => {
                     let _ = res_tx.send(self.blockchain.external_domain_profile(&key));
                 }
@@ -3828,51 +2923,7 @@ impl ChainActor {
                     let _ = res_tx.send(self.blockchain.external_domain_profiles());
                 }
                 ChainCommand::GetExternalIntakeDigest(res_tx) => {
-                    let _ = res_tx.send(self.blockchain.external_intake.state_digest());
-                }
-                ChainCommand::ReadmitExternalDomain(key, reason, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.readmit_external_domain(&key, &reason));
-                }
-                ChainCommand::ScheduleExternalFork {
-                    key,
-                    old_version,
-                    new_version,
-                    fork_height,
-                    grace_heights,
-                    response,
-                } => {
-                    let _ = response.send(self.blockchain.schedule_external_fork(
-                        &key,
-                        old_version,
-                        new_version,
-                        fork_height,
-                        grace_heights,
-                    ));
-                }
-                ChainCommand::SlashExternalProver {
-                    key,
-                    prover,
-                    evidence_digest,
-                    value_atoms,
-                    challenger,
-                    response,
-                } => {
-                    let _ = response.send(self.blockchain.slash_external_prover(
-                        &key,
-                        prover,
-                        evidence_digest,
-                        value_atoms,
-                        challenger,
-                    ));
-                }
-                ChainCommand::SetExternalQuorumPolicy(key, policy, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.set_external_quorum_policy(&key, policy));
-                }
-                ChainCommand::BondExternalProver(key, prover, bond_atoms, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .bond_external_prover(&key, prover, bond_atoms),
-                    );
+                    let _ = res_tx.send(self.blockchain.state.settlement.external_intake_digest());
                 }
                 ChainCommand::GetExternalQuorumRound(key, height, res_tx) => {
                     let _ = res_tx.send(self.blockchain.external_quorum_round(&key, height));
@@ -3883,61 +2934,25 @@ impl ChainActor {
                 ChainCommand::GetExternalDomainRegistration(key, res_tx) => {
                     let _ = res_tx.send(self.blockchain.external_domain_registration(&key));
                 }
-                ChainCommand::BondProver(address, amount, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .state
-                            .bond_prover(&address, amount)
-                            .map(|_| ())
-                            .map_err(|e| e.to_string()),
-                    );
-                }
-                ChainCommand::BondStorageOperator(address, amount, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .state
-                            .bond_storage_operator(&address, amount)
-                            .map(|_| ())
-                            .map_err(|e| e.to_string()),
-                    );
-                }
-                ChainCommand::BeginRoleBondUnbonding(address, role, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .state
-                            .begin_role_bond_unbonding(&address, role),
-                    );
-                }
-                ChainCommand::WithdrawRoleBond(address, role, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.state.withdraw_role_bond(&address, role));
-                }
-                ChainCommand::SubmitZkProof(submission, res_tx) => {
-                    let _ = res_tx.send(
-                        self.blockchain
-                            .submit_zk_proof(submission)
-                            .map_err(|e| e.to_string()),
-                    );
-                }
-                ChainCommand::SubmitRelayProof {
-                    message_id,
-                    relayer,
-                    proof,
-                    source_domain,
-                    response,
-                } => {
-                    let _ = response.send(self.blockchain.submit_relay_proof(
-                        message_id,
-                        relayer,
-                        &proof,
-                        source_domain,
-                    ));
-                }
                 ChainCommand::GetAiModel(id, res_tx) => {
                     let res = self.blockchain.state.ai_registry.models.get(&id).cloned();
                     let _ = res_tx.send(res);
                 }
                 ChainCommand::GetAiOutcome(id, res_tx) => {
                     let res = self.blockchain.state.ai_registry.outcomes.get(&id).cloned();
+                    let _ = res_tx.send(res);
+                }
+                ChainCommand::GetAiOpenRequests(res_tx) => {
+                    let height = self.ai_query_height();
+                    let registry = &self.blockchain.state.ai_registry;
+                    let res = registry
+                        .requests
+                        .values()
+                        .filter(|r| !registry.outcomes.contains_key(&r.request_id))
+                        .filter(|r| r.deadline_block >= height)
+                        .take(256)
+                        .cloned()
+                        .collect();
                     let _ = res_tx.send(res);
                 }
                 ChainCommand::GetAiRequest(id, res_tx) => {
@@ -4130,105 +3145,20 @@ impl ChainActor {
                 ChainCommand::GetDomainHeight(domain_id, res_tx) => {
                     let res = self
                         .blockchain
-                        .domain_registry
+                        .state
+                        .settlement
+                        .domains
                         .get(domain_id)
                         .map(|d| d.last_committed_height)
                         .ok_or_else(|| format!("Domain {domain_id} not found"));
                     let _ = res_tx.send(res);
                 }
-                ChainCommand::RegisterBridgeAsset {
-                    asset_id,
-                    domain,
-                    response,
-                } => {
-                    let _ = response.send(self.blockchain.register_bridge_asset(asset_id, domain));
-                }
-                ChainCommand::LockBridgeTransfer {
-                    source_domain,
-                    target_domain,
-                    source_height,
-                    event_index,
-                    asset_id,
-                    owner,
-                    recipient,
-                    amount,
-                    expiry_height,
-                    response,
-                } => {
-                    let _ = response.send(self.blockchain.lock_bridge_transfer(
-                        source_domain,
-                        target_domain,
-                        source_height,
-                        event_index,
-                        asset_id,
-                        owner,
-                        recipient,
-                        amount,
-                        expiry_height,
-                    ));
-                }
-                ChainCommand::MintBridgeTransferFromVerifiedEvent {
-                    source_domain,
-                    source_height,
-                    sequence,
-                    expected_block_hash,
-                    event,
-                    proof,
-                    relayer,
-                    response,
-                } => {
-                    let _ =
-                        response.send(self.blockchain.mint_bridge_transfer_from_verified_event(
-                            source_domain,
-                            source_height,
-                            sequence,
-                            expected_block_hash,
-                            event,
-                            &proof,
-                            relayer,
-                        ));
-                }
-                ChainCommand::BurnBridgeTransfer {
-                    message_id,
-                    domain,
-                    response,
-                } => {
-                    let _ = (message_id, domain);
-                    let _ = response.send(Err(
-                        "Raw bridge burn is disabled; use a target-domain burn event path".into(),
-                    ));
-                }
-                ChainCommand::UnlockBridgeTransfer {
-                    message_id,
-                    source_domain,
-                    response,
-                } => {
-                    let _ = response.send(
-                        self.blockchain
-                            .unlock_bridge_transfer(message_id, source_domain),
-                    );
-                }
-                ChainCommand::UnlockBridgeTransferFromVerifiedEvent {
-                    target_domain,
-                    target_height,
-                    sequence,
-                    expected_block_hash,
-                    event,
-                    proof,
-                    response,
-                } => {
-                    let _ =
-                        response.send(self.blockchain.unlock_bridge_transfer_from_verified_event(
-                            target_domain,
-                            target_height,
-                            sequence,
-                            expected_block_hash,
-                            event,
-                            &proof,
-                        ));
-                }
+                #[cfg(test)]
                 ChainCommand::SealGlobalHeader(res_tx) => {
                     let _ = res_tx.send(self.blockchain.seal_global_header(None));
+                }
+                ChainCommand::GetGlobalHeaderProof(global_height, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.global_header_proof(global_height));
                 }
                 ChainCommand::FlushStorage(res_tx) => {
                     let res = self.blockchain.storage.as_ref().map_or(Ok(0), |storage| {
@@ -4237,128 +3167,9 @@ impl ChainActor {
                     let _ = res_tx.send(res);
                 }
                 // ─── B.U.D.: Storage operations ─────
-                ChainCommand::OpenStorageDeal {
-                    domain_id,
-                    manifest,
-                    shard_id,
-                    operator,
-                    payer,
-                    replica_index,
-                    start_epoch,
-                    end_epoch,
-                    economics,
-                    domain_params,
-                    merkle_proof,
-                    storage_root,
-                    response,
-                } => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let _ = response.send(self.blockchain.open_storage_deal_with_escrow(
-                        domain_id,
-                        &manifest,
-                        shard_id,
-                        operator,
-                        payer,
-                        replica_index,
-                        start_epoch,
-                        end_epoch,
-                        economics,
-                        &domain_params,
-                        merkle_proof,
-                        storage_root,
-                    ));
-                }
-                ChainCommand::AcceptStorageReallocation {
-                    ticket_id,
-                    replacement_operator,
-                    payer,
-                    start_epoch,
-                    end_epoch,
-                    economics,
-                    domain_params,
-                    merkle_proof,
-                    storage_root,
-                    response,
-                } => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let _ = response.send(self.blockchain.accept_storage_reallocation_with_escrow(
-                        ticket_id,
-                        replacement_operator,
-                        payer,
-                        start_epoch,
-                        end_epoch,
-                        economics,
-                        &domain_params,
-                        merkle_proof,
-                        storage_root,
-                    ));
-                }
-                ChainCommand::RegisterStorageManifest { manifest, response } => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    // The manifest arrives from an RPC caller with its
-                    // `manifest_id` already filled in, and that id is the key
-                    // every deal, challenge and repair indexes by. Nothing
-                    // recomputed it, so a caller could register content under
-                    // any id it chose. Derive it from the contents and refuse
-                    // the mismatch.
-                    if let Err(e) = manifest.validate_untrusted() {
-                        let _ = response.send(Err(format!("invalid manifest: {e}")));
-                        continue;
-                    }
-                    // Paid content may not register as plaintext.
-                    //
-                    // `check_content_may_be_public` was written for this
-                    // moment and its doc comment says "called on the
-                    // declaration path", but nothing called it: the refusal
-                    // existed and never ran. Registration is the only place
-                    // it can run, because the damage is done at registration
-                    // rather than at read time. A plaintext `ContentId` is
-                    // the hash of the bytes, so anyone holding a candidate
-                    // file can confirm it is the listed asset, and anyone
-                    // holding most of one can brute force the rest. Once
-                    // that id is on chain the leak is already available, and
-                    // unlisting the asset afterwards does not take it back.
-                    if matches!(
-                        manifest.encryption,
-                        crate::storage::ContentEncryption::Plaintext
-                    ) {
-                        if let Err(e) = self
-                            .blockchain
-                            .state
-                            .marketplace
-                            .check_content_may_be_public(&manifest.manifest_id)
-                        {
-                            let _ = response.send(Err(format!(
-                                "refusing to register paid content as plaintext: {e}"
-                            )));
-                            continue;
-                        }
-                    }
-                    let manifest_id = manifest.manifest_id;
-                    self.blockchain
-                        .state
-                        .storage_registry
-                        .register_manifest(&manifest);
-                    let persist = self
-                        .blockchain
-                        .storage
-                        .as_ref()
-                        .map(|store| {
-                            store.save_storage_registry(&self.blockchain.state.storage_registry)
-                        })
-                        .transpose()
-                        .map_err(|e| e.to_string());
-                    let _ = response.send(persist.map(|_| manifest_id));
-                }
+                // Manifest registration, deal opening, repair acceptance and
+                // retrieval challenges are `StorageTx` transactions applied in
+                // block; no command here writes the storage registry.
                 ChainCommand::IssueViewGrant { response, .. } => {
                     // View grants are folded into the storage state root, so
                     // issuing one between blocks rewrites the local node's
@@ -4418,7 +3229,7 @@ impl ChainActor {
                     }
                     let _ = (commit, auth);
                     let _ = response.send(Err(
-                        "Out-of-block confidential commit registration is disabled to preserve state-root consensus"
+                        "Out-of-block confidential commit registration is disabled to preserve state-root consensus; submit StorageTx::CommitConfidentialBody through bud_sendRawTransaction"
                             .to_string(),
                     ));
                 }
@@ -4440,71 +3251,6 @@ impl ChainActor {
                         .get_confidential_commit(&content_id)
                         .cloned();
                     let _ = response.send(c);
-                }
-                ChainCommand::OpenStorageChallenge { request, response } => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let current_epoch = self.blockchain.last_block().index
-                        / crate::core::chain_config::epoch_len_for_chain_id(
-                            self.blockchain.chain_id,
-                        );
-                    if let Err(e) =
-                        crate::domain::storage_deal::StorageRegistry::validate_challenge_window(
-                            request.challenge_epoch,
-                            request.deadline_epoch,
-                            current_epoch,
-                        )
-                    {
-                        let _ = response.send(Err(e.to_string()));
-                        continue;
-                    }
-                    let opener = request
-                        .opener
-                        .unwrap_or(crate::core::address::Address::zero());
-                    let entropy = crate::core::hash::hash_fields_bytes(&[
-                        b"BDLM_RPC_STORAGE_CHALLENGE_ENTROPY_V1",
-                        &self.blockchain.chain_id.to_le_bytes(),
-                        self.blockchain.last_block().hash.as_bytes(),
-                        opener.as_bytes(),
-                        request.opener_signature.as_deref().unwrap_or(&[]),
-                    ]);
-                    // Take the bond before opening the challenge. Without this
-                    // the number in the request was validated and then ignored,
-                    // so an empty account could open challenges that cost the
-                    // operator a 16 MiB read each.
-                    let res = self
-                        .blockchain
-                        .debit_opener_bond(&opener, request.opener_bond)
-                        .and_then(|()| {
-                            self.blockchain
-                                .state
-                                .storage_registry
-                                .open_challenge_with_entropy(&request, opener, &entropy)
-                                .map_err(|e| {
-                                    // The challenge was refused, so the bond
-                                    // must not stay debited.
-                                    let _ = self
-                                        .blockchain
-                                        .refund_opener_bond(&opener, request.opener_bond);
-                                    e.to_string()
-                                })
-                        })
-                        .and_then(|challenge_id| {
-                            self.blockchain
-                                .storage
-                                .as_ref()
-                                .map(|store| {
-                                    store.save_storage_registry(
-                                        &self.blockchain.state.storage_registry,
-                                    )
-                                })
-                                .transpose()
-                                .map_err(|e| e.to_string())?;
-                            Ok(challenge_id)
-                        });
-                    let _ = response.send(res);
                 }
                 ChainCommand::DeriveCodingAudit {
                     manifest_id,
@@ -4556,7 +3302,6 @@ impl ChainActor {
                     audit,
                     data_column,
                     parity_byte,
-                    column_proof,
                     response,
                 } => {
                     if self.storage_economics_disabled_on_mainnet() {
@@ -4567,61 +3312,8 @@ impl ChainActor {
                         .blockchain
                         .state
                         .storage_registry
-                        .verify_coding_audit(&audit, &data_column, parity_byte, &column_proof)
+                        .verify_coding_audit(&audit, &data_column, parity_byte)
                         .map_err(|e| e.to_string());
-                    let _ = response.send(res);
-                }
-                ChainCommand::AnswerStorageChallenge {
-                    response_data,
-                    response,
-                } => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = response.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let res = self
-                        .blockchain
-                        .state
-                        .storage_registry
-                        .answer_challenge_with_chain_id(
-                            self.blockchain.chain_id,
-                            response_data.challenge_id,
-                            response_data._range_hash,
-                            response_data.responder,
-                            response_data.response_epoch,
-                            response_data.proof_bytes.as_deref(),
-                        )
-                        .map_err(|e| e.to_string())
-                        .and_then(|challenge_result| {
-                            // A `Mismatched` answer is a recorded slash, and a
-                            // recorded slash that never burns is not a slash.
-                            // Routed through the same accounting helper as a
-                            // missed deadline so the two cost the same.
-                            if challenge_result.outcome
-                                == crate::domain::storage_deal::ChallengeOutcome::Mismatched
-                            {
-                                self.blockchain
-                                    .apply_storage_bond_slash(
-                                        response_data.response_epoch,
-                                        challenge_result.deal_id,
-                                        response_data.responder,
-                                        challenge_result.slashed_bond,
-                                        "storage challenge answered with an unverifiable proof",
-                                    )
-                                    .map_err(|e| e.to_string())?;
-                            }
-                            self.blockchain
-                                .storage
-                                .as_ref()
-                                .map(|store| {
-                                    store.save_storage_registry(
-                                        &self.blockchain.state.storage_registry,
-                                    )
-                                })
-                                .transpose()
-                                .map_err(|e| e.to_string())?;
-                            Ok(challenge_result)
-                        });
                     let _ = response.send(res);
                 }
                 ChainCommand::GetStorageManifest {
@@ -4691,30 +3383,6 @@ impl ChainActor {
                     };
                     let _ = response.send(band);
                 }
-                ChainCommand::IssueStorageChallenges(epoch, res_tx) => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = res_tx.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let res = self.blockchain.issue_storage_challenges(epoch);
-                    let _ = res_tx.send(res);
-                }
-                ChainCommand::FinalizeMissedStorageChallenges(epoch, res_tx) => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = res_tx.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    let res = self.blockchain.finalize_missed_storage_challenges(epoch);
-                    let _ = res_tx.send(res);
-                }
-                ChainCommand::SubmitStorageProof(proof_hash, res_tx) => {
-                    if self.storage_economics_disabled_on_mainnet() {
-                        let _ = res_tx.send(Err(Self::mainnet_storage_disabled_error()));
-                        continue;
-                    }
-                    self.blockchain.accumulate_storage_proof(proof_hash);
-                    let _ = res_tx.send(Ok(()));
-                }
                 ChainCommand::GetStorageDeals(res_tx) => {
                     let deals = self
                         .blockchain
@@ -4733,7 +3401,10 @@ impl ChainActor {
                 ChainCommand::GetStorageEconomicsSummary(res_tx) => {
                     let operator_rewards: Vec<_> = self
                         .blockchain
-                        .storage_operator_rewards
+                        .state
+                        .storage_registry
+                        .economics
+                        .operator_rewards
                         .iter()
                         .map(|(operator, amount)| {
                             serde_json::json!({
@@ -4789,8 +3460,8 @@ impl ChainActor {
                         .under_replicated_shards(stats_epoch)
                         .len();
                     let _ = res_tx.send(serde_json::json!({
-                        "slashedBondTotal": self.blockchain.storage_slashed_bond_total,
-                        "burnedBondTotal": self.blockchain.storage_burned_bond_total,
+                        "slashedBondTotal": self.blockchain.state.storage_registry.economics.slashed_bond_total,
+                        "burnedBondTotal": self.blockchain.state.storage_registry.economics.burned_bond_total,
                         "operatorRewards": operator_rewards,
                         "eventCount": self.blockchain.storage_economics_events().len(),
                         "replicationTarget": crate::domain::storage_deal::STORAGE_REPLICATION_TARGET,
@@ -4830,7 +3501,10 @@ impl ChainActor {
                         .count();
                     let accrued_rewards = self
                         .blockchain
-                        .storage_operator_rewards
+                        .state
+                        .storage_registry
+                        .economics
+                        .operator_rewards
                         .get(&operator)
                         .copied()
                         .unwrap_or(0);
@@ -4943,27 +3617,6 @@ impl ChainActor {
                             &document,
                         )
                         .map_err(|e| e.to_string()),
-                    );
-                }
-                ChainCommand::BnsSetStorage {
-                    name,
-                    owner,
-                    storage_root,
-                    storage_domain_id,
-                    response,
-                } => {
-                    let _ = response.send(
-                        self.blockchain
-                            .state
-                            .bns_registry
-                            .set_storage(
-                                &name,
-                                owner,
-                                storage_root,
-                                storage_domain_id,
-                                self.blockchain.state.epoch_index,
-                            )
-                            .map_err(|e| e.to_string()),
                     );
                 }
                 ChainCommand::BnsCalculateCost {
@@ -5087,6 +3740,18 @@ impl ChainActor {
                         .cloned()
                         .collect();
                     let _ = response.send(receipts);
+                }
+                ChainCommand::HubGetGraftApps { response } => {
+                    let apps = self
+                        .blockchain
+                        .state
+                        .settlement
+                        .graft
+                        .apps
+                        .values()
+                        .cloned()
+                        .collect();
+                    let _ = response.send(apps);
                 }
                 ChainCommand::HubGetApps { response } => {
                     let apps: Vec<_> = self

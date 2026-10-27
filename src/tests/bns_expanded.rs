@@ -2,7 +2,11 @@
 
 use crate::bns::types::BnsError;
 use crate::bns::BnsRegistry;
+use crate::core::account::AccountState;
 use crate::core::address::Address;
+use crate::core::transaction::{Transaction, TransactionType, DEFAULT_CHAIN_ID};
+use crate::crypto::primitives::KeyPair;
+use crate::execution::executor::Executor;
 
 fn addr(b: u8) -> Address {
     Address::from([b; 32])
@@ -150,73 +154,21 @@ fn test_bns_full_resolve_with_storage() {
     assert_eq!(resolved.storage_domain_id, Some(1));
 }
 
-/// `renew` and `transfer` are unreachable from a transaction, and
-/// re-registering is not an equivalent substitute.
-///
-/// `TransactionType` has `BnsRegister`, `BnsSetContent`,
-/// `BnsRegisterSubdomain` and `BnsSetStorage` - no `BnsRenew`, no
-/// `BnsTransfer`. Both methods are called only from tests, so on a live chain
-/// an owner cannot renew a name and cannot hand one over.
-///
-/// The grace period in `register` softens it: the previous owner can
-/// re-register after expiry without being front-run. It does not replace
-/// renewal, because the two compute a different expiry -
-///
-///     renew:    expires_at += duration
-///     register: expires_at  = current_epoch + duration
-///
-/// So the only reachable path discards the remaining term. Renewing a year
-/// early costs that year; waiting until the last epoch to avoid the loss puts
-/// the name one missed block from the grace window. This asserts the size of
-/// that gap so it cannot be mistaken for a rounding difference, and fails the
-/// moment a `BnsRenew` transaction exists, forcing whoever adds it to delete
-/// the test deliberately.
 #[test]
-fn bns_renewal_is_unreachable_and_re_registering_loses_the_remaining_term() {
+fn bns_lifecycle_doors_reject_zero_duration_and_zero_owner() {
     let alice = Address::from([1u8; 32]);
     let mut reg = BnsRegistry::new();
-
-    // Registered at epoch 0 for 100 epochs: expires at 100.
     reg.register("term.bud".into(), alice, 0, 100).unwrap();
-    assert_eq!(reg.names.get("term.bud").unwrap().expires_at, 100);
 
-    // Renewing at epoch 10 for another 100 extends from the *expiry*: 200.
-    reg.renew("term.bud", &alice, 10, 100).unwrap();
     assert_eq!(
-        reg.names.get("term.bud").unwrap().expires_at,
-        200,
-        "renew must extend from the existing expiry"
+        reg.renew("term.bud", &alice, 10, 0),
+        Err(BnsError::InvalidName),
+        "a renewal must extend the registration"
     );
-
-    // What an owner can actually do today. Re-register the same name at the
-    // same epoch, for the same duration, and the expiry restarts from now.
-    let mut reg2 = BnsRegistry::new();
-    reg2.register("term.bud".into(), alice, 0, 100).unwrap();
-    // Not yet expired, so a re-registration is refused outright while live...
     assert_eq!(
-        reg2.register("term.bud".into(), alice, 10, 100),
-        Err(BnsError::NameTaken),
-        "a live name cannot be re-registered, so there is no early-renewal path at all"
-    );
-    // ...and after expiry the term restarts rather than extending.
-    reg2.register("term.bud".into(), alice, 100, 100).unwrap();
-    assert_eq!(
-        reg2.names.get("term.bud").unwrap().expires_at,
-        200,
-        "re-registering restarts from current_epoch"
-    );
-
-    // The transaction surface still has no way in.
-    let tx_src = include_str!("../core/transaction.rs");
-    assert!(
-        !tx_src.contains("BnsRenew"),
-        "a BnsRenew transaction now exists - wire it to `renew`, charge \
-         `calculate_cost`, and drop this test"
-    );
-    assert!(
-        !tx_src.contains("BnsTransfer"),
-        "a BnsTransfer transaction now exists - wire it to `transfer` and drop \
-         this test"
+        reg.transfer("term.bud", &alice, Address::zero(), 10),
+        Err(BnsError::InvalidName),
+        "a transfer must not create a name owned by the zero address"
     );
 }
 
@@ -280,4 +232,91 @@ fn test_bns_register_refuses_expiry_overflow() {
         .register("overflow.bud".to_string(), alice, 1, u64::MAX)
         .is_err());
     assert!(reg.is_empty());
+}
+
+fn lifecycle_tx(
+    from: Address,
+    amount: u64,
+    fee: u64,
+    nonce: u64,
+    tx_type: TransactionType,
+    data: Vec<u8>,
+) -> Transaction {
+    Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        amount,
+        fee,
+        nonce,
+        data,
+        DEFAULT_CHAIN_ID,
+        tx_type,
+    )
+}
+
+#[test]
+fn bns_renew_and_transfer_execute_through_consensus_doors() {
+    let key = KeyPair::from_seed(&[1u8; 32]).unwrap();
+    let alice = Address::from(key.public_key_bytes());
+    let bob = addr(2);
+    let name = "term.bud".to_string();
+    let duration = 100;
+    let mut state = AccountState::new();
+    state.add_balance(&alice, 100_000);
+    state
+        .bns_registry
+        .register(name.clone(), alice, 0, duration)
+        .unwrap();
+
+    let cost = state.bns_registry.calculate_cost(&name, duration);
+    let mut renewal = lifecycle_tx(
+        alice,
+        cost,
+        1,
+        0,
+        TransactionType::BnsRenew,
+        bincode::serialize(&(name.clone(), duration)).unwrap(),
+    );
+    renewal.sign(&key);
+    state.validate_transaction(&renewal).unwrap();
+    Executor::apply_transaction_checked(&mut state, &renewal).unwrap();
+    assert_eq!(
+        state.bns_registry.names.get(&name).unwrap().expires_at,
+        200,
+        "renewal extends from the old expiry"
+    );
+    assert_eq!(state.get_balance(&alice), 100_000 - cost - 1);
+    assert_eq!(state.get_nonce(&alice), 1);
+
+    let mut transfer = lifecycle_tx(
+        alice,
+        0,
+        1,
+        1,
+        TransactionType::BnsTransfer,
+        bincode::serialize(&(name.clone(), bob)).unwrap(),
+    );
+    transfer.sign(&key);
+    state.validate_transaction(&transfer).unwrap();
+    Executor::apply_transaction_checked(&mut state, &transfer).unwrap();
+    assert_eq!(state.bns_registry.resolve(&name, 100), Some(bob));
+    assert_eq!(state.get_nonce(&alice), 2);
+
+    let mut unauthorized = lifecycle_tx(
+        alice,
+        0,
+        1,
+        2,
+        TransactionType::BnsTransfer,
+        bincode::serialize(&(name, alice)).unwrap(),
+    );
+    unauthorized.sign(&key);
+    state.validate_transaction(&unauthorized).unwrap();
+    let error = Executor::apply_transaction_checked(&mut state, &unauthorized).unwrap_err();
+    assert_eq!(error.code(), "bns_transfer_failed");
+    assert_eq!(
+        state.get_nonce(&alice),
+        2,
+        "refused transfers do not advance nonce"
+    );
 }
