@@ -217,7 +217,9 @@ impl Executor {
             | TransactionType::Vote
             | TransactionType::Undelegate { .. }
             | TransactionType::WithdrawDelegation { .. }
-            | TransactionType::SetValidatorCommission { .. } => tx.fee,
+            | TransactionType::SetValidatorCommission { .. }
+            | TransactionType::Redelegate { .. }
+            | TransactionType::ClaimRewards { .. } => tx.fee,
             _ => tx.total_cost(),
         };
 
@@ -421,6 +423,49 @@ impl Executor {
                     )
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::Redelegate {
+                from_validator,
+                to_validator,
+            } => {
+                if tx.amount == 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "redelegation_shape",
+                        "Redelegation requires a positive amount, zero recipient, and empty data",
+                    ));
+                }
+                state
+                    .redelegate_to_validator(&tx.from, from_validator, to_validator, tx.amount)
+                    .map_err(|error| BudlumError::validation("redelegation_failed", error))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "redelegation fee underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+                tracing::info!(delegator = %tx.from, from = %from_validator, to = %to_validator, amount = tx.amount, "delegation moved");
+            }
+            TransactionType::ClaimRewards { validator } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "claim_rewards_shape",
+                        "Claiming rewards requires zero amount, recipient, and data",
+                    ));
+                }
+                if state.get_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance_for_fee",
+                        "insufficient balance for the reward claim fee",
+                    ));
+                }
+                let claimed = state
+                    .claim_delegator_rewards(&tx.from, validator)
+                    .map_err(|error| BudlumError::validation("claim_rewards_failed", error))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "reward claim fee underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+                tracing::info!(delegator = %tx.from, validator = %validator, amount = claimed, "delegation reward claimed");
             }
             TransactionType::RegisterConsensusKeys(registration) => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
