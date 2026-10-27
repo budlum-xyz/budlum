@@ -1000,8 +1000,12 @@ async fn budlum_head_height(client: &BudlumClient) -> Result<u64, String> {
 /// Hashes of burn transactions in one block.
 ///
 /// The node renders the transaction type with `{:?}`, so the wire value is the
-/// variant name. Matching on a prefix keeps a variant that carries fields
-/// (`BurnBridgeTransferWithEvent { .. }`) from being missed.
+/// variant name. The burn used to be applied by an operator RPC and is a
+/// `BridgeBurn` transaction now, so this matches `BridgeBurn(..)`; the old
+/// `BurnBridgeTransferWithEvent` name is kept in the match because a node on an
+/// older build still renders it that way, and a relayer that silently stopped
+/// detecting burns would look healthy while relaying nothing. Matching on a
+/// prefix keeps a variant that carries fields from being missed.
 async fn burn_events_in_block(client: &BudlumClient, height: u64) -> Result<Vec<String>, String> {
     let block = client
         .rpc_call("bud_getBlockByNumber", block_by_number_params(height))
@@ -1031,9 +1035,17 @@ fn burn_hashes_from_block(block: &serde_json::Value) -> Vec<String> {
     };
     txs.iter()
         .filter(|tx| {
-            tx.get("type")
-                .and_then(|t| t.as_str())
-                .is_some_and(|ty| ty.starts_with(BURN_TX_TYPE_PREFIX))
+            tx.get("type").and_then(|t| t.as_str()).is_some_and(|ty| {
+                // Three shapes: the in-block `BridgeBurn(..)` transaction that
+                // carries a burn now, the retirement-era
+                // `Bridge(BurnWithEvent(..))` rendering, and the operator-RPC
+                // name an older build still prints. A relayer that silently
+                // stopped detecting burns would look healthy while relaying
+                // nothing, so none of them is dropped.
+                ty.starts_with("BridgeBurn(")
+                    || ty.starts_with(BURN_TX_TYPE_PREFIX)
+                    || ty.starts_with("BurnBridgeTransferWithEvent")
+            })
         })
         .map(|tx| {
             tx.get("hash")
@@ -1230,11 +1242,26 @@ mod tests {
     }
 
     /// A variant rendered with its fields still has to match: `{:?}` prints
-    /// `Bridge(BurnWithEvent(BurnRequest { .. }))`, and an equality test
-    /// would miss it.
+    /// `Bridge(BurnWithEvent(BurnRequest { .. }))` or `BridgeBurn(BridgeBurnTx
+    /// { .. })`, and an equality test would miss the nested rendering.
     #[test]
     fn a_burn_rendered_with_fields_is_found() {
-        let b = block_with(&["Bridge(BurnWithEvent(BurnRequest { domain: 5 }))"]);
+        let b = block_with(&["BridgeBurn(BridgeBurnTx { domain: 2 })"]);
+        assert_eq!(burn_hashes_from_block(&b).len(), 1);
+    }
+
+    /// The door the burn moved to: an in-block `BridgeBurn` transaction.
+    #[test]
+    fn the_in_block_burn_transaction_is_found() {
+        let b = block_with(&["Transfer", "BridgeBurn(BridgeBurnTx)", "Transfer"]);
+        assert_eq!(burn_hashes_from_block(&b), vec!["0x01".to_string()]);
+    }
+
+    /// A node on an older build still renders the old name, and a relayer that
+    /// stopped seeing those burns would relay nothing while looking healthy.
+    #[test]
+    fn the_legacy_render_is_still_found() {
+        let b = block_with(&["BurnBridgeTransferWithEvent"]);
         assert_eq!(burn_hashes_from_block(&b).len(), 1);
     }
 
