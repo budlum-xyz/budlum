@@ -54,6 +54,14 @@ contract Receiver is BudlumPaymentReceiver {
     }
 }
 
+/// A second account that fulfils through the executor: the per-caller guard
+/// must let it through even after the test contract has used its own slot.
+contract Filler {
+    function run(GraftExecutor executor, bytes32 intent, address target) external {
+        executor.execute(intent, bytes32(uint256(2)), target, abi.encodeCall(Counter.bump, ()), hex"01");
+    }
+}
+
 contract GraftTest is Harness {
     GraftExecutor internal executor;
     Counter internal counter;
@@ -102,12 +110,35 @@ contract GraftTest is Harness {
         executor.execute(intent, bytes32(uint256(1)), address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
     }
 
+    /// The once-per-intent guard is per caller: a second account cannot burn
+    /// the id, and cannot be blocked by the first caller either.
+    function test_the_once_per_intent_guard_is_per_caller() public {
+        bytes32 intent = keccak256("contested-intent");
+        executor.execute(intent, bytes32(uint256(1)), address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
+        assertTrue(executor.fulfilled(intent, address(this)), "the caller's slot is used");
+        assertEq(counter.count(), 1, "the call was made");
+
+        // Another account still gets to fulfil the same intent: the first
+        // caller cannot burn the id for everyone.
+        Filler filler = new Filler();
+        filler.run(executor, intent, address(counter));
+        assertTrue(executor.fulfilled(intent, address(filler)), "the other caller's slot was free");
+        assertEq(counter.count(), 2, "the second call was made too");
+    }
+
+    function test_a_call_to_an_address_with_no_code_is_refused() public {
+        vm.expectRevert(GraftExecutor.CallFailed.selector);
+        executor.execute(
+            keccak256("no-code"), bytes32(uint256(1)), address(0xdead), hex"", hex"01"
+        );
+    }
+
     function test_a_failed_call_emits_nothing_and_reverts() public {
         vm.expectRevert(GraftExecutor.CallFailed.selector);
         executor.execute(
             keccak256("intent"), bytes32(uint256(1)), address(counter), abi.encodeCall(Counter.fail, ()), hex"01"
         );
-        assertTrue(!executor.fulfilled(keccak256("intent")), "not marked fulfilled");
+        assertTrue(!executor.fulfilled(keccak256("intent"), address(this)), "not marked fulfilled");
     }
 
     function _proof(Receiver receiver, FinalityStub finality, bytes32 graftId)
