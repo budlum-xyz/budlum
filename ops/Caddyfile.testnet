@@ -1,0 +1,50 @@
+# Public TLS front of a testnet RPC host.
+#
+# The node, the faucet and the indexer speak plain HTTP on loopback
+# (config/testnet.toml). Caddy terminates TLS with an automatically issued
+# certificate and forwards to them. Set TESTNET_DOMAIN in Caddy's environment
+# (for example `testnet.example.org`); the hosts below are subdomains of it,
+# and their DNS records must point at this machine before Caddy starts.
+#
+#   TESTNET_DOMAIN=<TESTNET_DOMAIN> caddy run --config ops/Caddyfile.testnet
+#
+# Caddy sets X-Forwarded-For; the node reads the client address from it only
+# because `trusted_proxies = ["127.0.0.1"]` names this proxy, and applies its
+# per-IP rate limit to that address. The operator listener (18546) and the
+# metrics listener (19090) are never proxied.
+
+{
+	# Certificate issuance needs an address to send expiry notices to.
+	email {$TESTNET_ACME_EMAIL}
+}
+
+(common) {
+	encode gzip
+	request_body {
+		max_size 2MB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+}
+
+# Public JSON-RPC over HTTPS, and WebSocket subscriptions on the same host
+# (Caddy forwards the upgrade unchanged).
+rpc.{$TESTNET_DOMAIN} {
+	import common
+	reverse_proxy 127.0.0.1:18545
+}
+
+# The faucet (budlum-faucet serve --listen 127.0.0.1:18600).
+faucet.{$TESTNET_DOMAIN} {
+	import common
+	reverse_proxy 127.0.0.1:18600
+}
+
+# The read-only explorer API (budlum-indexer, 127.0.0.1:18700).
+explorer-api.{$TESTNET_DOMAIN} {
+	import common
+	reverse_proxy 127.0.0.1:18700
+}
