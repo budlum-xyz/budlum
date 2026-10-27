@@ -178,11 +178,13 @@ pub struct PoAAuthorityKey {
 /// The digest a PoA authority signs with its composite key.
 #[must_use]
 pub fn poa_commit_digest(
+    chain_id: u64,
     domain_id: DomainId,
     domain_height: u64,
     domain_block_hash: &Hash32,
 ) -> Hash32 {
     crate::core::hash::hash_fields_bytes(&[&poa_commit_signing_message(
+        chain_id,
         domain_id,
         domain_height,
         domain_block_hash,
@@ -268,15 +270,25 @@ pub struct PoAAuthoritySignature {
 }
 
 /// Canonical message a PoA authority signs to attest a commitment. Binds the
-/// Signature to the specific (domain, height, block hash), so a signature cannot
-/// Be replayed for a different commitment.
+/// signature to the network (`chain_id`), the domain, the height and the block
+/// hash, so a signature cannot be replayed for a different commitment - and a
+/// quorum collected on one network cannot be presented to another.
+///
+/// The chain id is not decoration: domain ids are small integers assigned by
+/// permissionless registration, so two networks can both have a domain 7, and
+/// without the chain id the same `(domain, height, hash)` triple would produce
+/// the same message on both. The `_V2` tag is part of the domain separation: a
+/// signature made under `_V1` (which carried no chain id) does not verify here,
+/// so no pre-fix attestation can be replayed against the chain-bound verifier.
 pub fn poa_commit_signing_message(
+    chain_id: u64,
     domain_id: DomainId,
     domain_height: u64,
     domain_block_hash: &Hash32,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(8 + 8 + 32 + 16);
-    msg.extend_from_slice(b"BUDLUM_POA_COMMIT_V1");
+    let mut msg = Vec::with_capacity(24 + 8 + 8 + 32);
+    msg.extend_from_slice(b"BUDLUM_POA_COMMIT_V2");
+    msg.extend_from_slice(&chain_id.to_le_bytes());
     msg.extend_from_slice(&domain_id.to_le_bytes());
     msg.extend_from_slice(&domain_height.to_le_bytes());
     msg.extend_from_slice(domain_block_hash);
@@ -762,6 +774,7 @@ impl PoAFinalityAdapter {
             )));
         }
         let digest = poa_commit_digest(
+            domain.domain_chain_id,
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
@@ -1009,6 +1022,7 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
 
         // The message every authority must have signed, bound to THIS commitment.
         let msg = poa_commit_signing_message(
+            domain.domain_chain_id,
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
@@ -1392,6 +1406,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                     return Ok(rejected);
                 }
                 let msg = poa_commit_signing_message(
+                    domain.domain_chain_id,
                     domain.id,
                     commitment.domain_height,
                     &commitment.domain_block_hash,
@@ -1948,6 +1963,7 @@ mod tests {
         // finalizes nothing by design; register the set this test signs with.
         domain.validator_set_hash = poa_authority_set_hash(&domain, &authorities).unwrap();
         let msg = poa_commit_signing_message(
+            domain.domain_chain_id,
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
@@ -1999,6 +2015,64 @@ mod tests {
                         signatures: vec![],
                     },
                 )
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+    }
+
+    /// The PoA attestation preimage is `(chain_id, domain, height, hash)`, not
+    /// `(domain, height, hash)`. Domain ids are small integers handed out by
+    /// permissionless registration, so two networks can each have a domain 7;
+    /// without the chain id the same triple would produce the same message on
+    /// both, and a quorum collected on a testnet domain would finalize the
+    /// mainnet domain of the same id. The test signs for one network and
+    /// verifies on another with every other field identical.
+    #[test]
+    fn a_poa_quorum_collected_on_one_chain_does_not_finalize_on_another() {
+        use crate::crypto::primitives::KeyPair;
+        let mut domain = default_domain(7, ConsensusKind::PoA, 45262, "poa-authority-quorum", 0);
+        let mut commitment = commitment(ConsensusKind::PoA);
+        commitment.domain_id = domain.id;
+        let adapter = PoAFinalityAdapter::default();
+
+        let mut kps = Vec::new();
+        let mut authorities = Vec::new();
+        for i in 0..3u8 {
+            let mut seed = [0u8; 32];
+            seed[0] = 0xC0 + i;
+            let kp = KeyPair::from_seed(&seed).unwrap();
+            authorities.push(crate::core::address::Address::from(kp.public_key_bytes()));
+            kps.push(kp);
+        }
+        domain.validator_set_hash = poa_authority_set_hash(&domain, &authorities).unwrap();
+        let msg = poa_commit_signing_message(
+            domain.domain_chain_id,
+            domain.id,
+            commitment.domain_height,
+            &commitment.domain_block_hash,
+        );
+        let proof = FinalityProof::PoA {
+            authorities: authorities.clone(),
+            signatures: authorities
+                .iter()
+                .enumerate()
+                .map(|(i, authority)| PoAAuthoritySignature {
+                    authority: *authority,
+                    signature: kps[i].sign(&msg).to_vec(),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            adapter.verify_finality(&domain, &commitment, &proof).unwrap(),
+            FinalityStatus::Finalized
+        );
+
+        // Same domain id, height and block hash, different network.
+        let mut elsewhere = domain.clone();
+        elsewhere.domain_chain_id = 45260;
+        assert!(matches!(
+            adapter
+                .verify_finality(&elsewhere, &commitment, &proof)
                 .unwrap(),
             FinalityStatus::Rejected(_)
         ));
@@ -2459,6 +2533,7 @@ mod tests {
         ));
 
         let msg = poa_commit_signing_message(
+            domain.domain_chain_id,
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,

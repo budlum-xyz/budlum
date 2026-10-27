@@ -28,6 +28,57 @@ pub fn is_software_token_path(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// SHA3-256 digests of the PKCS#11 module files a mainnet release sanctions
+/// for custody.
+///
+/// A file-name denylist cannot establish hardware custody. `p11-kit-proxy.so`
+/// is a dispatcher that hands the token to whatever module the operator
+/// registers, a software token copied to a neutral file name keeps its keys in
+/// software, and a bare soname is resolved by the dynamic loader after this
+/// check has run. What a release *can* pin is bytes: the module file it built,
+/// reviewed and tested against.
+///
+/// Empty means nothing is sanctioned. Mainnet then refuses to start a validator
+/// or an anchor keystore until a release fills this in, which is the
+/// fail-closed direction: an unpinned module is an unknown module, not a
+/// probably-hardware one.
+pub const SANCTIONED_MODULE_DIGESTS: &[[u8; 32]] = &[];
+
+/// Whether `digest` is one of the module digests the release sanctions.
+///
+/// Split from [`is_sanctioned_module_path`] so the membership rule can be
+/// tested without a module file on disk.
+#[must_use]
+pub fn module_digest_is_sanctioned(digest: &[u8; 32], sanctioned: &[[u8; 32]]) -> bool {
+    sanctioned.iter().any(|pinned| pinned == digest)
+}
+
+/// SHA3-256 of the file `path` resolves to, following symlinks, or `None` when
+/// the file cannot be read.
+///
+/// The digest is taken over the *resolved* file so a symlink, a copy or a
+/// renamed module is judged by its bytes and not by its name.
+#[must_use]
+pub fn module_digest(path: &str) -> Option<[u8; 32]> {
+    use sha3::Digest;
+    let resolved = std::fs::canonicalize(path).ok()?;
+    let bytes = std::fs::read(resolved).ok()?;
+    let hash = sha3::Sha3_256::digest(&bytes);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hash);
+    Some(out)
+}
+
+/// Whether the PKCS#11 module at `path` is a module the release sanctions.
+///
+/// This is the custody gate on the mainnet validator and anchor key paths. It
+/// answers `false` for anything the release has not pinned, including every
+/// module while [`SANCTIONED_MODULE_DIGESTS`] is empty.
+#[must_use]
+pub fn is_sanctioned_module_path(path: &str) -> bool {
+    module_digest(path).is_some_and(|digest| module_digest_is_sanctioned(&digest, SANCTIONED_MODULE_DIGESTS))
+}
+
 /// Why a mainnet validator configuration is rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainnetKeyPolicyViolation {
@@ -47,6 +98,13 @@ pub enum MainnetKeyPolicyViolation {
     DiskValidatorKeys,
     /// PKCS#11 module path empty.
     MissingPkcs11ModulePath,
+    /// The PKCS#11 module is not one the release sanctions.
+    ///
+    /// Distinct from `SoftwareHsmBackend`: that one is a name match against a
+    /// known software token, while this one says the module's bytes are not in
+    /// the release's pin table at all - which covers every evasion of the name
+    /// test (a dispatcher, a renamed copy, an unpinned vendor build).
+    UnsignedPkcs11Module,
     /// PKCS#11 PIN env var name empty.
     MissingPkcs11PinEnv,
     /// Named PIN environment variable missing or empty.
@@ -182,6 +240,11 @@ pub fn check_mainnet_validator_key_policy(
             _ => return Err(MainnetKeyPolicyViolation::EmptyPkcs11Pin),
         }
     }
+    // Bytes, not names: the release pins the module it tested. A denylist can
+    // only name the software tokens somebody thought of.
+    if !is_sanctioned_module_path(module) {
+        return Err(MainnetKeyPolicyViolation::UnsignedPkcs11Module);
+    }
     Ok(())
 }
 
@@ -250,9 +313,26 @@ mod tests {
         }
     }
 
+    /// The fixture path is a hardware module by name, and a full, otherwise
+    /// valid PKCS#11 configuration now stops at the pin table: no release
+    /// sanctions it, so nothing is admitted. Before the digest gate this test
+    /// asserted `is_ok()` and that assertion was the hole.
     #[test]
-    fn accepts_full_pkcs11_config() {
-        assert!(check_mainnet_validator_key_policy(&base()).is_ok());
+    fn refuses_a_module_no_release_pins() {
+        assert_eq!(
+            check_mainnet_validator_key_policy(&base()),
+            Err(MainnetKeyPolicyViolation::UnsignedPkcs11Module)
+        );
+    }
+
+    #[test]
+    fn the_pin_table_is_a_membership_rule_over_digests() {
+        let pinned = [[0x11u8; 32], [0x22u8; 32]];
+        assert!(module_digest_is_sanctioned(&[0x11u8; 32], &pinned));
+        assert!(!module_digest_is_sanctioned(&[0x33u8; 32], &pinned));
+        // Nothing pinned means nothing admitted, including on an empty table.
+        assert!(!module_digest_is_sanctioned(&[0u8; 32], &[]));
+        assert!(!is_sanctioned_module_path("/nonexistent/libpkcs11.so"));
     }
 
     #[test]

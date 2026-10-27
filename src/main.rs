@@ -1160,6 +1160,13 @@ async fn main() {
             if budlum_core::crypto::mainnet_policy::is_software_token_path(module_path) {
                 fail("a software token is not allowed for anchor keys");
             }
+            // The anchor keys are the chain's post-quantum root of trust, and
+            // vendor labels plus a name denylist cannot establish that the
+            // module holding them is hardware. The release pins the module's
+            // bytes; anything else is unknown, and unknown is refused.
+            if !budlum_core::crypto::mainnet_policy::is_sanctioned_module_path(module_path) {
+                fail("anchor keys require a PKCS#11 module the release sanctions");
+            }
             let anchor_keys: Vec<(u8, String)> = pkcs11
                 .anchor_keys
                 .iter()

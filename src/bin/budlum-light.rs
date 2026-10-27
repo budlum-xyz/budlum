@@ -44,6 +44,28 @@ use budlum_core::light_client::{
 use budlum_core::settlement::GlobalBlockHeader;
 use clap::Parser;
 
+/// The network the verifier is configured for.
+///
+/// A closed set on purpose: the chain the client verifies against is a
+/// command-line decision, never a value read from the file under verification.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum Network {
+    Mainnet,
+    Testnet,
+    Devnet,
+}
+
+impl Network {
+    fn chain_id(self) -> u64 {
+        let network = match self {
+            Self::Mainnet => budlum_core::core::chain_config::Network::Mainnet,
+            Self::Testnet => budlum_core::core::chain_config::Network::Testnet,
+            Self::Devnet => budlum_core::core::chain_config::Network::Devnet,
+        };
+        network.chain_id().value()
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "budlum-light",
@@ -66,6 +88,17 @@ struct Cli {
     /// trust anchor, never from the export being verified.
     #[arg(long)]
     trusted_set_hash: String,
+
+    /// The network this export is claimed to be from: `mainnet`, `testnet`
+    /// or `devnet`.
+    ///
+    /// The network decides the security rule the client applies (mainnet
+    /// refuses a BLS-only checkpoint), so it comes from the operator and not
+    /// from the file being verified. An export whose headers name another chain
+    /// than this one is refused before anything is verified: otherwise the
+    /// exporter chooses the security level of the verifier.
+    #[arg(long, value_enum)]
+    network: Network,
 
     /// Finality checkpoint interval of the chain.
     #[arg(long, default_value_t = 10)]
@@ -211,9 +244,21 @@ fn main() -> ExitCode {
         block_hash: cli.trusted_hash,
         set_hash: cli.trusted_set_hash,
     };
-    // The network is the one the headers name: a mainnet client refuses
-    // BLS-only checkpoints.
-    let chain_id = export.headers[0].chain_id;
+    // The network comes from the command line, and the export has to agree with
+    // it. Reading it out of `headers[0]` would let an exporter that wants the
+    // testnet rule claim the testnet chain id while shipping mainnet history -
+    // and the trust anchors on the command line cannot catch that, because they
+    // say nothing about which chain produced them.
+    let chain_id = cli.network.chain_id();
+    let declared = export.headers[0].chain_id;
+    if declared != chain_id {
+        eprintln!(
+            "chain export is for chain {declared}, not for the {network:?} chain {chain_id} \
+             this client is verifying against; pass --network to match the export",
+            network = cli.network
+        );
+        return ExitCode::FAILURE;
+    }
     let mut client = match LightClient::for_chain(trusted, chain_id) {
         Ok(client) => client,
         Err(e) => {

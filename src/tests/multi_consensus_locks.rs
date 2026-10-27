@@ -163,6 +163,7 @@ mod poa_authority_binding {
         declared: &[crate::core::address::Address],
     ) -> FinalityProof {
         let msg = crate::domain::finality_adapter::poa_commit_signing_message(
+            domain.domain_chain_id,
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,

@@ -199,6 +199,47 @@ impl ExternalChain {
             Self::Custom(id) => id,
         }
     }
+
+    /// The chain the id names, if it names one of the canonical chains.
+    ///
+    /// The inverse of [`Self::domain_id`] over the named variants. `Custom(id)`
+    /// is deliberately not matched: every unclaimed id is a custom chain, and
+    /// treating them all as canonical ids would make the set unbounded.
+    #[must_use]
+    pub const fn from_domain_id(id: u32) -> Option<Self> {
+        match id {
+            1 => Some(Self::Ethereum),
+            2 => Some(Self::Solana),
+            3 => Some(Self::Bitcoin),
+            4 => Some(Self::Avalanche),
+            5 => Some(Self::Polygon),
+            6 => Some(Self::Arbitrum),
+            7 => Some(Self::Optimism),
+            _ => None,
+        }
+    }
+
+    /// The chain's own identifier on its own network: the EIP-155 chain id where
+    /// the chain has one, `101` for Solana, `0` for Bitcoin (whose identity is
+    /// its genesis hash, not a numeric id).
+    ///
+    /// A consensus domain registered for one of these chains carries this value
+    /// in `ConsensusDomain::domain_chain_id`, which is what lets the external
+    /// root anchor tell "the domain of Ethereum" from "a domain that happened to
+    /// pick id 1".
+    #[must_use]
+    pub const fn canonical_chain_id(self) -> u64 {
+        match self {
+            Self::Ethereum => 1,
+            Self::Solana => 101,
+            Self::Bitcoin => 0,
+            Self::Avalanche => 43_114,
+            Self::Polygon => 137,
+            Self::Arbitrum => 42_161,
+            Self::Optimism => 10,
+            Self::Custom(id) => id as u64,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
