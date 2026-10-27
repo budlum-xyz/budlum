@@ -33,7 +33,5 @@ fn main() {
         );
     }
     println!();
-    println!(
-        "Keccak chip only: no ML-DSA-87 verification is proven inside bud-pul yet."
-    );
+    println!("Keccak chip only: no ML-DSA-87 verification is proven inside bud-pul yet.");
 }

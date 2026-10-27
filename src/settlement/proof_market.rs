@@ -184,6 +184,27 @@ impl ProofTaskKind {
                     return Err("ProofTaskKind storage challenge_epoch cannot be zero".into());
                 }
             }
+            ProofTaskKind::PulAggregate {
+                window_start,
+                window_end,
+                archive_witness_bytes,
+                pul_full_bytes,
+            } => {
+                // The same two rules the creation door applies, repeated here
+                // because `validate` is the shape check every reader runs: a
+                // window that covers no block, or an aggregate that is not
+                // smaller than half the witness it replaces, is not a task.
+                if *window_end <= *window_start {
+                    return Err("ProofTaskKind PUL window must cover at least one block".into());
+                }
+                if !pul_proof_is_warranted(*archive_witness_bytes, *pul_full_bytes) {
+                    return Err(
+                        "ProofTaskKind PUL aggregate is not smaller than half the archived \
+                         witness"
+                            .into(),
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -194,6 +215,7 @@ impl ProofTaskKind {
             ProofTaskKind::ZkProof { .. } => 2,
             ProofTaskKind::SyncCommitteeSig { .. } => 3,
             ProofTaskKind::StorageAttestation { .. } => 4,
+            ProofTaskKind::PulAggregate { .. } => 5,
         }
     }
 
@@ -227,6 +249,21 @@ impl ProofTaskKind {
             } => {
                 out.extend_from_slice(deal_id);
                 out.extend_from_slice(&challenge_epoch.to_le_bytes());
+            }
+            ProofTaskKind::PulAggregate {
+                window_start,
+                window_end,
+                archive_witness_bytes,
+                pul_full_bytes,
+            } => {
+                // Declaration order, little endian: the window first, then
+                // the two sizes the warrant is decided from. A reader that
+                // recomputed the id from another order would disagree with
+                // the writer about the same task.
+                out.extend_from_slice(&window_start.to_le_bytes());
+                out.extend_from_slice(&window_end.to_le_bytes());
+                out.extend_from_slice(&archive_witness_bytes.to_le_bytes());
+                out.extend_from_slice(&pul_full_bytes.to_le_bytes());
             }
         }
         out
@@ -462,6 +499,10 @@ impl ProofTask {
             ProofTaskKind::ZkProof { .. } => 10_000_000,         // 10x
             ProofTaskKind::SyncCommitteeSig { .. } => 2_000_000, // 2x
             ProofTaskKind::StorageAttestation { .. } => 3_000_000, // 3x
+            // A PUL aggregate stands in for every signature in its window, so
+            // the work scales with the window and sits above a single storage
+            // attestation and below a circuit proof.
+            ProofTaskKind::PulAggregate { .. } => 4_000_000, // 4x
         }
     }
 

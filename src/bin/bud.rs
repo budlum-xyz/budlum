@@ -1250,11 +1250,7 @@ fn run_redelegate(
     to_validator: &str,
     amount_bud: u64,
 ) -> Result<(), String> {
-    let from = parse_address(
-        from_validator
-            .strip_prefix("0x")
-            .unwrap_or(from_validator),
-    )?;
+    let from = parse_address(from_validator.strip_prefix("0x").unwrap_or(from_validator))?;
     let to = parse_address(to_validator.strip_prefix("0x").unwrap_or(to_validator))?;
     let amount = amount_bud
         .checked_mul(budlum_core::tokenomics::BUD_UNIT)

@@ -2992,6 +2992,105 @@ impl Executor {
                 })?;
                 sender.nonce = sender.nonce.saturating_add(1);
             }
+            TransactionType::RelayCrossDomainMessage(message) => {
+                // The door the registration used to reach through the public
+                // RPC and the gossip side channel, both of which wrote the
+                // message registry outside a block. The transaction signature
+                // is the authentication: the carried message names `tx.from`
+                // as its sender (`validate_transaction_with_context` refuses
+                // anything else) and travels with an empty envelope, so the
+                // relayer that signs the transaction is the relayer that
+                // registers the message.
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "relay_message_shape",
+                        "a relayed cross-domain message requires zero amount, zero recipient and empty data",
+                    ));
+                }
+                if state.get_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance_for_fee",
+                        "insufficient balance for the cross-domain relay fee",
+                    ));
+                }
+                state
+                    .registry
+                    .ensure_active_relayer(&tx.from)
+                    .map_err(|e| BudlumError::validation("relay_not_relayer", e.to_string()))?;
+                if message.sender != tx.from {
+                    return Err(BudlumError::validation(
+                        "relay_sender_mismatch",
+                        "the relayed message must name the transaction signer as its sender",
+                    ));
+                }
+                if !message.sender_signature.is_empty() || !message.sender_public_key.is_empty() {
+                    return Err(BudlumError::validation(
+                        "relay_envelope_must_be_empty",
+                        "a relayed message is authenticated by its transaction, so its own \
+                         signature envelope must be empty",
+                    ));
+                }
+                crate::cross_domain::message::register_cross_domain_on_state(state, message)
+                    .map_err(|e| {
+                        BudlumError::validation("cross_domain_message_failed", e.to_string())
+                    })?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::RoleUnbond { role } => {
+                // The unbonding half of the `RoleBond` door. The role id is
+                // the whole payload; the bond stays locked and slashable
+                // until the governance window passes.
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "role_unbond_shape",
+                        "a role unbond requires zero amount, zero recipient and empty data",
+                    ));
+                }
+                if state.get_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance_for_fee",
+                        "insufficient balance for the role unbond fee",
+                    ));
+                }
+                let role = crate::registry::role::RoleId(*role);
+                state
+                    .unbond_role(&tx.from, role)
+                    .map_err(|e| BudlumError::validation("role_unbond_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
+            TransactionType::RoleWithdraw { role } => {
+                // The refund half: the registry removes the registration and
+                // the stake returns to the balance in this block.
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(BudlumError::validation(
+                        "role_withdraw_shape",
+                        "a role withdraw requires zero amount, zero recipient and empty data",
+                    ));
+                }
+                if state.get_balance(&tx.from) < tx.fee {
+                    return Err(BudlumError::validation(
+                        "insufficient_balance_for_fee",
+                        "insufficient balance for the role withdraw fee",
+                    ));
+                }
+                let role = crate::registry::role::RoleId(*role);
+                state
+                    .withdraw_role_bond(&tx.from, role)
+                    .map_err(|e| BudlumError::validation("role_withdraw_failed", e.to_string()))?;
+                let sender = state.get_or_create(&tx.from);
+                sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
+                    BudlumError::validation("balance_underflow", "balance underflow")
+                })?;
+                sender.nonce = sender.nonce.saturating_add(1);
+            }
             TransactionType::BridgeBurn(burn) => {
                 // A burn moves the transfer's units back out of the burner and
                 // writes `bridge_state`; both are in the state root, so this is

@@ -1307,6 +1307,7 @@ fn test_bls_proof_of_possession() {
         &wrong_key,
         DEFAULT_CHAIN_ID
     ));
+}
 
 /// The PQ length classification stays in step with the Kani mirror.
 ///
@@ -1375,5 +1376,4 @@ fn pq_signature_classification_matches_the_kani_mirror() {
             );
         }
     }
-}
 }
