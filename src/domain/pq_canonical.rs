@@ -430,6 +430,7 @@ mod tests {
 
     const CHAIN: u64 = 45262;
 
+    #[allow(clippy::expect_used)] // a test fixture: a refused assembly is a broken test
     fn anchor(height: u64, ledger: &AnchorKeyLedger, signers: &[u8]) -> PqAnchor {
         let owned: Vec<_> = signers.iter().map(|i| signer(*i)).collect();
         let mut refs: Vec<&dyn AnchorSigner> = Vec::new();
@@ -447,6 +448,7 @@ mod tests {
         .expect("an anchor over one leaf")
     }
 
+    #[allow(clippy::expect_used)] // a test fixture, as above
     fn root_seal(ledger: &AnchorKeyLedger, anchors: &[PqAnchor], height: u64) -> RootSeal {
         build_root_seal(
             CHAIN,
