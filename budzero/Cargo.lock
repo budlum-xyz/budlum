@@ -386,7 +386,6 @@ name = "bud-pul"
 version = "0.1.0"
 dependencies = [
  "bud-proof",
- "p3-air",
  "p3-field",
  "p3-goldilocks",
  "p3-keccak-air",
