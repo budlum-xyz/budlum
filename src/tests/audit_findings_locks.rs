@@ -37,10 +37,10 @@ mod tests {
         );
 
         // A chain launched with the other backend must be refused outright.
-        let other = if PQ_SCHEME_ID == "dilithium5" {
+        let other = if PQ_SCHEME_ID == "ml-dsa-87" {
             "ml-dsa-65"
         } else {
-            "dilithium5"
+            "ml-dsa-87"
         };
         cfg.pq_scheme = Some(other.to_string());
         let err = cfg

@@ -9,7 +9,7 @@ pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 /// which is stricter in both value and encoding. See that constant for the
 /// comparison and for why this one must stay the looser of the two.
 pub const MAX_BLOCK_SIZE: usize = 1024 * 1024;
-pub const MAX_TX_SIZE: usize = 100 * 1024;
+pub const MAX_TX_SIZE: usize = crate::consensus::budget::MAX_TX_BYTES;
 /// Maximum number of full blocks returned in one range-sync response.
 ///
 /// This is derived from the transport frame ceiling instead of being an
@@ -127,14 +127,20 @@ pub enum NetworkMessage {
     GetQcBlob {
         epoch: u64,
         checkpoint_height: u64,
+        /// Zero denotes the first chunk (and the legacy two-field request).
+        chunk_index: u32,
     },
 
     QcBlobResponse {
         epoch: u64,
         checkpoint_height: u64,
         checkpoint_hash: String,
+        /// One chunk of the binary QC V2 blob. A blob of a thousand
+        /// validators is several megabytes and travels as numbered chunks.
         blob_data: Vec<u8>,
         found: bool,
+        chunk_index: u32,
+        chunk_count: u32,
     },
 
     QcFaultProof {
