@@ -49,23 +49,31 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod ai_test_verifier;
 pub mod audit_deps;
 pub mod audit_guard;
 pub mod backup_drill;
 pub mod clippy_extra_report;
+pub mod contracts;
 pub mod devnet;
 pub mod docker_smoke;
 pub mod fsf_fit;
 pub mod json;
 pub mod multinode_smoke;
+pub mod pq_measure;
 pub mod prepush;
+pub mod propagation;
 pub mod report;
+pub mod resource_sample;
 pub mod rpc;
 pub mod sbom;
 pub mod seed_corpus;
 pub mod smoke_rpc;
+pub mod stark_soundness;
 pub mod step_reachability;
 pub mod support;
+pub mod testnet_genesis;
+pub mod testnet_rehearsal;
 
 /// Find the repository root.
 ///
