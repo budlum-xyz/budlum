@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, 'arena/**']
 
 concurrency:
   group: solidity-${{ github.ref }}
@@ -47,3 +47,57 @@ jobs:
           fi
           solc --bin --abi --optimize --overwrite -o /tmp/solc-out "${files[@]}"
           echo "compiled ${#files[@]} file(s)"
+
+  forge-test:
+    name: Foundry tests (F01-F06, Graft, Mikoriza)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: 1.97.1
+
+      # Pinned Foundry release with a pinned checksum, for the same reason as
+      # the pinned solc above.
+      - name: Install Foundry v1.3.5
+        run: |
+          curl -sSL -o /tmp/foundry.tgz \
+            https://github.com/foundry-rs/foundry/releases/download/v1.3.5/foundry_v1.3.5_linux_amd64.tar.gz
+          echo "9746c51f76c57ee2b099aa67d8b6fb8a93c82175671b654b1b8fd8ddba8e3b42  /tmp/foundry.tgz" \
+            | sha256sum -c -
+          mkdir -p "$HOME/.foundry/bin"
+          tar xzf /tmp/foundry.tgz -C "$HOME/.foundry/bin"
+          echo "$HOME/.foundry/bin" >> "$GITHUB_PATH"
+
+      - name: Install solc 0.8.26 for forge
+        run: |
+          curl -sSL -o /tmp/solc \
+            https://github.com/ethereum/solidity/releases/download/v0.8.26/solc-static-linux
+          echo "d5f23436f443edb85d8e76906d12f0a86ce0490e7663a9e608efeb7a93f149ef  /tmp/solc" \
+            | sha256sum -c -
+          mkdir -p "$HOME/.svm/0.8.26"
+          install -m 0755 /tmp/solc "$HOME/.svm/0.8.26/solc-0.8.26"
+
+      # Deployment rule: no Sepolia deployment while any of
+      # these is red.
+      - name: forge test through the Rust wrapper
+        run: cargo run --locked --manifest-path xtask/tools/Cargo.toml -- contracts test --offline
+
+      # Dev EVM: deploy the parameterless contracts to a local anvil
+      # chain from an unlocked dev account. No key is used or stored (K7).
+      - name: Deploy to a local anvil chain
+        run: |
+          set -euo pipefail
+          anvil --port 8546 --silent &
+          for _ in $(seq 1 30); do
+            cast chain-id --rpc-url http://127.0.0.1:8546 >/dev/null 2>&1 && break
+            sleep 1
+          done
+          from=$(cast rpc --rpc-url http://127.0.0.1:8546 eth_accounts | tr -d '[]"' | cut -d, -f1)
+          forge create --root contracts --offline graft/GraftExecutor.sol:GraftExecutor \
+            --rpc-url http://127.0.0.1:8546 --unlocked --from "$from" --broadcast

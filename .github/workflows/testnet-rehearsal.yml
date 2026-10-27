@@ -1,0 +1,59 @@
+name: Testnet Rehearsal
+
+# The full local testnet rehearsal: four PoS
+# validators, the RPC node, the faucet and the explorer API from
+# ops/testnet-local.yml, and the module scenarios of
+# `xtask/tools testnet-rehearsal --compose`. It runs every night and on
+# demand; pull requests run its preflight through `budlum-tools --self-test`.
+# The report is kept as an artifact whether the run passes or fails.
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: testnet-rehearsal-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: Rehearsal (build, start, scenarios, report)
+        run: |
+          if ! cargo run --release --manifest-path xtask/tools/Cargo.toml -- testnet-rehearsal --compose --keep --report target/testnet-rehearsal.md; then
+            echo "::error::testnet rehearsal failed; container state and logs follow."
+            if ! docker compose -f ops/testnet-local.yml ps; then
+              echo "::error::\`docker compose ps\` also failed."
+            fi
+            if ! docker compose -f ops/testnet-local.yml logs --tail=200; then
+              echo "::error::\`docker compose logs\` also failed."
+            fi
+            exit 1
+          fi
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: testnet-rehearsal-report
+          path: target/testnet-rehearsal.md
+          if-no-files-found: warn
+      - name: Teardown (always)
+        if: always()
+        run: |
+          set -uo pipefail
+          if ! docker compose -f ops/testnet-local.yml down -v --remove-orphans; then
+            echo "::warning::teardown failed; the job verdict belongs to the rehearsal step."
+          fi
