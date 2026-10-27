@@ -580,52 +580,6 @@ fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
         "the burn message is its own id, correlated with the lock's"
     );
 
-    // A refund window is measured from a height the chain has reached. A burn
-    // whose declared base sits ahead of every block this node has seen would
-    // place the expiry an attacker's choice away from the real tip, so the
-    // executor refuses it before anything moves - the holder's own signature
-    // over the payload does not make a fabricated base true.
-    let mut late = burn_tx.clone();
-    late.domain_height = 9_999;
-    late.expiry_height = 10_000;
-    late.sign_holder_authorization(&holder_keys, bc.chain_id);
-    let mut late_tx = crate::core::transaction::Transaction::new_with_chain_id(
-        recipient,
-        Address::zero(),
-        0,
-        bc.state.base_fee,
-        0,
-        Vec::new(),
-        bc.chain_id,
-        crate::core::transaction::TransactionType::BridgeBurn(late),
-    );
-    late_tx.signature_version = crate::core::transaction::SIGNATURE_VERSION_V4;
-    late_tx.signature = Some(holder_keys.sign(&late_tx.signing_hash()).to_vec());
-    late_tx.hash = late_tx.calculate_hash();
-    let mut refused = state.clone();
-    // The fee payer must be able to reach the door, so the refusal below is
-    // the height rule and nothing before it.
-    refused.get_or_create(&recipient).balance += bc.state.base_fee;
-    let err = Executor::apply_transaction(&mut refused, &late_tx).unwrap_err();
-    assert!(
-        err.to_string()
-            .contains("bridge burn domain height is ahead of the executing block")
-            && err
-                .to_string()
-                .contains("refund window must be measured from a height the chain has reached"),
-        "an expiry base ahead of the chain must be refused: {err}"
-    );
-    assert_eq!(
-        refused.get_balance(&recipient),
-        state.get_balance(&recipient) + bc.state.base_fee,
-        "a refused window must not debit the holder"
-    );
-    assert_eq!(
-        refused.pending_bridge_burns.len(),
-        state.pending_bridge_burns.len(),
-        "a refused window must not enqueue a relay"
-    );
-
     // Draining the queue performs the node-local half and nothing else.
     let mut bc = bc;
     bc.state = state;

@@ -437,8 +437,7 @@ mod p01_consensus_rounds_tests {
         let mut block = Block::new(1, parent.hash.clone(), vec![]);
         block.timestamp = parent.timestamp + MIN_BLOCK_INTERVAL_MS;
         block.producer = Some(address);
-        let result =
-            engine.preview_block_with_chain(&mut block, &state, std::slice::from_ref(&parent));
+        let result = engine.preview_block_with_chain(&mut block, &state, &[parent.clone()]);
         if result.is_ok() {
             assert!(
                 block.nonce <= MAX_LEADER_ROUNDS,
@@ -446,6 +445,64 @@ mod p01_consensus_rounds_tests {
                 block.nonce
             );
         }
+    }
+
+    ///: once a Filiz Chain is active, the block's election proof is
+    /// the reveal opening it and the output is that reveal's eligibility
+    /// value; a reveal that opens nothing is refused before the threshold.
+    #[test]
+    fn pos_validate_reads_a_filiz_reveal_once_the_chain_is_active() {
+        use crate::consensus::filiz::{eligibility_output, FilizChain, FilizRegistration};
+        let keys = ValidatorKeys::generate().unwrap();
+        let (mut state, address) = ready_validator_state(&keys);
+        let chain = FilizChain::with_parameters(address.0, [9u8; 32], 64, 8).unwrap();
+        let mut registration = FilizRegistration::default();
+        registration
+            .register(address.0, chain.commitment(), chain.length(), 0)
+            .unwrap();
+        state.get_validator_mut(&address).unwrap().filiz = Some(registration);
+        let engine = PoSEngine::new(
+            PoSConfig {
+                min_stake: 1,
+                epoch_length: 1,
+            },
+            None,
+        );
+        let parent = Block::genesis();
+        let build = |reveal: [u8; 32]| {
+            let mut block = Block::new(3, parent.hash.clone(), vec![]);
+            block.slot = 3;
+            block.epoch = 3;
+            block.producer = Some(address);
+            block.validator_set_hash = state
+                .consensus_validator_set_hash(block.chain_id)
+                .expect("fixture keys are consensus-ready");
+            let seed = engine
+                .calculate_seed_with_chain(block.chain_id, 3, 3, 0, std::slice::from_ref(&parent))
+                .expect("seed derivation succeeds");
+            block.vrf_output =
+                eligibility_output(&address.0, &reveal, &seed, block.chain_id, 3).to_vec();
+            block.vrf_proof = reveal.to_vec();
+            block.sign(&keys.sig_key);
+            block
+        };
+
+        let honest = build(chain.next_reveal().unwrap());
+        if let Err(error) = engine.validate_block(&honest, std::slice::from_ref(&parent), &state) {
+            assert!(
+                !error.0.contains("Filiz") && !error.0.contains("VRF proof"),
+                "an honest reveal must pass the election check, got: {error:?}"
+            );
+        }
+
+        let forged = build([0x55; 32]);
+        let error = engine
+            .validate_block(&forged, std::slice::from_ref(&parent), &state)
+            .expect_err("a reveal that opens nothing must be refused");
+        assert!(
+            error.0.contains("Filiz reveal does not open"),
+            "got: {error:?}"
+        );
     }
 }
 
@@ -504,7 +561,7 @@ mod p01_poa_round_pricing_tests {
         // lag in its stamp are not time anyone observed, so round 6 is refused.
         engine.note_block_seen(&parent.hash, now_ms);
         let error = engine
-            .validate_block(&block, std::slice::from_ref(&parent), &state)
+            .validate_block(&block, &[parent.clone()], &state)
             .expect_err("schedule lag must not buy a leader round");
         assert!(
             error.0.contains("claimed before it elapsed"),
@@ -517,7 +574,7 @@ mod p01_poa_round_pricing_tests {
         // something else.
         let engine = PoAEngine::new(PoAConfig::default(), None);
         engine.note_block_seen(&parent.hash, parent.timestamp);
-        if let Err(error) = engine.validate_block(&block, std::slice::from_ref(&parent), &state) {
+        if let Err(error) = engine.validate_block(&block, &[parent.clone()], &state) {
             assert!(
                 !error.0.contains("claimed before it elapsed"),
                 "a genuinely stalled slot must walk the ladder, got: {error:?}"

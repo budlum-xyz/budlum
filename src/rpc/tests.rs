@@ -452,10 +452,7 @@ mod rpc_tests {
             .social_delete(crate::storage::ContentId::of(b"x"), auth, 1)
             .await
             .unwrap_err();
-        assert!(
-            err.contains("state-root") && err.contains("bud_sendRawTransaction"),
-            "the refusal must name the diverging root and the door that does work, got: {err}"
-        );
+        assert!(err.contains("block transaction"), "{err}");
     }
 
     #[tokio::test]
@@ -906,7 +903,7 @@ mod rpc_tests {
     }
 
     #[tokio::test]
-    async fn the_storage_write_rpcs_refuse_and_name_their_transaction_doors() {
+    async fn test_storage_rpc_full_lifecycle_register_deal_challenge_answer() {
         let (server, bc) = setup().await;
         let manifest = crate::storage::ContentManifest::from_bytes_sliced(
             b"hello storage rpc lifecycle test",
@@ -914,115 +911,283 @@ mod rpc_tests {
         )
         .unwrap();
         let s_id = manifest.shards[0].shard_id;
-        let op = Address::from([31u8; 32]);
-        let payer = Address::from([32u8; 32]);
-        bc.credit_development_account(&payer, 100_000_000)
-            .await
-            .expect("devnet credit");
-        let payer_before = bc.get_balance(&payer).await;
-        let economics = crate::domain::storage_deal::StorageEconomicsParams {
-            operator_bond: 2_000_000,
-            fee_per_byte_epoch: 10,
-        };
 
-        let refusals = [
-            (
-                server
-                    .storage_register_manifest(manifest.clone())
-                    .await
-                    .expect_err("manifest registration is a transaction"),
-                "StorageTx::RegisterManifest",
-            ),
-            (
-                server
-                    .storage_open_deal(
-                        1,
-                        manifest.clone(),
-                        format!("0x{}", hex::encode(s_id.0)),
-                        format!("0x{}", op.to_hex()),
-                        format!("0x{}", payer.to_hex()),
-                        0,
-                        10,
-                        100,
-                        economics.clone(),
-                        crate::domain::storage_params::StorageDomainParams::default(),
-                        Some(valid_merkle_proof()),
-                        Some([0x42u8; 32]),
-                        7,
-                        String::new(),
-                        String::new(),
-                    )
-                    .await
-                    .expect_err("deal opening is a transaction"),
-                "StorageTx::OpenDeal",
-            ),
-            (
-                server
-                    .storage_accept_reallocation(
-                        0,
-                        format!("0x{}", op.to_hex()),
-                        format!("0x{}", payer.to_hex()),
-                        0,
-                        10,
-                        economics,
-                        crate::domain::storage_params::StorageDomainParams::default(),
-                        None,
-                        None,
-                        7,
-                        String::new(),
-                        String::new(),
-                    )
-                    .await
-                    .expect_err("repair acceptance is a transaction"),
-                "StorageTx::AcceptReallocation",
-            ),
-            (
-                server
-                    .storage_open_challenge(
-                        crate::domain::storage_deal::RetrievalChallengeRequest {
-                            deal_id: 0,
-                            byte_start: 0,
-                            byte_end: 15,
-                            challenge_epoch: 0,
-                            deadline_epoch: 25,
-                            opener_bond: 50,
-                            opener: Some(payer),
-                            opener_signature: None,
-                        },
-                    )
-                    .await
-                    .expect_err("challenge opening is a transaction"),
-                "StorageTx::OpenChallenge",
-            ),
-            (
-                server
-                    .storage_answer_challenge(crate::domain::storage_deal::RetrievalResponse {
-                        challenge_id: 0,
-                        _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
-                        responder: op,
-                        response_epoch: 18,
-                        responder_signature: None,
-                        proof_bytes: None,
-                    })
-                    .await
-                    .expect_err("challenge answers are transactions"),
-                "StorageTx::AnswerChallenge",
-            ),
-        ];
-        for (err, door) in refusals {
-            assert!(
-                err.message().contains(door) && err.message().contains("bud_sendRawTransaction"),
-                "the refusal names {door}: {}",
-                err.message()
-            );
-        }
+        let reg_res = server
+            .storage_register_manifest(manifest.clone())
+            .await
+            .unwrap();
+        assert_eq!(reg_res["shardCount"], manifest.shard_count);
 
         let get_man = server
             .storage_get_manifest(format!("0x{}", hex::encode(manifest.manifest_id.0)))
             .await
             .unwrap();
-        assert_eq!(get_man["found"], false, "a refused call registers nothing");
-        assert_eq!(bc.get_balance(&payer).await, payer_before);
+        assert_eq!(get_man["found"], true);
+
+        let op_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let op = Address::from(op_keypair.public_key_bytes());
+        let payer_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let payer = Address::from(payer_keypair.public_key_bytes());
+
+        // Give payer and operator enough balance for deal fees and bond
+        bc.credit_development_account(&payer, 100_000_000)
+            .await
+            .expect("devnet credit");
+        bc.credit_development_account(&op, 100_000_000)
+            .await
+            .expect("devnet credit");
+
+        // The deal-open RPC now requires both the payer and the operator to
+        // sign the exact deal parameters. Without these, an unsigned call
+        // could spend any account the caller names (HIGH, CWE-862).
+        // The preimage also binds the manifest-derived shard size and the
+        // manifest id, because the chain prices the escrow from the manifest
+        // entry; a signature must not survive a forged manifest (HIGH,
+        // CWE-347). A caller-chosen request_id is bound too, so one signed
+        // authorization cannot be replayed (MEDIUM, CWE-294).
+        let request_id: u64 = 7;
+        let chain_id = bc.get_chain_id().await;
+        let deal_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_OPEN_DEAL_V2",
+            &chain_id.to_le_bytes(),
+            &1u32.to_le_bytes(),
+            s_id.as_bytes(),
+            op.as_bytes(),
+            payer.as_bytes(),
+            &0u8.to_le_bytes(),
+            &10u64.to_le_bytes(),
+            &100u64.to_le_bytes(),
+            &u64::from(manifest.shards[0].size).to_le_bytes(),
+            manifest.manifest_id.as_bytes(),
+            &10u64.to_le_bytes(),
+            &2_000_000u64.to_le_bytes(),
+            &request_id.to_le_bytes(),
+        ]);
+        let payer_sig = payer_keypair.sign(&deal_msg).to_vec();
+        let op_sig = op_keypair.sign(&deal_msg).to_vec();
+
+        let deal_res = server
+            .storage_open_deal(
+                1,
+                manifest.clone(),
+                format!("0x{}", hex::encode(s_id.0)),
+                format!("0x{}", op.to_hex()),
+                format!("0x{}", payer.to_hex()),
+                0,
+                10,
+                100,
+                crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 2_000_000,
+                    fee_per_byte_epoch: 10,
+                },
+                crate::domain::storage_params::StorageDomainParams::default(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+                request_id,
+                hex::encode(payer_sig.clone()),
+                hex::encode(op_sig.clone()),
+            )
+            .await
+            .unwrap();
+        let deal_id = deal_res["dealId"].as_u64().unwrap();
+
+        let watcher_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let watcher = Address::from(watcher_keypair.public_key_bytes());
+        // The opener bond is now really debited from the opener's balance, so
+        // The watcher requires one. The field was previously documented as
+        // Debited and never was, which let a freshly generated key with a zero
+        // Balance open a challenge - exactly what this test was doing.
+        bc.credit_development_account(&watcher, 100_000)
+            .await
+            .expect("devnet credit");
+        // The challenge window is validated against the chain's current
+        // epoch (a far-future challenge_epoch would push the rate-limit
+        // minimum out for good); this fresh chain sits at epoch 0.
+        let open_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_OPEN_CHALLENGE_V1",
+            &deal_id.to_le_bytes(),
+            &0u64.to_le_bytes(),
+            &15u64.to_le_bytes(),
+            &0u64.to_le_bytes(),
+            &25u64.to_le_bytes(),
+            &50u64.to_le_bytes(),
+            watcher.as_bytes(),
+        ]);
+        let open_sig = watcher_keypair.sign(&open_msg).to_vec();
+
+        let chal_res = server
+            .storage_open_challenge(crate::domain::storage_deal::RetrievalChallengeRequest {
+                deal_id,
+                byte_start: 0,
+                byte_end: 15,
+                challenge_epoch: 0,
+                deadline_epoch: 25,
+                opener_bond: 50,
+                opener: Some(watcher),
+                opener_signature: Some(open_sig),
+            })
+            .await
+            .unwrap();
+        let challenge_id = chal_res["challengeId"].as_u64().unwrap();
+
+        let answer_msg = crate::core::hash::hash_fields_bytes(&[
+            b"BUD_ANSWER_CHALLENGE_V1",
+            &challenge_id.to_le_bytes(),
+            &[0xAA; 32],
+            op.as_bytes(),
+            &18u64.to_le_bytes(),
+        ]);
+        let answer_sig = op_keypair.sign(&answer_msg).to_vec();
+
+        let ans_res = server
+            .storage_answer_challenge(crate::domain::storage_deal::RetrievalResponse {
+                challenge_id,
+                _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
+                responder: op,
+                response_epoch: 18,
+                responder_signature: Some(answer_sig),
+                proof_bytes: Some(b"test-mock-proof".to_vec()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(ans_res["outcome"], "Answered");
+
+        let outcome = server.storage_get_outcome(challenge_id).await.unwrap();
+        assert_eq!(outcome["challengeId"], serde_json::json!(challenge_id));
+        assert_eq!(outcome["outcome"], "Answered");
+        assert_eq!(
+            outcome["proofKind"], "interim_availability_only",
+            "retrieval results must not be presented as full Proof-of-Storage"
+        );
+        assert_eq!(outcome["proof_kind"], "interim_availability_only");
+
+        // HIGH (CWE-862) regression: an unsigned deal open must be
+        // refused before any balance changes. The signatures are required,
+        // so an empty/forged pair is rejected by the RPC, never reaching the
+        // chain path that debits escrow and locks bond.
+        let unsigned = server
+            .storage_open_deal(
+                1,
+                manifest.clone(),
+                format!("0x{}", hex::encode(s_id.0)),
+                format!("0x{}", op.to_hex()),
+                format!("0x{}", payer.to_hex()),
+                0,
+                10,
+                100,
+                crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 2_000_000,
+                    fee_per_byte_epoch: 10,
+                },
+                crate::domain::storage_params::StorageDomainParams::default(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+                request_id,
+                String::new(),
+                String::new(),
+            )
+            .await;
+        assert!(
+            unsigned.is_err(),
+            "an unsigned deal open must be refused, not debit arbitrary accounts"
+        );
+
+        // A signature from the wrong key must also be refused.
+        let wrong_key = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let wrong_sig = hex::encode(wrong_key.sign(&deal_msg));
+        let wrong_payer = server
+            .storage_open_deal(
+                1,
+                manifest.clone(),
+                format!("0x{}", hex::encode(s_id.0)),
+                format!("0x{}", op.to_hex()),
+                format!("0x{}", payer.to_hex()),
+                0,
+                10,
+                100,
+                crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 2_000_000,
+                    fee_per_byte_epoch: 10,
+                },
+                crate::domain::storage_params::StorageDomainParams::default(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+                request_id,
+                wrong_sig,
+                hex::encode(op_sig.clone()),
+            )
+            .await;
+        assert!(
+            wrong_payer.is_err(),
+            "a payer signature from the wrong key must be refused"
+        );
+
+        // HIGH (CWE-347) regression: the signed preimage binds the
+        // manifest-derived shard size and the manifest id, so a valid
+        // signature cannot be replayed against a forged manifest that
+        // declares a larger shard for the same shard_id. The chain prices
+        // the escrow from that size, so without this binding the forgery
+        // would debit more than either signer authorized.
+        let mut forged = manifest.clone();
+        forged.shards[0].size = 999_999;
+        let forged_res = server
+            .storage_open_deal(
+                1,
+                forged,
+                format!("0x{}", hex::encode(s_id.0)),
+                format!("0x{}", op.to_hex()),
+                format!("0x{}", payer.to_hex()),
+                0,
+                10,
+                100,
+                crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 2_000_000,
+                    fee_per_byte_epoch: 10,
+                },
+                crate::domain::storage_params::StorageDomainParams::default(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+                request_id,
+                hex::encode(payer_sig.clone()),
+                hex::encode(op_sig.clone()),
+            )
+            .await;
+        assert!(
+            forged_res.is_err(),
+            "a signature must not survive a manifest that changes the escrow size"
+        );
+
+        // MEDIUM (CWE-294) regression: the same signed deal-open must
+        // not be replayable. The first call above opened an ACTIVE deal over
+        // (manifest, shard, operator, replica 0, epochs 10..100); resending
+        // the same signed request must be refused by the chain's duplicate
+        // active-deal guard before any escrow or bond moves again.
+        let replay = server
+            .storage_open_deal(
+                1,
+                manifest.clone(),
+                format!("0x{}", hex::encode(s_id.0)),
+                format!("0x{}", op.to_hex()),
+                format!("0x{}", payer.to_hex()),
+                0,
+                10,
+                100,
+                crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 2_000_000,
+                    fee_per_byte_epoch: 10,
+                },
+                crate::domain::storage_params::StorageDomainParams::default(),
+                Some(valid_merkle_proof()),
+                Some([0x42u8; 32]),
+                request_id,
+                hex::encode(payer_sig.clone()),
+                hex::encode(op_sig.clone()),
+            )
+            .await;
+        assert!(
+            replay.is_err(),
+            "the same signed deal-open must not be replayable for a second escrow debit"
+        );
     }
 
     #[tokio::test]

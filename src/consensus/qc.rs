@@ -5,7 +5,7 @@ use sha3::{Digest, Sha3_256};
 
 use crate::chain::finality::ValidatorSetSnapshot;
 use crate::consensus::merkle_tree;
-use crate::core::chain_config::{MAX_QC_BLOB_BYTES, QC_BLOB_TTL_EPOCHS};
+use crate::core::chain_config::QC_BLOB_TTL_EPOCHS;
 use crate::crypto::primitives::PqKeyPair;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,7 +22,7 @@ pub struct QcBlob {
 pub struct PqSignatureEntry {
     pub validator_index: u32,
     pub validator_address: String,
-    pub dilithium_signature: Vec<u8>,
+    pub pq_signature: Vec<u8>,
 }
 
 /// The disputed attestation an `InvalidDilithiumV1` proof carries (P01-F26).
@@ -32,7 +32,7 @@ pub struct PqSignatureEntry {
 /// without a lint waiver.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InvalidDilithiumEvidence {
-    pub dilithium_signature: Vec<u8>,
+    pub pq_signature: Vec<u8>,
     pub merkle_proof: Vec<Vec<u8>>,
     pub leaf_index: u32,
 }
@@ -51,7 +51,7 @@ pub struct QcFaultProof {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum QcProofKind {
     InvalidDilithiumV1 {
-        dilithium_signature: Vec<u8>,
+        pq_signature: Vec<u8>,
         merkle_proof: Vec<Vec<u8>>,
         leaf_index: u32,
     },
@@ -102,7 +102,7 @@ impl QcBlob {
     /// The Merkle leaf for one signature entry.
     ///
     /// Both trailing fields are length-prefixed. `validator_address` is a
-    /// `String` and `dilithium_signature` a `Vec<u8>`, appended with nothing
+    /// `String` and `pq_signature` a `Vec<u8>`, appended with nothing
     /// between them, so a character could be moved from the end of the address
     /// into the front of the signature and the leaf would not change. Measured:
     /// a 66-character address and a 4595-byte signature produce the same digest
@@ -126,8 +126,8 @@ impl QcBlob {
         let address = entry.validator_address.as_bytes();
         hasher.update((address.len() as u64).to_le_bytes());
         hasher.update(address);
-        hasher.update((entry.dilithium_signature.len() as u64).to_le_bytes());
-        hasher.update(&entry.dilithium_signature);
+        hasher.update((entry.pq_signature.len() as u64).to_le_bytes());
+        hasher.update(&entry.pq_signature);
         let result = hasher.finalize();
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&result);
@@ -187,20 +187,191 @@ impl QcBlob {
 
     /// `created_epoch` arrives with the deserialized blob, so the sum must
     /// not be able to overflow on a hostile value.
+    /// Wire length of [`Self::to_bytes`].
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        1 + 8
+            + 8
+            + 2
+            + self.checkpoint_hash.len()
+            + 2
+            + self.merkle_root.len()
+            + 8
+            + 4
+            + self
+                .pq_signatures
+                .iter()
+                .map(|entry| 4 + 2 + entry.validator_address.len() + 4 + entry.pq_signature.len())
+                .sum::<usize>()
+    }
+
+    /// The canonical binary encoding (QC V2): version, epoch, height, the
+    /// checkpoint hash and merkle root as length prefixed strings, the created
+    /// epoch, the entry count, then each entry. Integers are big endian. This
+    /// replaces the JSON encoding, which inflated random bytes 3.57 times.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a string field exceeds [`QC_WIRE_MAX_STRING`] or a signature
+    /// exceeds [`QC_WIRE_MAX_SIGNATURE`]: such a blob has no valid encoding.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
+        fn put_str(out: &mut Vec<u8>, text: &str, what: &str) -> Result<(), String> {
+            let len = u16::try_from(text.len())
+                .ok()
+                .filter(|len| usize::from(*len) <= QC_WIRE_MAX_STRING)
+                .ok_or_else(|| {
+                    format!("QcBlob {what} is longer than {QC_WIRE_MAX_STRING} bytes")
+                })?;
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(text.as_bytes());
+            Ok(())
+        }
+        let count = u32::try_from(self.pq_signatures.len())
+            .map_err(|_| "QcBlob has too many entries".to_string())?;
+        let mut out = Vec::with_capacity(self.encoded_len());
+        out.push(QC_WIRE_VERSION);
+        out.extend_from_slice(&self.epoch.to_be_bytes());
+        out.extend_from_slice(&self.checkpoint_height.to_be_bytes());
+        put_str(&mut out, &self.checkpoint_hash, "checkpoint hash")?;
+        put_str(&mut out, &self.merkle_root, "merkle root")?;
+        out.extend_from_slice(&self.created_epoch.to_be_bytes());
+        out.extend_from_slice(&count.to_be_bytes());
+        for entry in &self.pq_signatures {
+            if entry.pq_signature.len() > QC_WIRE_MAX_SIGNATURE {
+                return Err("QcBlob signature is longer than the largest scheme".into());
+            }
+            out.extend_from_slice(&entry.validator_index.to_be_bytes());
+            put_str(&mut out, &entry.validator_address, "validator address")?;
+            // Checked above: at most 4,627, so the cast cannot truncate.
+            out.extend_from_slice(&(entry.pq_signature.len() as u32).to_be_bytes());
+            out.extend_from_slice(&entry.pq_signature);
+        }
+        Ok(out)
+    }
+
+    /// Decodes [`Self::to_bytes`]. Nothing scales with an unchecked length:
+    /// the entry count is bounded by the bytes that remain and by
+    /// `max_entries` (the validator count of the snapshot) before any entry is
+    /// allocated, and trailing bytes are refused.
+    ///
+    /// # Errors
+    ///
+    /// A message for the first rule the bytes break.
+    pub fn from_bytes(bytes: &[u8], max_entries: usize) -> Result<Self, String> {
+        struct Reader<'a>(&'a [u8]);
+        impl<'a> Reader<'a> {
+            fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+                if self.0.len() < n {
+                    return Err("QcBlob is truncated".into());
+                }
+                let (head, rest) = self.0.split_at(n);
+                self.0 = rest;
+                Ok(head)
+            }
+            fn u64(&mut self) -> Result<u64, String> {
+                let raw: [u8; 8] = self
+                    .take(8)?
+                    .try_into()
+                    .map_err(|_| "QcBlob is truncated")?;
+                Ok(u64::from_be_bytes(raw))
+            }
+            fn u32(&mut self) -> Result<u32, String> {
+                let raw: [u8; 4] = self
+                    .take(4)?
+                    .try_into()
+                    .map_err(|_| "QcBlob is truncated")?;
+                Ok(u32::from_be_bytes(raw))
+            }
+            fn string(&mut self, what: &str) -> Result<String, String> {
+                let raw: [u8; 2] = self
+                    .take(2)?
+                    .try_into()
+                    .map_err(|_| "QcBlob is truncated")?;
+                let len = usize::from(u16::from_be_bytes(raw));
+                if len > QC_WIRE_MAX_STRING {
+                    return Err(format!(
+                        "QcBlob {what} is longer than {QC_WIRE_MAX_STRING} bytes"
+                    ));
+                }
+                String::from_utf8(self.take(len)?.to_vec())
+                    .map_err(|_| format!("QcBlob {what} is not UTF-8"))
+            }
+        }
+        let mut reader = Reader(bytes);
+        let version = reader.take(1)?[0];
+        if version != QC_WIRE_VERSION {
+            return Err(format!(
+                "QcBlob wire version {version} is not {QC_WIRE_VERSION}"
+            ));
+        }
+        let epoch = reader.u64()?;
+        let checkpoint_height = reader.u64()?;
+        let checkpoint_hash = reader.string("checkpoint hash")?;
+        let merkle_root = reader.string("merkle root")?;
+        let created_epoch = reader.u64()?;
+        let count = reader.u32()? as usize;
+        // An entry is at least 4 + 2 + 4 bytes, so the remaining bytes bound
+        // the count whatever the header claims.
+        if count > max_entries || count > reader.0.len() / 10 {
+            return Err(format!(
+                "QcBlob claims {count} entries for {max_entries} validators and {} bytes",
+                reader.0.len()
+            ));
+        }
+        let mut pq_signatures = Vec::with_capacity(count);
+        for _ in 0..count {
+            let validator_index = reader.u32()?;
+            let validator_address = reader.string("validator address")?;
+            let sig_len = reader.u32()? as usize;
+            if sig_len > QC_WIRE_MAX_SIGNATURE {
+                return Err("QcBlob signature is longer than the largest scheme".into());
+            }
+            pq_signatures.push(PqSignatureEntry {
+                validator_index,
+                validator_address,
+                pq_signature: reader.take(sig_len)?.to_vec(),
+            });
+        }
+        if !reader.0.is_empty() {
+            return Err("QcBlob has trailing bytes".into());
+        }
+        Ok(Self {
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+            pq_signatures,
+            merkle_root,
+            created_epoch,
+        })
+    }
+
+    /// The blob split into transport chunks of at most [`QC_CHUNK_BYTES`].
+    ///
+    /// # Errors
+    ///
+    /// The encoding errors of [`Self::to_bytes`].
+    pub fn to_chunks(&self) -> Result<Vec<Vec<u8>>, String> {
+        Ok(self
+            .to_bytes()?
+            .chunks(QC_CHUNK_BYTES)
+            .map(<[u8]>::to_vec)
+            .collect())
+    }
+
     pub fn is_expired(&self, current_epoch: u64) -> bool {
         current_epoch > self.created_epoch.saturating_add(QC_BLOB_TTL_EPOCHS)
     }
 
-    pub fn validate_size(&self) -> Result<(), String> {
-        let estimated_size = self
-            .pq_signatures
-            .iter()
-            .map(|s| s.dilithium_signature.len() + s.validator_address.len() + 8)
-            .sum::<usize>();
-
-        if estimated_size > MAX_QC_BLOB_BYTES {
+    /// The size rule: the blob's wire length is at most `header + n * entry`
+    /// for the `n` validators of its snapshot. The bound grows with
+    /// the validator set instead of stopping the set at a fixed byte count
+    /// (the old 1 MiB cap refused a set of about 310 members).
+    pub fn validate_size(&self, validators: usize) -> Result<(), String> {
+        let encoded = self.encoded_len();
+        let max = qc_blob_max_bytes(validators);
+        if encoded > max {
             return Err(format!(
-                "QcBlob too large: {estimated_size} bytes (max: {MAX_QC_BLOB_BYTES})"
+                "QcBlob too large: {encoded} bytes (max: {max} for {validators} validators)"
             ));
         }
         Ok(())
@@ -211,8 +382,25 @@ impl QcBlob {
         computed == self.merkle_root
     }
 
+    /// Verify under the scheme statuses of a fresh genesis. A chain calls
+    /// [`Self::verify_against_snapshot_in`] with its state registry.
     pub fn verify_against_snapshot(
         &self,
+        snapshot: &ValidatorSetSnapshot,
+        required_signers: Option<&[usize]>,
+        current_epoch: Option<u64>,
+    ) -> Result<HashSet<usize>, String> {
+        self.verify_against_snapshot_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            snapshot,
+            required_signers,
+            current_epoch,
+        )
+    }
+
+    pub fn verify_against_snapshot_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
         snapshot: &ValidatorSetSnapshot,
         required_signers: Option<&[usize]>,
         current_epoch: Option<u64>,
@@ -252,7 +440,7 @@ impl QcBlob {
         // `validate_size` caps the blob in bytes, not in entries, and the
         // per-entry overhead is small: with a 1-byte signature an entry costs
         // about 50 bytes, so roughly 20 000 of them fit under
-        // `MAX_QC_BLOB_BYTES`. Every one of those is hashed by
+        // the byte bound. Every one of those is hashed by
         // `verify_merkle_root` before the loop below reaches its first
         // signature and rejects the blob. Measured on a four-validator
         // snapshot (debug build):
@@ -277,7 +465,7 @@ impl QcBlob {
                 snapshot.validators.len()
             ));
         }
-        self.validate_size()?;
+        self.validate_size(snapshot.validators.len())?;
         if !self.verify_merkle_root() {
             return Err("QcBlob merkle root mismatch".into());
         }
@@ -319,10 +507,12 @@ impl QcBlob {
                 &self.checkpoint_hash,
                 entry.validator_index,
             );
-            PqKeyPair::verify(
+            PqKeyPair::verify_in(
+                registry,
                 &validator.pq_public_key,
+                crate::crypto::ctx::QC_V2,
                 &message,
-                &entry.dilithium_signature,
+                &entry.pq_signature,
             )
             .map_err(|e| {
                 format!(
@@ -355,6 +545,17 @@ impl QcBlob {
     }
 
     pub fn detect_fault_proofs(&self, snapshot: &ValidatorSetSnapshot) -> Vec<QcFaultProof> {
+        self.detect_fault_proofs_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            snapshot,
+        )
+    }
+
+    pub fn detect_fault_proofs_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        snapshot: &ValidatorSetSnapshot,
+    ) -> Vec<QcFaultProof> {
         let mut proofs = Vec::new();
 
         for (leaf_index, entry) in self.pq_signatures.iter().enumerate() {
@@ -374,10 +575,12 @@ impl QcBlob {
                 &self.checkpoint_hash,
                 entry.validator_index,
             );
-            if PqKeyPair::verify(
+            if PqKeyPair::verify_in(
+                registry,
                 &validator.pq_public_key,
+                crate::crypto::ctx::QC_V2,
                 &message,
-                &entry.dilithium_signature,
+                &entry.pq_signature,
             )
             .is_err()
             {
@@ -389,7 +592,7 @@ impl QcBlob {
                         entry.validator_index,
                         entry.validator_address.clone(),
                         InvalidDilithiumEvidence {
-                            dilithium_signature: entry.dilithium_signature.clone(),
+                            pq_signature: entry.pq_signature.clone(),
                             merkle_proof,
                             leaf_index: leaf_index as u32,
                         },
@@ -431,7 +634,7 @@ impl QcFaultProof {
             validator_index,
             validator_address,
             kind: QcProofKind::InvalidDilithiumV1 {
-                dilithium_signature: evidence.dilithium_signature,
+                pq_signature: evidence.pq_signature,
                 merkle_proof: evidence.merkle_proof,
                 leaf_index: evidence.leaf_index,
             },
@@ -472,7 +675,7 @@ impl QcFaultProof {
     /// tree the root was built with.
     pub fn verify_inclusion(&self, merkle_root: &str) -> Result<(), String> {
         let QcProofKind::InvalidDilithiumV1 {
-            dilithium_signature,
+            pq_signature,
             merkle_proof,
             leaf_index,
         } = &self.kind
@@ -489,7 +692,7 @@ impl QcFaultProof {
         let leaf = QcBlob::leaf_hash(&PqSignatureEntry {
             validator_index: self.validator_index,
             validator_address: self.validator_address.clone(),
-            dilithium_signature: dilithium_signature.clone(),
+            pq_signature: pq_signature.clone(),
         });
 
         let mut siblings = Vec::with_capacity(merkle_proof.len());
@@ -540,11 +743,11 @@ impl QcFaultProof {
         }
         match &self.kind {
             QcProofKind::InvalidDilithiumV1 {
-                dilithium_signature,
+                pq_signature,
                 merkle_proof,
                 leaf_index,
             } => {
-                if dilithium_signature.is_empty() {
+                if pq_signature.is_empty() {
                     return Err("Empty Dilithium signature".into());
                 }
                 if merkle_proof.is_empty() && *leaf_index != 0 {
@@ -580,6 +783,19 @@ impl QcFaultProof {
         blob: &QcBlob,
         snapshot: &ValidatorSetSnapshot,
     ) -> Result<QcProofVerdict, String> {
+        self.verify_against_blob_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            blob,
+            snapshot,
+        )
+    }
+
+    pub fn verify_against_blob_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        blob: &QcBlob,
+        snapshot: &ValidatorSetSnapshot,
+    ) -> Result<QcProofVerdict, String> {
         self.validate()?;
 
         if self.epoch != blob.epoch {
@@ -594,7 +810,7 @@ impl QcFaultProof {
 
         match &self.kind {
             QcProofKind::InvalidDilithiumV1 {
-                dilithium_signature,
+                pq_signature,
                 leaf_index,
                 ..
             } => {
@@ -606,7 +822,7 @@ impl QcFaultProof {
                     .ok_or_else(|| format!("Leaf index {leaf_index} out of range"))?;
                 if entry.validator_index != self.validator_index
                     || entry.validator_address != self.validator_address
-                    || entry.dilithium_signature != *dilithium_signature
+                    || entry.pq_signature != *pq_signature
                 {
                     return Err("Fault proof leaf does not match blob contents".into());
                 }
@@ -628,8 +844,14 @@ impl QcFaultProof {
                     &self.checkpoint_hash,
                     self.validator_index,
                 );
-                if PqKeyPair::verify(&validator.pq_public_key, &message, dilithium_signature)
-                    .is_ok()
+                if PqKeyPair::verify_in(
+                    registry,
+                    &validator.pq_public_key,
+                    crate::crypto::ctx::QC_V2,
+                    &message,
+                    pq_signature,
+                )
+                .is_ok()
                 {
                     return Err("Fault proof targets a valid Dilithium signature".into());
                 }
@@ -657,8 +879,12 @@ impl QcFaultProof {
                 // ZK QC fault proof verifier
                 // Is not yet implemented. This is a deliberate fail-closed guard:
                 // ZK domain finality attestations CANNOT be invalidated via fault
-                // Proofs until a proper ZK verifier (e.g., Groth16/PLONK circuit
-                // Verification) is integrated. This prevents forged ZK attestations
+                // Proofs until a proper ZK verifier is integrated. That verifier
+                // is a BudZero STARK proof of the fault; no
+                // pairing-based SNARK (Groth16, KZG-based PLONK, anything over
+                // BN254) sits on a Budlum verification path, and the
+                // `no_pairing_snark_in_verification_path` gate holds the line.
+                // This prevents forged ZK attestations
                 // From being finalized without verification, at the cost of also
                 // Preventing legitimate fault challenges.
                 //
@@ -678,19 +904,138 @@ impl QcFaultProof {
     }
 }
 
+/// Largest transport chunk of a QC blob. A blob of 1,000 validators is about
+/// 3.4 MB; it travels as numbered chunks instead of one message.
+pub const QC_CHUNK_BYTES: usize = 256 * 1024;
+
+/// Reassembles a QC blob from numbered chunks, bounded by the snapshot's
+/// validator count before the first chunk is stored.
+#[derive(Debug)]
+pub struct QcBlobAssembler {
+    max_entries: usize,
+    expected_chunks: usize,
+    chunks: Vec<Option<Vec<u8>>>,
+    received_bytes: usize,
+}
+
+impl QcBlobAssembler {
+    /// A new assembler for a blob announced as `chunk_count` chunks, for a
+    /// validator set of `max_entries`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the announced chunk count cannot hold a blob of that set, or
+    /// is zero.
+    pub fn new(max_entries: usize, chunk_count: usize) -> Result<Self, String> {
+        let max_bytes = qc_blob_max_bytes(max_entries);
+        let max_chunks = max_bytes.div_ceil(QC_CHUNK_BYTES);
+        if chunk_count == 0 || chunk_count > max_chunks {
+            return Err(format!(
+                "QcBlob announced as {chunk_count} chunks, a set of {max_entries} allows 1 to {max_chunks}"
+            ));
+        }
+        Ok(Self {
+            max_entries,
+            expected_chunks: chunk_count,
+            chunks: vec![None; chunk_count],
+            received_bytes: 0,
+        })
+    }
+
+    /// Stores chunk `index`. A repeated index is refused: a peer cannot
+    /// replace what it already sent.
+    ///
+    /// # Errors
+    ///
+    /// Out-of-range index, repeated index, or an oversize chunk.
+    pub fn push(&mut self, index: usize, chunk: Vec<u8>) -> Result<(), String> {
+        if chunk.len() > QC_CHUNK_BYTES {
+            return Err("QcBlob chunk exceeds the chunk size".into());
+        }
+        let slot = self
+            .chunks
+            .get_mut(index)
+            .ok_or_else(|| format!("QcBlob chunk index {index} is out of range"))?;
+        if slot.is_some() {
+            return Err(format!("QcBlob chunk {index} arrived twice"));
+        }
+        self.received_bytes += chunk.len();
+        *slot = Some(chunk);
+        Ok(())
+    }
+
+    /// Whether every chunk has arrived.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.chunks.iter().all(Option::is_some)
+    }
+
+    /// The decoded blob once every chunk is in.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a chunk is missing, a non-final chunk is not full, or the
+    /// bytes do not decode.
+    pub fn finish(self) -> Result<QcBlob, String> {
+        let mut bytes = Vec::with_capacity(self.received_bytes);
+        for (i, chunk) in self.chunks.into_iter().enumerate() {
+            let chunk = chunk.ok_or_else(|| format!("QcBlob chunk {i} is missing"))?;
+            if i + 1 < self.expected_chunks && chunk.len() != QC_CHUNK_BYTES {
+                return Err(format!("QcBlob chunk {i} is short but not the last"));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        QcBlob::from_bytes(&bytes, self.max_entries)
+    }
+}
+
+/// The message a validator signs for its PQ attestation (QC V2).
+///
+/// Every field is length prefixed, and the scheme id of the signing key is
+/// part of the message (INV-02), so an attestation made under one scheme can
+/// not be presented as another. The FIPS 204 context `BDLM/QC/V2` is applied
+/// by the signing call.
 pub fn pq_signing_message(
     epoch: u64,
     checkpoint_height: u64,
     checkpoint_hash: &str,
     validator_index: u32,
 ) -> Vec<u8> {
+    let scheme = crate::crypto::scheme::SchemeId::ML_DSA_65.0.to_be_bytes();
     let mut msg = Vec::new();
-    msg.extend_from_slice(b"BUDLUM_PQ_QC");
-    msg.extend_from_slice(&epoch.to_le_bytes());
-    msg.extend_from_slice(&checkpoint_height.to_le_bytes());
-    msg.extend_from_slice(checkpoint_hash.as_bytes());
-    msg.extend_from_slice(&validator_index.to_le_bytes());
+    for field in [
+        b"BDLM_PQ_QC_V2".as_slice(),
+        scheme.as_slice(),
+        &epoch.to_le_bytes(),
+        &checkpoint_height.to_le_bytes(),
+        checkpoint_hash.as_bytes(),
+        &validator_index.to_le_bytes(),
+    ] {
+        msg.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        msg.extend_from_slice(field);
+    }
     msg
+}
+
+/// Version byte of the QC blob wire encoding.
+pub const QC_WIRE_VERSION: u8 = 2;
+/// Longest string field (checkpoint hash, merkle root, address) on the wire.
+pub const QC_WIRE_MAX_STRING: usize = 128;
+/// Longest PQ signature an entry may carry: the largest registered lattice
+/// scheme, ML-DSA-87 (4,627 bytes).
+pub const QC_WIRE_MAX_SIGNATURE: usize = 4_627;
+/// Bytes of an entry besides its signature at the string bound: index, address
+/// length and bytes, signature length.
+const QC_ENTRY_OVERHEAD: usize = 4 + 2 + QC_WIRE_MAX_STRING + 4;
+/// Largest wire size of one entry: [`QC_ENTRY_OVERHEAD`] plus the longest signature.
+pub const QC_ENTRY_MAX_BYTES: usize = QC_ENTRY_OVERHEAD + QC_WIRE_MAX_SIGNATURE;
+/// Largest wire size of the blob header at the string bounds.
+const QC_HEADER_MAX_BYTES: usize = 1 + 8 + 8 + (2 + QC_WIRE_MAX_STRING) * 2 + 8 + 4;
+
+/// The wire size bound of a blob for `validators` members.
+#[must_use]
+pub const fn qc_blob_max_bytes(validators: usize) -> usize {
+    QC_HEADER_MAX_BYTES + validators * QC_ENTRY_MAX_BYTES
 }
 
 /// Test-only attestation helper (P01-F21: production blobs come from the
@@ -706,12 +1051,12 @@ pub fn sign_attestation(
 ) -> Result<PqSignatureEntry, String> {
     let message = pq_signing_message(epoch, checkpoint_height, checkpoint_hash, validator_index);
     let signature = pq_key
-        .sign(&message)
-        .map_err(|e| format!("Dilithium sign failed: {e}"))?;
+        .sign(crate::crypto::ctx::QC_V2, &message)
+        .map_err(|e| format!("PQ sign failed: {e}"))?;
     Ok(PqSignatureEntry {
         validator_index,
         validator_address,
-        dilithium_signature: signature,
+        pq_signature: signature,
     })
 }
 
@@ -821,24 +1166,24 @@ mod tests {
         let honest = PqSignatureEntry {
             validator_index: 7,
             validator_address: "0xabcdef".to_string(),
-            dilithium_signature: vec![1, 2, 3, 4],
+            pq_signature: vec![1, 2, 3, 4],
         };
 
         // Move the last address character to the front of the signature. The
         // concatenation is byte-identical; only the split differs.
         let mut shifted_signature = vec![b'f'];
-        shifted_signature.extend_from_slice(&honest.dilithium_signature);
+        shifted_signature.extend_from_slice(&honest.pq_signature);
         let shifted = PqSignatureEntry {
             validator_index: honest.validator_index,
             validator_address: "0xabcde".to_string(),
-            dilithium_signature: shifted_signature,
+            pq_signature: shifted_signature,
         };
 
         // The premise: without lengths these two are the same bytes.
         let mut honest_concat = honest.validator_address.as_bytes().to_vec();
-        honest_concat.extend_from_slice(&honest.dilithium_signature);
+        honest_concat.extend_from_slice(&honest.pq_signature);
         let mut shifted_concat = shifted.validator_address.as_bytes().to_vec();
-        shifted_concat.extend_from_slice(&shifted.dilithium_signature);
+        shifted_concat.extend_from_slice(&shifted.pq_signature);
         assert_eq!(
             honest_concat, shifted_concat,
             "the fixture must actually be a re-split, or this test proves \
@@ -858,14 +1203,14 @@ mod tests {
         let honest = vec![PqSignatureEntry {
             validator_index: 0,
             validator_address: "0xdeadbeef".to_string(),
-            dilithium_signature: vec![9; 32],
+            pq_signature: vec![9; 32],
         }];
         let mut shifted_signature = vec![b'f'];
-        shifted_signature.extend_from_slice(&honest[0].dilithium_signature);
+        shifted_signature.extend_from_slice(&honest[0].pq_signature);
         let shifted = vec![PqSignatureEntry {
             validator_index: 0,
             validator_address: "0xdeadbee".to_string(),
-            dilithium_signature: shifted_signature,
+            pq_signature: shifted_signature,
         }];
 
         assert_ne!(
@@ -882,17 +1227,17 @@ mod tests {
         let both = PqSignatureEntry {
             validator_index: 1,
             validator_address: String::new(),
-            dilithium_signature: Vec::new(),
+            pq_signature: Vec::new(),
         };
         let address_only = PqSignatureEntry {
             validator_index: 1,
             validator_address: "ab".to_string(),
-            dilithium_signature: Vec::new(),
+            pq_signature: Vec::new(),
         };
         let signature_only = PqSignatureEntry {
             validator_index: 1,
             validator_address: String::new(),
-            dilithium_signature: vec![b'a', b'b'],
+            pq_signature: vec![b'a', b'b'],
         };
 
         let leaves = [
@@ -923,7 +1268,7 @@ mod tests {
         let (snapshot, keys) = make_snapshot_with_pq_keys(4);
         let entries1 = make_signed_entries(&snapshot, &keys, "cp_hash");
         let mut entries2 = entries1.clone();
-        entries2[0].dilithium_signature[0] ^= 0xFF;
+        entries2[0].pq_signature[0] ^= 0xFF;
         let root1 = QcBlob::compute_merkle_root(&entries1);
         let root2 = QcBlob::compute_merkle_root(&entries2);
         assert_ne!(root1, root2);
@@ -946,12 +1291,149 @@ mod tests {
         assert!(blob.is_expired(12));
     }
 
+    fn synthetic_blob(entries: usize) -> QcBlob {
+        let pq_signatures: Vec<PqSignatureEntry> = (0..entries)
+            .map(|i| PqSignatureEntry {
+                validator_index: i as u32,
+                validator_address: format!("{i:064x}"),
+                // ML-DSA-65 sized; the codec does not look inside.
+                pq_signature: vec![(i % 251) as u8; 3309],
+            })
+            .collect();
+        QcBlob::new(7, 700, format!("{:064x}", 0xabcdu32), pq_signatures)
+    }
+
+    #[test]
+    fn wire_encoding_round_trips_and_matches_its_length() {
+        let blob = synthetic_blob(5);
+        let bytes = blob.to_bytes().unwrap();
+        assert_eq!(bytes.len(), blob.encoded_len());
+        assert_eq!(bytes[0], QC_WIRE_VERSION);
+        let back = QcBlob::from_bytes(&bytes, 5).unwrap();
+        assert_eq!(back.to_bytes().unwrap(), bytes);
+        assert_eq!(back.merkle_root, blob.merkle_root);
+        assert_eq!(back.pq_signatures.len(), 5);
+    }
+
+    #[test]
+    fn wire_encoding_is_not_json_sized() {
+        let blob = synthetic_blob(10);
+        let binary = blob.encoded_len();
+        let json = serde_json::to_vec(&blob).unwrap().len();
+        assert!(
+            json > binary * 2,
+            "json {json} bytes against binary {binary} bytes"
+        );
+    }
+
+    #[test]
+    fn wire_decoding_refuses_malformed_input() {
+        let blob = synthetic_blob(3);
+        let bytes = blob.to_bytes().unwrap();
+        // Truncated at every interesting cut.
+        for cut in [0, 1, 9, 30, bytes.len() / 2, bytes.len() - 1] {
+            assert!(QcBlob::from_bytes(&bytes[..cut], 3).is_err(), "cut {cut}");
+        }
+        // Trailing byte.
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(QcBlob::from_bytes(&trailing, 3).is_err());
+        // Wrong version.
+        let mut wrong = bytes.clone();
+        wrong[0] = QC_WIRE_VERSION + 1;
+        assert!(QcBlob::from_bytes(&wrong, 3).is_err());
+        // More entries than the validator set.
+        assert!(QcBlob::from_bytes(&bytes, 2).is_err());
+        // A header that claims a huge count over few bytes is refused before
+        // anything is allocated for it.
+        let count_at = 1 + 8 + 8 + 2 + blob.checkpoint_hash.len() + 2 + blob.merkle_root.len() + 8;
+        let mut huge = bytes.clone();
+        huge[count_at..count_at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(QcBlob::from_bytes(&huge, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn oversize_fields_have_no_encoding() {
+        let mut blob = synthetic_blob(1);
+        blob.checkpoint_hash = "x".repeat(QC_WIRE_MAX_STRING + 1);
+        assert!(blob.to_bytes().is_err());
+        let mut blob = synthetic_blob(1);
+        blob.pq_signatures[0].pq_signature = vec![0; QC_WIRE_MAX_SIGNATURE + 1];
+        assert!(blob.to_bytes().is_err());
+    }
+
+    #[test]
+    fn size_bound_grows_with_the_validator_set() {
+        // The old fixed 1 MiB cap stopped a set at about 310 members.
+        assert!(qc_blob_max_bytes(1_000) > 1_048_576);
+        let blob = synthetic_blob(1_000);
+        assert!(blob.validate_size(1_000).is_ok());
+        assert!(blob.encoded_len() > 1_048_576);
+        // The same blob does not fit a smaller set.
+        assert!(blob.validate_size(100).is_err());
+    }
+
+    /// A blob of 1,000 validators travels as chunks and reassembles to the
+    /// same bytes.
+    #[test]
+    fn thousand_validator_blob_travels_in_chunks() {
+        let blob = synthetic_blob(1_000);
+        let chunks = blob.to_chunks().unwrap();
+        assert!(chunks.len() > 10);
+        assert!(chunks[..chunks.len() - 1]
+            .iter()
+            .all(|chunk| chunk.len() == QC_CHUNK_BYTES));
+
+        // Out of order delivery.
+        let mut assembler = QcBlobAssembler::new(1_000, chunks.len()).unwrap();
+        for index in (0..chunks.len()).rev() {
+            assert!(!assembler.is_complete());
+            assembler.push(index, chunks[index].clone()).unwrap();
+        }
+        assert!(assembler.is_complete());
+        let back = assembler.finish().unwrap();
+        assert_eq!(back.to_bytes().unwrap(), blob.to_bytes().unwrap());
+        assert!(back.verify_merkle_root());
+    }
+
+    #[test]
+    fn assembler_refuses_a_cheating_sender() {
+        let blob = synthetic_blob(50);
+        let chunks = blob.to_chunks().unwrap();
+        // An announced chunk count above what the validator set allows.
+        assert!(QcBlobAssembler::new(50, 10_000).is_err());
+        assert!(QcBlobAssembler::new(50, 0).is_err());
+        let mut assembler = QcBlobAssembler::new(50, chunks.len()).unwrap();
+        assembler.push(0, chunks[0].clone()).unwrap();
+        // A repeated index cannot replace the first copy.
+        assert!(assembler.push(0, vec![1, 2, 3]).is_err());
+        assert!(assembler.push(chunks.len(), vec![]).is_err());
+        assert!(assembler.push(1, vec![0; QC_CHUNK_BYTES + 1]).is_err());
+        assert!(!assembler.is_complete());
+        assert!(assembler.finish().is_err());
+    }
+
+    #[test]
+    fn signing_message_binds_scheme_and_every_field() {
+        let base = pq_signing_message(1, 100, "hash", 0);
+        assert_ne!(base, pq_signing_message(2, 100, "hash", 0));
+        assert_ne!(base, pq_signing_message(1, 101, "hash", 0));
+        assert_ne!(base, pq_signing_message(1, 100, "hasi", 0));
+        assert_ne!(base, pq_signing_message(1, 100, "hash", 1));
+        // The scheme id of the signing key is in the message (INV-02).
+        let scheme = crate::crypto::scheme::SchemeId::ML_DSA_65.0.to_be_bytes();
+        assert!(base.windows(2).any(|w| w == scheme));
+        assert!(base
+            .windows(b"BDLM_PQ_QC_V2".len())
+            .any(|w| w == b"BDLM_PQ_QC_V2"));
+    }
+
     #[test]
     fn test_blob_size_validation() {
         let (snapshot, keys) = make_snapshot_with_pq_keys(4);
         let entries = make_signed_entries(&snapshot, &keys, "cp");
         let blob = QcBlob::new(1, 100, "cp".into(), entries);
-        assert!(blob.validate_size().is_ok());
+        assert!(blob.validate_size(blob.pq_signatures.len()).is_ok());
     }
 
     #[test]
@@ -968,7 +1450,7 @@ mod tests {
     fn test_detect_fault_proof_for_invalid_signature() {
         let (snapshot, keys) = make_snapshot_with_pq_keys(2);
         let mut entries = make_signed_entries(&snapshot, &keys, "cp");
-        entries[1].dilithium_signature[0] ^= 0xAA;
+        entries[1].pq_signature[0] ^= 0xAA;
         let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
         let proofs = blob.detect_fault_proofs(&snapshot);
         assert_eq!(proofs.len(), 1);
@@ -995,7 +1477,7 @@ mod tests {
             0,
             snapshot.validators[0].address.to_string(),
             InvalidDilithiumEvidence {
-                dilithium_signature: blob.pq_signatures[0].dilithium_signature.clone(),
+                pq_signature: blob.pq_signatures[0].pq_signature.clone(),
                 merkle_proof: blob.merkle_proof(0).unwrap(),
                 leaf_index: 0,
             },
@@ -1116,7 +1598,7 @@ mod tests {
         let mut entries = make_signed_entries(&snapshot, &keys, "cp");
         // Corrupt validator 1's dilithium signature so the blob
         // Has a detectable broken entry.
-        entries[1].dilithium_signature[0] ^= 0xAA;
+        entries[1].pq_signature[0] ^= 0xAA;
         let blob = QcBlob::new(snapshot.epoch, 100, "cp".into(), entries);
 
         let proofs = blob.detect_fault_proofs(&snapshot);
@@ -1143,7 +1625,7 @@ mod tests {
             0,
             "addr".into(),
             InvalidDilithiumEvidence {
-                dilithium_signature: vec![1],
+                pq_signature: vec![1],
                 merkle_proof: vec![vec![0u8; 32]; MAX_MERKLE_PROOF_ELEMENTS + 1],
                 leaf_index: 0,
             },
@@ -1164,7 +1646,7 @@ mod tests {
     ///
     /// `validate_size` bounds the blob in bytes, not entries. With a one-byte
     /// signature an entry costs about 50 bytes, so roughly 20 000 fit under
-    /// `MAX_QC_BLOB_BYTES` - and every one of them used to be hashed by
+    /// the byte bound - and every one of them used to be hashed by
     /// `verify_merkle_root` before the verification loop rejected the first
     /// one. Measured on this four-validator snapshot (debug build), 10 000
     /// entries cost 604 ms of CPU for a blob that can never verify.
@@ -1214,7 +1696,7 @@ mod tests {
                 .map(|i| PqSignatureEntry {
                     validator_index: (i % 4) as u32,
                     validator_address: snapshot.validators[i % 4].address.to_string(),
-                    dilithium_signature: vec![0u8; 1],
+                    pq_signature: vec![0u8; 1],
                 })
                 .collect();
             QcBlob {

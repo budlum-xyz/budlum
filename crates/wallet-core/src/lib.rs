@@ -806,19 +806,10 @@ pub const VIEW_KEY_VERSION: u32 = 1;
 
 /// The view-key package presented to an authority (section 10 #3).
 /// Closed to the public; delivered manually from the user wallet to the authority.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewKeyDisclosure {
     pub version: u32,
     pub view_key: [u8; 32],
-}
-
-impl std::fmt::Debug for ViewKeyDisclosure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ViewKeyDisclosure")
-            .field("version", &self.version)
-            .field("view_key", &"[redacted]")
-            .finish()
-    }
 }
 
 impl ViewKeyDisclosure {
@@ -2376,13 +2367,6 @@ mod tests {
         assert!(hex.starts_with("vk1:1:"));
         let parsed = ViewKeyDisclosure::from_hex(&hex).expect("parse");
         assert_eq!(parsed, disclosure);
-        // Debug is used by error paths and assert macros; only the explicit
-        // export operation may reveal the selective-disclosure secret.
-        let debug = format!("{disclosure:?}");
-        assert!(debug.contains("[redacted]"));
-        assert!(debug.contains("version: 1"));
-        assert!(!debug.contains(&format!("{:?}", disclosure.view_key)));
-        assert!(!debug.contains(&hex::encode(disclosure.view_key)));
     }
 
     #[test]

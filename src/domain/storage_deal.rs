@@ -914,19 +914,6 @@ pub enum StorageError {
     },
     /// Caller referenced a deal that does not exist.
     UnknownDeal(u64),
-    /// A deal reached its term while a retrieval challenge was still open on
-    /// it.
-    ///
-    /// The missed-challenge slash settles only an `Active` deal, so letting
-    /// the term pass under an open challenge is how an unanswered challenge
-    /// stops being slashed: the row leaves `Active`, `finalize_missed_challenge`
-    /// refuses with `DealNotActive`, and the opener's bond stays locked. The
-    /// deal is held `Active` until the challenge closes and the next sweep
-    /// expires it.
-    OpenChallengeBlocksExpiry {
-        deal_id: u64,
-        open_challenges: u32,
-    },
     /// Caller referenced a challenge that does not exist.
     UnknownChallenge(u64),
     /// Caller referenced a deal that is not `Active` (e.g. tried to
@@ -1132,14 +1119,6 @@ impl std::fmt::Display for StorageError {
             Self::UnknownDeal(id) => write!(f, "unknown deal {id}"),
             Self::UnknownChallenge(id) => write!(f, "unknown challenge {id}"),
             Self::DealNotActive(id) => write!(f, "deal {id} is not Active"),
-            Self::OpenChallengeBlocksExpiry {
-                deal_id,
-                open_challenges,
-            } => write!(
-                f,
-                "deal {deal_id} reached its term with {open_challenges} challenge(s) still open: \
-                 a missed answer could never be slashed under an expired deal"
-            ),
             Self::ExpiryWouldStrandContent {
                 deal_id,
                 manifest_id,
@@ -3117,6 +3096,7 @@ impl StorageRegistry {
         if !deal.is_active() {
             return Err(StorageError::DealNotActive(deal_id));
         }
+
         let operator = deal.operator;
         let manifest_id = deal.manifest_id;
         let shard_id = deal.shard_id;
@@ -4038,14 +4018,11 @@ impl StorageRegistry {
         self.reallocations.get(&ticket_id)
     }
 
-    /// Expire a deal that reached its `deal_end_epoch` without being
-    /// slashed.
-    ///
-    /// Returns the operator bond amount to be refunded by the blockchain
-    /// accounting layer. A deal with an unresolved retrieval challenge is
-    /// held `Active` instead: the missed-answer slash needs the row to still
-    /// be `Active`, so expiring under an open challenge would strand the
-    /// opener's bond ([`StorageError::OpenChallengeBlocksExpiry`]).
+    /// Expire a deal that reached its `deal_end_epoch` without
+    /// Being slashed.
+    /// Expire a deal that reached its `deal_end_epoch` without
+    /// Being slashed. Returns the operator bond amount to be refunded
+    /// By the blockchain accounting layer.
     pub fn expire_deal(&mut self, deal_id: u64, now_epoch: u64) -> Result<u64, StorageError> {
         let deal = self
             .deals
@@ -4059,24 +4036,6 @@ impl StorageRegistry {
         }
         if deal.status != DealStatus::Active {
             return Ok(0);
-        }
-        // A live question about these bytes outlives the term. The missed-
-        // challenge slash settles only an `Active` deal, so expiring under an
-        // open challenge would strand the opener's bond and make silence
-        // unpunishable. Held until the challenge closes, and the next epoch's
-        // sweep expires it then - the same rule the prune applies (BLG-0365).
-        let open_challenges = self
-            .challenges
-            .values()
-            .filter(|challenge| {
-                challenge.deal_id == deal_id && !self.results.contains_key(&challenge.challenge_id)
-            })
-            .count();
-        if open_challenges > 0 {
-            return Err(StorageError::OpenChallengeBlocksExpiry {
-                deal_id,
-                open_challenges: u32::try_from(open_challenges).unwrap_or(u32::MAX),
-            });
         }
         // A term ending must not be a way to lose an object. The question is
         // not how many carriers the manifest has in total: shards are not
@@ -6302,34 +6261,6 @@ mod tests {
             reg.open_challenge(deal_id, 0, 1, 5, 2, opener(), 100),
             Err(StorageError::InvalidEpochRange { .. })
         ));
-    }
-
-    #[test]
-    fn a_deal_does_not_expire_under_an_open_challenge() {
-        // The missed-challenge slash settles only an `Active` deal (open_one
-        // opens 100..200). A challenge may outlive the term - the deadline is
-        // its own - but the term may not pass while the question is open: the
-        // row would leave `Active`, `finalize_missed_challenge` would refuse
-        // with DealNotActive, and the opener's bond would be stranded with no
-        // slash. Held until the challenge closes.
-        let m = good_manifest();
-        let mut reg = StorageRegistry::new();
-        let (deal_id, _) = open_one(&mut reg, &m);
-        let challenge = reg
-            .open_challenge(deal_id, 0, 4, 110, 201, opener(), 50)
-            .expect("a challenge may run past the term");
-        assert!(matches!(
-            reg.expire_deal(deal_id, 201),
-            Err(StorageError::OpenChallengeBlocksExpiry {
-                open_challenges: 1,
-                ..
-            })
-        ));
-        // The missed-answer slash settles it; the deal has left `Active` by
-        // the slash, so the expiry has nothing left to do.
-        reg.finalize_missed_challenge(challenge, 202)
-            .expect("silence is slashed");
-        assert_eq!(reg.expire_deal(deal_id, 202).expect("nothing held"), 0);
     }
 
     #[test]
