@@ -374,6 +374,17 @@ pub struct AccountState {
     /// Team account + its vesting schedule, enforced on transfers. `None` when
     /// $BUD tokenomics is not enabled.
     pub team_vesting: Option<(Address, crate::tokenomics::VestingSchedule)>,
+    /// Whether the epoch transition pays validation rewards from the
+    /// pre-funded pool (testnet item 8, the `reward_pool.enabled` genesis
+    /// parameter).
+    ///
+    /// Consensus state, not node config: the epoch payment moves balances, so
+    /// every node - replaying a block, restoring a snapshot or following a
+    /// peer - has to reach the same answer. Genesis writes it from
+    /// `GenesisConfig::reward_pool_enabled`; a state that was never told
+    /// (a fixture built by `AccountState::new`) defaults to off, which pays
+    /// nothing rather than paying from a pool nobody funded.
+    pub reward_pool_enabled: bool,
     pub unbonding_queue: Vec<UnbondingEntry>,
     storage: Option<Storage>,
     pub epoch_index: u64,
@@ -471,6 +482,7 @@ impl AccountState {
             timed_burn: crate::tokenomics::TimedBurnState::new(),
             burn_reserve_address: None,
             team_vesting: None,
+            reward_pool_enabled: false,
             unbonding_queue: Vec::new(),
             storage: None,
             epoch_index: 0,
@@ -532,6 +544,7 @@ impl AccountState {
             timed_burn: crate::tokenomics::TimedBurnState::new(),
             burn_reserve_address: None,
             team_vesting: None,
+            reward_pool_enabled: false,
             unbonding_queue: Vec::new(),
             storage: Some(storage),
             epoch_index: 0,
@@ -602,6 +615,7 @@ impl AccountState {
             timed_burn: crate::tokenomics::TimedBurnState::new(),
             burn_reserve_address: None,
             team_vesting: None,
+            reward_pool_enabled: false,
             unbonding_queue: Vec::new(),
             storage: None,
             storage_registry: StorageRegistry::new(),
@@ -700,6 +714,12 @@ impl AccountState {
             poa_admitted: BTreeMap::new(),
             message_registry: snapshot.message_registry.clone().unwrap_or_default(),
             team_vesting,
+            // A snapshot taken before the flag existed means what that chain
+            // did: the network profile's answer. Absent on a testnet snapshot
+            // therefore restores `true`, not a silently disarmed pool.
+            reward_pool_enabled: snapshot.reward_pool_enabled.unwrap_or_else(|| {
+                crate::core::chain_config::reward_pool_for_chain_id(snapshot.chain_id).is_some()
+            }),
             unbonding_queue: snapshot.unbonding_queue.clone(),
             storage: None,
             epoch_index: snapshot.epoch_index,
@@ -3996,7 +4016,9 @@ mod redelegation_and_claim_tests {
         state.add_validator(addr(1), 1_000);
         state.add_validator(addr(2), 1_000);
         state.add_balance(&addr(9), 500);
-        state.delegate_to_validator(&addr(9), &addr(1), 200).unwrap();
+        state
+            .delegate_to_validator(&addr(9), &addr(1), 200)
+            .unwrap();
 
         state
             .redelegate_to_validator(&addr(9), &addr(1), &addr(2), 150)
@@ -4016,7 +4038,9 @@ mod redelegation_and_claim_tests {
         state.add_validator(addr(1), 1_000);
         state.add_validator(addr(2), 1_000);
         state.add_balance(&addr(9), 500);
-        state.delegate_to_validator(&addr(9), &addr(1), 100).unwrap();
+        state
+            .delegate_to_validator(&addr(9), &addr(1), 100)
+            .unwrap();
         assert!(state
             .redelegate_to_validator(&addr(9), &addr(1), &addr(2), 101)
             .is_err());
@@ -4029,13 +4053,18 @@ mod redelegation_and_claim_tests {
         let mut state = AccountState::new();
         state.add_validator(addr(1), 1_000);
         state.add_balance(&addr(9), 500);
-        state.delegate_to_validator(&addr(9), &addr(1), 100).unwrap();
+        state
+            .delegate_to_validator(&addr(9), &addr(1), 100)
+            .unwrap();
         state
             .registry
             .credit_claimable_reward(addr(9), addr(1), 42)
             .unwrap();
 
-        assert_eq!(state.claim_delegator_rewards(&addr(9), &addr(1)).unwrap(), 42);
+        assert_eq!(
+            state.claim_delegator_rewards(&addr(9), &addr(1)).unwrap(),
+            42
+        );
         assert_eq!(state.get_balance(&addr(9)), 442);
         assert!(state.claim_delegator_rewards(&addr(9), &addr(1)).is_err());
         assert_eq!(state.get_balance(&addr(9)), 442);

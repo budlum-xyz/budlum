@@ -346,6 +346,10 @@ async fn main() {
             bootstrap_domains: network_defaults.bootstrap_domains.clone(),
             poa_authorities: Vec::new(),
             anchor_ledger: network_defaults.anchor_ledger.clone(),
+            // The generated file states the flag instead of inheriting it from
+            // the template, so what the chain pays is readable in the file it
+            // was launched from (testnet item 8).
+            reward_pool: network_defaults.reward_pool,
         };
 
         let data = match serde_json::to_string_pretty(&genesis_config) {
