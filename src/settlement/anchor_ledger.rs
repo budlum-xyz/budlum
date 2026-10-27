@@ -466,6 +466,7 @@ pub(crate) mod test_support {
     }
 
     /// The test seal signer.
+    #[allow(clippy::expect_used)] // a fixture: a refused seed is a broken test
     pub(crate) fn seal_signer() -> SoftwareSealSigner {
         SoftwareSealSigner::from_seed(&[0x5E; 96]).expect("a 96 byte seed")
     }

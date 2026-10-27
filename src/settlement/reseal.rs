@@ -314,6 +314,7 @@ mod tests {
 
     const CHAIN: u64 = 45262;
 
+    #[allow(clippy::type_complexity)] // a test double of the HSM trait
     struct Key {
         public: Vec<u8>,
         sign: Box<dyn Fn(&[u8], &[u8]) -> Result<Vec<u8>, CryptoError> + Send + Sync>,
@@ -358,6 +359,7 @@ mod tests {
         vec![(360, [1; 32]), (720, [2; 32]), (1_080, [3; 32])]
     }
 
+    #[allow(clippy::expect_used)] // one rung at a time is the point of the fixture
     fn disable(registry: &mut SchemeStatusRegistry, scheme: SchemeId) {
         for to in [SchemeStatus::Deprecated, SchemeStatus::Disabled] {
             registry
