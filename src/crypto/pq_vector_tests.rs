@@ -281,9 +281,14 @@ fn pq_vectors_acvp_slhdsa_sigver() {
             }
         }
     }
+    // The committed corpus is the ACVP internalProjection set for the two
+    // SHAKE parameter sets: 3 verifications and 11 refusals. Both halves are
+    // pinned, so a corpus edit that silently drops the positive half - the
+    // only vectors that can catch an over-strict verifier - fails here rather
+    // than passing on a file of refusals alone.
     assert!(
-        valid >= 4 && invalid >= 8,
-        "sigVer mix: {valid} valid, {invalid} invalid"
+        valid == 3 && invalid == 11,
+        "sigVer mix: {valid} valid, {invalid} invalid (the ACVP file carries 3 and 11)"
     );
 }
 
