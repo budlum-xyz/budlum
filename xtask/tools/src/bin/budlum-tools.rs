@@ -24,13 +24,23 @@
 //! | `step-reachability [--self-test] [--fail JOB:STEP] [file...]` | `ops/scripts/check-step-reachability.py` |
 //! | `clippy-extra-report <json> [n]` | `ops/scripts/clippy-extra-report.py` |
 //! | `fsf-project-fit [--write] [--check] [--self-test]` | `tools/fsf_project_fit.py` |
+//! | `stark-soundness [--write] [--check] [--search] [--self-test]` | |
+//! | `pq-measure [--write] [--check] [--timings] [--self-test]` | |
+//! | `testnet-rehearsal [--compose]` | local four-validator testnet preflight |
+//! | `propagation-sim [--write] [--check]` | |
+//! | `ai-test-verifier --port P --key-file K` | |
+//! | `resource-sample --pid P --data-dir D [--seconds N]` | |
+//! | `contracts build\|test\|deploy` | |
 //! | `--self-test` | (new: the canary of every tool) |
 
 use budlum_tools::{
-    audit_deps, backup_drill, checked_repo_root, devnet, docker_smoke, multinode_smoke, prepush,
-    sbom, seed_corpus, smoke_rpc,
+    ai_test_verifier, audit_deps, backup_drill, checked_repo_root, contracts, devnet, docker_smoke,
+    multinode_smoke, prepush, propagation, resource_sample, sbom, seed_corpus, smoke_rpc,
+    testnet_genesis, testnet_rehearsal,
 };
-use budlum_tools::{audit_guard, clippy_extra_report, fsf_fit, step_reachability};
+use budlum_tools::{
+    audit_guard, clippy_extra_report, fsf_fit, pq_measure, stark_soundness, step_reachability,
+};
 
 fn usage() -> String {
     "budlum-tools <arac> [arg...]\n\
@@ -50,7 +60,15 @@ fn usage() -> String {
      \x20 step-reachability     which workflow steps can run (guards that point nowhere)\n\
      \x20 clippy-extra-report   per-lint tally and addresses from clippy JSON\n\
      \x20 fsf-project-fit       generate or check docs/FSF_PROJECT_FIT.md\n\
-     \x20 --self-test           run the canaries of seed-corpus, devnet, backup-drill, pre-push\n\
+     \x20 stark-soundness       BudZero STARK security bits (assumed, provable, quantum)\n\
+     \x20 pq-measure           post-quantum sizes (checked) and timings (artifact)\n\
+     \x20 testnet-genesis       assemble and check the testnet ceremony genesis\n\
+     \x20 testnet-rehearsal     preflight or run the local four-validator testnet\n\
+     \x20 contracts             forge build, test or deploy of the Ethereum contracts\n\
+     \x20 ai-test-verifier      answer open AI requests, attestation only\n\
+     \x20 resource-sample       CPU, memory, disk, network of a running node\n\
+     \x20 propagation-sim       p95 block propagation and the witness budget\n\
+     \x20 --self-test           run the tool canaries, including testnet-rehearsal\n\
      \x20 --list                print the tool names\n"
         .to_string()
 }
@@ -63,6 +81,14 @@ fn run_self_tests() {
         ("devnet", devnet::self_test()),
         ("backup-drill", backup_drill::self_test()),
         ("pre-push", prepush::self_test()),
+        ("testnet-genesis", testnet_genesis::self_test()),
+        ("stark-soundness", stark_soundness::self_test()),
+        ("pq-measure", pq_measure::self_test()),
+        ("testnet-rehearsal", testnet_rehearsal::self_test()),
+        ("contracts", contracts::self_test()),
+        ("propagation-sim", propagation::self_test()),
+        ("resource-sample", resource_sample::self_test()),
+        ("ai-test-verifier", ai_test_verifier::self_test()),
     ] {
         match result {
             Ok(msg) => println!("{msg}"),
@@ -97,6 +123,8 @@ fn main() {
             "step-reachability" => Some(step_reachability::cli(rest, &root)),
             "clippy-extra-report" => Some(clippy_extra_report::cli(rest, &root)),
             "fsf-project-fit" => Some(fsf_fit::cli(rest, &root)),
+            "stark-soundness" => Some(stark_soundness::cli(rest, &root)),
+            "pq-measure" => Some(pq_measure::cli(rest, &root)),
             _ => None,
         };
         if let Some(report) = ported {
@@ -127,6 +155,14 @@ fn main() {
                 "step-reachability",
                 "clippy-extra-report",
                 "fsf-project-fit",
+                "stark-soundness",
+                "pq-measure",
+                "testnet-genesis",
+                "testnet-rehearsal",
+                "contracts",
+                "propagation-sim",
+                "resource-sample",
+                "ai-test-verifier",
             ] {
                 println!("{name}");
             }
@@ -157,6 +193,16 @@ fn main() {
         }
         Some(&"docker-smoke-mainnet") => docker_smoke::run(&root),
         Some(&"devnet-multinode-smoke") => multinode_smoke::run(&root),
+        Some(&"testnet-genesis") => testnet_genesis::run(&root, refs.get(1..).unwrap_or_default()),
+        Some(&"contracts") => contracts::run(&root, refs.get(1..).unwrap_or_default()),
+        Some(&"ai-test-verifier") => {
+            ai_test_verifier::run(&root, refs.get(1..).unwrap_or_default())
+        }
+        Some(&"resource-sample") => resource_sample::run(refs.get(1..).unwrap_or_default()),
+        Some(&"propagation-sim") => propagation::run(&root, refs.get(1..).unwrap_or_default()),
+        Some(&"testnet-rehearsal") => {
+            testnet_rehearsal::run(&root, refs.get(1..).unwrap_or_default())
+        }
         Some(name) => {
             eprintln!("FAIL: there is no tool named `{name}`.\n");
             eprint!("{}", usage());

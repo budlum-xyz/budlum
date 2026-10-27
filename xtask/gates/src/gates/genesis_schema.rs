@@ -186,7 +186,7 @@ fn load(path: &Path) -> Result<Value, String> {
 }
 
 /// Which genesis files the gate reads from the repository root.
-const GENESIS_FILES: &[&str] = &["config/mainnet-genesis.json"];
+const GENESIS_FILES: &[&str] = &["config/mainnet-genesis.json", "config/testnet-genesis.json"];
 
 /// # Errors
 ///

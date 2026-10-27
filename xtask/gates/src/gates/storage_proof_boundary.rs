@@ -5,7 +5,10 @@
 //! challenge-answer verifier must be mandatory (`verify_answer_challenge_zk_proof`),
 //! the mock proof must be test-only (`cfg!(test) && proof_bytes ==
 //! "test-mock-proof"`), a wrong answer must produce `ChallengeOutcome::Mismatched`,
-//! and the bond must be burned for it.
+//! and the bond must be burned for it. The answer is the in-block
+//! `StorageTx::AnswerChallenge` door (`src/domain/storage_tx.rs`), and the
+//! missed-deadline path is `finalize_missed_storage_challenges` in
+//! `src/chain/blockchain.rs`; both must burn.
 
 use std::path::Path;
 
@@ -33,7 +36,8 @@ fn unguarded_mock_sites(src: &str) -> usize {
 /// Returns the first violated claim.
 pub fn run(root: &Path) -> Result<String, String> {
     let src = code_of(root, "src/domain/storage_deal.rs")?;
-    let actor = code_of(root, "src/chain/chain_actor.rs")?;
+    let door = code_of(root, "src/domain/storage_tx.rs")?;
+    let chain = code_of(root, "src/chain/blockchain.rs")?;
 
     for (needle, msg) in [
         (
@@ -68,9 +72,17 @@ pub fn run(root: &Path) -> Result<String, String> {
     if !root_bound {
         return Err(String::from("storage_root + proof_bytes binding not found"));
     }
-    if !actor.contains("apply_storage_bond_slash") {
+    let door_burns = door.contains("ChallengeOutcome::Mismatched")
+        && door.contains("burned_total")
+        && door.contains("slashed_bond");
+    if !door_burns {
         return Err(String::from(
-            "chain_actor.rs does not burn the bond for a Mismatched answer - the slash is recorded but never applied",
+            "storage_tx.rs does not burn the bond for a Mismatched answer - the slash is recorded but never applied",
+        ));
+    }
+    if !chain.contains("apply_storage_bond_slash") {
+        return Err(String::from(
+            "blockchain.rs does not burn the bond for a missed challenge - the slash is recorded but never applied",
         ));
     }
     Ok(String::from(
@@ -95,16 +107,13 @@ pub fn self_test() -> Result<String, String> {
     for sub in ["src/domain", "src/chain"] {
         std::fs::create_dir_all(tmp.join(sub)).map_err(|e| e.to_string())?;
     }
-    std::fs::copy(
-        root.join("src/domain/storage_deal.rs"),
-        tmp.join("src/domain/storage_deal.rs"),
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::copy(
-        root.join("src/chain/chain_actor.rs"),
-        tmp.join("src/chain/chain_actor.rs"),
-    )
-    .map_err(|e| e.to_string())?;
+    for rel in [
+        "src/domain/storage_deal.rs",
+        "src/domain/storage_tx.rs",
+        "src/chain/blockchain.rs",
+    ] {
+        std::fs::copy(root.join(rel), tmp.join(rel)).map_err(|e| e.to_string())?;
+    }
     if run(&tmp).is_err() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from("canary: an unmodified copy was refused"));
@@ -121,6 +130,18 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(String::from(
             "canary: a tree that produces no Mismatched passed",
+        ));
+    }
+    std::fs::write(&deal, text).map_err(|e| e.to_string())?;
+    // Break: the in-block answer no longer burns the slashed bond.
+    let door = tmp.join("src/domain/storage_tx.rs");
+    let door_text = std::fs::read_to_string(&door).map_err(|e| e.to_string())?;
+    std::fs::write(&door, door_text.replace("burned_total", "recorded_total"))
+        .map_err(|e| e.to_string())?;
+    if run(&tmp).is_ok() {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(String::from(
+            "canary: an in-block answer that burns nothing passed",
         ));
     }
     let _ = std::fs::remove_dir_all(&tmp);
