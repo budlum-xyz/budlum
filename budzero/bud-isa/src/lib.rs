@@ -619,7 +619,7 @@ mod tests {
         // bud-isa must not depend on bud-vm (it sits below it in the graph), so
         // the count is read from the source rather than imported.
         let src = include_str!("../../bud-vm/src/lib.rs");
-        let marker = "pub const POSEIDON_RC_FULL: [[u64; 8]; ";
+        let marker = "pub const POSEIDON_RC_FULL: [[u64; 12]; ";
         let start = src
             .find(marker)
             .expect("POSEIDON_RC_FULL declaration not found in bud-vm")
