@@ -97,25 +97,25 @@ contract MikorizaTest is Harness {
         manager.setMember(OPERATOR, 32 ether);
         registrar.forceBind(OPERATOR, bytes32(uint256(2)), new bytes(96));
         assertEq(registrar.reportAllocation(OPERATOR), 32e9, "units are gwei");
-        vm.expectRevert(BudlumRegistrar.AlreadyReported.selector);
+        vm.expectPartialRevert(BudlumRegistrar.AlreadyReported.selector);
         registrar.reportAllocation(OPERATOR);
         vm.roll(block.number + 1);
         registrar.reportAllocation(OPERATOR);
     }
 
     function test_an_unbound_operator_cannot_be_reported() public {
-        vm.expectRevert(BudlumRegistrar.NotBound.selector);
+        vm.expectPartialRevert(BudlumRegistrar.NotBound.selector);
         registrar.reportAllocation(OPERATOR);
     }
 
     function test_only_the_slasher_slashes() public {
-        vm.expectRevert(BudlumRegistrar.OnlySlasher.selector);
+        vm.expectPartialRevert(BudlumRegistrar.OnlySlasher.selector);
         registrar.slashForDoubleVote(OPERATOR, "x");
     }
 
     function test_the_slasher_refuses_two_signatures_of_one_hash() public {
         BudlumSlasher slasher = registrar.slasher();
-        vm.expectRevert(BudlumSlasher.SameHash.selector);
+        vm.expectPartialRevert(BudlumSlasher.SameHash.selector);
         slasher.slashDoubleVote(
             DoubleVote({
                 budlumValidator: bytes32(uint256(2)),
