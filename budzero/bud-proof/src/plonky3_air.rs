@@ -1,7 +1,7 @@
 use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, PermutationAirBuilder, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
 
-pub const TRACE_WIDTH: usize = 889;
+pub const TRACE_WIDTH: usize = 1073;
 
 /// Columns in the preprocessed (program ROM) trace: pc, raw instruction word,
 /// active flag, then the four decoded fields (opcode, rd, rs1, rs2).
@@ -100,7 +100,7 @@ pub const COL_MEM_SAME: usize = 54;
 ///
 /// The flag is allowed on an active row only, and only on the first row of an
 /// address block: the row after a row of the same address cannot carry it.
-pub const COL_MEM_IS_INIT: usize = 730;
+pub const COL_MEM_IS_INIT: usize = 914;
 
 /// Running fold of every initial-image row, checked against
 /// `public_inputs.initial_state_root` on the last row.
@@ -119,7 +119,7 @@ pub const COL_MEM_IS_INIT: usize = 730;
 /// verifier holds a value nobody checks" and "the verifier holds a value the
 /// trace must reproduce". Replacing the constants with transcript challenges
 /// is the remaining step; see `docs/AI_VERIFICATION_STATUS.md`.
-pub const COL_MEM_INIT_ACC: usize = 731;
+pub const COL_MEM_INIT_ACC: usize = 915;
 
 /// Fold constants for [`COL_MEM_INIT_ACC`].
 pub const MEM_INIT_BETA: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -145,27 +145,24 @@ pub const COL_CMP_LT_RAW: usize = 257; // raw less-than result computed from bit
 
 // Poseidon witness columns.
 //
-// The permutation is the Goldilocks width-8 Poseidon1 instance:
-// `R_F = 8` full rounds (4 leading + 4 trailing), `R_P = 22` partial rounds,
-// `alpha = 7`, 30 rounds total. The round constants and the MDS matrix are
-// taken from `bud_vm` so the AIR, the prover's witness generator and the VM
-// cannot drift apart - previously all three carried their own copy of a
-// 4-round prefix.
+// The permutation is the instance: Goldilocks width-12 Poseidon1, `R_F = 8` full
+// rounds (4 leading + 4 trailing), `R_P = 22` partial rounds, `alpha = 7`, 30 rounds
+// total, capacity 4. The round constants and the MDS matrix are taken from `bud_vm`
+// (which reads `budlum-note-packing`) so the AIR, the prover's witness generator and
+// the VM cannot drift apart.
 //
-// Layout. Every round records its entry state (8 columns). The S-box
-// intermediates are only recorded where an S-box actually runs: full rounds
-// touch all eight lanes, partial rounds only lane 0. That asymmetry is the
-// point of partial rounds - they raise the algebraic degree at a fraction of
-// the width - so the trace must not pay for lanes that are never squared.
+// Layout. Every round records its entry state (12 columns). The S-box intermediates
+// are only recorded where an S-box actually runs: full rounds touch all twelve lanes,
+// partial rounds only lane 0. That asymmetry is the point of partial rounds - they
+// raise the algebraic degree at a fraction of the width - so the trace must not pay
+// for lanes that are never squared.
 //
-//   state: 30 * 8                       = 240 columns
-//   x2:    8 * 8 (full) + 22 * 1 (part) =  86 columns
-//   x4:    same shape                   =  86 columns
-//
-// The first 258..353 block is kept where it was so the surrounding column
-// indices do not move; the remainder is appended past the end of the old
-// layout.
+//   state: 30 * 12                        = 360 columns
+//   x2:    8 * 12 (full) + 22 * 1 (part)  = 118 columns
+//   x4:    same shape                     = 118 columns
 pub const POSEIDON_ROUNDS: usize = 30;
+/// Lanes of the permutation state.
+pub const POSEIDON_WIDTH: usize = 12;
 ///
 /// Convenience: the round split is part of the AIR definition this
 /// module publishes; `POSEIDON_HALF_FULL` derives from it here, and it
@@ -178,11 +175,11 @@ pub const POSEIDON_FULL_ROUNDS: usize = 8;
 pub const POSEIDON_PARTIAL_ROUNDS: usize = 22;
 pub const POSEIDON_HALF_FULL: usize = POSEIDON_FULL_ROUNDS / 2;
 
-/// Number of S-box lanes in round `r`: all eight in a full round, one in a
+/// Number of S-box lanes in round `r`: all twelve in a full round, one in a
 /// partial round.
 pub const fn poseidon_sbox_lanes(round: usize) -> usize {
     if round < POSEIDON_HALF_FULL || round >= POSEIDON_ROUNDS - POSEIDON_HALF_FULL {
-        8
+        POSEIDON_WIDTH
     } else {
         1
     }
@@ -206,8 +203,8 @@ pub const fn poseidon_sbox_offset(round: usize) -> usize {
 /// columns; the layout constants beside it are what read it in-tree.
 pub const POSEIDON_SBOX_SLOTS: usize = poseidon_sbox_offset(POSEIDON_ROUNDS);
 
-pub const COL_POSEIDON_STATE_BASE: usize = 258; // 258..497 - state[r][i] at round entry
-pub const COL_POSEIDON_X2_BASE: usize = COL_POSEIDON_STATE_BASE + POSEIDON_ROUNDS * 8;
+pub const COL_POSEIDON_STATE_BASE: usize = 258; // state[r][i] at round entry
+pub const COL_POSEIDON_X2_BASE: usize = COL_POSEIDON_STATE_BASE + POSEIDON_ROUNDS * POSEIDON_WIDTH;
 pub const COL_POSEIDON_X4_BASE: usize = COL_POSEIDON_X2_BASE + POSEIDON_SBOX_SLOTS;
 ///
 /// Convenience: the end of the Poseidon column block, pub so trace
@@ -225,64 +222,74 @@ pub const COL_POSEIDON_END: usize = COL_POSEIDON_X4_BASE + POSEIDON_SBOX_SLOTS;
 // State root are bound at the first row; final_state_root, gas_used,
 // Exit_code, trace_len, event_digest are bound at the last real step
 // (cpu_active=1, is_halt=1).
-pub const COL_FINAL_ROOT_0: usize = 670; // 354..361 - final state root (8 × u32 limbs)
-pub const COL_INIT_ROOT_0: usize = 678; // 362..369 - initial state root (8 × u32 limbs)
+pub const COL_FINAL_ROOT_0: usize = 854; // 354..361 - final state root (8 × u32 limbs)
+pub const COL_INIT_ROOT_0: usize = 862; // 362..369 - initial state root (8 × u32 limbs)
 
 // (2026-07-22) privacy-layer opcode selectors.
 // Consumes 3 columns from the intentional reserved gap (was 370..378).
-pub const COL_IS_PRIVACY_COMMIT: usize = 686;
-pub const COL_IS_NULLIFIER_CHECK: usize = 687;
-pub const COL_IS_SUM_CONSERVATION: usize = 688;
+pub const COL_IS_PRIVACY_COMMIT: usize = 870;
+pub const COL_IS_NULLIFIER_CHECK: usize = 871;
+pub const COL_IS_SUM_CONSERVATION: usize = 872;
 
 // Opcode 0x1F is reserved. The selector and the expansion flag are forced
 // to zero on every row, so no proof of a trace with this opcode exists.
 // The columns 689 to 693 stay in the layout so the width and the proof
 // format do not change.
-pub const COL_IS_VERIFY_INFERENCE: usize = 689;
-pub const COL_INFERENCE_IS_EXPAND: usize = 690; // 1 on expansion rows (8 follow-up rows)
-pub const COL_INFERENCE_MODEL_COMMIT: usize = 691; // model commitment limb (u64 → Goldilocks)
-pub const COL_INFERENCE_INPUT_COMMIT: usize = 692; // input commitment limb
-pub const COL_INFERENCE_OUTPUT_COMMIT: usize = 693; // output commitment limb
+pub const COL_IS_VERIFY_INFERENCE: usize = 873;
+pub const COL_INFERENCE_IS_EXPAND: usize = 874; // 1 on expansion rows (8 follow-up rows)
+pub const COL_INFERENCE_MODEL_COMMIT: usize = 875; // model commitment limb (u64 → Goldilocks)
+pub const COL_INFERENCE_INPUT_COMMIT: usize = 876; // input commitment limb
+pub const COL_INFERENCE_OUTPUT_COMMIT: usize = 877; // output commitment limb
 
 /// Inverse witness for the dynamic-storage-slot flag `imm == -1`.
 pub const COL_STORAGE_SLOT_INV: usize = COL_INFERENCE_MODEL_COMMIT;
 
-pub const COL_TRACE_LEN_CTR: usize = 694; // 1 column - running count of cpu_active=1 rows
-pub const COL_GAS_LIMIT: usize = 695; // 1 column - vm.gas_limit, first row
-pub const COL_EVENT_DIGEST_0: usize = 696; // 380..387 - event_digest accumulator (8 × u32 limbs, additive)
-pub const COL_EXIT_CODE: usize = 704; // 1 column - 0=normal Halt, 1=error (set on Halt row)
-pub const COL_CHAIN_ID: usize = 705; // 1 column - vm.gas_limit sibling; chain_id is bound via first-row public input
+pub const COL_TRACE_LEN_CTR: usize = 878; // 1 column - running count of cpu_active=1 rows
+pub const COL_GAS_LIMIT: usize = 879; // 1 column - vm.gas_limit, first row
+pub const COL_EVENT_DIGEST_0: usize = 880; // 380..387 - event_digest accumulator (8 × u32 limbs, additive)
+pub const COL_EXIT_CODE: usize = 888; // 1 column - 0=normal Halt, 1=error (set on Halt row)
+pub const COL_CHAIN_ID: usize = 889; // 1 column - vm.gas_limit sibling; chain_id is bound via first-row public input
                                      // HIGH CWE-345 (2026-08-17): post-execution storage-write digest.
                                      // 8 u32 limbs, bound at the last real row against public_inputs[48..56].
-pub const COL_STATE_WRITES_0: usize = 745;
+pub const COL_STATE_WRITES_0: usize = 929;
 
-// (security audit) Merkle path verification columns.
+// Merkle path verification columns.
 //
-// When `merkle_is_expand` is true on a row, the following columns
-// Carry the Poseidon accumulator, sibling hash, round index, and
-// Key for one round of the VerifyMerkle path expansion. The AIR
-// Transitions `merkle_current` across rounds and forces the bit
-// To match `(key >> round) & 1`. The original step (round 0
-// Trigger) is also marked: it carries `merkle_key` but its
-// `merkle_is_expand` is false, and `merkle_current` is unused on
-// That row (it gets populated on the first expansion row from the
-// Leaf value via the AIR transition below).
-pub const COL_VM_MERKLE_KEY: usize = 706; // 1 column - path key (constant across the 64 expansion rows)
-pub const COL_VM_MERKLE_BIT: usize = 707; // 1 column - (key >> round) & 1
-pub const COL_VM_MERKLE_CURRENT: usize = 708; // 1 column - Poseidon accumulator entering this round
-pub const COL_VM_MERKLE_SIBLING: usize = 709; // 1 column - sibling hash for this round
-pub const COL_VM_MERKLE_ROUND: usize = 710; // 1 column - 0..63
-pub const COL_VM_MERKLE_IS_EXPAND: usize = 711; // 1 column - 1 on rows 1..64 of a VerifyMerkle expansion
-                                                // Poseidon 1-round witnesses (re-used from the existing Poseidon
-                                                // Opcode columns; these are *expansion-only* and only meaningful
-                                                // On rows where merkle_is_expand=1).
-pub const COL_MERKLE_POSEIDON_X2_0: usize = 712; // 396..403 - x^2 intermediate per element (8 columns)
-pub const COL_MERKLE_POSEIDON_X4_0: usize = 720; // 404..411 - x^4 intermediate per element (8 columns)
+// A `VerifyMerkle` is one original row followed by `MERKLE_ROUNDS` (264)
+// expansion rows, one per word of the path window
+// `[key, leaf[4], 64 x sibling[4], root[4]]`. A 256-bit node is four words and the
+// memory argument carries one event per row, so each row reads one word and the
+// rows come in groups of four:
+//
+//   group 0        the leaf        (`COL_MERKLE_LEAFG` = 1)
+//   groups 1..=64  one level each  (the path groups)
+//   group 65       the root        (`COL_MERKLE_ROOTG` = 1)
+//
+// The columns below are the walk state. `COL_MERKLE_BUF` collects the four words of
+// the current group (a word is written on its own row and carried to the next three),
+// `COL_MERKLE_CUR` is the node the walk holds, and on the last row of a path group
+// (`COL_MERKLE_HASH` = 1) the shared Poseidon gadget compresses the node and the buffer
+// into the next node. The root group compares the held node with the root words one
+// word per row.
+pub const COL_VM_MERKLE_KEY: usize = 890; // path key, constant across the expansion rows
+pub const COL_VM_MERKLE_BIT: usize = 891; // (key >> level) & 1 on path rows
+pub const COL_MERKLE_LEAFG: usize = 892; // 1 on the four leaf rows
+/// The word this row reads from the path window, as the memory argument sees it.
+pub const COL_VM_MERKLE_SIBLING: usize = 893;
+pub const COL_VM_MERKLE_ROUND: usize = 894; // row index in the window, 0..263
+pub const COL_VM_MERKLE_IS_EXPAND: usize = 895; // 1 on every expansion row
+pub const COL_MERKLE_CUR: usize = 896; // 4 columns: the node the walk holds entering the row
+pub const COL_MERKLE_BUF: usize = 900; // 4 columns: the words of the current group
+pub const COL_MERKLE_ROOTG: usize = 904; // 1 on the four root rows
+pub const COL_MERKLE_HASH: usize = 905; // 1 on the last row of a path group: the gadget runs here
+pub const COL_MERKLE_RESULT: usize = 906; // the `rd` value of the original row, carried
+pub const COL_MERKLE_EQ: usize = 907; // root rows: 1 when the held node word equals the root word
+pub const COL_MERKLE_OH: usize = 908; // 4 columns: one-hot word index within the group
+pub const COL_MERKLE_DINV: usize = 912; // root rows: inverse witness of the word difference
+pub const COL_MERKLE_ACC: usize = 913; // root rows: running product of `COL_MERKLE_EQ`
 
-// (security audit) final root check
-// Witnesses.
-pub const COL_MERKLE_DIFF_INV: usize = 728; // 1 column - diff = current - rs1_val; diff * diff_inv ∈ {0, 1}
-pub const COL_MERKLE_FINAL_FLAG: usize = 729; // 1 column - 1 on the *original* VerifyMerkle step's row (and 0 elsewhere)
+/// Expansion rows of one `VerifyMerkle`. Mirrors `bud_vm::MERKLE_ROUNDS`.
+pub const MERKLE_ROUNDS: usize = 4 + 64 * 4 + 4;
 
 /// Remaining path key on a Merkle expansion row: `key >> round`.
 ///
@@ -306,7 +313,7 @@ pub const COL_MERKLE_FINAL_FLAG: usize = 729; // 1 column - 1 on the *original* 
 /// `bit_r = (key >> r) & 1` for every round. Ending at zero after 64 rounds
 /// additionally pins `key` to 64 bits, which the old code assumed but never
 /// checked.
-pub const COL_MERKLE_KEY_REM: usize = 732;
+pub const COL_MERKLE_KEY_REM: usize = 916;
 
 /// Inverse witness for `next_reg_idx - reg_idx`, the column that makes
 /// [`COL_REG_SAME`] mean what its name says.
@@ -349,7 +356,7 @@ pub const COL_MERKLE_KEY_REM: usize = 732;
 /// one of those: the register table is laid out on the same rows as the CPU
 /// trace, so a `Eq` instruction and a register event share a row and would
 /// otherwise fight over the same witness.
-pub const COL_REG_SAME_INV: usize = 733;
+pub const COL_REG_SAME_INV: usize = 917;
 
 /// Inverse witness for `rd_idx`, used to decide in-circuit whether an
 /// instruction writes to r0.
@@ -395,7 +402,7 @@ pub const COL_REG_SAME_INV: usize = 733;
 /// Gating the thirty rules on `rd_idx != 0` was the other option and was
 /// rejected: a new opcode added without the guard is unprovable when it
 /// targets r0, and nothing would say so.
-pub const COL_RD_IDX_INV: usize = 734;
+pub const COL_RD_IDX_INV: usize = 918;
 
 /// Marks a register-table row as describing state the program started from
 /// rather than state it produced.
@@ -424,7 +431,7 @@ pub const COL_RD_IDX_INV: usize = 734;
 /// register block: the row after a row of the same register cannot carry it.
 /// Before that rule a padding row or the middle of a block could carry the
 /// flag and add an entry to the folded image that no first read backs.
-pub const COL_REG_IS_INIT: usize = 735;
+pub const COL_REG_IS_INIT: usize = 919;
 
 /// Running fold of every initial register row, checked against limbs 2 and 3
 /// of `public_inputs.initial_state_root` on the last real row.
@@ -442,7 +449,7 @@ pub const COL_REG_IS_INIT: usize = 735;
 /// any substitution that does not solve the system, not an adversary willing
 /// to do that work. Replacing both sets of constants with challenges is one
 /// change, not two, and is tracked with the memory one.
-pub const COL_REG_INIT_ACC: usize = 736;
+pub const COL_REG_INIT_ACC: usize = 920;
 
 /// Inverse witness deciding, in circuit, whether a `Load` or `Store` row
 /// addresses memory at all.
@@ -477,7 +484,7 @@ pub const COL_REG_INIT_ACC: usize = 736;
 /// so the multiplier is one or zero and never a register index. A `Store`
 /// always writes memory, so it is not scaled by `z`; only `Load` with base r0
 /// is load-immediate.
-pub const COL_RS1_IDX_INV: usize = 737;
+pub const COL_RS1_IDX_INV: usize = 921;
 
 /// Inverse witnesses proving a bit decomposition is the canonical one.
 ///
@@ -522,8 +529,8 @@ pub const COL_RS1_IDX_INV: usize = 737;
 /// the excluded patterns are exactly the non-canonical ones and the constraint
 /// stays degree three. `d_inv` is the witness these columns carry, one per
 /// operand.
-pub const COL_CMP_RS1_HI_INV: usize = 738;
-pub const COL_CMP_RS2_HI_INV: usize = 739;
+pub const COL_CMP_RS1_HI_INV: usize = 922;
+pub const COL_CMP_RS2_HI_INV: usize = 923;
 
 /// Inverse witness proving an `Assert` row's condition is non-zero.
 ///
@@ -554,7 +561,7 @@ pub const COL_CMP_RS2_HI_INV: usize = 739;
 /// already share. Those three are mutually exclusive with each other by the
 /// selector rules, and adding a fourth reader would work only for as long as
 /// that stays true.
-pub const COL_ASSERT_INV: usize = 740;
+pub const COL_ASSERT_INV: usize = 924;
 
 /// Boolean witness for "this `Syscall` row has `imm == 6`".
 ///
@@ -587,7 +594,7 @@ pub const COL_ASSERT_INV: usize = 740;
 /// is fine for gating an equality, which only cares whether the factor is
 /// zero, and useless as a multiplier inside a sum. The digest needs to add the
 /// contribution exactly once.
-pub const COL_SYSCALL_IS_6: usize = 741;
+pub const COL_SYSCALL_IS_6: usize = 925;
 
 /// Boolean witnesses for the remaining syscall numbers.
 ///
@@ -617,9 +624,9 @@ pub const COL_SYSCALL_IS_6: usize = 741;
 /// syscall two or three or six". Each number gets a witness pinned in both
 /// directions, the same shape as [`COL_SYSCALL_IS_6`], and the unknown case is
 /// then one minus the sum of the four.
-pub const COL_SYSCALL_IS_1: usize = 742;
-pub const COL_SYSCALL_IS_2: usize = 743;
-pub const COL_SYSCALL_IS_3: usize = 744;
+pub const COL_SYSCALL_IS_1: usize = 926;
+pub const COL_SYSCALL_IS_2: usize = 927;
+pub const COL_SYSCALL_IS_3: usize = 928;
 
 /// The Program CTL multiplicity witness: how many times pc=`i` appears in the
 /// CPU trace, meaning how many times that instruction was executed.
@@ -628,7 +635,7 @@ pub const COL_SYSCALL_IS_3: usize = 744;
 /// never run (a skipped branch) or run several times (a loop body). As long as
 /// the fixed weight `pre_active` is used, an honest prover produces an
 /// unbalanced LogUp sum and gets `InvalidProof`.
-pub const COL_PROG_MULT: usize = 753;
+pub const COL_PROG_MULT: usize = 937;
 
 /// The register table order witness: 32 bits of the step from this register
 /// row to the next one.
@@ -640,7 +647,7 @@ pub const COL_PROG_MULT: usize = 753;
 /// is a 32 bit number. A step that goes backward is a field element near
 /// 2^64 and has no 32 bit form. This is sound because `idx` is below 32 and
 /// `time` is below 2^32, so no honest or forged step wraps into range.
-pub const COL_REG_ORD_BITS_BASE: usize = 754;
+pub const COL_REG_ORD_BITS_BASE: usize = 938;
 pub const REG_ORD_BITS: usize = 32;
 
 /// Inverse witness pinning `COL_MEM_SAME` to the cell equality it claims.
@@ -650,7 +657,7 @@ pub const REG_ORD_BITS: usize = 32;
 /// `1 - diff * inv`. Before this column a prover could write zero for
 /// `m_same` on two rows of one address, turning off the value continuity
 /// between them. The first read of the next block then only had to be zero.
-pub const COL_MEM_SAME_INV: usize = 786;
+pub const COL_MEM_SAME_INV: usize = 970;
 
 /// The table a memory row belongs to: 1 memory, 2 stack, 3 storage.
 ///
@@ -658,29 +665,29 @@ pub const COL_MEM_SAME_INV: usize = 786;
 /// bases (`1 << 60` and `2 << 60`). Nothing bounded a `Load` address, so a
 /// pointer of `1 << 60` named a stack cell. The id is now a column of its own
 /// and a part of the sort key, and the address below it is 32 bit.
-pub const COL_MEM_TID: usize = 787;
+pub const COL_MEM_TID: usize = 971;
 
 /// The 64 bits of canonical `COL_MEM_ADDR` (`0..32` low limb `a_lo`,
 /// `32..64` high limb `a_hi`). Memory (`tid = 1`) and stack (`tid = 2`)
 /// addresses enforce `a_hi == 0` so cell indices stay below `2^32`; storage
 /// rows (`tid = 3`) span the full canonical Goldilocks field so Poseidon-derived
 /// `Map<K, V>` slots execute and verify identically.
-pub const COL_MEM_ADDR_BITS_BASE: usize = 788;
+pub const COL_MEM_ADDR_BITS_BASE: usize = 972;
 pub const MEM_ADDR_BITS: usize = 64;
 
 /// Inverse witness for `0xFFFF_FFFF - a_hi`, enforcing canonical Goldilocks
 /// representation (`a_hi == 0xFFFF_FFFF ==> a_lo == 0`).
-pub const COL_MEM_HI_MAX_INV: usize = 852;
+pub const COL_MEM_HI_MAX_INV: usize = 1036;
 
 /// Boolean flag and inverse witness pinning `m_top_same == (ntop == top)` where
 /// `top = tid * 2^32 + a_hi < 2^34` across consecutive live memory rows.
-pub const COL_MEM_TOP_SAME: usize = 853;
-pub const COL_MEM_TOP_SAME_INV: usize = 854;
+pub const COL_MEM_TOP_SAME: usize = 1037;
+pub const COL_MEM_TOP_SAME_INV: usize = 1038;
 
 /// The memory table order witness: 34 bits of the step from this row to the
 /// next one across lexicographic `(top, a_lo, clk)` where
 /// `top = tid * 2^32 + a_hi < 2^34`, `a_lo < 2^32`, and `clk < 2^20`.
-pub const COL_MEM_ORD_BITS_BASE: usize = 855;
+pub const COL_MEM_ORD_BITS_BASE: usize = 1039;
 pub const MEM_ORD_BITS: usize = 34;
 
 /// Fold constants for [`COL_REG_INIT_ACC`].
@@ -1192,149 +1199,69 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             .when(is_verify_merkle.clone())
             .assert_bool(rd_val_new.clone());
 
-        // (security audit) Merkle expansion rows.
+        // Merkle expansion rows.
         //
-        // When a VerifyMerkle instruction executes, the VM pushes
-        // 1 original step (carrying `merkle_key` but with
-        // `merkle_is_expand = 0`) followed by 64 expansion rows
-        // (one per Poseidon round). The AIR enforces:
+        // A `VerifyMerkle` is one original row (it carries the key) followed by
+        // `MERKLE_ROUNDS` expansion rows, one per word of the path window
+        // `[key, leaf[4], 64 x sibling[4], root[4]]`. The rows come in groups of four,
+        // because a 256-bit node is four words and the memory argument carries one event
+        // per row:
         //
-        //   1. `merkle_is_expand` is 0/1 (booleanity).
-        //   2. On an expansion row, the bit equals
-        //      `(merkle_key >> merkle_round) & 1` (no range proof
-        //      Needed since `merkle_round` is set to 0..63 by the
-        //      Prover and we constrain it mod 64 below).
-        //   3. The Poseidon transition: if bit=0, the next row's
-        //      `merkle_current` equals
-        //      `poseidon1(cur, sibling)`; if bit=1, it equals
-        //      `poseidon1(sibling, cur)`. The next row is either
-        //      The following expansion row (within the same
-        //      VerifyMerkle) or the original step's leaf value
-        //      (for round 0, the "previous" current is the leaf).
-        //   4. The final 64-round accumulator is checked against
-        //      `rs1_val` (claimed root) via an inverse-witness
-        //      Comparison; `rd_val_new` must equal
-        //      `(accumulator == rs1_val)`. (Implemented in
-        //      Commit 3.)
+        //   group 0         the leaf: the four words become the held node
+        //   groups 1..=64   a level: the four words are the sibling, and the last row of
+        //                   the group (`COL_MERKLE_HASH`) runs the Poseidon gadget on the
+        //                   node and the sibling, ordered by the key bit; the output is
+        //                   the node of the next row
+        //   group 65        the root: each row compares one word of the held node with
+        //                   the word it reads, and the last row hands the product of the
+        //                   comparisons to the `rd` value the original row carries
+        //
+        // The words reach the memory argument through `COL_VM_MERKLE_SIBLING` and the
+        // address `imm + 8 + 8 * round`, so nothing the walk consumes is chosen by the
+        // prover.
         let is_expand: AB::Expr = cur[COL_VM_MERKLE_IS_EXPAND].into();
         builder.assert_bool(is_expand.clone());
-
-        // Merkle_round is in 0..63 (we don't need a strict range
-        // Proof here, only that the prover cannot pick a value
-        // Outside that range; the transition below uses `round` to
-        // Extract the bit and the transition only makes sense for
-        // 0..63). The transition also forces the round index to
-        // Match the previous row's index + 1, so any out-of-range
-        // Value will be detected at the boundary.
-        let merkle_round: AB::Expr = cur[COL_VM_MERKLE_ROUND].into();
-        let merkle_key: AB::Expr = cur[COL_VM_MERKLE_KEY].into();
-        let merkle_bit: AB::Expr = cur[COL_VM_MERKLE_BIT].into();
-        let merkle_sibling: AB::Expr = cur[COL_VM_MERKLE_SIBLING].into();
-        let merkle_current: AB::Expr = cur[COL_VM_MERKLE_CURRENT].into();
-        let nxt_merkle_current: AB::Expr = nxt[COL_VM_MERKLE_CURRENT].into();
-        let nxt_merkle_round: AB::Expr = nxt[COL_VM_MERKLE_ROUND].into();
         let nxt_is_expand: AB::Expr = nxt[COL_VM_MERKLE_IS_EXPAND].into();
 
-        // Bit extraction: on expansion rows, `bit == (key >> round) & 1`.
-        //
-        // Booleanity alone used to be the whole constraint, and the comment
-        // here said the prover "can simply provide a valid bit column".
-        // Measured: flipping the round-0 bit, recomputing the chain from it
-        // and leaving `merkle_key` untouched produced a different root, and
-        // the AIR accepted the proof. Direction bits decide which sibling is
-        // on the left, so an unconstrained bit column means the path proves
-        // nothing about where the leaf sits - which is the entire content of
-        // a Merkle membership proof.
-        //
-        // `COL_MERKLE_KEY_REM` carries `key >> round` and is tied down by a
-        // shift chain:
-        //
-        //   round 0:     rem == key
-        //   each round:  rem == 2 * rem_next + bit
-        //   after 63:    rem_next == 0
-        //
-        // Since `bit` is boolean, `rem = 2 * rem' + bit` is one step of binary
-        // long division and admits exactly one solution per round, so the
-        // chain forces `bit_r = (key >> r) & 1`. Terminating at zero also pins
-        // `key` to 64 bits, which the previous code assumed without checking.
-        builder
-            .when(is_expand.clone())
-            .assert_bool(merkle_bit.clone());
-
-        let merkle_key_rem: AB::Expr = cur[COL_MERKLE_KEY_REM].into();
-        let nxt_merkle_key_rem: AB::Expr = nxt[COL_MERKLE_KEY_REM].into();
+        let merkle_round: AB::Expr = cur[COL_VM_MERKLE_ROUND].into();
+        let nxt_merkle_round: AB::Expr = nxt[COL_VM_MERKLE_ROUND].into();
+        let merkle_key: AB::Expr = cur[COL_VM_MERKLE_KEY].into();
+        let merkle_bit: AB::Expr = cur[COL_VM_MERKLE_BIT].into();
+        let merkle_word: AB::Expr = cur[COL_VM_MERKLE_SIBLING].into();
+        let leafg: AB::Expr = cur[COL_MERKLE_LEAFG].into();
+        let rootg: AB::Expr = cur[COL_MERKLE_ROOTG].into();
+        let nxt_leafg: AB::Expr = nxt[COL_MERKLE_LEAFG].into();
+        let nxt_rootg: AB::Expr = nxt[COL_MERKLE_ROOTG].into();
+        let merkle_hash: AB::Expr = cur[COL_MERKLE_HASH].into();
+        let cu = |i: usize| -> AB::Expr { cur[i].into() };
+        let oh: Vec<AB::Expr> = (0..4).map(|k| cur[COL_MERKLE_OH + k].into()).collect();
+        let nxt_oh: Vec<AB::Expr> = (0..4).map(|k| nxt[COL_MERKLE_OH + k].into()).collect();
+        let nxt_pathg: AB::Expr = nxt_is_expand.clone() - nxt_leafg.clone() - nxt_rootg.clone();
+        let merkle_rows_before_root: AB::Expr =
+            AB::Expr::from(AB::F::from_u64((MERKLE_ROUNDS - 4) as u64));
+        let merkle_last_round: AB::Expr =
+            AB::Expr::from(AB::F::from_u64((MERKLE_ROUNDS - 1) as u64));
         let two: AB::Expr = AB::Expr::from(AB::F::from_u8(2));
+        let on_original: AB::Expr = is_verify_merkle.clone() * (one.clone() - is_expand.clone());
 
-        // One long-division step per expansion row: rem == 2 * rem' + bit.
-        // Applied on expand -> expand transitions, which covers rounds 0..62
-        // and leaves round 63 to the terminator below.
-        builder
-            .when_transition()
-            .when(cpu_active.clone())
-            .assert_zero(
-                is_expand.clone()
-                    * nxt_is_expand.clone()
-                    * (merkle_key_rem.clone()
-                        - two.clone() * nxt_merkle_key_rem.clone()
-                        - merkle_bit.clone()),
-            );
-
-        // Terminator: the last expansion row of a path (expand followed by a
-        // non-expand row) has rem == bit, i.e. rem' would be zero. Together
-        // with the chain above this forces rem_r = key >> r exactly, and pins
-        // `key` to 64 bits - the old code assumed that without checking.
-        builder
-            .when_transition()
-            .when(cpu_active.clone())
-            .assert_zero(
-                is_expand.clone()
-                    * (one.clone() - nxt_is_expand.clone())
-                    * (merkle_key_rem.clone() - merkle_bit.clone()),
-            );
-
-        // Seed: the original VerifyMerkle step hands the whole key to its
-        // first expansion row. This is the same shape as the leaf binding
-        // below, and it is what ties the chain back to `merkle_key`.
-        builder
-            .when_transition()
-            .when(is_verify_merkle.clone() * (one.clone() - is_expand.clone()))
-            .when(nxt_is_expand.clone())
-            .assert_zero(nxt_merkle_key_rem.clone() - nxt[COL_VM_MERKLE_KEY].into());
-
-        // Round index: the prover must set merkle_round to the
-        // Expansion round number. For the first expansion row
-        // (round=0) the previous row is the original step; for
-        // Subsequent rows the previous is the previous expansion
-        // Row. We enforce the transition below.
-        // Merkle_round is 0..63 (not boolean). Bound via
-        // Expand→expand transition (+1) and first expansion round=0 leaf bind.
-
-        // Sibling and current are u64 limbs; no further constraint
-        // On their magnitudes (the Goldilocks field is large
-        // Enough to embed them). The Poseidon transition
-        // Will consume them.
+        // The block is closed on both sides.
         //
-        // Key must equal the key from the *previous* expansion
-        // Row's key, or - for the first expansion row (round=0)
-        // The key from the original step. Since the original
-        // Step's merkle_is_expand is 0 and `merkle_key` is
-        // Patched in-place by the VM (see `Vm::step`), the same
-        // `merkle_key` value appears on the original step and all
-        // 64 expansion rows. We enforce this by constraining
-        //   Merkle_key_next - merkle_key_cur = 0
-        // Whenever *both* rows are expansion rows OR the current
-        // Row is the original VerifyMerkle step (in which case
-        // `merkle_is_expand` is 0 but the original step's key is
-        // The seed for the path). To keep this simple and sound,
-        // We constrain: on every active row,
-        //   (merkle_is_expand_cur - merkle_is_expand_nxt)
-        //     * (merkle_key_cur - merkle_key_nxt) == 0
-        // I.e. the key may only change when one of the rows
-        // Is not expansion (which happens at the boundary
-        // Between two VerifyMerkle calls or at the start/end of
-        // The trace).
-        // Key continuity only when staying in / entering
-        // Expansion - not when leaving expansion to Halt (next key is 0).
+        // An expansion row has to be a `VerifyMerkle` row: the flag switches off the
+        // program lookup, the register argument and the gas charge, and without this
+        // it could be raised on any other opcode. An original row has to be followed
+        // by its expansion rows: the result on it is only worth anything when the path
+        // behind it was walked.
+        builder.assert_zero(is_expand.clone() * (one.clone() - is_verify_merkle.clone()));
+        builder
+            .when_transition()
+            .assert_zero(on_original.clone() * (one.clone() - nxt_is_expand.clone()));
+        // The path buffer address is one value for the whole path. Each expansion row
+        // derives its memory address from `imm`, which is exempt from the program table
+        // on an expansion row.
+        builder.when_transition().assert_zero(
+            is_verify_merkle.clone() * nxt_is_expand.clone() * (nxt[COL_IMM].into() - imm.clone()),
+        );
+        // The path key is one value for the whole path.
         builder
             .when_transition()
             .when(cpu_active.clone())
@@ -1352,260 +1279,225 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                     * (merkle_key.clone() - nxt[COL_VM_MERKLE_KEY].into()),
             );
 
-        // Round index transition: on every active row,
-        //   Is_expand_cur * is_expand_nxt
-        //     * (round_nxt - round_cur - 1) == 0
-        // Expansion rows increment the round index by 1.
+        // The direction bit is boolean, and the group kinds partition the expansion rows.
+        builder
+            .when(is_expand.clone())
+            .assert_bool(merkle_bit.clone());
+        builder.assert_bool(leafg.clone());
+        builder.assert_bool(rootg.clone());
+        builder.assert_bool(is_expand.clone() - leafg.clone() - rootg.clone());
+
+        // The word index is one-hot on expansion rows (and zero elsewhere), it rotates by
+        // one each row, and `COL_MERKLE_HASH` is the last word of a path group.
+        let mut oh_sum: AB::Expr = AB::Expr::ZERO;
+        for k in 0..4 {
+            builder.assert_bool(oh[k].clone());
+            oh_sum += oh[k].clone();
+        }
+        builder.assert_eq(oh_sum, is_expand.clone());
+        let path_g: AB::Expr = is_expand.clone() - leafg.clone() - rootg.clone();
+        builder.assert_eq(merkle_hash.clone(), path_g * oh[3].clone());
+
+        // Original row -> first expansion row: round 0, the leaf group, word 0, and the
+        // `rd` value starts its journey to the last row.
+        builder
+            .when_transition()
+            .when(on_original.clone())
+            .when(nxt_is_expand.clone())
+            .assert_zero(nxt_merkle_round.clone());
+        builder
+            .when_transition()
+            .when(on_original.clone())
+            .when(nxt_is_expand.clone())
+            .assert_one(nxt_leafg.clone());
+        builder
+            .when_transition()
+            .when(on_original.clone())
+            .when(nxt_is_expand.clone())
+            .assert_one(nxt_oh[0].clone());
+        builder
+            .when_transition()
+            .when(on_original.clone())
+            .when(nxt_is_expand.clone())
+            .assert_eq(nxt[COL_MERKLE_RESULT].into(), rd_val_new.clone());
+
+        // Expansion row -> expansion row.
+        // The round counts up by one, the word index rotates, the result is carried.
         builder
             .when_transition()
             .when(cpu_active.clone())
             .assert_zero(
                 is_expand.clone()
                     * nxt_is_expand.clone()
-                    * (nxt_merkle_round - merkle_round.clone() - one.clone()),
+                    * (nxt_merkle_round.clone() - merkle_round.clone() - one.clone()),
             );
-
-        // Poseidon transition (Commit 3 will expand with full
-        // 1-round Poseidon constraints). For now we only assert
-        // That the current accumulator on the original VerifyMerkle
-        // Step equals the leaf value (rs2_val), and that the first
-        // (security audit) Poseidon
-        // Single-round transition on every expansion row, and
-        // Final root check on the original step.
-        //
-        // The single-round Poseidon on a 2-element state
-        // [s0, s1] = [cur, sibling] or [sibling, cur] (depending
-        // On the bit) computes:
-        //   S_plus_rc = s + RC[0]
-        //   X2 = s_plus_rc^2
-        //   X4 = x2^2
-        //   Sbox = x4 * x2 * s_plus_rc
-        //   Output = 7 * sbox[0] + 1 * sbox[1]   (MDS row 0,
-        //                                              Other
-        //                                              Terms
-        //                                              Zero)
-        // The AIR checks the S-box identities and the output.
-
-        // Build the 8-element state depending on the bit.
-        //   Bit == 0: state = [cur, sibling, 0, 0, 0, 0, 0, 0]
-        //   Bit == 1: state = [sibling, cur, 0, 0, 0, 0, 0, 0]
-        let s0: AB::Expr = merkle_current.clone() * (one.clone() - merkle_bit.clone())
-            + merkle_sibling.clone() * merkle_bit.clone();
-        let s1: AB::Expr = merkle_sibling.clone() * (one.clone() - merkle_bit.clone())
-            + merkle_current.clone() * merkle_bit.clone();
-
-        // Round constants for round 0 (re-used from `poseidon4_hash`).
-        const RC0: [u64; 8] = [
-            0xdd5743e7f2a5a5d9,
-            0xcb3a864e58ada44b,
-            0xffa2449ed32f8cdc,
-            0x42025f65d6bd13ee,
-            0x7889175e25506323,
-            0x34b98bb03d24b737,
-            0xbdcc535ecc4faa2a,
-            0x5b20ad869fc0d033,
-        ];
-        // MDS first row: [7, 1, 3, 8, 8, 3, 4, 9]. With the
-        // Remaining 6 state elements zero, the output is
-        //   7 * sbox[0] + 1 * sbox[1].
-        const MDS_ROW_0: [u64; 8] = [7, 1, 3, 8, 8, 3, 4, 9];
-
-        // Witness columns populated by the prover.
-        let x2_0: AB::Expr = cur[COL_MERKLE_POSEIDON_X2_0].into();
-        let x4_0: AB::Expr = cur[COL_MERKLE_POSEIDON_X4_0].into();
-        let x2_1: AB::Expr = cur[COL_MERKLE_POSEIDON_X2_0 + 1].into();
-        let x4_1: AB::Expr = cur[COL_MERKLE_POSEIDON_X4_0 + 1].into();
-
-        let rc0_0 = AB::Expr::from(AB::F::from_u64(RC0[0]));
-        let rc0_1 = AB::Expr::from(AB::F::from_u64(RC0[1]));
-        let s0_plus_rc = s0.clone() + rc0_0;
-        let s1_plus_rc = s1.clone() + rc0_1;
-
-        // S-box identity: x^2 = (s + rc)^2
-        builder
-            .when(is_expand.clone())
-            .assert_zero(x2_0.clone() - s0_plus_rc.clone() * s0_plus_rc.clone());
-        builder
-            .when(is_expand.clone())
-            .assert_zero(x2_1.clone() - s1_plus_rc.clone() * s1_plus_rc.clone());
-        // X^4 = x^2 * x^2
-        builder
-            .when(is_expand.clone())
-            .assert_zero(x4_0.clone() - x2_0.clone() * x2_0.clone());
-        builder
-            .when(is_expand.clone())
-            .assert_zero(x4_1.clone() - x2_1.clone() * x2_1.clone());
-
-        // Sbox[0] = x4 * x2 * (s + rc)  (the Poseidon S-box)
-        let sbox_0: AB::Expr = x4_0.clone() * x2_0.clone() * s0_plus_rc.clone();
-        let sbox_1: AB::Expr = x4_1.clone() * x2_1.clone() * s1_plus_rc.clone();
-
-        // Poseidon single-round output: 7*sbox[0] + 1*sbox[1]
-        let poseidon_output: AB::Expr = sbox_0.clone()
-            * AB::Expr::from(AB::F::from_u64(MDS_ROW_0[0]))
-            + sbox_1.clone() * AB::Expr::from(AB::F::from_u64(MDS_ROW_0[1]));
-
-        // Poseidon transition: on every expansion row, the next
-        // Row's merkle_current must equal the Poseidon output.
-        // This is the row-by-row soundness check that closes.
-        // We apply it on the current row's transition (nxt row
-        // Carries the next accumulator). The transition is
-        // Suppressed when the next row is *not* an expansion row
-        // (last round) - that row's merkle_current is the
-        // 64th-round output and is checked below.
+        for k in 0..4 {
+            builder
+                .when_transition()
+                .when(is_expand.clone())
+                .when(nxt_is_expand.clone())
+                .assert_eq(nxt_oh[(k + 1) % 4].clone(), oh[k].clone());
+        }
         builder
             .when_transition()
             .when(is_expand.clone())
             .when(nxt_is_expand.clone())
-            .assert_zero(nxt_merkle_current.clone() - poseidon_output.clone());
+            .assert_eq(nxt[COL_MERKLE_RESULT].into(), cur[COL_MERKLE_RESULT].into());
+        // The buffer keeps every slot the next row does not write.
+        for k in 0..4 {
+            builder
+                .when_transition()
+                .when(is_expand.clone())
+                .when(nxt_is_expand.clone())
+                .when(one.clone() - nxt_oh[k].clone())
+                .assert_eq(
+                    nxt[COL_MERKLE_BUF + k].into(),
+                    cur[COL_MERKLE_BUF + k].into(),
+                );
+        }
+        // The word this row reads is the slot of the buffer its index names.
+        let mut buffered: AB::Expr = AB::Expr::ZERO;
+        for k in 0..4 {
+            buffered += oh[k].clone() * cu(COL_MERKLE_BUF + k);
+        }
+        builder
+            .when(is_expand.clone())
+            .assert_eq(merkle_word.clone(), buffered);
 
-        // Son turun ciktisi, kok karsilastirmasinin baktigi degere baglanir.
-        //
-        // # Kapanan bosluk
-        //
-        // The root check below reads the root the **original** VerifyMerkle row
-        // compared the `merkle_current` value against `rs1_val` (the claimed
-        // root). The prover writes the output of round 64 into that cell - but
-        // **no constraint enforced it**. So the chain was computed correctly row
-        // by row and its result was bound to nothing: a malicious prover writes
-        // `rs1_val` straight into the original row, the equality is satisfied
-        // and `rd_val_new = 1` is returned. The path looks verified, and nothing
-        // has been verified.
-        //
-        // This was the reason the opcode is kept off in production ("unfinished
-        // path verification"). The only thing missing was this transition: the
-        // Poseidon output of the **last** expansion row (`is_expand = 1` where
-        // the successor row is not an expansion) has to equal the
-        // `merkle_current` value of the original row that started that
-        // expansion.
-        //
-        // # Why it is read forwards, not backwards
-        //
-        // The original row comes **before** the expansions, so the AIR's two-row
-        // window cannot look from the last expansion back to the original. Instead the value
-        // is carried forwards: the `COL_MERKLE_FINAL_FLAG` column carries the value the
-        // original row expects through the expansion and equality is checked in the final
-        // round. The column was already defined and no constraint read it -
-        // a column that is defined but never asked is worse than a column that does not exist,
-        // because to a reader it looks like it is being checked.
-        let on_original_row: AB::Expr =
-            is_verify_merkle.clone() * (one.clone() - is_expand.clone());
+        // Inside a group the node, the group kind, the bit and the remaining key stay.
+        for k in 0..4 {
+            builder
+                .when_transition()
+                .when(is_expand.clone())
+                .when(nxt_is_expand.clone())
+                .when(one.clone() - oh[3].clone())
+                .assert_eq(
+                    nxt[COL_MERKLE_CUR + k].into(),
+                    cur[COL_MERKLE_CUR + k].into(),
+                );
+        }
+        for (now, next) in [
+            (leafg.clone(), nxt_leafg.clone()),
+            (rootg.clone(), nxt_rootg.clone()),
+            (merkle_bit.clone(), nxt[COL_VM_MERKLE_BIT].into()),
+            (
+                cur[COL_MERKLE_KEY_REM].into(),
+                nxt[COL_MERKLE_KEY_REM].into(),
+            ),
+        ] {
+            builder
+                .when_transition()
+                .when(is_expand.clone())
+                .when(nxt_is_expand.clone())
+                .when(one.clone() - oh[3].clone())
+                .assert_eq(next, now);
+        }
 
-        // The block is closed on both sides.
-        //
-        // An expansion row has to be a `VerifyMerkle` row: the flag switches
-        // off the program lookup, the register argument and the gas charge,
-        // and without this it could be raised on any other opcode.
-        builder.assert_zero(is_expand.clone() * (one.clone() - is_verify_merkle.clone()));
-        // An original row has to be followed by its expansion rows: the root
-        // comparison on it is only worth anything when the path behind it was
-        // walked, and a path that is not there cannot have been.
+        // The group kinds move at a group boundary only: the leaf group is the first
+        // group, the root group starts exactly after 64 levels (its first row is round
+        // `MERKLE_ROUNDS - 4`) and, once started, never ends.
         builder
             .when_transition()
-            .assert_zero(on_original_row.clone() * (one.clone() - nxt_is_expand.clone()));
-        // And the path runs to its end: the last row of an expansion block is
-        // round 63, so a block cannot stop after the first few rounds.
+            .when(is_expand.clone())
+            .when(oh[3].clone())
+            .assert_zero(nxt_leafg.clone());
+        builder
+            .when_transition()
+            .when(is_expand.clone())
+            .when(nxt_is_expand.clone())
+            .assert_zero(
+                (nxt_rootg.clone() - rootg.clone())
+                    * (nxt_merkle_round.clone() - merkle_rows_before_root.clone()),
+            );
+        builder
+            .when_transition()
+            .when(is_expand.clone())
+            .when(nxt_is_expand.clone())
+            .assert_zero(rootg.clone() * (one.clone() - nxt_rootg.clone()));
+        // The last expansion row is the last row of the window and belongs to the root.
         builder.when_transition().assert_zero(
             is_expand.clone()
                 * (one.clone() - nxt_is_expand.clone())
-                * (merkle_round.clone() - AB::Expr::from(AB::F::from_u8(63))),
+                * (merkle_round.clone() - merkle_last_round.clone()),
         );
-        // The path buffer address is one value for the whole path. Each
-        // expansion row derives its memory address from `imm`, and `imm` on an
-        // expansion row is exempt from the program table.
         builder.when_transition().assert_zero(
-            is_verify_merkle.clone() * nxt_is_expand.clone() * (nxt[COL_IMM].into() - imm.clone()),
+            is_expand.clone()
+                * (one.clone() - nxt_is_expand.clone())
+                * (one.clone() - rootg.clone()),
         );
-        let merkle_final_expected: AB::Expr = cur[COL_MERKLE_FINAL_FLAG].into();
-        let nxt_merkle_final_expected: AB::Expr = nxt[COL_MERKLE_FINAL_FLAG].into();
 
-        // The expected value is carried from the original row into the first expansion.
+        // The held node. The last leaf row hands the buffer over; the last row of a
+        // path group hands over the gadget output (the constraint sits with the gadget).
+        for k in 0..4 {
+            builder
+                .when_transition()
+                .when(leafg.clone() * oh[3].clone())
+                .assert_eq(
+                    nxt[COL_MERKLE_CUR + k].into(),
+                    cur[COL_MERKLE_BUF + k].into(),
+                );
+        }
+
+        // The remaining key. The first path row starts it at the whole key; each level
+        // halves it, `rem == 2 * rem' + bit`; the last level ends it, `rem == bit`. With
+        // `bit` boolean that is one step of binary long division, so the chain forces
+        // `bit == (key >> level) & 1` and, by ending after exactly 64 levels, pins `key`
+        // to 64 bits.
         builder
             .when_transition()
-            .when(on_original_row.clone())
-            .when(nxt_is_expand.clone())
-            .assert_zero(nxt_merkle_final_expected.clone() - merkle_current.clone());
-
-        // And it is carried from expansion row to expansion row unchanged. If it
-        // could change, the carrying would carry nothing.
+            .when(leafg.clone() * oh[3].clone())
+            .assert_eq(
+                nxt[COL_MERKLE_KEY_REM].into(),
+                nxt[COL_VM_MERKLE_KEY].into(),
+            );
         builder
             .when_transition()
-            .when(is_expand.clone())
-            .when(nxt_is_expand.clone())
-            .assert_zero(nxt_merkle_final_expected.clone() - merkle_final_expected.clone());
-
-        // On the last expansion row (the successor row is not an expansion) the round output
-        // must equal the carried value. The chain closes here: the value the original row
-        // compares against the root really is the result of 64 rounds.
+            .when(merkle_hash.clone())
+            .when(nxt_pathg.clone())
+            .assert_zero(
+                cu(COL_MERKLE_KEY_REM)
+                    - two.clone() * nxt[COL_MERKLE_KEY_REM].into()
+                    - merkle_bit.clone(),
+            );
         builder
             .when_transition()
-            .when(is_expand.clone())
-            .when(one.clone() - nxt_is_expand.clone())
-            .assert_zero(merkle_final_expected.clone() - poseidon_output.clone());
+            .when(merkle_hash.clone())
+            .when(nxt_rootg.clone())
+            .assert_eq(cur[COL_MERKLE_KEY_REM].into(), merkle_bit.clone());
 
-        // Commit 3, final root check: on the original
-        // VerifyMerkle step, the merkle_current (which the
-        // Trace_matrix sets to the 64th-round Poseidon output)
-        // Must equal the claimed root `rs1_val` (claimed root)
-        // Via an inverse-witness identity, and `rd_val_new` must
-        // Equal the resulting boolean.
-        //
-        // Layout: trace_matrix populates the original step's
-        // Merkle_current from the 64th-round output. The AIR
-        // Checks
-        //   Diff = merkle_current - rs1_val
-        //   Diff * diff_inv in {0, 1}
-        //   Diff * (1 - diff*diff_inv) = 0
-        //   Rd_val_new == diff * diff_inv
-        // On the original step's row (is_verify_merkle = 1,
-        // Merkle_final_flag = 1).
-        // Equality boolean via inverse witness on the
-        // *original* VerifyMerkle step only. Expansion rows reuse opcode 0x1E
-        // So is_verify_merkle=1 on them too - must gate with (1 - is_expand).
-        //   Prod = diff * inv ∈ {0,1}
-        //   Eq = 1 - prod (1 when final==root, 0 otherwise)
-        //   Diff * eq = 0
-        //   Rd_val_new == eq
-        let on_original: AB::Expr = on_original_row.clone();
-        let merkle_diff_inv: AB::Expr = cur[COL_MERKLE_DIFF_INV].into();
-        let diff: AB::Expr = merkle_current.clone() - rs1_val.clone();
-        let prod: AB::Expr = diff.clone() * merkle_diff_inv.clone();
+        // The root group: one word per row. `held` is the word of the node the row's
+        // index names, `diff` its difference from the word read, and `COL_MERKLE_EQ` is 1
+        // exactly when they are equal (an inverse witness, as for `Eq`).
+        let mut held: AB::Expr = AB::Expr::ZERO;
+        for k in 0..4 {
+            held += oh[k].clone() * cu(COL_MERKLE_CUR + k);
+        }
+        let diff: AB::Expr = held - merkle_word.clone();
+        let eq: AB::Expr = cur[COL_MERKLE_EQ].into();
         builder
-            .when(on_original.clone())
-            .assert_zero(prod.clone() * (one.clone() - prod.clone()));
-        let eq: AB::Expr = one.clone() - prod.clone();
-        builder
-            .when(on_original.clone())
-            .assert_zero(diff.clone() * eq.clone());
-        builder
-            .when(on_original.clone())
-            .assert_zero(rd_val_new.clone() - eq);
-
-        // Fix: leaf binding and first-round
-        // Index must fire ONLY on the *original* VerifyMerkle step.
-        // Expansion rows reuse Opcode::VerifyMerkle so is_verify_merkle=1 on
-        // Them too; without (1 - is_expand) the constraint wrongly forces
-        // Every expand→expand transition to set nxt_merkle_current = rs2_val
-        // (0 on expansion steps) and nxt_round = 0 - which breaks valid proofs.
-        //
-        // Leaf binding: original → first expansion: nxt.merkle_current = leaf.
+            .when(rootg.clone())
+            .assert_eq(eq.clone(), one.clone() - diff.clone() * cu(COL_MERKLE_DINV));
+        builder.when(rootg.clone()).assert_zero(diff * eq.clone());
+        // The running product: it starts at the first root row and the last row hands it
+        // to the result.
         builder
             .when_transition()
-            .when(on_original.clone())
-            .when(nxt_is_expand.clone())
-            .assert_zero(nxt_merkle_current.clone() - rs2_val.clone());
-        // First expansion row round index must be 0.
+            .when(one.clone() - rootg.clone())
+            .when(nxt_rootg.clone())
+            .assert_eq(nxt[COL_MERKLE_ACC].into(), nxt[COL_MERKLE_EQ].into());
         builder
             .when_transition()
-            .when(on_original.clone())
-            .when(nxt_is_expand.clone())
-            .assert_zero(nxt[COL_VM_MERKLE_ROUND].into());
-
-        // (Old long comment removed; the inverse-witness and
-        // Poseidon constraints above close. The leaf
-        // Binding on the first expansion row ties the trace's
-        // Merkle_current chain to the original step's leaf,
-        // Closing the soundness gap.)
+            .when(rootg.clone())
+            .when(nxt_rootg.clone())
+            .assert_eq(
+                nxt[COL_MERKLE_ACC].into(),
+                cu(COL_MERKLE_ACC) * nxt[COL_MERKLE_EQ].into(),
+            );
+        builder.when_transition().assert_zero(
+            is_expand.clone()
+                * (one.clone() - nxt_is_expand.clone())
+                * (cu(COL_MERKLE_RESULT) - cur[COL_MERKLE_ACC].into()),
+        );
 
         let is_push: AB::Expr = cur[COL_IS_PUSH].into();
         let is_pop: AB::Expr = cur[COL_IS_POP].into();
@@ -3189,8 +3081,14 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             let p_commit: AB::Expr = is_privacy_commit.clone();
             let p_null: AB::Expr = is_nullifier_check.clone();
             let p_sw: AB::Expr = is_swrite.clone();
+            // The last row of a Merkle path group: the gadget compresses two nodes.
+            let p_merkle: AB::Expr = cur[COL_MERKLE_HASH].into();
             // Any row that needs the Poseidon gadget.
-            let p: AB::Expr = p_poseidon.clone() + p_commit.clone() + p_null.clone() + p_sw.clone();
+            let p: AB::Expr = p_poseidon.clone()
+                + p_commit.clone()
+                + p_null.clone()
+                + p_sw.clone()
+                + p_merkle.clone();
 
             // Opcode ↔ selector binding (malicious prover cannot flip selector).
             let opcode_at: AB::Expr = cur[COL_OPCODE].into();
@@ -3226,41 +3124,37 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                     + cur[COL_STATE_WRITES_0 + 2 * k + 1].into()
                         * AB::Expr::from(AB::F::from_u64(1u64 << 32))
             };
-            let expected_s0 = p_poseidon.clone() * rs1_val.clone()
+            // The Merkle lanes: the node and the buffer, ordered by the key bit. Lanes 0..4
+            // are the left child, lanes 4..8 the right child.
+            let merkle_bit_here: AB::Expr = cur[COL_VM_MERKLE_BIT].into();
+            let merkle_lane = |k: usize, right: bool| -> AB::Expr {
+                let node: AB::Expr = cur[COL_MERKLE_CUR + k].into();
+                let buf: AB::Expr = cur[COL_MERKLE_BUF + k].into();
+                let (first, second) = if right { (buf, node) } else { (node, buf) };
+                first * (one.clone() - merkle_bit_here.clone()) + second * merkle_bit_here.clone()
+            };
+            let mut expected: Vec<AB::Expr> = vec![AB::Expr::ZERO; POSEIDON_WIDTH];
+            expected[0] = p_poseidon.clone() * rs1_val.clone()
                 + p_commit.clone() * rs1_val.clone()
                 + p_null.clone() * rs2_val.clone()
                 + p_sw.clone() * storage_slot.clone();
-            let expected_s1 = p_poseidon.clone() * rs2_val.clone()
+            expected[1] = p_poseidon.clone() * rs2_val.clone()
                 + p_commit.clone() * rs2_val.clone()
                 + p_null.clone() * domain_nullifier
                 + p_sw.clone() * rs1_val.clone();
-            let expected_s2 = p_commit.clone() * imm.clone() + p_sw.clone() * acc_lane(0);
-            let expected_s3 = p_sw.clone() * acc_lane(1);
-            let expected_s4 = p_sw.clone() * acc_lane(2);
-            let expected_s5 = p_sw.clone() * acc_lane(3);
-
-            builder
-                .when(p.clone())
-                .assert_eq(cur[COL_POSEIDON_STATE_BASE].into(), expected_s0);
-            builder
-                .when(p.clone())
-                .assert_eq(cur[COL_POSEIDON_STATE_BASE + 1].into(), expected_s1);
-            builder
-                .when(p.clone())
-                .assert_eq(cur[COL_POSEIDON_STATE_BASE + 2].into(), expected_s2);
-            builder
-                .when(p.clone())
-                .assert_eq(cur[COL_POSEIDON_STATE_BASE + 3].into(), expected_s3);
-            builder
-                .when(p.clone())
-                .assert_eq(cur[COL_POSEIDON_STATE_BASE + 4].into(), expected_s4);
-            builder
-                .when(p.clone())
-                .assert_eq(cur[COL_POSEIDON_STATE_BASE + 5].into(), expected_s5);
-            for i in 6..8 {
+            expected[2] = p_commit.clone() * imm.clone() + p_sw.clone() * acc_lane(0);
+            expected[3] = p_sw.clone() * acc_lane(1);
+            expected[4] = p_sw.clone() * acc_lane(2);
+            expected[5] = p_sw.clone() * acc_lane(3);
+            for k in 0..4 {
+                expected[k] = expected[k].clone() + p_merkle.clone() * merkle_lane(k, false);
+                expected[4 + k] = expected[4 + k].clone() + p_merkle.clone() * merkle_lane(k, true);
+            }
+            // Lanes 8..12 (the capacity) start at zero for every use.
+            for (lane, want) in expected.into_iter().enumerate() {
                 builder
                     .when(p.clone())
-                    .assert_zero(cur[COL_POSEIDON_STATE_BASE + i]);
+                    .assert_eq(cur[COL_POSEIDON_STATE_BASE + lane].into(), want);
             }
 
             // Single source of truth: the VM computes what the AIR checks, so
@@ -3274,10 +3168,10 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
             for r in 0..POSEIDON_ROUNDS {
                 let lanes = poseidon_sbox_lanes(r);
                 let sbox_off = poseidon_sbox_offset(r);
-                let mut sbox_out = vec![AB::Expr::ZERO; 8];
+                let mut sbox_out = vec![AB::Expr::ZERO; POSEIDON_WIDTH];
 
-                for i in 0..8 {
-                    let s: AB::Expr = cur[COL_POSEIDON_STATE_BASE + r * 8 + i].into()
+                for i in 0..POSEIDON_WIDTH {
+                    let s: AB::Expr = cur[COL_POSEIDON_STATE_BASE + r * POSEIDON_WIDTH + i].into()
                         + AB::Expr::from(AB::F::from_u64(RC[r][i]));
 
                     if i < lanes {
@@ -3302,18 +3196,19 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 }
 
                 if r + 1 < POSEIDON_ROUNDS {
-                    for i in 0..8 {
+                    for i in 0..POSEIDON_WIDTH {
                         let mut sum: AB::Expr = AB::Expr::ZERO;
-                        for j in 0..8 {
+                        for j in 0..POSEIDON_WIDTH {
                             sum += sbox_out[j].clone() * AB::Expr::from(AB::F::from_u64(MDS[i][j]));
                         }
-                        builder
-                            .when(p.clone())
-                            .assert_eq(cur[COL_POSEIDON_STATE_BASE + (r + 1) * 8 + i].into(), sum);
+                        builder.when(p.clone()).assert_eq(
+                            cur[COL_POSEIDON_STATE_BASE + (r + 1) * POSEIDON_WIDTH + i].into(),
+                            sum,
+                        );
                     }
                 } else {
                     let mut sum: AB::Expr = AB::Expr::ZERO;
-                    for j in 0..8 {
+                    for j in 0..POSEIDON_WIDTH {
                         sum += sbox_out[j].clone() * AB::Expr::from(AB::F::from_u64(MDS[0][j]));
                     }
                     poseidon_out = sum;
@@ -3321,10 +3216,16 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                     // output become the next accumulator (8 x u32 limbs).
                     for k in 0..4 {
                         let mut out_k: AB::Expr = AB::Expr::ZERO;
-                        for j in 0..8 {
+                        for j in 0..POSEIDON_WIDTH {
                             out_k +=
                                 sbox_out[j].clone() * AB::Expr::from(AB::F::from_u64(MDS[k][j]));
                         }
+                        // The same four lanes are the node a Merkle level hands to the
+                        // next row.
+                        builder
+                            .when_transition()
+                            .when(p_merkle.clone())
+                            .assert_eq(nxt[COL_MERKLE_CUR + k].into(), out_k.clone());
                         let next_limb_lo: AB::Expr = nxt[COL_STATE_WRITES_0 + 2 * k].into();
                         let next_limb_hi: AB::Expr = nxt[COL_STATE_WRITES_0 + 2 * k + 1].into();
                         builder.when_transition().when(is_swrite.clone()).assert_eq(
