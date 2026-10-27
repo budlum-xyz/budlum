@@ -2259,6 +2259,22 @@ impl AccountState {
         let jail_epochs = 7;
         validator.jail_until = self.epoch_index.saturating_add(jail_epochs);
 
+        // Fourth transition out of the eligible set, and until now the only one
+        // that left the tally alone. A vote carries a snapshot of the voter's
+        // stake while the quorum denominator is recomputed from the live
+        // eligible set at finalisation, so a validator that votes and then
+        // equivocates in a block header kept its full pre-slash weight in
+        // `votes_for` while its whole stake left `get_total_stake`. With the
+        // 33 % quorum that is a minority holding ~24.8 % of eligible stake
+        // clearing a threshold that names a third. The reduction saturates and
+        // keeps the address in `voters`, exactly as the unbonding, report and
+        // governance-slash paths do, so it cannot vote a second time.
+        for proposal in self.governance.proposals.iter_mut() {
+            if proposal.status == crate::core::governance::ProposalStatus::Active {
+                proposal.reduce_vote_weight(address, u64::MAX);
+            }
+        }
+
         // Mirror the slash into the permissionless registry so the two
         // Views stay consistent. The registry's `is_active` predicate is what
         // The rest of the node (consensus, RPC) checks, so an account that
@@ -2379,6 +2395,14 @@ impl AccountState {
                         // every activation predicate requires `!slashed` - and
                         // the remaining bond stayed locked for good. The jail
                         // flag with its expiry is the whole penalty.
+                        //
+                        // Which means the term is only real if the admission
+                        // predicates read it. Both of them go through
+                        // `Validator::is_eligible`, which expresses
+                        // `!jailed || epoch >= jail_until`; `active` alone is
+                        // not enough, because a stake top-up or a consensus-key
+                        // registration recomputes it without consulting the
+                        // jail (see the `Stake` / `RegisterConsensusKeys` arms).
                         validator.jailed = true;
                         validator.jail_until = self.epoch_index.saturating_add(7);
                         tracing::info!(
