@@ -204,7 +204,7 @@ impl RegenHealthTick {
         // for the repair sync instead of falling silent.
         let reverted = self.ledger.stage != Stage::Medusa;
         let live_diverged = match (
-            view.at(Stage::Medusa, view.live).and_then(|c| c.local),
+            view.at(view.live).and_then(|c| c.local),
             view.canonical(Stage::Medusa, view.live),
         ) {
             (Some(local), Some(canonical)) => local != canonical,

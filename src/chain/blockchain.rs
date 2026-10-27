@@ -8667,6 +8667,23 @@ impl Blockchain {
                     self.hold_expiry_that_would_strand(deal_id, current_epoch);
                     continue;
                 }
+                Err(
+                    crate::domain::storage_deal::StorageError::OpenChallengeBlocksExpiry {
+                        open_challenges,
+                        ..
+                    },
+                ) => {
+                    // The term is over but a question about these bytes is
+                    // still open. The missed-answer slash settles only an
+                    // `Active` deal, so the row is held and the next sweep
+                    // expires it. Expected, not a fault: no warning, and no
+                    // reallocation ticket until the deal actually expires.
+                    tracing::debug!(
+                        "B.U.D. deal {deal_id} reached its term with {open_challenges} challenge(s) \
+                         still open; held Active at epoch {current_epoch}"
+                    );
+                    continue;
+                }
                 Err(error) => {
                     tracing::warn!("Storage deal {deal_id} could not be expired: {error}");
                     continue;
@@ -9066,7 +9083,11 @@ mod tests {
             45262,
             None,
         );
-        let domain = default_domain(1, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 1);
+        // Domain id 1 is Ethereum's slot in the external-root map, and a
+        // domain may anchor under a claimed id only when it declares the chain
+        // that id names (`accept_verified_commitment`). The fixture is a real
+        // Ethereum domain, not a domain that happens to sit on id 1.
+        let domain = default_domain(1, ConsensusKind::PoW, 1, "pow-header-chain-v1", 1);
         bc.register_consensus_domain(domain.clone()).unwrap();
 
         let mut block1 = Block::new(1, "00".repeat(32), vec![]);
