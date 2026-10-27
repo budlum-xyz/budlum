@@ -255,6 +255,61 @@ pub fn merkle_rebuild_root_u64(
     Some(cur)
 }
 
+
+// ---------------------------------------------------------------------------
+// PQ signature length classification (mirrors `crypto::primitives`)
+// ---------------------------------------------------------------------------
+//
+// The bounded logic around signature verification is the length admissibility
+// check: a validator registration or an attestation either carries the length
+// the scheme demands or it is malformed before any signature arithmetic runs.
+// The three accepted signature lengths (Dilithium5, ML-DSA-65, ML-DSA-87) are
+// pairwise distinct, so a single length classifies a PQ signature
+// unambiguously. `budlum-core`'s `pq_signature_classification_matches_the_
+// kani_mirror` keeps the constants in step with `crypto::primitives`.
+
+/// Dilithium5 signature length in bytes (CRYSTALS-Dilithium round-3 set).
+pub const PQ_SIG_LEN_DILITHIUM5: usize = 4595;
+/// FIPS 204 ML-DSA-65 signature length in bytes.
+pub const PQ_SIG_LEN_ML_DSA_65: usize = 3309;
+/// FIPS 204 ML-DSA-87 signature length in bytes.
+pub const PQ_SIG_LEN_ML_DSA_87: usize = 4627;
+
+/// The PQ signature scheme a signature length identifies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PqSigClass {
+    Dilithium5,
+    MlDsa65,
+    MlDsa87,
+    Unknown,
+}
+
+/// Classify a PQ signature length, mirroring `crypto::primitives::classify_pq_signature_len`.
+#[must_use]
+pub fn classify_pq_signature_len(len: usize) -> PqSigClass {
+    if len == PQ_SIG_LEN_DILITHIUM5 {
+        PqSigClass::Dilithium5
+    } else if len == PQ_SIG_LEN_ML_DSA_65 {
+        PqSigClass::MlDsa65
+    } else if len == PQ_SIG_LEN_ML_DSA_87 {
+        PqSigClass::MlDsa87
+    } else {
+        PqSigClass::Unknown
+    }
+}
+
+/// Whether a signature length is acceptable for an expected scheme, mirroring
+/// `crypto::primitives::pq_signature_len_acceptable`.
+#[must_use]
+pub fn pq_signature_len_acceptable(len: usize, expected: PqSigClass) -> bool {
+    match expected {
+        PqSigClass::Dilithium5 => len == PQ_SIG_LEN_DILITHIUM5,
+        PqSigClass::MlDsa65 => len == PQ_SIG_LEN_ML_DSA_65,
+        PqSigClass::MlDsa87 => len == PQ_SIG_LEN_ML_DSA_87,
+        PqSigClass::Unknown => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Finality certificate bitmap accounting (mirrors `chain::finality`)
 // ---------------------------------------------------------------------------
