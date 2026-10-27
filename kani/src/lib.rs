@@ -256,60 +256,6 @@ pub fn merkle_rebuild_root_u64(
 }
 
 // ---------------------------------------------------------------------------
-// PQ signature length classification (mirrors `crypto::primitives`)
-// ---------------------------------------------------------------------------
-//
-// The bounded logic around signature verification is the length admissibility
-// check: a validator registration or an attestation either carries the length
-// the scheme demands or it is malformed before any signature arithmetic runs.
-// The three accepted signature lengths (Dilithium5, ML-DSA-65, ML-DSA-87) are
-// pairwise distinct, so a single length classifies a PQ signature
-// unambiguously. `budlum-core`'s `pq_signature_classification_matches_the_
-// kani_mirror` keeps the constants in step with `crypto::primitives`.
-
-/// Dilithium5 signature length in bytes (CRYSTALS-Dilithium round-3 set).
-pub const PQ_SIG_LEN_DILITHIUM5: usize = 4595;
-/// FIPS 204 ML-DSA-65 signature length in bytes.
-pub const PQ_SIG_LEN_ML_DSA_65: usize = 3309;
-/// FIPS 204 ML-DSA-87 signature length in bytes.
-pub const PQ_SIG_LEN_ML_DSA_87: usize = 4627;
-
-/// The PQ signature scheme a signature length identifies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PqSigClass {
-    Dilithium5,
-    MlDsa65,
-    MlDsa87,
-    Unknown,
-}
-
-/// Classify a PQ signature length, mirroring `crypto::primitives::classify_pq_signature_len`.
-#[must_use]
-pub fn classify_pq_signature_len(len: usize) -> PqSigClass {
-    if len == PQ_SIG_LEN_DILITHIUM5 {
-        PqSigClass::Dilithium5
-    } else if len == PQ_SIG_LEN_ML_DSA_65 {
-        PqSigClass::MlDsa65
-    } else if len == PQ_SIG_LEN_ML_DSA_87 {
-        PqSigClass::MlDsa87
-    } else {
-        PqSigClass::Unknown
-    }
-}
-
-/// Whether a signature length is acceptable for an expected scheme, mirroring
-/// `crypto::primitives::pq_signature_len_acceptable`.
-#[must_use]
-pub fn pq_signature_len_acceptable(len: usize, expected: PqSigClass) -> bool {
-    match expected {
-        PqSigClass::Dilithium5 => len == PQ_SIG_LEN_DILITHIUM5,
-        PqSigClass::MlDsa65 => len == PQ_SIG_LEN_ML_DSA_65,
-        PqSigClass::MlDsa87 => len == PQ_SIG_LEN_ML_DSA_87,
-        PqSigClass::Unknown => false,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Finality certificate bitmap accounting (mirrors `chain::finality`)
 // ---------------------------------------------------------------------------
 //
@@ -463,11 +409,9 @@ pub fn stake_sum(stakes: &[u64; MAX_MIRROR_VALIDATORS], n: usize) -> u128 {
 #[cfg(kani)]
 mod proofs {
     use super::{
-        bitmap_voted_stake, classify_pq_signature_len, merkle_parent_layer_fold,
-        merkle_rebuild_root_u64, merkle_root_u64, merkle_sibling_index, penalty_for,
-        pq_signature_len_acceptable, raw_quotient, stake_sum, PqSigClass, FIXED_POINT_SCALE,
-        MAX_MIRROR_LEAVES, MAX_MIRROR_VALIDATORS, PQ_SIG_LEN_DILITHIUM5, PQ_SIG_LEN_ML_DSA_65,
-        PQ_SIG_LEN_ML_DSA_87,
+        bitmap_voted_stake, merkle_parent_layer_fold, merkle_rebuild_root_u64, merkle_root_u64,
+        merkle_sibling_index, penalty_for, raw_quotient, stake_sum, FIXED_POINT_SCALE,
+        MAX_MIRROR_LEAVES, MAX_MIRROR_VALIDATORS,
     };
 
     /// A slash can never take more stake than the member has.
@@ -902,76 +846,6 @@ mod proofs {
             merkle_rebuild_root_u64(&leaves, len, leaf_index),
             None,
             "an empty tree or an index past the last leaf has no rebuild"
-        );
-    }
-
-    /// PQ signature classification is total and round-trips.
-    ///
-    /// For every length, the classifier returns a scheme or `Unknown`; when it
-    /// names a scheme, the length is exactly that scheme's constant. This is
-    /// the admissibility check every PQ attestation passes through.
-    #[kani::proof]
-    fn pq_signature_classification_round_trips() {
-        let len: usize = kani::any();
-        let class = classify_pq_signature_len(len);
-        match class {
-            PqSigClass::Dilithium5 => {
-                assert_eq!(len, PQ_SIG_LEN_DILITHIUM5);
-            }
-            PqSigClass::MlDsa65 => {
-                assert_eq!(len, PQ_SIG_LEN_ML_DSA_65);
-            }
-            PqSigClass::MlDsa87 => {
-                assert_eq!(len, PQ_SIG_LEN_ML_DSA_87);
-            }
-            PqSigClass::Unknown => {}
-        }
-    }
-
-    /// An acceptable length for a scheme is classified as that scheme.
-    ///
-    /// The two functions are separate entry points; this proves they cannot
-    /// disagree, so a caller that checks acceptability and a caller that
-    /// classifies see the same boundary.
-    #[kani::proof]
-    fn pq_signature_acceptability_agrees_with_classification() {
-        let len: usize = kani::any();
-        let expected: u8 = kani::any();
-        let expected = match expected % 4 {
-            0 => PqSigClass::Dilithium5,
-            1 => PqSigClass::MlDsa65,
-            2 => PqSigClass::MlDsa87,
-            _ => PqSigClass::Unknown,
-        };
-
-        if pq_signature_len_acceptable(len, expected) {
-            assert_eq!(
-                classify_pq_signature_len(len),
-                expected,
-                "a length acceptable for a scheme must classify as that scheme"
-            );
-        }
-    }
-
-    /// The three accepted PQ signature lengths are pairwise distinct.
-    ///
-    /// A collision would make classification ambiguous, which is exactly the
-    /// failure mode the length check exists to prevent.
-    #[kani::proof]
-    fn pq_signature_lengths_are_pairwise_distinct() {
-        // Through the classifier, not by comparing the constants: two equal
-        // lengths make the first branch win and the second assert fail.
-        assert_eq!(
-            classify_pq_signature_len(PQ_SIG_LEN_DILITHIUM5),
-            PqSigClass::Dilithium5
-        );
-        assert_eq!(
-            classify_pq_signature_len(PQ_SIG_LEN_ML_DSA_65),
-            PqSigClass::MlDsa65
-        );
-        assert_eq!(
-            classify_pq_signature_len(PQ_SIG_LEN_ML_DSA_87),
-            PqSigClass::MlDsa87
         );
     }
 
