@@ -21,14 +21,18 @@
 //! - M1: Winternitz core, epoch-bound Merkle key evolution, quota-bounded
 //!   signing, self-consistency and refusal batteries, SHA3-256 reference
 //!   backend.
-//! - M2 (this file set): canonical Poseidon2-Goldilocks-16 backend over the
+//! - M2 (this file set): a Poseidon2-Goldilocks-16 backend over the
 //!   [`hash::BpqsHash`] seam (p3 parameters, straightline in-crate port);
-//!   SHAKE-256 XOF cross-check backend on the `keccak` permutation
-//!   (FIPS 202 domain suffix 0x1F); the backend differential battery
-//!   (same scheme, three hash families); frozen KAT vector file under
-//!   `kat/`; differential bench example vs the in-tree `ml-dsa` and the
-//!   `slh-dsa` crate; BPQS fuzz harness in the repo fuzz workspace.
-//!   `Sha3_256Hash` is cross-check 1 from here on.
+//!   SHAKE-256 XOF backend on the `keccak` permutation (FIPS 202 domain
+//!   suffix 0x1F); the backend differential battery (same scheme, three hash
+//!   families); frozen KAT vector file under `kat/`; differential bench
+//!   example vs the in-tree `ml-dsa` and the `slh-dsa` crate; BPQS fuzz
+//!   harness in the repo fuzz workspace.
+//! - (): the canonical backend for long-lived
+//!   use is SHAKE-256 ([`CanonicalHash`]). Poseidon2 stays only as a
+//!   research backend for in-VM verification experiments: an algebraic hash
+//!   is never the long-lived signature or commitment hash. The
+//!   algorithm slot in `pq_anchor.rs` stays reserved.
 //!
 //! ## Honesty box
 //!
@@ -87,6 +91,12 @@ pub use hash::{BpqsHash, Sha3_256Hash};
 pub use params::{BpqsParams, ParamsL3, ParamsL5};
 pub use poseidon2::Poseidon2GoldilocksHash;
 pub use shake256::Shake256Hash;
+
+/// The canonical hash backend for any long-lived use of this construction
+///: SHAKE-256, a FIPS 202 member whose security rests on the
+/// Keccak permutation alone. The Poseidon2 backend is research-only and is
+/// never the hash of a long-lived signature or commitment.
+pub type CanonicalHash = Shake256Hash;
 pub use sign::{keygen_root, verify_at_height, BpqsSignature};
 
 #[cfg(test)]

@@ -15,15 +15,22 @@ crate-type = ["cdylib", "rlib"]
 # signature scheme. The node already links the same family via the
 # `pq-ml-dsa` validator feature; the wallet pins Category 5 (256-bit
 # quantum security) rather than inheriting Category 3.
-ml-dsa = { version = "0.1.1", features = ["alloc", "zeroize", "rand_core"] }
-# rand_core 0.10 traits only (no getrandom feature): the hedged-signing
-# adapter below implements TryRng by hand from the crate's own CSPRNG path,
-# so wasm builds keep working exactly as before.
-rand_core = { version = "0.10", default-features = false }
+ml-dsa = { version = "=0.1.1", features = ["alloc", "zeroize", "rand_core"] }
+# The shared cryptographic core (`src/crypto.rs` mounts the node own files by
+# path): ML-DSA is verified by a second library, SLH-DSA backs the recovery key
+# and the emergency suite, Ed25519 is the composite signature classical half.
+# Exact pins, the same versions as the root manifest.
+libcrux-ml-dsa = { version = "=0.0.11", default-features = false, features = ["std", "mldsa65", "mldsa87"] }
+slh-dsa = { version = "=0.2.0-rc.5", features = ["zeroize"] }
+ed25519-dalek = "=3.0.0"
 sha3 = "0.10"
 sha2 = "0.10"
 hex = "0.4"
-zeroize = { version = "1", features = ["derive"] }
+zeroize = { version = "=1.9.1", features = ["derive"] }
+# SHAKE256 of the key derivation, the same crate and pin as the root manifest.
+shake = "=0.1.0"
+#: the wallet password is NFKD normalized before the root derivation.
+unicode-normalization = { version = "=0.1.24", default-features = false }
 # The wallet packs the field elements the chain will look up by. That packing
 # is the same rule the node and the zkVM state layer apply, so all three read
 # it from one place rather than each carrying a copy.
@@ -32,12 +39,17 @@ budlum-note-packing = { path = "../note-packing" }
 # BIP39 mnemonic generation (minimal in-tree impl - no external dep for entropy→mnemonic)
 # Key derivation is ML-DSA-87 seed-based (FIPS 204) hardened only.
 
+# The mounted PQ core tests (`src/crypto/pq_vector_tests.rs`) read the NIST and
+# Wycheproof vector files in `tests/vectors/pq`.
+[dev-dependencies]
+serde_json = "=1.0.154"
+
 [package.metadata.cargo-machete]
 # wasm-bindgen is an optional dependency activated by the `wasm` feature (see
 # the [features] section below). cargo-machete cannot see feature-gated optional
 # deps in a default build and therefore thinks it is "unused"; that is a false
 # positive, and the dependency is used when built with `--features wasm`.
-ignored = ["wasm-bindgen"]
+ignored = ["wasm-bindgen", "getrandom-wasm"]
 
 [features]
 default = []
@@ -47,8 +59,11 @@ default = []
 production = ["dep:getrandom"]
 # UniFFI bindings (mobile: Kotlin/Swift)
 uniffi = []
-# WASM bindings (browser)
-wasm = ["wasm-bindgen"]
+# WASM bindings (browser): BrowserWallet and the RPC bodies.
+wasm = ["wasm-bindgen", "rpc"]
+# JSON-RPC bodies and answers for the node's public listener; no network
+# dependency, the host sends them.
+rpc = []
 
 [dependencies.getrandom]
 version = "0.2"
@@ -60,6 +75,10 @@ optional = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+# ml-dsa reaches getrandom 0.4 through crypto-common. On wasm32 that version
+# has no entropy source unless its `wasm_js` backend is selected; the browser
+# build (`--features wasm`) does not compile without it.
+getrandom-wasm = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
 # wallet-core is a separate workspace and does not inherit the root manifest's
 # profile. It handles balances and amounts, where a silent release-mode wrap is

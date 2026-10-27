@@ -61,8 +61,9 @@ plus ~10^3 u64 compares.
 Three facts collide with the pre-registration's sentence:
 
 1. The permutations are not the same permutation. The AIR constrains a
-   width-8 Poseidon2; the BPQS canonical backend (user decision
-   2026-09-19, "p3 parameters") is width-16 with a 512-bit capacity
+   width-8 Poseidon2; the BPQS
+   research backend (user decision 2026-09-19, "p3 parameters"; SHAKE-256 is
+   the canonical backend since) is width-16 with a 512-bit capacity
    sponge - the width is exactly where the L5 budget lives (SECURITY-
    ARGUMENT.md section 5/A3). A width-8 sponge at the same rate split
    offers a 256-bit capacity, which prices the one-way claim at ~128
@@ -123,7 +124,7 @@ available; recorded so the cost of E1 is visible against it.
 
 Registered recommendation (this document's own weighing, pending the
 user's decision on item 7 and the review-call issue): E1, queued as
-manifest items M-3/M-4 below so the review assesses the widened chip
+manifest items / below so the review assesses the widened chip
 set in the same engagement as the VerifyMerkle binding re-review.
 
 ## 5. Audit queue manifest (routing for the bar-3/bar-4 joint engagement)
@@ -131,24 +132,24 @@ set in the same engagement as the VerifyMerkle binding re-review.
 The single named audit package this document and `src/settlement/
 pq_anchor.rs` both wait on; each item names its evidence owner:
 
-- M-1: VerifyMerkle opcode 0x1E re-review after the binding fix -
+-: VerifyMerkle opcode 0x1E re-review after the binding fix -
   includes `rejects_verify_merkle_root_not_produced_by_the_path` and
   the address-wrap panic history (fix + regression pins in place).
   Owner of evidence: bud-proof / bud-isa trees as pinned at the
   engagement start commit.
-- M-2: plonky3 AIR main package covering execution + Poseidon width-8
+-: plonky3 AIR main package covering execution + Poseidon width-8
   privacy lane (the 30-round constraint set; the privacy opcodes'
   reopening rationale in bud-isa is part of the record the reviewer
   reads).
-- M-3 (queued by this document): Poseidon16 chip (E1) with the
+- (queued by this document): Poseidon16 chip (E1) with the
   cross-KAT obligation against `crates/bpqs/src/poseidon2.rs`
   constants and the pinned upstream vector; opens once decision item 7
   lands E1-side.
-- M-4 (queued by this document): BPQS verify-chain trace projection
+- (queued by this document): BPQS verify-chain trace projection
   (the ~2 x 10^3-permutation schedule of section 2) expressed over
-  M-3's chip, so the anchor verification's row count is part of the
+ 's chip, so the anchor verification's row count is part of the
   audited package, not an estimate in a markdown file.
-- M-5: gas table impact of any new chip (17-priced-opcode calibration
+-: gas table impact of any new chip (17-priced-opcode calibration
   gate currently pins floors; new priced entries need new evidence).
 
 ## 6. What blocks where (dependency graph, one line each)
@@ -158,6 +159,6 @@ pq_anchor.rs` both wait on; each item names its evidence owner:
 - Bar 3 (review call) can issue in parallel with KARAR-7; the call's
   question 2 already subsumes it (`docs/BPQS_INDEPENDENT_REVIEW_CALL.md`).
 - Bar 4 (this document) -> E1/E2/E3 posture (user decision; E1
-  recommended) -> M-3/M-4 implementation (a later milestone; chip work
+  recommended) -> / implementation (a later milestone; chip work
   belongs to the BudZero tree, not crates/bpqs) -> VerifyMerkle
   external review (shared blocker with anchor production mode).

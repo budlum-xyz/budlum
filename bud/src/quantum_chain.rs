@@ -3,11 +3,16 @@
 //! Fix in 8 steps, KQ-* gates, no unsafe.
 //!
 //! FINAL decisions: V4 SHA3 hard fork, a 128KB block holding 27 tx, lower
-//! threshold, same_set, dual_required_new, snow_hybrid, ci_gate, only
-//! ml-dsa-87 final, sha3_sponge, hard_fork_announce.
+//! threshold, same_set, ci_gate, only ml-dsa-87 final, sha3_sponge,
+//! hard_fork_announce.
 //!
-//! K4 fix (2026-08-16): signature verification moved from a no-op to real
-//! cryptography - ed25519 (RFC 8032) + ML-DSA-87 (FIPS 204).
+//! What this module is not: it holds no signature scheme, no wallet and no
+//! key exchange. An `Ed25519 plus ML-DSA` transaction type, a dual wallet and a
+//! `SnowHybrid` P2P verdict used to live here; the first was never used, the
+//! second hashed seeds into an address of its own, and the third answered a
+//! constant. None of them was the chain's cryptography, and all three read as
+//! if they were, so they are gone. The `no_constant_security_verdicts` gate
+//! keeps a function named like a security verdict from returning a literal.
 //!
 //! There is no VRF in this module. A `PqVrf` used to live here whose output
 //! was `SHA3(pk || slot || prev)`: every input public, so anyone computed
@@ -42,61 +47,6 @@ impl Sha3Hasher {
     }
 }
 
-/// Hybrid Tx: Ed25519 + ML-DSA-87 - 128KB block
-/// K4 fix: the old verify only checked sizes (the signature was NOT verified).
-/// It now really verifies the ed25519 signature plus the ML-DSA-87 (FIPS 204)
-/// signature.
-#[derive(Debug, Clone)]
-pub struct HybridTx {
-    pub ed_sig: [u8; 64],
-    pub pq_sig: Vec<u8>, // 4627B ML-DSA-87
-    pub pq_pub_hash: [u8; 32],
-}
-impl HybridTx {
-    /// The commitment a transaction carries to its ML-DSA public key.
-    fn pq_pub_hash_of(pq_pk: &[u8]) -> [u8; 32] {
-        Sha3Hasher::hash_fields(&[b"BUD_PQ_PUB_HASH_V1", pq_pk])
-    }
-    pub fn verify(&self, msg: &[u8], ed_pk: &[u8], pq_pk: &[u8]) -> bool {
-        use ed25519_dalek::{Signature as EdSig, VerifyingKey as EdVk};
-        // 0) The PQ key must be the one this transaction commits to.
-        if self.pq_pub_hash != Self::pq_pub_hash_of(pq_pk) {
-            return false;
-        }
-        // 1) Verify the Ed25519 signature.
-        let pk32: [u8; 32] = match ed_pk.try_into() {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        let vk = match EdVk::from_bytes(&pk32) {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        let ed_sig = match EdSig::from_slice(&self.ed_sig) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        if vk.verify_strict(msg, &ed_sig).is_err() {
-            return false;
-        }
-        // 2) Verify the ML-DSA-87 signature (FIPS 204).
-        let enc_vk = match ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(pq_pk) {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-        let vk87 = ml_dsa::VerifyingKey::<ml_dsa::MlDsa87>::decode(&enc_vk);
-        let sig87 = match ml_dsa::Signature::<ml_dsa::MlDsa87>::try_from(&self.pq_sig[..]) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        use ml_dsa::signature::Verifier as PqVerifier;
-        vk87.verify(msg, &sig87).is_ok()
-    }
-    pub fn size_bytes(&self) -> usize {
-        64 + self.pq_sig.len() + 32
-    }
-}
-
 /// Hybrid Finality Vote - same_set quorum
 #[derive(Debug, Clone)]
 pub struct HybridFinalityVote {
@@ -118,48 +68,6 @@ impl HybridFinalityVote {
         // an honest signer. `ceil(2n/3)` admitted two of three.
         let quorum = n - (n - 1) / 3;
         bls_ok && pq_ok && count >= quorum
-    }
-}
-
-/// Dual Wallet - dual_required_new, no address, SHA3(ed||pq) bud1...
-#[derive(Clone)]
-pub struct DualWallet {
-    pub ed_seed: [u8; 32],
-    pub pq_seed: [u8; 32],
-}
-
-/// The seeds are secrets: the debug form never prints them.
-impl std::fmt::Debug for DualWallet {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("DualWallet { seeds: <redacted> }")
-    }
-}
-impl DualWallet {
-    pub fn from_bip39_seed(seed: &[u8; 64]) -> Self {
-        let mut ed = [0u8; 32];
-        ed.copy_from_slice(&seed[0..32]);
-        let mut h = Sha3_256::new();
-        h.update(b"BUD_PQ_V1");
-        h.update(seed);
-        let pq: [u8; 32] = h.finalize().into();
-        Self {
-            ed_seed: ed,
-            pq_seed: pq,
-        }
-    }
-    /// The address commits to the PUBLIC keys, so a verifier holding the keys can recompute it.
-    fn address_from_pubkeys(ed_pk: &[u8], pq_pk: &[u8]) -> [u8; 32] {
-        Sha3Hasher::hash_fields(&[b"BUD_DUAL_ADDR_V1", ed_pk, pq_pk])
-    }
-    pub fn address(&self) -> [u8; 32] {
-        let ed_pk = ed25519_dalek::SigningKey::from_bytes(&self.ed_seed).verifying_key();
-        let pq_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed(&self.pq_seed.into());
-        let pq_vk: &ml_dsa::VerifyingKey<ml_dsa::MlDsa87> = pq_sk.as_ref();
-        let pq_pk: Vec<u8> = pq_vk.encode().into_iter().collect();
-        Self::address_from_pubkeys(ed_pk.as_bytes(), &pq_pk)
-    }
-    pub fn has_dual(&self) -> bool {
-        self.ed_seed != [0u8; 32] && self.pq_seed != [0u8; 32]
     }
 }
 
@@ -209,18 +117,6 @@ impl MobileSelfProvider {
     }
 }
 
-/// Snow hybrid X25519 + ML-KEM-768 - P2P
-pub struct SnowHybrid;
-impl SnowHybrid {
-    /// No ML-KEM handshake exists in this tree (no ML-KEM crate is a dependency).
-    pub fn handshake_ml_kem_ok() -> bool {
-        false
-    }
-    pub fn is_quantum_resistant() -> bool {
-        Self::handshake_ml_kem_ok()
-    }
-}
-
 /// SHA3 sponge - Poseidon2 → SHA3
 pub struct Sha3Sponge;
 impl Sha3Sponge {
@@ -235,17 +131,8 @@ impl QuantumChainGates {
     pub fn kq_hash(data: &[u8], digest: &[u8; 32]) -> bool {
         Sha3Hasher::hash_bytes(data) == *digest
     }
-    pub fn kq_tx(tx: &HybridTx, msg: &[u8], ed_pk: &[u8], pq_pk: &[u8]) -> bool {
-        tx.verify(msg, ed_pk, pq_pk)
-    }
     pub fn kq_final(bls_ok: bool, pq_ok: bool, signers: &[usize], n: usize) -> bool {
         HybridFinalityVote::verify_quorum(bls_ok, pq_ok, signers, n)
-    }
-    pub fn kq_wallet(wallet: &DualWallet) -> bool {
-        wallet.has_dual()
-    }
-    pub fn kq_p2p() -> bool {
-        SnowHybrid::handshake_ml_kem_ok()
     }
     pub fn kq_stark(transcript: &FiatShamirTranscript) -> bool {
         transcript.is_complete()
@@ -266,90 +153,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_debug_form_of_a_wallet_does_not_print_the_seeds() {
-        let w = DualWallet {
-            ed_seed: [0xAB; 32],
-            pq_seed: [0xCD; 32],
-        };
-        let shown = format!("{w:?}");
-        assert!(!shown.contains("171") && !shown.contains("205"), "{shown}");
-    }
-    use ed25519_dalek::Signer as Ed25519Signer;
-    #[test]
     fn sha3_hasher() {
         let h = Sha3Hasher::hash_bytes(b"hello");
         assert_eq!(h.len(), 32);
         assert_ne!(h, [0u8; 32]);
-    }
-    #[test]
-    fn hybrid_tx_128kb() {
-        use ml_dsa::signature::Signer as PqSigner;
-        use ml_dsa::Generate as PqGenerate;
-        use rand_core::OsRng; // ed25519-dalek: rand_core 0.6
-                              // real keys + real signatures (ed25519 + ML-DSA-87)
-        let ed_sk = ed25519_dalek::SigningKey::generate(&mut OsRng);
-        let ed_pk = ed_sk.verifying_key();
-        let pq_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::generate(); // getrandom inside (FIPS 204)
-        let pq_pk: &ml_dsa::VerifyingKey<ml_dsa::MlDsa87> = pq_sk.as_ref();
-        let msg = b"budlum hybrid tx payload";
-        let ed_sig: [u8; 64] = ed_sk.sign(msg).to_bytes();
-        let pq_sig: Vec<u8> = pq_sk.sign(msg).encode().into_iter().collect();
-        let pq_pk_bytes: Vec<u8> = pq_pk.encode().into_iter().collect();
-        let tx = HybridTx {
-            ed_sig,
-            pq_sig: pq_sig.clone(),
-            pq_pub_hash: HybridTx::pq_pub_hash_of(&pq_pk_bytes),
-        };
-        // the right input -> PASSES
-        assert!(tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes));
-        // a changed message -> REFUSED (the signature really is checked)
-        assert!(!tx.verify(b"tampered", ed_pk.as_bytes(), &pq_pk_bytes));
-        // a wrong pq key -> REFUSED
-        let other_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::generate();
-        let other_pk: Vec<u8> = other_sk.as_ref().encode().into_iter().collect();
-        assert!(!tx.verify(msg, ed_pk.as_bytes(), &other_pk));
-        // a PQ key that does not match the committed hash -> REFUSED, even with a valid signature
-        let other_sk2 = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::generate();
-        let other_pk2: Vec<u8> = other_sk2.as_ref().encode().into_iter().collect();
-        let other_sig: Vec<u8> = other_sk2.sign(msg).encode().into_iter().collect();
-        let swapped = HybridTx {
-            ed_sig,
-            pq_sig: other_sig,
-            pq_pub_hash: [0u8; 32],
-        };
-        assert!(
-            !swapped.verify(msg, ed_pk.as_bytes(), &other_pk2),
-            "a PQ key not bound by pq_pub_hash is REFUSED"
-        );
-        // a tampered pq_sig byte -> REFUSED (K38)
-        let mut bad_pq = pq_sig.clone();
-        let mid = bad_pq.len() / 2;
-        bad_pq[mid] ^= 0x40;
-        let bad_tx = HybridTx {
-            ed_sig,
-            pq_sig: bad_pq,
-            pq_pub_hash: HybridTx::pq_pub_hash_of(&pq_pk_bytes),
-        };
-        assert!(
-            !bad_tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes),
-            "a tampered PQ signature is REFUSED"
-        );
-        // a tampered ed_sig byte -> REFUSED
-        let mut bad_ed = ed_sig;
-        bad_ed[0] ^= 0x01;
-        let bad_ed_tx = HybridTx {
-            ed_sig: bad_ed,
-            pq_sig: pq_sig.clone(),
-            pq_pub_hash: HybridTx::pq_pub_hash_of(&pq_pk_bytes),
-        };
-        assert!(
-            !bad_ed_tx.verify(msg, ed_pk.as_bytes(), &pq_pk_bytes),
-            "a tampered Ed signature is REFUSED"
-        );
-        // boyut: 64 + 4627 + 32 = 4723; 27 tx = 127,521 B <= 128 KiB
-        assert!(tx.size_bytes() < MAX_BLOCK_BYTES);
-        let block_ok = QuantumChainGates::kq_block(tx.size_bytes() * 27);
-        assert!(block_ok);
     }
     #[test]
     fn finality_same_set() {
@@ -373,10 +180,7 @@ mod tests {
         ));
     }
     #[test]
-    fn the_p2p_gate_is_false_without_a_handshake() {
-        assert!(!SnowHybrid::handshake_ml_kem_ok());
-        assert!(!SnowHybrid::is_quantum_resistant());
-        assert!(!QuantumChainGates::kq_p2p());
+    fn a_transcript_with_labels_out_of_order_is_refused() {
         let mut t = FiatShamirTranscript::new();
         for l in [
             "proof_data",
@@ -390,29 +194,6 @@ mod tests {
             !QuantumChainGates::kq_stark(&t),
             "labels out of order are refused"
         );
-    }
-    #[test]
-    fn dual_wallet_required() {
-        let seed = [3u8; 64];
-        let w = DualWallet::from_bip39_seed(&seed);
-        assert!(w.has_dual());
-        let addr = w.address();
-        assert_ne!(addr, [0u8; 32]);
-        // the address is a function of the public keys: a verifier can recompute it
-        let ed_pk = ed25519_dalek::SigningKey::from_bytes(&w.ed_seed).verifying_key();
-        let pq_sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed(&w.pq_seed.into());
-        let pq_vk: &ml_dsa::VerifyingKey<ml_dsa::MlDsa87> = pq_sk.as_ref();
-        let pq_pk: Vec<u8> = pq_vk.encode().into_iter().collect();
-        assert_eq!(
-            addr,
-            DualWallet::address_from_pubkeys(ed_pk.as_bytes(), &pq_pk)
-        );
-        // the old construction hashed the secret seeds; it must differ
-        let mut old = Sha3_256::new();
-        old.update(w.ed_seed);
-        old.update(w.pq_seed);
-        let old: [u8; 32] = old.finalize().into();
-        assert_ne!(addr, old);
     }
     #[test]
     fn device_10dk() {

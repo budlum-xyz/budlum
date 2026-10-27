@@ -1,7 +1,7 @@
 # B.U.D. Core (bud-core): 1.0 / 2.0 / 3.0
 
-Broad Universal Database 2.0: a multi-format, lossless, quantum-resistant
-storage core. This crate is the real Rust implementation of the `.bud` v2
+Broad Universal Database 2.0: a multi-format, lossless storage core with
+SHA3-256 content identifiers. This crate is the real Rust implementation of the `.bud` v2
 container format and its pipeline.
 
 **Status:** 137 tests green (132 unit, 1 test_bud2, 4 integration), 0 warnings,
@@ -42,7 +42,7 @@ bud bft-vote --pipe-id 3 --ratio 17.19 --validator v   # BFT finality, more than
 | `bud_format_dedup` | Intra-tenant dedup plus PoW ownership (K20) |
 | `bud_format_social` | Social bridge records and the K74 ownership split (Owned/Licensed, EU 2426) |
 | `bud_format_bft` | Ratio finality, more than two thirds, GRANDPA-like |
-| `quantum_chain` | Ed25519 plus ML-DSA-87 hybrid signatures and a dual wallet (K3/K4/B1) |
+| `quantum_chain` | SHA3-256 helpers, the finality quorum rule and the STARK transcript completeness check |
 | `bud_format_economics` | The cost model with its honest ceiling gate, plus K60 zero-egress |
 | `bud_format_registry` | The MIME and format registry, plus the proof gates |
 
