@@ -40,9 +40,13 @@ mod tests {
         blockchain.state.add_balance(&operator, 3_000_000);
         blockchain.state.add_balance(&payer, 3_000_000);
 
-        let manifest =
+        let mut manifest =
             ContentManifest::from_bytes_sliced(b"storage economics persistence payload", 8)
                 .unwrap();
+        // The RPC deal door refuses a payer that is not the manifest's
+        // authority, so the fixture declares the payer as owner exactly as an
+        // uploading client does.
+        manifest.owner = payer;
         let shard_id = manifest.shards[0].shard_id;
         let params = StorageDomainParams::default();
         // The rate is derived from the shard size so that one epoch still costs
@@ -257,8 +261,11 @@ mod tests {
         blockchain.state.add_balance(&operator, 5_000_000);
         blockchain.state.add_balance(&payer, 5_000_000);
 
-        let manifest =
+        let mut manifest =
             ContentManifest::from_bytes_sliced(b"storage bond return payload", 8).unwrap();
+        // Ownership: the deal door (RPC and in-block alike) requires the payer
+        // to be the manifest's authority; the fixture says so up front.
+        manifest.owner = payer;
         let shard_id = manifest.shards[0].shard_id;
         let params = StorageDomainParams::default();
         let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard in manifest").size);
@@ -686,5 +693,109 @@ mod tests {
             .get_reallocation_ticket(ticket_id)
             .expect("ticket exists");
         assert_eq!(ticket.status, ReallocationStatus::Pending);
+    }
+
+    /// The operator-RPC deal door runs the same authority rule the in-block
+    /// path runs: a payer that does not own the manifest cannot place a deal
+    /// over it, and the refusal leaves balances and the registry untouched
+    /// (Review 9 / CWE-862 - ownership gate for storage-deal open).
+    #[test]
+    fn rpc_deal_open_refuses_a_payer_that_does_not_own_the_manifest() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
+        let owner = Address::from([0x31u8; 32]);
+        let payer = Address::from([0x32u8; 32]);
+        let operator = Address::from([0x33u8; 32]);
+        blockchain.state.add_balance(&owner, 5_000_000);
+        blockchain.state.add_balance(&payer, 5_000_000);
+        blockchain.state.add_balance(&operator, 5_000_000);
+
+        let mut manifest =
+            ContentManifest::from_bytes_sliced(b"stranger deal refusal payload", 8).unwrap();
+        manifest.owner = owner;
+        let shard_id = manifest.shards[0].shard_id;
+        let params = StorageDomainParams::default();
+        let shard_bytes = u64::from(manifest.shard(&shard_id).expect("shard in manifest").size);
+        let economics = StorageEconomicsParams {
+            operator_bond: params.min_operator_bond,
+            fee_per_byte_epoch: 10 * (FEE_RATE_SCALE as u64) / shard_bytes,
+        };
+        let proof = {
+            let envelope = bud_proof::ProofEnvelope {
+                proof_format_version: 1,
+                backend: "test-backend".to_string(),
+                p3_version: "0.6".to_string(),
+                fri_params_id: "test-fri".to_string(),
+                public_inputs_hash: [0x42u8; 32],
+                proof_bytes: vec![0xABu8; 96],
+                degree_bits: 8,
+            };
+            bincode::serialize(&envelope).unwrap()
+        };
+        blockchain
+            .state
+            .storage_registry
+            .register_manifest(&manifest);
+
+        let deals_before = blockchain.state.storage_registry.deals_iter().count();
+        let payer_before = blockchain.state.get_balance(&payer);
+        let operator_before = blockchain.state.get_balance(&operator);
+
+        let err = blockchain
+            .open_storage_deal_with_escrow(
+                42,
+                &manifest,
+                shard_id,
+                operator,
+                payer,
+                0,
+                0,
+                10,
+                economics.clone(),
+                &params,
+                Some(proof.clone()),
+                Some([0x42u8; 32]),
+            )
+            .expect_err("a stranger's payer must not open a deal over the owner's manifest");
+        assert!(err.contains("does not own"), "got: {err}");
+        assert_eq!(
+            blockchain.state.get_balance(&payer),
+            payer_before,
+            "a refused open must not debit the payer"
+        );
+        assert_eq!(
+            blockchain.state.get_balance(&operator),
+            operator_before,
+            "a refused open must not move the operator's bond"
+        );
+        assert_eq!(
+            blockchain.state.storage_registry.deals_iter().count(),
+            deals_before,
+            "a refused open must not write a deal row"
+        );
+
+        // The authority itself opens the same deal through the same door.
+        let deal_id = blockchain
+            .open_storage_deal_with_escrow(
+                42,
+                &manifest,
+                shard_id,
+                operator,
+                owner,
+                0,
+                0,
+                10,
+                economics,
+                &params,
+                Some(proof),
+                Some([0x42u8; 32]),
+            )
+            .expect("the owner opens its own deal");
+        assert_eq!(
+            blockchain.state.storage_registry.deals_iter().count(),
+            deals_before + 1,
+            "the owner's deal row lands"
+        );
+        let _ = deal_id;
     }
 }

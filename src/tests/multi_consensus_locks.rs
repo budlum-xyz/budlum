@@ -166,6 +166,9 @@ mod poa_authority_binding {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.state_root,
+            &commitment.tx_root,
+            &commitment.event_root,
         );
         let signatures = signers
             .iter()
