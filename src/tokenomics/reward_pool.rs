@@ -393,7 +393,9 @@ mod tests {
         assert_eq!(state.get_balance(&delegator), 0);
         assert_eq!(state.registry.claimable_reward(delegator, validator), 90);
         assert_eq!(
-            state.claim_delegator_rewards(&delegator, &validator).unwrap(),
+            state
+                .claim_delegator_rewards(&delegator, &validator)
+                .unwrap(),
             90
         );
         assert_eq!(state.get_balance(&delegator), 90);
