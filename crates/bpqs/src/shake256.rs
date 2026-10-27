@@ -65,13 +65,15 @@ fn xor_block(st: &mut [u64; 25], block: &[u8]) {
 }
 
 /// SHAKE-256 backend behind the [`BpqsHash`] seam: FIPS 202 XOF with the
-/// 0x1F suffix. Distinct function from [`super::hash::Sha3_256Hash`] (their
-/// domain suffixes differ by construction); both stay in the tree as the
-/// audit cross-checks of the canonical Poseidon2 backend.
+/// 0x1F suffix. This is the canonical backend for long-lived use (,
+///), exported as [`super::CanonicalHash`]. Distinct function from
+/// [`super::hash::Sha3_256Hash`] (their domain suffixes differ by
+/// construction); SHA3-256 stays as the cross-check, Poseidon2 as the
+/// research-only algebraic backend.
 ///
-/// WIRING: exposed for the differential audit battery and for whoever
-/// instantiates the scheme behind the `BpqsHash` seam; the canonical
-/// in-tree backend is Poseidon2 and this stays as its cross-check.
+/// WIRING: exposed as the canonical backend for whoever instantiates the
+/// scheme behind the `BpqsHash` seam; the differential audit battery and the
+/// KAT corpus pin it.
 pub struct Shake256Hash;
 
 impl BpqsHash for Shake256Hash {

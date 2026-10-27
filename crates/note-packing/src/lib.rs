@@ -47,6 +47,8 @@
 #![forbid(unsafe_code)]
 #![no_std]
 
+pub mod poseidon;
+
 /// A packed note hash: commitment or nullifier, as stored on chain.
 pub type NoteHash = [u8; 32];
 
