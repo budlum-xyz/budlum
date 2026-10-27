@@ -212,6 +212,7 @@ impl CrossDomainMessage {
             return Err("message signer is not the declared sender".into());
         }
         crate::crypto::primitives::verify_ml_dsa_87_signature(
+            crate::crypto::ctx::CROSS_DOMAIN_V1,
             &self.message_id,
             &self.sender_signature,
             &self.sender_public_key,
