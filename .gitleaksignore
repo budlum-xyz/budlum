@@ -2,12 +2,3 @@
 # Doc placeholder key sk_live_abc123 in a skill file that no longer exists at the
 # branch head; the commit stays in history. See the note in .gitleaks.toml.
 6333d5a59f4610c8315036e88c01bb4c7c4e1822:.:generic-api-key:306
-7569bfd5fde868af174d7284d3acc28e168b88b9:crates/wallet-core/Cargo.lock:generic-api-key:577
-865b951df74064bf04a873cd60d21cba7594dcfa:src/crypto/pq.rs:generic-api-key:604
-865b951df74064bf04a873cd60d21cba7594dcfa:src/crypto/pq.rs:generic-api-key:613
-304cfe827277aa670e2fc2de9eab506046afc025:Cargo.lock:generic-api-key:2801
-33d80f8c34846012c476de834a11b44e480504bc:budzero/bud-proof/src/plonky3_prover.rs:generic-api-key:2500
-33d80f8c34846012c476de834a11b44e480504bc:budzero/bud-vm/src/lib.rs:generic-api-key:1721
-6d7eefbc1d9e9c5e01410da459bdd92c701a0731:src/cli/commands.rs:generic-api-key:956
-fd7b941d273c0bc199e1aa3425c7a7ef502b573b:src/wallet/mod.rs:generic-api-key:19
-d4134230c23076f3c5eb355dbb7346de65315ace:fuzz/Cargo.lock:generic-api-key:2659

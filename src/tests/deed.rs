@@ -34,3 +34,16 @@ fn deed_manifest_validate_id_binding_and_roles() {
     assert_eq!(roles::INDUSTRY_SPONSOR.value(), 10);
     assert_eq!(roles::RESEARCH_CONTRIBUTOR.value(), 11);
 }
+
+#[test]
+fn deed_roles_bond_through_the_role_door() {
+    let mut state = crate::core::account::AccountState::new();
+    let sponsor = test_addr_from_byte(3u8);
+    let floor = state.registry.params().min_stake;
+    state.add_balance(&sponsor, floor);
+    state
+        .bond_role(&sponsor, roles::INDUSTRY_SPONSOR, floor)
+        .expect("the DeEd sponsor seat bonds at the floor");
+    assert!(state.registry.is_active(&sponsor, roles::INDUSTRY_SPONSOR));
+    assert_eq!(state.get_balance(&sponsor), 0);
+}

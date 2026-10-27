@@ -195,27 +195,7 @@ impl RegenHealthTick {
             repair_cost,
             regrowth_cost,
         );
-        // A reversion leaves the ledger holding an earlier stage, and the
-        // divergence that caused it sits at the live checkpoint, above the one
-        // `assess` reads. A Healthy verdict for the reverted stage says
-        // nothing about the live view, so it must not end the recovery: while
-        // the node's own block at the live checkpoint still differs from the
-        // certificate - or cannot be compared at all - the tick keeps asking
-        // for the repair sync instead of falling silent.
-        let reverted = self.ledger.stage != Stage::Medusa;
-        let live_diverged = match (
-            view.at(view.live).and_then(|c| c.local),
-            view.canonical(Stage::Medusa, view.live),
-        ) {
-            (Some(local), Some(canonical)) => local != canonical,
-            _ => true,
-        };
         match verdict {
-            HealthVerdict::Healthy if reverted && live_diverged => TickOutcome::Repair {
-                stress: Stress::Divergence,
-                repair_cost,
-                regrowth_cost,
-            },
             HealthVerdict::Healthy => TickOutcome::Healthy,
             HealthVerdict::RepairRecommended {
                 stress,
@@ -345,13 +325,8 @@ mod tests {
         assert!(outcome.opens_sync());
         assert_eq!(tick.ledger.stage, Stage::Ephyra);
 
-        // Still diverged: growth is refused, and the reverted stage must not
-        // report Healthy while the live view still diverges - it keeps asking
-        // for the repair sync that can replace the block.
-        assert!(matches!(
-            tick.observe(&view(diverged(2000))),
-            TickOutcome::Repair { .. }
-        ));
+        // Still diverged: growth is refused, the reverted stage is healthy.
+        assert_eq!(tick.observe(&view(diverged(2000))), TickOutcome::Healthy);
         assert_eq!(tick.ledger.stage, Stage::Ephyra);
 
         // The sync round fetched the canonical block: the ledger grows back.

@@ -126,7 +126,9 @@ impl Network {
         match self {
             Network::Mainnet => ConsensusParams {
                 epoch_len: 100,
-                min_stake: 1_000_000,
+                // 1 BUD (10^6 atoms). Written in BUD so the unit is explicit
+                //; the mainnet value is Ayaz's decision (DECISIONS.md).
+                min_stake: crate::tokenomics::bud(1),
                 slot_ms: 6_000,
                 finality_checkpoint_interval: 10,
                 finality_quorum_numerator: 2,
@@ -136,7 +138,8 @@ impl Network {
             },
             Network::Testnet => ConsensusParams {
                 epoch_len: 50,
-                min_stake: 10_000,
+                // TESTNET-DEFAULT: 1,000 BUD.
+                min_stake: crate::tokenomics::bud(1_000),
                 slot_ms: 3_000,
                 finality_checkpoint_interval: 5,
                 finality_quorum_numerator: 2,
@@ -154,6 +157,41 @@ impl Network {
                 max_votes_per_msg: 64,
                 transport_v2_activation_height: 0,
             },
+        }
+    }
+
+    /// The validation reward pool this profile pays from, if any.
+    ///
+    /// Testnet: the default schedule, 10M BUD over 100 000 epochs
+    ///. Mainnet waits for Ayaz (D-04). Devnet has
+    /// no distribution to fund a pool from.
+    #[must_use]
+    pub fn reward_pool(&self) -> Option<crate::tokenomics::reward_pool::RewardPoolSchedule> {
+        match self {
+            Network::Testnet => Some(crate::tokenomics::reward_pool::RewardPoolSchedule::default()),
+            Network::Mainnet | Network::Devnet => None,
+        }
+    }
+
+    /// The Mikoriza (shared security) parameters of this profile.
+    ///
+    /// The flag is a genesis parameter. Devnet has it on so the rehearsal can
+    /// run the path; testnet keeps it off until the end-to-end Sepolia test
+    /// passes (10.7); the mainnet decision is Ayaz's.
+    /// `max_restaked_share_ppm = 300_000` and one weight atom per allocated
+    /// unit are TESTNET-DEFAULT values.
+    #[must_use]
+    pub const fn shared_security(
+        &self,
+    ) -> crate::settlement::shared_security::SharedSecurityParams {
+        crate::settlement::shared_security::SharedSecurityParams {
+            enabled: matches!(self, Network::Devnet),
+            // TESTNET-DEFAULT: restaked weight stays below a third of
+            // the total, so ETH-backed validators cannot finalize alone.
+            max_restaked_share_ppm: 300_000,
+            // TESTNET-DEFAULT: one BUD weight atom per allocated unit
+            // (a unit is one gwei of allocated ETH magnitude).
+            units_to_weight_ppm: 1_000_000,
         }
     }
 
@@ -238,6 +276,26 @@ impl std::fmt::Display for Network {
 }
 
 pub const EPOCH_LEN: u64 = 100;
+
+/// The Mikoriza parameters of the profile `chain_id` names; an unknown chain
+/// has the feature off.
+#[must_use]
+pub fn shared_security_for_chain_id(
+    chain_id: u64,
+) -> crate::settlement::shared_security::SharedSecurityParams {
+    Network::from_chain_id(chain_id).map_or(
+        crate::settlement::shared_security::SharedSecurityParams::DISABLED,
+        |network| network.shared_security(),
+    )
+}
+
+/// The reward pool of the profile `chain_id` names; none for an unknown chain.
+#[must_use]
+pub fn reward_pool_for_chain_id(
+    chain_id: u64,
+) -> Option<crate::tokenomics::reward_pool::RewardPoolSchedule> {
+    Network::from_chain_id(chain_id).and_then(|network| network.reward_pool())
+}
 
 pub fn epoch_len_for_chain_id(chain_id: u64) -> u64 {
     Network::from_chain_id(chain_id).map_or(EPOCH_LEN, |network| network.epoch_len())

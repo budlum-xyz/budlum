@@ -416,7 +416,9 @@ mod poa_compliance_gate {
         // it would bypass the gate that verifies the record is consistent with the template; the record
         // already says the template operator must equal the domain operator.
         let operator = bc
-            .domain_registry
+            .state
+            .settlement
+            .domains
             .get(11)
             .and_then(|d| d.operator)
             .expect("the operator of the registered domain");

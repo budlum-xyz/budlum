@@ -86,6 +86,7 @@ pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "transfer_fee_ppm",
     "swap_fee_ppm",
     "bridge_fee_ppm",
+    "app_fee_share_ppm",
     "ai_model_register_fee",
     "liveness_slashing_enabled",
 ];
@@ -150,6 +151,11 @@ pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<()
             params.bridge_fee_ppm = value
                 .parse::<u64>()
                 .map_err(|e| format!("invalid bridge_fee_ppm: {e}"))?;
+        }
+        "app_fee_share_ppm" => {
+            params.app_fee_share_ppm = value
+                .parse::<u64>()
+                .map_err(|e| format!("invalid app_fee_share_ppm: {e}"))?;
         }
         "malicious_slash_ratio_fixed" => {
             params.malicious_slash_ratio_fixed = value
@@ -479,6 +485,19 @@ mod proposer_epoch_count_as_seq {
 }
 
 impl GovernanceState {
+    #[must_use]
+    pub fn proposal_count(&self) -> usize {
+        self.proposals.len()
+    }
+
+    #[must_use]
+    pub fn active_proposal_count(&self) -> usize {
+        self.proposals
+            .iter()
+            .filter(|proposal| proposal.status == ProposalStatus::Active)
+            .count()
+    }
+
     pub fn has_non_default_state(&self) -> bool {
         !self.proposals.is_empty()
             || self.next_proposal_id != 0
@@ -852,6 +871,10 @@ mod tests {
         }
         assert_eq!(
             validate_governance_parameter_update("ai_model_register_fee", "25"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_governance_parameter_update("app_fee_share_ppm", "400000"),
             Ok(())
         );
         assert!(validate_governance_parameter_update("ai_model_register_fee", "x").is_err());

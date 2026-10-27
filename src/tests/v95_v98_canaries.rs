@@ -40,7 +40,13 @@ mod tests {
         chain_a
             .register_consensus_domain(domain)
             .expect("domain registers");
-        assert!(chain_a.domain_registry.domains().iter().any(|d| d.id == 7));
+        assert!(chain_a
+            .state
+            .settlement
+            .domains
+            .domains()
+            .iter()
+            .any(|d| d.id == 7));
 
         for _ in 0..3 {
             let _ = chain_a.produce_block(producer);
@@ -53,7 +59,13 @@ mod tests {
             .expect("the longer chain is adopted");
 
         assert!(
-            !chain_a.domain_registry.domains().iter().any(|d| d.id == 7),
+            !chain_a
+                .state
+                .settlement
+                .domains
+                .domains()
+                .iter()
+                .any(|d| d.id == 7),
             "a domain from the abandoned chain must not survive the reorg"
         );
     }

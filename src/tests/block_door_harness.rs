@@ -112,16 +112,63 @@ impl BlockHarness {
         Self::reopen(&path, key, sender)
     }
 
-    /// A PoW domain operated by the harness sender, ready to register.
+    /// A PoW domain operated by the harness sender, ready for a
+    /// `SettlementTx::RegisterDomain`.
     pub fn operated_domain(&self, id: crate::domain::DomainId) -> crate::domain::ConsensusDomain {
-        let mut domain = crate::domain::plugin::default_domain(
-            id,
-            crate::domain::ConsensusKind::PoW,
-            CHAIN_ID + u64::from(id),
-            crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
-            0,
-        );
+        self.operated_domain_of_kind(id, crate::domain::ConsensusKind::PoW)
+    }
+
+    /// A domain of `kind` operated by the harness sender.
+    pub fn operated_domain_of_kind(
+        &self,
+        id: crate::domain::DomainId,
+        kind: crate::domain::ConsensusKind,
+    ) -> crate::domain::ConsensusDomain {
+        let adapter = match kind {
+            crate::domain::ConsensusKind::PoW => crate::domain::types::POW_HEADER_CHAIN_ADAPTER,
+            crate::domain::ConsensusKind::PoS => "pos-qc-finality",
+            _ => "poa-authority-quorum",
+        };
+        let mut domain =
+            crate::domain::plugin::default_domain(id, kind, CHAIN_ID + u64::from(id), adapter, 0);
         domain.operator = Some(self.sender);
         domain
+    }
+
+    /// Register `domain` through a block.
+    pub fn register_domain(&mut self, domain: crate::domain::ConsensusDomain) -> u64 {
+        self.apply(TransactionType::Settlement(
+            crate::settlement::domains::SettlementTx::RegisterDomain(Box::new(domain)),
+        ))
+    }
+
+    /// Register two domains the sender operates (1, PoW, and 2, PoS) and
+    /// `asset_id` against domain 1, then lock `amount` of the sender's
+    /// balance toward `recipient` on domain 2. Each write is its own block.
+    pub fn lock_through_blocks(
+        &mut self,
+        asset_id: crate::cross_domain::AssetId,
+        recipient: Address,
+        amount: u64,
+    ) {
+        use crate::cross_domain::bridge_tx::{BridgeTx, LockRequest};
+        let source = self.operated_domain(1);
+        let target = self.operated_domain_of_kind(2, crate::domain::ConsensusKind::PoS);
+        self.register_domain(source);
+        self.register_domain(target);
+        self.apply(TransactionType::Bridge(BridgeTx::RegisterAsset {
+            asset_id,
+            domain: 1,
+        }));
+        self.apply(TransactionType::Bridge(BridgeTx::Lock(LockRequest {
+            source_domain: 1,
+            target_domain: 2,
+            source_height: 10,
+            event_index: 0,
+            asset_id,
+            recipient,
+            amount,
+            expiry_height: 1_000,
+        })));
     }
 }
