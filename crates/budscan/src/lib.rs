@@ -67,6 +67,7 @@ pub mod ens;
 pub mod evidence;
 pub mod evm_audit;
 pub mod fetch;
+pub mod indexer;
 pub mod light_client;
 pub mod name_rule;
 pub mod patchset;
