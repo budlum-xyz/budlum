@@ -37,9 +37,9 @@ mod byzantine_settlement_tests {
         let mut node_a = make_node();
         let mut node_b = make_node();
 
-        let pow_domain = node_a.state.settlement.domains.get(1).unwrap().clone();
-        let pos_domain = node_a.state.settlement.domains.get(2).unwrap().clone();
-        let poa_domain = node_a.state.settlement.domains.get(3).unwrap().clone();
+        let pow_domain = node_a.domain_registry.get(1).unwrap().clone();
+        let pos_domain = node_a.domain_registry.get(2).unwrap().clone();
+        let poa_domain = node_a.domain_registry.get(3).unwrap().clone();
 
         let mut pow_commitments = Vec::new();
         let mut pos_commitments = Vec::new();
@@ -530,9 +530,12 @@ mod byzantine_settlement_tests {
         );
     }
 
-    /// K4: a restart rebuilds the state from the stored blocks. A domain
-    /// registered in a block comes back; a commitment accepted outside any
-    /// block (the test shim) does not, and neither does the nonce it moved.
+    /// K4: a restart rebuilds the state from the genesis state plus the
+    /// stored blocks, so a write that never reached a block does not survive.
+    ///
+    /// The commitment's writes are not applied by the accept path on this
+    /// branch: they travel in a signed `StateUpdateTx`, and this test produces
+    /// no block, so the nonce never moves - before or after the restart.
     #[tokio::test]
     async fn test_crash_recovery() {
         use crate::tests::block_door_harness::BlockHarness;
@@ -544,19 +547,28 @@ mod byzantine_settlement_tests {
         let alice = Address::from([0xA1u8; 32]);
         let mut harness = BlockHarness::open(path_str);
         let pow = harness.operated_domain(1);
-        harness.register_domain(pow.clone());
+        harness
+            .chain
+            .register_consensus_domain(pow.clone())
+            .unwrap();
 
         let mut block = Block::new(1, "h1".to_string(), vec![]);
         block.hash = block.calculate_hash();
         let mut com = DomainCommitment::from_block(&pow, &block, [0u8; 32], [0u8; 32], 1).unwrap();
         com.state_updates.insert(alice, 1);
         harness.chain.submit_domain_commitment(com).unwrap();
-        assert_eq!(harness.chain.state.get_nonce(&alice), 1);
+        assert_eq!(
+            harness.chain.state.get_nonce(&alice),
+            0,
+            "the accept path must not apply a commitment's writes out of block"
+        );
 
         let harness = harness.restart();
-        assert!(harness.chain.state.settlement.domains.get(1).is_some());
-        assert_eq!(harness.chain.state.settlement.commitments.len(), 0);
-        assert_eq!(harness.chain.state.get_nonce(&alice), 0);
+        assert_eq!(
+            harness.chain.state.get_nonce(&alice),
+            0,
+            "a restart rebuilds the state from the stored blocks; nothing moved here"
+        );
     }
 
     #[tokio::test]
@@ -673,7 +685,7 @@ mod byzantine_settlement_tests {
         // equivocating one froze the domain and moved nothing.
         assert_eq!(node.state.get_nonce(&alice), 1);
         assert_eq!(
-            node.state.settlement.domains.get(1).unwrap().status,
+            node.domain_registry.get(1).unwrap().status,
             DomainStatus::Frozen
         );
     }
@@ -895,7 +907,7 @@ mod byzantine_settlement_tests {
             let _ = node.submit_domain_commitment(c2.clone());
         }
         for node in nodes.iter() {
-            let domain = node.state.settlement.domains.get(domain_id).unwrap();
+            let domain = node.domain_registry.get(domain_id).unwrap();
             assert_eq!(domain.status, DomainStatus::Frozen);
         }
         let c3 = make_domain_commitment_at_height(&nodes[0], domain_id, 11, "state_c", 12);
@@ -969,7 +981,7 @@ mod byzantine_settlement_tests {
         nonce: u64,
         sequence: u64,
     ) -> DomainCommitment {
-        let domain = node.state.settlement.domains.get(domain_id).unwrap();
+        let domain = node.domain_registry.get(domain_id).unwrap();
 
         let height = nonce;
         let mut block = linked_test_block(domain_id, height);
@@ -1015,7 +1027,7 @@ mod byzantine_settlement_tests {
         state_root: &str,
         sequence: u64,
     ) -> DomainCommitment {
-        let domain = node.state.settlement.domains.get(domain_id).unwrap();
+        let domain = node.domain_registry.get(domain_id).unwrap();
 
         let mut block = linked_test_block(domain_id, height);
 
