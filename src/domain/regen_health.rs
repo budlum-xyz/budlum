@@ -249,6 +249,7 @@ pub fn assess(
                 height: polyp_height,
                 commitment,
                 carried: Default::default(),
+                seal: None,
             },
             stress: Stress::RepairFailed,
         };
@@ -349,6 +350,9 @@ pub fn assess(
             height: target_height,
             commitment: target_commitment,
             carried: Default::default(),
+            // The caller attaches the seal of its canonical source; `assess`
+            // knows commitments only.
+            seal: None,
         },
         stress,
     }
@@ -546,6 +550,7 @@ mod tests {
                     proofs_reusable: 5,
                     proofs_discarded: 1,
                     records_refiled: 2,
+                    proofs_classical_rederive: 0,
                 },
                 event_number: 1,
             });

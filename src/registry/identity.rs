@@ -509,6 +509,21 @@ impl IdentityRegistry {
     }
 
     #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.records.len()
+    }
+
+    #[must_use]
+    pub fn credential_count(&self) -> usize {
+        self.credentials.len()
+    }
+
+    #[must_use]
+    pub fn revoked_count(&self) -> usize {
+        self.revoked.len()
+    }
+
+    #[must_use]
     pub fn record(&self, subject: &Address) -> Option<&IdentityRecord> {
         self.records.get(subject)
     }
@@ -985,6 +1000,31 @@ pub fn authorize_recovery(
     epoch: u64,
     chain_id: u64,
 ) -> Result<(), IdentityError> {
+    authorize_recovery_in(
+        &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+        registry,
+        subject,
+        new_key,
+        approvals,
+        epoch,
+        chain_id,
+    )
+}
+
+/// [`authorize_recovery`] under the scheme statuses of a chain.
+///
+/// # Errors
+///
+/// See [`authorize_recovery`].
+pub fn authorize_recovery_in(
+    scheme_registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    registry: &mut IdentityRegistry,
+    subject: Address,
+    new_key: [u8; 32],
+    approvals: &[GuardianApproval],
+    epoch: u64,
+    chain_id: u64,
+) -> Result<(), IdentityError> {
     let digest = recovery_digest(&subject, &new_key, epoch, chain_id);
     let mut guardians = Vec::with_capacity(approvals.len());
     for approval in approvals {
@@ -992,7 +1032,9 @@ pub fn authorize_recovery(
             &approval.public_key,
         )
         .map_err(|e| IdentityError::BadApproval(format!("key: {e}")))?;
-        crate::crypto::primitives::verify_ml_dsa_87_signature(
+        crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+            scheme_registry,
+            crate::crypto::ctx::IDENTITY_V2,
             &digest,
             &approval.signature,
             &approval.public_key,
@@ -1016,11 +1058,36 @@ pub fn authorize_issue_consent(
     epoch: u64,
     chain_id: u64,
 ) -> Result<(), IdentityError> {
+    authorize_issue_consent_in(
+        &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+        registry,
+        credential,
+        consent,
+        epoch,
+        chain_id,
+    )
+}
+
+/// [`authorize_issue_consent`] under the scheme statuses of a chain.
+///
+/// # Errors
+///
+/// See [`authorize_issue_consent`].
+pub fn authorize_issue_consent_in(
+    scheme_registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    registry: &IdentityRegistry,
+    credential: &CredentialCommitment,
+    consent: &SubjectConsent,
+    epoch: u64,
+    chain_id: u64,
+) -> Result<(), IdentityError> {
     let digest = issue_consent_digest(credential, chain_id);
     let signer =
         crate::crypto::primitives::wallet_address_from_ml_dsa_87_public_key(&consent.public_key)
             .map_err(|e| IdentityError::BadApproval(format!("consent key: {e}")))?;
-    crate::crypto::primitives::verify_ml_dsa_87_signature(
+    crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+        scheme_registry,
+        crate::crypto::ctx::IDENTITY_V2,
         &digest,
         &consent.signature,
         &consent.public_key,
@@ -1073,6 +1140,32 @@ pub fn execute_identity_tx(
     epoch: u64,
     chain_id: u64,
 ) -> Result<(), IdentityError> {
+    execute_identity_tx_in(
+        &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+        registry,
+        from,
+        tx,
+        domain,
+        epoch,
+        chain_id,
+    )
+}
+
+/// [`execute_identity_tx`] under the scheme statuses of a chain: the executor
+/// passes `AccountState::scheme_registry`.
+///
+/// # Errors
+///
+/// See [`execute_identity_tx`].
+pub fn execute_identity_tx_in(
+    scheme_registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    registry: &mut IdentityRegistry,
+    from: &Address,
+    tx: IdentityTx,
+    domain: &ConsensusKind,
+    epoch: u64,
+    chain_id: u64,
+) -> Result<(), IdentityError> {
     match tx {
         IdentityTx::Register { record } => {
             if &record.subject != from {
@@ -1103,7 +1196,14 @@ pub fn execute_identity_tx(
                         "issue: the subject must consent to a third-party issuance".to_string(),
                     )
                 })?;
-                authorize_issue_consent(registry, &credential, &consent, epoch, chain_id)?;
+                authorize_issue_consent_in(
+                    scheme_registry,
+                    registry,
+                    &credential,
+                    &consent,
+                    epoch,
+                    chain_id,
+                )?;
             }
             registry.apply(domain, IdentityOp::Issue { credential }, epoch)
         }
@@ -1129,7 +1229,15 @@ pub fn execute_identity_tx(
                     did_of(&subject)
                 )));
             }
-            authorize_recovery(registry, subject, new_key, &approvals, epoch, chain_id)
+            authorize_recovery_in(
+                scheme_registry,
+                registry,
+                subject,
+                new_key,
+                &approvals,
+                epoch,
+                chain_id,
+            )
         }
     }
 }
@@ -2306,7 +2414,9 @@ mod tests {
         let msg = issue_consent_digest(&credential, 1);
         let consent = SubjectConsent {
             public_key: subject_key.public_key_bytes().to_vec(),
-            signature: subject_key.sign(&msg).to_vec(),
+            signature: subject_key
+                .sign(crate::crypto::ctx::IDENTITY_V2, &msg)
+                .to_vec(),
         };
         execute_identity_tx(
             &mut registry,
@@ -2328,11 +2438,11 @@ mod tests {
         let approvals = vec![
             GuardianApproval {
                 public_key: g1.public_key_bytes().to_vec(),
-                signature: g1.sign(&msg).to_vec(),
+                signature: g1.sign(crate::crypto::ctx::IDENTITY_V2, &msg).to_vec(),
             },
             GuardianApproval {
                 public_key: g2.public_key_bytes().to_vec(),
-                signature: g2.sign(&msg).to_vec(),
+                signature: g2.sign(crate::crypto::ctx::IDENTITY_V2, &msg).to_vec(),
             },
         ];
         execute_identity_tx(

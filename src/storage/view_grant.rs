@@ -210,10 +210,30 @@ impl GrantAuthorization {
     /// [`GrantAuthError::BadSignature`] when the signature does not verify, which
     /// includes a binary built without the `wallet-ml-dsa` feature.
     pub fn verify(&self, digest: &[u8; 32], owner: &Address) -> Result<(), GrantAuthError> {
+        self.verify_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            digest,
+            owner,
+        )
+    }
+
+    /// [`Self::verify`] under the scheme statuses of a chain.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::verify`].
+    pub fn verify_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        digest: &[u8; 32],
+        owner: &Address,
+    ) -> Result<(), GrantAuthError> {
         if &self.derived_owner()? != owner {
             return Err(GrantAuthError::WrongOwner);
         }
-        crate::crypto::primitives::verify_ml_dsa_87_signature(
+        crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+            registry,
+            crate::crypto::ctx::STORAGE_V2,
             digest,
             &self.signature,
             &self.owner_key,

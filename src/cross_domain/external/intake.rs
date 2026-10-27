@@ -9,10 +9,14 @@
 //! module docs in `mod.rs` said so out loud and named the two consensus
 //! decisions that wiring would require:
 //!
-//! 1. **Where the registry lives in consensus state.** Answered here: it is a
-//!    field on [`crate::chain::blockchain::Blockchain`], persisted through the
-//!    storage layer like `universal_relayer`, and its height clock is driven
-//!    by block commit (`set_height` from the block-import path).
+//! 1. **Where the registry lives in consensus state.** Answered here: it is
+//!    `AccountState::settlement.external_intake`, written only by the
+//!    `ExternalDomain` transaction door (`external_tx.rs`), carried in the
+//!    state snapshot, folded into the state root, and clocked at block end
+//!    (`on_block_committed` from the block-effects transition). It used to
+//!    be a field on `Blockchain`, written by operator RPCs and persisted
+//!    beside the chain, which no block root covered (
+//!,,).
 //! 2. **How an attestation becomes a `GlobalBlockHeader` commitment.**
 //!    Answered here: it does not get a new header field. An accepted
 //!    attestation is stored in the registry; the registry is part of the
@@ -239,6 +243,12 @@ pub struct IntakeEntry {
     /// probe replay both need it later, and "later" must not depend on the
     /// original registrar still being around to resupply it.
     pub golden: RawConsensusEvidence,
+    /// The account that posted the registration bond. It alone may change
+    /// this registration's own rules (version forks, the quorum policy,
+    /// readmission after a fault): those are decisions about the bond it
+    /// posted, not about the network, so no other key holds them.
+    #[serde(default)]
+    pub registrant: Address,
 }
 
 /// The consensus-resident intake state: the framework registry plus the
@@ -430,6 +440,7 @@ impl IntakeState {
                 policy,
                 admission,
                 golden,
+                registrant: poster,
             },
         );
         Ok(key)
@@ -764,8 +775,9 @@ impl IntakeState {
 
     /// Default economics for a newly proposed domain: a conservative ceiling
     /// with fee and challenge terms under which honesty is provably cheaper.
-    /// Callers may pass their own; this exists so the RPC path has one
+    /// Callers may pass their own; this exists so a registrant has one
     /// documented starting point instead of five magic numbers.
+    /// Convenience: the starting economics a registrant's client builds an `ExternalDomainTx::Register` from; the RPC that used it is a transaction now.
     #[must_use]
     pub fn conservative_economics(routing_ceiling_atoms: u128) -> DomainEconomics {
         DomainEconomics {
@@ -1291,6 +1303,42 @@ mod tests {
             carrier,
             Some(addr(2)),
             "first carrier is the representative"
+        );
+    }
+
+    ///: an accepted attestation puts the scheme the adapter checked in
+    /// the profile, with the weakest class beside it. A domain that has
+    /// accepted nothing shows no facts and no class.
+    #[test]
+    fn the_profile_of_an_accepted_domain_shows_the_observed_scheme() {
+        use crate::crypto::facts::{ObservedScheme, QuantumClass};
+        use crate::crypto::scheme::SchemeId;
+        let mut state = IntakeState::new();
+        let key = register(&mut state);
+        let before = crate::cross_domain::external::profile_of(
+            &state.registry.domain(&key).expect("domain").record,
+        );
+        assert!(before.crypto_facts.is_empty());
+        assert_eq!(before.quantum_class, None);
+
+        state
+            .bond_prover(&key, addr(2), economics_bond())
+            .expect("bond");
+        let evidence = quorum_evidence(&eth_spec(), addr(2));
+        state
+            .submit_evidence(&evidence, Some(Box::new(StrictTestBls)))
+            .expect("a bonded prover's golden evidence is accepted");
+
+        let profile = crate::cross_domain::external::profile_of(
+            &state.registry.domain(&key).expect("domain").record,
+        );
+        let bls = ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG);
+        assert_eq!(profile.crypto_facts.count(bls), 1);
+        assert_eq!(profile.quantum_class, Some(QuantumClass::Classical));
+        assert!(
+            profile.summary_line().contains("crypto=bls12-381x1"),
+            "got: {}",
+            profile.summary_line()
         );
     }
 

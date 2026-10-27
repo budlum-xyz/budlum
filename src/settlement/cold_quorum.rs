@@ -37,11 +37,13 @@
 //!   (the key epoch is inside `ColdWalletState::payload_for`), but a quorum
 //!   that did not also pin the epoch it is signing for would let an attacker
 //!   present signatures collected before a rotation as if they were current.
-//! - Signature malleability in Ed25519 is real: a valid `(R, s)` under weak
-//!   verification can admit variants the signer never produced. Every
-//!   verification here is `verify_strict`, which rejects non-canonical
-//!   encodings and weak public keys; accepting a malleable signature set would
-//!   let two presentations of one signing act be counted as two devices.
+//! - A cold device signs with SLH-DSA-SHAKE-256s. The key is 64
+//!   bytes and the signature 29,792 bytes, and it carries the FIPS 205 context
+//!   `BDLM/COLD/V1`. A 32-byte Ed25519 key, or an Ed25519 signature, is not a
+//!   device key or a device signature: the length is checked before any
+//!   verification and the verifier takes the scheme from the registry, never
+//!   from the length (INV-03). The committee is hash based on purpose: it is
+//!   the rung that still stands when the lattice family is gone.
 //!
 //! # The six development fixtures, and why they must never hold value
 //!
@@ -58,10 +60,18 @@
 //! dev fixtures exactly when in a hurry, and the fixture that silently becomes
 //! the production key is how cold wallets die.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use super::cold_wallet::ColdWalletPolicy;
+use crate::crypto::scheme::SchemeId;
+use crate::crypto::{ctx, pq};
+
+/// The length of a cold device verifying key: SLH-DSA-SHAKE-256s, `2n` bytes.
+pub const COLD_DEVICE_KEY_LEN: usize = 64;
+
+/// The length of a cold device seed: `sk_seed || sk_prf || pk_seed`.
+pub const COLD_DEVICE_SEED_LEN: usize = 96;
 
 /// How many development fixture devices exist.
 ///
@@ -82,8 +92,9 @@ pub struct SignerIdentity {
     /// A human-facing label. Never used in verification; it exists for audit
     /// trails and refusal logs.
     pub label: String,
-    /// The device's public verification key, raw bytes.
-    pub verifying_key: [u8; 32],
+    /// The device's SLH-DSA-SHAKE-256s verification key, raw bytes. Exactly
+    /// [`COLD_DEVICE_KEY_LEN`] bytes; `verify_quorum` refuses any other length.
+    pub verifying_key: Vec<u8>,
 }
 
 /// One device's signature over the canonical settlement payload.
@@ -95,26 +106,18 @@ pub struct DeviceSignature {
     /// The key epoch the device believes it is signing under. Pinned so that
     /// signatures collected before a rotation cannot be presented as current.
     pub key_epoch: u32,
-    /// Strictly-verified Ed25519 signature bytes. `Vec<u8>` matches the
-    /// codebase's signature convention; the exactly-64-bytes rule is enforced
-    /// at verification, where anything else is an invalid signature.
+    /// SLH-DSA-SHAKE-256s signature bytes under `BDLM/COLD/V1`. `Vec<u8>`
+    /// matches the codebase's signature convention; the exact length is
+    /// enforced at verification, where anything else is an invalid signature.
     pub signature: Vec<u8>,
 }
 
 /// A device that can sign. Only the development fixtures hold a signing key
 /// inside this module; production custody is deliberately out of scope here.
+#[derive(Clone)]
 pub struct DeviceSigner {
     pub identity: SignerIdentity,
-    key: SigningKey,
-}
-
-impl Clone for DeviceSigner {
-    fn clone(&self) -> Self {
-        Self {
-            identity: self.identity.clone(),
-            key: SigningKey::from_bytes(&self.key.to_bytes()),
-        }
-    }
+    seed: Zeroizing<Vec<u8>>,
 }
 
 impl DeviceSigner {
@@ -131,12 +134,57 @@ impl DeviceSigner {
     /// quorums) sign certificates through this helper; exercised by those
     /// callers' tests until a production committee channel submits payloads.
     pub fn sign_payload(&self, payload: &[u8], key_epoch: u32) -> DeviceSignature {
-        let signature = self.key.sign(payload);
         DeviceSignature {
             device_id: self.identity.device_id,
             key_epoch,
-            signature: signature.to_bytes().to_vec(),
+            // The seed length was checked at construction and the context is
+            // a registry constant, so signing cannot fail. If it ever did, the
+            // empty signature fails closed: no verifier accepts it.
+            signature: self.sign_bytes(payload).unwrap_or_default(),
         }
+    }
+
+    /// The signature bytes over `payload`, `None` when the backend refuses.
+    #[cfg(not(test))]
+    fn sign_bytes(&self, payload: &[u8]) -> Option<Vec<u8>> {
+        pq::slh_dsa_sign(
+            SchemeId::SLH_DSA_SHAKE_256S,
+            &self.seed,
+            payload,
+            ctx::COLD_V1,
+            None,
+        )
+        .ok()
+    }
+
+    /// Test builds sign each distinct `(device, payload)` once per process:
+    /// SLH-DSA-SHAKE-256s signing is a few million hash calls, and the
+    /// signature is deterministic, so a cached copy is the same bytes.
+    #[cfg(test)]
+    fn sign_bytes(&self, payload: &[u8]) -> Option<Vec<u8>> {
+        static CACHE: std::sync::Mutex<Vec<(u32, Vec<u8>, Vec<u8>)>> =
+            std::sync::Mutex::new(Vec::new());
+        let device = self.identity.device_id;
+        if let Ok(cache) = CACHE.lock() {
+            if let Some((_, _, signature)) = cache
+                .iter()
+                .find(|(d, p, _)| *d == device && p.as_slice() == payload)
+            {
+                return Some(signature.clone());
+            }
+        }
+        let signature = pq::slh_dsa_sign(
+            SchemeId::SLH_DSA_SHAKE_256S,
+            &self.seed,
+            payload,
+            ctx::COLD_V1,
+            None,
+        )
+        .ok()?;
+        if let Ok(mut cache) = CACHE.lock() {
+            cache.push((device, payload.to_vec(), signature.clone()));
+        }
+        Some(signature)
     }
 }
 
@@ -145,19 +193,42 @@ impl DeviceSigner {
 /// Deliberately simple and visible: anything subtler would only pretend these
 /// keys have entropy. Kept in production code (BLG-0074) so `verify_quorum`
 /// can *reject* these public keys wherever they appear.
-fn dev_fixture_seed(device_id: u32) -> [u8; 32] {
-    let mut seed = [0u8; 32];
+///
+/// Renewed for the SLH-DSA committee: 96 bytes, a different base
+/// byte than the Ed25519 fixtures, so no old fixture seed is a valid seed here.
+fn dev_fixture_seed(device_id: u32) -> [u8; COLD_DEVICE_SEED_LEN] {
+    let mut seed = [0u8; COLD_DEVICE_SEED_LEN];
     for (j, byte) in seed.iter_mut().enumerate() {
-        *byte = 0xC0 ^ (device_id as u8) ^ (j as u8);
+        *byte = 0x5C ^ (device_id as u8) ^ (j as u8);
     }
     seed
 }
 
 /// The verifying key fixture device `device_id` will always present.
-fn dev_fixture_verifying_key(device_id: u32) -> [u8; 32] {
-    SigningKey::from_bytes(&dev_fixture_seed(device_id))
-        .verifying_key()
-        .to_bytes()
+///
+/// Derived once per process: SLH-DSA key generation is a hypertree top-layer
+/// build, and `verify_quorum` asks for all six on every call.
+#[cfg(not(test))]
+fn dev_fixture_verifying_key(device_id: u32) -> Vec<u8> {
+    static KEYS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    let keys = KEYS.get_or_init(|| {
+        (1..=DEV_FIXTURE_DEVICE_COUNT)
+            .map(fixture_public_key)
+            .collect()
+    });
+    usize::try_from(device_id)
+        .ok()
+        .and_then(|id| id.checked_sub(1))
+        .and_then(|slot| keys.get(slot))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The public key of the fixture seed of `device_id`; empty when derivation
+/// fails (it cannot: the seed has the right length).
+fn fixture_public_key(device_id: u32) -> Vec<u8> {
+    pq::slh_dsa_public_key(SchemeId::SLH_DSA_SHAKE_256S, &dev_fixture_seed(device_id))
+        .unwrap_or_default()
 }
 
 /// The six development fixture devices, in committee order 1..=6.
@@ -170,18 +241,21 @@ fn dev_fixture_verifying_key(device_id: u32) -> [u8; 32] {
 #[cfg(test)]
 #[must_use]
 pub fn dev_fixture_device_signers() -> Vec<DeviceSigner> {
+    static KEYS: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+    let keys = KEYS.get_or_init(|| {
+        (1..=DEV_FIXTURE_DEVICE_COUNT)
+            .map(fixture_public_key)
+            .collect()
+    });
     (1..=DEV_FIXTURE_DEVICE_COUNT)
-        .map(|i| {
-            let key = SigningKey::from_bytes(&dev_fixture_seed(i));
-            let verifying_key = dev_fixture_verifying_key(i);
-            DeviceSigner {
-                identity: SignerIdentity {
-                    device_id: i,
-                    label: format!("cold-quorum-dev-fixture-{i}"),
-                    verifying_key,
-                },
-                key,
-            }
+        .zip(keys.iter())
+        .map(|(i, verifying_key)| DeviceSigner {
+            identity: SignerIdentity {
+                device_id: i,
+                label: format!("cold-quorum-dev-fixture-{i}"),
+                verifying_key: verifying_key.clone(),
+            },
+            seed: Zeroizing::new(dev_fixture_seed(i).to_vec()),
         })
         .collect()
 }
@@ -206,6 +280,9 @@ pub enum QuorumError {
     IdentitySetSizeMismatch { device_count: u32, presented: usize },
     /// BLG-0073: two device ids present the same verifying key.
     DuplicateVerifyingKey { device_id: u32 },
+    ///: a device key that is not 64 bytes of SLH-DSA-SHAKE-256s, an
+    /// Ed25519 key for one.
+    BadKeyLength { device_id: u32, got: usize },
     /// BLG-0074: a public development fixture identity tried to sign.
     FixtureIdentity { device_id: u32 },
     /// A signature pinned to a different key epoch than the one the gate is
@@ -233,6 +310,7 @@ impl QuorumError {
             Self::DuplicateSigner { .. } => "quorum-duplicate-signer",
             Self::IdentitySetSizeMismatch { .. } => "quorum-identity-set-size-mismatch",
             Self::DuplicateVerifyingKey { .. } => "quorum-duplicate-verifying-key",
+            Self::BadKeyLength { .. } => "quorum-bad-key-length",
             Self::FixtureIdentity { .. } => "quorum-fixture-identity",
             Self::EpochMismatch { .. } => "quorum-epoch-mismatch",
             Self::UnknownSigner { .. } => "quorum-unknown-signer",
@@ -279,6 +357,10 @@ impl std::fmt::Display for QuorumError {
                     "cold quorum verifying key reused at device id {device_id}"
                 )
             }
+            Self::BadKeyLength { device_id, got } => write!(
+                f,
+                "cold quorum device {device_id} key is {got} bytes, a device key is {COLD_DEVICE_KEY_LEN}"
+            ),
             Self::FixtureIdentity { device_id } => {
                 write!(
                     f,
@@ -351,6 +433,16 @@ pub fn verify_quorum(
             presented: identities.len(),
         });
     }
+    //: a device key is 64 bytes. An Ed25519 key never gets as far as a
+    // verification attempt.
+    for identity in identities {
+        if identity.verifying_key.len() != COLD_DEVICE_KEY_LEN {
+            return Err(QuorumError::BadKeyLength {
+                device_id: identity.device_id,
+                got: identity.verifying_key.len(),
+            });
+        }
+    }
     // BLG-0073: two device ids sharing one verifying key are one device.
     for (i, a) in identities.iter().enumerate() {
         for b in identities.iter().skip(i + 1) {
@@ -410,24 +502,19 @@ pub fn verify_quorum(
             .ok_or(QuorumError::UnknownSigner {
                 device_id: sig.device_id,
             })?;
-        let verifying_key = VerifyingKey::from_bytes(&identity.verifying_key).map_err(|_| {
-            QuorumError::InvalidSignature {
-                device_id: sig.device_id,
-            }
+        // The scheme is named here, never read off the length of the key or
+        // the signature (INV-03); a signature of the wrong length is refused
+        // by the facade before any hash is computed.
+        pq::verify(
+            SchemeId::SLH_DSA_SHAKE_256S,
+            &identity.verifying_key,
+            payload,
+            ctx::COLD_V1,
+            &sig.signature,
+        )
+        .map_err(|_| QuorumError::InvalidSignature {
+            device_id: sig.device_id,
         })?;
-        let raw: [u8; 64] =
-            sig.signature
-                .as_slice()
-                .try_into()
-                .map_err(|_| QuorumError::InvalidSignature {
-                    device_id: sig.device_id,
-                })?;
-        let signature = Signature::from_bytes(&raw);
-        verifying_key
-            .verify_strict(payload, &signature)
-            .map_err(|_| QuorumError::InvalidSignature {
-                device_id: sig.device_id,
-            })?;
     }
     seen.sort_unstable();
     Ok(seen)
@@ -474,10 +561,14 @@ mod tests {
     fn fixture_committee_is_six_distinct_identities() {
         let signers = dev_fixture_device_signers();
         assert_eq!(signers.len() as u32, DEV_FIXTURE_DEVICE_COUNT);
-        let mut keys: Vec<[u8; 32]> = signers.iter().map(|s| s.identity.verifying_key).collect();
+        let mut keys: Vec<Vec<u8>> = signers
+            .iter()
+            .map(|s| s.identity.verifying_key.clone())
+            .collect();
         keys.sort();
         keys.dedup();
         assert_eq!(keys.len(), DEV_FIXTURE_DEVICE_COUNT as usize);
+        assert!(keys.iter().all(|k| k.len() == COLD_DEVICE_KEY_LEN));
         for (n, s) in signers.iter().enumerate() {
             assert_eq!(s.identity.device_id as usize, n + 1);
             assert!(s.identity.label.starts_with("cold-quorum-dev-fixture-"));
@@ -593,9 +684,7 @@ mod tests {
             identities.push(SignerIdentity {
                 device_id: u32::from(pad),
                 label: format!("pad-{pad}"),
-                verifying_key: SigningKey::from_bytes(&[pad; 32])
-                    .verifying_key()
-                    .to_bytes(),
+                verifying_key: vec![pad; COLD_DEVICE_KEY_LEN],
             });
         }
         let sigs = three_of_six(&payload, 1);
@@ -650,13 +739,13 @@ mod tests {
         let p = policy();
         let signers = dev_fixture_device_signers();
         let identities: Vec<_> = signers.iter().take(2).map(|s| s.identity.clone()).collect();
-        let payload = b"quorum-size-check";
+        let payload = payload();
         let signatures: Vec<_> = signers
             .iter()
             .take(2)
-            .map(|s| s.sign_payload(payload, 1))
+            .map(|s| s.sign_payload(&payload, 1))
             .collect();
-        let err = verify_quorum(&p, &identities, payload, 1, &signatures).unwrap_err();
+        let err = verify_quorum(&p, &identities, &payload, 1, &signatures).unwrap_err();
         assert_eq!(err.kind(), "quorum-identity-set-size-mismatch");
     }
 
@@ -665,14 +754,65 @@ mod tests {
         let p = policy();
         let signers = dev_fixture_device_signers();
         let mut identities: Vec<_> = signers.iter().map(|s| s.identity.clone()).collect();
-        identities[5].verifying_key = identities[0].verifying_key;
-        let payload = b"quorum-dup-key-check";
-        let signatures: Vec<_> = signers
-            .iter()
-            .take(3)
-            .map(|s| s.sign_payload(payload, 1))
-            .collect();
-        let err = verify_quorum(&p, &identities, payload, 1, &signatures).unwrap_err();
+        identities[5].verifying_key = identities[0].verifying_key.clone();
+        let payload = payload();
+        let signatures = three_of_six(&payload, 1);
+        let err = verify_quorum(&p, &identities, &payload, 1, &signatures).unwrap_err();
         assert_eq!(err.kind(), "quorum-duplicate-verifying-key");
+    }
+
+    // ----: the committee is SLH-DSA-SHAKE-256s ----
+
+    #[test]
+    fn an_ed25519_device_key_is_refused_before_any_verification() {
+        let payload = payload();
+        let signers = dev_fixture_device_signers();
+        let mut identities: Vec<SignerIdentity> =
+            signers.iter().map(|s| s.identity.clone()).collect();
+        // An Ed25519 public key is 32 bytes.
+        identities[0].verifying_key = vec![9u8; 32];
+        let sigs = three_of_six(&payload, 1);
+        let err = verify_quorum(&policy(), &identities, &payload, 1, &sigs)
+            .expect_err("a 32 byte key is not a device key");
+        assert_eq!(err.kind(), "quorum-bad-key-length");
+    }
+
+    #[test]
+    fn an_ed25519_device_signature_is_refused() {
+        let payload = payload();
+        let signers = dev_fixture_device_signers();
+        let identities: Vec<SignerIdentity> = signers.iter().map(|s| s.identity.clone()).collect();
+        let mut sigs = three_of_six(&payload, 1);
+        // A 64 byte Ed25519 signature in place of a device signature.
+        sigs[0].signature = vec![0x42; 64];
+        let err = verify_quorum(&policy(), &identities, &payload, 1, &sigs)
+            .expect_err("an Ed25519 sized signature is not a device signature");
+        assert_eq!(err.kind(), "quorum-invalid-signature");
+    }
+
+    #[test]
+    fn a_forged_full_length_signature_does_not_verify() {
+        let payload = payload();
+        let signers = dev_fixture_device_signers();
+        let identities: Vec<SignerIdentity> = signers.iter().map(|s| s.identity.clone()).collect();
+        let mut sigs = three_of_six(&payload, 1);
+        sigs[2].signature = vec![0u8; pq::signature_len(SchemeId::SLH_DSA_SHAKE_256S).unwrap_or(0)];
+        let err = verify_quorum(&policy(), &identities, &payload, 1, &sigs)
+            .expect_err("a forged full length signature must fail");
+        assert_eq!(err.kind(), "quorum-invalid-signature");
+        assert_eq!(
+            sigs[0].signature.len(),
+            pq::signature_len(SchemeId::SLH_DSA_SHAKE_256S).unwrap_or(0)
+        );
+    }
+
+    #[test]
+    fn the_fixture_seeds_are_96_bytes_and_distinct() {
+        let a = dev_fixture_seed(1);
+        let b = dev_fixture_seed(2);
+        assert_eq!(a.len(), COLD_DEVICE_SEED_LEN);
+        assert_ne!(a, b);
+        // Renewed: no byte of the old 32-byte Ed25519 fixture seed leads.
+        assert_ne!(a[0], 0xC0 ^ 1);
     }
 }

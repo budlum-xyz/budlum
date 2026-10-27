@@ -36,8 +36,11 @@
 //!   reinterpretation - see [`crate::cross_domain::external::versioning`].
 
 use crate::core::address::Address;
+use crate::crypto::facts::{CryptoObserver, ObservedScheme};
 use crate::domain::types::Hash32;
 use serde::{Deserialize, Serialize};
+
+pub use crate::crypto::facts::AssumptionClass;
 
 /// The identity of an adapter. Stable across upgrades of the adapter itself,
 /// because it is the key the domain registry and every stored attestation
@@ -161,8 +164,11 @@ pub enum SecurityBacking {
     /// `slashable` is carried because it is the difference between "the
     /// signers lose money if they lie" and "the signers lose nothing": an
     /// Ethereum sync committee is the second, and a reader is entitled to know
-    /// that without having to read the Altair spec.
+    /// that without having to read the Altair spec. `scheme` names what the
+    /// signers signed with: BLS12-381 for a sync committee, secp256k1
+    /// for an EVM validator set, an ML-DSA scheme for a post-quantum one.
     SignatureSet {
+        scheme: ObservedScheme,
         signers: u64,
         required: u64,
         total_weight: u128,
@@ -184,6 +190,19 @@ pub enum SecurityBacking {
     None,
 }
 
+impl SecurityBacking {
+    /// The scheme a verified claim of this backing rests on, `None` when the
+    /// backing names none (work, a bare authority set, nothing yet).
+    #[must_use]
+    pub fn observed_scheme(&self) -> Option<ObservedScheme> {
+        match self {
+            Self::SignatureSet { scheme, .. } => Some(*scheme),
+            Self::Zk { system, .. } => Some(ObservedScheme::Proof(system.assumption_class())),
+            Self::Work { .. } | Self::Authority { .. } | Self::None => None,
+        }
+    }
+}
+
 /// Proof systems this chain can reason about by name. Closed on purpose: an
 /// unnamed proof system is one whose assumptions nobody has read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,11 +210,26 @@ pub enum ProofSystem {
     /// The chain's own STARK-based zkVM.
     BudlumZkVm,
     /// Groth16 over BN254: cheap to verify on an EVM chain, trusted setup.
+    /// An external label only: Budlum never verifies it, because a pairing-based
+    /// SNARK is not allowed on a verification path.
     Groth16,
-    /// PLONK-family: universal setup, larger proofs.
+    /// PLONK-family: universal setup, larger proofs. An external label only,
+    /// like [`ProofSystem::Groth16`].
     Plonk,
     /// STARK: transparent setup, larger proofs, no trusted ceremony.
     Stark,
+}
+
+impl ProofSystem {
+    /// What the system's soundness rests on: Groth16 and PLONK on a
+    /// pairing over an elliptic curve, the STARK systems on a hash function.
+    #[must_use]
+    pub const fn assumption_class(self) -> AssumptionClass {
+        match self {
+            Self::Groth16 | Self::Plonk => AssumptionClass::ClassicalPairing,
+            Self::Stark | Self::BudlumZkVm => AssumptionClass::Hash,
+        }
+    }
 }
 
 /// What Budlum commits to. Uniform across every external system, which is the
@@ -438,6 +472,30 @@ pub trait ExternalFinalityAdapter: Send + Sync {
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError>;
+
+    /// [`Self::verify`], reporting the schemes the verification checked to
+    /// `observer`. Nothing is reported for a refused evidence.
+    ///
+    /// The default reports the scheme the attestation's backing names. An
+    /// adapter that checks more than its backing says (an EVM validator set
+    /// signs with secp256k1 and the committee that finalises it with BLS)
+    /// overrides this and names each one at the point it checks it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::verify`] refuses with.
+    fn verify_observed(
+        &self,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<FinalityAttestation, AdapterError> {
+        let attestation = self.verify(evidence, policy)?;
+        if let Some(scheme) = attestation.security.observed_scheme() {
+            observer.observe(scheme);
+        }
+        Ok(attestation)
+    }
 
     /// The negative cases this adapter must refuse. Data, not code - see
     /// [`crate::cross_domain::external::selftest`] for why that distinction is

@@ -406,6 +406,27 @@ impl BftGuardianFinality {
         threshold: usize,
         proposal_digest: &[u8; 32],
     ) -> Result<Vec<GuardianVote>, &'static str> {
+        Self::finalize_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            votes,
+            guardians,
+            threshold,
+            proposal_digest,
+        )
+    }
+
+    /// [`Self::finalize`] under the scheme statuses of a chain.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::finalize`].
+    pub fn finalize_in(
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        votes: Vec<GuardianVote>,
+        guardians: &[[u8; ML_DSA_87_PUBLIC_KEY_LEN]],
+        threshold: usize,
+        proposal_digest: &[u8; 32],
+    ) -> Result<Vec<GuardianVote>, &'static str> {
         if guardians.is_empty() {
             return Err("K-BUD-BFT-GUARDIAN: no guardians");
         }
@@ -434,7 +455,9 @@ impl BftGuardianFinality {
             if &vote.proposal_digest != proposal_digest {
                 return Err("K-BUD-BFT-GUARDIAN: vote names another proposal");
             }
-            crate::crypto::primitives::verify_ml_dsa_87_signature(
+            crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+                registry,
+                crate::crypto::ctx::GUARDIAN_V1,
                 &message,
                 &vote.signature,
                 &vote.guardian_id,
@@ -759,7 +782,10 @@ mod tests {
         let vote = |k: &WalletKeyPair, digest: [u8; 32]| GuardianVote {
             guardian_id: k.public_key_bytes(),
             proposal_digest: digest,
-            signature: k.sign(&GuardianVote::signed_message(&digest)),
+            signature: k.sign(
+                crate::crypto::ctx::GUARDIAN_V1,
+                &GuardianVote::signed_message(&digest),
+            ),
         };
         let honest: Vec<GuardianVote> = keys.iter().map(|k| vote(k, proposal)).collect();
         assert!(

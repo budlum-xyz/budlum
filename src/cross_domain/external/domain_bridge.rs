@@ -14,13 +14,15 @@
 //! WIRING: wired - `Blockchain::verify_domain_commitment_finality` constructs
 //! this bridge for a `ConsensusKind::Custom` domain whose `finality_adapter`
 //! is [`EXTERNAL_DOMAIN_FINALITY_ADAPTER`], rebuilding the adapter from the
-//! consensus-resident intake entry (`external_intake`) and the policy the
+//! consensus-resident intake entry (`settlement.external_intake`) and the
+//! policy the
 //! domain was admitted under. The registry state that feeds it and the
 //! commitment path are documented in `intake.rs`.
 
 use crate::cross_domain::external::spec::{
     AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, SecurityBacking, VerificationPolicy,
 };
+use crate::crypto::facts::{CryptoFacts, CryptoObserver, NullObserver};
 use crate::domain::finality_adapter::{
     DomainFinalityAdapter, FinalityError, FinalityProof, FinalityStatus,
 };
@@ -111,6 +113,16 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
         commitment: &DomainCommitment,
         proof: &FinalityProof,
     ) -> Result<FinalityStatus, FinalityError> {
+        self.verify_finality_observed(domain, commitment, proof, &mut NullObserver)
+    }
+
+    fn verify_finality_observed(
+        &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<FinalityStatus, FinalityError> {
         if domain.finality_adapter != EXTERNAL_DOMAIN_FINALITY_ADAPTER {
             return Ok(FinalityStatus::Rejected(format!(
                 "domain {} is not bound to the external-domain finality adapter",
@@ -118,9 +130,10 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
             )));
         }
         let evidence = decode_external_evidence(proof)?;
+        let mut seen = CryptoFacts::new();
         let attestation = self
             .adapter
-            .verify(&evidence, &self.policy)
+            .verify_observed(&evidence, &self.policy, &mut seen)
             .map_err(|error| {
                 FinalityError(format!("external adapter refused evidence: {error}"))
             })?;
@@ -226,6 +239,12 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 "external finality proof hash does not match the commitment".to_string(),
             ));
         }
+        // Only a commitment that finalizes reports what the adapter checked.
+        for row in seen.observed() {
+            for _ in 0..row.count {
+                observer.observe(row.scheme);
+            }
+        }
         Ok(FinalityStatus::Finalized)
     }
 }
@@ -281,6 +300,9 @@ mod tests {
                 // An unslashable signature set (BLG-0132 fixture): the
                 // slashable-only policy must refuse it.
                 security: SecurityBacking::SignatureSet {
+                    scheme: crate::crypto::facts::ObservedScheme::Scheme(
+                        crate::crypto::scheme::SchemeId::BLS12381_MINSIG,
+                    ),
                     signers: 3,
                     required: 2,
                     total_weight: 3,

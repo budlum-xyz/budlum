@@ -2,9 +2,10 @@
 //! Altair sync committee.
 //!
 //! WIRING: wired - this adapter goes live through an admission into the
-//! external-domain registry, now bound to consensus as
-//! `Blockchain::external_intake` (`AdapterSpec::EthereumSync` builds it, the
-//! node's `PairingBls` supplies the pairing check). The executor still
+//! external-domain registry, bound to consensus in
+//! `AccountState::settlement` and written by the `ExternalDomain`
+//! transaction door (`AdapterSpec::EthereumSync` builds it, the node's
+//! `PairingBls` supplies the pairing check). The executor still
 //! refuses generic Ethereum relay results (`relayer_evm_package_required`):
 //! relay execution and finality attestation are different powers, and this
 //! wiring grants only the second.
@@ -53,6 +54,8 @@ use crate::cross_domain::external::spec::{
     AdapterDescriptor, AdapterError, AdapterId, FinalityAttestation, FinalityKind, ProofSystem,
     RawConsensusEvidence, SecurityBacking, TimeUnit, TrustModel, VerificationPolicy,
 };
+use crate::crypto::facts::{CryptoObserver, NullObserver, ObservedScheme};
+use crate::crypto::scheme::SchemeId;
 use serde::{Deserialize, Serialize};
 
 /// `SYNC_COMMITTEE_SIZE` in the Altair preset: 2**9.
@@ -399,6 +402,15 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
     ) -> Result<FinalityAttestation, AdapterError> {
+        self.verify_observed(evidence, policy, &mut NullObserver)
+    }
+
+    fn verify_observed(
+        &self,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<FinalityAttestation, AdapterError> {
         if evidence.adapter != self.descriptor.id {
             return Err(AdapterError::WrongAdapter {
                 expected: self.descriptor.name.clone(),
@@ -545,6 +557,10 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             }
         }
 
+        // Every check passed. The one scheme this adapter verified is the
+        // committee's BLS12-381 aggregate.
+        observer.observe(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
+
         Ok(FinalityAttestation {
             adapter: self.descriptor.id,
             domain: crate::cross_domain::external::spec::DomainKey::from_parts(
@@ -561,6 +577,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             finalized_at: epoch_of_slot(update.finalized_slot),
             time_unit: TimeUnit::Epoch,
             security: SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
                 signers,
                 required: minimum_signers(),
                 total_weight: u128::from(SYNC_COMMITTEE_SIZE),
