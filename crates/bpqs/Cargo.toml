@@ -9,8 +9,8 @@ description = "Budlum-BPQS research line (F2): epoch-chained Winternitz few-time
 # Deliberately minimal: the research acceptance bar wants a surface a
 # third-party auditor can read in one sitting. sha3 gives the SHA3-256
 # cross-check backend; keccak (already pinned in this lock as sha3's own
-# permutation dependency) carries the SHAKE-256 XOF cross-check written
-# in-crate because sha3 0.12 ships no SHAKE surface. The canonical
+# permutation dependency) carries the canonical SHAKE-256 XOF backend written
+# in-crate because sha3 0.12 ships no SHAKE surface. The research-only
 # Poseidon2 backend is hand-ported in-tree (src/poseidon2.rs) with zero
 # additional surface.
 [dependencies]
