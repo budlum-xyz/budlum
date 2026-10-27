@@ -106,7 +106,7 @@ contract GraftTest is Harness {
         bytes32 intent = keccak256("intent");
         executor.execute(intent, bytes32(uint256(1)), address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
         assertEq(counter.count(), 1, "the call was made");
-        vm.expectRevert(GraftExecutor.AlreadyFulfilled.selector);
+        vm.expectPartialRevert(GraftExecutor.AlreadyFulfilled.selector);
         executor.execute(intent, bytes32(uint256(1)), address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
     }
 
@@ -127,14 +127,14 @@ contract GraftTest is Harness {
     }
 
     function test_a_call_to_an_address_with_no_code_is_refused() public {
-        vm.expectRevert(GraftExecutor.CallFailed.selector);
+        vm.expectPartialRevert(GraftExecutor.CallFailed.selector);
         executor.execute(
             keccak256("no-code"), bytes32(uint256(1)), address(0xdead), hex"", hex"01"
         );
     }
 
     function test_a_failed_call_emits_nothing_and_reverts() public {
-        vm.expectRevert(GraftExecutor.CallFailed.selector);
+        vm.expectPartialRevert(GraftExecutor.CallFailed.selector);
         executor.execute(
             keccak256("intent"), bytes32(uint256(1)), address(counter), abi.encodeCall(Counter.fail, ()), hex"01"
         );
@@ -173,7 +173,7 @@ contract GraftTest is Harness {
         Receiver receiver = new Receiver(finality, graftId);
         PaymentProof memory proof = _proof(receiver, finality, graftId);
         assertEq(receiver.consume(proof), 500, "amount");
-        vm.expectRevert(BudlumPaymentReceiver.AlreadyConsumed.selector);
+        vm.expectPartialRevert(BudlumPaymentReceiver.AlreadyConsumed.selector);
         receiver.consume(proof);
     }
 
@@ -183,7 +183,7 @@ contract GraftTest is Harness {
         Receiver receiver = new Receiver(finality, graftId);
         PaymentProof memory proof = _proof(receiver, finality, graftId);
         proof.payment.amount = 501;
-        vm.expectRevert(BudlumPaymentReceiver.ProofInvalid.selector);
+        vm.expectPartialRevert(BudlumPaymentReceiver.ProofInvalid.selector);
         receiver.consume(proof);
     }
 

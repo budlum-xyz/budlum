@@ -4,8 +4,14 @@ pragma solidity ^0.8.24;
 /// @notice The Foundry cheat codes the tests use. Declared here so the tree
 ///         carries no test library dependency.
 interface Vm {
-    function expectRevert(bytes4 selector) external;
+    /// Exact payload match: the next call must revert with exactly these
+    /// bytes. Only meaningful when the full payload is known.
+    function expectRevert(bytes calldata revertData) external;
     function expectRevert() external;
+    /// Selector match: the next call must revert with this error, whatever
+    /// its arguments are. This is the expectation the suites want - a custom
+    /// error that carries arguments does not revert with four bytes.
+    function expectPartialRevert(bytes4 selector) external;
     function roll(uint256 blockNumber) external;
     function prank(address sender) external;
     function deal(address who, uint256 amount) external;
