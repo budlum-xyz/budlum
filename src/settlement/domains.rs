@@ -1377,6 +1377,29 @@ fn execute_proof_market_tx(
             slash_condition_hash,
             min_prover_stake,
         } => {
+            if let ProofTaskKind::PulAggregate {
+                window_start,
+                window_end,
+                archive_witness_bytes,
+                pul_full_bytes,
+            } = kind
+            {
+                if window_end <= window_start {
+                    return Err(SettlementTxError::Refused(
+                        "a PUL aggregate window must cover at least one block".into(),
+                    ));
+                }
+                if !crate::settlement::proof_market::pul_proof_is_warranted(
+                    *archive_witness_bytes,
+                    *pul_full_bytes,
+                ) {
+                    return Err(SettlementTxError::Refused(
+                        "the PUL aggregate is not smaller than half the archived witness, so \
+                         the window produces no proof"
+                            .into(),
+                    ));
+                }
+            }
             let task = crate::settlement::proof_market::ProofTask::new(
                 kind.clone(),
                 ctx.sender,
@@ -1593,6 +1616,13 @@ fn execute_proof_market_tx(
                 ProofTaskKind::ZkProof { .. } => {
                     return Err(SettlementTxError::Refused(
                         "proof-market ZK tasks require SubmitZkProof".into(),
+                    ));
+                }
+                ProofTaskKind::PulAggregate { .. } => {
+                    return Err(SettlementTxError::Refused(
+                        "proof-market PUL aggregate tasks settle against the PUL window, not a \
+                         finality proof"
+                            .into(),
                     ));
                 }
             }

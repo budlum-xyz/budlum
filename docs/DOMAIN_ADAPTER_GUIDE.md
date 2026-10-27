@@ -77,7 +77,7 @@ admitted.
    rule with `SetQuorumPolicy`. Only the registrant changes the rules.
 
 External-domain writes are refused on mainnet until the mainnet readiness
-gates are met.
+gates are met (`docs/MAINNET_READINESS.md`).
 
 ## 4. Consensus domains
 
