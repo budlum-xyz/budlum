@@ -3488,6 +3488,8 @@ impl Blockchain {
             crate::core::transaction::TransactionType::Undelegate { .. }
                 | crate::core::transaction::TransactionType::WithdrawDelegation { .. }
                 | crate::core::transaction::TransactionType::SetValidatorCommission { .. }
+                | crate::core::transaction::TransactionType::Redelegate { .. }
+                | crate::core::transaction::TransactionType::ClaimRewards { .. }
         ) {
             tx.fee
         } else {
@@ -3522,6 +3524,38 @@ impl Blockchain {
                 ) && self.state.registry.delegated_amount(tx.from, validator) < tx.amount
                 {
                     reasons.push("delegation_unbond_exceeds_position".to_string());
+                }
+            }
+            crate::core::transaction::TransactionType::Redelegate {
+                from_validator,
+                to_validator,
+            } => {
+                if tx.amount == 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    reasons.push("invalid_redelegation_shape".to_string());
+                }
+                if from_validator == to_validator {
+                    reasons.push("redelegation_same_validator".to_string());
+                }
+                if self.state.get_validator(&from_validator).is_none()
+                    || self.state.get_validator(&to_validator).is_none()
+                {
+                    reasons.push("redelegation_target_not_validator".to_string());
+                }
+                if self.state.registry.delegated_amount(tx.from, from_validator) < tx.amount {
+                    reasons.push("redelegation_exceeds_position".to_string());
+                }
+            }
+            crate::core::transaction::TransactionType::ClaimRewards { validator } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    reasons.push("invalid_claim_rewards_shape".to_string());
+                }
+                if self
+                    .state
+                    .registry
+                    .claimable_reward(tx.from, validator)
+                    == 0
+                {
+                    reasons.push("no_claimable_reward".to_string());
                 }
             }
             crate::core::transaction::TransactionType::WithdrawDelegation { validator } => {
