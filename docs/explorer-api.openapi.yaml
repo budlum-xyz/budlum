@@ -1,0 +1,271 @@
+openapi: 3.0.3
+info:
+  title: Budlum explorer API
+  version: "1.0.0"
+  description: |
+    Read-only JSON API served by `budlum-indexer`.
+    item 6). The indexer follows a node's finalized chain and stores every
+    finalized block, so nothing this API has returned is taken back by a
+    reorg. History (blocks, transactions, address histories, block producer
+    records) comes from the index; current state (domains, global headers,
+    BNS names, B.U.D. manifests) is read from the node at request time.
+
+    Facts only: the API reports what the chain recorded and computes no
+    score or ranking.
+
+    Amounts are base units (1 BUD = 1,000,000 units). Hashes and addresses
+    are hex; a `0x` prefix is accepted and ignored on input.
+  license:
+    name: PolyForm Shield 1.0.0
+servers:
+  - url: https://explorer-api.<TESTNET_DOMAIN>
+    description: Public testnet (TLS by ops/Caddyfile.testnet)
+  - url: http://127.0.0.1:18700
+    description: Local indexer
+paths:
+  /health:
+    get:
+      summary: Liveness of the indexer process
+      responses:
+        "200":
+          description: The process answers.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+  /v1/status:
+    get:
+      summary: Indexed height and the node's status
+      responses:
+        "200":
+          description: The last indexed (finalized) height and `bud_getStatus` of the node.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  indexedHeight:
+                    type: integer
+                    nullable: true
+                    description: Null before the genesis block is indexed.
+                  node:
+                    type: object
+                    nullable: true
+                    description: The node's `bud_getStatus` answer, null when unreachable.
+  /v1/blocks:
+    get:
+      summary: The latest indexed blocks, newest first
+      parameters:
+        - $ref: "#/components/parameters/limit"
+      responses:
+        "200":
+          description: Up to `limit` blocks.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Block" }
+  /v1/blocks/{height}:
+    get:
+      summary: One block by height
+      parameters:
+        - name: height
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: The block.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Block" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/blocks/hash/{hash}:
+    get:
+      summary: One block by hash
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The block.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Block" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/txs/{hash}:
+    get:
+      summary: One transaction by hash, with its block
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The transaction and where it is.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IndexedTransaction" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/addresses/{address}/txs:
+    get:
+      summary: The transactions an address sent or received, newest first
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema: { type: string }
+        - $ref: "#/components/parameters/limit"
+        - name: before
+          in: query
+          description: Only transactions in blocks below this height (paging).
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Up to `limit` transactions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/IndexedTransaction" }
+  /v1/producers:
+    get:
+      summary: Every block producer with its recorded production
+      responses:
+        "200":
+          description: One record per producer seen in finalized blocks.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    address: { type: string }
+                    blocks: { type: integer, description: Finalized blocks produced. }
+                    first: { type: integer, description: Height of the first one. }
+                    last: { type: integer, description: Height of the latest one. }
+  /v1/domains:
+    get:
+      summary: Registered consensus domains (from the node, `bud_getConsensusDomains`)
+      responses:
+        "200": { $ref: "#/components/responses/NodeJson" }
+        "502": { $ref: "#/components/responses/NodeUnreachable" }
+  /v1/domains/{id}:
+    get:
+      summary: One consensus domain (from the node, `bud_getDomainInfo`)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200": { $ref: "#/components/responses/NodeJson" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/NodeUnreachable" }
+  /v1/external-domains:
+    get:
+      summary: Registered external domains (from the node, `bud_getExternalDomains`)
+      responses:
+        "200": { $ref: "#/components/responses/NodeJson" }
+        "502": { $ref: "#/components/responses/NodeUnreachable" }
+  /v1/global-headers/{height}:
+    get:
+      summary: One global header (from the node, `bud_getGlobalHeader`)
+      parameters:
+        - name: height
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200": { $ref: "#/components/responses/NodeJson" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/NodeUnreachable" }
+  /v1/bns/{name}:
+    get:
+      summary: A `.bud` name (from the node, `bud_bnsResolveFull`)
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/NodeJson" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/NodeUnreachable" }
+  /v1/manifests/{id}:
+    get:
+      summary: A B.U.D. content manifest (from the node, `bud_storageGetManifest`)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { $ref: "#/components/responses/NodeJson" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { $ref: "#/components/responses/NodeUnreachable" }
+components:
+  parameters:
+    limit:
+      name: limit
+      in: query
+      description: Page size, 1 to 100 (default 20).
+      schema: { type: integer, minimum: 1, maximum: 100 }
+  responses:
+    NotFound:
+      description: Nothing under this key.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NodeJson:
+      description: The node's JSON-RPC result, passed through unchanged.
+      content:
+        application/json:
+          schema: {}
+    NodeUnreachable:
+      description: The node did not answer or refused the read.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+    Transaction:
+      type: object
+      description: As `bud_getTransactionByHash` returns it.
+      properties:
+        hash: { type: string }
+        from: { type: string }
+        to: { type: string }
+        amount: { type: string, description: "0x quantity, base units" }
+        fee: { type: string, description: "0x quantity, base units" }
+      additionalProperties: true
+    Block:
+      type: object
+      description: As `bud_getBlockByNumber` returns it.
+      properties:
+        number: { type: string, description: 0x quantity }
+        hash: { type: string }
+        parentHash: { type: string }
+        timestamp: { type: string, description: "0x quantity, milliseconds" }
+        producer: { type: string, nullable: true }
+        stateRoot: { type: string, nullable: true }
+        txRoot: { type: string, nullable: true }
+        transactions:
+          type: array
+          items: { $ref: "#/components/schemas/Transaction" }
+      additionalProperties: true
+    IndexedTransaction:
+      type: object
+      properties:
+        blockNumber: { type: integer }
+        index: { type: integer, description: Position in the block. }
+        transaction: { $ref: "#/components/schemas/Transaction" }
