@@ -75,7 +75,10 @@ RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
 # Pass the PROTOC env explicitly to the build: prost-build resolves protoc
 # could not find it, docker-smoke reported 'Could not find protoc'.
 RUN PROTOC=/usr/bin/protoc cargo build --release --locked && \
-    cp target/release/budlum-core /usr/local/bin/budlum-core
+    cp target/release/budlum-core /usr/local/bin/budlum-core && \
+    cp target/release/bud /usr/local/bin/bud && \
+    cp target/release/budlum-faucet /usr/local/bin/budlum-faucet && \
+    cp target/release/budlum-indexer /usr/local/bin/budlum-indexer
 
 # ── Stage 2: Runtime ────────────────────────────────────────
 FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
@@ -120,6 +123,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core
+# The CLI runs the validator key generation and the genesis ceremony
+# (`bud validator init`, `bud genesis assemble`) in the compose rehearsal.
+COPY --from=builder /usr/local/bin/bud /usr/local/bin/bud
+# One image, four roles: validator and RPC
+# node (budlum-core), faucet (budlum-faucet) and explorer API
+# (budlum-indexer). ops/testnet-local.yml picks the role by entrypoint.
+COPY --from=builder /usr/local/bin/budlum-faucet /usr/local/bin/budlum-faucet
+COPY --from=builder /usr/local/bin/budlum-indexer /usr/local/bin/budlum-indexer
 
 # Hadolint DL3066: non-numeric user-id. The user is created with the deterministic
 # UID 1000 and `USER 1000` uses the numeric form, so it resolves on the host side
@@ -130,7 +141,7 @@ RUN useradd --create-home --shell /bin/bash --uid 1000 budlum
 # inherits the image directory ownership on first mount - if it is not created
 # owned by budlum beforehand the container (USER 1000) gets EACCES during storage
 # init and falls into a restart loop (a defect caught in the first CI run, 2026-07-18).
-RUN mkdir -p /home/budlum/data /home/budlum/secrets \
+RUN mkdir -p /home/budlum/data /home/budlum/secrets /home/budlum/ceremony \
     && chown -R 1000:1000 /home/budlum
 
 USER 1000
