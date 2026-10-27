@@ -40,12 +40,18 @@
 //!   cargo bench --bench timing_safe (this is what CI uses)
 //! Environment variables (for local in-depth analysis):
 //!   TIMING_SAFE_BATCHES (default 64), TIMING_SAFE_ITERS (default 4096 per batch per class)
+//!   TIMING_SAFE_PQ_SAMPLES (default 400) and TIMING_SAFE_SLH_SAMPLES (default 10): signs per
+//!   key class for the post-quantum signers
 
 use std::env;
 use std::hint::black_box;
 use std::process::ExitCode;
 use std::time::Instant;
 
+use budlum_core::crypto::composite::CompositeKeypair;
+use budlum_core::crypto::ctx;
+use budlum_core::crypto::pq;
+use budlum_core::crypto::scheme::{SchemeId, SuiteId};
 use budlum_core::rpc::server::constant_time_eq_str;
 
 /// The dudect standard decision threshold (statistical significance).
@@ -258,6 +264,130 @@ fn getenv_usize(key: &str, default: usize) -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(default)
+}
+
+/// One timed signing run: the closure signs once, the clock reads the whole call.
+fn time_once<F: FnMut()>(mut f: F) -> f64 {
+    let start = Instant::now();
+    f();
+    start.elapsed().as_nanos() as f64
+}
+
+/// The two key classes of a dudect test on a signer: a seed whose first half is
+/// all zero bytes (class A) against a fully random seed (class B). Both classes
+/// draw a fresh key per sample, so a difference between them can only come from
+/// the structure of the secret, not from one lucky or unlucky key.
+fn seed_for_class(class_b: bool, rng: &mut XorShift, len: usize) -> Vec<u8> {
+    let mut seed = vec![0u8; len];
+    let skip = if class_b { 0 } else { len / 2 };
+    for byte in seed.iter_mut().skip(skip) {
+        *byte = rng.next().to_le_bytes()[0];
+    }
+    seed
+}
+
+///: secret-dependent timing of the post-quantum signers.
+///
+/// Classes are key classes (a near-zero seed against a random seed) with a random
+/// message in both, measured interleaved so drift loads them equally. The verdict
+/// is the same two-part rule as above, with the practical-significance denominator
+/// being the signer's own mean time: |Welch t| >= 4.5 AND the means differ by at
+/// least 5 percent. Each signer first has to catch a deliberately leaky copy of
+/// itself (class B padded by 60 percent of the mean), otherwise the result is
+/// not a measurement of anything (exit 2).
+///
+/// ML-DSA signing is a rejection-sampling loop, so its time varies from call to
+/// call by design; that variation is identically distributed in both classes,
+/// which is what the test checks. SLH-DSA signing does a fixed number of hashes.
+fn pq_signer_classes() -> Result<(), ExitCode> {
+    let samples = getenv_usize("TIMING_SAFE_PQ_SAMPLES", 400).max(16);
+    let slh_samples = getenv_usize("TIMING_SAFE_SLH_SAMPLES", 10).max(6);
+    let mut rng = XorShift(0x5151_A11C_E5EE_D001);
+    type Signer<'a> = (&'a str, usize, Box<dyn Fn(&[u8], &[u8]) + 'a>, usize);
+    let signers: Vec<Signer> = vec![
+        (
+            "ml-dsa-87 sign",
+            samples,
+            Box::new(|seed: &[u8], msg: &[u8]| {
+                let seed: [u8; 32] = seed.try_into().unwrap();
+                black_box(
+                    pq::ml_dsa_sign(SchemeId::ML_DSA_87, &seed, msg, ctx::TX_V7, &[0u8; 32])
+                        .unwrap(),
+                );
+            }),
+            32,
+        ),
+        (
+            "composite sign (suite 0x0001)",
+            samples,
+            Box::new(|seed: &[u8], msg: &[u8]| {
+                let keys =
+                    CompositeKeypair::from_seeds(SuiteId::USER, seed, seed.try_into().unwrap())
+                        .unwrap();
+                black_box(keys.sign(ctx::TX_V7, msg, &[0u8; 32]).unwrap());
+            }),
+            32,
+        ),
+        (
+            "slh-dsa-shake-256s sign",
+            slh_samples,
+            Box::new(|seed: &[u8], msg: &[u8]| {
+                black_box(
+                    pq::slh_dsa_sign(SchemeId::SLH_DSA_SHAKE_256S, seed, msg, ctx::SEAL_V1, None)
+                        .unwrap(),
+                );
+            }),
+            96,
+        ),
+    ];
+    for (name, n, sign, seed_len) in &signers {
+        let mut class_a = Vec::with_capacity(*n);
+        let mut class_b = Vec::with_capacity(*n);
+        let mut control_b = Vec::with_capacity(*n);
+        // Warm-up.
+        let warm_seed = seed_for_class(true, &mut rng, *seed_len);
+        sign(&warm_seed, b"warm-up message");
+        for _ in 0..*n {
+            let msg_a: Vec<u8> = (0..48).map(|_| rng.next().to_le_bytes()[0]).collect();
+            let msg_b: Vec<u8> = (0..48).map(|_| rng.next().to_le_bytes()[0]).collect();
+            let seed_a = seed_for_class(false, &mut rng, *seed_len);
+            let seed_b = seed_for_class(true, &mut rng, *seed_len);
+            class_a.push(time_once(|| sign(&seed_a, &msg_a)));
+            class_b.push(time_once(|| sign(&seed_b, &msg_b)));
+        }
+        let m = (mean(&class_a) + mean(&class_b)) / 2.0;
+        // The leaky copy: the same measurement with class B padded by 60 percent.
+        for value in &class_b {
+            control_b.push(*value + 0.6 * m);
+        }
+        let t_control = welch_t(&class_a, &control_b);
+        if !t_control.is_finite() || t_control.abs() < T_THRESHOLD {
+            eprintln!(
+                "FAIL(harness): {name}: a 60 percent leak was not detected (|t|={:.2}); \
+                 the measurement is not sensitive enough to count.",
+                t_control.abs()
+            );
+            return Err(ExitCode::from(2));
+        }
+        let t = welch_t(&class_a, &class_b);
+        let delta = (mean(&class_a) - mean(&class_b)).abs();
+        let ratio = delta / m;
+        println!(
+            "class {name:<30}: mean={m:.0}ns delta={delta:.0}ns |t|={:.2} ratio={:.1}% control |t|={:.2}",
+            if t.is_finite() { t.abs() } else { 0.0 },
+            ratio * 100.0,
+            t_control.abs()
+        );
+        if t.is_finite() && t.abs() >= T_THRESHOLD && ratio >= EFFECT_RATIO_THRESHOLD {
+            eprintln!(
+                "FAIL(regression): {name} timing depends on the key class (|t|={:.2}, ratio={:.1}%).",
+                t.abs(),
+                ratio * 100.0
+            );
+            return Err(ExitCode::from(1));
+        }
+    }
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -501,6 +631,11 @@ fn main() -> ExitCode {
             );
             return ExitCode::from(1);
         }
+    }
+
+    //: the post-quantum signers, same verdict rule, own controls.
+    if let Err(code) = pq_signer_classes() {
+        return code;
     }
 
     // Both conditions together: statistical evidence AND practical magnitude. Neither
