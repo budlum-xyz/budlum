@@ -9,7 +9,11 @@ use tiny_keccak::{Hasher, Keccak};
 /// constant together with any change to the serialized proof shape,
 /// transcript, public inputs, or envelope fields - never edit the literals
 /// scattered across the codebase, or a bump is silently half-applied.
-pub const PROOF_FORMAT_VERSION: u32 = 1;
+///
+/// Version 2: the challenge field is the cubic extension of Goldilocks and the
+/// FRI query count is 76. Version 1 proofs (quadratic extension, 100 queries) gave less
+/// than 128 bits provable and are refused.
+pub const PROOF_FORMAT_VERSION: u32 = 2;
 
 /// A proof larger than this is refused before it is deserialized or hashed:
 /// the allocation cap that closes the parse-time side of a bloated-proof DoS

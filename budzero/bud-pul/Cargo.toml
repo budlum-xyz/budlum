@@ -1,0 +1,21 @@
+[package]
+name = "bud-pul"
+version = "0.1.0"
+edition = "2021"
+# Inherit the workspace license value for the cargo-deny license gate
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bud-proof = { path = "../bud-proof" }
+p3-air = "=0.7.0"
+p3-matrix = "=0.7.0"
+p3-field = "=0.7.0"
+p3-goldilocks = "=0.7.0"
+p3-keccak-air = "=0.7.0"
+
+[dev-dependencies]
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+postcard = { version = "1.0", features = ["alloc"] }
