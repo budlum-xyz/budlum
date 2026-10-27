@@ -76,9 +76,34 @@ pub fn now_millis() -> u128 {
 /// by more than one [`ROUND_TIMEOUT_MS`] refuses that producer's retry-round
 /// block; round 0 - the ordinary case - is unaffected, so a skewed node still
 /// follows the chain, and the next round's leader can produce instead.
+///
+/// # Why the parent's timestamp is clamped
+///
+/// A parent's timestamp is not always the moment the parent was published.
+/// Production stamps blocks from the slot schedule
+/// (`genesis_time + index * slot_ms`), so on a chain that has fallen behind
+/// its schedule the newest header can be minutes older than the moment it
+/// actually landed. Pricing the round straight off that stamp made the gate
+/// saturate: once the lag reached
+/// `MIN_BLOCK_INTERVAL_MS + MAX_LEADER_ROUNDS * ROUND_TIMEOUT_MS` (49 s), every
+/// round up to [`MAX_LEADER_ROUNDS`] was affordable at once, and every
+/// authority or validator elected in one of them could publish a valid
+/// competing block for a slot it does not lead. The gate then priced nothing
+/// exactly when the chain was least healthy (CWE-807).
+///
+/// The anchor is therefore clamped to a window the chain already agrees on:
+/// a parent stamp older than `now - MAX_FUTURE_BLOCK_TIME_MS` stops buying
+/// rounds. That is the mirror image of the future bound - a header may be at
+/// most [`MAX_FUTURE_BLOCK_TIME_MS`] ahead of a verifier - so the most a stale
+/// parent can ever grant is
+/// `(MAX_FUTURE_BLOCK_TIME_MS - MIN_BLOCK_INTERVAL_MS) / ROUND_TIMEOUT_MS`
+/// (4) rounds, however far behind the schedule the chain has drifted. A real
+/// stall still advances rounds, because a real stall moves the parent into
+/// the window by elapsed time, not by schedule arithmetic.
 pub fn affordable_leader_round(parent_timestamp_ms: u128, now_ms: u128) -> u64 {
+    let anchor = parent_timestamp_ms.max(now_ms.saturating_sub(MAX_FUTURE_BLOCK_TIME_MS));
     let spaced = now_ms
-        .saturating_sub(parent_timestamp_ms)
+        .saturating_sub(anchor)
         .saturating_sub(MIN_BLOCK_INTERVAL_MS);
     u64::try_from(spaced / ROUND_TIMEOUT_MS)
         .unwrap_or(u64::MAX)
@@ -367,6 +392,41 @@ pub trait ConsensusEngine: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Schedule lag must not buy rounds.
+    ///
+    /// Production stamps blocks from the slot schedule, so a chain that has
+    /// fallen behind its schedule carries parent timestamps that are much
+    /// older than the moment the parent landed. Pricing straight off that
+    /// stamp let the gate saturate: at 49 s of lag every round up to
+    /// `MAX_LEADER_ROUNDS` was affordable at once and any authority could
+    /// produce for a slot it does not lead. The anchor is clamped to the same
+    /// window the future bound already allows, so the price flattens out.
+    #[test]
+    fn a_stale_parent_cannot_buy_more_rounds_than_a_stalled_one() {
+        let now = 1_700_000_000_000u128;
+        // A parent on time: nothing but round 0 is affordable.
+        assert_eq!(affordable_leader_round(now - 1_500, now), 0);
+        // A genuinely stalled slot: rounds advance with real elapsed time.
+        assert_eq!(affordable_leader_round(now - 13_500, now), 4);
+        // A parent ten minutes behind its schedule prices exactly the same as
+        // one inside the window: the lag stops paying.
+        let stale = affordable_leader_round(now - 600_000, now);
+        assert_eq!(stale, 4, "schedule lag must not raise the price");
+        assert!(
+            stale < MAX_LEADER_ROUNDS,
+            "the gate must never saturate to MAX_LEADER_ROUNDS on lag alone"
+        );
+        // The most a stale parent can grant is the future window, minus the
+        // minimum block interval, in round timeouts.
+        let ceiling =
+            u64::try_from((MAX_FUTURE_BLOCK_TIME_MS - MIN_BLOCK_INTERVAL_MS) / ROUND_TIMEOUT_MS)
+                .unwrap();
+        assert_eq!(stale, ceiling.min(MAX_LEADER_ROUNDS));
+        // A future-dated parent still prices at zero: it buys nothing.
+        assert_eq!(affordable_leader_round(now + 60_000, now), 0);
+    }
+
     #[test]
     fn test_constants() {
         assert_eq!(MAX_FUTURE_BLOCK_TIME_MS, 15_000);
