@@ -31,14 +31,59 @@ pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
 pub const MAX_LEADER_ROUNDS: u64 = 16;
 /// Wall-clock spacing between leader rounds of one slot (P01-F01, P01-F02).
 ///
-/// Claiming round `r` costs `r` timeouts: validation requires the block
-/// timestamp to sit at least `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
-/// after its parent. Without that floor every validator would jump straight
-/// to the widest threshold in round `MAX_LEADER_ROUNDS` and the round term
-/// would buy nothing but forks. The floor also removes the "stay 1 s ahead of
+/// Claiming round `r` costs `r` timeouts, and the price is charged twice:
+/// the block timestamp must sit at least
+/// `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS` after its parent, and the
+/// claim must be affordable by the verifying node's clock
+/// ([`affordable_leader_round`]). Without the floor every validator would jump
+/// straight to the widest round and the retry term would buy nothing but forks;
+/// without the clock the floor is free, because the producer writes both of the
+/// numbers it compares (CWE-807). The floor also removes the "stay 1 s ahead of
 /// the parent" steering channel (P01-F20): a later round can no longer be
 /// claimed on the minimum step.
 pub const ROUND_TIMEOUT_MS: u128 = 3 * 1000;
+
+/// Wall clock, milliseconds since the Unix epoch.
+///
+/// One definition for the round pricing below: the producer and the verifier
+/// must ask the same question the same way, or the round stops being priced at
+/// all (CWE-807).
+pub fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+/// The highest leader round a slot can have reached by `now_ms`.
+///
+/// Round `r` is affordable once `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
+/// has elapsed since the parent block's timestamp; the result is capped at
+/// [`MAX_LEADER_ROUNDS`].
+///
+/// This is the *pricing* half of the round rule, and it is deliberately
+/// clock-based. The other half - the floor "`block.timestamp` must be at least
+/// `parent + MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`" - compares two
+/// values the producer writes, so on its own it prices nothing: the timestamp
+/// may sit up to [`MAX_FUTURE_BLOCK_TIME_MS`] ahead of the verifier, which makes
+/// rounds `0..=MAX_FUTURE_BLOCK_TIME_MS / ROUND_TIMEOUT_MS` affordable the
+/// instant the parent lands. Every authority or validator elected in one of
+/// those rounds could then publish a valid block for a slot it does not lead,
+/// and a slot would routinely have several valid competing blocks.
+///
+/// Both sides use this function: the producer clamps the round it claims, the
+/// verifier refuses a claim above it. A verifier whose clock trails a producer
+/// by more than one [`ROUND_TIMEOUT_MS`] refuses that producer's retry-round
+/// block; round 0 - the ordinary case - is unaffected, so a skewed node still
+/// follows the chain, and the next round's leader can produce instead.
+pub fn affordable_leader_round(parent_timestamp_ms: u128, now_ms: u128) -> u64 {
+    let spaced = now_ms
+        .saturating_sub(parent_timestamp_ms)
+        .saturating_sub(MIN_BLOCK_INTERVAL_MS);
+    u64::try_from(spaced / ROUND_TIMEOUT_MS)
+        .unwrap_or(u64::MAX)
+        .min(MAX_LEADER_ROUNDS)
+}
 /// Consensus block-size ceiling, measured over the **JSON** encoding.
 ///
 /// Distinct from `network::protocol::MAX_BLOCK_SIZE` (1 MiB) on purpose, and
