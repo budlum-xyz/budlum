@@ -599,6 +599,7 @@ fn diff_cases() -> usize {
 }
 
 #[test]
+#[allow(clippy::type_complexity)] // the pool is (scheme, key, message, context, signature)
 fn pq_vectors_differential_random_inputs() {
     let mut rng = SplitMix(0x5EED_0001);
     // A pool of genuine (key, message, context, signature) tuples per scheme.
