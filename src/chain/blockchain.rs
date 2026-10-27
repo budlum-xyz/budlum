@@ -7571,6 +7571,14 @@ impl Blockchain {
         if vote.checkpoint_hash.len() > MAX_CHECKPOINT_HASH_LEN {
             return Err("Rejecting prevote: checkpoint_hash is not a block hash".into());
         }
+        // The vote signature is a BLS point, and it is hashed as part of the
+        // auth preimage below. Refuse anything that cannot be one before the
+        // preimage is built, so an oversized `sig_bls` is neither hashed nor
+        // retained as a local invalid-vote sample.
+        const MAX_VOTE_SIG_LEN: usize = 128;
+        if vote.sig_bls.len() > MAX_VOTE_SIG_LEN || vote.auth_sig.len() > MAX_VOTE_SIG_LEN {
+            return Err("Rejecting prevote: signature is not a BLS signature".into());
+        }
         // Chain binding. `vote.chain_id` is the domain the sender signed
         // under, and the signature check below rebuilds the preimage from it,
         // so a vote minted for another chain fails verification either way.
@@ -7652,6 +7660,12 @@ impl Blockchain {
     pub fn handle_precommit(&mut self, vote: Precommit) -> Result<Option<FinalityCert>, String> {
         if vote.checkpoint_hash.len() > MAX_CHECKPOINT_HASH_LEN {
             return Err("Rejecting precommit: checkpoint_hash is not a block hash".into());
+        }
+        // Same ceiling as `handle_prevote`: the signature must be a BLS point
+        // before it enters the auth preimage or the invalid-vote sample store.
+        const MAX_VOTE_SIG_LEN: usize = 128;
+        if vote.sig_bls.len() > MAX_VOTE_SIG_LEN || vote.auth_sig.len() > MAX_VOTE_SIG_LEN {
+            return Err("Rejecting precommit: signature is not a BLS signature".into());
         }
         // Chain binding; see `handle_prevote`.
         if vote.chain_id != self.chain_id {
@@ -7928,6 +7942,24 @@ impl Blockchain {
             merkle_proof,
             storage_root,
         };
+        // The manifest on this path comes from the RPC caller, so the
+        // authority rule the in-block path applies has to run here too. Deal
+        // rows are the only thing the registry derives durability, repair and
+        // operator standing from, and a payer that does not own the content
+        // must not be able to place one over it. A manifest that is not
+        // registered yet may only be registered by the account that names
+        // itself its owner.
+        let authority = self
+            .state
+            .storage_registry
+            .owner_of(&manifest.manifest_id)
+            .unwrap_or(manifest.owner);
+        if payer != authority {
+            return Err(format!(
+                "manifest {} belongs to {authority}, not to payer {payer}; refusing to open a deal over content the payer does not own",
+                manifest.manifest_id
+            ));
+        }
         let now_unix_secs = self.current_unix_secs();
         let deal_id = crate::domain::deal_open::open_deal_escrowed(
             &mut self.state,
