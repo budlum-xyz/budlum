@@ -6,16 +6,20 @@
 //!
 //! # How live node state maps onto the ledger stages
 //!
-//! - `Medusa` is the latest finalized checkpoint. The node's own block hash
-//!   at that height is the commitment it holds.
-//! - `Ephyra` is the finalized checkpoint one interval below it.
-//! - `Polyp` is genesis. The runtime has no network-agreed commitment for
-//!   genesis, so the canonical source answers nothing for it, and a verdict
-//!   that needs a full reversion becomes an alarm.
+//! Every stage is trusted only through a post-quantum seal
+//! ([`crate::domain::pq_canonical`]):
 //!
-//! The canonical commitment for a height is the checkpoint hash in the
-//! finality certificate stored for that height. A certificate carries a
-//! quorum signature, so no single node chose it.
+//! - `Medusa` is the latest finalized checkpoint. The node's own block hash
+//!   at that height is the commitment it holds; the canonical commitment is
+//!   the checkpoint hash of a certificate whose ML-DSA-65 QC was verified.
+//! - `Ephyra` is the latest verified Anchor V2 at or below it. The node holds
+//!   the aggregate root it recomputes from its own header archive.
+//! - `Polyp` is the latest Root Seal. The commitment is the seal digest.
+//!
+//! A checkpoint whose canonical commitment carries no seal that anchors its
+//! stage and height with a post-quantum family counts as having no canonical
+//! commitment at all: a BLS-only certificate, an unsigned snapshot or an
+//! unverified anchor is never a source, and the verdict becomes an alarm.
 //!
 //! # Where the cost estimates come from
 //!
@@ -38,19 +42,25 @@
 //! the target checkpoint is a chain state transition that the chain actor
 //! does not define, so this tick does not do it.
 
+use crate::domain::pq_canonical::SealId;
 use crate::domain::regen_health::{assess, AlarmReason, HealthPolicy, HealthVerdict};
 use crate::domain::regeneration_stage::{
     RegenerationLedger, Reversion, ReversionError, Stage, StageSnapshot, Stress,
 };
 
-/// One finalized checkpoint as the node sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One sealed checkpoint of one stage as the node sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
+    /// The stage this checkpoint belongs to.
+    pub stage: Stage,
     pub height: u64,
-    /// The node's own block hash at this height, if it holds the block.
+    /// The commitment the node holds for this stage and height, if any.
     pub local: Option<[u8; 32]>,
-    /// The checkpoint hash in the stored finality certificate, if any.
+    /// The canonical commitment from the post-quantum source, if any.
     pub canonical: Option<[u8; 32]>,
+    /// The seal behind `canonical`. Without a seal that anchors this stage
+    /// and height through a post-quantum family, `canonical` is ignored.
+    pub seal: Option<SealId>,
 }
 
 /// The checkpoints one tick looks at.
@@ -59,30 +69,56 @@ pub struct CheckpointView {
     /// Height of the latest finalized checkpoint. Zero means nothing is
     /// finalized yet.
     pub live: u64,
-    /// Height of the finalized checkpoint one interval below `live`.
+    /// Height of the latest verified anchor at or below `live` (Ephyra).
     pub previous: Option<u64>,
+    /// Height of the latest Root Seal (Polyp).
+    pub polyp: Option<u64>,
     /// Every checkpoint the node fetched for this tick: at least `live`,
-    /// `previous` and [`RegenHealthTick::held_height`].
+    /// `previous`, `polyp` and [`RegenHealthTick::held_stage`] at
+    /// [`RegenHealthTick::held_height`].
     pub checkpoints: Vec<Checkpoint>,
 }
 
 impl CheckpointView {
-    fn at(&self, height: u64) -> Option<&Checkpoint> {
-        self.checkpoints.iter().find(|c| c.height == height)
+    fn at(&self, stage: Stage, height: u64) -> Option<&Checkpoint> {
+        self.checkpoints
+            .iter()
+            .find(|c| c.stage == stage && c.height == height)
     }
 
+    /// The canonical commitment, only when a post-quantum seal of this stage
+    /// and height stands behind it.
     fn canonical(&self, stage: Stage, height: u64) -> Option<[u8; 32]> {
-        if stage == Stage::Polyp {
-            return None;
+        let checkpoint = self.at(stage, height)?;
+        let sealed = checkpoint
+            .seal
+            .as_ref()
+            .is_some_and(|seal| seal.anchors(stage, height));
+        if sealed {
+            checkpoint.canonical
+        } else {
+            None
         }
-        self.at(height).and_then(|c| c.canonical)
     }
 
+    fn seal(&self, stage: Stage, height: u64) -> Option<SealId> {
+        self.at(stage, height).and_then(|c| c.seal.clone())
+    }
+
+    /// The height a stage holds a snapshot at, only when a sealed canonical
+    /// commitment stands behind it. A stage whose seal the quantum alarm took
+    /// away has no height, so `cheapest_target` descends past it to the next
+    /// safe seal.
     fn stage_height(&self, stage: Stage) -> Option<u64> {
-        match stage {
+        let height = match stage {
             Stage::Medusa => Some(self.live),
             Stage::Ephyra => self.previous,
-            Stage::Polyp => Some(0),
+            Stage::Polyp => self.polyp,
+        }?;
+        if stage == Stage::Medusa || self.canonical(stage, height).is_some() {
+            Some(height)
+        } else {
+            None
         }
     }
 }
@@ -148,6 +184,12 @@ impl RegenHealthTick {
         self.ledger.height
     }
 
+    /// The stage the ledger holds, the stage of [`Self::held_height`].
+    #[must_use]
+    pub fn held_stage(&self) -> Stage {
+        self.ledger.stage
+    }
+
     /// Runs one health tick against `view`.
     pub fn observe(&mut self, view: &CheckpointView) -> TickOutcome {
         if view.live == 0 {
@@ -159,7 +201,7 @@ impl RegenHealthTick {
         if self.ledger.stage == Stage::Medusa {
             // The adult stage follows the live checkpoint. A missing block
             // holds no commitment, so it cannot match the certificate.
-            let live = view.at(view.live).and_then(|c| c.local);
+            let live = view.at(Stage::Medusa, view.live).and_then(|c| c.local);
             self.ledger.height = view.live;
             self.ledger.commitment = live.unwrap_or_default();
         } else if let Some(next) = self.ledger.stage.later() {
@@ -167,7 +209,7 @@ impl RegenHealthTick {
             // the node's own block at that checkpoint is canonical.
             let local = view
                 .stage_height(next)
-                .and_then(|height| view.at(height))
+                .and_then(|height| view.at(next, height))
                 .and_then(|c| c.local.map(|local| (c.height, local)));
             if let Some((height, commitment)) = local {
                 let snapshot = StageSnapshot {
@@ -175,6 +217,7 @@ impl RegenHealthTick {
                     height,
                     commitment,
                     carried: Default::default(),
+                    seal: view.seal(next, height),
                 };
                 // A refusal leaves the ledger unchanged; the next tick tries
                 // again after the sync round.
@@ -186,7 +229,7 @@ impl RegenHealthTick {
         let regrowth_cost = self
             .ledger
             .height
-            .saturating_sub(view.previous.unwrap_or(0));
+            .saturating_sub(view.previous.or(view.polyp).unwrap_or(0));
         let verdict = assess(
             &self.ledger,
             &self.policy,
@@ -206,7 +249,9 @@ impl RegenHealthTick {
                 repair_cost,
                 regrowth_cost,
             },
-            HealthVerdict::RevertTo { target, stress } => {
+            HealthVerdict::RevertTo { mut target, stress } => {
+                // `assess` knows commitments only; the seal is the source's.
+                target.seal = view.seal(target.stage, target.height);
                 let result = if self.ledger.validate().is_ok() {
                     self.ledger
                         .revert(&target, stress, &self.policy.reversion, &canonical)
@@ -237,6 +282,8 @@ pub fn hash32(hex_str: &str) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::scheme::SchemeId;
+    use crate::domain::pq_canonical::{test_seal, SealKind};
     use crate::domain::regeneration_stage::ReversionPolicy;
 
     const INTERVAL: u64 = 100;
@@ -248,12 +295,18 @@ mod tests {
         h
     }
 
-    fn honest(height: u64) -> Checkpoint {
+    fn honest_at(stage: Stage, height: u64) -> Checkpoint {
         Checkpoint {
+            stage,
             height,
             local: Some(hash_of(height)),
             canonical: Some(hash_of(height)),
+            seal: Some(test_seal(stage, height)),
         }
+    }
+
+    fn honest(height: u64) -> Checkpoint {
+        honest_at(Stage::Medusa, height)
     }
 
     fn diverged(height: u64) -> Checkpoint {
@@ -271,7 +324,8 @@ mod tests {
         CheckpointView {
             live,
             previous: Some(previous),
-            checkpoints: vec![live_cp, honest(previous)],
+            polyp: None,
+            checkpoints: vec![live_cp, honest_at(Stage::Ephyra, previous)],
         }
     }
 
@@ -399,6 +453,124 @@ mod tests {
             tick.observe(&view(live)),
             TickOutcome::Repair { .. }
         ));
+    }
+
+    #[test]
+    fn a_bls_only_certificate_is_no_canonical_source() {
+        // The checkpoint matches nothing the node holds, and its only seal is
+        // the BLS certificate: the tick must alarm, not repair or revert to it.
+        let mut tick = RegenHealthTick::default();
+        let live = Checkpoint {
+            seal: Some(SealId::new(
+                SealKind::FinalityQc,
+                2000,
+                &[SchemeId::BLS12381_MINSIG],
+            )),
+            ..diverged(2000)
+        };
+        match tick.observe(&view(live)) {
+            TickOutcome::Alarm { reason, .. } => {
+                assert_eq!(reason.kind(), "regen-alarm-no-canonical-source");
+            }
+            other => panic!("expected Alarm, got {other:?}"),
+        }
+        assert!(tick.ledger.reversion_events.is_empty());
+    }
+
+    #[test]
+    fn an_unsealed_snapshot_is_no_canonical_source() {
+        let mut tick = RegenHealthTick::default();
+        let live = Checkpoint {
+            seal: None,
+            ..diverged(2000)
+        };
+        assert!(matches!(
+            tick.observe(&view(live)),
+            TickOutcome::Alarm { .. }
+        ));
+        // Even a healthy-looking view is not signed off without a seal.
+        let mut tick = RegenHealthTick::default();
+        let unsealed = Checkpoint {
+            seal: None,
+            ..honest(300)
+        };
+        assert!(matches!(
+            tick.observe(&view(unsealed)),
+            TickOutcome::Alarm { .. }
+        ));
+    }
+
+    #[test]
+    fn a_forged_anchor_target_is_refused() {
+        // The live checkpoint diverged, so the tick wants to revert to the
+        // Ephyra anchor. That anchor's seal names another height: it does not
+        // anchor this stage and height, so the target has no canonical source
+        // and the ledger never moves.
+        let mut tick = RegenHealthTick::default();
+        let forged_anchor = Checkpoint {
+            seal: Some(test_seal(Stage::Ephyra, 1)),
+            ..honest_at(Stage::Ephyra, 1900)
+        };
+        let view = CheckpointView {
+            live: 2000,
+            previous: Some(1900),
+            polyp: None,
+            checkpoints: vec![diverged(2000), forged_anchor],
+        };
+        let outcome = tick.observe(&view);
+        assert!(
+            !matches!(outcome, TickOutcome::Reverted(_)),
+            "a forged anchor must not be a reversion target, got {outcome:?}"
+        );
+        assert_eq!(tick.ledger.stage, Stage::Medusa);
+        assert!(tick.ledger.reversion_events.is_empty());
+    }
+
+    #[test]
+    fn a_dead_anchor_seal_makes_the_tick_descend_to_the_root_seal() {
+        // Damage that the Ephyra anchor would normally clear. A lattice break
+        // took the anchor's family away, so the observation carries no seal for
+        // it and the tick reverts two stages, to the root seal.
+        let mut tick = RegenHealthTick::default();
+        let dead_anchor = Checkpoint {
+            canonical: None,
+            seal: None,
+            ..honest_at(Stage::Ephyra, 1900)
+        };
+        let view = CheckpointView {
+            live: 2000,
+            previous: Some(1900),
+            polyp: Some(1800),
+            checkpoints: vec![diverged(2000), dead_anchor, honest_at(Stage::Polyp, 1800)],
+        };
+        // The Polyp snapshot is two stages down: the default policy allows two
+        // stages per event.
+        match tick.observe(&view) {
+            TickOutcome::Reverted(reversion) => {
+                assert_eq!(reversion.to, Stage::Polyp);
+                assert_eq!(reversion.height_after, 1800);
+            }
+            other => panic!("expected the descent to the root seal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_root_seal_is_the_polyp_target_of_a_full_reversion() {
+        let mut tick = RegenHealthTick::default();
+        // No anchor is held, so only the Polyp seal can clear the damage.
+        let view = CheckpointView {
+            live: 2000,
+            previous: None,
+            polyp: Some(1900),
+            checkpoints: vec![diverged(2000), honest_at(Stage::Polyp, 1900)],
+        };
+        match tick.observe(&view) {
+            TickOutcome::Reverted(reversion) => {
+                assert_eq!(reversion.to, Stage::Polyp);
+                assert_eq!(reversion.height_after, 1900);
+            }
+            other => panic!("expected a reversion to the root seal, got {other:?}"),
+        }
     }
 
     #[test]

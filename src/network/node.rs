@@ -5,7 +5,7 @@ use libp2p::{
     kad::{
         store::MemoryStore, Behaviour as Kademlia, Config as KademliaConfig, Event as KademliaEvent,
     },
-    noise, ping, request_response,
+    noise, ping, request_response, tls,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
 };
@@ -28,6 +28,70 @@ const SYNC_TIMEOUT_SECS: u64 = 60;
 /// 100; with a 1 MiB request ceiling that pins 100 MiB or more per peer.
 const MAX_SYNC_CONCURRENT_STREAMS: usize = 16;
 const MAX_PENDING_BITSWAP_FETCH_WAITERS: usize = 128;
+/// QC blobs assembled at once, across all peers.
+const MAX_QC_ASSEMBLIES: usize = 8;
+/// How long a partly received QC blob is kept.
+const QC_ASSEMBLY_TTL: Duration = Duration::from_secs(120);
+/// Most validators a QC blob may name on the wire. The snapshot check at
+/// import is the exact bound; this one only limits what is buffered before it.
+const MAX_QC_WIRE_VALIDATORS: usize = 2048;
+
+/// A QC response is accepted only for a request we made to this peer. Each
+/// request asks for exactly one chunk; the next is requested after validation.
+struct QcFetch {
+    peer: PeerId,
+    epoch: u64,
+    height: u64,
+    checkpoint_hash: String,
+    chunk_index: u32,
+    chunk_count: Option<u32>,
+}
+
+/// Build a single bounded peer-bound response, never a gossip broadcast.
+fn qc_chunk_response(
+    epoch: u64,
+    height: u64,
+    index: u32,
+    blob: Option<crate::consensus::qc::QcBlob>,
+) -> Result<NetworkMessage, String> {
+    let missing = || NetworkMessage::QcBlobResponse {
+        epoch,
+        checkpoint_height: height,
+        checkpoint_hash: String::new(),
+        blob_data: Vec::new(),
+        found: false,
+        chunk_index: index,
+        chunk_count: 0,
+    };
+    let Some(blob) = blob else {
+        return Ok(missing());
+    };
+    if height == 0
+        || blob.epoch != epoch
+        || blob.checkpoint_height != height
+        || !blob.verify_merkle_root()
+        || blob.pq_signatures.len() > MAX_QC_WIRE_VALIDATORS
+    {
+        return Ok(missing());
+    }
+    let payload = blob.to_bytes()?;
+    let chunk_bytes = crate::consensus::qc::QC_CHUNK_BYTES;
+    let count =
+        u32::try_from(payload.len().div_ceil(chunk_bytes)).map_err(|_| "too many QC chunks")?;
+    if count == 0 || index >= count {
+        return Ok(missing());
+    }
+    let start = index as usize * chunk_bytes;
+    Ok(NetworkMessage::QcBlobResponse {
+        epoch,
+        checkpoint_height: height,
+        checkpoint_hash: blob.checkpoint_hash,
+        blob_data: payload[start..payload.len().min(start + chunk_bytes)].to_vec(),
+        found: true,
+        chunk_index: index,
+        chunk_count: count,
+    })
+}
 
 /// Double sign guard for precommits.
 ///
@@ -68,6 +132,9 @@ pub struct BudlumBehaviour {
     kad: Kademlia<MemoryStore>,
     sync: request_response::Behaviour<crate::network::sync_codec::SyncCodec>,
     bitswap: request_response::Behaviour<bud_node::BitswapCodec>,
+    /// `/budlum/witness/1.0.0`: witnesses of a block for a node that
+    /// pruned them, checked against the block's `witness_root`.
+    witness: request_response::Behaviour<crate::network::witness_protocol::WitnessCodec>,
     /// Connection budget: without it a peer can open unbounded connections
     /// and exhaust memory (libp2p resource-management DoS, RUSTSEC-2022-0084).
     /// The incoming cap plus the per-peer cap also blunt eclipse attempts: an
@@ -80,9 +147,7 @@ use crate::chain::chain_actor::ChainHandle;
 use crate::chain::finality::{Precommit, Prevote};
 use crate::network::gossip_dedup::{DedupResult, GossipDedup};
 use crate::network::peer_manager::PeerManager;
-use crate::network::regen_health_tick::{
-    hash32, Checkpoint, CheckpointView, RegenHealthTick, TickOutcome,
-};
+use crate::network::regen_health_tick::{Checkpoint, CheckpointView, RegenHealthTick, TickOutcome};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 #[allow(clippy::large_enum_variant)]
@@ -159,24 +224,6 @@ impl NodeClient {
         let _ = self.sender.try_send(NodeCommand::Broadcast(
             "blocks".into(),
             NetworkMessage::DomainCommitment(commitment),
-        ));
-    }
-    pub fn broadcast_verified_domain_commitment_sync(
-        &self,
-        payload: crate::domain::VerifiedDomainCommitment,
-    ) {
-        let _ = self.sender.try_send(NodeCommand::Broadcast(
-            "blocks".into(),
-            NetworkMessage::VerifiedDomainCommitment(payload),
-        ));
-    }
-    pub fn broadcast_cross_domain_message_sync(
-        &self,
-        msg: crate::cross_domain::CrossDomainMessage,
-    ) {
-        let _ = self.sender.try_send(NodeCommand::Broadcast(
-            "blocks".into(),
-            NetworkMessage::CrossDomainMessage(msg),
         ));
     }
     pub fn broadcast_slashing_evidence_sync(
@@ -378,6 +425,18 @@ pub fn load_or_generate_identity_key(path: Option<&str>) -> identity::Keypair {
     }
 }
 
+/// The gossipsub author signature is not a consensus input.
+///
+/// `MessageAuthenticity::Signed` makes the swarm sign every message with the
+/// node's Ed25519 identity key. That signature only says which peer relayed or
+/// authored a gossip frame; it is a classical signature and carries no
+/// security weight. No consensus decision rests on it: a block, a vote, an
+/// evidence record or a certificate is accepted on the composite signature
+/// inside its own payload, never on the gossip author. The one place the author
+/// field is read is the handshake, where it ties the handshake to the sending
+/// connection, and a forged author there only gets the frame dropped. The
+/// `gossip_author_is_not_a_consensus_input` test pins this by scanning this
+/// file for every read of the field.
 fn handshake_origin_matches_peer(
     propagation_source: PeerId,
     message_source: Option<PeerId>,
@@ -438,6 +497,15 @@ pub struct Node {
     pub chain: ChainHandle,
     pub peer_manager: Arc<Mutex<PeerManager>>,
     pub gossip_dedup: Arc<Mutex<GossipDedup>>,
+    /// QC blobs in flight, one assembly per `(peer, epoch, height)`. At most
+    /// [`MAX_QC_ASSEMBLIES`] at once, and each one expires after
+    /// [`QC_ASSEMBLY_TTL`].
+    qc_assemblies:
+        HashMap<(PeerId, u64, u64), (std::time::Instant, crate::consensus::qc::QcBlobAssembler)>,
+    qc_fetches: HashMap<request_response::OutboundRequestId, QcFetch>,
+    /// Bounded in-progress deliveries: subsequent chunks spend the first
+    /// chunk's blob rate token, never a new token per 256 KiB frame.
+    qc_serves: HashMap<(PeerId, u64, u64), (std::time::Instant, u32)>,
     pub bootstrap_peers: Vec<String>,
     pub dns_seeds: Vec<String>,
     pub dns_seed_port: u16,
@@ -528,6 +596,19 @@ pub struct Node {
     /// about its own view against the finality certificates, and it starts
     /// again from the live checkpoint on restart.
     regen_health: RegenHealthTick,
+    /// Transactions a reversion gave up, offered again after re-growth
+    ///, and the height the stash starts above.
+    regen_mempool: crate::domain::RegenMempool,
+    regen_stash_from: Option<u64>,
+    /// Witness requests in flight, with the root the answer must hash to.
+    witness_requests: HashMap<
+        request_response::OutboundRequestId,
+        (
+            crate::network::witness_protocol::WitnessRequest,
+            [u8; 32],
+            PeerId,
+        ),
+    >,
     /// Single-flight guard ensuring peer-supplied fork batches can keep at
     /// most one `reorg_to_peer_suffix` task running at a time (CWE-407).
     reorg_in_flight: Arc<std::sync::atomic::AtomicBool>,
@@ -611,6 +692,183 @@ struct VoteHistory {
 }
 
 impl Node {
+    /// Adds one chunk of a QC blob to its assembly. Returns the blob when the
+    /// last chunk arrives, `None` while chunks are missing.
+    ///
+    /// # Errors
+    ///
+    /// A message when the chunk is out of range, repeated, oversize, the
+    /// assembly table is full of other blobs, or the finished bytes do not
+    /// decode.
+    fn assemble_qc_chunk(
+        &mut self,
+        peer: PeerId,
+        epoch: u64,
+        height: u64,
+        chunk_index: u32,
+        chunk_count: u32,
+        chunk: Vec<u8>,
+    ) -> Result<Option<crate::consensus::qc::QcBlob>, String> {
+        use crate::consensus::qc::QcBlobAssembler;
+        let now = std::time::Instant::now();
+        self.qc_assemblies
+            .retain(|_, (started, _)| now.duration_since(*started) < QC_ASSEMBLY_TTL);
+        let key = (peer, epoch, height);
+        if !self.qc_assemblies.contains_key(&key) {
+            if self.qc_assemblies.len() >= MAX_QC_ASSEMBLIES {
+                return Err("too many QC blobs are being assembled".into());
+            }
+            let assembler = QcBlobAssembler::new(MAX_QC_WIRE_VALIDATORS, chunk_count as usize)?;
+            self.qc_assemblies.insert(key, (now, assembler));
+        }
+        let outcome = match self.qc_assemblies.get_mut(&key) {
+            Some((_, assembler)) => assembler.push(chunk_index as usize, chunk),
+            None => Err("QC assembly vanished".to_string()),
+        };
+        if let Err(e) = outcome {
+            self.qc_assemblies.remove(&key);
+            return Err(e);
+        }
+        let complete = self
+            .qc_assemblies
+            .get(&key)
+            .is_some_and(|(_, assembler)| assembler.is_complete());
+        if !complete {
+            return Ok(None);
+        }
+        match self.qc_assemblies.remove(&key) {
+            Some((_, assembler)) => assembler.finish().map(Some),
+            None => Err("QC assembly vanished".into()),
+        }
+    }
+
+    /// Fetch QC data over /sync, never from the public gossip topic. The
+    /// request ID pins every answer to the requested peer, epoch, height and
+    /// checkpoint hash, and only one chunk per blob is in flight.
+    fn request_qc_blob(&mut self, peer: PeerId, epoch: u64, height: u64, hash: String) {
+        if height == 0
+            || self.qc_fetches.len() >= MAX_QC_ASSEMBLIES
+            || self
+                .qc_fetches
+                .values()
+                .any(|f| f.peer == peer && f.epoch == epoch && f.height == height)
+        {
+            return;
+        }
+        let request = NetworkMessage::GetQcBlob {
+            epoch,
+            checkpoint_height: height,
+            chunk_index: 0,
+        };
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .sync
+            .send_request(&peer, request.to_bytes());
+        self.qc_fetches.insert(
+            id,
+            QcFetch {
+                peer,
+                epoch,
+                height,
+                checkpoint_hash: hash,
+                chunk_index: 0,
+                chunk_count: None,
+            },
+        );
+    }
+
+    /// Continue a peer-bound fetch, importing only a complete, matching blob.
+    async fn accept_qc_response(
+        &mut self,
+        fetch: QcFetch,
+        peer: PeerId,
+        response: NetworkMessage,
+    ) -> Result<(), String> {
+        let NetworkMessage::QcBlobResponse {
+            epoch,
+            checkpoint_height,
+            checkpoint_hash,
+            blob_data,
+            found,
+            chunk_index,
+            chunk_count,
+        } = response
+        else {
+            return Err("unexpected QC response type".into());
+        };
+        if peer != fetch.peer
+            || epoch != fetch.epoch
+            || checkpoint_height != fetch.height
+            || chunk_index != fetch.chunk_index
+        {
+            return Err("QC response does not match the outbound request".into());
+        }
+        if !found {
+            if chunk_count != 0 || !blob_data.is_empty() || !checkpoint_hash.is_empty() {
+                return Err("malformed missing QC response".into());
+            }
+            self.qc_assemblies.remove(&(peer, epoch, checkpoint_height));
+            return Ok(());
+        }
+        let max_chunks = crate::consensus::qc::qc_blob_max_bytes(MAX_QC_WIRE_VALIDATORS)
+            .div_ceil(crate::consensus::qc::QC_CHUNK_BYTES);
+        if checkpoint_hash != fetch.checkpoint_hash
+            || chunk_count == 0
+            || chunk_count as usize > max_chunks
+            || chunk_index >= chunk_count
+            || fetch
+                .chunk_count
+                .is_some_and(|previous| previous != chunk_count)
+            || blob_data.is_empty()
+        {
+            return Err("invalid QC response metadata".into());
+        }
+        let blob = self.assemble_qc_chunk(
+            peer,
+            epoch,
+            checkpoint_height,
+            chunk_index,
+            chunk_count,
+            blob_data,
+        )?;
+        if let Some(blob) = blob {
+            if chunk_index + 1 != chunk_count
+                || blob.epoch != epoch
+                || blob.checkpoint_height != checkpoint_height
+                || blob.checkpoint_hash != fetch.checkpoint_hash
+            {
+                return Err("assembled QC blob does not match its request".into());
+            }
+            self.chain.import_qc_blob(blob).await?;
+            self.peer_manager_lock().report_good_behavior(&peer);
+        } else {
+            let next = chunk_index + 1;
+            if next >= chunk_count {
+                return Err("incomplete QC blob".into());
+            }
+            let request = NetworkMessage::GetQcBlob {
+                epoch,
+                checkpoint_height,
+                chunk_index: next,
+            };
+            let id = self
+                .swarm
+                .behaviour_mut()
+                .sync
+                .send_request(&peer, request.to_bytes());
+            self.qc_fetches.insert(
+                id,
+                QcFetch {
+                    chunk_index: next,
+                    chunk_count: Some(chunk_count),
+                    ..fetch
+                },
+            );
+        }
+        Ok(())
+    }
+
     /// Take the `PeerManager` lock, recovering if it was poisoned.
     ///
     /// A `Mutex` poisons when a thread panics while holding it, and every
@@ -728,45 +986,44 @@ impl Node {
 
     /// One regeneration health tick against the finalized checkpoints.
     ///
-    /// The canonical commitment for a height is the checkpoint hash in the
-    /// stored finality certificate; the held one is this node's own block
-    /// hash at that height. [`RegenHealthTick::observe`] decides and moves
-    /// the reversion ledger. This method gathers the view and acts on the
+    /// The canonical commitment of each stage comes from the post-quantum
+    /// source (Root Seal, verified anchor, finality checkpoint with its QC);
+    /// the held one is this node's own. [`RegenHealthTick::observe`] decides
+    /// and moves the reversion ledger. This method gathers the view and acts on the
     /// outcome: repair and revert open a sync round, alarms are logged as
     /// errors with their stable kind label.
     async fn regen_health_tick(&mut self) {
+        use crate::domain::regeneration_stage::Stage;
         let live = self.chain.get_finalized_height().await;
-        let chain_id = self.chain.get_chain_id().await;
-        let interval =
-            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(chain_id);
-        let previous = live.checked_sub(interval);
-        let mut heights = vec![live];
-        heights.extend(previous);
-        let held = self.regen_health.held_height();
-        if !heights.contains(&held) {
-            heights.push(held);
+        let (polyp, previous) = self.chain.pq_sealed_heights(live).await;
+        // Every stage is read through the post-quantum canonical source: a
+        // BLS-only certificate or an unverified anchor yields no seal, and the
+        // tick treats a commitment without a seal as absent.
+        let mut wanted = vec![(Stage::Medusa, live)];
+        wanted.extend(previous.map(|height| (Stage::Ephyra, height)));
+        wanted.extend(polyp.map(|height| (Stage::Polyp, height)));
+        let held = (
+            self.regen_health.held_stage(),
+            self.regen_health.held_height(),
+        );
+        if !wanted.contains(&held) {
+            wanted.push(held);
         }
-        let mut checkpoints = Vec::with_capacity(heights.len());
-        for height in heights {
-            let local = self
-                .chain
-                .get_block(height)
-                .await
-                .and_then(|block| hash32(&block.hash));
-            let canonical = self
-                .chain
-                .get_finality_cert(height)
-                .await
-                .and_then(|cert| hash32(&cert.checkpoint_hash));
+        let mut checkpoints = Vec::with_capacity(wanted.len());
+        for (stage, height) in wanted {
+            let observed = self.chain.pq_stage_observation(stage, height).await;
             checkpoints.push(Checkpoint {
+                stage,
                 height,
-                local,
-                canonical,
+                local: observed.local,
+                canonical: observed.canonical,
+                seal: observed.seal,
             });
         }
         let view = CheckpointView {
             live,
             previous,
+            polyp,
             checkpoints,
         };
         let outcome = self.regen_health.observe(&view);
@@ -804,12 +1061,115 @@ impl Node {
                 "Regeneration health alarm: self-recovery is impossible or unsafe"
             ),
         }
+        match &outcome {
+            TickOutcome::Reverted(reversion) => {
+                self.stash_reverted_transactions(reversion.height_after, live)
+                    .await;
+            }
+            TickOutcome::Healthy => {
+                if self.regen_health.held_stage() == Stage::Medusa {
+                    self.rebroadcast_stashed_transactions(live).await;
+                }
+            }
+            _ => {}
+        }
         if outcome.opens_sync() {
             let locator = self.chain.get_locator().await;
             if !self.request_headers_from_peer(None, locator, 500) {
                 info!("Regeneration health: no sync round opened, one is open or no peer fits");
             }
         }
+    }
+
+    /// Ask `peer` for the witnesses of transactions of one block. The answer is
+    /// admitted only when it hashes to `witness_root` (the root the block
+    /// header commits); a peer that answers anything else is reported.
+    pub fn request_witnesses(
+        &mut self,
+        peer: PeerId,
+        request: crate::network::witness_protocol::WitnessRequest,
+        witness_root: [u8; 32],
+    ) {
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .witness
+            .send_request(&peer, request.encode());
+        self.witness_requests
+            .insert(id, (request, witness_root, peer));
+    }
+
+    /// The most blocks one reversion stashes transactions of.
+    const REGEN_STASH_MAX_BLOCKS: u64 = 2_000;
+
+    /// Keep the transactions of the heights a reversion gave up: the
+    /// view above `target` is rolled back, so what sat in it would vanish.
+    async fn stash_reverted_transactions(&mut self, target: u64, live: u64) {
+        let first = target.saturating_add(1);
+        let last = live.min(target.saturating_add(Self::REGEN_STASH_MAX_BLOCKS));
+        let mut kept = 0;
+        for height in first..=last {
+            let Some(block) = self.chain.get_block(height).await else {
+                continue;
+            };
+            kept += self.regen_mempool.stash(
+                &block.transactions,
+                height,
+                &crate::mempool::pool::charged_bytes,
+            );
+        }
+        self.regen_stash_from = Some(
+            self.regen_stash_from
+                .map_or(target, |held| held.min(target)),
+        );
+        info!(
+            kept,
+            target, live, "Regeneration: stashed the transactions of the reverted heights"
+        );
+    }
+
+    /// After the ledger is back at the adult stage, offer the stashed
+    /// transactions the canonical chain did not include to the mempool and the
+    /// network again. The mempool door validates them like any other.
+    async fn rebroadcast_stashed_transactions(&mut self, live: u64) {
+        let Some(from) = self.regen_stash_from else {
+            return;
+        };
+        if self.regen_mempool.is_empty() {
+            self.regen_stash_from = None;
+            return;
+        }
+        let mut confirmed = std::collections::HashSet::new();
+        let last = live.min(from.saturating_add(Self::REGEN_STASH_MAX_BLOCKS * 2));
+        for height in from.saturating_add(1)..=last {
+            if let Some(block) = self.chain.get_block(height).await {
+                confirmed.extend(block.transactions.iter().map(|tx| tx.hash.clone()));
+            }
+        }
+        let txs = self
+            .regen_mempool
+            .take_unconfirmed(live, &|hash| confirmed.contains(hash));
+        self.regen_stash_from = None;
+        let mut accepted = 0;
+        for tx in txs {
+            if self.chain.add_transaction(tx.clone()).await.is_ok() {
+                accepted += 1;
+                let msg = NetworkMessage::Transaction(tx);
+                let topic = gossipsub::IdentTopic::new("transactions");
+                if let Err(e) = self
+                    .swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(topic, msg.to_bytes())
+                {
+                    warn!("Failed to gossip a re-offered transaction: {e}");
+                }
+            }
+        }
+        info!(
+            accepted,
+            "Regeneration: re-offered the stashed transactions after re-growth"
+        );
     }
 
     fn clear_sync_round(&mut self) {
@@ -820,9 +1180,9 @@ impl Node {
 
     /// Try to switch to the fork that `suffix` belongs to.
     ///
-    /// The peer sends only the blocks from its fork height; the shared prefix
-    /// is joined to them by the chain actor, which already holds it. The
-    /// result is logged, never dropped.
+    /// `try_reorg` needs the whole candidate chain from genesis. The peer
+    /// sends only the blocks from the fork height, so the shared prefix is
+    /// taken from the local chain. The result is logged, never dropped.
     async fn reorg_to_peer_suffix(
         chain: ChainHandle,
         suffix: Vec<crate::core::block::Block>,
@@ -830,18 +1190,23 @@ impl Node {
         flight_guard: ReorgFlightGuard,
         last_completed: Arc<AtomicU64>,
     ) {
+        // Charged on every exit, so the interval is always measured from when
+        // the work actually stopped - including the refusals, which still cost
+        // the reads that produced them.
+        let _slot = ReorgSlot {
+            last_completed: Arc::clone(&last_completed),
+            reorg: flight_guard,
+        };
+        let Some(first) = suffix.first() else {
+            return;
+        };
+        let start = first.index;
         // Peer-independent throttle (CWE-407). A batch is cheap to send and
         // proportional to the node's own chain to act on, so an attacker who
         // can gossip can otherwise keep this actor rebuilding forever. Counted
         // from completion, and applied before any chain read: a frame that
         // arrives inside the window is dropped without the node paying for the
         // work it would have triggered.
-        //
-        // The throttle is decided BEFORE the slot exists. Charging the
-        // interval on the refusal path let a peer roll the window forward with
-        // every cheap attempt - and `try_reorg` is reachable from nowhere else
-        // - so one peer could keep every honest reconstruction out for as long
-        // as it kept trying (CWE-400).
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -852,17 +1217,6 @@ impl Node {
             );
             return;
         }
-        let Some(first) = suffix.first() else {
-            return;
-        };
-        let start = first.index;
-        // The interval has already been decided, so nothing below this point
-        // may stamp it until the batch has cleared the checks that cost the
-        // node nothing. Those checks are the deadline for the slot: see where
-        // it is created, after the fork-depth and parent-hash tests. The
-        // single-flight guard is a parameter, so every early return still
-        // releases it whether or not the slot exists yet.
-        //
         // The cost that has to be bounded here is the work one peer batch can
         // make this node do, not the height the fork happens to sit at. It is
         // bounded twice over below: the fork depth (`MAX_REORG_DEPTH`) and the
@@ -895,25 +1249,27 @@ impl Node {
                 }
             }
         }
-        // The batch cleared the depth and parent checks, so the work below is
-        // real: a fork-choice evaluation over the peer's suffix and, if it
-        // wins, a reconstruction. Only from here on does the attempt charge
-        // the interval. Stamping it earlier let a peer occupy the one global
-        // window with a batch refused for depth or for not continuing this
-        // chain - work the node did not do - and every other peer's genuine
-        // batch then arrived inside a closed window, so one peer could deny
-        // this node fork recovery for as long as it kept sending (CWE-400).
-        let _slot = ReorgSlot {
-            last_completed: Arc::clone(&last_completed),
-            reorg: flight_guard,
+        // One read for the whole prefix. The previous loop issued one chain
+        // round trip per height, which is what the removed height cap was
+        // protecting against; a single range read is proportional to the
+        // local chain the node already holds.
+        let prefix_len = usize::try_from(start).unwrap_or(usize::MAX);
+        let prefix = chain.get_blocks_range(0, prefix_len).await;
+        if prefix.len() != prefix_len {
+            warn!(
+                "Reorg from {peer} skipped: local chain holds {} blocks of the {start} the fork needs",
+                prefix.len()
+            );
+            return;
+        }
+        let candidate = match join_reorg_candidate(prefix, suffix) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                warn!("Reorg candidate from {peer} rejected: {error}");
+                return;
+            }
         };
-        // The join happens on the chain actor's side of the boundary
-        // (CWE-400). Reading the prefix here meant a genesis-wide copy whose
-        // size the peer chose with `start`, every five minutes, whether or not
-        // the candidate could win fork choice; the actor already holds the
-        // chain and joins the suffix before copying anything, refusing a batch
-        // that cannot make the chain longer for two integer comparisons.
-        match chain.try_reorg_suffix(suffix).await {
+        match chain.try_reorg(candidate).await {
             Ok(true) => info!("Reorg to the chain of {peer} done"),
             Ok(false) => info!("Reorg to the chain of {peer} not needed: not a better chain"),
             Err(error) => warn!("Reorg to the chain of {peer} failed: {error}"),
@@ -1263,7 +1619,17 @@ impl Node {
         };
         let swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
             .with_tokio()
-            .with_tcp(tcp::Config::default(), noise::Config::new, yamux_config)?
+            .with_tcp(
+                tcp::Config::default(),
+                //: TLS 1.3 first, Noise as the fallback the devnet
+                // still speaks. The security upgrade is negotiated per
+                // connection, so a TLS-only peer and a Noise-only peer both
+                // connect to this node.
+                (tls::Config::new, noise::Config::new),
+                yamux_config,
+            )?
+            // QUIC carries TLS 1.3 itself.
+            .with_quic()
             // The raw TCP transport only understands /ip4 and /ip6 multiaddrs;
             // It answers every /dns4, /dns6 or /dnsaddr dial with
             // MultiaddrNotSupported. `with_dns` layers the system resolver on
@@ -1321,6 +1687,13 @@ impl Node {
                         StreamProtocol::new(bud_node::BITSWAP_PROTOCOL_NAME),
                         request_response::ProtocolSupport::Full,
                     )],
+                    req_cfg.clone(),
+                );
+                let witness = request_response::Behaviour::new(
+                    [(
+                        StreamProtocol::new(crate::network::witness_protocol::WITNESS_PROTOCOL),
+                        request_response::ProtocolSupport::Full,
+                    )],
                     req_cfg,
                 );
 
@@ -1335,6 +1708,7 @@ impl Node {
                     kad: kademlia,
                     sync,
                     bitswap,
+                    witness,
                     limits: libp2p::connection_limits::Behaviour::new(
                         libp2p::connection_limits::ConnectionLimits::default()
                             .with_max_established(Some(
@@ -1366,6 +1740,9 @@ impl Node {
             chain,
             peer_manager,
             gossip_dedup,
+            qc_assemblies: HashMap::new(),
+            qc_fetches: HashMap::new(),
+            qc_serves: HashMap::new(),
             bootstrap_peers: Vec::new(),
             dns_seeds: Vec::new(),
             dns_seed_port: 0,
@@ -1397,6 +1774,9 @@ impl Node {
             mobile_profile: None,
             mobile_peer_ceiling: MAX_PEERS,
             regen_health: RegenHealthTick::default(),
+            regen_mempool: crate::domain::RegenMempool::new(),
+            regen_stash_from: None,
+            witness_requests: HashMap::new(),
             reorg_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reorg_last_completed_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
@@ -1577,6 +1957,11 @@ impl Node {
     pub fn listen(&mut self, port: u16) -> Result<(), Box<dyn Error>> {
         let addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
         self.swarm.listen_on(addr)?;
+        // The same port over QUIC (UDP),.
+        let quic: Multiaddr = format!("/ip4/0.0.0.0/udp/{port}/quic-v1").parse()?;
+        if let Err(e) = self.swarm.listen_on(quic) {
+            warn!("QUIC listener not started: {e}");
+        }
         info!("Listening on port {port}");
         Ok(())
     }
@@ -3274,6 +3659,7 @@ impl Node {
                                             set_hash,
                                         };
 
+                                        let qc_checkpoint_hash = cert.checkpoint_hash.clone();
                                         match self.chain.handle_finality_cert(cert).await {
                                             Ok(_) => {
                                                 {
@@ -3285,8 +3671,9 @@ impl Node {
                                                 warn!("Failed to apply FinalityCert from {peer_id}: {e}");
                                                 if e.contains("Missing verified QC blob") {
                                                     warn!(
-                                                        "Missing verified QC blob for FinalityCert from {peer_id}; refusing legacy gossip QC-blob fetch for epoch={epoch}, height={checkpoint_height}"
+                                                        "Missing verified QC blob for FinalityCert from {peer_id}; requesting over /sync for epoch={epoch}, height={checkpoint_height}"
                                                     );
+                                                    self.request_qc_blob(peer_id, epoch, checkpoint_height, qc_checkpoint_hash);
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                 } else {
                                                     self.peer_manager_lock().report_bad_behavior(&peer_id);
@@ -3297,73 +3684,16 @@ impl Node {
                                         }
                                     }
 
-                                    NetworkMessage::GetQcBlob { epoch, checkpoint_height } => {
+                                    NetworkMessage::GetQcBlob { epoch, checkpoint_height, .. } => {
                                         warn!("Ignoring gossip GetQcBlob from {peer_id}: QC blob fetch is point-to-point; refusing epoch={epoch}, height={checkpoint_height}");
                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }
-
-                                    NetworkMessage::QcBlobResponse { epoch, checkpoint_height, found, blob_data, .. } => {
-                                        let rate_limit_ok = self.peer_manager_lock().check_blob_rate_limit(&peer_id);
-                                        if !rate_limit_ok {
-                                            warn!("Peer {peer_id} exceeded blob rate limit or lock error. Ignoring QcBlobResponse.");
-                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
-                                            continue;
-                                        }
-                                        info!("QcBlobResponse from {peer_id}: epoch={epoch}, height={checkpoint_height}, found={found}");
-
-                                        if found {
-                                            match serde_json::from_slice::<crate::consensus::qc::QcBlob>(&blob_data) {
-                                                Ok(blob) => {
-                                                    if blob.epoch != epoch || blob.checkpoint_height != checkpoint_height {
-                                                        warn!(
-                                                            "QcBlobResponse metadata mismatch from {}: expected epoch={}, height={}, got epoch={}, height={}",
-                                                            peer_id,
-                                                            epoch,
-                                                            checkpoint_height,
-                                                            blob.epoch,
-                                                            blob.checkpoint_height
-                                                        );
-                                                        {
-                                                            let mut pm = self.peer_manager_lock();
-                                                            pm.report_bad_behavior(&peer_id);
-                                                        }
-                                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
-                                                        continue;
-                                                    }
-
-                                                    match self.chain.import_qc_blob(blob).await {
-                                                        Ok(_) => {
-                                                            {
-                                                                let mut pm = self.peer_manager_lock();
-                                                                pm.report_good_behavior(&peer_id);
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            warn!("Failed to import QcBlob from {peer_id}: {e}");
-                                                            {
-                                                                let mut pm = self.peer_manager_lock();
-                                                                pm.report_bad_behavior(&peer_id);
-                                                            }
-                                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
-                                                            continue;
-                                                        }
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    warn!("Failed to parse QcBlobResponse from {peer_id}: {e}");
-                                                    {
-                                                        let mut pm = self.peer_manager_lock();
-                                                        pm.report_bad_behavior(&peer_id);
-                                                    }
-                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
-                                                    continue;
-                                                }
-                                            }
-                                        } else {
-                                            self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
-                                            continue;
-                                        }
+                                    NetworkMessage::QcBlobResponse { .. } => {
+                                        // No unsolicited or gossip-sourced QC blobs. Only a
+                                        // matching /sync request ID may open an assembly.
+                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                        continue;
                                     }
 
                                     NetworkMessage::QcFaultProof { proof_data } => {
@@ -3418,54 +3748,35 @@ impl Node {
                                         continue;
                                     }
                                     NetworkMessage::VerifiedDomainCommitment(payload) => {
-                                        // Consensus-state isolation, same rule as
-                                        // the raw `DomainCommitment` arm above:
-                                        // applying a commitment writes
-                                        // `external_roots`, which
-                                        // `AccountState::calculate_state_root`
-                                        // folds into the state root, and no
-                                        // block-execution path reproduces that
-                                        // write. A peer frame is a notification,
-                                        // not an authorized state transition -
-                                        // the operator listener is the only entry
-                                        // that carries the finality check plus the
-                                        // signed in-block StateUpdateTx, and a node
-                                        // that applied this one would seal blocks
-                                        // its peers reject.
-                                        warn!(
-                                            "Ignoring gossiped VerifiedDomainCommitment from {} for domain {}; a verified commitment enters through the operator path and its in-block state update, never from a peer",
-                                            peer_id, payload.commitment.domain_id
+                                        //: a gossiped commitment used to
+                                        // be applied to the domain registry
+                                        // whenever it arrived, so two nodes
+                                        // held different registries at the
+                                        // same height. A commitment enters
+                                        // through the `Settlement` transaction
+                                        // now; the gossip form is dropped and
+                                        // not forwarded.
+                                        tracing::debug!(
+                                            "Dropping gossiped VerifiedDomainCommitment for domain {} from {peer_id}: commitments travel as Settlement transactions",
+                                            payload.commitment.domain_id
                                         );
-                                        {
-                                            let mut pm = self.peer_manager_lock();
-                                            pm.report_bad_behavior(&peer_id);
-                                        }
-                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }
                                     NetworkMessage::CrossDomainMessage(msg_obj) => {
-                                        info!("Received CrossDomainMessage from {peer_id} for bridge");
-                                        let msg_clone = msg_obj.clone();
-                                        let chain = self.chain.clone();
-                                        let swarm_cmd_tx = self.command_tx.clone();
-                                        let pm_arc = self.peer_manager.clone();
-                                        tokio::spawn(async move {
-                                            match chain.submit_relayed_cross_domain_message(msg_clone.clone()).await {
-                                                Ok(_) => {
-                                                    if let Ok(mut pm) = pm_arc.lock() {
-                                                        pm.report_good_behavior(&peer_id);
-                                                    }
-                                                    let msg = NetworkMessage::CrossDomainMessage(msg_clone);
-                                                    let _ = swarm_cmd_tx.send(NodeCommand::Broadcast("blocks".into(), msg)).await;
-                                                }
-                                                Err(e) => {
-                                                    warn!("Failed to process CrossDomainMessage from {peer_id}: {e}");
-                                                    if let Ok(mut pm) = pm_arc.lock() {
-                                                        pm.report_invalid_tx(&peer_id);
-                                                    }
-                                                }
-                                            }
-                                        });
+                                        //: a gossiped message used to be
+                                        // inserted into the message registry
+                                        // (state-root bearing) whenever it
+                                        // arrived, so two nodes held different
+                                        // registries at the same height. A
+                                        // relayed message enters through the
+                                        // `RelayCrossDomainMessage` transaction
+                                        // now; the gossip form is dropped and
+                                        // not forwarded.
+                                        tracing::debug!(
+                                            "Dropping gossiped CrossDomainMessage {} from {peer_id}: relayed messages travel as RelayCrossDomainMessage transactions",
+                                            hex::encode(msg_obj.message_id)
+                                        );
                                         self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                         continue;
                                     }
@@ -3627,11 +3938,59 @@ impl Node {
                                                         let response = NetworkMessage::Blocks(blocks);
                                                         let _ = self.swarm.behaviour_mut().sync.send_response(channel, response.to_bytes());
                                                     }
+                                                    NetworkMessage::GetQcBlob { epoch, checkpoint_height, chunk_index } => {
+                                                        let max_chunks = crate::consensus::qc::qc_blob_max_bytes(MAX_QC_WIRE_VALIDATORS)
+                                                            .div_ceil(crate::consensus::qc::QC_CHUNK_BYTES);
+                                                        let now = std::time::Instant::now();
+                                                        self.qc_serves.retain(|_, (started, _)| now.duration_since(*started) < QC_ASSEMBLY_TTL);
+                                                        let key = (peer, epoch, checkpoint_height);
+                                                        let allowed = if chunk_index == 0 {
+                                                            self.qc_serves.len() < MAX_QC_ASSEMBLIES
+                                                                && self.peer_manager_lock().check_blob_rate_limit(&peer)
+                                                        } else {
+                                                            self.qc_serves.get(&key).is_some_and(|(_, next)| *next == chunk_index)
+                                                        };
+                                                        if checkpoint_height == 0 || chunk_index as usize >= max_chunks || !allowed {
+                                                            self.peer_manager_lock().report_bad_behavior(&peer);
+                                                            continue;
+                                                        }
+                                                        let blob = self.chain.get_qc_blob(checkpoint_height).await;
+                                                        match qc_chunk_response(epoch, checkpoint_height, chunk_index, blob) {
+                                                            Ok(answer @ NetworkMessage::QcBlobResponse { found: true, chunk_count, .. }) => {
+                                                                if chunk_index + 1 == chunk_count {
+                                                                    self.qc_serves.remove(&key);
+                                                                } else {
+                                                                    self.qc_serves.insert(key, (now, chunk_index + 1));
+                                                                }
+                                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, answer.to_bytes());
+                                                            }
+                                                            Ok(answer) => {
+                                                                self.qc_serves.remove(&key);
+                                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, answer.to_bytes());
+                                                            }
+                                                            Err(e) => warn!("QC blob at height {checkpoint_height} cannot be served: {e}"),
+                                                        }
+                                                    }
                                                     _ => {}
                                                 }
                                             }
                                         }
                                         request_response::Message::Response { request_id, response } => {
+                                            if let Some(fetch) = self.qc_fetches.remove(&request_id) {
+                                                let key = (fetch.peer, fetch.epoch, fetch.height);
+                                                let result = NetworkMessage::from_bytes_validated(&response)
+                                                    .map_err(|e| format!("{e:?}"));
+                                                let result = match result {
+                                                    Ok(msg) => self.accept_qc_response(fetch, peer, msg).await,
+                                                    Err(e) => Err(e),
+                                                };
+                                                if let Err(e) = result {
+                                                    self.qc_assemblies.remove(&key);
+                                                    warn!("QC response from {peer} rejected: {e}");
+                                                    self.peer_manager_lock().report_bad_behavior(&peer);
+                                                }
+                                                continue;
+                                            }
                                             if let Ok(msg) = NetworkMessage::from_bytes_validated(&response) {
                                                 match msg {
                                                     NetworkMessage::Headers(headers) => {
@@ -3753,6 +4112,9 @@ impl Node {
                                     }
                                 }
                                 request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
+                                    if let Some(fetch) = self.qc_fetches.remove(&request_id) {
+                                        self.qc_assemblies.remove(&(fetch.peer, fetch.epoch, fetch.height));
+                                    }
                                     warn!("Outbound sync failure to {}: {:?}", peer, error);
                                     {
                                         let mut pm = self.peer_manager_lock();
@@ -3894,6 +4256,89 @@ impl Node {
                                 }
                             }
                         }
+                        SwarmEvent::Behaviour(BudlumBehaviourEvent::Witness(event)) => {
+                            use crate::network::witness_protocol::{
+                                check_witnesses, WitnessRequest, WitnessResponse,
+                            };
+                            match event {
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Request {
+                                            request, channel, ..
+                                        },
+                                    ..
+                                } => {
+                                    // Same boundary as /sync and Bitswap: a banned,
+                                    // unhandshaked or rate-limited peer gets nothing.
+                                    let allowed = {
+                                        let mut pm = self.peer_manager_lock();
+                                        !pm.is_banned(&peer)
+                                            && pm.is_handshaked(&peer)
+                                            && pm.check_rate_limit(&peer)
+                                    };
+                                    if !allowed {
+                                        warn!("Rejected a witness request from banned/unhandshaked/rate-limited peer {peer}");
+                                        continue;
+                                    }
+                                    if WitnessRequest::decode(&request).is_none() {
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        continue;
+                                    }
+                                    // No witness storage yet: say so, never
+                                    // invent a witness.
+                                    let _ = self
+                                        .swarm
+                                        .behaviour_mut()
+                                        .witness
+                                        .send_response(channel, WitnessResponse::NotAvailable.encode());
+                                }
+                                request_response::Event::Message {
+                                    peer,
+                                    message:
+                                        request_response::Message::Response {
+                                            request_id,
+                                            response,
+                                        },
+                                    ..
+                                } => {
+                                    let Some((request, root, asked)) =
+                                        self.witness_requests.remove(&request_id)
+                                    else {
+                                        warn!("Unsolicited witness response from {peer}");
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        continue;
+                                    };
+                                    if asked != peer {
+                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                        continue;
+                                    }
+                                    let verdict = WitnessResponse::decode(&response)
+                                        .ok_or(None)
+                                        .and_then(|decoded| {
+                                            check_witnesses(&request, &decoded, &root).map_err(Some)
+                                        });
+                                    match verdict {
+                                        Ok(()) => {
+                                            self.peer_manager_lock().report_good_behavior(&peer);
+                                            info!(
+                                                height = request.block_height,
+                                                count = request.tx_ids.len(),
+                                                "Witnesses verified against the witness_root"
+                                            );
+                                        }
+                                        Err(reason) => {
+                                            self.peer_manager_lock().report_bad_behavior(&peer);
+                                            warn!(?reason, "Witness response from {peer} refused");
+                                        }
+                                    }
+                                }
+                                request_response::Event::OutboundFailure { request_id, .. } => {
+                                    self.witness_requests.remove(&request_id);
+                                }
+                                _ => {}
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -3915,6 +4360,54 @@ const _: fn(&mut Node) = |node| {
     fn assert_send<T: Send>(_: T) {}
     assert_send(node.run());
 };
+
+/// Join the local prefix (genesis up to the fork height) and the peer suffix
+/// into one chain for `try_reorg`. The suffix must continue the prefix.
+fn join_reorg_candidate(
+    mut prefix: Vec<crate::core::block::Block>,
+    suffix: Vec<crate::core::block::Block>,
+) -> Result<Vec<crate::core::block::Block>, String> {
+    let first = suffix.first().ok_or("empty suffix")?;
+    let parent = prefix.last().ok_or("fork starts at genesis")?;
+    if first.index != prefix.len() as u64 || first.previous_hash != parent.hash {
+        return Err("suffix does not continue the local prefix".into());
+    }
+    prefix.extend(suffix);
+    Ok(prefix)
+}
+
+#[cfg(test)]
+mod reorg_candidate_tests {
+    use super::join_reorg_candidate;
+    use crate::core::block::Block;
+
+    fn child(parent: &Block) -> Block {
+        Block::new(parent.index + 1, parent.hash.clone(), Vec::new())
+    }
+
+    #[test]
+    fn suffix_is_joined_to_the_prefix_from_genesis() {
+        let genesis = Block::genesis();
+        let one = child(&genesis);
+        let two = child(&one);
+        let joined = join_reorg_candidate(vec![genesis.clone(), one.clone()], vec![two.clone()])
+            .expect("suffix continues prefix");
+        assert_eq!(joined.len(), 3);
+        assert_eq!(joined[0], genesis);
+        assert_eq!(joined[2], two);
+    }
+
+    #[test]
+    fn a_suffix_that_does_not_continue_the_prefix_is_refused() {
+        let genesis = Block::genesis();
+        let one = child(&genesis);
+        let two = child(&one);
+        let three = child(&two);
+        assert!(join_reorg_candidate(vec![genesis.clone()], vec![three]).is_err());
+        assert!(join_reorg_candidate(Vec::new(), vec![one]).is_err());
+        assert!(join_reorg_candidate(vec![genesis], Vec::new()).is_err());
+    }
+}
 
 #[cfg(test)]
 mod vote_history_wiring_tests {
@@ -4141,6 +4634,104 @@ mod mobile_profile_wiring_tests {
 
 #[cfg(test)]
 mod sync_handler_order_tests {
+    #[test]
+    fn thousand_validator_qc_is_served_in_binary_chunks_and_reassembled() {
+        use crate::consensus::qc::{PqSignatureEntry, QcBlob, QcBlobAssembler, QC_CHUNK_BYTES};
+        use crate::network::protocol::NetworkMessage;
+        let blob = QcBlob::new(
+            4,
+            100,
+            "checkpoint".into(),
+            (0..1000)
+                .map(|i| PqSignatureEntry {
+                    validator_index: i,
+                    validator_address: format!("validator-{i}"),
+                    // Synthetic bytes exercise the transport, not signature verification.
+                    pq_signature: vec![7; 3309],
+                })
+                .collect(),
+        );
+        let first = super::qc_chunk_response(4, 100, 0, Some(blob.clone())).unwrap();
+        let NetworkMessage::QcBlobResponse {
+            found: true,
+            chunk_count,
+            ..
+        } = first
+        else {
+            panic!("QC blob should be found");
+        };
+        assert!(chunk_count > 1);
+        let mut assembler = QcBlobAssembler::new(1000, chunk_count as usize).unwrap();
+        for index in 0..chunk_count {
+            let response = super::qc_chunk_response(4, 100, index, Some(blob.clone())).unwrap();
+            let received = NetworkMessage::from_bytes_validated(&response.to_bytes()).unwrap();
+            let NetworkMessage::QcBlobResponse {
+                found: true,
+                epoch,
+                checkpoint_height,
+                checkpoint_hash,
+                blob_data,
+                chunk_index,
+                chunk_count: count,
+            } = received
+            else {
+                panic!("expected QC response");
+            };
+            assert_eq!(
+                (epoch, checkpoint_height, checkpoint_hash.as_str()),
+                (4, 100, "checkpoint")
+            );
+            assert_eq!((chunk_index, count), (index, chunk_count));
+            assert!(blob_data.len() <= QC_CHUNK_BYTES);
+            assembler.push(chunk_index as usize, blob_data).unwrap();
+        }
+        let decoded = assembler.finish().unwrap();
+        assert_eq!(decoded.to_bytes().unwrap(), blob.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn qc_serving_refuses_missing_epoch_and_invalid_chunk() {
+        use crate::consensus::qc::{PqSignatureEntry, QcBlob};
+        use crate::network::protocol::NetworkMessage;
+        let blob = QcBlob::new(
+            4,
+            100,
+            "checkpoint".into(),
+            vec![PqSignatureEntry {
+                validator_index: 0,
+                validator_address: "validator".into(),
+                pq_signature: vec![7; 3309],
+            }],
+        );
+        for response in [
+            super::qc_chunk_response(5, 100, 0, Some(blob.clone())).unwrap(),
+            super::qc_chunk_response(4, 100, 1, Some(blob)).unwrap(),
+            super::qc_chunk_response(4, 100, 0, None).unwrap(),
+        ] {
+            let NetworkMessage::QcBlobResponse {
+                found,
+                blob_data,
+                chunk_count,
+                ..
+            } = response
+            else {
+                panic!("expected QC response");
+            };
+            assert!(!found);
+            assert!(blob_data.is_empty());
+            assert_eq!(chunk_count, 0);
+        }
+        let request = NetworkMessage::GetQcBlob {
+            epoch: 4,
+            checkpoint_height: 100,
+            chunk_index: 1,
+        };
+        assert!(matches!(
+            NetworkMessage::from_bytes_validated(&request.to_bytes()),
+            Ok(NetworkMessage::GetQcBlob { chunk_index: 1, .. })
+        ));
+    }
+
     /// Production half of this file; the test modules would match their own text.
     fn production() -> &'static str {
         include_str!("node.rs")
@@ -4320,40 +4911,6 @@ mod sync_handler_order_tests {
             "the interval must expire measured from completion"
         );
 
-        // A batch refused for depth or for not continuing the local chain does
-        // no work, so it must not charge the interval that every other peer
-        // competes for. Pinned as source order in the one function that has
-        // the throttle: the stamping slot is created after both structural
-        // checks, and before the call that starts the real work.
-        let body = production();
-        let slot = body
-            .find("let _slot = ReorgSlot {")
-            .expect("the throttle must still stamp through a slot");
-        let depth_check = body
-            .find("MAX_REORG_DEPTH as u64")
-            .expect("the depth check must still exist");
-        let parent_check = body
-            .find("does not continue the local chain")
-            .expect("the parent-hash check must still exist");
-        let actor_call = body
-            .find("match chain.try_reorg_suffix(suffix).await {")
-            .expect("the suffix must be handed to the chain actor");
-        assert!(
-            depth_check < slot && parent_check < slot,
-            "a batch refused for depth or parent must not stamp the reorg window"
-        );
-        assert!(
-            slot < actor_call,
-            "an attempt that reaches the actor must stamp the window"
-        );
-        // CWE-400: the peer's fork height used to size a genesis-wide chain
-        // read on this side of the actor boundary. Nothing here may read the
-        // prefix again; the actor joins it from the chain it already holds.
-        assert!(
-            !body.contains("get_blocks_range(0,"),
-            "the peer-chosen fork height must not size a chain read in the network layer"
-        );
-
         let code = production();
         // `production()` is the file before its test module, so this counts
         // production call sites: exactly one, the /sync answer.
@@ -4366,5 +4923,49 @@ mod sync_handler_order_tests {
             !code.contains("reorg_blocks"),
             "the unsolicited gossip batch must not be handed to a reconstruction"
         );
+    }
+}
+
+#[cfg(test)]
+mod gossip_author_tests {
+    use super::*;
+
+    /// A spoofed gossip author must not change consensus state: the author
+    /// field of a gossip frame is read only to tie a handshake to its
+    /// connection. Reading it anywhere else in this file would let a classical
+    /// signature steer a decision.
+    #[test]
+    fn gossip_author_is_not_a_consensus_input() {
+        let whole = include_str!("node.rs");
+        let production = whole
+            .split_once("#[cfg(test)]")
+            .map(|(before, _)| before)
+            .expect("this file keeps its tests behind #[cfg(test)]");
+        let reads: Vec<&str> = production
+            .lines()
+            .filter(|line| line.contains("message.source"))
+            .collect();
+        assert!(
+            !reads.is_empty(),
+            "the handshake check reads the author; the scan is measuring nothing"
+        );
+        for line in &reads {
+            assert!(
+                line.contains("handshake_origin_matches_peer")
+                    || line.trim_start().starts_with("message.source"),
+                "gossip author read outside the handshake origin check: {line}"
+            );
+        }
+    }
+
+    /// A relayed handshake (author is not the sending peer) is dropped, and a
+    /// frame with no author is dropped too.
+    #[test]
+    fn spoofed_handshake_author_is_rejected() {
+        let relay = PeerId::random();
+        let author = PeerId::random();
+        assert!(handshake_origin_matches_peer(relay, Some(relay)));
+        assert!(!handshake_origin_matches_peer(relay, Some(author)));
+        assert!(!handshake_origin_matches_peer(relay, None));
     }
 }

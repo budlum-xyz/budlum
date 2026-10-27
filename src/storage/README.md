@@ -8,9 +8,17 @@ The root `README.md` is a dashboard only; maturity and risk warnings live here.
 - **Maturity:** devnet-only. Whether it ships on mainnet is a separate decision.
 - **Code location:** `src/storage/` (manifest, deal, params), RPC endpoints in `src/rpc/api.rs` (`bud_storage*`),
   E2E tests in `src/tests/bud_e2e.rs`.
-- **RPC surface:** `bud_storageRegisterManifest`, `bud_storageOpenDeal`,
-  `bud_storageGetManifest`, `bud_storageGetDealsByManifest`, `bud_storageGetDealsByShard`,
-  `bud_storageOpenChallenge`, `bud_storageAnswerChallenge`,
+- **Writes are transactions.** Manifest registration, the operator class and
+  self-host declarations, deal opening, coding-audit answers, repair
+  acceptance, and opening and answering retrieval challenges are
+  `StorageTx` variants (`src/domain/storage_tx.rs`), sent with
+  `bud_sendRawTransaction` and applied by the executor in block. The old
+  operator RPCs (`bud_storageRegisterManifest`, `bud_storageOpenDeal`,
+  `bud_storageAcceptReallocation`, `bud_storageOpenChallenge`,
+  `bud_storageAnswerChallenge`) refuse every call and name the transaction
+.
+- **Read RPC surface:** `bud_storageGetManifest`, `bud_storageGetDealsByManifest`,
+  `bud_storageGetDealsByShard`, `bud_storageGetChallenges`,
   `bud_storageGetOutcome`, `bud_storageGetEconomicsSummary`,
   `bud_storageGetEconomicsEvents`, `bud_storageGetOperatorEconomics`.
 - **Data sovereignty rule:** there is NO whitelist/admin/pause/freeze hook; every RPC can be
@@ -19,7 +27,7 @@ The root `README.md` is a dashboard only; maturity and risk warnings live here.
 ## Maturity warnings (they stay here rather than moving to the root dashboard)
 
 1. **Risk of a false green:** `RetrievalChallenge` is not a real Proof-of-Storage;
-   the answer only accepts a `range_hash` (see the note in `api.rs`), so an operator can pass
+   the answer only carries a `range_hash` (see the note in `api.rs`), so an operator can pass
    the gate by storing only the requested byte range instead of the full data.
    `bud_storageGetOutcome` therefore returns `proofKind` / `proof_kind = "interim_availability_only"`
    on every answer. A full proof depends on the BudZKVM `VerifyMerkle` 64-depth production gate (closed).
