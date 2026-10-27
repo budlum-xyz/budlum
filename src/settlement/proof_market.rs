@@ -49,6 +49,36 @@ pub enum ProofTaskKind {
         deal_id: [u8; 32],
         challenge_epoch: u64,
     },
+    /// A PUL-Full aggregate over one finality window: one proof standing in
+    /// for every signature the window carried. The window is only worth
+    /// proving when the aggregate is smaller than half the raw witness an
+    /// archive would otherwise keep, so the task carries both sizes and
+    /// [`pul_proof_is_warranted`] decides at creation time.
+    PulAggregate {
+        window_start: u64,
+        window_end: u64,
+        archive_witness_bytes: u64,
+        pul_full_bytes: u64,
+    },
+}
+
+/// PUL-Full is produced only when the aggregate is smaller than this fraction
+/// of the archived witness. The rule is economic, not cryptographic: below it
+/// the proof costs more than the bytes it replaces.
+pub const PUL_FULL_COST_NUMERATOR: u64 = 1;
+/// See [`PUL_FULL_COST_NUMERATOR`].
+pub const PUL_FULL_COST_DENOMINATOR: u64 = 2;
+
+/// Whether one finality window is worth a PUL-Full proof: the aggregate must
+/// be smaller than half the witness it lets an archive drop. An empty window
+/// has nothing to aggregate and never warrants a proof.
+#[must_use]
+pub fn pul_proof_is_warranted(archive_witness_bytes: u64, pul_full_bytes: u64) -> bool {
+    if archive_witness_bytes == 0 {
+        return false;
+    }
+    u128::from(pul_full_bytes) * u128::from(PUL_FULL_COST_DENOMINATOR)
+        < u128::from(archive_witness_bytes) * u128::from(PUL_FULL_COST_NUMERATOR)
 }
 
 /// A signed proof-market operation carried by the settlement transaction door.
@@ -1150,6 +1180,20 @@ mod tests {
 
     fn test_address(byte: u8) -> Address {
         Address::from([byte; 32])
+    }
+
+    #[test]
+    fn a_window_below_the_threshold_produces_no_proof() {
+        // Half the witness is the break-even point: an aggregate that is not
+        // smaller than it is not worth producing.
+        assert!(pul_proof_is_warranted(10_000, 4_999));
+        assert!(!pul_proof_is_warranted(10_000, 5_000));
+        assert!(!pul_proof_is_warranted(10_000, 5_001));
+        assert!(!pul_proof_is_warranted(0, 0));
+        assert!(!pul_proof_is_warranted(1, 1));
+        // The comparison is done in u128, so a huge window cannot overflow it.
+        assert!(pul_proof_is_warranted(u64::MAX, 1));
+        assert!(!pul_proof_is_warranted(u64::MAX, u64::MAX));
     }
 
     /// A slash condition the task can be punished against.
