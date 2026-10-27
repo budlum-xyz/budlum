@@ -142,6 +142,27 @@ enum Command {
         #[arg(long, required = true)]
         validator: String,
     },
+    /// Move a delegation from one validator to another (`Redelegate`); no
+    /// unbonding round trip, the voting weight follows the position.
+    Redelegate {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        from_validator: String,
+        #[arg(long, required = true)]
+        to_validator: String,
+        /// Stake to move, in whole BUD.
+        #[arg(long, required = true)]
+        amount_bud: u64,
+    },
+    /// Claim the delegator rewards an epoch close credited
+    /// (`ClaimRewards`).
+    ClaimRewards {
+        #[command(flatten)]
+        signer: V5Signer,
+        #[arg(long, required = true)]
+        validator: String,
+    },
     /// Consensus domains: register one in a block.
     Domain {
         #[command(subcommand)]
@@ -1221,6 +1242,51 @@ fn run_delegation(
     )
 }
 
+/// `bud redelegate`: move a position to another validator.
+fn run_redelegate(
+    rpc_url: &str,
+    signer: &V5Signer,
+    from_validator: &str,
+    to_validator: &str,
+    amount_bud: u64,
+) -> Result<(), String> {
+    let from = parse_address(
+        from_validator
+            .strip_prefix("0x")
+            .unwrap_or(from_validator),
+    )?;
+    let to = parse_address(to_validator.strip_prefix("0x").unwrap_or(to_validator))?;
+    let amount = amount_bud
+        .checked_mul(budlum_core::tokenomics::BUD_UNIT)
+        .ok_or("the amount overflows the base unit")?;
+    let key = open_wallet(signer)?;
+    send_v5(
+        rpc_url,
+        &key,
+        v5_template(
+            TransactionType::Redelegate {
+                from_validator: from,
+                to_validator: to,
+            },
+            amount,
+            signer.fee,
+        ),
+        None,
+    )
+}
+
+/// `bud claim-rewards`: take the claimable delegator reward of one validator.
+fn run_claim_rewards(rpc_url: &str, signer: &V5Signer, validator: &str) -> Result<(), String> {
+    let validator = parse_address(validator.strip_prefix("0x").unwrap_or(validator))?;
+    let key = open_wallet(signer)?;
+    send_v5(
+        rpc_url,
+        &key,
+        v5_template(TransactionType::ClaimRewards { validator }, 0, signer.fee),
+        None,
+    )
+}
+
 /// `bud ai-answer`: sign one AI verifier result.
 fn run_ai_answer(
     rpc_url: &str,
@@ -2010,6 +2076,21 @@ fn main() {
         } => run_ai_answer(&cli.rpc_url, signer, request_id, output_commitment),
         Command::WithdrawDelegation { signer, validator } => {
             run_delegation(&cli.rpc_url, signer, validator, None, false)
+        }
+        Command::Redelegate {
+            signer,
+            from_validator,
+            to_validator,
+            amount_bud,
+        } => run_redelegate(
+            &cli.rpc_url,
+            signer,
+            from_validator,
+            to_validator,
+            *amount_bud,
+        ),
+        Command::ClaimRewards { signer, validator } => {
+            run_claim_rewards(&cli.rpc_url, signer, validator)
         }
         Command::Domain { action } => match action {
             DomainAction::RegisterPow {
