@@ -6538,6 +6538,16 @@ impl Blockchain {
 
         self.chain = new_chain;
         self.state = new_state;
+        // The adopted tip is a different block from the one the round price
+        // book was stamped with, so the book has to move with it: left naming
+        // the orphaned tip, the new tip's leader rounds fall back to a
+        // producer-written header stamp - the exact fallback the sighting
+        // exists to remove, and on the producer side a source of claims peers
+        // reject. The adoption is now, which is when this node took the chain.
+        if let Some(tip) = self.chain.last() {
+            self.consensus
+                .note_block_seen(&tip.hash, crate::consensus::now_millis());
+        }
 
         // BLG-0186 (P09-F07): the DISK still holds FINALITY_CERT and
         // QC_BLOB at the reorged heights. Left behind, a later
