@@ -1,0 +1,42 @@
+# Ethereum (Sepolia) side of the Budlum testnet.
+#
+# `cargo run --manifest-path xtask/tools/Cargo.toml -- contracts deploy`
+# reads the constructor parameters below, deploys every contract whose
+# parameters are all set, and writes the addresses into [addresses].
+# The RPC endpoint comes from BUDLUM_ETH_RPC_URL and the deployer key from the
+# keystore at BUDLUM_ETH_KEYSTORE (its password from ETH_PASSWORD). No key,
+# URL or password is ever written here (K7).
+#
+# Deployment rule: no deployment while any F01-F06 negative
+# test is red in CI.
+
+[network]
+name = "sepolia"
+chain_id = 11155111
+budlum_chain_id = 45261
+
+[verifier]
+# BudlumFinalityVerifier constructor commitments, published as the key-hash
+# manifest of the deployment ceremony. Empty until the ceremony (Ayaz).
+challenge_window_blocks = 7200
+fraud_proof_verifier = ""
+committee_pubkey_hash = ""
+g2_generator_hash = ""
+ml_dsa_pubkey_hash = ""
+
+[mikoriza]
+# EigenLayer Sepolia AllocationManager and the strategies the operator set
+# uses. Empty until an EigenLayer test operator exists (Ayaz).
+allocation_manager = ""
+operator_set_id = 0
+strategies = ""
+# wad slashed per strategy for a proven double vote (TESTNET-DEFAULT: 10%).
+double_vote_wad = "100000000000000000"
+
+[addresses]
+# Written by `contracts deploy`. Mirrored in docs/TESTNET.md.
+budlum_finality_verifier = ""
+graft_executor = ""
+budlum_remote_account_factory = ""
+budlum_registrar = ""
+budlum_slasher = ""

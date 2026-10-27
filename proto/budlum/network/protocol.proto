@@ -70,8 +70,50 @@ enum ProtoTransactionType {
     POA_ONBOARDING = 48;
     // Bond into a permissionless application role of the verifier family.
     ROLE_BOND = 49;
-    BRIDGE_BURN = 50;
-    CROSS_DOMAIN_MESSAGE = 51;
+    // A bonded relayer registers a cross-domain message, applied in block.
+    // The transaction signer must be the message sender; the payload carries
+    // no signature envelope of its own.
+    RELAY_CROSS_DOMAIN_MESSAGE = 50;
+    // Begin unbonding the signer's bond in one permissionless role, applied
+    // in block. Replaces the operator RPC that wrote the registry outside a
+    // block.
+    ROLE_UNBOND = 51;
+    // Withdraw the signer's matured role bond, applied in block.
+    ROLE_WITHDRAW = 52;
+    // An external-domain write (registration, evidence, prover bond,
+    // readmission, version fork, quorum policy), applied in block. Replaces
+    // the operator RPCs that wrote the intake outside a block.
+    EXTERNAL_DOMAIN = 53;
+    // A domain settlement write (domain registration, commitment, sovereign
+    // template, ZK program allowlist, ZK proof), applied in block. Replaces
+    // the operator RPCs and the gossip side channel that wrote the domain
+    // registries outside a block.
+    SETTLEMENT = 54;
+    // A bridge write (asset registration, lock, mint, burn, unlock, relay
+    // proof), applied in block. Replaces the operator RPCs that wrote the
+    // bridge state, the relayer ledger and balances outside a block.
+    BRIDGE = 55;
+    // Extend a live BNS registration from its current expiry.
+    BNS_RENEW = 56;
+    // Transfer a live BNS registration to the signed transaction's recipient
+    // encoded in `data`.
+    BNS_TRANSFER = 57;
+    // Delegate stake to an existing validator.
+    DELEGATE = 58;
+    // Begin unbonding delegated stake.
+    UNDELEGATE = 59;
+    // Withdraw a matured delegation exit.
+    WITHDRAW_DELEGATION = 60;
+    // Set the validator's bounded reward commission.
+    SET_VALIDATOR_COMMISSION = 61;
+    // Quantum canary claim, step one: the commitment H(canary, proof, claimer)
+    //. Applied in block against the canary book.
+    CANARY_COMMIT = 62;
+    // Quantum canary claim, step two: the proof. The block that accepts a
+    // valid reveal applies the alarm effect.
+    CANARY_REVEAL = 63;
+    // Register a Filiz Chain commitment for leader election.
+    REGISTER_FILIZ = 64;
 }
 
 message ProtoTransaction {
@@ -128,8 +170,17 @@ message ProtoTransaction {
         ProtoStorageTx storage = 54;
         ProtoPoaOnboardingTx poa_onboarding = 55;
         ProtoRoleBond role_bond = 56;
-        ProtoBridgeBurn bridge_burn = 57;
-        ProtoCrossDomainMessageTx cross_domain_message = 58;
+        ProtoCrossDomainMessagePayload relay_cross_domain_message = 57;
+        ProtoRoleBond role_unbond = 58;
+        ProtoRoleBond role_withdraw = 59;
+        ProtoExternalDomainTx external_domain = 60;
+        ProtoSettlementTx settlement = 61;
+        ProtoBridgeTx bridge = 62;
+        ProtoDelegation delegation = 63;
+        ProtoValidatorCommission validator_commission = 64;
+        ProtoCanaryCommit canary_commit = 65;
+        ProtoCanaryReveal canary_reveal = 66;
+        ProtoFilizRegistration register_filiz = 67;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
@@ -182,6 +233,14 @@ message ProtoStateUpdate {
 message ProtoStateUpdateEntry {
     bytes address = 1;
     uint64 nonce = 2;
+}
+
+message ProtoDelegation {
+    bytes validator = 1;
+}
+
+message ProtoValidatorCommission {
+    uint32 commission_ppm = 1;
 }
 
 message ProtoConsensusKeyRegistration {
@@ -254,6 +313,8 @@ message ProtoCrossDomainMessagePayload {
     string payload_hash = 10;
     ProtoMessageKind kind = 11;
     uint64 expiry_height = 12;
+    // Envelope version 3: 0 no class, 1 classical, 2 lattice, 3 hash.
+    uint32 source_quantum_class = 13;
 }
 
 message ProtoRelayerResult {
@@ -404,6 +465,11 @@ message ProtoBlockHeader {
     // when sharding is not active for the block.
     bytes shards_root = 17;
     repeated bytes slashing_reports = 18;
+    // Witness root. Empty when the block carries none.
+    bytes witness_root = 19;
+    // Producer key of a composite (0x06) or ML-DSA-87 (0x05) block
+    // signature; empty for Ed25519.
+    bytes producer_public_key = 20;
 }
 
 message ProtoBlock {
@@ -432,6 +498,8 @@ message ProtoBlock {
     // when sharding is not active for the block.
     bytes shards_root = 21;
     repeated bytes slashing_reports = 22;
+    // Witness root. Empty when the block carries none.
+    bytes witness_root = 23;
 }
 
 
@@ -476,29 +544,55 @@ message ProtoPoaOnboardingTx {
     bytes data = 1;
 }
 
+// The canary commit payload: the 32 byte commitment.
+message ProtoCanaryCommit {
+    bytes commitment = 1;
+}
+
+// The Filiz registration payload: the chain's top link and its length.
+message ProtoFilizRegistration {
+    bytes commitment = 1;
+    uint64 length = 2;
+}
+
+// The canary reveal payload: the puzzle code and the proof bytes.
+message ProtoCanaryReveal {
+    uint32 canary = 1;
+    bytes proof = 2;
+}
+
 // The role-bond payload: the role id. The bond amount is the signed
-// transaction header's amount.
+// transaction header's amount. The unbond and withdraw doors carry the same
+// payload and a zero amount.
 message ProtoRoleBond {
     uint32 role = 1;
-}
-
-// A bridge burn: bincode-encoded `core::transaction::BridgeBurnTx`. Ids and
-// heights only - the amount and the burner come from the transfer row, which
-// the executor reads from consensus state.
-message ProtoBridgeBurn {
-    bytes data = 1;
-}
-
-// A relayed cross-domain message: bincode-encoded
-// `cross_domain::message::CrossDomainMessage`, sender signature included.
-message ProtoCrossDomainMessageTx {
-    bytes data = 1;
 }
 
 // The storage transaction payload: bincode-encoded `domain::StorageTx`, the
 // same convention as identity and vault. The signature preimage is built
 // field by field in core::transaction::encode_storage_tx.
 message ProtoStorageTx {
+    bytes data = 1;
+}
+
+// The external-domain payload, bincode-encoded like the storage payload.
+// The signing preimage writes every field explicitly; these bytes are only
+// the wire form.
+message ProtoExternalDomainTx {
+    bytes data = 1;
+}
+
+// The domain settlement payload, bincode-encoded like the external-domain
+// payload. The signing preimage writes every field explicitly; these bytes
+// are only the wire form.
+message ProtoSettlementTx {
+    bytes data = 1;
+}
+
+// The bridge payload, bincode-encoded like the settlement payload. The
+// signing preimage writes every field explicitly; these bytes are only the
+// wire form.
+message ProtoBridgeTx {
     bytes data = 1;
 }
 
@@ -631,6 +725,8 @@ message ProtoFinalityCert {
 message ProtoGetQcBlob {
     uint64 epoch = 1;
     uint64 checkpoint_height = 2;
+    // Zero is the first chunk, preserving older two-field requests.
+    uint32 chunk_index = 3;
 }
 
 message ProtoQcBlobResponse {
@@ -639,6 +735,8 @@ message ProtoQcBlobResponse {
     string checkpoint_hash = 3;
     bytes blob_data = 4;
     bool found = 5;
+    uint32 chunk_index = 6;
+    uint32 chunk_count = 7;
 }
 
 message ProtoQcFaultProof {
