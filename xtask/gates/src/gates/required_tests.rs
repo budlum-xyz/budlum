@@ -33,6 +33,7 @@ fn registry() -> Vec<(&'static str, &'static [&'static str])> {
             super::node_classification_gate::TESTS,
         ),
         ("poa-compliance", super::poa_compliance_gate::TESTS),
+        ("pq-core", super::pq_core_gate::TESTS),
         ("storage-provider", super::storage_provider_gate::TESTS),
         ("wallet-core", super::wallet_core_gate::TESTS),
     ]
