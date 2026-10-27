@@ -60,7 +60,7 @@
 //! reduced to one source.
 
 use crate::crypto::primitives::{
-    verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
+    verify_ml_dsa_87_signature_in, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
 };
 use sha3::{Digest, Sha3_256};
 use std::collections::BTreeSet;
@@ -177,9 +177,27 @@ impl PrivateTransferAuth {
     ///
     /// [`PrivateTransferError::InvalidAuthorization`].
     pub fn verify_auth_sig(&self) -> Result<(), PrivateTransferError> {
+        self.verify_auth_sig_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
+    }
+
+    /// [`Self::verify_auth_sig`] under the scheme statuses of a chain.
+    ///
+    /// # Errors
+    ///
+    /// [`PrivateTransferError::InvalidAuthorization`].
+    pub fn verify_auth_sig_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    ) -> Result<(), PrivateTransferError> {
         let payload = authorization_payload(&self.commitment, &self.nullifier, self.amount);
-        verify_ml_dsa_87_signature(&payload, &self.authorization_sig, &self.spender_key)
-            .map_err(|_| PrivateTransferError::InvalidAuthorization)
+        verify_ml_dsa_87_signature_in(
+            registry,
+            crate::crypto::ctx::PRIVATE_TRANSFER_V1,
+            &payload,
+            &self.authorization_sig,
+            &self.spender_key,
+        )
+        .map_err(|_| PrivateTransferError::InvalidAuthorization)
     }
 }
 
@@ -218,7 +236,7 @@ mod tests {
         let commitment = transfer_commitment(&nullifier, amount, blinding);
         let payload = authorization_payload(&commitment, &nullifier, amount);
         PrivateTransferAuth {
-            authorization_sig: kp.sign(&payload),
+            authorization_sig: kp.sign(crate::crypto::ctx::PRIVATE_TRANSFER_V1, &payload),
             spender_key: kp.public_key_bytes(),
             nullifier,
             commitment,
