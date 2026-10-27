@@ -542,7 +542,7 @@ mod tests {
         let mut vm = bud_vm::Vm::new(4096);
         let mut words = vec![0u64];
         words.extend_from_slice(&leaf);
-        words.extend(std::iter::repeat(0u64).take(64 * 4));
+        words.extend(std::iter::repeat_n(0u64, 64 * 4));
         words.extend_from_slice(&root);
         for (i, word) in words.iter().enumerate() {
             let at = 256 + i * 8;

@@ -15,8 +15,7 @@
 //!    state snapshot, folded into the state root, and clocked at block end
 //!    (`on_block_committed` from the block-effects transition). It used to
 //!    be a field on `Blockchain`, written by operator RPCs and persisted
-//!    beside the chain, which no block root covered (
-//!,,).
+//!    beside the chain, which no block root covered.
 //! 2. **How an attestation becomes a `GlobalBlockHeader` commitment.**
 //!    Answered here: it does not get a new header field. An accepted
 //!    attestation is stored in the registry; the registry is part of the
