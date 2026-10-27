@@ -2,12 +2,38 @@ use crate::core::account::Account;
 use crate::core::address::Address;
 use crate::core::block::Block;
 use crate::core::transaction::Transaction;
+use crate::cross_domain::message::CrossDomainMessage;
+use crate::cross_domain::BridgeState;
+use crate::domain::{ConsensusDomain, DomainCommitment};
 use crate::settlement::GlobalBlockHeader;
 use crate::storage::traits::{BlockchainStorage, DurableCommitBatch, SeenBlockMap};
 use serde::{de::DeserializeOwned, Serialize};
 use sled::Db;
 use std::str::from_utf8;
 use tracing::info;
+
+/// On-disk `ConsensusDomain` shape used appended
+/// `pow_parameters`. Bincode is positional, so serde defaults alone cannot
+/// Recover an older record that ends before the new field.
+#[derive(serde::Deserialize)]
+struct LegacyConsensusDomainV1 {
+    id: crate::domain::DomainId,
+    kind: crate::domain::ConsensusKind,
+    status: crate::domain::DomainStatus,
+    domain_chain_id: u64,
+    operator: Option<Address>,
+    operator_bond: u64,
+    config_hash: crate::domain::Hash32,
+    validator_set_hash: crate::domain::Hash32,
+    finality_adapter: String,
+    min_confirmations: u64,
+    bridge_enabled: bool,
+    block_hash_scheme: crate::domain::types::RootScheme,
+    state_root_scheme: crate::domain::types::RootScheme,
+    tx_root_scheme: crate::domain::types::RootScheme,
+    last_committed_height: u64,
+    last_committed_hash: crate::domain::Hash32,
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DatabaseBackupV1 {
@@ -35,6 +61,36 @@ fn decode_database_backup(bytes: &[u8]) -> std::io::Result<DatabaseBackupV1> {
     Ok(backup)
 }
 
+impl From<LegacyConsensusDomainV1> for ConsensusDomain {
+    fn from(domain: LegacyConsensusDomainV1) -> Self {
+        Self {
+            id: domain.id,
+            kind: domain.kind,
+            status: domain.status,
+            domain_chain_id: domain.domain_chain_id,
+            operator: domain.operator,
+            operator_bond: domain.operator_bond,
+            config_hash: domain.config_hash,
+            validator_set_hash: domain.validator_set_hash,
+            finality_adapter: domain.finality_adapter,
+            min_confirmations: domain.min_confirmations,
+            bridge_enabled: domain.bridge_enabled,
+            block_hash_scheme: domain.block_hash_scheme,
+            state_root_scheme: domain.state_root_scheme,
+            tx_root_scheme: domain.tx_root_scheme,
+            last_committed_height: domain.last_committed_height,
+            last_committed_hash: domain.last_committed_hash,
+            pow_parameters: None,
+            // The migrated legacy record had no such field, so which programs
+            // this domain permits is unknown. An unknown
+            // Allow = no allowance: the list is left empty, and the domain cannot
+            // be advanced by zk until a program list is given.
+            zk_program_allowlist: Vec::new(),
+            plugin_code_hash: None,
+        }
+    }
+}
+
 fn encode<T: Serialize>(value: &T) -> std::io::Result<Vec<u8>> {
     bincode::serialize(value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
@@ -60,12 +116,23 @@ fn decode<T: DeserializeOwned>(value: &[u8]) -> std::io::Result<T> {
 #[derive(Debug)]
 pub struct Storage {
     db: Db,
+    /// BLG-0190 (P09-F11): a test-only knob that makes the storage-economics
+    /// persist fail for real, so the accounting paths' `?` propagation can
+    /// be EXERCISED instead of grepped. Never set outside `cfg(test)`; no
+    /// production behaviour reads it.
+    #[cfg(test)]
+    fail_economics_writes: std::sync::atomic::AtomicBool,
 }
 
 impl Clone for Storage {
     fn clone(&self) -> Self {
         Self {
             db: self.db.clone(),
+            #[cfg(test)]
+            fail_economics_writes: std::sync::atomic::AtomicBool::new(
+                self.fail_economics_writes
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
         }
     }
 }
@@ -99,6 +166,9 @@ fn sled_open_with_retry<P: AsRef<std::path::Path>>(path: P) -> std::io::Result<D
     }
     unreachable!("retry loop returns on success, on final attempt, or on non-lock errors")
 }
+
+/// Version tag stored next to the storage registry row. Bump it when the row shape changes.
+const STORAGE_REGISTRY_ROW_VERSION: u32 = 1;
 
 impl Storage {
     /// # Errors
@@ -470,8 +540,23 @@ impl Storage {
                 batch.remove(b"CANONICAL_HEIGHT");
             }
 
-            // 4. Remove the IN_PROGRESS_HEIGHT marker. (The bridge state is
-            // account state the block replay rebuilds; no row rolls back.)
+            // 4. Roll bridge state back to the previous durable tip.
+            // Durable commits store BRIDGE_STATE_AT:{h}. On interrupt at H we
+            // must not leave a newer BRIDGE_STATE than the restored tip (H-1).
+            batch.remove(format!("BRIDGE_STATE_AT:{height}").as_bytes());
+            if height > 0 {
+                let prev = height - 1;
+                let prev_key = format!("BRIDGE_STATE_AT:{prev}");
+                if let Some(prev_bridge) = self.db.get(prev_key.as_bytes())? {
+                    batch.insert(b"BRIDGE_STATE", prev_bridge);
+                } else {
+                    batch.remove(b"BRIDGE_STATE");
+                }
+            } else {
+                batch.remove(b"BRIDGE_STATE");
+            }
+
+            // 5. Remove the IN_PROGRESS_HEIGHT marker
             batch.remove(b"IN_PROGRESS_HEIGHT");
 
             // Apply rollback batch atomically
@@ -564,15 +649,29 @@ impl Storage {
             );
         }
 
-        // 9. Accounts. (The bridge state is account state the block replay
-        // rebuilds; it has no row of its own.)
+        // 9. Bridge state. Every durable height gets a snapshot: a commit
+        // that carries no new bridge state carries the live one forward, so
+        // that a rollback from the next height finds the state that was valid
+        // here. Without it, an interrupted commit at H+1 read the missing
+        // `BRIDGE_STATE_AT:H` as "no bridge state" and deleted the live
+        // `BRIDGE_STATE` that a commit at H had never touched.
+        let at = format!("BRIDGE_STATE_AT:{}", batch.block.index);
+        if let Some(ref bridge_state) = batch.bridge_state {
+            let val = encode(bridge_state)?;
+            b.insert(b"BRIDGE_STATE", val.as_slice());
+            b.insert(at.as_bytes(), val.as_slice());
+        } else if let Some(live) = self.db.get(b"BRIDGE_STATE")? {
+            b.insert(at.as_bytes(), live);
+        }
+
+        // 10. Accounts
         for (pubkey, account) in &batch.accounts {
             let key = format!("ACCT:{pubkey}");
             let val = encode(account)?;
             b.insert(key.as_bytes(), val.as_slice());
         }
 
-        // 10. Remove IN_PROGRESS_HEIGHT marker
+        // 11. Remove IN_PROGRESS_HEIGHT marker
         b.remove(b"IN_PROGRESS_HEIGHT");
 
         // Apply batch atomically and flush
@@ -951,6 +1050,102 @@ impl Storage {
         self.db.insert(key.as_bytes(), state_root.as_bytes())?;
         self.db.flush()?;
         Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_consensus_domain(&self, domain: &ConsensusDomain) -> std::io::Result<()> {
+        let key = format!("DOMAIN:{}", domain.id);
+        let val = encode(domain)?;
+        self.db.insert(key.as_bytes(), val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_consensus_domains(&self) -> std::io::Result<Vec<ConsensusDomain>> {
+        let mut domains: Vec<ConsensusDomain> = Vec::new();
+        for item in self.db.scan_prefix(b"DOMAIN:") {
+            let (_key, val) = item?;
+            let domain = decode::<ConsensusDomain>(&val).or_else(|_| {
+                bincode::deserialize::<LegacyConsensusDomainV1>(&val)
+                    .map(ConsensusDomain::from)
+                    .map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
+                    })
+            })?;
+            domains.push(domain);
+        }
+        domains.sort_by_key(|domain| domain.id);
+        Ok(domains)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_domain_commitment(&self, commitment: &DomainCommitment) -> std::io::Result<()> {
+        let key = format!(
+            "DOMAIN_COMMITMENT:{}:{}:{}",
+            commitment.domain_id, commitment.domain_height, commitment.sequence
+        );
+        let val = encode(commitment)?;
+        self.db.insert(key.as_bytes(), val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_domain_commitment_batch(
+        &self,
+        commitment: &DomainCommitment,
+        domains: &[ConsensusDomain],
+    ) -> std::io::Result<()> {
+        let commitment_key = format!(
+            "DOMAIN_COMMITMENT:{}:{}:{}",
+            commitment.domain_id, commitment.domain_height, commitment.sequence
+        );
+        let commitment_val = encode(commitment)?;
+        let mut batch = sled::Batch::default();
+        batch.insert(commitment_key.as_bytes(), commitment_val.as_slice());
+
+        for domain in domains {
+            let domain_key = format!("DOMAIN:{}", domain.id);
+            let domain_val = encode(domain)?;
+            batch.insert(domain_key.as_bytes(), domain_val.as_slice());
+        }
+
+        self.db.apply_batch(batch)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_domain_commitments(&self) -> std::io::Result<Vec<DomainCommitment>> {
+        let mut commitments: Vec<DomainCommitment> = Vec::new();
+        for item in self.db.scan_prefix(b"DOMAIN_COMMITMENT:") {
+            let (_key, val) = item?;
+            commitments.push(decode(&val)?);
+        }
+        commitments.sort_by_key(|commitment| {
+            (
+                commitment.domain_id,
+                commitment.domain_height,
+                commitment.sequence,
+            )
+        });
+        Ok(commitments)
     }
 
     /// # Errors
@@ -1860,6 +2055,30 @@ impl BlockchainStorage for Storage {
         Self::delete_finality_cert(self, height)
     }
 
+    fn save_consensus_domain(&self, domain: &ConsensusDomain) -> std::io::Result<()> {
+        Self::save_consensus_domain(self, domain)
+    }
+
+    fn load_consensus_domains(&self) -> std::io::Result<Vec<ConsensusDomain>> {
+        Self::load_consensus_domains(self)
+    }
+
+    fn save_domain_commitment(&self, commitment: &DomainCommitment) -> std::io::Result<()> {
+        Self::save_domain_commitment(self, commitment)
+    }
+
+    fn save_domain_commitment_batch(
+        &self,
+        commitment: &DomainCommitment,
+        domains: &[ConsensusDomain],
+    ) -> std::io::Result<()> {
+        Self::save_domain_commitment_batch(self, commitment, domains)
+    }
+
+    fn load_domain_commitments(&self) -> std::io::Result<Vec<DomainCommitment>> {
+        Self::load_domain_commitments(self)
+    }
+
     fn save_global_header(&self, header: &GlobalBlockHeader) -> std::io::Result<()> {
         Self::save_global_header(self, header)
     }
@@ -1872,6 +2091,40 @@ impl BlockchainStorage for Storage {
         Self::load_global_headers(self)
     }
 
+    fn save_bridge_state(&self, bridge_state: &BridgeState) -> std::io::Result<()> {
+        Self::save_bridge_state(self, bridge_state)
+    }
+
+    fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
+        Self::load_bridge_state(self)
+    }
+
+    fn save_universal_relayer(
+        &self,
+        relayer: &crate::cross_domain::relayer::UniversalRelayer,
+    ) -> std::io::Result<()> {
+        Self::save_universal_relayer(self, relayer)
+    }
+
+    fn load_universal_relayer(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::relayer::UniversalRelayer>> {
+        Self::load_universal_relayer(self)
+    }
+
+    fn save_proof_claim_registry(
+        &self,
+        registry: &crate::prover::ProofClaimRegistry,
+    ) -> std::io::Result<()> {
+        Self::save_proof_claim_registry(self, registry)
+    }
+
+    fn load_proof_claim_registry(
+        &self,
+    ) -> std::io::Result<Option<crate::prover::ProofClaimRegistry>> {
+        Self::load_proof_claim_registry(self)
+    }
+
     fn save_quarantine_ledger(
         &self,
         ledger: &crate::registry::QuarantineLedger,
@@ -1879,8 +2132,42 @@ impl BlockchainStorage for Storage {
         Self::save_quarantine_ledger(self, ledger)
     }
 
+    fn save_external_intake(
+        &self,
+        intake: &crate::cross_domain::external::IntakeState,
+    ) -> std::io::Result<()> {
+        Self::save_external_intake(self, intake)
+    }
+
+    fn load_external_intake(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::external::IntakeState>> {
+        Self::load_external_intake(self)
+    }
+
     fn load_quarantine_ledger(&self) -> std::io::Result<Option<crate::registry::QuarantineLedger>> {
         Self::load_quarantine_ledger(self)
+    }
+
+    fn save_storage_economics_state(
+        &self,
+        snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
+    ) -> std::io::Result<()> {
+        Self::save_storage_economics_state(self, snapshot)
+    }
+
+    fn load_storage_economics_state(
+        &self,
+    ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>> {
+        Self::load_storage_economics_state(self)
+    }
+
+    fn save_cross_domain_message(&self, message: &CrossDomainMessage) -> std::io::Result<()> {
+        Self::save_cross_domain_message(self, message)
+    }
+
+    fn load_cross_domain_messages(&self) -> std::io::Result<Vec<CrossDomainMessage>> {
+        Self::load_cross_domain_messages(self)
     }
 
     fn save_tx_index(&self, tx_hash: &str, block_height: u64) -> std::io::Result<()> {
@@ -2134,6 +2421,7 @@ mod tests {
             state_root: "dummy_state_root".to_string(),
             finality_cert: None,
             global_headers: vec![],
+            bridge_state: None,
             accounts: vec![(addr, account)],
         };
 
@@ -2162,6 +2450,20 @@ mod tests {
         storage.db.insert(b"STATE_ROOT:2", b"half_state").unwrap();
         storage.db.insert(b"LAST", block2.hash.as_bytes()).unwrap();
         storage.db.insert(b"CANONICAL_HEIGHT", b"2").unwrap();
+        let mut bridge_poison = BridgeState::new();
+        let poison_asset = AssetId([0xFFu8; 32]);
+        bridge_poison.register_asset(poison_asset, 9).unwrap();
+        let poison_root = bridge_poison.root();
+        assert_ne!(bridge_h1_root, poison_root);
+        let poison_bytes = encode(&bridge_poison).unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE", poison_bytes.as_slice())
+            .unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE_AT:2", poison_bytes.as_slice())
+            .unwrap();
         storage.db.flush().unwrap();
 
         // Drop the first storage handle to release the file lock
@@ -2175,6 +2477,76 @@ mod tests {
         assert!(storage2.get_block_by_height(2).unwrap().is_none());
         assert_eq!(storage2.get_canonical_height().unwrap(), 1);
         assert_eq!(storage2.get_last_hash().unwrap().unwrap(), block.hash);
+        // Live BRIDGE_STATE must match tip-1 snapshot, not poison.
+        let restored = storage2
+            .load_bridge_state()
+            .unwrap()
+            .expect("bridge state restored");
+        assert_eq!(
+            restored.root(),
+            bridge_h1_root,
+            "bridge must roll back to tip-1 after interrupted H=2"
+        );
+        assert!(storage2.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_none());
+    }
+
+    /// A commit that carries no bridge state still leaves a snapshot at its
+    /// height, so a rollback from the next height restores the live state
+    /// instead of deleting it. Measured before the fix: commit H=1 with
+    /// bridge state, commit H=2 with `None`, interrupt at H=3, and the
+    /// recovery removed `BRIDGE_STATE` outright.
+    #[test]
+    fn a_commit_without_bridge_state_carries_the_live_snapshot_forward() {
+        use crate::cross_domain::{AssetId, BridgeState};
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let storage = Storage::new(path).unwrap();
+
+        let mut block1 = Block::new(1, "0".repeat(64), vec![]);
+        block1.hash = block1.calculate_hash();
+        let mut bridge = BridgeState::new();
+        bridge.register_asset(AssetId([0x22u8; 32]), 1).unwrap();
+        let root = bridge.root();
+        storage
+            .commit_durable_batch(&DurableCommitBatch {
+                block: block1.clone(),
+                state_root: "s1".into(),
+                finality_cert: None,
+                global_headers: vec![],
+                bridge_state: Some(bridge),
+                accounts: vec![],
+            })
+            .unwrap();
+
+        let mut block2 = Block::new(2, block1.hash.clone(), vec![]);
+        block2.hash = block2.calculate_hash();
+        storage
+            .commit_durable_batch(&DurableCommitBatch {
+                block: block2.clone(),
+                state_root: "s2".into(),
+                finality_cert: None,
+                global_headers: vec![],
+                bridge_state: None,
+                accounts: vec![],
+            })
+            .unwrap();
+        assert!(
+            storage.db.get(b"BRIDGE_STATE_AT:2").unwrap().is_some(),
+            "height 2 carries the live snapshot forward"
+        );
+
+        // Interrupt at height 3 with nothing else written.
+        storage.db.insert(b"IN_PROGRESS_HEIGHT", b"3").unwrap();
+        storage.db.flush().unwrap();
+        drop(storage);
+
+        let storage2 = Storage::new(path).unwrap();
+        let restored = storage2
+            .load_bridge_state()
+            .unwrap()
+            .expect("the bridge state valid at height 2 survives the rollback");
+        assert_eq!(restored.root(), root);
+        assert_eq!(storage2.get_canonical_height().unwrap(), 2);
     }
 
     /// Present-but-unreadable height markers are errors, not height 0.
@@ -2390,6 +2762,7 @@ mod tests {
             state_root: "root".to_string(),
             finality_cert: None,
             global_headers: vec![],
+            bridge_state: None,
             accounts: vec![],
         };
         storage.commit_durable_batch(&batch).unwrap();
