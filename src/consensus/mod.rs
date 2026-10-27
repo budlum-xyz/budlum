@@ -55,7 +55,7 @@ pub fn now_millis() -> u128 {
         .as_millis()
 }
 
-/// Arrival times of recently validated blocks, as this node observed them.
+/// When this node adopted its current tip, and which block that is.
 ///
 /// The round price is "how long ago did the parent land", and a header cannot
 /// answer that: production stamps blocks from the slot schedule
@@ -66,21 +66,27 @@ pub fn now_millis() -> u128 {
 /// affordable at once (CWE-807) - while capping the stamp instead froze the
 /// retry ladder for genuinely stalled slots.
 ///
-/// A node does know when it first saw a block, and that fact cannot be
-/// inflated: a peer can delay delivery, which only makes this node stricter
-/// (and self-heals, because `now` keeps moving while the sighting does not),
-/// but it can never backdate it. The book is bounded and per-engine, so two
-/// nodes price the same block against their own observation times.
-pub struct RoundPriceBook {
-    seen: std::sync::Mutex<std::collections::VecDeque<(String, u128)>>,
-}
-
-/// How many parent arrival times [`RoundPriceBook`] remembers.
+/// A node does know when it adopted a block, and that fact cannot be inflated:
+/// a peer can delay delivery, which only makes this node stricter (and
+/// self-heals, because `now` keeps moving while the adoption time does not),
+/// but it can never backdate it.
 ///
-/// Two entries would cover a parent and its child; the rest is slack for
-/// short forks and out-of-order gossip. Beyond this the book forgets the
-/// oldest sighting, and a price falls back to the header stamp.
-const ROUND_PRICE_MEMORY: usize = 64;
+/// The book holds exactly one entry - the tip - and only chain commit writes
+/// it, never validation. Both properties are deliberate:
+///
+/// - Writing from validation would price a parent and its child milliseconds
+///   apart whenever a single pass walks several blocks (fork recovery through
+///   a peer's candidate chain, replay), so a legitimately produced retry block
+///   inside that chain would be refused and a node stuck on a minority fork
+///   could never adopt the better one.
+/// - A multi-entry cache is evictable. A peer that keeps a candidate chain
+///   replaying through the engine would flush the live tip's sighting and hand
+///   the price back to a schedule-derived stamp, which is the round-claim
+///   window this mechanism exists to close. One slot, written only by this
+///   node's own commit, cannot be evicted by anyone else.
+pub struct RoundPriceBook {
+    live: std::sync::Mutex<Option<(String, u128)>>,
+}
 
 impl Default for RoundPriceBook {
     fn default() -> Self {
@@ -92,49 +98,43 @@ impl RoundPriceBook {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            seen: std::sync::Mutex::new(std::collections::VecDeque::with_capacity(
-                ROUND_PRICE_MEMORY,
-            )),
+            live: std::sync::Mutex::new(None),
         }
     }
 
-    /// Record that `block_hash` was first seen by this node at `now_ms`.
+    /// Record that `block_hash` is now this node's tip, adopted at `now_ms`.
     ///
-    /// Idempotent: the first sighting wins. A later call cannot shorten the
-    /// elapsed time, and a poisoned lock is treated as "no observation
+    /// Called from the chain commit path, and from a restore for the tip a
+    /// node loads from disk. A poisoned lock is treated as "no adoption
     /// recorded" rather than as a panicking consensus path.
-    pub fn note_seen(&self, block_hash: &str, now_ms: u128) {
-        let Ok(mut seen) = self.seen.lock() else {
-            return;
-        };
-        if seen.iter().any(|(hash, _)| hash == block_hash) {
-            return;
+    pub fn note_tip_block(&self, block_hash: &str, now_ms: u128) {
+        if let Ok(mut live) = self.live.lock() {
+            *live = Some((block_hash.to_string(), now_ms));
         }
-        if seen.len() == ROUND_PRICE_MEMORY {
-            seen.pop_front();
-        }
-        seen.push_back((block_hash.to_string(), now_ms));
     }
 
-    /// When this node first saw `block_hash`, if it is still remembered.
+    /// When this node adopted `block_hash`, if it is still the tip.
+    ///
+    /// A parent that is not our tip - any block in a peer's candidate chain,
+    /// any historical block - has no sighting here, and its round price falls
+    /// back to its own header. That is the permissive direction a replay and a
+    /// fork recovery need.
     #[must_use]
-    pub fn seen_at(&self, block_hash: &str) -> Option<u128> {
-        let Ok(seen) = self.seen.lock() else {
+    pub fn live_tip_seen(&self, block_hash: &str) -> Option<u128> {
+        let Ok(live) = self.live.lock() else {
             return None;
         };
-        seen.iter()
-            .find(|(hash, _)| hash == block_hash)
+        live.as_ref()
+            .filter(|(hash, _)| hash == block_hash)
             .map(|(_, at)| *at)
     }
 
     /// The highest round this node may *claim*, from the producer's side.
     ///
-    /// A producer only claims time it has watched pass: with no sighting of
-    /// the parent the ladder starts at round 0 rather than trusting a header
-    /// stamp, which is the direction that cannot produce a block its peers
-    /// refuse. A node that restarts therefore proposes round 0 for one slot
-    /// instead of over-claiming on a lagging chain, and every later slot has
-    /// its parent in the book again.
+    /// The same rule the verifier applies, which is the point: propose and
+    /// verify cannot drift apart. A producer whose parent is its own tip has a
+    /// sighting by construction, so a claim is always priced by time this node
+    /// watched pass.
     #[must_use]
     pub fn claimable_round_for(
         &self,
@@ -142,11 +142,7 @@ impl RoundPriceBook {
         parent_timestamp_ms: u128,
         now_ms: u128,
     ) -> u64 {
-        affordable_leader_round(
-            parent_timestamp_ms,
-            Some(self.seen_at(parent_hash).unwrap_or(now_ms)),
-            now_ms,
-        )
+        affordable_leader_round(parent_timestamp_ms, self.live_tip_seen(parent_hash), now_ms)
     }
 }
 
@@ -184,11 +180,13 @@ impl RoundPriceBook {
 /// passes and the sighting stays where it was - the two cases the stamp alone
 /// cannot tell apart.
 ///
-/// Without a sighting - a block this node never observed live, such as a
-/// historical replay - the stamp is the only fact there is, and the rule falls
-/// back to it. That is the strict direction for a producer (it cannot claim
-/// more than its header pays for) and the permissive one for a replay, which
-/// is what a node catching up on history needs.
+/// A parent with no sighting is priced from its own header. Only a block this
+/// node adopted as its tip has one (see [`RoundPriceBook`]), so a peer's
+/// candidate chain and a replay - anything that walks blocks without adopting
+/// them - price from headers, which is what lets a legitimate retry block
+/// inside such a chain be accepted. A sighting cannot be manufactured or
+/// evicted by a peer: it is written by this node's own commit, for its own
+/// tip, and a tip's parent is always the block that came before it.
 #[must_use]
 pub fn affordable_leader_round(
     parent_timestamp_ms: u128,
@@ -273,14 +271,15 @@ pub trait ConsensusEngine: Send + Sync {
         state: &AccountState,
     ) -> Result<(), ConsensusError>;
 
-    /// Record when this node first saw a block, which is what prices the
-    /// leader rounds of its children.
+    /// Record that `block_hash` is now this node's tip, adopted at `at_ms`.
     ///
     /// Engines that price rounds (PoA, PoS) keep the observation; the default
     /// does nothing, because an engine with no round term has nothing to
-    /// price. The chain restore path calls this for a tip it adopts without
-    /// re-validating, so a restarted node does not price its next slot from a
-    /// header timestamp that a lagging schedule left in the past.
+    /// price. Only adoption writes it - the block-apply path and the restore
+    /// path - never validation: a pass that walks several blocks (a peer's
+    /// candidate chain, a replay) must not price a parent and its child
+    /// milliseconds apart, or a legitimate retry block inside that chain would
+    /// be refused.
     fn note_block_seen(&self, _block_hash: &str, _at_ms: u128) {}
 
     /// The kind of chain this engine produces blocks for.
@@ -542,35 +541,40 @@ mod tests {
         // A future-dated parent still prices at zero, however it was seen.
         assert_eq!(affordable_leader_round(now + 60_000, None, now), 0);
 
-        // With no sighting at all - a historical block - the stamp is the
-        // only fact there is, and the rule falls back to it.
+        // A parent that is not this node's tip has no sighting, and prices
+        // from its own header: this is the path a peer's candidate chain and a
+        // replay take, and pricing it at zero would refuse every legitimate
+        // retry block in them.
         assert_eq!(
             affordable_leader_round(stale_stamp, None, now),
             MAX_LEADER_ROUNDS
         );
     }
 
-    /// The book remembers first sightings, and never lets one be moved back.
+    /// The book holds the tip it adopted, and nothing a peer can move.
+    ///
+    /// One slot, written only by commit: a candidate chain replayed through
+    /// validation cannot overwrite it, and the sighting it holds is the one
+    /// that prices the next slot's rounds.
     #[test]
-    fn the_round_price_book_keeps_first_sightings_and_stays_bounded() {
+    fn the_round_price_book_holds_only_the_adopted_tip() {
         let book = RoundPriceBook::new();
-        assert_eq!(book.seen_at("aa"), None);
-        book.note_seen("aa", 1_000);
-        book.note_seen("aa", 9_000);
-        assert_eq!(book.seen_at("aa"), Some(1_000), "the first sighting wins");
+        assert_eq!(book.live_tip_seen("aa"), None);
 
-        for i in 0..ROUND_PRICE_MEMORY + 10 {
-            book.note_seen(&format!("b{i}"), 2_000 + i as u128);
-        }
-        let remembered = (0..ROUND_PRICE_MEMORY + 10)
-            .filter(|i| book.seen_at(&format!("b{i}")).is_some())
-            .count();
-        assert_eq!(remembered, ROUND_PRICE_MEMORY, "the book is bounded");
+        book.note_tip_block("aa", 1_000);
+        assert_eq!(book.live_tip_seen("aa"), Some(1_000));
         assert_eq!(
-            book.seen_at("aa"),
+            book.live_tip_seen("bb"),
             None,
-            "the oldest sighting is the one dropped"
+            "a block that is not the tip has no sighting"
         );
+
+        // Adopting a new tip replaces the entry: the book cannot grow, so it
+        // cannot be flooded, and it holds no sighting a fork could evict while
+        // its block is still the tip.
+        book.note_tip_block("bb", 5_000);
+        assert_eq!(book.live_tip_seen("aa"), None);
+        assert_eq!(book.live_tip_seen("bb"), Some(5_000));
     }
 
     #[test]

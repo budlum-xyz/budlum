@@ -186,10 +186,11 @@ mod p01_consensus_rounds_tests {
             "the refusal must be the wall-clock price of the round, got: {error:?}"
         );
 
-        // Same claim, a parent old enough that round 2 has genuinely elapsed:
-        // the pricing gate lets it through and any later refusal is about
-        // something else.
+        // Same claim, a parent this node watched land a minute ago: round 2
+        // has genuinely elapsed, so the pricing gate lets it through and any
+        // later refusal is about something else.
         let (parent, block) = fixture(now_ms.saturating_sub(60_000));
+        engine.note_block_seen(&parent.hash, parent.timestamp);
         if let Err(error) = engine.validate_block(&block, &[parent], &state) {
             assert!(
                 !error.0.contains("claimed before it elapsed")
@@ -509,16 +510,29 @@ mod p01_poa_round_pricing_tests {
             "the refusal must be the wall-clock price of the round, got: {error:?}"
         );
 
-        // Same parent, same child, but the node watched the parent land ten
-        // minutes ago: a real stall, and the ladder has reached round 6, so
-        // the pricing gate lets the claim through and any later refusal is
-        // about something else.
+        // Same parent, same child, but the node adopted the parent ten minutes
+        // ago: a real stall, and the ladder has reached round 6, so the
+        // pricing gate lets the claim through and any later refusal is about
+        // something else.
         let engine = PoAEngine::new(PoAConfig::default(), None);
         engine.note_block_seen(&parent.hash, parent.timestamp);
-        if let Err(error) = engine.validate_block(&block, &[parent], &state) {
+        if let Err(error) = engine.validate_block(&block, &[parent.clone()], &state) {
             assert!(
                 !error.0.contains("claimed before it elapsed"),
                 "a genuinely stalled slot must walk the ladder, got: {error:?}"
+            );
+        }
+
+        // A parent this node never adopted - it is inside a peer's candidate
+        // chain being walked in one pass, or a replay - has no sighting and is
+        // priced from its header. Pricing it at zero would refuse every
+        // legitimate retry block in that chain, which is how a node stuck on a
+        // minority fork would fail to adopt the better one.
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        if let Err(error) = engine.validate_block(&block, &[parent], &state) {
+            assert!(
+                !error.0.contains("claimed before it elapsed"),
+                "a candidate-chain parent must price from its header, got: {error:?}"
             );
         }
     }
