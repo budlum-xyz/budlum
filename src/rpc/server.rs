@@ -2665,63 +2665,22 @@ impl BudlumApiServer for RpcServer {
         &self,
         payload: crate::domain::VerifiedDomainCommitment,
     ) -> Result<String, ErrorObjectOwned> {
-        // Consensus-state isolation: `submit_verified_domain_commitment` writes
-        // to `external_roots` and `domain_registry`, so public listeners must
-        // not reach it directly, and the signed in-block StateUpdateTx carrier
-        // must be verified and enqueued fail-closed before applying state.
+        // A commitment is a signed `Settlement` transaction
+        // (`SettlementTx::SubmitCommitment`) from a bonded RELAYER, applied in
+        // block. It used to advance the domain registry and the external roots
+        // on this node, then gossip the payload so every peer applied it again
+        // whenever it arrived.
         self.require_operator("bud_submitVerifiedDomainCommitment")?;
-        let hash = hex::encode(payload.leaf_hash());
-        let payload_clone = payload.clone();
-        let commitment = payload.commitment.clone();
-
-        self.chain
-            .verify_verified_domain_commitment(payload.clone())
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid verified domain commitment: {e}"),
-                    None::<()>,
-                )
-            })?;
-
-        let tx = self
-            .chain
-            .build_state_update_transaction(commitment)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32603,
-                    format!("Could not build state update transaction: {e}"),
-                    None::<()>,
-                )
-            })?;
-        let tx_clone = tx.clone();
-        self.chain.add_transaction(tx).await.map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32603,
-                format!("State update transaction rejected: {e}"),
-                None::<()>,
-            )
-        })?;
-
-        self.chain
-            .submit_verified_domain_commitment(payload)
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Invalid verified domain commitment: {e}"),
-                    None::<()>,
-                )
-            })?;
-
-        self.node.broadcast_tx_sync(tx_clone);
-        self.node
-            .broadcast_verified_domain_commitment_sync(payload_clone);
-        Ok(format!("0x{hash}"))
+        let _ = payload;
+        Err(ErrorObjectOwned::owned(
+            -32602,
+            "Out-of-block domain commitments are refused: they advanced the domain \
+             registry on this node alone. A bonded RELAYER sends a signed Settlement \
+             transaction (SettlementTx::SubmitCommitment) carrying the commitment and \
+             its finality proof through bud_sendRawTransaction.",
+            None::<()>,
+        ))
     }
-
     async fn submit_cross_domain_message(
         &self,
         msg: crate::cross_domain::CrossDomainMessage,
