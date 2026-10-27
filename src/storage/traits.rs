@@ -5,9 +5,6 @@ use crate::core::account::Account;
 use crate::core::address::Address;
 use crate::core::block::{Block, BlockHeader};
 use crate::core::transaction::Transaction;
-use crate::cross_domain::message::CrossDomainMessage;
-use crate::cross_domain::BridgeState;
-use crate::domain::{ConsensusDomain, DomainCommitment};
 use crate::settlement::GlobalBlockHeader;
 use std::collections::HashMap;
 
@@ -108,35 +105,6 @@ pub trait BlockchainStorage: Send + Sync {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
-    fn save_consensus_domain(&self, domain: &ConsensusDomain) -> std::io::Result<()>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn load_consensus_domains(&self) -> std::io::Result<Vec<ConsensusDomain>>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn save_domain_commitment(&self, commitment: &DomainCommitment) -> std::io::Result<()>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn save_domain_commitment_batch(
-        &self,
-        commitment: &DomainCommitment,
-        domains: &[ConsensusDomain],
-    ) -> std::io::Result<()>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn load_domain_commitments(&self) -> std::io::Result<Vec<DomainCommitment>>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
     fn save_global_header(&self, header: &GlobalBlockHeader) -> std::io::Result<()>;
     /// # Errors
     ///
@@ -152,46 +120,6 @@ pub trait BlockchainStorage: Send + Sync {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
-    fn save_bridge_state(&self, bridge_state: &BridgeState) -> std::io::Result<()>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn save_universal_relayer(
-        &self,
-        relayer: &crate::cross_domain::relayer::UniversalRelayer,
-    ) -> std::io::Result<()>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn load_universal_relayer(
-        &self,
-    ) -> std::io::Result<Option<crate::cross_domain::relayer::UniversalRelayer>>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn save_proof_claim_registry(
-        &self,
-        registry: &crate::prover::ProofClaimRegistry,
-    ) -> std::io::Result<()>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn load_proof_claim_registry(
-        &self,
-    ) -> std::io::Result<Option<crate::prover::ProofClaimRegistry>>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
     fn save_quarantine_ledger(
         &self,
         ledger: &crate::registry::QuarantineLedger,
@@ -201,46 +129,6 @@ pub trait BlockchainStorage: Send + Sync {
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
     fn load_quarantine_ledger(&self) -> std::io::Result<Option<crate::registry::QuarantineLedger>>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn save_external_intake(
-        &self,
-        intake: &crate::cross_domain::external::IntakeState,
-    ) -> std::io::Result<()>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn load_external_intake(
-        &self,
-    ) -> std::io::Result<Option<crate::cross_domain::external::IntakeState>>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn save_storage_economics_state(
-        &self,
-        snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
-    ) -> std::io::Result<()>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn load_storage_economics_state(
-        &self,
-    ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn save_cross_domain_message(&self, message: &CrossDomainMessage) -> std::io::Result<()>;
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    fn load_cross_domain_messages(&self) -> std::io::Result<Vec<CrossDomainMessage>>;
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
@@ -319,6 +207,5 @@ pub struct DurableCommitBatch {
     pub state_root: String,
     pub finality_cert: Option<FinalityCert>,
     pub global_headers: Vec<GlobalBlockHeader>,
-    pub bridge_state: Option<BridgeState>,
     pub accounts: Vec<(Address, Account)>,
 }
