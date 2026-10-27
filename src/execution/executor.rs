@@ -356,7 +356,7 @@ impl Executor {
                     ));
                 }
                 state
-                    .delegate_to_validator(&tx.from, &validator, tx.amount)
+                    .delegate_to_validator(&tx.from, validator, tx.amount)
                     .map_err(|error| BudlumError::validation("delegation_failed", error))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -372,7 +372,7 @@ impl Executor {
                     ));
                 }
                 state
-                    .begin_delegation_unbonding(&tx.from, &validator, tx.amount)
+                    .begin_delegation_unbonding(&tx.from, validator, tx.amount)
                     .map_err(|error| BudlumError::validation("delegation_unbond_failed", error))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
@@ -389,7 +389,7 @@ impl Executor {
                 }
                 let withdrawn =
                     state
-                        .withdraw_delegation(&tx.from, &validator)
+                        .withdraw_delegation(&tx.from, validator)
                         .map_err(|error| {
                             BudlumError::validation("delegation_withdraw_failed", error)
                         })?;
