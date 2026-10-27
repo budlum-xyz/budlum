@@ -537,7 +537,7 @@ impl ConsensusEngine for PoAEngine {
                     // stall still walks the ladder in real time.
                     let affordable = affordable_leader_round(
                         prev.timestamp,
-                        self.round_prices.seen_at(&prev.hash),
+                        self.round_prices.live_tip_seen(&prev.hash),
                         now_millis(),
                     );
                     if round > affordable {
@@ -588,14 +588,10 @@ impl ConsensusEngine for PoAEngine {
                 "No active PoA authorities; refusing hash-only PoA block".into(),
             ));
         }
-        // This block can now be priced as a parent: the round its child may
-        // claim is measured from the moment this node saw it land, not from a
-        // header stamp a lagging schedule put in the past.
-        self.round_prices.note_seen(&block.hash, now_millis());
         Ok(())
     }
     fn note_block_seen(&self, block_hash: &str, at_ms: u128) {
-        self.round_prices.note_seen(block_hash, at_ms);
+        self.round_prices.note_tip_block(block_hash, at_ms);
     }
     fn consensus_type(&self) -> &'static str {
         "PoA"

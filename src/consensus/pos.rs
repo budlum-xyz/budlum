@@ -864,7 +864,7 @@ impl ConsensusEngine for PoSEngine {
                         // genuine stall still walks the ladder in real time.
                         let affordable = affordable_leader_round(
                             prev.timestamp,
-                            self.round_prices.seen_at(&prev.hash),
+                            self.round_prices.live_tip_seen(&prev.hash),
                             now_millis(),
                         );
                         if round > affordable {
@@ -950,14 +950,10 @@ impl ConsensusEngine for PoSEngine {
                 "No active consensus-ready validators; refusing unsigned PoS block".into(),
             ));
         }
-        // This block can now be priced as a parent: the round its child may
-        // claim is measured from the moment this node saw it land, not from a
-        // header stamp a lagging schedule put in the past.
-        self.round_prices.note_seen(&block.hash, now_millis());
         Ok(())
     }
     fn note_block_seen(&self, block_hash: &str, at_ms: u128) {
-        self.round_prices.note_seen(block_hash, at_ms);
+        self.round_prices.note_tip_block(block_hash, at_ms);
     }
     fn consensus_type(&self) -> &'static str {
         "PoS"
@@ -1363,7 +1359,7 @@ impl ConsensusEngine for PoSEngine {
             // The moment this node loaded it is the only honest observation
             // time: round 0 is claimable for the next slot, and the ladder
             // starts walking from here instead of from a stamp in the past.
-            self.round_prices.note_seen(&tip.hash, now_millis());
+            self.round_prices.note_tip_block(&tip.hash, now_millis());
             let next_slot = tip.index.saturating_add(1);
             let next_epoch = next_slot / self.config.epoch_length;
             let randomness = self.epoch_randomness_from_chain(tip.chain_id, next_epoch, &chain)?;
