@@ -1451,6 +1451,64 @@ impl AccountState {
         Ok(amount)
     }
 
+    /// Begin unbonding one permissionless role bond (`RoleUnbond` door).
+    ///
+    /// The one body for the unbonding half of the role-bond lifecycle: the
+    /// `RoleBond` door debits the balance through [`Self::bond_role`], so the
+    /// refund half lives here too rather than in the executor. The bond stays
+    /// locked and slashable until the governance unbonding window passes;
+    /// [`PermissionlessRegistry::begin_unbonding`] reads that window.
+    ///
+    /// # Errors
+    ///
+    /// The registry's refusals: no registration, a role that is not active or
+    /// already unbonding.
+    pub fn unbond_role(
+        &mut self,
+        address: &Address,
+        role: crate::registry::role::RoleId,
+    ) -> Result<u64, crate::registry::RegistryError> {
+        // The role rule is the same list the validator unbonding path keeps
+        // (a validator unwinds through `Unstake`, an AI operator through its
+        // own pair); a role outside the list names itself in the refusal.
+        Self::ensure_withdrawable_role(role)
+            .map_err(|_| crate::registry::RegistryError::UnsupportedRole { role })?;
+        let epoch = self.epoch_index;
+        self.registry.begin_unbonding(*address, role, epoch)
+    }
+
+    /// Withdraw one matured role bond back into the account balance
+    /// (`RoleWithdraw` door).
+    ///
+    /// The registry removes the registration, so the same bond cannot be
+    /// withdrawn twice, and the refund is credited here in the same block
+    /// that executed the transaction. The refund is a checked add: an
+    /// overflowing balance is refused rather than capped.
+    ///
+    /// # Errors
+    ///
+    /// The registry's refusals (no registration, still unbonding) and a
+    /// balance that cannot take the refund.
+    pub fn withdraw_role_bond(
+        &mut self,
+        address: &Address,
+        role: crate::registry::role::RoleId,
+    ) -> Result<u64, crate::registry::RegistryError> {
+        Self::ensure_withdrawable_role(role)
+            .map_err(|_| crate::registry::RegistryError::UnsupportedRole { role })?;
+        let epoch = self.epoch_index;
+        let stake = self.registry.withdraw(*address, role, epoch)?;
+        let account = self.get_or_create(address);
+        account.balance = account.balance.checked_add(stake).ok_or(
+            crate::registry::RegistryError::StakeOverflow {
+                account: *address,
+                role,
+            },
+        )?;
+        self.dirty_accounts.insert(*address);
+        Ok(stake)
+    }
+
     pub fn begin_ai_operator_unbonding(&mut self, address: &Address) -> Result<u64, String> {
         if self
             .ai_registry
