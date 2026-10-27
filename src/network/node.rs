@@ -1180,9 +1180,9 @@ impl Node {
 
     /// Try to switch to the fork that `suffix` belongs to.
     ///
-    /// `try_reorg` needs the whole candidate chain from genesis. The peer
-    /// sends only the blocks from the fork height, so the shared prefix is
-    /// taken from the local chain. The result is logged, never dropped.
+    /// The peer sends only the blocks from its fork height; the shared prefix
+    /// is joined to them by the chain actor, which already holds it. The
+    /// result is logged, never dropped.
     async fn reorg_to_peer_suffix(
         chain: ChainHandle,
         suffix: Vec<crate::core::block::Block>,
@@ -1190,23 +1190,18 @@ impl Node {
         flight_guard: ReorgFlightGuard,
         last_completed: Arc<AtomicU64>,
     ) {
-        // Charged on every exit, so the interval is always measured from when
-        // the work actually stopped - including the refusals, which still cost
-        // the reads that produced them.
-        let _slot = ReorgSlot {
-            last_completed: Arc::clone(&last_completed),
-            reorg: flight_guard,
-        };
-        let Some(first) = suffix.first() else {
-            return;
-        };
-        let start = first.index;
         // Peer-independent throttle (CWE-407). A batch is cheap to send and
         // proportional to the node's own chain to act on, so an attacker who
         // can gossip can otherwise keep this actor rebuilding forever. Counted
         // from completion, and applied before any chain read: a frame that
         // arrives inside the window is dropped without the node paying for the
         // work it would have triggered.
+        //
+        // The throttle is decided BEFORE the slot exists. Charging the
+        // interval on the refusal path let a peer roll the window forward with
+        // every cheap attempt - and `try_reorg` is reachable from nowhere else
+        // - so one peer could keep every honest reconstruction out for as long
+        // as it kept trying (CWE-400).
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -1217,6 +1212,17 @@ impl Node {
             );
             return;
         }
+        let Some(first) = suffix.first() else {
+            return;
+        };
+        let start = first.index;
+        // The interval has already been decided, so nothing below this point
+        // may stamp it until the batch has cleared the checks that cost the
+        // node nothing. Those checks are the deadline for the slot: see where
+        // it is created, after the fork-depth and parent-hash tests. The
+        // single-flight guard is a parameter, so every early return still
+        // releases it whether or not the slot exists yet.
+        //
         // The cost that has to be bounded here is the work one peer batch can
         // make this node do, not the height the fork happens to sit at. It is
         // bounded twice over below: the fork depth (`MAX_REORG_DEPTH`) and the
@@ -1249,27 +1255,25 @@ impl Node {
                 }
             }
         }
-        // One read for the whole prefix. The previous loop issued one chain
-        // round trip per height, which is what the removed height cap was
-        // protecting against; a single range read is proportional to the
-        // local chain the node already holds.
-        let prefix_len = usize::try_from(start).unwrap_or(usize::MAX);
-        let prefix = chain.get_blocks_range(0, prefix_len).await;
-        if prefix.len() != prefix_len {
-            warn!(
-                "Reorg from {peer} skipped: local chain holds {} blocks of the {start} the fork needs",
-                prefix.len()
-            );
-            return;
-        }
-        let candidate = match join_reorg_candidate(prefix, suffix) {
-            Ok(candidate) => candidate,
-            Err(error) => {
-                warn!("Reorg candidate from {peer} rejected: {error}");
-                return;
-            }
+        // The batch cleared the depth and parent checks, so the work below is
+        // real: a fork-choice evaluation over the peer's suffix and, if it
+        // wins, a reconstruction. Only from here on does the attempt charge
+        // the interval. Stamping it earlier let a peer occupy the one global
+        // window with a batch refused for depth or for not continuing this
+        // chain - work the node did not do - and every other peer's genuine
+        // batch then arrived inside a closed window, so one peer could deny
+        // this node fork recovery for as long as it kept sending (CWE-400).
+        let _slot = ReorgSlot {
+            last_completed: Arc::clone(&last_completed),
+            reorg: flight_guard,
         };
-        match chain.try_reorg(candidate).await {
+        // The join happens on the chain actor's side of the boundary
+        // (CWE-400). Reading the prefix here meant a genesis-wide copy whose
+        // size the peer chose with `start`, every five minutes, whether or not
+        // the candidate could win fork choice; the actor already holds the
+        // chain and joins the suffix before copying anything, refusing a batch
+        // that cannot make the chain longer for two integer comparisons.
+        match chain.try_reorg_suffix(suffix).await {
             Ok(true) => info!("Reorg to the chain of {peer} done"),
             Ok(false) => info!("Reorg to the chain of {peer} not needed: not a better chain"),
             Err(error) => warn!("Reorg to the chain of {peer} failed: {error}"),
@@ -3748,19 +3752,27 @@ impl Node {
                                         continue;
                                     }
                                     NetworkMessage::VerifiedDomainCommitment(payload) => {
-                                        //: a gossiped commitment used to
-                                        // be applied to the domain registry
-                                        // whenever it arrived, so two nodes
-                                        // held different registries at the
-                                        // same height. A commitment enters
-                                        // through the `Settlement` transaction
-                                        // now; the gossip form is dropped and
-                                        // not forwarded.
-                                        tracing::debug!(
-                                            "Dropping gossiped VerifiedDomainCommitment for domain {} from {peer_id}: commitments travel as Settlement transactions",
-                                            payload.commitment.domain_id
+                                        // Consensus-state isolation, same rule as
+                                        // the raw `DomainCommitment` arm above:
+                                        // applying a commitment writes
+                                        // `external_roots`, which
+                                        // `AccountState::calculate_state_root`
+                                        // folds into the state root, and no
+                                        // block-execution path reproduces that
+                                        // write. A commitment enters through the
+                                        // `Settlement` transaction (its verified
+                                        // finality plus its in-block state
+                                        // update); the gossip form is refused
+                                        // here, reported, and not forwarded.
+                                        warn!(
+                                            "Ignoring gossiped VerifiedDomainCommitment from {} for domain {}; commitments travel as Settlement transactions",
+                                            peer_id, payload.commitment.domain_id
                                         );
-                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                        {
+                                            let mut pm = self.peer_manager_lock();
+                                            pm.report_bad_behavior(&peer_id);
+                                        }
+                                        self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
                                         continue;
                                     }
                                     NetworkMessage::CrossDomainMessage(msg_obj) => {
@@ -4361,54 +4373,6 @@ const _: fn(&mut Node) = |node| {
     assert_send(node.run());
 };
 
-/// Join the local prefix (genesis up to the fork height) and the peer suffix
-/// into one chain for `try_reorg`. The suffix must continue the prefix.
-fn join_reorg_candidate(
-    mut prefix: Vec<crate::core::block::Block>,
-    suffix: Vec<crate::core::block::Block>,
-) -> Result<Vec<crate::core::block::Block>, String> {
-    let first = suffix.first().ok_or("empty suffix")?;
-    let parent = prefix.last().ok_or("fork starts at genesis")?;
-    if first.index != prefix.len() as u64 || first.previous_hash != parent.hash {
-        return Err("suffix does not continue the local prefix".into());
-    }
-    prefix.extend(suffix);
-    Ok(prefix)
-}
-
-#[cfg(test)]
-mod reorg_candidate_tests {
-    use super::join_reorg_candidate;
-    use crate::core::block::Block;
-
-    fn child(parent: &Block) -> Block {
-        Block::new(parent.index + 1, parent.hash.clone(), Vec::new())
-    }
-
-    #[test]
-    fn suffix_is_joined_to_the_prefix_from_genesis() {
-        let genesis = Block::genesis();
-        let one = child(&genesis);
-        let two = child(&one);
-        let joined = join_reorg_candidate(vec![genesis.clone(), one.clone()], vec![two.clone()])
-            .expect("suffix continues prefix");
-        assert_eq!(joined.len(), 3);
-        assert_eq!(joined[0], genesis);
-        assert_eq!(joined[2], two);
-    }
-
-    #[test]
-    fn a_suffix_that_does_not_continue_the_prefix_is_refused() {
-        let genesis = Block::genesis();
-        let one = child(&genesis);
-        let two = child(&one);
-        let three = child(&two);
-        assert!(join_reorg_candidate(vec![genesis.clone()], vec![three]).is_err());
-        assert!(join_reorg_candidate(Vec::new(), vec![one]).is_err());
-        assert!(join_reorg_candidate(vec![genesis], Vec::new()).is_err());
-    }
-}
-
 #[cfg(test)]
 mod vote_history_wiring_tests {
     use crate::core::chain_config::Network;
@@ -4909,6 +4873,40 @@ mod sync_handler_order_tests {
         assert!(
             super::reorg_interval_elapsed(&completed, now),
             "the interval must expire measured from completion"
+        );
+
+        // A batch refused for depth or for not continuing the local chain does
+        // no work, so it must not charge the interval that every other peer
+        // competes for. Pinned as source order in the one function that has
+        // the throttle: the stamping slot is created after both structural
+        // checks, and before the call that starts the real work.
+        let body = production();
+        let slot = body
+            .find("let _slot = ReorgSlot {")
+            .expect("the throttle must still stamp through a slot");
+        let depth_check = body
+            .find("MAX_REORG_DEPTH as u64")
+            .expect("the depth check must still exist");
+        let parent_check = body
+            .find("does not continue the local chain")
+            .expect("the parent-hash check must still exist");
+        let actor_call = body
+            .find("match chain.try_reorg_suffix(suffix).await {")
+            .expect("the suffix must be handed to the chain actor");
+        assert!(
+            depth_check < slot && parent_check < slot,
+            "a batch refused for depth or parent must not stamp the reorg window"
+        );
+        assert!(
+            slot < actor_call,
+            "an attempt that reaches the actor must stamp the window"
+        );
+        // CWE-400: the peer's fork height used to size a genesis-wide chain
+        // read on this side of the actor boundary. Nothing here may read the
+        // prefix again; the actor joins it from the chain it already holds.
+        assert!(
+            !body.contains("get_blocks_range(0,"),
+            "the peer-chosen fork height must not size a chain read in the network layer"
         );
 
         let code = production();
