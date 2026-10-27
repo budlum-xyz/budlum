@@ -2337,6 +2337,12 @@ impl Transaction {
             TransactionType::UniversalRelay(_) | TransactionType::RelayerResult(_) => {
                 schedule.contract_call_gas * 3
             }
+            // Both write registry state and one moves the transfer's balance;
+            // priced with the other state-writing doors rather than as a plain
+            // transfer.
+            TransactionType::BridgeBurn(_) | TransactionType::CrossDomainMessage(_) => {
+                schedule.contract_call_gas
+            }
             TransactionType::AiOfferData { .. } | TransactionType::AiPurchaseData { .. } => {
                 schedule.transfer_gas * 5
             }
@@ -3155,6 +3161,16 @@ fn encode_manifest_body(manifest: &crate::storage::ContentManifest, out: &mut Ve
         },
     );
     put_u8(out, manifest.encryption.commitment_tag());
+    // Column commitments of the parity shards. Length-prefixed and written on
+    // every encoding (an empty list is a zero length, not an absence) so the
+    // signing preimage cannot tell two manifests apart by their roots alone.
+    // They are also inside `manifest_id`, which the preimage already carries -
+    // that makes a rewrite detectable, this makes it a signature failure
+    // rather than a refused registration.
+    put_u32(out, manifest.column_roots.len() as u32);
+    for root in &manifest.column_roots {
+        put_fixed(out, root);
+    }
 }
 
 /// Canonical preimage of an identity transaction. Every pub field of every
