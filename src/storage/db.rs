@@ -1081,6 +1081,169 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    pub fn save_storage_registry(
+        &self,
+        registry: &crate::domain::storage_deal::StorageRegistry,
+    ) -> std::io::Result<()> {
+        let val = encode(registry)?;
+        self.db.insert(
+            b"STORAGE_REGISTRY_VERSION",
+            STORAGE_REGISTRY_ROW_VERSION.to_le_bytes().to_vec(),
+        )?;
+        self.db.insert(b"STORAGE_REGISTRY", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_storage_registry(
+        &self,
+    ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
+        if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
+            let version = self.db.get(b"STORAGE_REGISTRY_VERSION")?;
+            let expected_version = STORAGE_REGISTRY_ROW_VERSION.to_le_bytes();
+            // No tag means the row was written before the tag existed, which is
+            // still the row this build writes: it must load, or every node that
+            // ever persisted a registry refuses to boot after an upgrade. A row
+            // that does carry a tag from another build is still refused.
+            if version
+                .as_deref()
+                .is_some_and(|tag| tag != expected_version.as_slice())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "STORAGE_REGISTRY row has no matching version tag; a row from another build \
+                     is refused",
+                ));
+            }
+            // One shape only. A row written before the settled-ticket queue
+            // used to be padded with an empty queue and accepted; the queue
+            // is part of the registry root and decides when a ticket row is
+            // dropped, so the padded node split from its peers at the first
+            // retention cutoff. Such a row is reported, not repaired.
+            let decoded =
+                decode::<crate::domain::storage_deal::StorageRegistry>(&val).map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "STORAGE_REGISTRY row does not decode as the current StorageRegistry \
+                             shape; a row from an older build cannot be loaded without changing \
+                             the committed registry root, so it is refused: {error}"
+                        ),
+                    )
+                })?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_proof_claim_registry(
+        &self,
+        registry: &crate::prover::ProofClaimRegistry,
+    ) -> std::io::Result<()> {
+        let val = encode(registry)?;
+        self.db.insert(b"PROOF_CLAIM_REGISTRY", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_proof_claim_registry(
+        &self,
+    ) -> std::io::Result<Option<crate::prover::ProofClaimRegistry>> {
+        if let Some(val) = self.db.get(b"PROOF_CLAIM_REGISTRY")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    /// BLG-0190 (P09-F11): arm/disarm the test-only persist failure.
+    #[cfg(test)]
+    pub(crate) fn set_fail_economics_writes(&self, on: bool) {
+        self.fail_economics_writes
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn save_storage_economics_state(
+        &self,
+        snapshot: &crate::chain::blockchain::StorageEconomicsStateSnapshot,
+    ) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self
+            .fail_economics_writes
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(std::io::Error::other(
+                "injected storage-economics persist failure (BLG-0190)",
+            ));
+        }
+        let val = encode(snapshot)?;
+        self.db.insert(b"STORAGE_ECONOMICS_STATE", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_storage_economics_state(
+        &self,
+    ) -> std::io::Result<Option<crate::chain::blockchain::StorageEconomicsStateSnapshot>> {
+        if let Some(val) = self.db.get(b"STORAGE_ECONOMICS_STATE")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_cross_domain_message(&self, message: &CrossDomainMessage) -> std::io::Result<()> {
+        let key = format!("XDOMAIN_MSG:{}", hex::encode(message.message_id));
+        let val = encode(message)?;
+        self.db.insert(key.as_bytes(), val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_cross_domain_messages(&self) -> std::io::Result<Vec<CrossDomainMessage>> {
+        let mut messages: Vec<CrossDomainMessage> = Vec::new();
+        for item in self.db.scan_prefix(b"XDOMAIN_MSG:") {
+            let (_key, val) = item?;
+            messages.push(decode(&val)?);
+        }
+        Ok(messages)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
     pub fn get_state_root(&self, height: u64) -> std::io::Result<Option<String>> {
         let key = format!("STATE_ROOT:{height}");
         if let Some(val) = self.db.get(key.as_bytes())? {
@@ -1792,6 +1955,9 @@ mod tests {
     use crate::core::block::Block;
     use tempfile::tempdir;
 
+    /// Two rules, and the difference between them is what keeps an upgraded
+    /// node booting: a row with NO tag is the legacy row this build still
+    /// writes and must load; a row with a FOREIGN tag is refused.
     #[test]
     fn qc_blob_binary_storage_and_legacy_bincode_are_readable() {
         use crate::consensus::qc::{PqSignatureEntry, QcBlob};
@@ -1875,6 +2041,37 @@ mod tests {
             storage.get_qc_blob(100).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
+    }
+
+    /// A storage registry row written before the tag existed still loads; a
+    /// tag from another build is still refused.
+    #[test]
+    fn a_storage_registry_row_from_before_the_tag_still_loads() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let registry = crate::domain::storage_deal::StorageRegistry::default();
+        storage.save_storage_registry(&registry).unwrap();
+        assert!(storage.load_storage_registry().unwrap().is_some());
+
+        // No tag at all: written before the tag existed. It must load - every
+        // database persisted by the previous release looks like this, and
+        // refusing it left those nodes unable to start.
+        storage.db().remove(b"STORAGE_REGISTRY_VERSION").unwrap();
+        assert!(
+            storage.load_storage_registry().unwrap().is_some(),
+            "a row from before the tag existed still loads"
+        );
+
+        // A tag from another build is still refused.
+        storage
+            .db()
+            .insert(
+                b"STORAGE_REGISTRY_VERSION",
+                &(STORAGE_REGISTRY_ROW_VERSION.wrapping_add(1)).to_le_bytes(),
+            )
+            .unwrap();
+        let err = storage.load_storage_registry().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]
