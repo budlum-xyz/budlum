@@ -766,3 +766,85 @@ fn quarantine_ledger_rows_survive_restart_after_slash() {
         .expect("alarm row survived the restart");
     assert_eq!(alarm.severity, 3);
 }
+
+// --- 4. Relayed registration is a transaction -------------------------------
+
+/// A relayed message reaches the registry in block, through the executor.
+///
+/// The out-of-block door inserted into `message_registry`, which is folded into
+/// the state root: a node that served the call and a node that did not disagreed
+/// until a state sync. The `CrossDomainMessage` transaction carries the same
+/// gates into block execution, and this drives that exact path.
+#[test]
+fn a_relayed_message_is_registered_by_the_executor_inside_a_block() {
+    use crate::core::transaction::TransactionType;
+    use crate::execution::executor::Executor;
+
+    let mut bc = fresh_chain();
+    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let relayer = Address::from(keypair.public_key_bytes());
+    bc.state.add_balance(&relayer, 5_000);
+    bc.state.bond_relayer(&relayer, 2_000).unwrap();
+    let message = signed_relayed_message(&keypair, 1);
+    let mut state = bc.state.clone();
+    // The transaction is signed by the relayer: it pays the fee and it is the
+    // actor the gate names, while the message carries its own sender signature.
+    let tx = crate::core::transaction::Transaction::new_with_chain_id(
+        relayer,
+        Address::zero(),
+        0,
+        state.base_fee,
+        0,
+        Vec::new(),
+        45262,
+        TransactionType::CrossDomainMessage(message.clone()),
+    );
+    Executor::apply_transaction(&mut state, &tx).expect("the message registers in block");
+    assert_eq!(
+        state.message_registry.len(),
+        1,
+        "the registration is consensus state, written by execution"
+    );
+    assert_eq!(state.get_nonce(&relayer), 1, "the fee and nonce are paid");
+
+    // An inactive relayer is refused by the same execution.
+    let stranger = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let stranger_addr = Address::from(stranger.public_key_bytes());
+    let mut unsigned_state = bc.state.clone();
+    // Funded, so the refusal names the relayer gate rather than the fee.
+    unsigned_state.add_balance(&stranger_addr, 1_000);
+    let bad = crate::core::transaction::Transaction::new_with_chain_id(
+        stranger_addr,
+        Address::zero(),
+        0,
+        unsigned_state.base_fee,
+        0,
+        Vec::new(),
+        45262,
+        TransactionType::CrossDomainMessage(signed_relayed_message(&stranger, 2)),
+    );
+    let err = Executor::apply_transaction(&mut unsigned_state, &bad).unwrap_err();
+    assert!(err.contains("not an active relayer"), "{err}");
+    assert_eq!(
+        unsigned_state.message_registry.len(),
+        0,
+        "a refused relay writes nothing"
+    );
+
+    // A value-carrying message transaction is refused before anything moves.
+    let mut value_state = bc.state.clone();
+    let mut carrying = crate::core::transaction::Transaction::new_with_chain_id(
+        relayer,
+        Address::zero(),
+        1,
+        value_state.base_fee,
+        0,
+        Vec::new(),
+        45262,
+        TransactionType::CrossDomainMessage(signed_relayed_message(&keypair, 3)),
+    );
+    carrying.amount = 1;
+    let err = Executor::apply_transaction(&mut value_state, &carrying).unwrap_err();
+    assert!(err.contains("moves no value"), "{err}");
+    assert_eq!(value_state.message_registry.len(), 0);
+}
