@@ -114,6 +114,10 @@ pub enum ChainCommand {
     DrainSlashingEvidence(oneshot::Sender<Vec<crate::consensus::pos::SlashingEvidence>>),
     CleanupMempool(oneshot::Sender<usize>),
     TryReorg(Vec<Block>, oneshot::Sender<Result<bool, String>>),
+    /// Join this actor's own chain with a peer-supplied suffix and evaluate a
+    /// reorg (CWE-400). The prefix never leaves the actor: the caller sends
+    /// only the fork blocks, whatever height the peer claims to fork at.
+    TryReorgSuffix(Vec<Block>, oneshot::Sender<Result<bool, String>>),
     GetChainInfo(oneshot::Sender<String>),
     GetLocator(oneshot::Sender<Vec<String>>),
     FindCommonHeight(Vec<String>, oneshot::Sender<Option<u64>>),
@@ -928,6 +932,23 @@ impl ChainHandle {
     pub async fn try_reorg(&self, fork: Vec<Block>) -> Result<bool, String> {
         let (res_tx, res_rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::TryReorg(fork, res_tx)).await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Reorg onto a suffix the peer sent, without copying the local chain.
+    ///
+    /// The join happens inside the actor, so the peer's fork height no longer
+    /// sizes a chain read on the caller's side: the only blocks that cross the
+    /// boundary are the ones the peer actually sent, already capped by the
+    /// sync batch limit.
+    pub async fn try_reorg_suffix(&self, suffix: Vec<Block>) -> Result<bool, String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::TryReorgSuffix(suffix, res_tx))
+            .await;
         res_rx
             .await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -2341,6 +2362,27 @@ pub struct ChainActor {
 }
 
 impl ChainActor {
+    /// BLG-0195 (P10-F05): after a successful reorg the old tip's finality
+    /// round is dead (0186 invalidated it), but nobody restarted voting - the
+    /// node just sat there and the post-fork chain finalized nothing until the
+    /// NEXT checkpoint block happened to arrive through AddBlock. Resume the
+    /// prevote task on the new tip when it is itself a checkpoint height,
+    /// mirroring ValidateAndAddBlock. Shared by both reorg entry points.
+    fn resume_finality_after_reorg(&mut self, outcome: &Result<bool, String>) {
+        if !matches!(outcome, Ok(true)) {
+            return;
+        }
+        if let Some(tip) = self.blockchain.chain.last().cloned() {
+            if crate::chain::finality::is_checkpoint_height_for_chain(
+                tip.index,
+                self.blockchain.chain_id,
+            ) {
+                self.blockchain
+                    .start_prevote_task(tip.index, tip.hash.clone());
+            }
+        }
+    }
+
     pub fn new(blockchain: Blockchain) -> (Self, ChainHandle) {
         let (tx, rx) = mpsc::channel(1000);
         (
@@ -2695,6 +2737,14 @@ impl ChainActor {
                             }
                         }
                     }
+                    let _ = res_tx.send(outcome);
+                }
+                ChainCommand::TryReorgSuffix(suffix, res_tx) => {
+                    let outcome = self
+                        .blockchain
+                        .try_reorg_suffix(suffix)
+                        .map_err(|e| e.to_string());
+                    self.resume_finality_after_reorg(&outcome);
                     let _ = res_tx.send(outcome);
                 }
                 ChainCommand::GetChainInfo(tx) => {
