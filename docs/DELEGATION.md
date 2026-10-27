@@ -23,7 +23,7 @@ promised rate. A profile shows what happened, never what will.
 
 ## 2. Transactions
 
-All four are signed transactions applied in a block. No RPC writes
+All six are signed transactions applied in a block. No RPC writes
 delegation state.
 
 | Transaction | Signer | Effect |
@@ -32,6 +32,8 @@ delegation state.
 | `Undelegate { validator }` (tag 59) | delegator | Moves the amount out of the position into the exit queue; it leaves voting weight at once and stays slashable |
 | `WithdrawDelegation { validator }` (tag 60) | delegator | Credits every matured exit of this delegator with this validator |
 | `SetValidatorCommission { commission_ppm }` (tag 61) | validator | Sets the commission taken from delegators' rewards |
+| `Redelegate { from_validator, to_validator }` (tag 65) | delegator | Moves the amount from one position to another in the same block, with no unbonding round trip; voting weight follows the position |
+| `ClaimRewards { validator }` (tag 66) | delegator | Credits the delegator rewards an epoch close already took out of the pool for this pair |
 
 A validator cannot delegate to itself; its own bond is `Stake`. A
 delegator can always undelegate, also from a jailed or inactive validator:
@@ -60,6 +62,10 @@ unslashed validator its stake-weighted share. For one validator:
 3. The validator receives its self part plus the commission.
 4. The rest of the delegated part is split across positions by amount, in
    delegator address order; the last position takes the rounding remainder.
+   Each delegator share is credited as a claimable debt, not pushed into the
+   balance: `ClaimRewards { validator }` is what moves it to the account, so a
+   delegator cannot be paid twice and the payout is an explicit, signed
+   transaction. The debt is consensus state and sits in the delegation root.
 
 Nothing is minted. The pool pays from its own balance, and the supply
 invariant tests hold.
@@ -78,6 +84,8 @@ validator and its delegators earn nothing until the jail ends.
 bud delegate --key-file wallet.key --validator <address> --amount-bud 100
 bud undelegate --key-file wallet.key --validator <address> --amount-bud 40
 bud withdraw-delegation --key-file wallet.key --validator <address>
+bud redelegate --key-file wallet.key --from-validator <address> --to-validator <address> --amount-bud 40
+bud claim-rewards --key-file wallet.key --validator <address>
 bud validator commission --key-file ./secrets/testnet-validator.key --rate-ppm 50000
 ```
 

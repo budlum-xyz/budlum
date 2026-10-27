@@ -213,7 +213,15 @@ pub fn pay_epoch(
                 if share == 0 {
                     continue;
                 }
-                if state.try_add_balance(&position.delegator, share).is_ok() {
+                // The delegator share is credited as a claimable debt rather
+                // than pushed into the balance: `ClaimRewards` is how it
+                // reaches the account, so a delegator cannot be paid twice and
+                // the payout is an explicit, signed transaction.
+                if state
+                    .registry
+                    .credit_claimable_reward(position.delegator, address, share)
+                    .is_ok()
+                {
                     distributed = distributed.saturating_add(share);
                     paid = paid.saturating_add(share);
                 }
@@ -379,8 +387,15 @@ mod tests {
         };
         assert_eq!(pay_epoch(&mut state, &schedule, 0), 1_100);
         // The delegated share is 100; 10% is commission, so the validator
-        // receives its 1,000 self share plus 10 and the delegator gets 90.
+        // receives its 1,000 self share plus 10. The delegator's 90 is a
+        // claimable debt until the delegator signs a claim.
         assert_eq!(state.get_balance(&validator), 1_010);
+        assert_eq!(state.get_balance(&delegator), 0);
+        assert_eq!(state.registry.claimable_reward(delegator, validator), 90);
+        assert_eq!(
+            state.claim_delegator_rewards(&delegator, &validator).unwrap(),
+            90
+        );
         assert_eq!(state.get_balance(&delegator), 90);
         assert_eq!(state.get_balance(&pool), 0);
     }

@@ -878,6 +878,95 @@ impl AccountState {
         Ok(())
     }
 
+    /// Move an existing delegation from one validator to another. No liquid
+    /// balance moves: the position changes owner-validator pair, and the
+    /// aggregate voting weight follows it in the same block.
+    ///
+    /// The target has to satisfy the same admission rules as a fresh
+    /// delegation (registered, eligible, not slashed, self bond above the
+    /// floor), because redelegation is how a delegator reaches a validator
+    /// without an unbonding round trip.
+    pub fn redelegate_to_validator(
+        &mut self,
+        delegator: &Address,
+        from: &Address,
+        to: &Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        if amount == 0 {
+            return Err("redelegation amount must be non-zero".into());
+        }
+        if from == to {
+            return Err("redelegation needs two different validators".into());
+        }
+        if delegator == to {
+            return Err("a validator cannot delegate to itself".into());
+        }
+        let active = self.registry.delegated_amount(*delegator, *from);
+        if active < amount {
+            return Err("redelegation exceeds the active position".into());
+        }
+        let target = self
+            .validators
+            .get(to)
+            .ok_or_else(|| "validator does not exist".to_string())?;
+        if !target.is_eligible(self.epoch_index) || target.slashed {
+            return Err("validator is not eligible for delegation".into());
+        }
+        if !self.registry.is_active(to, roles::VALIDATOR) {
+            return Err("validator is not registered as active".into());
+        }
+        let current_delegated = self.registry.delegated_stake(to);
+        if target.stake.saturating_sub(current_delegated) < self.registry.params().min_stake {
+            return Err("validator self bond is below the delegation floor".into());
+        }
+        let target_stake = target
+            .stake
+            .checked_add(amount)
+            .ok_or_else(|| "validator stake overflow".to_string())?;
+        let source_stake = self
+            .validators
+            .get(from)
+            .ok_or_else(|| "source validator does not exist".to_string())?
+            .stake
+            .checked_sub(amount)
+            .ok_or_else(|| "source validator stake does not cover the position".to_string())?;
+
+        // The registry mutation runs after every check that can refuse, so a
+        // refused redelegation leaves no half-moved position behind.
+        self.registry
+            .move_delegation(*delegator, *from, *to, amount)?;
+        if let Some(entry) = self.validators.get_mut(from) {
+            entry.stake = source_stake;
+        }
+        if let Some(entry) = self.validators.get_mut(to) {
+            entry.stake = target_stake;
+        }
+        self.sync_validator_registration(from);
+        self.sync_validator_registration(to);
+        Ok(())
+    }
+
+    /// Pay out what the epoch close credited to `delegator` for `validator`.
+    /// The registry entry is removed first: a claim that cannot be credited is
+    /// refused rather than paid twice.
+    pub fn claim_delegator_rewards(
+        &mut self,
+        delegator: &Address,
+        validator: &Address,
+    ) -> Result<u64, String> {
+        let amount = self
+            .registry
+            .claim_delegator_rewards(*delegator, *validator)?;
+        if self.try_add_balance(delegator, amount).is_err() {
+            // Put the debt back: the claim is refused, not lost.
+            self.registry
+                .credit_claimable_reward(*delegator, *validator, amount)?;
+            return Err("claimable reward cannot be credited".into());
+        }
+        Ok(amount)
+    }
+
     /// Begin a delegation exit. The amount leaves active voting weight but
     /// remains committed and slashable in the registry's unbonding queue.
     pub fn begin_delegation_unbonding(
@@ -1842,6 +1931,34 @@ impl AccountState {
                     return Err("Active validator key rotation is forbidden".into());
                 }
                 registration.validate(tx.from, tx.chain_id)?;
+            }
+            TransactionType::Redelegate {
+                from_validator,
+                to_validator,
+            } => {
+                if tx.amount == 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Redelegation requires a positive amount, zero recipient, and empty data"
+                            .into(),
+                    );
+                }
+                if from_validator == to_validator {
+                    return Err("Redelegation needs two different validators".into());
+                }
+                if tx.from == *to_validator {
+                    return Err("A validator cannot delegate to itself".into());
+                }
+            }
+            TransactionType::ClaimRewards { validator } => {
+                if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
+                    return Err(
+                        "Claiming rewards requires zero amount, zero recipient, and empty data"
+                            .into(),
+                    );
+                }
+                if *validator == Address::zero() {
+                    return Err("Claiming rewards needs a validator".into());
+                }
             }
             TransactionType::RegisterFiliz { commitment, length } => {
                 if tx.amount != 0 || tx.to != Address::zero() || !tx.data.is_empty() {
@@ -3865,6 +3982,66 @@ impl Default for AccountState {
         Self::new()
     }
 }
+#[cfg(test)]
+mod redelegation_and_claim_tests {
+    use super::*;
+
+    fn addr(b: u8) -> Address {
+        Address::from([b; 32])
+    }
+
+    #[test]
+    fn a_redelegation_moves_weight_without_an_unbonding_round_trip() {
+        let mut state = AccountState::new();
+        state.add_validator(addr(1), 1_000);
+        state.add_validator(addr(2), 1_000);
+        state.add_balance(&addr(9), 500);
+        state.delegate_to_validator(&addr(9), &addr(1), 200).unwrap();
+
+        state
+            .redelegate_to_validator(&addr(9), &addr(1), &addr(2), 150)
+            .unwrap();
+
+        assert_eq!(state.registry.delegated_amount(addr(9), addr(1)), 50);
+        assert_eq!(state.registry.delegated_amount(addr(9), addr(2)), 150);
+        assert_eq!(state.get_validator(&addr(1)).unwrap().stake, 850);
+        assert_eq!(state.get_validator(&addr(2)).unwrap().stake, 1_150);
+        // no liquid balance moves: redelegation is a position move
+        assert_eq!(state.get_balance(&addr(9)), 300);
+    }
+
+    #[test]
+    fn a_redelegation_refuses_more_than_the_position() {
+        let mut state = AccountState::new();
+        state.add_validator(addr(1), 1_000);
+        state.add_validator(addr(2), 1_000);
+        state.add_balance(&addr(9), 500);
+        state.delegate_to_validator(&addr(9), &addr(1), 100).unwrap();
+        assert!(state
+            .redelegate_to_validator(&addr(9), &addr(1), &addr(2), 101)
+            .is_err());
+        assert_eq!(state.get_validator(&addr(1)).unwrap().stake, 1_100);
+        assert_eq!(state.get_validator(&addr(2)).unwrap().stake, 1_000);
+    }
+
+    #[test]
+    fn a_claim_pays_the_claimable_reward_exactly_once() {
+        let mut state = AccountState::new();
+        state.add_validator(addr(1), 1_000);
+        state.add_balance(&addr(9), 500);
+        state.delegate_to_validator(&addr(9), &addr(1), 100).unwrap();
+        state
+            .registry
+            .credit_claimable_reward(addr(9), addr(1), 42)
+            .unwrap();
+
+        assert_eq!(state.claim_delegator_rewards(&addr(9), &addr(1)).unwrap(), 42);
+        assert_eq!(state.get_balance(&addr(9)), 442);
+        assert!(state.claim_delegator_rewards(&addr(9), &addr(1)).is_err());
+        assert_eq!(state.get_balance(&addr(9)), 442);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
