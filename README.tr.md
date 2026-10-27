@@ -312,7 +312,8 @@ Zincir kimliği `45261`, ağ imzası `BDLT`. Özet:
 - Düğüm: `budlum-core --config config/testnet.toml`.
 
 Uç noktalar, parametreler ve yerel prova için bkz.
-[docs/TESTNET.md](docs/TESTNET.md).
+[docs/TESTNET.md](docs/TESTNET.md); ana ağ öncesi kapılar için
+[docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
 
 ### Düğüm rolleri
 
