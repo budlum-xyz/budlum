@@ -76,6 +76,11 @@ impl L1NoteRegistry {
         self.spent_nullifiers.len()
     }
 
+    #[must_use]
+    pub fn spent_commitment_count(&self) -> usize {
+        self.spent_commitments.len()
+    }
+
     pub fn contains_commitment(&self, c: &NoteHash) -> bool {
         self.live_commitments.contains(c)
     }

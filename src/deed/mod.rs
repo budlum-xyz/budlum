@@ -1,9 +1,12 @@
 //! DeEd domain primitives.
 //!
 //! DeEd is an application domain on Budlum, not a new chain or settlement
-//! Layer. This module contains only the canonical manifest and permissionless
-//! Role vocabulary; consensus, RPC, rewards, and bridge wiring remain separate
-//! Follow-up changes.
+//! layer. This module holds the canonical manifest and the permissionless
+//! role vocabulary. The two roles bond through the `RoleBond` transaction
+//! door (`AccountState::bond_role`); an artifact's bytes are a B.U.D. content
+//! id registered through `StorageTx::RegisterManifest`. Rewards and bridge
+//! wiring are out of scope (: DeEd inherits the
+//! account layer's cryptography and is not developed further).
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;

@@ -170,6 +170,36 @@ impl AiRegistry {
         }
     }
 
+    #[must_use]
+    pub fn model_count(&self) -> usize {
+        self.models.len()
+    }
+
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        self.requests.len()
+    }
+
+    #[must_use]
+    pub fn result_count(&self) -> usize {
+        self.results.values().map(Vec::len).sum()
+    }
+
+    #[must_use]
+    pub fn outcome_count(&self) -> usize {
+        self.outcomes.len()
+    }
+
+    #[must_use]
+    pub fn verifier_stake_count(&self) -> usize {
+        self.verifier_stakes.len()
+    }
+
+    #[must_use]
+    pub fn callback_event_count(&self) -> usize {
+        self.callback_queue.values().map(Vec::len).sum()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
             && self.requests.is_empty()
