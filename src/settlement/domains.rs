@@ -547,7 +547,31 @@ pub fn verify_commitment_finality_observed(
     .map_err(|e| e.to_string())?;
 
     match status {
-        FinalityStatus::Finalized => Ok(()),
+        FinalityStatus::Finalized => {
+            // Only a PoA proof attests the commitment's nonce writes: both PoA
+            // adapters put `state_updates` into the message the authorities
+            // sign (`poa_commit_signing_message`), while the PoS, BFT, PoW and
+            // ZK adapters attest the block hash and the roots. A non-empty map
+            // under any other proof is therefore submitter-chosen data, and it
+            // is refused at the seam - before `apply_pending_commitments` can
+            // write another account's nonce - because the RELAYER role that
+            // submits a commitment is permissionless.
+            if !commitment.state_updates.is_empty()
+                && !matches!(
+                    proof,
+                    FinalityProof::PoA { .. } | FinalityProof::PoAPq { .. }
+                )
+            {
+                return Err(format!(
+                    "Domain {} height {}: commitment claims {} state updates that no finality \
+                     proof attests",
+                    commitment.domain_id,
+                    commitment.domain_height,
+                    commitment.state_updates.len()
+                ));
+            }
+            Ok(())
+        }
         FinalityStatus::Pending {
             required_depth,
             observed_depth,
@@ -1295,6 +1319,14 @@ pub(crate) fn execute_relayer_intent_tx(
                 .get(intent_id)
                 .ok_or_else(|| SettlementTxError::Refused("relayer intent not found".into()))?;
             let owner = intent.owner;
+            let deadline = intent.deadline_block;
+            // An intent without an externally anchored action has no
+            // settlement verifier at all (`settle_intent` refuses it), so no
+            // bid on it could ever have been honoured.
+            let settleable = matches!(
+                intent.action,
+                crate::relayer::RelayerActionKind::ExternalTransaction { .. }
+            );
             let escrow = policy.escrowed_amount(intent_id);
             if state.get_balance(&owner).checked_add(escrow).is_none() {
                 return Err(SettlementTxError::Refused(
@@ -1310,6 +1342,15 @@ pub(crate) fn execute_relayer_intent_tx(
             // liveness rate, the same rule as an expired Graft intent.
             let slash_ratio = state.registry.params().liveness_slash_ratio_fixed;
             for bid in &bids {
+                // A bid that had already lapsed when the intent reached its
+                // own deadline was never a live commitment, and an intent
+                // nobody could settle was never a job. Slashing either burns
+                // bonded stake for a fault the bidder did not have, at the
+                // price of one transaction - which made expiring intents a
+                // griefing tool against the relayer set.
+                if !settleable || bid.expires_at_block <= deadline {
+                    continue;
+                }
                 let should_slash = state
                     .registry
                     .get(&bid.relayer, crate::registry::role::roles::RELAYER)

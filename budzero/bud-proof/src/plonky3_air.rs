@@ -1873,6 +1873,23 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
                 );
             }
 
+            // Limbs 1..7 are constant for the whole trace (the transition
+            // rule below) and bound to `public_inputs[41..48]` on the last
+            // row, but nothing pinned the value they start from: a prover
+            // that filled them with arbitrary constants satisfied every
+            // constraint, and the last row carried those constants into the
+            // bound public input. Only limb 0 tracks execution, so without
+            // this the 32 byte event digest is bound in its first 8 bytes and
+            // free in the remaining 24 - which is the value an attested event
+            // root is taken from. The honest witness writes zero into every
+            // limb on row zero (`event_digest_from_events`), so this is what
+            // the last-row binding already assumed.
+            for j in 1..8 {
+                builder
+                    .when_first_row()
+                    .assert_zero(cur[COL_EVENT_DIGEST_0 + j]);
+            }
+
             // The old comment here claimed a bounds check was unnecessary
             // because `public_inputs[40]` is a u32, so an out-of-range
             // accumulator would surface at the last-row binding. That stopped
