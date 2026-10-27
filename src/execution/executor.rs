@@ -3058,8 +3058,8 @@ impl Executor {
                 }
                 let role = crate::registry::role::RoleId(*role);
                 state
-                    .unbond_role(&tx.from, role)
-                    .map_err(|e| BudlumError::validation("role_unbond_failed", e.to_string()))?;
+                    .begin_role_bond_unbonding(&tx.from, role)
+                    .map_err(|e| BudlumError::validation("role_unbond_failed", e))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
@@ -3084,7 +3084,7 @@ impl Executor {
                 let role = crate::registry::role::RoleId(*role);
                 state
                     .withdraw_role_bond(&tx.from, role)
-                    .map_err(|e| BudlumError::validation("role_withdraw_failed", e.to_string()))?;
+                    .map_err(|e| BudlumError::validation("role_withdraw_failed", e))?;
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")
