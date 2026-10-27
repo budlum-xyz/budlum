@@ -82,7 +82,7 @@ pub const DEV_FIXTURE_DEVICE_COUNT: u32 = 6;
 
 /// One cold device's public identity.
 ///
-/// The key bytes are stored rather than a parsed [`VerifyingKey`] so the
+/// The key bytes are stored rather than a parsed `VerifyingKey` so the
 /// identity round-trips through serde exactly as it is announced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignerIdentity {
