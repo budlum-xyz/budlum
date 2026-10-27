@@ -252,12 +252,9 @@ prescribed:
   every non-empty tree terminates with a single root, and every leaf's proof
   path rebuilds the root. `qc_merkle_matches_the_kani_mirror` pins the bounded
   model to the production tree.
-* Signature verification: the bounded logic around PQ attestations is the
-  length-admissibility check (`crypto::primitives::classify_pq_signature_len`).
-  The harnesses prove classification is total and round-trips, acceptability
-  never disagrees with classification, and the three accepted signature
-  lengths are pairwise distinct. `pq_signature_classification_matches_the_
-  kani_mirror` pins the constants. The finality bitmap accounting
+* Signature verification: a scheme is named by the caller and never inferred
+  from a length (`crypto::scheme`, INV-03), and the ML-DSA check runs through
+  the dual-verifier facade `crypto::pq`. The finality bitmap accounting
   (`bitmap_cannot_vote_more_stake_than_the_set_holds`) proves a certificate
   can never vote more stake than its set holds.
 
