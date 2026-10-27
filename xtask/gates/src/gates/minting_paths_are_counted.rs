@@ -70,6 +70,8 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          the rounding dust of the 4 percent share that the NFT boost carved \
          out of the booster's debit, and the shares plus dust equal exactly \
          that pending amount. \
+         One in `refund_opener_bond`: the challenge bond that \
+         `debit_opener_bond` took from the opener. \
          One in the storage deal expiry sweep: the operator bond that \
          `open_deal` debited. \
          One in the block-application storage prune: the operator bond that \
