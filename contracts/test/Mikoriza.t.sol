@@ -133,20 +133,16 @@ contract MikorizaTest is Harness {
     function test_the_slasher_signs_the_rust_checkpoint_message() public {
         BudlumSlasher slasher = registrar.slasher();
         bytes memory message = slasher.checkpointSigningMessage(3, 40, "ab");
-        assertEq(
-            keccak256(message),
-            keccak256(
-                abi.encodePacked(
-                    "BUDLUM_PRECOMMIT_V2",
-                    "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_",
-                    hex"cdb0000000000000",
-                    hex"0300000000000000",
-                    hex"2800000000000000",
-                    "ab"
-                )
-            ),
-            "checkpoint_signing_message"
-        );
+        // A golden vector, not a re-encoding of the encoder under test: these
+        // are the bytes the Rust implementation produces for
+        // `checkpoint_signing_message(45261, 3, 40, "ab")`. The Rust test
+        // `the_checkpoint_preimage_is_the_one_the_slasher_golden_vector_pins`
+        // (src/chain/finality.rs) asserts the identical literal, so the two
+        // implementations are pinned to one another: neither side can drift
+        // without the other's test failing.
+        bytes memory expected =
+            hex"4255444c554d5f505245434f4d4d49545f5632424c535f5349475f424c53313233383147315f584d443a5348412d3235365f535357555f524f5f504f505fcdb0000000000000030000000000000028000000000000006162";
+        assertEq(message, expected, "checkpoint_signing_message");
     }
 
     function test_a_compressed_key_without_the_compression_flag_does_not_match() public pure {
