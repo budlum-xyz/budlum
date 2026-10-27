@@ -124,6 +124,40 @@ pub struct GenesisConsensusKeys {
     pub registration: crate::core::transaction::ConsensusKeyRegistration,
 }
 
+/// The validation reward pool as a genesis parameter, written
+/// `"reward_pool": { "enabled": true }` in a ceremony file.
+///
+/// The flag decides two things at once, and they have to agree: whether
+/// genesis moves the pool out of the ecosystem share into the keyless pool
+/// account, and whether the epoch transition of the chain pays from it. A
+/// chain that funds a pool it never pays from strands 10M BUD; a chain that
+/// pays from a pool it never funded would have to mint, which no chain does.
+///
+/// `None` on `GenesisConfig` means "follow the network profile"
+/// ([`crate::core::chain_config::Network::reward_pool`]): testnet on, mainnet
+/// and devnet off. Writing the flag explicitly is what makes the choice a
+/// recorded genesis parameter rather than a property of the binary that
+/// happened to build the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenesisRewardPool {
+    /// Whether this chain pays validation rewards from a pre-funded pool.
+    pub enabled: bool,
+}
+
+impl GenesisRewardPool {
+    /// The flag, on.
+    #[must_use]
+    pub const fn enabled() -> Self {
+        Self { enabled: true }
+    }
+
+    /// The flag, off.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self { enabled: false }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenesisConfig {
     pub chain_id: u64,
@@ -202,6 +236,18 @@ pub struct GenesisConfig {
     /// own public development ledger (`AnchorEmission::devnet`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anchor_ledger: Option<crate::settlement::AnchorKeyLedger>,
+
+    /// The validation reward pool flag of this chain (testnet item 8).
+    ///
+    /// `None` follows the network profile, which is what every ceremony file
+    /// written before the flag existed means: testnet funds and pays the
+    /// default schedule, mainnet and devnet do not. `Some` pins the answer in
+    /// genesis, so a chain can refuse a pool its profile would otherwise
+    /// provide - and, once mainnet's schedule is decided (D-04), take one it
+    /// would not. The pool is never minted: it moves out of the ecosystem
+    /// share at genesis and the epoch transition pays only its balance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward_pool: Option<GenesisRewardPool>,
 }
 
 impl Default for GenesisConfig {
@@ -221,6 +267,7 @@ impl Default for GenesisConfig {
             bootstrap_domains: vec![],
             poa_authorities: Vec::new(),
             anchor_ledger: None,
+            reward_pool: None,
         }
     }
 }
@@ -499,6 +546,46 @@ impl GenesisConfig {
         Ok(())
     }
 
+    /// Whether this chain pays validation rewards from a pre-funded pool
+    /// (testnet item 8).
+    ///
+    /// The genesis flag when the ceremony file states one, otherwise the
+    /// network profile. This is the single answer genesis uses for both the
+    /// pool funding and the epoch-transition gate, so the two can never
+    /// disagree.
+    #[must_use]
+    pub fn reward_pool_enabled(&self) -> bool {
+        match self.reward_pool {
+            Some(flag) => flag.enabled,
+            None => crate::core::chain_config::reward_pool_for_chain_id(self.chain_id).is_some(),
+        }
+    }
+
+    /// The reward pool flag is consistent with the chain it is written into.
+    ///
+    /// A mainnet genesis may not turn the pool on: there is no mainnet
+    /// schedule yet (D-04 is Ayaz's), and a flag with no schedule would fund
+    /// nothing while telling operators the pool is live. Refusing names the
+    /// owner instead of failing later as an empty epoch payout.
+    pub fn validate_reward_pool_flag(&self) -> Result<(), String> {
+        let Some(flag) = self.reward_pool else {
+            return Ok(());
+        };
+        if !flag.enabled {
+            return Ok(());
+        }
+        let expected = crate::core::chain_config::reward_pool_for_chain_id(self.chain_id);
+        if expected.is_none() {
+            let network = crate::core::chain_config::Network::from_chain_id(self.chain_id);
+            return Err(format!(
+                "Genesis reward_pool.enabled is true on {:?} (chain {}), which has no reward-pool schedule in \
+                 the binary; a mainnet schedule is Ayaz's decision (D-04)",
+                network, self.chain_id
+            ));
+        }
+        Ok(())
+    }
+
     /// The anchor key ledger, when genesis carries one, is well formed and is
     /// the ledger of this chain. Absence is allowed here: the ledger
     /// arrives with the anchor key ceremony, and production anchoring refuses
@@ -521,6 +608,7 @@ impl GenesisConfig {
     pub fn validate_consensus_ceremony(&self, network: Network) -> Result<(), String> {
         self.validate_pq_scheme()?;
         self.validate_anchor_ledger()?;
+        self.validate_reward_pool_flag()?;
         if self.chain_id != network.chain_id().value() {
             return Err(format!(
                 "Genesis chain ID {} does not match {} profile chain ID {}",
@@ -912,6 +1000,10 @@ impl GenesisConfig {
             }
         }
 
+        // testnet item 8: the same answer genesis funded the pool with is the
+        // one the epoch transition reads, recorded in consensus state so a
+        // replay, a snapshot restore and a peer all gate identically.
+        state.reward_pool_enabled = self.reward_pool_enabled();
         state
     }
 
@@ -937,6 +1029,9 @@ impl GenesisConfig {
     /// The validation reward pool the profile funds at genesis; 0 without one
     /// or with an invalid schedule.
     fn genesis_reward_pool(&self) -> u64 {
+        if !self.reward_pool_enabled() {
+            return 0;
+        }
         crate::core::chain_config::reward_pool_for_chain_id(self.chain_id)
             .filter(|schedule| schedule.validate().is_ok())
             .map_or(0, |schedule| schedule.validation_reward_pool)
@@ -1048,6 +1143,11 @@ fn mainnet_genesis_with(tokenomics: crate::tokenomics::TokenomicsParams) -> Gene
         bootstrap_domains: BootstrapDomainConfig::mainnet_defaults(),
         poa_authorities: Vec::new(),
         anchor_ledger: None,
+        // mainnet: no pool until Ayaz fixes the schedule (D-04). The flag is
+        // written rather than left to default so the ceremony file states the
+        // decision, and a mainnet genesis asking for the pool is refused by
+        // `validate_reward_pool_flag` instead of quietly minting nothing.
+        reward_pool: Some(GenesisRewardPool::disabled()),
     }
 }
 
@@ -1078,6 +1178,8 @@ pub fn testnet_genesis() -> GenesisConfig {
         bootstrap_domains: vec![],
         poa_authorities: Vec::new(),
         anchor_ledger: None,
+        // testnet: the reward pool is on, and genesis says so.
+        reward_pool: Some(GenesisRewardPool::enabled()),
     }
 }
 
@@ -1116,6 +1218,8 @@ pub fn devnet_genesis() -> GenesisConfig {
         bootstrap_domains: vec![],
         poa_authorities: Vec::new(),
         anchor_ledger: None,
+        // devnet: no distribution to fund a pool from.
+        reward_pool: Some(GenesisRewardPool::disabled()),
     }
 }
 
@@ -1910,6 +2014,69 @@ mod mainnet_genesis_tests {
 
         // Metabolic burn: 1%
         assert_eq!(params.tx_fee_burn_ratio_fixed, FIXED_POINT_SCALE / 100);
+    }
+
+    /// testnet item 8: `reward_pool.enabled` is the genesis parameter, and it
+    /// decides both halves at once - the funding at genesis and the flag the
+    /// epoch transition reads. Testnet states it on, devnet off, mainnet off.
+    #[test]
+    fn the_reward_pool_flag_is_a_genesis_parameter() {
+        let testnet = testnet_genesis();
+        assert_eq!(testnet.reward_pool, Some(GenesisRewardPool::enabled()));
+        assert!(testnet.reward_pool_enabled());
+        assert!(testnet.validate_reward_pool_flag().is_ok());
+
+        let devnet = devnet_genesis();
+        assert!(!devnet.reward_pool_enabled());
+        assert_eq!(devnet.genesis_reward_pool(), 0);
+
+        let mainnet = mainnet_genesis();
+        assert!(!mainnet.reward_pool_enabled());
+        assert_eq!(mainnet.genesis_reward_pool(), 0);
+    }
+
+    /// The flag is written, not merely read: a ceremony file that leaves it
+    /// out follows the profile, and one that turns the pool off keeps both
+    /// sides off (no funding, no payments).
+    #[test]
+    fn turning_the_flag_off_leaves_the_pool_unfunded_and_the_gate_closed() {
+        let mut genesis = testnet_genesis();
+        genesis.reward_pool = None;
+        assert!(
+            genesis.reward_pool_enabled(),
+            "an absent flag follows the testnet profile"
+        );
+
+        genesis.reward_pool = Some(GenesisRewardPool::disabled());
+        assert!(!genesis.reward_pool_enabled());
+        assert_eq!(genesis.genesis_reward_pool(), 0);
+        let state = genesis.build_state();
+        assert!(!state.reward_pool_enabled);
+        assert_eq!(
+            state.get_balance(&crate::tokenomics::reward_pool::reward_pool_account()),
+            0
+        );
+
+        genesis.reward_pool = Some(GenesisRewardPool::enabled());
+        let state = genesis.build_state();
+        assert!(state.reward_pool_enabled);
+        assert_eq!(
+            state.get_balance(&crate::tokenomics::reward_pool::reward_pool_account()),
+            crate::tokenomics::reward_pool::DEFAULT_VALIDATION_REWARD_POOL
+        );
+    }
+
+    /// A mainnet genesis may not turn the pool on: there is no mainnet
+    /// schedule yet, and the flag would promise an epoch payment nothing can
+    /// make. The refusal names the owner of the decision.
+    #[test]
+    fn mainnet_refuses_to_turn_the_reward_pool_on() {
+        let mut genesis = mainnet_genesis();
+        genesis.reward_pool = Some(GenesisRewardPool::enabled());
+        let error = genesis
+            .validate_reward_pool_flag()
+            .expect_err("a mainnet pool has no schedule to pay from");
+        assert!(error.contains("D-04"), "error names the decision: {error}");
     }
 
     #[test]
