@@ -2772,6 +2772,27 @@ impl Executor {
                     })?;
                 burn.verify_holder_authorization(holder, tx.chain_id)
                     .map_err(|e| BudlumError::validation("bridge_burn_failed", e))?;
+                // The refund window is a number of blocks past the burn, so
+                // its base is a height this chain has actually reached, not a
+                // height the payload makes up. A caller-chosen base could put
+                // the expiry any distance from the real tip - outside the
+                // protocol window relative to the chain the sweep runs on.
+                // Both numbers are what the holder signed, so only a refusal
+                // (never a silent rewrite) keeps caller and chain agreeing.
+                if burn.expiry_height != 0 {
+                    if burn.domain_height > state.current_block_height {
+                        return Err(BudlumError::validation(
+                            "bridge_burn_expiry_base_ahead_of_chain",
+                            "bridge burn domain height is ahead of the executing block; the refund window must be measured from a height the chain has reached",
+                        ));
+                    }
+                    if burn.expiry_height <= state.current_block_height {
+                        return Err(BudlumError::validation(
+                            "bridge_burn_expiry_already_due",
+                            "bridge burn expiry is already due at the executing block; a burn that cannot be relayed first is refused",
+                        ));
+                    }
+                }
                 let event = crate::cross_domain::bridge::apply_burn_to_state(
                     state,
                     &crate::cross_domain::bridge::BridgeBurnParams {
