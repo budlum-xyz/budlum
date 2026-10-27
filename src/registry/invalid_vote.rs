@@ -33,6 +33,24 @@ use std::collections::{BTreeMap, BTreeSet};
 
 type InvalidVoteSample = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 
+/// Bounds on what one retained sample may hold.
+///
+/// A sample is peer-supplied bytes: `sig_bls` appears twice (inside the vote
+/// preimage and inside the auth preimage built from it), gossip accepts up to
+/// 10 MB, and a bonded validator signs the auth message over whatever blob it
+/// likes. Without a ceiling every receiving node keeps roughly twice the
+/// attacker's chosen size per sample, up to the sample cap, and serialises the
+/// whole report to JSON on the vote that crosses the threshold.
+///
+/// The ceilings are the protocol's own: a vote preimage is a handful of
+/// integers, and the largest signature the scheme table admits is
+/// SLH-DSA-SHAKE-256s at 29 792 bytes.
+const MAX_VOTE_PREIMAGE_BYTES: usize = 1_024;
+const MAX_VOTE_SIGNATURE_BYTES: usize = 32_768;
+/// Total bytes one validator's retained samples may hold. Above this the
+/// sample is counted and dropped rather than kept.
+const MAX_SAMPLES_BYTES_PER_VALIDATOR: usize = 64 * 1_024;
+
 /// Per-validator, per-epoch invalid-signature-vote counter.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InvalidVoteTracker {
@@ -163,8 +181,30 @@ impl InvalidVoteTracker {
         let sample_cap = params
             .max_invalid_votes_per_epoch
             .min(MAX_SPAM_REPORT_SAMPLES as u64) as usize;
-        if entry.len() < sample_cap {
-            entry.push(sample);
+        // Count first: an over-sized sample still proves the validator sent an
+        // invalid vote, and dropping the count would let a spammer avoid the
+        // threshold by padding every vote past the ceiling.
+        let (vote_msg, bad_sig) = (&sample.2, &sample.3);
+        let within_ceiling = vote_msg.len() <= MAX_VOTE_PREIMAGE_BYTES
+            && bad_sig.len() <= MAX_VOTE_SIGNATURE_BYTES
+            && sample.1.len() <= MAX_VOTE_SIGNATURE_BYTES
+            // The auth preimage wraps both parts, so its ceiling follows.
+            && sample.0.len()
+                <= MAX_VOTE_PREIMAGE_BYTES + MAX_VOTE_SIGNATURE_BYTES + 64;
+        if within_ceiling && entry.len() < sample_cap {
+            let retained: usize = entry
+                .iter()
+                .map(|existing| {
+                    existing
+                        .iter()
+                        .map(Vec::len)
+                        .fold(0usize, usize::saturating_add)
+                })
+                .fold(0usize, usize::saturating_add);
+            let incoming = sample.iter().map(Vec::len).sum::<usize>();
+            if retained.saturating_add(incoming) <= MAX_SAMPLES_BYTES_PER_VALIDATOR {
+                entry.push(sample);
+            }
         }
         self.record_invalid_vote(epoch, validator, params)
     }
@@ -243,6 +283,49 @@ mod tests {
         c.reported.insert(addr(1), ());
         assert_ne!(a.root(), c.root());
         assert_ne!(InvalidVoteTracker::new().root(), a.root());
+    }
+
+    /// A sample carries peer-supplied bytes. An over-sized one is counted -
+    /// the vote was invalid, which is the fact the threshold follows - but it
+    /// is not retained, so a validator cannot make every node hold megabytes
+    /// by padding the blob it signs the auth message over.
+    #[test]
+    fn an_over_sized_sample_is_counted_and_not_retained() {
+        let mut t = InvalidVoteTracker::new();
+        let p = params(3);
+        let v = addr(1);
+        let vote = crate::chain::finality::checkpoint_signing_message(45261, 7, 10, "hash");
+        let padded = vec![0xAB; 4 * 1_024 * 1_024];
+        let auth = crate::chain::finality::vote_auth_signing_message(&vote, &padded);
+        assert!(t
+            .record_invalid_vote_with_sample(7, v, (auth, vec![1; 96], vote.clone(), padded), &p)
+            .is_none());
+        assert_eq!(t.invalid_count(&v), 1, "the invalid vote still counts");
+        assert!(
+            t.samples.get(&v).is_none_or(Vec::is_empty),
+            "nothing over the ceiling is retained"
+        );
+
+        // An honest-sized sample is retained, and the sample survives into
+        // the report on the vote that crosses the threshold.
+        let sig = vec![2u8; 96];
+        let auth = crate::chain::finality::vote_auth_signing_message(&vote, &sig);
+        t.record_invalid_vote_with_sample(7, v, (auth, vec![3; 96], vote.clone(), sig.clone()), &p);
+        assert_eq!(t.samples.get(&v).map(Vec::len), Some(1));
+        let sig = vec![4u8; 96];
+        let auth = crate::chain::finality::vote_auth_signing_message(&vote, &sig);
+        let report = t
+            .record_invalid_vote_with_sample(7, v, (auth, vec![5; 96], vote, sig), &p)
+            .expect("threshold crossed");
+        match &report.proof {
+            SlashingProof::InvalidSignatureSpam { samples, .. } => {
+                assert_eq!(samples.len(), 2);
+                assert!(samples
+                    .iter()
+                    .all(|s| s.3.len() <= MAX_VOTE_SIGNATURE_BYTES));
+            }
+            other => panic!("expected InvalidSignatureSpam, got {other:?}"),
+        }
     }
 
     #[test]
