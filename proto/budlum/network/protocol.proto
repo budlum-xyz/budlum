@@ -632,19 +632,6 @@ message ProtoBridgeTx {
     bytes data = 1;
 }
 
-// A bridge burn: bincode-encoded `core::transaction::BridgeBurnTx`. Ids and
-// heights only - the amount and the burner come from the transfer row, which
-// the executor reads from consensus state.
-message ProtoBridgeBurn {
-    bytes data = 1;
-}
-
-// A relayed cross-domain message: bincode-encoded
-// `cross_domain::message::CrossDomainMessage`, sender signature included.
-message ProtoCrossDomainMessageTx {
-    bytes data = 1;
-}
-
 message ProtoNetworkMessage {
     oneof payload {
         ProtoHandshake handshake = 1;
