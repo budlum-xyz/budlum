@@ -951,7 +951,8 @@ pub struct SubjectConsent {
 
 /// The digest a subject's issuance consent is made over: the credential's
 /// id (which folds the fields root, the issuer and the issuance time), the
-/// subject, the validity window, and this chain.
+/// subject, the schema label, the public field names, the validity window, and
+/// this chain.
 ///
 /// The id alone is not enough. It commits to the fields root, the issuer and
 /// the issuance time, but not to `subject` - the field that selects whose
@@ -961,12 +962,29 @@ pub struct SubjectConsent {
 /// credential that never lapses, on the strength of a signature the subject
 /// gave for a bounded one. Revocation is issuer-only, so the subject could
 /// not undo it.
+///
+/// Neither is the id enough for the label. It folds
+/// `CredentialCommitment::root()`, a Merkle fold over the raw
+/// `field.commitment` bytes, so the label that says what those bytes *mean* was
+/// never in the signed material: an issuer holding a consent for one credential
+/// could resubmit the identical commitments under another schema and another
+/// field naming, and the published credential would read as a statement the
+/// subject never saw. V3 binds both. A V2 digest, which bound neither, does not
+/// verify here.
 #[must_use]
 pub fn issue_consent_digest(credential: &CredentialCommitment, chain_id: u64) -> Vec<u8> {
     let mut msg = Vec::new();
-    msg.extend_from_slice(b"BUDLUM_ID_ISSUE_CONSENT_V2");
+    msg.extend_from_slice(b"BUDLUM_ID_ISSUE_CONSENT_V3");
     msg.extend_from_slice(&credential_id(credential));
     msg.extend_from_slice(credential.subject.as_bytes());
+    msg.extend_from_slice(&(credential.schema.len() as u64).to_le_bytes());
+    msg.extend_from_slice(credential.schema.as_bytes());
+    msg.extend_from_slice(&(credential.fields.len() as u64).to_le_bytes());
+    for field in &credential.fields {
+        msg.extend_from_slice(&(field.name.len() as u64).to_le_bytes());
+        msg.extend_from_slice(field.name.as_bytes());
+        msg.extend_from_slice(&field.commitment);
+    }
     match credential.expires_at {
         Some(expires_at) => {
             msg.push(1);
@@ -1590,6 +1608,44 @@ mod tests {
             base,
             issue_consent_digest(&credential, 2),
             "and the chain it was given on"
+        );
+    }
+
+    /// The label is a consent term too.
+    ///
+    /// `credential_id` folds `CredentialCommitment::root()`, a Merkle fold over
+    /// the raw `field.commitment` bytes, so two credentials that carry the same
+    /// commitments under different schema labels - or under the same label with
+    /// the fields renamed - have the same id. Without the label in the digest an
+    /// issuer could resubmit one consented commitment set as a credential about
+    /// something else entirely, and the subject's signature would still verify.
+    #[test]
+    fn the_issue_consent_covers_the_schema_and_the_field_names() {
+        let (credential, _) = credential();
+        let base = issue_consent_digest(&credential, 1);
+
+        let mut relabelled = credential.clone();
+        relabelled.schema = "bud-vc-employment-v1".into();
+        assert_eq!(
+            credential_id(&relabelled),
+            credential_id(&credential),
+            "the fixture must differ only in a field the id does not fold, \
+             or this test proves nothing"
+        );
+        assert_ne!(
+            base,
+            issue_consent_digest(&relabelled, 1),
+            "a consent for one schema must not authorize another"
+        );
+
+        let mut renamed = credential.clone();
+        if let Some(field) = renamed.fields.first_mut() {
+            field.name = "different-name".into();
+        }
+        assert_ne!(
+            base,
+            issue_consent_digest(&renamed, 1),
+            "the field names the subject saw are part of what it consented to"
         );
     }
 

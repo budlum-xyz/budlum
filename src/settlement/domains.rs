@@ -765,6 +765,21 @@ pub fn accept_verified_commitment(
             "Domain {domain_id} height {domain_height}: zero state root, no external-root anchor written (fail-closed)"
         ));
     }
+    // Whose anchor this would be. The anchor map is keyed by the same small
+    // integers `ExternalChain::domain_id()` hands out (Ethereum 1 ... Optimism
+    // 7), and domain registration is permissionless: a registrant that picks one
+    // of those ids would be writing the finalized root of an external chain it
+    // does not own, which is exactly the value the bridge and relayer gates read
+    // as that chain's anchor. A domain may anchor under a claimed id only when
+    // it is the domain of the chain that id names.
+    let may_anchor = match crate::core::transaction::ExternalChain::from_domain_id(domain_id) {
+        Some(chain) => state
+            .settlement
+            .domains
+            .get(domain_id)
+            .is_some_and(|domain| domain.domain_chain_id == chain.canonical_chain_id()),
+        None => true,
+    };
     let outcome = accept_commitment(state, commitment)?;
     // An idempotent resubmission of an old commitment must not move the
     // anchor back to its older state root (BLG-0169), and a frozen domain
@@ -778,6 +793,9 @@ pub fn accept_verified_commitment(
         .get(domain_id)
         .map_or(0, |domain| domain.last_committed_height);
     if committed_height < domain_height {
+        return Ok(outcome);
+    }
+    if !may_anchor {
         return Ok(outcome);
     }
     if !state.anchor_external_root(domain_id, state_root) {
@@ -1785,6 +1803,55 @@ mod tests {
             .expect("a well-formed block commits")
     }
 
+    /// The external-root anchor is shared with the canonical external-chain
+    /// ids, and domain registration is permissionless. A domain registered at id
+    /// 1 is not Ethereum unless it says it is: its commitment still advances,
+    /// but it does not write the root the bridge and relayer gates read as
+    /// Ethereum's finalized anchor.
+    #[test]
+    fn only_the_domain_of_a_chain_may_write_that_chains_anchor() {
+        let mut state = AccountState::new();
+        // Id 1 with somebody else's chain id: a domain that took a claimed id.
+        let mut impostor = pow(1);
+        impostor.domain_chain_id = 45262;
+        state.add_balance(&operator(&impostor), MIN_DOMAIN_OPERATOR_BOND + FEE);
+        execute_settlement_tx(
+            &mut state,
+            &ctx(operator(&impostor)),
+            &SettlementTx::RegisterDomain(Box::new(impostor.clone())),
+        )
+        .unwrap();
+        let block_one = block(1, &"00".repeat(32), 0x71);
+        accept_verified_commitment(&mut state, commitment(&impostor, &block_one, 0))
+            .expect("the commitment still advances");
+        assert!(
+            !state.external_roots.contains_key(&1),
+            "a domain that is not Ethereum's must not write Ethereum's anchor"
+        );
+
+        // The same id, declared as the domain of chain 1, does anchor.
+        let mut ethereum = pow(1);
+        ethereum.domain_chain_id = 1;
+        ethereum.validator_set_hash = [0u8; 32];
+        let mut state = AccountState::new();
+        state.add_balance(&operator(&ethereum), MIN_DOMAIN_OPERATOR_BOND + FEE);
+        execute_settlement_tx(
+            &mut state,
+            &ctx(operator(&ethereum)),
+            &SettlementTx::RegisterDomain(Box::new(ethereum.clone())),
+        )
+        .unwrap();
+        accept_verified_commitment(&mut state, commitment(&ethereum, &block_one, 0))
+            .expect("accepted");
+        let mut expected = [0u8; 32];
+        expected.copy_from_slice(&hex::decode(&block_one.state_root).expect("hex root"));
+        assert_eq!(
+            state.external_roots.get(&1).copied(),
+            Some(expected),
+            "the domain of chain 1 anchors under id 1"
+        );
+    }
+
     /// item 5: a message one domain emits passes through the
     /// settlement chain (proven against that domain's accepted commitment)
     /// into the registry its target domain reads.
@@ -2119,6 +2186,10 @@ mod tests {
             20,
             1,
             policy.policy_hash(),
+            // The emitter the owner expects on the target chain. This test is
+            // about the settlement door, not about the emitter rule, so it
+            // names the address the later bid/settle steps use.
+            relayer,
         );
         execute_settlement_tx(
             &mut state,
