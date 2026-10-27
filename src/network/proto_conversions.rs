@@ -78,6 +78,26 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     },
                 )),
             ),
+            TransactionType::Redelegate {
+                from_validator,
+                to_validator,
+            } => (
+                pb::ProtoTransactionType::Redelegate as i32,
+                Some(pb::proto_transaction::TypePayload::Redelegate(
+                    pb::ProtoRedelegate {
+                        from_validator: from_validator.as_bytes().to_vec(),
+                        to_validator: to_validator.as_bytes().to_vec(),
+                    },
+                )),
+            ),
+            TransactionType::ClaimRewards { validator } => (
+                pb::ProtoTransactionType::ClaimRewards as i32,
+                Some(pb::proto_transaction::TypePayload::Delegation(
+                    pb::ProtoDelegation {
+                        validator: validator.as_bytes().to_vec(),
+                    },
+                )),
+            ),
             TransactionType::SetValidatorCommission { commission_ppm } => (
                 pb::ProtoTransactionType::SetValidatorCommission as i32,
                 Some(pb::proto_transaction::TypePayload::ValidatorCommission(
@@ -1039,6 +1059,37 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                         TransactionType::Undelegate { validator }
                     }
                     _ => TransactionType::WithdrawDelegation { validator },
+                }
+            }
+            pb::ProtoTransactionType::Redelegate => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Redelegate(payload)) => payload,
+                    _ => return Err("Missing redelegation payload".into()),
+                };
+                if payload.from_validator.len() != 32 || payload.to_validator.len() != 32 {
+                    return Err("redelegation validators must be 32 bytes".into());
+                }
+                let mut from = [0u8; 32];
+                from.copy_from_slice(&payload.from_validator);
+                let mut to = [0u8; 32];
+                to.copy_from_slice(&payload.to_validator);
+                TransactionType::Redelegate {
+                    from_validator: Address::from(from),
+                    to_validator: Address::from(to),
+                }
+            }
+            pb::ProtoTransactionType::ClaimRewards => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::Delegation(payload)) => payload,
+                    _ => return Err("Missing reward claim payload".into()),
+                };
+                if payload.validator.len() != 32 {
+                    return Err("reward claim validator must be 32 bytes".into());
+                }
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&payload.validator);
+                TransactionType::ClaimRewards {
+                    validator: Address::from(bytes),
                 }
             }
             pb::ProtoTransactionType::SetValidatorCommission => {
