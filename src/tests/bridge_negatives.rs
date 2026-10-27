@@ -270,14 +270,18 @@ fn the_bridge_doors_are_transactions_and_the_out_of_block_paths_are_test_only() 
     let source = include_str!("../chain/blockchain.rs");
     // Both resetting methods still exist for the suites, but only behind
     // `#[cfg(test)]`: a production caller cannot reach them.
+    // The names are checked from the other side now: the writer must either
+    // be gone from this file, or - where a suite still needs one - live
+    // behind `#[cfg(test)]`. What may not exist is a production path that
+    // writes the message registry or the bridge outside block execution.
     for name in [
         "fn burn_bridge_transfer_with_event(",
         "fn submit_relayed_cross_domain_message(",
         "fn submit_cross_domain_message(",
     ] {
-        let at = source
-            .find(name)
-            .unwrap_or_else(|| panic!("{name} must still exist for the suites"));
+        let Some(at) = source.find(name) else {
+            continue;
+        };
         let before = &source[..at];
         let gate = before.rfind("#[cfg(test)]").map(|i| i + 200 >= at);
         assert_eq!(

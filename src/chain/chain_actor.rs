@@ -2838,18 +2838,27 @@ impl ChainActor {
                         .map_or(0, |h| h.global_height.saturating_add(1));
                     let info = serde_json::json!({
                         "globalHeight": global_height,
-                        "latestGlobalHash": latest.as_ref().map(super::super::settlement::global_block::GlobalBlockHeader::calculate_hash),
-                        "pendingGlobalHash": header.calculate_hash(),
-                        "domainRegistryRoot": hex::encode(header.domain_registry_root),
-                        "domainCommitmentRoot": hex::encode(header.domain_commitment_root),
-                        "bridgeStateRoot": hex::encode(header.bridge_state_root),
-                        "replayNonceRoot": hex::encode(header.replay_nonce_root),
+                        "latestGlobalHash": latest
+                            .as_ref()
+                            .map(super::super::settlement::global_block::GlobalBlockHeader::calculate_hash)
+                            .map(|hash| format!("0x{hash}")),
+                        "pendingGlobalHash": format!("0x{}", header.calculate_hash()),
+                        "domainRegistryRoot": format!("0x{}", hex::encode(header.domain_registry_root)),
+                        "domainCommitmentRoot": format!("0x{}", hex::encode(header.domain_commitment_root)),
+                        "bridgeStateRoot": format!("0x{}", hex::encode(header.bridge_state_root)),
+                        "replayNonceRoot": format!("0x{}", hex::encode(header.replay_nonce_root)),
                         "domainCommitmentCount": self.blockchain.state.settlement.commitments.len(),
-                        "proofMarketRoot": hex::encode(self.blockchain.state.proof_market.root()),
+                        "proofMarketRoot": format!(
+                            "0x{}",
+                            hex::encode(self.blockchain.state.proof_market.root())
+                        ),
                         "proofMarketActiveTasks": self.blockchain.state.proof_market.active_tasks.len(),
                         "proofMarketPendingReceipts": self.blockchain.state.proof_market.pending_receipts.len(),
                         "proofMarketEscrowedCreators": self.blockchain.state.proof_market.escrowed.len(),
-                        "graftRoot": hex::encode(self.blockchain.state.settlement.graft.root()),
+                        "graftRoot": format!(
+                            "0x{}",
+                            hex::encode(self.blockchain.state.settlement.graft.root())
+                        ),
                         "graftApplications": self.blockchain.state.settlement.graft.apps.len(),
                         "graftPayments": self.blockchain.state.settlement.graft.payments.len(),
                         "graftIntents": self.blockchain.state.settlement.graft.intents.len(),

@@ -1831,8 +1831,10 @@ impl Transaction {
     /// witness root and the witness protocol carry them.
     #[must_use]
     pub fn witness_bytes(&self) -> Vec<u8> {
-        // Owned plain data: serializing cannot fail; a fixed marker keeps
-        // the root identical on every node if it ever did.
+        // Owned plain data: serializing cannot fail; a fixed marker keeps the
+        // root identical on every node if it ever did. Never
+        // `unwrap_or_default`: an empty Vec would commit two different
+        // witnesses to one digest (tests/hash_input_serialize_locks).
         bincode::serialize(&self.witness())
             .unwrap_or_else(|_| b"budlum/serialize-failed/witness".to_vec())
     }
@@ -2807,22 +2809,25 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::BridgeBurn(_) => 50,
         TransactionType::CrossDomainMessage(_) => 51,
         TransactionType::RelayCrossDomainMessage(_) => 52,
-        TransactionType::RoleUnbond { .. } => 53,
-        TransactionType::RoleWithdraw { .. } => 54,
-        TransactionType::ExternalDomain(_) => 55,
-        TransactionType::Settlement(_) => 56,
-        TransactionType::Bridge(_) => 57,
-        TransactionType::BnsRenew => 58,
-        TransactionType::BnsTransfer => 59,
-        TransactionType::Delegate { .. } => 60,
-        TransactionType::Undelegate { .. } => 61,
-        TransactionType::WithdrawDelegation { .. } => 62,
-        TransactionType::SetValidatorCommission { .. } => 63,
-        TransactionType::CanaryCommit { .. } => 64,
-        TransactionType::CanaryReveal { .. } => 65,
-        TransactionType::RegisterFiliz { .. } => 66,
-        TransactionType::Redelegate { .. } => 67,
-        TransactionType::ClaimRewards { .. } => 68,
+        // The two role-bond doors take the next free numbers rather than a
+        // slot beside `RoleBond`: every tag below them is already signed
+        // history, and renumbering it would change a preimage a peer signed.
+        TransactionType::ExternalDomain(_) => 53,
+        TransactionType::Settlement(_) => 54,
+        TransactionType::Bridge(_) => 55,
+        TransactionType::BnsRenew => 56,
+        TransactionType::BnsTransfer => 57,
+        TransactionType::Delegate { .. } => 58,
+        TransactionType::Undelegate { .. } => 59,
+        TransactionType::WithdrawDelegation { .. } => 60,
+        TransactionType::SetValidatorCommission { .. } => 61,
+        TransactionType::CanaryCommit { .. } => 62,
+        TransactionType::CanaryReveal { .. } => 63,
+        TransactionType::RegisterFiliz { .. } => 64,
+        TransactionType::Redelegate { .. } => 65,
+        TransactionType::ClaimRewards { .. } => 66,
+        TransactionType::RoleUnbond { .. } => 67,
+        TransactionType::RoleWithdraw { .. } => 68,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {

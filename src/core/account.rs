@@ -4065,7 +4065,10 @@ mod redelegation_and_claim_tests {
 
         assert_eq!(state.registry.delegated_amount(addr(9), addr(1)), 50);
         assert_eq!(state.registry.delegated_amount(addr(9), addr(2)), 150);
-        assert_eq!(state.get_validator(&addr(1)).unwrap().stake, 850);
+        // Delegated weight counts inside the validator's stake - see the
+        // target below - so the source keeps the 50 still delegated to it:
+        // 1_000 of its own plus 200 delegated, less the 150 that moved.
+        assert_eq!(state.get_validator(&addr(1)).unwrap().stake, 1_050);
         assert_eq!(state.get_validator(&addr(2)).unwrap().stake, 1_150);
         // no liquid balance moves: redelegation is a position move
         assert_eq!(state.get_balance(&addr(9)), 300);

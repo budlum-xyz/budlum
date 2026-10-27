@@ -9,8 +9,16 @@
 //! refusals, checkpoint parking until quorum finality, and the missing
 //! negative cases named by P01-F19.
 
+/// Whether the engine refused because the leader round the producer claims has
+/// not elapsed at wall clock. PoS and PoA enforce the same rule and word the
+/// refusal differently; the suites ask the question, not the sentence.
+fn round_not_elapsed(error: &str) -> bool {
+    error.contains("claimed before it elapsed") || error.contains("claimed ahead of wall clock")
+}
+
 #[cfg(test)]
 mod p01_consensus_rounds_tests {
+    use super::round_not_elapsed;
     use crate::consensus::poa::{PoAConfig, PoAEngine};
     use crate::consensus::pos::{PoSConfig, PoSEngine};
     use crate::consensus::pow::{PoWConfig, PoWEngine};
@@ -182,7 +190,7 @@ mod p01_consensus_rounds_tests {
             .validate_block(&block, &[parent], &state)
             .expect_err("a future-dated parent must not buy an unearned round");
         assert!(
-            error.0.contains("claimed before it elapsed"),
+            round_not_elapsed(&error.0),
             "the refusal must be the wall-clock price of the round, got: {error:?}"
         );
 
@@ -193,7 +201,7 @@ mod p01_consensus_rounds_tests {
         engine.note_block_seen(&parent.hash, parent.timestamp);
         if let Err(error) = engine.validate_block(&block, &[parent], &state) {
             assert!(
-                !error.0.contains("claimed before it elapsed")
+                !round_not_elapsed(&error.0)
                     && !error.0.contains("claimed too early"),
                 "an elapsed round must clear the pricing gates, got: {error:?}"
             );
@@ -468,7 +476,20 @@ mod p01_consensus_rounds_tests {
             },
             None,
         );
-        let parent = Block::genesis();
+        // Epoch randomness for epoch E reads the transcript of epoch E - 2,
+        // so the fixture carries the blocks that window names: genesis and
+        // the block after it. The candidate then builds on the last of them.
+        let mut genesis = Block::genesis();
+        genesis.hash = genesis.calculate_hash();
+        let mut first = Block::new(1, genesis.hash.clone(), vec![]);
+        // Epoch 1 is the randomness window epoch 3 reads, and a source block
+        // above genesis must carry the VRF transcript of its producer.
+        first.producer = Some(address);
+        first.vrf_output = [0x11; 32].to_vec();
+        first.vrf_proof = vec![0x22];
+        first.hash = first.calculate_hash();
+        let parents = vec![genesis, first];
+        let parent = parents[1].clone();
         let build = |reveal: [u8; 32]| {
             let mut block = Block::new(3, parent.hash.clone(), vec![]);
             block.slot = 3;
@@ -478,7 +499,7 @@ mod p01_consensus_rounds_tests {
                 .consensus_validator_set_hash(block.chain_id)
                 .expect("fixture keys are consensus-ready");
             let seed = engine
-                .calculate_seed_with_chain(block.chain_id, 3, 3, 0, std::slice::from_ref(&parent))
+                .calculate_seed_with_chain(block.chain_id, 3, 3, 0, &parents)
                 .expect("seed derivation succeeds");
             block.vrf_output =
                 eligibility_output(&address.0, &reveal, &seed, block.chain_id, 3).to_vec();
@@ -488,7 +509,7 @@ mod p01_consensus_rounds_tests {
         };
 
         let honest = build(chain.next_reveal().unwrap());
-        if let Err(error) = engine.validate_block(&honest, std::slice::from_ref(&parent), &state) {
+        if let Err(error) = engine.validate_block(&honest, &parents, &state) {
             assert!(
                 !error.0.contains("Filiz") && !error.0.contains("VRF proof"),
                 "an honest reveal must pass the election check, got: {error:?}"
@@ -497,7 +518,7 @@ mod p01_consensus_rounds_tests {
 
         let forged = build([0x55; 32]);
         let error = engine
-            .validate_block(&forged, std::slice::from_ref(&parent), &state)
+            .validate_block(&forged, &parents, &state)
             .expect_err("a reveal that opens nothing must be refused");
         assert!(
             error.0.contains("Filiz reveal does not open"),
@@ -513,6 +534,7 @@ mod p01_consensus_rounds_tests {
 /// block for round 2 just because it dated the parent an hour ahead.
 #[cfg(test)]
 mod p01_poa_round_pricing_tests {
+    use super::round_not_elapsed;
     use crate::consensus::poa::{PoAConfig, PoAEngine};
     use crate::consensus::ConsensusEngine;
     use crate::consensus::{MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS};
@@ -564,7 +586,7 @@ mod p01_poa_round_pricing_tests {
             .validate_block(&block, &[parent.clone()], &state)
             .expect_err("schedule lag must not buy a leader round");
         assert!(
-            error.0.contains("claimed before it elapsed"),
+            round_not_elapsed(&error.0),
             "the refusal must be the wall-clock price of the round, got: {error:?}"
         );
 
@@ -576,7 +598,7 @@ mod p01_poa_round_pricing_tests {
         engine.note_block_seen(&parent.hash, parent.timestamp);
         if let Err(error) = engine.validate_block(&block, &[parent.clone()], &state) {
             assert!(
-                !error.0.contains("claimed before it elapsed"),
+                !round_not_elapsed(&error.0),
                 "a genuinely stalled slot must walk the ladder, got: {error:?}"
             );
         }
@@ -589,7 +611,7 @@ mod p01_poa_round_pricing_tests {
         let engine = PoAEngine::new(PoAConfig::default(), None);
         if let Err(error) = engine.validate_block(&block, &[parent], &state) {
             assert!(
-                !error.0.contains("claimed before it elapsed"),
+                !round_not_elapsed(&error.0),
                 "a candidate-chain parent must price from its header, got: {error:?}"
             );
         }
@@ -617,7 +639,7 @@ mod p01_poa_round_pricing_tests {
             .validate_block(&block, &[parent], &state)
             .expect_err("a future-dated parent must not buy an unearned PoA round");
         assert!(
-            error.0.contains("claimed before it elapsed"),
+            round_not_elapsed(&error.0),
             "the PoA refusal must be the wall-clock price of the round, got: {error:?}"
         );
     }
