@@ -143,6 +143,8 @@ pub enum HandoffError {
     Order,
     #[error("index {0} is not a committee seat")]
     NotCommittee(u32),
+    #[error("the certificate randomness is not the epoch randomness")]
+    Randomness,
     #[error("{signed} of {committee} committee members signed; more than two thirds are required")]
     Quorum { signed: usize, committee: usize },
     #[error("the signature of member {index} does not verify: {reason}")]
@@ -197,22 +199,37 @@ impl HandoffCertificate {
         }
     }
 
-    /// Verify the certificate against the outgoing set it names.
+    /// Verify the certificate against the outgoing set it names and the
+    /// canonical epoch randomness the chain computed for `self.epoch`.
+    ///
+    /// `epoch_randomness` is the caller's independent knowledge of
+    /// `consensus::filiz::epoch_randomness(chain_id, epoch, canonical_reveals)`.
+    /// The certificate carries its own `randomness` field, and that field seats
+    /// the committee - so a certificate that names its own randomness would
+    /// pick its own committee out of the outgoing set and its signatures would
+    /// agree with that choice. Comparing the field against the value the
+    /// verifier trusts is what turns the committee from the certificate's
+    /// claim into the chain's seating.
     ///
     /// # Errors
     ///
-    /// [`HandoffError`] for a set mismatch, a signer outside the committee,
-    /// an order violation, two thirds not reached, or a bad signature.
+    /// [`HandoffError`] for a set mismatch, a randomness that is not the
+    /// epoch's, a signer outside the committee, an order violation, two
+    /// thirds not reached, or a bad signature.
     pub fn verify_in(
         &self,
         registry: &crate::crypto::scheme::SchemeStatusRegistry,
         outgoing: &[HandoffMember],
+        epoch_randomness: [u8; 32],
     ) -> Result<(), HandoffError> {
         if set_digest(self.chain_id, self.epoch, outgoing) != self.outgoing_set {
             return Err(HandoffError::OutgoingSet);
         }
+        if self.randomness != epoch_randomness {
+            return Err(HandoffError::Randomness);
+        }
         let addresses: Vec<Vec<u8>> = outgoing.iter().map(|m| m.address.clone()).collect();
-        let committee = handoff_committee(&addresses, &self.randomness);
+        let committee = handoff_committee(&addresses, &epoch_randomness);
         if !self.signatures.windows(2).all(|w| w[0].index < w[1].index) {
             return Err(HandoffError::Order);
         }
@@ -261,6 +278,7 @@ pub fn follow_handoffs<'a>(
     start_epoch: u64,
     trusted: &'a [HandoffMember],
     steps: &'a [(HandoffCertificate, Vec<HandoffMember>)],
+    epoch_randomness: &dyn Fn(u64) -> [u8; 32],
 ) -> Result<(u64, &'a [HandoffMember]), HandoffError> {
     let mut epoch = start_epoch;
     let mut current = trusted;
@@ -277,7 +295,7 @@ pub fn follow_handoffs<'a>(
                 got: cert.epoch,
             });
         }
-        cert.verify_in(registry, current)?;
+        cert.verify_in(registry, current, epoch_randomness(cert.epoch))?;
         epoch = epoch.saturating_add(1);
         if set_digest(chain_id, epoch, incoming) != cert.incoming_set {
             return Err(HandoffError::IncomingSet);
@@ -358,28 +376,38 @@ mod tests {
         let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
 
         let cert = signed(&keys, &outgoing, &incoming, &[0, 1, 2]);
-        assert_eq!(cert.verify_in(&registry, &outgoing), Ok(()));
+        assert_eq!(cert.verify_in(&registry, &outgoing, [3; 32]), Ok(()));
         let steps = vec![(cert.clone(), incoming.clone())];
-        let (epoch, reached) =
-            follow_handoffs(&registry, 7, 4, &outgoing, &steps).expect("follows");
+        let (epoch, reached) = follow_handoffs(&registry, 7, 4, &outgoing, &steps, &|_| [3; 32])
+            .expect("follows");
         assert_eq!(epoch, 5);
         assert_eq!(reached, incoming.as_slice());
 
+        // The committee is seated by the certificate's `randomness` field, so a
+        // certificate signed by a committee chosen from a randomness of its own
+        // choosing must be refused: the chain seated a different one.
+        let mut renamed = cert.clone();
+        renamed.randomness = [4; 32];
+        assert_eq!(
+            renamed.verify_in(&registry, &outgoing, [3; 32]),
+            Err(HandoffError::Randomness)
+        );
+
         let short = signed(&keys, &outgoing, &incoming, &[0, 1]);
         assert!(matches!(
-            short.verify_in(&registry, &outgoing),
+            short.verify_in(&registry, &outgoing, [3; 32]),
             Err(HandoffError::Quorum { .. })
         ));
         let mut swapped = cert.clone();
         swapped.signatures[0].signature = swapped.signatures[1].signature.clone();
         assert!(matches!(
-            swapped.verify_in(&registry, &outgoing),
+            swapped.verify_in(&registry, &outgoing, [3; 32]),
             Err(HandoffError::Signature { .. })
         ));
         let mut forged_set = incoming.clone();
         forged_set[1].stake = 99;
         assert_eq!(
-            follow_handoffs(&registry, 7, 4, &outgoing, &[(cert, forged_set)]),
+            follow_handoffs(&registry, 7, 4, &outgoing, &[(cert, forged_set)], &|_| [3; 32]),
             Err(HandoffError::IncomingSet)
         );
     }
