@@ -1,6 +1,6 @@
 use super::{
-    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS,
-    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, RoundPriceBook,
+    MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
 };
 use crate::core::account::{AccountState, Validator};
 use crate::core::address::Address;
@@ -69,6 +69,14 @@ pub struct PoAEngine {
     /// Addresses can be considered for PoA leadership even if other validators
     /// Are active in the permissionless state.
     authorities: Vec<Address>,
+    /// When this node first saw each recently validated block.
+    ///
+    /// A leader round is priced by "how long ago did the parent land", and the
+    /// parent's header timestamp is not that: production stamps blocks from the
+    /// slot schedule, so a lagging chain carries stamps far older than the
+    /// moment the block landed. The observation time is the fact only this node
+    /// has, and no peer can backdate it.
+    round_prices: RoundPriceBook,
 }
 
 impl PoAEngine {
@@ -78,6 +86,7 @@ impl PoAEngine {
             keypair,
             signer: None,
             authorities: Vec::new(),
+            round_prices: RoundPriceBook::new(),
         }
     }
 
@@ -91,6 +100,7 @@ impl PoAEngine {
             keypair,
             signer: Some(signer),
             authorities: Vec::new(),
+            round_prices: RoundPriceBook::new(),
         }
     }
     pub fn with_config(
@@ -103,6 +113,7 @@ impl PoAEngine {
             keypair,
             signer: None,
             authorities: validators,
+            round_prices: RoundPriceBook::new(),
         }
     }
 
@@ -305,7 +316,8 @@ impl PoAEngine {
         // validation enforces, so a producer can never claim a round this node
         // would not itself accept.
         let round_cap = parent_timestamp.map_or(MAX_LEADER_ROUNDS, |prev_ts| {
-            affordable_leader_round(prev_ts, now_millis())
+            self.round_prices
+                .claimable_round_for(&block.previous_hash, prev_ts, now_millis())
         });
 
         for round in 0..=round_cap {
@@ -520,7 +532,14 @@ impl ConsensusEngine for PoAEngine {
                     // node's clock with the same function the producer clamps
                     // itself with, so an authority cannot publish a valid block
                     // for a round another authority leads.
-                    let affordable = affordable_leader_round(prev.timestamp, now_millis());
+                    // Priced from when this node saw the parent land: a
+                    // schedule-lagged stamp cannot buy a round, and a genuine
+                    // stall still walks the ladder in real time.
+                    let affordable = affordable_leader_round(
+                        prev.timestamp,
+                        self.round_prices.seen_at(&prev.hash),
+                        now_millis(),
+                    );
                     if round > affordable {
                         return Err(ConsensusError(format!(
                             "PoA leader round {round} claimed before it elapsed: only round \
@@ -569,7 +588,14 @@ impl ConsensusEngine for PoAEngine {
                 "No active PoA authorities; refusing hash-only PoA block".into(),
             ));
         }
+        // This block can now be priced as a parent: the round its child may
+        // claim is measured from the moment this node saw it land, not from a
+        // header stamp a lagging schedule put in the past.
+        self.round_prices.note_seen(&block.hash, now_millis());
         Ok(())
+    }
+    fn note_block_seen(&self, block_hash: &str, at_ms: u128) {
+        self.round_prices.note_seen(block_hash, at_ms);
     }
     fn consensus_type(&self) -> &'static str {
         "PoA"

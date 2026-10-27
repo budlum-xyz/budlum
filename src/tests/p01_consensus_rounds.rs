@@ -472,6 +472,57 @@ mod p01_poa_round_pricing_tests {
         (state, address)
     }
 
+    /// A schedule-lagged parent must not buy rounds, and a genuine stall must
+    /// still refill the slot.
+    ///
+    /// Both blocks are stamped identically - the parent is ten minutes behind
+    /// its schedule and the child claims round 6 - so the header cannot tell
+    /// the two situations apart. What differs is when the verifying node saw
+    /// the parent land: a moment ago (lag, nothing has elapsed) or ten minutes
+    /// ago (a real stall, the ladder has walked past round 6).
+    #[test]
+    fn poa_prices_a_round_by_when_the_parent_was_seen_not_by_its_stamp() {
+        let (state, address) = single_authority_state();
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        let now_ms = crate::consensus::now_millis();
+        let round = 6u64;
+
+        let mut parent = Block::genesis();
+        parent.timestamp = now_ms.saturating_sub(600_000);
+        parent.hash = parent.calculate_hash();
+        let mut block = Block::new(1, parent.hash.clone(), vec![]);
+        block.timestamp = parent
+            .timestamp
+            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+        block.producer = Some(address);
+        block.nonce = round;
+
+        // The verifier has just seen this parent: the ten minutes of schedule
+        // lag in its stamp are not time anyone observed, so round 6 is refused.
+        engine.note_block_seen(&parent.hash, now_ms);
+        let error = engine
+            .validate_block(&block, &[parent.clone()], &state)
+            .expect_err("schedule lag must not buy a leader round");
+        assert!(
+            error.0.contains("claimed before it elapsed"),
+            "the refusal must be the wall-clock price of the round, got: {error:?}"
+        );
+
+        // Same parent, same child, but the node watched the parent land ten
+        // minutes ago: a real stall, and the ladder has reached round 6, so
+        // the pricing gate lets the claim through and any later refusal is
+        // about something else.
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        engine.note_block_seen(&parent.hash, parent.timestamp);
+        if let Err(error) = engine.validate_block(&block, &[parent], &state) {
+            assert!(
+                !error.0.contains("claimed before it elapsed"),
+                "a genuinely stalled slot must walk the ladder, got: {error:?}"
+            );
+        }
+    }
+
     #[test]
     fn poa_refuses_a_round_the_verifier_clock_has_not_reached() {
         let (state, address) = single_authority_state();
