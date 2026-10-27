@@ -27,7 +27,17 @@ pub trait ConsensusSigner: Send + Sync {
             "BLS signing not supported by this backend".to_string(),
         ))
     }
-    fn pq_sign(&self, _msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    /// Pure Ed25519 over `msg` itself, no prehash and no tag: the Ed25519
+    /// half of a composite signature signs the composite message
+    /// representative. A backend that cannot sign arbitrary
+    /// messages keeps the default refusal.
+    fn ed25519_sign_message(&self, _msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        Err(CryptoError::Signing(
+            "raw Ed25519 message signing not supported by this backend".to_string(),
+        ))
+    }
+    /// Sign `msg` with the validator PQ key under the FIPS 204 context `ctx`.
+    fn pq_sign(&self, _ctx: &[u8], _msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         Err(CryptoError::Signing(
             "PQ signing not supported by this backend".to_string(),
         ))
@@ -88,6 +98,10 @@ impl ConsensusSigner for KeyPairSigner {
         Ok(self.keypair.sign(block_hash).to_vec())
     }
 
+    fn ed25519_sign_message(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        Ok(self.keypair.sign(msg).to_vec())
+    }
+
     fn bls_sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let bls = self
             .bls_key
@@ -96,12 +110,12 @@ impl ConsensusSigner for KeyPairSigner {
         Ok(crate::chain::finality::sign_bls(&bls.secret_key, msg))
     }
 
-    fn pq_sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    fn pq_sign(&self, ctx: &[u8], msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let pq = self
             .pq_key
             .as_ref()
             .ok_or_else(|| CryptoError::Signing("No PQ key available".to_string()))?;
-        pq.sign(msg)
+        pq.sign(ctx, msg)
     }
 
     fn bls_public_key(&self) -> Option<Vec<u8>> {
@@ -117,6 +131,44 @@ impl ConsensusSigner for KeyPairSigner {
     fn backend_name(&self) -> &'static str {
         "local"
     }
+}
+
+/// The validator-suite composite public key a signer holds: its ML-DSA-65
+/// key and its Ed25519 key. `None` when the backend has no PQ key.
+#[must_use]
+pub fn composite_public_key(
+    signer: &dyn ConsensusSigner,
+) -> Option<crate::crypto::composite::CompositePublicKey> {
+    Some(crate::crypto::composite::CompositePublicKey {
+        suite: crate::crypto::scheme::SuiteId::VALIDATOR,
+        pq: signer.pq_public_key()?,
+        ed: signer.public_key_bytes(),
+    })
+}
+
+/// A validator-suite composite signature made through a signer backend (an
+/// HSM): ML-DSA-65 through `pq_sign` under `ctx` and Ed25519 through
+/// `ed25519_sign_message`, both over the one composite message
+/// representative, so `composite::verify_in` accepts it like a signature of
+/// a local composite key. No secret leaves the backend.
+///
+/// # Errors
+///
+/// A backend without a PQ key or raw Ed25519 signing, or a component that
+/// fails or returns a signature of the wrong length.
+pub fn sign_composite_with(
+    signer: &dyn ConsensusSigner,
+    ctx: &[u8],
+    payload: &[u8],
+) -> Result<crate::crypto::composite::CompositeSignature, CryptoError> {
+    let suite = crate::crypto::scheme::SuiteId::VALIDATOR;
+    let m_prime = crate::crypto::composite::message_representative(suite, ctx, payload)
+        .map_err(|e| CryptoError::Signing(e.to_string()))?;
+    let pq = signer.pq_sign(ctx, &m_prime)?;
+    let ed_bytes = signer.ed25519_sign_message(&m_prime)?;
+    let ed = <[u8; 64]>::try_from(ed_bytes.as_slice())
+        .map_err(|_| CryptoError::Signing("the Ed25519 half is not 64 bytes".into()))?;
+    Ok(crate::crypto::composite::CompositeSignature { suite, pq, ed })
 }
 
 #[cfg(test)]
@@ -148,6 +200,32 @@ mod tests {
     fn default_consensus_signer_rejects_missing_bls_pq_material() {
         let signer = KeyPairSigner::new(KeyPair::generate().expect("ed25519 key"));
         assert!(signer.bls_sign(b"msg").is_err());
-        assert!(signer.pq_sign(b"msg").is_err());
+        assert!(signer
+            .pq_sign(crate::crypto::ctx::BLOCK_V6, b"msg")
+            .is_err());
+    }
+
+    /// through a signer backend: the composite signature it assembles
+    /// verifies under the composite public key it reports.
+    #[test]
+    fn a_signer_backend_makes_a_verifiable_composite_signature() {
+        let keypair = KeyPair::generate().unwrap();
+        let signer = KeyPairSigner::new(keypair).with_pq(PqKeyPair::generate());
+        let public = composite_public_key(&signer).expect("PQ key present");
+        let signature =
+            sign_composite_with(&signer, crate::crypto::ctx::BLOCK_V6, &[7u8; 32]).unwrap();
+        assert!(crate::crypto::composite::verify(
+            &public,
+            crate::crypto::ctx::BLOCK_V6,
+            &[7u8; 32],
+            &signature
+        )
+        .is_ok());
+        assert!(sign_composite_with(
+            &KeyPairSigner::new(KeyPair::generate().unwrap()),
+            b"c",
+            b"m"
+        )
+        .is_err());
     }
 }

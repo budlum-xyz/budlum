@@ -741,17 +741,13 @@ impl<'a> Parser<'a> {
                     self.expect(Token::ParenClose)?;
                     Ok(Expr::Call(format!("block::{field}"), Vec::new()))
                 } else if name == "verify_merkle_proof" {
+                    // One argument: the address of the path window. The key, the
+                    // 256-bit leaf and root and the 64 siblings live in that window
+                    //; a node does not fit a register.
                     self.expect(Token::ParenOpen)?;
-                    let root = self.parse_child(child_max)?;
-                    self.expect(Token::Comma)?;
-                    let leaf = self.parse_child(child_max)?;
-                    self.expect(Token::Comma)?;
                     let path = self.parse_child(child_max)?;
                     self.expect(Token::ParenClose)?;
-                    Ok(Expr::Call(
-                        "verify_merkle_proof".to_string(),
-                        vec![root, leaf, path],
-                    ))
+                    Ok(Expr::Call("verify_merkle_proof".to_string(), vec![path]))
                 } else if self.peek() == &Token::ParenOpen {
                     self.consume();
                     let mut args = Vec::new();
