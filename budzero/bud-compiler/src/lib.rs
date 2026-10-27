@@ -645,7 +645,7 @@ mod tests {
         let source = r#"
             contract MerklePathOk {
                 pub fn main() {
-                    let ok = verify_merkle_proof(0, 0, 256);
+                    let ok = verify_merkle_proof(256);
                     emit Result(ok);
                 }
             }
@@ -667,7 +667,7 @@ mod tests {
             contract MerklePathDynamic {
                 pub fn main() {
                     let addr = 256;
-                    let bad = verify_merkle_proof(0, 0, addr);
+                    let bad = verify_merkle_proof(addr);
                     emit Result(bad);
                 }
             }
@@ -684,7 +684,7 @@ mod tests {
         let source = r#"
             contract MerklePathBig {
                 pub fn main() {
-                    let bad = verify_merkle_proof(0, 0, 2147483648);
+                    let bad = verify_merkle_proof(2147483648);
                     emit Result(bad);
                 }
             }

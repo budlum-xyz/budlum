@@ -9,6 +9,22 @@ const PQ_DATA_LABEL: &str = "BUD_PQ_KEY";
 /// HSM belongs to the public key that was read.
 const ED25519_BINDING_TEST_MESSAGE: &[u8] = b"BUDLUM_PKCS11_ED25519_BINDING_V1";
 
+/// A post-quantum signing key that lives in an HSM and never leaves it
+///. The anchor and Root Seal signers of `settlement::anchor_production`
+/// sit on this trait; the PKCS#11 3.2 implementation is `Pkcs11PqKey`.
+pub trait HsmPqKey: Send + Sync {
+    /// The raw public key of the token object (ML-DSA-87 or
+    /// SLH-DSA-SHAKE-256s, as the key was generated).
+    fn public_key(&self) -> Vec<u8>;
+    /// Sign `payload` inside the token under the FIPS 204/205 context `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::Signing`] for any token refusal. Never substituted
+    /// output.
+    fn sign(&self, ctx: &[u8], payload: &[u8]) -> Result<Vec<u8>, CryptoError>;
+}
+
 pub struct Pkcs11Signer {
     /// Read by [`Self::connection_info`] (F12): no dead-code allow here.
     module_path: String,
@@ -35,6 +51,10 @@ pub struct Pkcs11Signer {
     /// and a slot with no readable key may be announced only through these.
     expected_bls_public_key: Option<Vec<u8>>,
     expected_pq_public_key: Option<Vec<u8>>,
+    /// ML-DSA-65 validator key signing through the PKCS#11 3.2 standard
+    /// mechanism. When present it is the PQ path and the vendor
+    /// mechanism and the software fallback are not consulted.
+    standard_pq_key: Option<Pkcs11PqKey>,
 }
 
 struct Pkcs11Inner {
@@ -164,6 +184,7 @@ impl Pkcs11Signer {
             pq_public_key_bytes,
             expected_bls_public_key: None,
             expected_pq_public_key: None,
+            standard_pq_key: None,
         })
     }
 
@@ -241,6 +262,30 @@ impl Pkcs11Signer {
         Ok(self)
     }
 
+    /// Bind the validator ML-DSA-65 key stored under `label` and sign with it
+    /// through the PKCS#11 3.2 standard mechanism (: the first path; a
+    /// vendor mechanism is for tokens without 3.2). The key is opened with the
+    /// pairing proof of [`Pkcs11PqToken::open_key`] and, when the operator
+    /// configured an expected public key, must equal it.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::KeyGeneration`] when the token has no such key pair, the
+    /// pairing proof fails or the key is not the configured one.
+    pub fn with_standard_pq_key(mut self, label: &str) -> Result<Self, CryptoError> {
+        let token = Pkcs11PqToken::open(&self.module_path, self.slot_id, &self.token_pin_env)?;
+        let key = token.open_key(label, HsmPqAlgorithm::MlDsa65)?;
+        if let Some(expected) = &self.expected_pq_public_key {
+            if key.public_key() != *expected {
+                return Err(CryptoError::KeyGeneration(
+                    "HSM PQ public key does not match the operator-configured key".into(),
+                ));
+            }
+        }
+        self.standard_pq_key = Some(key);
+        Ok(self)
+    }
+
     /// Set vendor-native BLS/PQ mechanism IDs.
     /// Cryptoki 0.12 uses Mechanism::VendorDefined for hardware-native signing.
     pub fn with_vendor_mechanisms(
@@ -274,6 +319,7 @@ impl Pkcs11Signer {
     fn announced_pq_public_key(&self) -> Option<Vec<u8>> {
         self.expected_pq_public_key
             .clone()
+            .or_else(|| self.standard_pq_key.as_ref().map(HsmPqKey::public_key))
             .or_else(|| self.pq_public_key_bytes.clone())
     }
 
@@ -293,13 +339,14 @@ impl Pkcs11Signer {
                 CryptoError::KeyGeneration(format!("HSM BLS key binding test failed: {e}"))
             })?;
         }
-        if self.pq_mechanism.is_some() {
+        if self.pq_mechanism.is_some() || self.standard_pq_key.is_some() {
             let pk = Self::binding_key("PQ", self.announced_pq_public_key())
                 .map_err(CryptoError::KeyGeneration)?;
-            let sig = self.pq_sign(BINDING_MSG)?;
-            crate::crypto::primitives::PqKeyPair::verify(&pk, BINDING_MSG, &sig).map_err(|e| {
-                CryptoError::KeyGeneration(format!("HSM PQ key binding test failed: {e}"))
-            })?;
+            let ctx = crate::crypto::ctx::KEY_BINDING_V1;
+            let sig = self.pq_sign(ctx, BINDING_MSG)?;
+            crate::crypto::primitives::PqKeyPair::verify(&pk, ctx, BINDING_MSG, &sig).map_err(
+                |e| CryptoError::KeyGeneration(format!("HSM PQ key binding test failed: {e}")),
+            )?;
         }
         Ok(())
     }
@@ -410,15 +457,21 @@ impl Pkcs11Signer {
         }
     }
 
-    /// A vendor PQ signature must have the length of a known validator PQ scheme.
+    /// A vendor PQ signature must have the length of the validator PQ scheme.
+    ///
+    /// The scheme is fixed by configuration (ML-DSA-65, suite 0x0002) and named
+    /// here; the length is checked against that scheme only, never used to
+    /// decide which scheme the bytes are (INV-03).
     fn check_pq_signature_len(sig: &[u8]) -> Result<(), String> {
-        use crate::crypto::primitives::{classify_pq_signature_len, PqSignatureClass};
-        match classify_pq_signature_len(sig.len()) {
-            PqSignatureClass::Dilithium5 | PqSignatureClass::MlDsa65 => Ok(()),
-            _ => Err(format!(
-                "PQ signature length {} matches no validator PQ scheme",
+        let expected = crate::crypto::pq::signature_len(crate::crypto::scheme::SchemeId::ML_DSA_65)
+            .map_err(|e| e.to_string())?;
+        if sig.len() == expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "PQ signature length {} is not the validator scheme length {expected}",
                 sig.len()
-            )),
+            ))
         }
     }
 
@@ -590,14 +643,19 @@ pub struct Pkcs11VendorCapabilities {
     pub bls_software_fallback_present: bool,
     /// Software PQ key material loaded from HSM data object (fallback path).
     pub pq_software_fallback_present: bool,
+    /// The validator PQ key signs through the PKCS#11 3.2 standard mechanism.
+    pub pq_standard_mechanism: bool,
 }
 
 impl Pkcs11VendorCapabilities {
-    /// True only when both vendor mechanism IDs are configured.
-    /// Still requires external audit before mainnet "non-extractable" claims.
+    /// True only when the BLS vendor mechanism is configured and the PQ key
+    /// signs in the token, through the PKCS#11 3.2 standard mechanism or a
+    /// vendor mechanism. Still requires external audit before mainnet
+    /// "non-extractable" claims.
     #[must_use]
     pub fn vendor_native_signing_configured(&self) -> bool {
-        self.bls_vendor_mechanism.is_some() && self.pq_vendor_mechanism.is_some()
+        self.bls_vendor_mechanism.is_some()
+            && (self.pq_vendor_mechanism.is_some() || self.pq_standard_mechanism)
     }
 
     /// True when BLS can be signed (vendor path OR software fallback material).
@@ -609,7 +667,9 @@ impl Pkcs11VendorCapabilities {
     /// True when PQ can be signed (vendor path OR software fallback material).
     #[must_use]
     pub fn pq_signing_available(&self) -> bool {
-        self.pq_vendor_mechanism.is_some() || self.pq_software_fallback_present
+        self.pq_vendor_mechanism.is_some()
+            || self.pq_standard_mechanism
+            || self.pq_software_fallback_present
     }
 }
 
@@ -624,6 +684,7 @@ impl Pkcs11Signer {
             pq_vendor_mechanism: self.pq_mechanism,
             bls_software_fallback_present: bls_sw,
             pq_software_fallback_present: pq_sw,
+            pq_standard_mechanism: self.standard_pq_key.is_some(),
         }
     }
 
@@ -661,6 +722,18 @@ impl ConsensusSigner for Pkcs11Signer {
             .ok_or_else(|| CryptoError::Signing("HSM session closed".into()))?;
 
         Self::sign_ed25519(&inner.session, self.key_label.as_deref(), block_hash)
+            .map_err(CryptoError::Signing)
+    }
+
+    fn ed25519_sign_message(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| CryptoError::Signing("HSM mutex poisoned".into()))?;
+        let inner = guard
+            .as_ref()
+            .ok_or_else(|| CryptoError::Signing("HSM session closed".into()))?;
+        Self::sign_ed25519(&inner.session, self.key_label.as_deref(), msg)
             .map_err(CryptoError::Signing)
     }
 
@@ -712,7 +785,15 @@ impl ConsensusSigner for Pkcs11Signer {
         Ok(crate::chain::finality::sign_bls(&bls.secret_key, msg))
     }
 
-    fn pq_sign(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    fn pq_sign(&self, ctx: &[u8], msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        // The PKCS#11 3.2 standard mechanism carries the FIPS 204 context and
+        // the key never leaves the token: no vendor mechanism, no software
+        // fallback.
+        if let Some(key) = &self.standard_pq_key {
+            let sig = key.sign(ctx, msg)?;
+            Self::check_pq_signature_len(&sig).map_err(CryptoError::Signing)?;
+            return Ok(sig);
+        }
         // Same fail-closed ordering as `bls_sign`; the two must stay identical
         // or a strict-mode validator gets one guarantee for its BLS key and a
         // different one for its PQ key.
@@ -722,29 +803,21 @@ impl ConsensusSigner for Pkcs11Signer {
                     .into(),
             ));
         }
-        if let Some(mech_id) = self.pq_mechanism {
-            let guard = self
-                .inner
-                .lock()
-                .map_err(|_| CryptoError::Signing("HSM mutex".into()))?;
-            if let Some(inner) = guard.as_ref() {
-                let check = Self::check_pq_signature_len;
-                match self.try_vendor_sign(&inner.session, mech_id, PQ_DATA_LABEL, msg, check) {
-                    Ok(sig) => return Ok(sig),
-                    Err(e) => {
-                        if self.strict_vendor_native {
-                            return Err(CryptoError::Signing(format!(
-                                "vendor-native PQ signing required, fallback forbidden: {e}"
-                            )));
-                        }
-                        tracing::warn!("Vendor PQ sign failed ({e}), sw fallback")
-                    }
-                }
-            } else if self.strict_vendor_native {
+        if self.pq_mechanism.is_some() {
+            // A vendor-defined mechanism signs the raw message and takes no
+            // FIPS 204 context, so its signature cannot carry the context
+            // string every PQ signature must bind. Signing without a
+            // context is refused, not emulated: the standard PKCS#11 3.2
+            // ML-DSA mechanisms take a context parameter (`with_standard_pq_key`).
+            if self.strict_vendor_native {
                 return Err(CryptoError::Signing(
-                    "vendor-native PQ signing required, but the HSM session is closed".into(),
+                    "vendor-native PQ signing required, but vendor mechanisms carry no FIPS 204 context (use the PKCS#11 3.2 standard key, `with_standard_pq_key`)"
+                        .into(),
                 ));
             }
+            tracing::warn!(
+                "Vendor PQ mechanism cannot carry a FIPS 204 context; using the software key"
+            );
         }
         let guard = self
             .pq_key
@@ -753,7 +826,9 @@ impl ConsensusSigner for Pkcs11Signer {
         let pq = guard
             .as_ref()
             .ok_or_else(|| CryptoError::Signing("No PQ key in HSM".into()))?;
-        pq.sign(msg)
+        let sig = pq.sign(ctx, msg)?;
+        Self::check_pq_signature_len(&sig).map_err(CryptoError::Signing)?;
+        Ok(sig)
     }
 
     fn bls_public_key(&self) -> Option<Vec<u8>> {
@@ -814,6 +889,7 @@ mod tests {
             pq_vendor_mechanism: Some(0x8000_0002),
             bls_software_fallback_present: false,
             pq_software_fallback_present: false,
+            pq_standard_mechanism: false,
         };
         assert!(caps.vendor_native_signing_configured());
         assert!(caps.bls_signing_available());
@@ -824,6 +900,7 @@ mod tests {
             pq_vendor_mechanism: None,
             bls_software_fallback_present: true,
             pq_software_fallback_present: true,
+            pq_standard_mechanism: false,
         };
         assert!(!fallback_only.vendor_native_signing_configured());
         assert!(fallback_only.bls_signing_available());
@@ -834,9 +911,25 @@ mod tests {
             pq_vendor_mechanism: None,
             bls_software_fallback_present: false,
             pq_software_fallback_present: false,
+            pq_standard_mechanism: false,
         };
         assert!(!empty.bls_signing_available());
         assert!(!empty.pq_signing_available());
+
+        let standard = Pkcs11VendorCapabilities {
+            bls_vendor_mechanism: Some(0x8000_0001),
+            pq_vendor_mechanism: None,
+            bls_software_fallback_present: false,
+            pq_software_fallback_present: false,
+            pq_standard_mechanism: true,
+        };
+        assert!(standard.vendor_native_signing_configured());
+        assert!(standard.pq_signing_available());
+        let no_bls = Pkcs11VendorCapabilities {
+            bls_vendor_mechanism: None,
+            ..standard
+        };
+        assert!(!no_bls.vendor_native_signing_configured());
     }
 }
 
@@ -1187,5 +1280,418 @@ mod vendor_tests {
     fn an_ambiguous_ed25519_key_selection_is_refused() {
         let err = Pkcs11Signer::require_single_key("public", 2).unwrap_err();
         assert!(err.contains("refusing to guess"), "{err}");
+    }
+}
+
+// ──: post-quantum keys through the PKCS#11 3.2 standard
+// mechanisms. cryptoki 0.12 carries CKM_ML_DSA, CKM_SLH_DSA and their key
+// pair generation mechanisms, so no vendor mechanism and no raw call is
+// involved. A vendor-specific mechanism stays the fallback for tokens that
+// lack 3.2 (`Pkcs11Signer::with_vendor_mechanisms`).
+
+use cryptoki::mechanism::dsa::{HedgeType, SignAdditionalContext};
+use cryptoki::mechanism::Mechanism;
+use cryptoki::object::{
+    Attribute, AttributeType, KeyType, MlDsaParameterSetType, ObjectClass, ObjectHandle,
+    ParameterSetType, SlhDsaParameterSetType,
+};
+use std::sync::Arc;
+
+use crate::crypto::scheme::SchemeId;
+
+/// The post-quantum families a token key can belong to. Only the three the
+/// needs for signing: ML-DSA-65 (validator), ML-DSA-87 (anchor) and
+/// SLH-DSA-SHAKE-256s (Root Seal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HsmPqAlgorithm {
+    /// CKK_ML_DSA with CKP_ML_DSA_65: the validator key.
+    MlDsa65,
+    /// CKK_ML_DSA with CKP_ML_DSA_87.
+    MlDsa87,
+    /// CKK_SLH_DSA with CKP_SLH_DSA_SHAKE_256S.
+    SlhDsaShake256s,
+}
+
+impl HsmPqAlgorithm {
+    fn scheme(self) -> SchemeId {
+        match self {
+            Self::MlDsa65 => SchemeId::ML_DSA_65,
+            Self::MlDsa87 => SchemeId::ML_DSA_87,
+            Self::SlhDsaShake256s => SchemeId::SLH_DSA_SHAKE_256S,
+        }
+    }
+
+    fn key_type(self) -> KeyType {
+        match self {
+            Self::MlDsa65 | Self::MlDsa87 => KeyType::ML_DSA,
+            Self::SlhDsaShake256s => KeyType::SLH_DSA,
+        }
+    }
+
+    fn parameter_set(self) -> ParameterSetType {
+        match self {
+            Self::MlDsa65 => MlDsaParameterSetType::ML_DSA_65.into(),
+            Self::MlDsa87 => MlDsaParameterSetType::ML_DSA_87.into(),
+            Self::SlhDsaShake256s => SlhDsaParameterSetType::SHAKE_256S.into(),
+        }
+    }
+
+    fn keygen_mechanism(self) -> Mechanism<'static> {
+        match self {
+            Self::MlDsa65 | Self::MlDsa87 => Mechanism::MlDsaKeyPairGen,
+            Self::SlhDsaShake256s => Mechanism::SlhDsaKeyPairGen,
+        }
+    }
+
+    /// The signing mechanism carrying the FIPS 204/205 context string. The
+    /// hedge variant is the token's choice (hedged when it can).
+    fn sign_mechanism(self, ctx: &[u8]) -> Mechanism<'_> {
+        let params = SignAdditionalContext::new(HedgeType::Preferred, Some(ctx));
+        match self {
+            Self::MlDsa65 | Self::MlDsa87 => Mechanism::MlDsa(params),
+            Self::SlhDsaShake256s => Mechanism::SlhDsa(params),
+        }
+    }
+}
+
+fn pq_err(what: &str, e: impl std::fmt::Display) -> CryptoError {
+    CryptoError::KeyGeneration(format!("PKCS#11 3.2 {what}: {e}"))
+}
+
+/// A logged-in session on one token, shared by the post-quantum keys that
+/// live on it. A session is not `Sync`, so every operation takes the lock.
+pub struct Pkcs11PqToken {
+    inner: Mutex<Pkcs11Inner>,
+}
+
+impl Pkcs11PqToken {
+    /// Load the module, open a read-write session on `slot_id` and log in as
+    /// the user with the PIN read from the environment variable.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::KeyGeneration`] for a missing or empty PIN, a module
+    /// that does not load, a slot that is absent or a failed login.
+    pub fn open(
+        module_path: &str,
+        slot_id: u64,
+        token_pin_env: &str,
+    ) -> Result<Arc<Self>, CryptoError> {
+        let pin = std::env::var(token_pin_env)
+            .map_err(|e| pq_err("PIN env not accessible", format!("{token_pin_env}: {e}")))?;
+        if pin.is_empty() {
+            return Err(pq_err("PIN", "empty"));
+        }
+        let client = cryptoki::context::Pkcs11::new(module_path)
+            .map_err(|e| pq_err("module load", format!("{module_path}: {e}")))?;
+        match client.initialize(cryptoki::context::CInitializeArgs::new(
+            cryptoki::context::CInitializeFlags::OS_LOCKING_OK,
+        )) {
+            Ok(()) => {}
+            // The validator signer of the same node already initialised the
+            // module in this process.
+            Err(cryptoki::error::Error::Pkcs11(
+                cryptoki::error::RvError::CryptokiAlreadyInitialized,
+                _,
+            )) => {}
+            Err(e) => return Err(pq_err("initialize", e)),
+        }
+        let slots = client
+            .get_slots_with_token()
+            .map_err(|e| pq_err("slot enumeration", e))?;
+        let slot = slots
+            .iter()
+            .find(|s| s.id() == slot_id)
+            .copied()
+            .ok_or_else(|| pq_err("slot", format!("{slot_id} not found")))?;
+        let session = client
+            .open_rw_session(slot)
+            .map_err(|e| pq_err("session", e))?;
+        let pin_secret = secrecy::SecretString::new(pin.into_boxed_str());
+        session
+            .login(cryptoki::session::UserType::User, Some(&pin_secret))
+            .map_err(|e| pq_err("login", e))?;
+        Ok(Arc::new(Self {
+            inner: Mutex::new(Pkcs11Inner {
+                pkcs11_client: client,
+                session,
+            }),
+        }))
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Pkcs11Inner>, CryptoError> {
+        self.inner
+            .lock()
+            .map_err(|_| pq_err("session", "lock poisoned"))
+    }
+
+    /// Generate a key pair inside the token under `label`. The private key is
+    /// a token object, sensitive and not extractable; the public key is read
+    /// back and length checked.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::KeyGeneration`] when the token lacks the 3.2 mechanism,
+    /// refuses the template, or returns a public key of the wrong length.
+    pub fn generate_key(
+        self: &Arc<Self>,
+        label: &str,
+        algorithm: HsmPqAlgorithm,
+    ) -> Result<Pkcs11PqKey, CryptoError> {
+        {
+            let guard = self.lock()?;
+            let public_template = [
+                Attribute::Token(true),
+                Attribute::Verify(true),
+                Attribute::Label(label.into()),
+                Attribute::ParameterSet(algorithm.parameter_set()),
+            ];
+            let private_template = [
+                Attribute::Token(true),
+                Attribute::Private(true),
+                Attribute::Sensitive(true),
+                Attribute::Extractable(false),
+                Attribute::Sign(true),
+                Attribute::Label(label.into()),
+            ];
+            guard
+                .session
+                .generate_key_pair(
+                    &algorithm.keygen_mechanism(),
+                    &public_template,
+                    &private_template,
+                )
+                .map_err(|e| pq_err("key pair generation", e))?;
+        }
+        self.open_key(label, algorithm)
+    }
+
+    /// Bind to the key pair stored under `label`. Exactly one private and one
+    /// public object must carry the label; the public key must have the
+    /// length and parameter set of `algorithm`; and a probe signature made by
+    /// the token must verify under that public key, which proves the two
+    /// objects are one pair.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoError::KeyGeneration`] naming the check that failed.
+    pub fn open_key(
+        self: &Arc<Self>,
+        label: &str,
+        algorithm: HsmPqAlgorithm,
+    ) -> Result<Pkcs11PqKey, CryptoError> {
+        let (private_key, public_key) = {
+            let guard = self.lock()?;
+            let find_one = |class: ObjectClass| -> Result<ObjectHandle, CryptoError> {
+                let template = [
+                    Attribute::Class(class),
+                    Attribute::KeyType(algorithm.key_type()),
+                    Attribute::Label(label.into()),
+                ];
+                let found = guard
+                    .session
+                    .find_objects(&template)
+                    .map_err(|e| pq_err("object search", e))?;
+                match found.as_slice() {
+                    [one] => Ok(*one),
+                    [] => Err(pq_err("key", format!("no {class} object labelled {label}"))),
+                    many => Err(pq_err(
+                        "key",
+                        format!("{} objects labelled {label}, refusing to guess", many.len()),
+                    )),
+                }
+            };
+            let private_key = find_one(ObjectClass::PRIVATE_KEY)?;
+            let public_handle = find_one(ObjectClass::PUBLIC_KEY)?;
+            let attributes = guard
+                .session
+                .get_attributes(
+                    public_handle,
+                    &[AttributeType::Value, AttributeType::ParameterSet],
+                )
+                .map_err(|e| pq_err("public key attributes", e))?;
+            let mut value = None;
+            for attribute in attributes {
+                match attribute {
+                    Attribute::Value(bytes) => value = Some(bytes),
+                    Attribute::ParameterSet(set) if set != algorithm.parameter_set() => {
+                        return Err(pq_err("key", "parameter set is not the expected one"));
+                    }
+                    _ => {}
+                }
+            }
+            (
+                private_key,
+                value.ok_or_else(|| pq_err("key", "public key has no value"))?,
+            )
+        };
+        let expected = crate::crypto::pq::public_key_len(algorithm.scheme())
+            .map_err(|e| pq_err("public key length", format!("{e:?}")))?;
+        if public_key.len() != expected {
+            return Err(pq_err(
+                "key",
+                format!(
+                    "public key is {} bytes, expected {expected}",
+                    public_key.len()
+                ),
+            ));
+        }
+        let key = Pkcs11PqKey {
+            algorithm,
+            public_key,
+            private_key,
+            token: Arc::clone(self),
+        };
+        // The pairing proof: a probe signed in the token verifies under the
+        // public key that was read.
+        let probe = b"BDLM_PKCS11_PQ_BINDING_V1";
+        key.sign(crate::crypto::ctx::ANCHOR_V2, probe)?;
+        Ok(key)
+    }
+}
+
+/// A post-quantum signing key held in a PKCS#11 3.2 token. The private key
+/// never leaves the token; the signature is checked against the public key
+/// before it is returned.
+pub struct Pkcs11PqKey {
+    algorithm: HsmPqAlgorithm,
+    public_key: Vec<u8>,
+    private_key: ObjectHandle,
+    token: Arc<Pkcs11PqToken>,
+}
+
+impl HsmPqKey for Pkcs11PqKey {
+    fn public_key(&self) -> Vec<u8> {
+        self.public_key.clone()
+    }
+
+    fn sign(&self, ctx: &[u8], payload: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        let signature = {
+            let guard = self.token.lock()?;
+            guard
+                .session
+                .sign(
+                    &self.algorithm.sign_mechanism(ctx),
+                    self.private_key,
+                    payload,
+                )
+                .map_err(|e| CryptoError::Signing(format!("PKCS#11 3.2 sign: {e}")))?
+        };
+        // A token that returns a signature its own public key does not accept
+        // is faulty or lying; nothing downstream sees that signature.
+        crate::crypto::pq::verify(
+            self.algorithm.scheme(),
+            &self.public_key,
+            payload,
+            ctx,
+            &signature,
+        )
+        .map_err(|e| {
+            CryptoError::Signing(format!("PKCS#11 3.2 token signature rejected: {e:?}"))
+        })?;
+        Ok(signature)
+    }
+}
+
+#[cfg(test)]
+mod pkcs11_pq_tests {
+    use super::*;
+
+    /// The environment of the software token CI job (kryoptic built with the
+    /// `pqc` feature). Without it the test has nothing to talk to and reports
+    /// that it did not run; CI sets it and fails the job when it is missing.
+    const MODULE_ENV: &str = "BUDLUM_PKCS11_32_MODULE";
+    const PIN_ENV: &str = "BUDLUM_PKCS11_32_PIN";
+    const SO_PIN: &str = "so-pin-for-tests";
+    const USER_PIN: &str = "user-pin-for-tests";
+
+    fn initialise_token(module: &str) -> u64 {
+        let client = cryptoki::context::Pkcs11::new(module).expect("module loads");
+        client
+            .initialize(cryptoki::context::CInitializeArgs::new(
+                cryptoki::context::CInitializeFlags::OS_LOCKING_OK,
+            ))
+            .expect("initialize");
+        let slot = *client
+            .get_slots_with_token()
+            .expect("slots")
+            .first()
+            .expect("a slot");
+        let so = secrecy::SecretString::new(SO_PIN.to_string().into_boxed_str());
+        client
+            .init_token(slot, &so, "budlum-pq")
+            .expect("init token");
+        let session = client.open_rw_session(slot).expect("so session");
+        session
+            .login(cryptoki::session::UserType::So, Some(&so))
+            .expect("so login");
+        let user = secrecy::SecretString::new(USER_PIN.to_string().into_boxed_str());
+        session.init_pin(&user).expect("init user pin");
+        session.logout().expect("logout");
+        slot.id()
+    }
+
+    #[test]
+    fn a_pkcs11_3_2_token_signs_ml_dsa_87_and_slh_dsa_with_the_fips_context() {
+        let Ok(module) = std::env::var(MODULE_ENV) else {
+            eprintln!("{MODULE_ENV} is not set: the PKCS#11 3.2 token test did not run");
+            return;
+        };
+        let slot = initialise_token(&module);
+        std::env::set_var(PIN_ENV, USER_PIN);
+        let token = Pkcs11PqToken::open(&module, slot, PIN_ENV).expect("token opens");
+
+        for (label, algorithm, scheme, ctx) in [
+            (
+                "validator-0",
+                HsmPqAlgorithm::MlDsa65,
+                SchemeId::ML_DSA_65,
+                crate::crypto::ctx::KEY_BINDING_V1,
+            ),
+            (
+                "anchor-0",
+                HsmPqAlgorithm::MlDsa87,
+                SchemeId::ML_DSA_87,
+                crate::crypto::ctx::ANCHOR_V2,
+            ),
+            (
+                "seal-0",
+                HsmPqAlgorithm::SlhDsaShake256s,
+                SchemeId::SLH_DSA_SHAKE_256S,
+                crate::crypto::ctx::SEAL_V1,
+            ),
+        ] {
+            let key = token
+                .generate_key(label, algorithm)
+                .expect("generate in token");
+            let payload = b"payload signed inside the token";
+            let signature = key.sign(ctx, payload).expect("token signs");
+            crate::crypto::pq::verify(scheme, &key.public_key(), payload, ctx, &signature)
+                .expect("the signature verifies through the dual verifier facade");
+            // The FIPS context is bound: another context does not verify.
+            assert!(crate::crypto::pq::verify(
+                scheme,
+                &key.public_key(),
+                payload,
+                crate::crypto::ctx::COLD_V1,
+                &signature
+            )
+            .is_err());
+            // The private key is not extractable.
+            {
+                let guard = token.lock().expect("lock");
+                let value = guard
+                    .session
+                    .get_attributes(key.private_key, &[AttributeType::Value]);
+                assert!(
+                    value.map_or(true, |attrs| attrs.is_empty()),
+                    "the private key value must not be readable"
+                );
+            }
+            // A second handle binds to the same pair and a missing label fails.
+            let again = token.open_key(label, algorithm).expect("reopen");
+            assert_eq!(again.public_key(), key.public_key());
+            assert!(token.open_key("no-such-label", algorithm).is_err());
+        }
     }
 }

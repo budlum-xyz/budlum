@@ -698,7 +698,7 @@ mod tests {
 
     fn prove_canonical() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
         let program = storage_challenge_program();
-        let mut vm = Vm::new(1024);
+        let mut vm = Vm::new(4096);
         // VerifyMerkle imm=256 as storage challenge: the VM is fail-closed on
         // mainnet; proof still must verify (kademe 1 path).
         let receipt = vm.run_receipt(&program);

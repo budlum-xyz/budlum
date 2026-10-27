@@ -353,7 +353,7 @@ impl SemanticAnalyzer {
         );
         self.functions.insert(
             "verify_merkle_proof".to_string(),
-            (vec![Type::U64, Type::U64, Type::U64], Type::U64),
+            (vec![Type::U64], Type::U64),
         );
         self.functions
             .insert("msg::sender".to_string(), (vec![], Type::U64));
