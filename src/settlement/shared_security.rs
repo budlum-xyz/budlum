@@ -147,6 +147,20 @@ impl RestakeSource {
             Self::EigenLayer => Box::new(EigenLayerSource),
         }
     }
+
+    /// The external chain this protocol's allocations are attested on.
+    ///
+    /// An allocation is only as real as the chain that attests it, and the
+    /// source is chosen by the transaction sender. Without this binding an
+    /// `EigenLayer` claim could point at evidence anchored on any domain the
+    /// sender registered itself, which is a chain nobody else vouched for.
+    /// EigenLayer settles on Ethereum, so the evidence must be Ethereum's.
+    #[must_use]
+    pub const fn external_chain(self) -> crate::core::transaction::ExternalChain {
+        match self {
+            Self::EigenLayer => crate::core::transaction::ExternalChain::Ethereum,
+        }
+    }
 }
 
 /// Whether a restaked validator counts.
@@ -339,6 +353,18 @@ fn observe(
     if evidence.chain.domain_id() != domain_key {
         return Err(refused("Mikoriza evidence comes from another domain"));
     }
+    // The source is the sender's word; the chain is the fact. A source that
+    // settles elsewhere cannot back an allocation here, or a caller could
+    // name the most valuable restaking protocol and anchor the evidence on a
+    // domain it registered itself.
+    let attested_on = source.external_chain();
+    if evidence.chain != attested_on {
+        return Err(refused(format!(
+            "Mikoriza allocation is claimed from {source:?}, which attests on {attested_on:?}, \
+             but the evidence comes from {:?}",
+            evidence.chain
+        )));
+    }
     // The validator binds the same BLS key on both sides: the slasher on
     // Ethereum verifies double votes against the key Budlum finality uses.
     if let Some(validator) = state.validators.get(&allocation.budlum_validator) {
@@ -453,7 +479,7 @@ mod tests {
     use crate::core::account::Validator;
     use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams};
 
-    const DOMAIN: u32 = 11;
+    const DOMAIN: u32 = 1;
     const FEE: u64 = 5;
     const REGISTRAR: [u8; 20] = [0xEE; 20];
 
@@ -481,6 +507,9 @@ mod tests {
             crate::domain::POW_HEADER_CHAIN_ADAPTER,
             1,
         );
+        // Domain 1 is Ethereum's id: only a domain that declares Ethereum's
+        // chain id may anchor the root the Mikoriza gate reads as Ethereum's.
+        domain.domain_chain_id = 1;
         domain.operator = Some(operator);
         state.add_balance(&operator, domain.operator_bond.saturating_add(FEE));
         crate::settlement::domains::register_domain(&mut state, domain).expect("domain");
@@ -527,7 +556,7 @@ mod tests {
             operator_correlation(&allocation.eth_operator),
         );
         let mut result = RelayerExternalResult {
-            chain: crate::core::transaction::ExternalChain::Custom(DOMAIN),
+            chain: RestakeSource::EigenLayer.external_chain(),
             tx_hash: "0x01".into(),
             success: true,
             message: Some(message),
@@ -627,6 +656,42 @@ mod tests {
         let older = claim(validator, 9_000, 4);
         let tx = observe_tx(&mut state, &older, 1);
         assert!(execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &tx).is_err());
+    }
+
+    #[test]
+    fn an_eigen_layer_claim_must_be_attested_on_ethereum() {
+        // The source is the sender's word and the chain is the fact. A caller
+        // that anchors its evidence on a domain it registered itself could
+        // otherwise claim the most valuable restaking protocol for a chain
+        // nobody else vouched for.
+        let operator = Address::from([1u8; 32]);
+        let mut state = state_with_registrar(operator);
+        let validator = Address::from([2u8; 32]);
+        let allocation = claim(validator, 1_000, 5);
+        let honest = anchored(&mut state, &allocation, 0);
+        let mut foreign = honest.clone();
+        foreign.chain = crate::core::transaction::ExternalChain::Custom(DOMAIN);
+        // Re-anchor the forged evidence so only the chain binding can refuse it.
+        let leaf = foreign.result_leaf();
+        let mut proof = foreign.clone();
+        proof.external_state_root = leaf;
+        proof.receipt_proof = bincode::serialize(&crate::cross_domain::event_tree::MerkleProof {
+            leaf,
+            index: 0,
+            siblings: Vec::new(),
+        })
+        .expect("proof");
+        assert!(state.anchor_external_root(DOMAIN, leaf));
+        let tx = SharedSecurityTx::Observe {
+            domain_key: DOMAIN,
+            source: RestakeSource::EigenLayer,
+            allocation,
+            evidence: proof,
+        };
+        let err = execute_shared_security_tx(&mut state, &ctx(operator, devnet()), &tx)
+            .expect_err("a claim attested off Ethereum is refused");
+        assert!(err.to_string().contains("attests on"), "{err}");
+        assert!(state.settlement.shared_security.validators.is_empty());
     }
 
     #[test]
