@@ -12,8 +12,7 @@ use crate::plonky3_air::{
     COL_EXIT_CODE, COL_FINAL_ROOT_0, COL_GAS_LIMIT, COL_INFERENCE_OUTPUT_COMMIT, COL_INIT_ROOT_0,
     COL_IS_PRIVACY_COMMIT, COL_IS_VERIFY_INFERENCE, COL_MEM_ADDR_BITS_BASE, COL_MEM_HI_MAX_INV,
     COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MEM_ORD_BITS_BASE, COL_MEM_SAME_INV, COL_MEM_TID,
-    COL_MEM_TOP_SAME, COL_MEM_TOP_SAME_INV, COL_MERKLE_DIFF_INV, COL_MERKLE_FINAL_FLAG,
-    COL_MERKLE_KEY_REM, COL_MERKLE_POSEIDON_X2_0, COL_MERKLE_POSEIDON_X4_0, COL_POSEIDON_END,
+    COL_MEM_TOP_SAME, COL_MEM_TOP_SAME_INV, COL_MERKLE_ACC, COL_MERKLE_KEY_REM, COL_POSEIDON_END,
     COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, COL_PROG_MULT,
     COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_ORD_BITS_BASE, COL_REG_SAME_INV,
     COL_RS1_IDX_INV, COL_STATE_WRITES_0, COL_SYSCALL_IS_1, COL_SYSCALL_IS_2, COL_SYSCALL_IS_3,
@@ -163,31 +162,13 @@ fn all_ranges() -> Vec<ColRange> {
             start: COL_CHAIN_ID,
             end: COL_CHAIN_ID + 1,
         },
-        // VerifyMerkle path expansion
+        // VerifyMerkle path expansion: the key, the bit, the group kinds, the word read,
+        // the round, the node, the buffer, the gadget flag, the result and the root
+        // comparison, one block.
         ColRange {
             name: "verify_merkle",
             start: COL_VM_MERKLE_KEY,
-            end: COL_MERKLE_POSEIDON_X2_0,
-        },
-        ColRange {
-            name: "merkle_poseidon_x2",
-            start: COL_MERKLE_POSEIDON_X2_0,
-            end: COL_MERKLE_POSEIDON_X4_0,
-        },
-        ColRange {
-            name: "merkle_poseidon_x4",
-            start: COL_MERKLE_POSEIDON_X4_0,
-            end: COL_MERKLE_DIFF_INV,
-        },
-        ColRange {
-            name: "merkle_diff_inv",
-            start: COL_MERKLE_DIFF_INV,
-            end: COL_MERKLE_DIFF_INV + 1,
-        },
-        ColRange {
-            name: "merkle_final_flag",
-            start: COL_MERKLE_FINAL_FLAG,
-            end: COL_MERKLE_FINAL_FLAG + 1,
+            end: COL_MERKLE_ACC + 1,
         },
         // Initial-memory commitment. Appended past the old end of the
         // layout so the columns before it did not have to move again.
@@ -484,7 +465,7 @@ fn trace_layout_reserved_gap_is_documented() {
 fn poseidon_block_matches_the_round_schedule() {
     use crate::plonky3_air::{
         poseidon_sbox_lanes, POSEIDON_FULL_ROUNDS, POSEIDON_PARTIAL_ROUNDS, POSEIDON_ROUNDS,
-        POSEIDON_SBOX_SLOTS,
+        POSEIDON_SBOX_SLOTS, POSEIDON_WIDTH,
     };
 
     assert_eq!(
@@ -497,14 +478,14 @@ fn poseidon_block_matches_the_round_schedule() {
     assert_eq!(POSEIDON_SBOX_SLOTS, expected_slots);
     assert_eq!(
         expected_slots,
-        POSEIDON_FULL_ROUNDS * 8 + POSEIDON_PARTIAL_ROUNDS,
-        "full rounds squash eight lanes, partial rounds one"
+        POSEIDON_FULL_ROUNDS * POSEIDON_WIDTH + POSEIDON_PARTIAL_ROUNDS,
+        "full rounds squash every lane, partial rounds one"
     );
 
     // State is one row of eight per round; x2 and x4 are one slot per S-box.
     assert_eq!(
         COL_POSEIDON_X2_BASE - COL_POSEIDON_STATE_BASE,
-        POSEIDON_ROUNDS * 8
+        POSEIDON_ROUNDS * POSEIDON_WIDTH
     );
     assert_eq!(
         COL_POSEIDON_X4_BASE - COL_POSEIDON_X2_BASE,
@@ -514,11 +495,15 @@ fn poseidon_block_matches_the_round_schedule() {
 
     // A partial round must be cheaper than a full one, otherwise the whole
     // point of the schedule is lost.
-    assert_eq!(poseidon_sbox_lanes(0), 8, "round 0 is a leading full round");
+    assert_eq!(
+        poseidon_sbox_lanes(0),
+        POSEIDON_WIDTH,
+        "round 0 is a leading full round"
+    );
     assert_eq!(poseidon_sbox_lanes(4), 1, "round 4 is partial");
     assert_eq!(
         poseidon_sbox_lanes(POSEIDON_ROUNDS - 1),
-        8,
+        POSEIDON_WIDTH,
         "the last round is a trailing full round"
     );
 }

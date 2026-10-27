@@ -46,3 +46,6 @@ harness = false
 # sequence (the other prover tests build their arrays by hand).
 bud-compiler = { path = "../bud-compiler" }
 tiny-keccak = { version = "2.0", features = ["keccak"] }
+# For tests/poseidon_parity.rs: the shared Poseidon definition is run next to
+# Plonky3's own permutation, so a drifting copy of the constants fails there.
+budlum-note-packing = { path = "../../crates/note-packing" }
