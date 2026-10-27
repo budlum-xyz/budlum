@@ -2685,6 +2685,11 @@ impl BudlumApiServer for RpcServer {
         &self,
         msg: crate::cross_domain::CrossDomainMessage,
     ) -> Result<String, ErrorObjectOwned> {
+        // The node signs and pays for the transaction this call drives, so an
+        // unauthenticated caller could spend the consensus signer's fee
+        // balance and its nonces until it had none left. Operator-only is the
+        // floor here; the general door is a message the relayer signs itself.
+        self.require_operator("bud_submitCrossDomainMessage")?;
         let msg_clone = msg.clone();
 
         // Relayer-gated and in block. `message_registry` is in the state root,
@@ -3989,134 +3994,42 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // Operator-only: this call changes node-local state outside a block.
         self.require_operator("bud_storageOpenDeal")?;
-        let clean_shard = shard_id.strip_prefix("0x").unwrap_or(&shard_id);
-        let s_bytes = hex::decode(clean_shard).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid shard_id hex: {e}"), None::<()>)
-        })?;
-        if s_bytes.len() != 32 {
-            return Err(ErrorObjectOwned::owned(
-                -32602,
-                "shard_id must be 32 bytes",
-                None::<()>,
-            ));
-        }
-        let mut s_arr = [0u8; 32];
-        s_arr.copy_from_slice(&s_bytes);
-        let s_id = ContentId(s_arr);
-
-        let op_addr = Address::from_hex(&operator).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid operator hex: {e}"), None::<()>)
-        })?;
-
-        let payer_addr = Address::from_hex(&payer).map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid payer hex: {e}"), None::<()>)
-        })?;
-
-        // The caller must prove control of BOTH addresses this call debits:
-        // the payer's escrow and the operator's bond. Without this, any
-        // caller that can reach the RPC listener can spend another user's
-        // balance and lock another operator's bond. The signed message binds
-        // every deal parameter that changes the debit, so a signature cannot
-        // be replayed against a different deal. This is the same pattern the
-        // challenge RPCs use (BUD_OPEN_CHALLENGE_V1 / BUD_ANSWER_CHALLENGE_V1),
-        // which is what makes the escrow and bond gates economically
-        // meaningful.
-        let payer_sig = hex::decode(payer_signature).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid payer_signature hex: {e}"),
-                None::<()>,
-            )
-        })?;
-        let operator_sig = hex::decode(operator_signature).map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid operator_signature hex: {e}"),
-                None::<()>,
-            )
-        })?;
-
-        // The chain prices the payer escrow from the manifest entry for this
-        // shard (manifest.shard(&shard_id).size), so the signed preimage must
-        // bind that size and the manifest identity as well. Without them, a
-        // valid signature could be replayed with a forged manifest that
-        // declares a larger shard for the same shard_id and debits more than
-        // either signer authorized (HIGH, CWE-347).
-        let shard_bytes = manifest
-            .shard(&s_id)
-            .ok_or_else(|| {
-                ErrorObjectOwned::owned(
-                    -32602,
-                    format!("shard {s_id:?} is not part of the manifest"),
-                    None::<()>,
-                )
-            })
-            .map(|shard| u64::from(shard.size))?;
-
-        // The signed preimage binds a caller-chosen `request_id` so one
-        // signed authorization cannot be replayed to open the same deal
-        // repeatedly and debit escrow and bond again (MEDIUM, CWE-294).
-        // The chain also refuses a second active deal over the same
-        // (manifest, shard, operator, replica, range), so replay is closed on
-        // both layers.
-        let chain_id = self.chain.get_chain_id().await;
-        let deal_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_OPEN_DEAL_V2",
-            &chain_id.to_le_bytes(),
-            &domain_id.to_le_bytes(),
-            s_id.as_bytes(),
-            op_addr.as_bytes(),
-            payer_addr.as_bytes(),
-            &replica_index.to_le_bytes(),
-            &start_epoch.to_le_bytes(),
-            &end_epoch.to_le_bytes(),
-            &shard_bytes.to_le_bytes(),
-            manifest.manifest_id.as_bytes(),
-            &economics.fee_per_byte_epoch.to_le_bytes(),
-            &economics.operator_bond.to_le_bytes(),
-            &request_id.to_le_bytes(),
-        ]);
-        crate::crypto::primitives::verify_signature(&deal_msg, &payer_sig, payer_addr.as_bytes())
-            .map_err(|e| {
-            ErrorObjectOwned::owned(-32602, format!("Invalid payer signature: {e}"), None::<()>)
-        })?;
-        crate::crypto::primitives::verify_signature(&deal_msg, &operator_sig, op_addr.as_bytes())
-            .map_err(|e| {
-            ErrorObjectOwned::owned(
-                -32602,
-                format!("Invalid operator signature: {e}"),
-                None::<()>,
-            )
-        })?;
-
-        let deal_id = self
-            .chain
-            .open_storage_deal(
-                domain_id,
-                manifest.clone(),
-                s_id,
-                op_addr,
-                payer_addr,
-                replica_index,
-                start_epoch,
-                end_epoch,
-                economics.clone(),
-                domain_params,
-                merkle_proof.clone(),
-                storage_root,
-            )
-            .await
-            .map_err(|e| {
-                ErrorObjectOwned::owned(-32602, format!("open_deal failed: {e}"), None::<()>)
-            })?;
-
-        Ok(serde_json::json!({
-            "dealId": deal_id,
-            "status": "Active",
-            "operator": operator,
-        }))
+        // Deal opening moves escrow and bond, and the row decides who may
+        // answer a retrieval challenge later. Writing it here wrote it on the
+        // serving node alone, outside the block, and it took the ownership
+        // gate with it: the manifest claim the in-block door checks was never
+        // consulted on this path, so a caller that could reach the operator
+        // listener could open a deal for a manifest it does not own.
+        //
+        // The door is `StorageTx::OpenDeal`, carried by a signed `Storage`
+        // transaction, which applies the claim gate and the payer/operator
+        // consents in the executor where every node replays them.
+        let _ = (
+            domain_id,
+            manifest,
+            shard_id,
+            operator,
+            payer,
+            replica_index,
+            start_epoch,
+            end_epoch,
+            economics,
+            domain_params,
+            merkle_proof,
+            storage_root,
+            request_id,
+            payer_signature,
+            operator_signature,
+        );
+        Err(ErrorObjectOwned::owned(
+            -32602,
+            "Out-of-block deal opening is refused: it moved escrow and bond on this node \
+             alone and skipped the manifest-claim gate. The payer sends a signed Storage \
+             transaction (StorageTx::OpenDeal, carrying the operator's consent) through \
+             bud_sendRawTransaction.",
+            None::<()>,
+        ))
     }
 
     async fn storage_accept_reallocation(
