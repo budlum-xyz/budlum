@@ -70,54 +70,63 @@ enum ProtoTransactionType {
     POA_ONBOARDING = 48;
     // Bond into a permissionless application role of the verifier family.
     ROLE_BOND = 49;
+    // Burn a minted bridge transfer back out of this domain: the debit half of
+    // a mint, applied in block so `bridge_state` and the balance move under
+    // the state root. Ids and heights only; the amount and the burner come
+    // from the transfer row.
+    BRIDGE_BURN = 50;
+    // Register a cross-domain message as a transaction rather than an
+    // operator RPC, applied in block. The payload is the message itself, its
+    // sender signature included.
+    CROSS_DOMAIN_MESSAGE = 51;
     // A bonded relayer registers a cross-domain message, applied in block.
     // The transaction signer must be the message sender; the payload carries
     // no signature envelope of its own.
-    RELAY_CROSS_DOMAIN_MESSAGE = 50;
+    RELAY_CROSS_DOMAIN_MESSAGE = 52;
     // Begin unbonding the signer's bond in one permissionless role, applied
     // in block. Replaces the operator RPC that wrote the registry outside a
     // block.
-    ROLE_UNBOND = 51;
+    ROLE_UNBOND = 53;
     // Withdraw the signer's matured role bond, applied in block.
-    ROLE_WITHDRAW = 52;
+    ROLE_WITHDRAW = 54;
     // An external-domain write (registration, evidence, prover bond,
     // readmission, version fork, quorum policy), applied in block. Replaces
     // the operator RPCs that wrote the intake outside a block.
-    EXTERNAL_DOMAIN = 53;
+    EXTERNAL_DOMAIN = 55;
     // A domain settlement write (domain registration, commitment, sovereign
     // template, ZK program allowlist, ZK proof), applied in block. Replaces
     // the operator RPCs and the gossip side channel that wrote the domain
     // registries outside a block.
-    SETTLEMENT = 54;
+    SETTLEMENT = 56;
     // A bridge write (asset registration, lock, mint, burn, unlock, relay
     // proof), applied in block. Replaces the operator RPCs that wrote the
     // bridge state, the relayer ledger and balances outside a block.
-    BRIDGE = 55;
+    BRIDGE = 57;
     // Extend a live BNS registration from its current expiry.
-    BNS_RENEW = 56;
+    BNS_RENEW = 58;
     // Transfer a live BNS registration to the signed transaction's recipient
     // encoded in `data`.
-    BNS_TRANSFER = 57;
+    BNS_TRANSFER = 59;
     // Delegate stake to an existing validator.
-    DELEGATE = 58;
+    DELEGATE = 60;
     // Begin unbonding delegated stake.
-    UNDELEGATE = 59;
+    UNDELEGATE = 61;
     // Withdraw a matured delegation exit.
-    WITHDRAW_DELEGATION = 60;
+    WITHDRAW_DELEGATION = 62;
     // Set the validator's bounded reward commission.
-    SET_VALIDATOR_COMMISSION = 61;
+    SET_VALIDATOR_COMMISSION = 63;
     // Quantum canary claim, step one: the commitment H(canary, proof, claimer)
     //. Applied in block against the canary book.
-    CANARY_COMMIT = 62;
+    CANARY_COMMIT = 64;
     // Quantum canary claim, step two: the proof. The block that accepts a
     // valid reveal applies the alarm effect.
-    CANARY_REVEAL = 63;
+    CANARY_REVEAL = 65;
     // Register a Filiz Chain commitment for leader election.
-    REGISTER_FILIZ = 64;
+    REGISTER_FILIZ = 66;
     // Move an active delegation from one validator to another.
-    REDELEGATE = 65;
+    REDELEGATE = 67;
     // Claim the delegator rewards an epoch close credited.
-    CLAIM_REWARDS = 66;
+    CLAIM_REWARDS = 68;
 }
 
 message ProtoTransaction {
@@ -186,6 +195,8 @@ message ProtoTransaction {
         ProtoCanaryReveal canary_reveal = 66;
         ProtoFilizRegistration register_filiz = 67;
         ProtoRedelegate redelegate = 68;
+        ProtoBridgeBurn bridge_burn = 69;
+        ProtoCrossDomainMessageTx cross_domain_message = 70;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
@@ -605,6 +616,19 @@ message ProtoSettlementTx {
 // signing preimage writes every field explicitly; these bytes are only the
 // wire form.
 message ProtoBridgeTx {
+    bytes data = 1;
+}
+
+// A bridge burn: bincode-encoded `core::transaction::BridgeBurnTx`. Ids and
+// heights only - the amount and the burner come from the transfer row, which
+// the executor reads from consensus state.
+message ProtoBridgeBurn {
+    bytes data = 1;
+}
+
+// A relayed cross-domain message: bincode-encoded
+// `cross_domain::message::CrossDomainMessage`, sender signature included.
+message ProtoCrossDomainMessageTx {
     bytes data = 1;
 }
 

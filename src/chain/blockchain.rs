@@ -2656,6 +2656,34 @@ impl Blockchain {
         );
     }
 
+    /// Enqueue the relay requests of the bridge burns this block applied.
+    ///
+    /// The burn itself is already committed: the executor wrote
+    /// `bridge_state` and moved the units inside the block, so nothing here
+    /// decides a write. What is left is the universal-relayer enqueue, which
+    /// lives in node-local bookkeeping with its own persistence, not in the
+    /// state root. The executor leaves the event in `pending_bridge_burns` and
+    /// this drains it once the block is applied, the same handoff
+    /// `pending_bud_boost_share` uses.
+    ///
+    /// Runs on every node that applies the block, so two nodes with the same
+    /// chain produce the same relay queue; a replayed block regenerates the
+    /// list from the same transactions.
+    ///
+    /// WIRING: called from `produce_block` and `validate_and_add_block` right
+    /// after `self.state` becomes the committed state, and from the bridge
+    /// suite that asserts the drain moves nothing twice.
+    pub fn drain_pending_bridge_burns(&mut self) -> usize {
+        let pending = std::mem::take(&mut self.state.pending_bridge_burns);
+        let count = pending.len();
+        for event in pending {
+            if let Some(message) = event.message.clone() {
+                self.enqueue_bridge_relay(event, &message);
+            }
+        }
+        count
+    }
+
     /// The full registration record of one external domain - economics,
     /// version windows, prover bonds, attestation book - together with the
     /// registry clock, for the status surface. A clone, because the caller
@@ -4729,6 +4757,9 @@ impl Blockchain {
         // Dead cross-domain message rows are pruned inside `apply_block_effects`
         // (before `state_root` is computed) so replay and validation stay exact.
         self.flush_quarantine_ledger();
+        // Bridge burns this block applied: the relay requests are node-local
+        // and are enqueued after the commit, like the boost share above.
+        self.drain_pending_bridge_burns();
 
         self.record_validator_snapshot(self.state.epoch_index);
 
@@ -5211,6 +5242,11 @@ impl Blockchain {
         // BEFORE `calculate_state_root`, so every replay path reproduces them.
         // The relayer sweep runs at block end inside the state transition
         // (`SettlementRegistries::on_block_end`).
+        // Bridge burns applied by this block: their relay requests are a
+        // node-local queue and are enqueued here, after the commit, exactly as
+        // `pending_bud_boost_share` is distributed. Nothing about the burn
+        // itself waits for this drain.
+        self.drain_pending_bridge_burns();
 
         self.record_validator_snapshot(self.state.epoch_index);
         self.mempool.set_min_fee(self.state.base_fee);

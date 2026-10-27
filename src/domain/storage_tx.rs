@@ -74,6 +74,18 @@ pub enum StorageTx {
         audit_id: u64,
         data_column: Vec<u8>,
         parity_byte: u8,
+        /// Merkle path for `parity_byte` at the audited column, against the
+        /// audited parity shard's commitment in the manifest
+        /// ([`crate::storage::column_commitment`]).
+        ///
+        /// This is what turns the audit from "the operator can produce a
+        /// consistent column" into "the operator holds the shard this manifest
+        /// describes": the siblings in the path are hashes of the real shard,
+        /// so a memorised column of another object cannot answer. A manifest
+        /// recorded before column commitments carries none, and an answer for
+        /// it is checked the old way - see
+        /// [`crate::domain::storage_deal::StorageError::CodingAuditColumnProofRejected`].
+        column_proof: Vec<[u8; 32]>,
     },
     /// Accept a repair ticket for a replacement placement. The sender is the
     /// payer: the replacement fee is escrowed from the sender. The
@@ -378,7 +390,15 @@ pub fn execute_storage_tx(
             audit_id,
             data_column,
             parity_byte,
-        } => answer_coding_audit(state, sender, *audit_id, data_column, *parity_byte),
+            column_proof,
+        } => answer_coding_audit(
+            state,
+            sender,
+            *audit_id,
+            data_column,
+            *parity_byte,
+            column_proof,
+        ),
         StorageTx::AcceptReallocation(accept) => accept_reallocation(state, ctx, accept),
         StorageTx::OpenChallenge {
             deal_id,
@@ -659,6 +679,7 @@ fn answer_coding_audit(
     audit_id: u64,
     data_column: &[u8],
     parity_byte: u8,
+    column_proof: &[[u8; 32]],
 ) -> Result<(), StorageTxError> {
     if data_column.is_empty() {
         return Err(StorageTxError::EmptyDataColumn);
@@ -690,7 +711,15 @@ fn answer_coding_audit(
     let now = state.current_block_unix_secs;
     state
         .storage_registry
-        .answer_coding_audit(audit_id, *sender, data_column, parity_byte, epoch, now)
+        .answer_coding_audit(
+            audit_id,
+            *sender,
+            data_column,
+            parity_byte,
+            column_proof,
+            epoch,
+            now,
+        )
         .map(|_| ())
         .map_err(|e| StorageTxError::CodingAuditRefused(e.to_string()))
 }

@@ -265,6 +265,22 @@ impl From<&Transaction> for pb::ProtoTransaction {
                     pb::ProtoRoleBond { role: *role },
                 )),
             ),
+            TransactionType::BridgeBurn(burn) => (
+                pb::ProtoTransactionType::BridgeBurn as i32,
+                Some(pb::proto_transaction::TypePayload::BridgeBurn(
+                    pb::ProtoBridgeBurn {
+                        data: bincode_payload_or_log("BridgeBurnTx", burn),
+                    },
+                )),
+            ),
+            TransactionType::CrossDomainMessage(message) => (
+                pb::ProtoTransactionType::CrossDomainMessage as i32,
+                Some(pb::proto_transaction::TypePayload::CrossDomainMessage(
+                    pb::ProtoCrossDomainMessageTx {
+                        data: bincode_payload_or_log("CrossDomainMessage", message),
+                    },
+                )),
+            ),
             TransactionType::RelayCrossDomainMessage(message) => (
                 pb::ProtoTransactionType::RelayCrossDomainMessage as i32,
                 Some(pb::proto_transaction::TypePayload::RelayCrossDomainMessage(
@@ -1280,6 +1296,26 @@ impl TryFrom<pb::ProtoTransaction> for Transaction {
                     _ => return Err("Missing or mismatched RoleBond payload".into()),
                 };
                 TransactionType::RoleBond { role: payload.role }
+            }
+            pb::ProtoTransactionType::BridgeBurn => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::BridgeBurn(p)) => p,
+                    _ => return Err("Missing or mismatched BridgeBurn payload".into()),
+                };
+                TransactionType::BridgeBurn(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid bridge burn payload: {e}"))?,
+                )
+            }
+            pb::ProtoTransactionType::CrossDomainMessage => {
+                let payload = match proto.type_payload {
+                    Some(pb::proto_transaction::TypePayload::CrossDomainMessage(p)) => p,
+                    _ => return Err("Missing or mismatched CrossDomainMessage payload".into()),
+                };
+                TransactionType::CrossDomainMessage(
+                    bincode::deserialize(&payload.data)
+                        .map_err(|e| format!("Invalid cross-domain message payload: {e}"))?,
+                )
             }
             pb::ProtoTransactionType::RelayCrossDomainMessage => {
                 let payload = match proto.type_payload {
@@ -2857,6 +2893,7 @@ mod tests {
                 audit_id: 11,
                 data_column: vec![1, 2, 3, 4],
                 parity_byte: 5,
+                column_proof: vec![[6u8; 32], [7u8; 32]],
             }),
             TransactionType::Identity(crate::registry::IdentityTx::Register {
                 record: crate::registry::IdentityRecord::new(

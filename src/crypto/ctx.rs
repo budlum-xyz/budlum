@@ -76,6 +76,18 @@ pub const PRIVATE_TRANSFER_V1: &[u8] = b"BDLM/PRIVATE_TRANSFER/V1";
 /// Key file pairing probe and HSM key binding message.
 pub const KEY_BINDING_V1: &[u8] = b"BDLM/KEY_BINDING/V1";
 
+/// A bridge-transfer holder's authorization of a burn (the debit half of a
+/// mint). Separate from the transaction context because the holder authorizes
+/// the burn and the fee payer authorizes the transaction; one may be the other
+/// and neither is implied by the other.
+pub const BRIDGE_V1: &[u8] = b"BDLM/BRIDGE/V1";
+
+/// A cross-domain message sender's authentication of the message id (the
+/// envelope that binds the relayed message, `BDLM/...`). Distinct from the
+/// relay transaction's own context: the sender authenticates the message and
+/// the submitting relayer authenticates the transaction.
+pub const CROSS_DOMAIN_V1: &[u8] = b"BDLM/CROSS_DOMAIN/V1";
+
 /// table, in the order of section 6.5.
 pub const TABLE: &[&[u8]] = &[
     TX_V7,
@@ -109,6 +121,8 @@ pub const EXTRAS: &[&[u8]] = &[
     TEE_V1,
     PRIVATE_TRANSFER_V1,
     KEY_BINDING_V1,
+    BRIDGE_V1,
+    CROSS_DOMAIN_V1,
 ];
 
 /// Whether `ctx` is a registered context string.
