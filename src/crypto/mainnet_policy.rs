@@ -76,7 +76,8 @@ pub fn module_digest(path: &str) -> Option<[u8; 32]> {
 /// module while [`SANCTIONED_MODULE_DIGESTS`] is empty.
 #[must_use]
 pub fn is_sanctioned_module_path(path: &str) -> bool {
-    module_digest(path).is_some_and(|digest| module_digest_is_sanctioned(&digest, SANCTIONED_MODULE_DIGESTS))
+    module_digest(path)
+        .is_some_and(|digest| module_digest_is_sanctioned(&digest, SANCTIONED_MODULE_DIGESTS))
 }
 
 /// Why a mainnet validator configuration is rejected.
@@ -145,6 +146,12 @@ impl std::fmt::Display for MainnetKeyPolicyViolation {
             Self::MissingPkcs11ModulePath => {
                 write!(f, "mainnet validators require pkcs11 module_path")
             }
+            Self::UnsignedPkcs11Module => write!(
+                f,
+                "mainnet validators require a PKCS#11 module from the release's pinned table; \
+                 an unpinned module (a proxy, a renamed copy or an unvouched vendor build) is \
+                 refused"
+            ),
             Self::MissingPkcs11PinEnv => {
                 write!(f, "mainnet validators require pkcs11 token_pin_env")
             }

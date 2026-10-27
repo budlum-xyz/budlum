@@ -5,9 +5,9 @@ use libp2p::{
     kad::{
         store::MemoryStore, Behaviour as Kademlia, Config as KademliaConfig, Event as KademliaEvent,
     },
-    noise, ping, request_response, tls,
+    noise, ping, request_response,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
+    tcp, tls, yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
 };
 use std::collections::HashMap;
 use std::error::Error;

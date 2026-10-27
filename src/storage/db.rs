@@ -177,7 +177,11 @@ impl Storage {
     /// conditions.
     pub fn new(path: &str) -> std::io::Result<Self> {
         let db = sled_open_with_retry(path)?;
-        let storage = Self { db };
+        let storage = Self {
+            db,
+            #[cfg(test)]
+            fail_economics_writes: std::sync::atomic::AtomicBool::new(false),
+        };
         storage.apply_migrations()?;
         storage.recover_interrupted_commit()?;
         Ok(storage)
@@ -426,7 +430,11 @@ impl Storage {
             // Reopen races with it and flakes (tur13_5, 2026-07-18). The
             // Semantics are unchanged - the checks run on the freshly
             // Restored data exactly as `Storage::new` would run them.
-            let restored = Self { db };
+            let restored = Self {
+                db,
+                #[cfg(test)]
+                fail_economics_writes: std::sync::atomic::AtomicBool::new(false),
+            };
             restored.apply_migrations()?;
             restored.recover_interrupted_commit()?;
             let errors = restored.check_integrity().map_err(std::io::Error::other)?;
@@ -1330,6 +1338,104 @@ impl Storage {
                         ),
                     )
                 })?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_bridge_state(&self, bridge_state: &BridgeState) -> std::io::Result<()> {
+        let val = encode(bridge_state)?;
+        self.db.insert(b"BRIDGE_STATE", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_bridge_state(&self) -> std::io::Result<Option<BridgeState>> {
+        if let Some(val) = self.db.get(b"BRIDGE_STATE")? {
+            // One shape only. Two shorter shapes used to be accepted here
+            // and filled in with empty maps: one without the settled queue,
+            // one without the replay heights as well. Both maps feed a
+            // committed root (`bridge_state_root`, `replay_nonce_root`), so
+            // a node that loaded a shorter row committed roots its peers
+            // could not reproduce. A row this shape does not decode is
+            // reported, not repaired.
+            let decoded = decode::<BridgeState>(&val).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "BRIDGE_STATE row does not decode as the current BridgeState shape; \
+                         a row from an older build cannot be loaded without changing the \
+                         committed bridge and replay roots, so it is refused: {error}"
+                    ),
+                )
+            })?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_universal_relayer(
+        &self,
+        relayer: &crate::cross_domain::relayer::UniversalRelayer,
+    ) -> std::io::Result<()> {
+        let val = encode(relayer)?;
+        self.db.insert(b"UNIVERSAL_RELAYER", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_universal_relayer(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::relayer::UniversalRelayer>> {
+        if let Some(val) = self.db.get(b"UNIVERSAL_RELAYER")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_external_intake(
+        &self,
+        intake: &crate::cross_domain::external::IntakeState,
+    ) -> std::io::Result<()> {
+        let val = encode(intake)?;
+        self.db.insert(b"EXTERNAL_INTAKE", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_external_intake(
+        &self,
+    ) -> std::io::Result<Option<crate::cross_domain::external::IntakeState>> {
+        if let Some(val) = self.db.get(b"EXTERNAL_INTAKE")? {
+            let decoded = decode(&val)?;
             Ok(Some(decoded))
         } else {
             Ok(None)
@@ -2435,7 +2541,24 @@ mod tests {
         let accounts = storage.load_all_accounts().unwrap();
         assert_eq!(accounts.get(&addr).unwrap().balance, 500);
 
-        // 5. Simulate an interrupted commit at height 2.
+        // 5a. Durable tip-1 bridge snapshot (as commit_durable_batch would write).
+        use crate::cross_domain::{AssetId, BridgeState};
+        let mut bridge_h1 = BridgeState::new();
+        let asset = AssetId([0x11u8; 32]);
+        bridge_h1.register_asset(asset, 1).unwrap();
+        let bridge_h1_root = bridge_h1.root();
+        let bridge_h1_bytes = encode(&bridge_h1).unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE", bridge_h1_bytes.as_slice())
+            .unwrap();
+        storage
+            .db
+            .insert(b"BRIDGE_STATE_AT:1", bridge_h1_bytes.as_slice())
+            .unwrap();
+
+        // 5b. Simulate an interrupted commit at height 2 with a poisoned
+        // bridge state, so the rollback has something to undo.
         storage.db.insert(b"IN_PROGRESS_HEIGHT", b"2").unwrap();
         let mut block2 = Block::new(2, block.hash.clone(), vec![]);
         block2.hash = block2.calculate_hash();
