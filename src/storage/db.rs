@@ -1477,6 +1477,7 @@ impl Storage {
     /// conditions.
     /// BLG-0190 (P09-F11): arm/disarm the test-only persist failure.
     #[cfg(test)]
+    #[allow(dead_code)] // armed by the economics persistence tests only.
     pub(crate) fn set_fail_economics_writes(&self, on: bool) {
         self.fail_economics_writes
             .store(on, std::sync::atomic::Ordering::Relaxed);
