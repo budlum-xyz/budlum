@@ -575,6 +575,17 @@ pub enum TransactionType {
         commitment: [u8; 32],
         length: u64,
     },
+    /// Move an active delegation from one validator to another. Appended last
+    /// on purpose: bincode encodes the variant index, so inserting it earlier
+    /// would renumber every type after it.
+    Redelegate {
+        from_validator: Address,
+        to_validator: Address,
+    },
+    /// Claim the delegator rewards an epoch close credited to the sender.
+    ClaimRewards {
+        validator: Address,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1913,6 +1924,18 @@ impl Transaction {
                     return false;
                 }
             }
+            TransactionType::Redelegate { .. } => {
+                if self.amount == 0 || self.to != Address::zero() || !self.data.is_empty() {
+                    debug!("redelegation requires a positive amount, zero recipient, and empty data");
+                    return false;
+                }
+            }
+            TransactionType::ClaimRewards { .. } => {
+                if self.amount != 0 || self.to != Address::zero() || !self.data.is_empty() {
+                    debug!("claiming rewards requires zero amount, zero recipient, and empty data");
+                    return false;
+                }
+            }
             TransactionType::Delegate { .. } | TransactionType::Undelegate { .. } => {
                 if self.amount == 0 || self.to != Address::zero() || !self.data.is_empty() {
                     debug!("delegation transactions require a positive amount, zero recipient, and empty data");
@@ -2144,6 +2167,8 @@ impl Transaction {
             | TransactionType::Undelegate { .. }
             | TransactionType::WithdrawDelegation { .. }
             | TransactionType::SetValidatorCommission { .. }
+            | TransactionType::Redelegate { .. }
+            | TransactionType::ClaimRewards { .. }
             | TransactionType::RegisterConsensusKeys(_)
             | TransactionType::RegisterFiliz { .. } => schedule.stake_gas,
             TransactionType::Vote => schedule.vote_gas,
@@ -2314,6 +2339,57 @@ impl Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn redelegation_and_claim_carry_their_addresses_and_pass_validation() {
+        let delegator = test_addr_from_byte(7u8);
+        let from = test_addr_from_byte(1u8);
+        let to = test_addr_from_byte(2u8);
+        let move_tx = Transaction::new_with_chain_id(
+            delegator,
+            Address::zero(),
+            100,
+            5,
+            1,
+            Vec::new(),
+            45_261,
+            TransactionType::Redelegate {
+                from_validator: from,
+                to_validator: to,
+            },
+        );
+        assert_eq!(
+            move_tx.tx_type,
+            TransactionType::Redelegate {
+                from_validator: from,
+                to_validator: to
+            }
+        );
+        assert_eq!(transaction_type_tag(&move_tx.tx_type), 65);
+
+        let claim_tx = Transaction::new_with_chain_id(
+            delegator,
+            Address::zero(),
+            0,
+            5,
+            2,
+            Vec::new(),
+            45_261,
+            TransactionType::ClaimRewards { validator: from },
+        );
+        assert_eq!(
+            claim_tx.tx_type,
+            TransactionType::ClaimRewards { validator: from }
+        );
+        assert_eq!(transaction_type_tag(&claim_tx.tx_type), 66);
+
+        // both types survive the consensus encoding unchanged
+        for tx in [&move_tx, &claim_tx] {
+            let bytes = bincode::serialize(tx).unwrap();
+            let back: Transaction = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(back.tx_type, tx.tx_type);
+        }
+    }
+
     #[test]
     fn test_transaction_creation() {
         let recipient = test_addr_from_byte(1u8);
@@ -2546,6 +2622,8 @@ fn transaction_type_tag(tx_type: &TransactionType) -> u8 {
         TransactionType::CanaryCommit { .. } => 62,
         TransactionType::CanaryReveal { .. } => 63,
         TransactionType::RegisterFiliz { .. } => 64,
+        TransactionType::Redelegate { .. } => 65,
+        TransactionType::ClaimRewards { .. } => 66,
     }
 }
 fn encode_chain(chain: ExternalChain, out: &mut Vec<u8>) {
@@ -3169,6 +3247,16 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
         TransactionType::SetValidatorCommission { commission_ppm } => {
             put_u32(out, *commission_ppm);
         }
+        TransactionType::Redelegate {
+            from_validator,
+            to_validator,
+        } => {
+            put_fixed(out, from_validator.as_bytes());
+            put_fixed(out, to_validator.as_bytes());
+        }
+        TransactionType::ClaimRewards { validator } => {
+            put_fixed(out, validator.as_bytes());
+        }
         TransactionType::RegisterConsensusKeys(registration) => {
             put_string(out, &registration.scheme_id);
             put_bytes(out, &registration.vrf_public_key);
@@ -3423,6 +3511,18 @@ fn encode_transaction_type_payload(tx_type: &TransactionType, out: &mut Vec<u8>)
             put_u8(out, 58);
             put_fixed(out, commitment);
             put_u64(out, *length);
+        }
+        TransactionType::Redelegate {
+            from_validator,
+            to_validator,
+        } => {
+            put_u8(out, 59);
+            put_fixed(out, from_validator.as_bytes());
+            put_fixed(out, to_validator.as_bytes());
+        }
+        TransactionType::ClaimRewards { validator } => {
+            put_u8(out, 60);
+            put_fixed(out, validator.as_bytes());
         }
     }
 }

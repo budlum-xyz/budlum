@@ -114,6 +114,10 @@ enum ProtoTransactionType {
     CANARY_REVEAL = 63;
     // Register a Filiz Chain commitment for leader election.
     REGISTER_FILIZ = 64;
+    // Move an active delegation from one validator to another.
+    REDELEGATE = 65;
+    // Claim the delegator rewards an epoch close credited.
+    CLAIM_REWARDS = 66;
 }
 
 message ProtoTransaction {
@@ -181,6 +185,7 @@ message ProtoTransaction {
         ProtoCanaryCommit canary_commit = 65;
         ProtoCanaryReveal canary_reveal = 66;
         ProtoFilizRegistration register_filiz = 67;
+        ProtoRedelegate redelegate = 68;
     }
     // ML-DSA-87 (FIPS 204) public key for V5 user transactions.
     // For V4 transactions this is empty.
@@ -233,6 +238,13 @@ message ProtoStateUpdate {
 message ProtoStateUpdateEntry {
     bytes address = 1;
     uint64 nonce = 2;
+}
+
+// Redelegation names both ends: the position leaves the first validator and
+// joins the second in the same block.
+message ProtoRedelegate {
+    bytes from_validator = 1;
+    bytes to_validator = 2;
 }
 
 message ProtoDelegation {

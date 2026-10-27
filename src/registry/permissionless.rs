@@ -267,6 +267,16 @@ pub struct DelegationUnbonding {
     pub release_epoch: u64,
 }
 
+/// A delegator reward the epoch close credited to the delegator but that has
+/// not been claimed yet. Consensus state: the entry moves value that already
+/// left the reward pool, so every node has to agree on it exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimableReward {
+    pub delegator: Address,
+    pub validator: Address,
+    pub amount: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatorCommission {
     pub validator: Address,
@@ -307,6 +317,10 @@ pub struct PermissionlessRegistry {
     /// Validator reward commission schedule, also consensus state.
     #[serde(default)]
     validator_commissions: Vec<ValidatorCommission>,
+    /// Delegator rewards earned but not claimed yet. Consensus state: the
+    /// whole vector is hashed into the delegation root.
+    #[serde(default)]
+    claimable_rewards: Vec<ClaimableReward>,
 }
 
 fn permissionless_member_key(role: RoleId, account: Address) -> String {
@@ -1072,6 +1086,127 @@ impl PermissionlessRegistry {
         Ok(())
     }
 
+    /// Move an active delegation position from one validator to another
+    /// without an unbonding round trip. Voting weight follows the position, so
+    /// the caller adjusts both validators' aggregate stake after this returns.
+    ///
+    /// The source position must already exist and cover the amount; the
+    /// destination either grows an existing position or takes a new one, under
+    /// the same [`MAX_DELEGATIONS`] ceiling as [`Self::delegate`].
+    pub fn move_delegation(
+        &mut self,
+        delegator: Address,
+        from: Address,
+        to: Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        if amount == 0 {
+            return Err("redelegation amount must be non-zero".into());
+        }
+        if from == to {
+            return Err("redelegation needs two different validators".into());
+        }
+        if delegator == to {
+            return Err("a validator cannot delegate to itself".into());
+        }
+        let source = self
+            .delegations
+            .iter()
+            .position(|position| position.delegator == delegator && position.validator == from)
+            .ok_or_else(|| "no active delegation to redelegate from".to_string())?;
+        if self.delegations[source].amount < amount {
+            return Err("redelegation exceeds the active position".into());
+        }
+        let destination = self
+            .delegations
+            .iter()
+            .position(|position| position.delegator == delegator && position.validator == to);
+        if destination.is_none() && self.delegations.len() >= MAX_DELEGATIONS {
+            return Err("delegation position limit reached".into());
+        }
+        match destination {
+            Some(index) => {
+                self.delegations[index].amount = self.delegations[index]
+                    .amount
+                    .checked_add(amount)
+                    .ok_or_else(|| "delegation amount overflow".to_string())?;
+            }
+            None => self.delegations.push(DelegationPosition {
+                delegator,
+                validator: to,
+                amount,
+            }),
+        }
+        self.delegations[source].amount -= amount;
+        self.delegations
+            .retain(|position| position.delegator != delegator || position.amount > 0);
+        Ok(())
+    }
+
+    /// Credit a delegator reward that the epoch close has already taken out of
+    /// the reward pool. The value sits here until [`Self::claim_delegator_rewards`]
+    /// moves it to the delegator's liquid balance, so a delegator who never
+    /// claims cannot be paid twice and a node that restarts sees the same debt.
+    pub fn credit_claimable_reward(
+        &mut self,
+        delegator: Address,
+        validator: Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        if amount == 0 {
+            return Ok(());
+        }
+        if let Some(reward) = self
+            .claimable_rewards
+            .iter_mut()
+            .find(|reward| reward.delegator == delegator && reward.validator == validator)
+        {
+            reward.amount = reward
+                .amount
+                .checked_add(amount)
+                .ok_or_else(|| "claimable reward overflow".to_string())?;
+            return Ok(());
+        }
+        if self.claimable_rewards.len() >= MAX_DELEGATIONS {
+            return Err("claimable reward limit reached".into());
+        }
+        self.claimable_rewards.push(ClaimableReward {
+            delegator,
+            validator,
+            amount,
+        });
+        Ok(())
+    }
+
+    /// What `delegator` has earned on `validator` and not claimed yet.
+    #[must_use]
+    pub fn claimable_reward(&self, delegator: Address, validator: Address) -> u64 {
+        self.claimable_rewards
+            .iter()
+            .find(|reward| reward.delegator == delegator && reward.validator == validator)
+            .map_or(0, |reward| reward.amount)
+    }
+
+    /// Take the claimable reward of one `(delegator, validator)` pair. The
+    /// entry is removed before the caller credits anything, so a claim can
+    /// never pay twice.
+    pub fn claim_delegator_rewards(
+        &mut self,
+        delegator: Address,
+        validator: Address,
+    ) -> Result<u64, String> {
+        let index = self
+            .claimable_rewards
+            .iter()
+            .position(|reward| reward.delegator == delegator && reward.validator == validator)
+            .ok_or_else(|| "no claimable reward for this delegator and validator".to_string())?;
+        let amount = self.claimable_rewards.remove(index).amount;
+        if amount == 0 {
+            return Err("the claimable reward is zero".into());
+        }
+        Ok(amount)
+    }
+
     pub fn delegated_amount(&self, delegator: Address, validator: Address) -> u64 {
         self.delegations
             .iter()
@@ -1368,6 +1503,7 @@ impl PermissionlessRegistry {
         if self.delegations.is_empty()
             && self.delegation_unbonding.is_empty()
             && self.validator_commissions.is_empty()
+            && self.claimable_rewards.is_empty()
         {
             return None;
         }
@@ -1378,6 +1514,8 @@ impl PermissionlessRegistry {
             &bincode::serialize(&self.delegation_unbonding)
                 .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
             &bincode::serialize(&self.validator_commissions)
+                .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
+            &bincode::serialize(&self.claimable_rewards)
                 .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
         ]))
     }
@@ -1391,6 +1529,7 @@ impl PermissionlessRegistry {
             && self.delegations.is_empty()
             && self.delegation_unbonding.is_empty()
             && self.validator_commissions.is_empty()
+            && self.claimable_rewards.is_empty()
     }
 
     pub fn has_non_default_state(&self) -> bool {
@@ -1435,6 +1574,11 @@ impl PermissionlessRegistry {
                     .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
             );
         }
+        for reward in &self.claimable_rewards {
+            hasher.update(
+                bincode::serialize(reward).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
+            );
+        }
         if !self.charged_offences.is_empty() {
             hasher.update(
                 bincode::serialize(&self.charged_offences)
@@ -1457,6 +1601,58 @@ mod tests {
 
     fn addr(b: u8) -> Address {
         Address::from([b; 32])
+    }
+
+    #[test]
+    fn a_delegation_moves_between_validators_in_one_step() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(1), MIN_REGISTRATION_STAKE, 0).unwrap();
+        reg.register_validator(addr(2), MIN_REGISTRATION_STAKE, 0).unwrap();
+        reg.delegate(addr(9), addr(1), 100).unwrap();
+
+        reg.move_delegation(addr(9), addr(1), addr(2), 40).unwrap();
+        assert_eq!(reg.delegated_amount(addr(9), addr(1)), 60);
+        assert_eq!(reg.delegated_amount(addr(9), addr(2)), 40);
+        assert_eq!(reg.delegated_stake(&addr(1)), 60);
+        assert_eq!(reg.delegated_stake(&addr(2)), 40);
+
+        // moving the whole position retires the source row
+        reg.move_delegation(addr(9), addr(1), addr(2), 60).unwrap();
+        assert_eq!(reg.delegated_amount(addr(9), addr(1)), 0);
+        assert_eq!(reg.delegated_amount(addr(9), addr(2)), 100);
+        assert_eq!(reg.delegations_for(&addr(1)).len(), 0);
+    }
+
+    #[test]
+    fn a_redelegation_refuses_more_than_the_position_and_the_same_validator() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.register_validator(addr(1), MIN_REGISTRATION_STAKE, 0).unwrap();
+        reg.register_validator(addr(2), MIN_REGISTRATION_STAKE, 0).unwrap();
+        reg.delegate(addr(9), addr(1), 100).unwrap();
+        assert!(reg.move_delegation(addr(9), addr(1), addr(2), 101).is_err());
+        assert!(reg.move_delegation(addr(9), addr(1), addr(1), 10).is_err());
+        assert!(reg.move_delegation(addr(9), addr(2), addr(1), 10).is_err());
+        assert_eq!(reg.delegated_amount(addr(9), addr(1)), 100);
+    }
+
+    #[test]
+    fn a_claimable_reward_is_claimed_once() {
+        let mut reg = PermissionlessRegistry::new();
+        reg.credit_claimable_reward(addr(9), addr(1), 70).unwrap();
+        reg.credit_claimable_reward(addr(9), addr(1), 20).unwrap();
+        assert_eq!(reg.claimable_reward(addr(9), addr(1)), 90);
+        assert_eq!(reg.claim_delegator_rewards(addr(9), addr(1)).unwrap(), 90);
+        assert_eq!(reg.claimable_reward(addr(9), addr(1)), 0);
+        assert!(reg.claim_delegator_rewards(addr(9), addr(1)).is_err());
+    }
+
+    #[test]
+    fn claimable_rewards_are_part_of_the_delegation_root() {
+        let mut reg = PermissionlessRegistry::new();
+        let empty = reg.delegation_root();
+        reg.credit_claimable_reward(addr(9), addr(1), 5).unwrap();
+        assert_ne!(reg.delegation_root(), empty);
+        assert!(reg.delegation_root().is_some());
     }
 
     #[test]
