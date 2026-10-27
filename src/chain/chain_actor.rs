@@ -382,6 +382,10 @@ pub enum ChainCommand {
         audit: crate::domain::storage_deal::CodingAudit,
         data_column: Vec<u8>,
         parity_byte: u8,
+        /// The Merkle opening of the answered column. The registry checks the
+        /// column against the manifest's commitment before the Reed-Solomon
+        /// relationship, so a memorised column cannot pass as an answer.
+        column_proof: Vec<[u8; 32]>,
         response: oneshot::Sender<Result<(), String>>,
     },
     GetStorageManifest {
@@ -1123,6 +1127,7 @@ impl ChainHandle {
         audit: crate::domain::storage_deal::CodingAudit,
         data_column: Vec<u8>,
         parity_byte: u8,
+        column_proof: Vec<[u8; 32]>,
     ) -> Result<(), String> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -1131,6 +1136,7 @@ impl ChainHandle {
                 audit,
                 data_column,
                 parity_byte,
+                column_proof,
                 response: tx,
             })
             .await;
@@ -3302,6 +3308,7 @@ impl ChainActor {
                     audit,
                     data_column,
                     parity_byte,
+                    column_proof,
                     response,
                 } => {
                     if self.storage_economics_disabled_on_mainnet() {
@@ -3312,7 +3319,7 @@ impl ChainActor {
                         .blockchain
                         .state
                         .storage_registry
-                        .verify_coding_audit(&audit, &data_column, parity_byte)
+                        .verify_coding_audit(&audit, &data_column, parity_byte, &column_proof)
                         .map_err(|e| e.to_string());
                     let _ = response.send(res);
                 }
