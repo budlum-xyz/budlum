@@ -1,3 +1,4 @@
+//! WIRING: unwired - verify_ml_dsa_single is reached only from the PQ vector tests in this tree; the production path verifies through the batched backend dispatch.
 //! Post-quantum verification facade.
 //!
 //! One entry point, [`verify`], for every ML-DSA and SLH-DSA signature the node
@@ -431,6 +432,7 @@ pub fn ml_dsa_sign(
 /// # Errors
 ///
 /// [`PqError`] for an empty or too long context, or an unsupported scheme.
+/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
 pub fn ml_dsa_sign_libcrux(
     scheme: SchemeId,
     seed: &[u8; ML_DSA_SEED_LEN],

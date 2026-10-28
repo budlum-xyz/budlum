@@ -188,6 +188,7 @@ impl ProofFamily {
     /// the table does not list is classical: an unknown scheme earns no
     /// trust.
     #[must_use]
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn of_scheme(scheme: SchemeId) -> Self {
         match scheme.info().map(|info| info.family) {
             Some(
@@ -239,6 +240,7 @@ impl Transdifferentiated {
 /// `ledger_height`: only a post-quantum proof about a height the ledger still
 /// holds. A classical proof is never used directly.
 #[must_use]
+/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
 pub fn proof_usable_after_reversion(
     family: ProofFamily,
     proof_height: u64,

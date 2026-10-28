@@ -3118,6 +3118,34 @@ impl Blockchain {
         })
     }
 
+    /// The epoch a checkpoint height belongs to, derived locally from the
+    /// chain's own epoch length. The voting, verification and sync paths all
+    /// ask this one helper, so a certificate's declared epoch cannot drift
+    /// from the height it certifies without being refused, and the three
+    /// paths cannot disagree about the derivation.
+    fn epoch_for_checkpoint_height(&self, checkpoint_height: u64) -> u64 {
+        checkpoint_height / crate::core::chain_config::epoch_len_for_chain_id(self.chain_id).max(1)
+    }
+
+    /// The certificate epoch rule the checkpoint paths share: a certificate
+    /// is bound to the epoch its checkpoint height derives to, locally,
+    /// before any validator set is consulted.
+    fn require_checkpoint_epoch(
+        &self,
+        epoch: u64,
+        checkpoint_height: u64,
+        what: &str,
+    ) -> Result<(), String> {
+        let expected = self.epoch_for_checkpoint_height(checkpoint_height);
+        if epoch != expected {
+            return Err(format!(
+                "{what} epoch {epoch} does not match epoch {expected} of checkpoint height \
+                 {checkpoint_height}"
+            ));
+        }
+        Ok(())
+    }
+
     pub fn get_qc_blob(&self, height: u64) -> Option<QcBlob> {
         self.verified_qc_blobs.get(&height).cloned().or_else(|| {
             self.storage
@@ -3359,6 +3387,7 @@ impl Blockchain {
             ));
         }
 
+        self.require_checkpoint_epoch(blob.epoch, blob.checkpoint_height, "QcBlob")?;
         let snapshot = self.require_validator_snapshot(blob.epoch)?;
         // (security audit §4, §2) enforce the BLS
         // Finality quorum (2/3 of `snapshot.validators`) against the
@@ -5001,6 +5030,7 @@ impl Blockchain {
         if last.index != cert.checkpoint_height || last.hash != cert.checkpoint_hash {
             return Err("the segment does not end at the certified checkpoint".into());
         }
+        self.require_checkpoint_epoch(cert.epoch, cert.checkpoint_height, "Segment certificate")?;
         let snapshot = self.require_validator_snapshot(cert.epoch)?;
         cert.verify(&snapshot)?;
         Self::ensure_blob_matches_checkpoint(qc, &cert.checkpoint_hash)?;
@@ -6204,6 +6234,7 @@ impl Blockchain {
             ));
         }
 
+        self.require_checkpoint_epoch(cert.epoch, cert.checkpoint_height, "Finality certificate")?;
         let snapshot = self.require_validator_snapshot(cert.epoch)?;
 
         // /: finality is the BLS certificate AND the ML-DSA QC of the
@@ -6593,6 +6624,14 @@ impl Blockchain {
         if vote.checkpoint_hash.len() > MAX_CHECKPOINT_HASH_LEN {
             return Err("Rejecting prevote: checkpoint_hash is not a block hash".into());
         }
+        // The vote signature is a BLS point, and it is hashed as part of the
+        // auth preimage below. Refuse anything that cannot be one before the
+        // preimage is built, so an oversized `sig_bls` is neither hashed nor
+        // retained as a local invalid-vote sample.
+        const MAX_VOTE_SIG_LEN: usize = 128;
+        if vote.sig_bls.len() > MAX_VOTE_SIG_LEN || vote.auth_sig.len() > MAX_VOTE_SIG_LEN {
+            return Err("Rejecting prevote: signature is not a BLS signature".into());
+        }
         // Chain binding. `vote.chain_id` is the domain the sender signed
         // under, and the signature check below rebuilds the preimage from it,
         // so a vote minted for another chain fails verification either way.
@@ -6674,6 +6713,12 @@ impl Blockchain {
     pub fn handle_precommit(&mut self, vote: Precommit) -> Result<Option<FinalityCert>, String> {
         if vote.checkpoint_hash.len() > MAX_CHECKPOINT_HASH_LEN {
             return Err("Rejecting precommit: checkpoint_hash is not a block hash".into());
+        }
+        // Same ceiling as `handle_prevote`: the signature must be a BLS point
+        // before it enters the auth preimage or the invalid-vote sample store.
+        const MAX_VOTE_SIG_LEN: usize = 128;
+        if vote.sig_bls.len() > MAX_VOTE_SIG_LEN || vote.auth_sig.len() > MAX_VOTE_SIG_LEN {
+            return Err("Rejecting precommit: signature is not a BLS signature".into());
         }
         // Chain binding; see `handle_prevote`.
         if vote.chain_id != self.chain_id {
@@ -6918,6 +6963,123 @@ impl Blockchain {
     }
 
     // ─── B.U.D.: On-chain storage operations ────────────
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_storage_deal_with_escrow(
+        &mut self,
+        domain_id: u32,
+        manifest: &crate::storage::ContentManifest,
+        shard_id: crate::storage::ContentId,
+        operator: Address,
+        payer: Address,
+        replica_index: u8,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: &crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+    ) -> Result<u64, String> {
+        // The checks, the registry open and the debits live in `deal_open`,
+        // so the in-block path shares them. This wrapper adds the wall clock,
+        // the caller's bond floor and the persist.
+        let terms = crate::domain::deal_open::DealOpenTerms {
+            domain_id,
+            manifest,
+            shard_id,
+            operator,
+            replica_index,
+            start_epoch,
+            end_epoch,
+            economics,
+            merkle_proof,
+            storage_root,
+        };
+        // The manifest on this path comes from the RPC caller, so the
+        // authority rule the in-block path applies has to run here too. Deal
+        // rows are the only thing the registry derives durability, repair and
+        // operator standing from, and a payer that does not own the content
+        // must not be able to place one over it. A manifest that is not
+        // registered yet may only be registered by the account that names
+        // itself its owner.
+        let authority = self
+            .state
+            .storage_registry
+            .owner_of(&manifest.manifest_id)
+            .unwrap_or(manifest.owner);
+        if payer != authority {
+            return Err(format!(
+                "manifest {} belongs to {authority}, not to payer {payer}; refusing to open a deal over content the payer does not own",
+                manifest.manifest_id
+            ));
+        }
+        let now_unix_secs = self.current_unix_secs();
+        let deal_id = crate::domain::deal_open::open_deal_escrowed(
+            &mut self.state,
+            &terms,
+            payer,
+            now_unix_secs,
+            domain_params.min_operator_bond,
+            0,
+        )?;
+        // Persistence rides the block commit: on this branch the door the
+        // RPC points at is the signed storage transaction, whose effects
+        // persist with the rest of the state. This wrapper is the in-memory
+        // harness view of the same `deal_open` checks.
+        Ok(deal_id)
+    }
+
+    /// B.U.D.: On-chain acceptance of a reallocation (repair) ticket.
+    ///
+    /// The economic mirror of [`Self::open_storage_deal_with_escrow`] for
+    /// the replacement placement: the placement is decided by the ticket,
+    /// not the caller - manifest, shard and replica come from the registry
+    /// record. The ticket checks, the cooldown, the balance checks and the
+    /// registry acceptance all live in `deal_open::accept_reallocation_escrowed`
+    /// and run before any debit, so a refusal leaves balances and the registry
+    /// untouched and there is nothing to refund.
+    ///
+    /// The registry's `accept_reallocation_ticket` keeps the one-shot
+    /// guarantee (a filled ticket refuses a second acceptance) and the
+    /// merkle envelope stays mandatory, so a replacement cannot claim a
+    /// shard it cannot prove. Until this path existed, a repair ticket
+    /// opened by the maintenance sweep could never be filled on-chain:
+    /// the trigger ran, and the acceptance was test-only.
+    #[allow(clippy::too_many_arguments)]
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    pub fn accept_storage_reallocation_with_escrow(
+        &mut self,
+        ticket_id: u64,
+        replacement_operator: Address,
+        payer: Address,
+        start_epoch: u64,
+        end_epoch: u64,
+        economics: crate::domain::storage_deal::StorageEconomicsParams,
+        domain_params: &crate::domain::storage_params::StorageDomainParams,
+        merkle_proof: Option<Vec<u8>>,
+        storage_root: Option<crate::domain::Hash32>,
+    ) -> Result<u64, String> {
+        let terms = crate::domain::deal_open::ReallocationTerms {
+            ticket_id,
+            replacement_operator,
+            start_epoch,
+            end_epoch,
+            economics,
+            merkle_proof,
+            storage_root,
+        };
+        let now_unix_secs = self.current_unix_secs();
+        let replacement_deal_id = crate::domain::deal_open::accept_reallocation_escrowed(
+            &mut self.state,
+            &terms,
+            payer,
+            now_unix_secs,
+            domain_params.min_operator_bond,
+            0,
+        )?;
+        // Persistence rides the block commit; see `open_storage_deal_with_escrow`.
+        Ok(replacement_deal_id)
+    }
 
     /// Test harness only: the reward step of the block-end storage
     /// maintenance (`chain::storage_maintenance`) at `current_epoch`.
