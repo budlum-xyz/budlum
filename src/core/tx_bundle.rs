@@ -17,6 +17,7 @@
 //!
 //! A bundle is executed as its members, in order. A node that accepts a bundle
 //! admits all members or none.
+//! WIRING: unwired - the transaction-bundle helpers are the submission wave's surface; the RPC and CLI paths that assemble bundles land with that wave.
 
 use crate::core::address::Address;
 use crate::core::transaction::{

@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_deposit_observed is reached only from the adapter fixture tests in this tree; the live relayer observation runs the adapter's verify_observation instead.
+//! WIRING: verify_deposit_observed is reached from the adapter fixture tests in this tree; the live relayer observation runs the adapter's verify_observation instead.
 //! F10.4 EvmChainAdapter - the ChainAdapter impl for the EVM leg. NOT a
 //! fully live path (BLG-0135/P06-F06): the off-chain half is a stub that
 //! refuses at broadcast, so the Ethereum-to-Budlum leg has no live end-to-end
