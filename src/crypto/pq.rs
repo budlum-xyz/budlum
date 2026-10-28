@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_ml_dsa_single is reached only from the PQ vector tests in this tree; the production path verifies through the batched backend dispatch.
+//! WIRING: verify_ml_dsa_single is reached from the PQ vector tests in this tree; the production path verifies through the batched backend dispatch.
 //! Post-quantum verification facade.
 //!
 //! One entry point, [`verify`], for every ML-DSA and SLH-DSA signature the node

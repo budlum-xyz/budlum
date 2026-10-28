@@ -166,14 +166,11 @@ fn uses_identifier(text: &str, label: &str) -> bool {
     false
 }
 
-/// Strip `//` comments so a note about the labels is not a use of them.
+/// Strip comments, string literals and test modules: a note about the
+/// labels, a label inside a string or test code naming the labels is not a
+/// production use of them - the gate's scope, as its header says.
 fn code_only(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for line in text.lines() {
-        out.push_str(line.split("//").next().unwrap_or(""));
-        out.push('\n');
-    }
-    out
+    super::capability_modules_are_wired::code_only(text)
 }
 
 fn scan(root: &Path) -> Result<(usize, Vec<String>), String> {
