@@ -64,3 +64,16 @@ path = "src/cross_domain/external/intake.rs"
 function = "*"
 pq_companion = "none: an external network quorum, shown as classical in the domain profile"
 k02 = "d"
+
+[[entry]]
+path = "src/security/quantum_canary.rs"
+function = "(imports)"
+pq_companion = "ML-DSA-87 signatures over the same canary statements (the canary's own signing path)"
+k02 = "a"
+
+[[entry]]
+path = "src/domain/producer.rs"
+function = "(imports)"
+pq_companion = "ML-DSA-65 QC of the same producer (consensus/qc.rs); a block needs the QC too"
+k02 = "b"
+

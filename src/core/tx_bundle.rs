@@ -30,16 +30,16 @@ use crate::crypto::scheme::SchemeStatusRegistry;
 use sha3::{Digest, Sha3_256};
 
 /// The domain tag of the bundle root.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const BUNDLE_TAG: &[u8] = b"BDLM_TX_BUNDLE_V1";
 
 /// The most members one bundle carries.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const MAX_BUNDLE_TXS: usize = 16;
 
 /// Why a bundle is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub enum BundleError {
     /// No members, or more than [`MAX_BUNDLE_TXS`].
     Size(usize),
@@ -72,7 +72,7 @@ impl std::error::Error for BundleError {}
 
 /// Several V7 bodies and the one witness that authorizes them.
 #[derive(Debug, Clone, PartialEq)]
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub struct TxBundle {
     /// The member bodies, in execution order.
     pub members: Vec<Transaction>,

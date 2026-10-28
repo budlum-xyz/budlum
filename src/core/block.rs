@@ -21,7 +21,7 @@ use tracing::{info, warn};
 pub const DEFAULT_CHAIN_ID: u64 = 45262;
 /// First byte of `producer_public_key` for a composite (validator suite)
 /// block signature. `0x05` is the ML-DSA-87 producer form.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const PRODUCER_KEY_COMPOSITE: u8 = 0x06;
 use crate::consensus::pos::SlashingEvidence;
 
@@ -586,7 +586,7 @@ impl Block {
     /// # Errors
     ///
     /// The backend has no PQ key or cannot sign a component.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn sign_composite_with_signer(
         &mut self,
         signer: &dyn ConsensusSigner,
@@ -767,7 +767,7 @@ impl Block {
             }
         }
     }
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn verify_signature_with_pubkey(&self, expected_pubkey: &Address) -> bool {
         self.verify_signature_with_pubkey_in(
             &crate::crypto::scheme::SchemeStatusRegistry::genesis(),

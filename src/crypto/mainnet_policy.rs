@@ -42,7 +42,7 @@ pub fn is_software_token_path(path: &str) -> bool {
 /// or an anchor keystore until a release fills this in, which is the
 /// fail-closed direction: an unpinned module is an unknown module, not a
 /// probably-hardware one.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const SANCTIONED_MODULE_DIGESTS: &[[u8; 32]] = &[];
 
 /// Whether `digest` is one of the module digests the release sanctions.
@@ -50,7 +50,7 @@ pub const SANCTIONED_MODULE_DIGESTS: &[[u8; 32]] = &[];
 /// Split from [`is_sanctioned_module_path`] so the membership rule can be
 /// tested without a module file on disk.
 #[must_use]
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub fn module_digest_is_sanctioned(digest: &[u8; 32], sanctioned: &[[u8; 32]]) -> bool {
     sanctioned.iter().any(|pinned| pinned == digest)
 }
@@ -61,7 +61,7 @@ pub fn module_digest_is_sanctioned(digest: &[u8; 32], sanctioned: &[[u8; 32]]) -
 /// The digest is taken over the *resolved* file so a symlink, a copy or a
 /// renamed module is judged by its bytes and not by its name.
 #[must_use]
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub fn module_digest(path: &str) -> Option<[u8; 32]> {
     use sha3::Digest;
     let resolved = std::fs::canonicalize(path).ok()?;

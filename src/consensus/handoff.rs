@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
 /// The committee size above which the PQ part of a Handoff Certificate is committee signed.
-/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave - production callers land with that wave.
 pub const COMMITTEE_SIZE: usize = 512;
 
 const COMMITTEE_TAG: &[u8] = b"BDLM_HANDOFF_COMMITTEE_V1";
@@ -38,7 +38,7 @@ fn rank(randomness: &[u8; 32], address: &[u8]) -> [u8; 32] {
 /// index is returned: the whole set signs. A duplicate address ranks by its own hash and an
 /// index tie-break, so the result stays total and deterministic.
 #[must_use]
-/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave - production callers land with that wave.
 pub fn handoff_committee(validators: &[Vec<u8>], randomness: &[u8; 32]) -> Vec<usize> {
     if validators.len() <= COMMITTEE_SIZE {
         return (0..validators.len()).collect();
@@ -110,7 +110,7 @@ pub fn set_digest(chain_id: u64, epoch: u64, members: &[HandoffMember]) -> [u8; 
 /// One committee member's ML-DSA-65 signature; `index` is the member's
 /// position in the outgoing set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave - production callers land with that wave.
 pub struct HandoffSignature {
     pub index: u32,
     pub signature: Vec<u8>,
@@ -133,7 +133,7 @@ pub struct HandoffCertificate {
 
 /// Why a Handoff Certificate or a chain of them was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave - production callers land with that wave.
 pub enum HandoffError {
     #[error("the outgoing set does not match the certificate")]
     OutgoingSet,
@@ -176,7 +176,7 @@ impl HandoffCertificate {
 
     /// An unsigned certificate for the move from `outgoing` to `incoming`.
     #[must_use]
-    /// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
+    /// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave - production callers land with that wave.
     pub fn unsigned(
         chain_id: u64,
         epoch: u64,
@@ -278,7 +278,7 @@ impl HandoffCertificate {
 /// # Errors
 ///
 /// The first step that does not continue the chain or does not verify.
-/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave - production callers land with that wave.
 pub fn follow_handoffs<'a>(
     registry: &crate::crypto::scheme::SchemeStatusRegistry,
     chain_id: u64,

@@ -17,7 +17,7 @@ use sha3::{Digest, Keccak256};
 
 /// Why a signature recovers no address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub enum RecoverError {
     #[error("the signature is not 65 bytes r || s || v")]
     Length,

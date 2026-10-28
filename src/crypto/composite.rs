@@ -36,15 +36,15 @@ use sha3::{Digest, Sha3_256};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// The domain tag at the front of every message representative.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const COMPOSITE_TAG: &[u8] = b"BDLM_COMPOSITE_SIG_V1";
 /// The version byte of the key and signature encodings.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const ENCODING_VERSION: u8 = 1;
 /// Ed25519 public key length.
 pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
 /// Ed25519 signature length.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const ED25519_SIGNATURE_LEN: usize = 64;
 /// Ed25519 seed length.
 pub const ED25519_SEED_LEN: usize = 32;

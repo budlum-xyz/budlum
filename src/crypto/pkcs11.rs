@@ -1554,7 +1554,7 @@ impl Pkcs11PqToken {
 /// A post-quantum signing key held in a PKCS#11 3.2 token. The private key
 /// never leaves the token; the signature is checked against the public key
 /// before it is returned.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub struct Pkcs11PqKey {
     algorithm: HsmPqAlgorithm,
     public_key: Vec<u8>,

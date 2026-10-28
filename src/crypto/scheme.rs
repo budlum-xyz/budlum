@@ -26,7 +26,7 @@ impl SchemeId {
     /// BLS12-381 min-signature, RFC 9380 with proof of possession.
     pub const BLS12381_MINSIG: Self = Self(0x0002);
     /// sr25519 VRF.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const SR25519_VRF: Self = Self(0x0003);
     /// ML-DSA-44, FIPS 204.
     pub const ML_DSA_44: Self = Self(0x0101);
@@ -39,33 +39,33 @@ impl SchemeId {
     /// SLH-DSA-SHAKE-256s, FIPS 205.
     pub const SLH_DSA_SHAKE_256S: Self = Self(0x0203);
     /// FN-DSA-512.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const FN_DSA_512: Self = Self(0x0301);
     /// FN-DSA-1024.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const FN_DSA_1024: Self = Self(0x0302);
     /// Budlum BPQS level 5 (research; reserved).
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const BPQS_L5: Self = Self(0x0401);
     /// X25519MLKEM768, RFC 10024.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const X25519_MLKEM768: Self = Self(0x1001);
     /// HPKE KEM MLKEM768-X25519 (code point 0x647a).
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const HPKE_MLKEM768_X25519: Self = Self(0x1002);
     /// ML-KEM-1024, FIPS 203.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const ML_KEM_1024: Self = Self(0x1003);
     /// BudZero STARK, version 2.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const BUDZERO_STARK_V2: Self = Self(0x2001);
 
     /// First identifier of the range held for the NIST additional-signature
     /// round-3 candidates.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const NIST_ADDITIONAL_FIRST: u16 = 0x0500;
     /// Last identifier of that range.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const NIST_ADDITIONAL_LAST: u16 = 0x05FF;
 
     /// Big-endian wire form. Signed preimages use this, never a length.
@@ -76,7 +76,7 @@ impl SchemeId {
 
     /// Whether the identifier is inside the reserved NIST candidate range.
     #[must_use]
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const fn is_nist_additional(self) -> bool {
         self.0 >= Self::NIST_ADDITIONAL_FIRST && self.0 <= Self::NIST_ADDITIONAL_LAST
     }
@@ -148,7 +148,7 @@ impl SchemeStatus {
 
     /// The byte a status travels as in a snapshot and in the registry commitment.
     #[must_use]
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const fn to_byte(self) -> u8 {
         match self {
             Self::Reserved => 0,
@@ -160,7 +160,7 @@ impl SchemeStatus {
 
     /// The status of a byte, `None` for a byte no status uses.
     #[must_use]
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::Reserved),
@@ -179,7 +179,7 @@ impl SchemeStatus {
 
     /// Whether new objects of this scheme may be created.
     #[must_use]
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const fn signs(self) -> bool {
         matches!(self, Self::Active)
     }
@@ -187,7 +187,7 @@ impl SchemeStatus {
 
 /// One row of the scheme table.
 #[derive(Debug, Clone, Copy)]
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub struct SchemeInfo {
     /// Wire identifier.
     pub id: SchemeId,
@@ -208,7 +208,7 @@ pub struct SchemeInfo {
 }
 
 /// The scheme table of section 6.5. Sorted by identifier.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const SCHEMES: &[SchemeInfo] = &[
     SchemeInfo {
         id: SchemeId::ED25519,
@@ -372,10 +372,10 @@ impl SuiteId {
     /// ML-DSA-65 + Ed25519. Validator block, evidence and PoA.
     pub const VALIDATOR: Self = Self(0x0002);
     /// FN-DSA-1024 + Ed25519. Second user suite, reserved.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const USER_FN_DSA: Self = Self(0x0003);
     /// SLH-DSA-SHAKE-128s + Ed25519. Emergency validator suite.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub const EMERGENCY_VALIDATOR: Self = Self(0x0004);
 
     /// Big-endian wire form.
@@ -400,7 +400,7 @@ impl SuiteId {
 
 /// One row of the suite table.
 #[derive(Debug, Clone, Copy)]
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub struct SuiteInfo {
     /// Wire identifier.
     pub id: SuiteId,
@@ -415,7 +415,7 @@ pub struct SuiteInfo {
 }
 
 /// The suite table of section 6.5. Sorted by identifier.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const SUITES: &[SuiteInfo] = &[
     SuiteInfo {
         id: SuiteId::USER,
@@ -506,7 +506,7 @@ impl std::fmt::Display for SchemeError {
 impl std::error::Error for SchemeError {}
 
 /// The domain tag of the registry commitment.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const REGISTRY_COMMITMENT_TAG: &[u8] = b"BDLM_SCHEME_REGISTRY_V1";
 
 /// The scheme and suite statuses of a chain.
@@ -614,7 +614,7 @@ impl SchemeStatusRegistry {
 
     /// The status of a suite, `None` when unlisted.
     #[must_use]
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn suite_status(&self, id: SuiteId) -> Option<SchemeStatus> {
         self.suites.get(&id.0).copied()
     }
@@ -627,7 +627,7 @@ impl SchemeStatusRegistry {
 
     /// Whether new objects of this scheme may be created.
     #[must_use]
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn scheme_signs(&self, id: SchemeId) -> bool {
         self.scheme_status(id).is_some_and(SchemeStatus::signs)
     }

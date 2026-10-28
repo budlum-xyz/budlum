@@ -343,13 +343,13 @@ fn verify_signature(
 }
 
 /// Context of a multisig approval: the node verifies V6 owner signatures under it.
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
 pub const MULTISIG_CTX: &[u8] = crypto::ctx::TX_V6;
 /// Context of a social-recovery guardian approval.
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
 pub const RECOVERY_CTX: &[u8] = crypto::ctx::IDENTITY_V2;
 /// Context of a private-transfer spend authorization.
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
 pub const PRIVATE_TRANSFER_CTX: &[u8] = crypto::ctx::PRIVATE_TRANSFER_V1;
 
 /// Guardian-based social recovery policy.
@@ -894,7 +894,7 @@ pub mod wasm_bindings {
     ///). The words stay inside the wasm instance; only the address and
     /// signed transactions leave it.
     #[wasm_bindgen]
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
     pub struct BrowserWallet {
         inner: super::Wallet,
     }
@@ -932,7 +932,7 @@ pub mod wasm_bindings {
         /// # Errors
         ///
         /// A recipient that is not 32 bytes of hex.
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
         pub fn sign_transfer(
             &self,
             to_hex: &str,
@@ -967,7 +967,7 @@ pub mod wasm_bindings {
     /// The `bud_sendRawTransaction` body of a signed transaction.
     #[wasm_bindgen]
     #[must_use]
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
     pub fn send_raw_transaction_body(signed_json: &str) -> String {
         super::rpc::send_raw_transaction(signed_json)
     }
@@ -975,7 +975,7 @@ pub mod wasm_bindings {
     /// The `bud_getNonce` body of an address.
     #[wasm_bindgen]
     #[must_use]
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
     pub fn get_nonce_body(address_hex: &str) -> String {
         super::rpc::get_nonce(address_hex)
     }
@@ -983,7 +983,7 @@ pub mod wasm_bindings {
     /// The `bud_chainId` body.
     #[wasm_bindgen]
     #[must_use]
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
     pub fn chain_id_body() -> String {
         super::rpc::chain_id()
     }
@@ -994,7 +994,7 @@ pub mod wasm_bindings {
     ///
     /// The node's error, or a result that is not a number.
     #[wasm_bindgen]
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
     pub fn quantity_result(answer: &str) -> Result<u64, JsError> {
         super::rpc::quantity_result(answer).map_err(|e| JsError::new(&e))
     }
@@ -1243,7 +1243,7 @@ impl Wallet {
 
     /// Sign under an explicit FIPS 204 context from [`crypto::ctx`].
     #[must_use]
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
     pub fn sign_for(&self, ctx: &[u8], message: &[u8]) -> SignatureBytes {
         sign_message(&self.signing_key, ctx, message)
     }
@@ -1255,7 +1255,7 @@ impl Wallet {
     }
 
     /// Verify under an explicit FIPS 204 context from [`crypto::ctx`].
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
     pub fn verify_for(
         public_key: &PublicKeyBytes,
         ctx: &[u8],

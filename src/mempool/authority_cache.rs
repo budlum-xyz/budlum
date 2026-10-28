@@ -17,7 +17,7 @@ use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, VecDeque};
 
 /// The default capacity, in entries.
-/// exposed for: mempool surface — admission paths read these with the mempool wiring wave.
+/// exposed for: mempool surface - admission paths read these with the mempool wiring wave.
 pub const DEFAULT_CAPACITY: usize = 16_384;
 
 type Key = ([u8; 32], [u8; 32]);

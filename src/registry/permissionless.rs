@@ -246,7 +246,7 @@ pub struct SlashOutcome {
 }
 
 /// Maximum active delegation positions and pending exits retained in live state.
-/// WIRING: registry surface — the delegation door that reads it lands with its wiring wave.
+/// WIRING: registry surface - the delegation door that reads it lands with its wiring wave.
 pub const MAX_DELEGATIONS: usize = 100_000;
 // The unbonding period, the commission cap and the per-epoch commission
 // change limit are economic values (K9): they live in `RegistryParams`
@@ -272,7 +272,7 @@ pub struct DelegationUnbonding {
 /// not been claimed yet. Consensus state: the entry moves value that already
 /// left the reward pool, so every node has to agree on it exactly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-/// WIRING: registry surface — the delegation door that reads it lands with its wiring wave.
+/// WIRING: registry surface - the delegation door that reads it lands with its wiring wave.
 pub struct ClaimableReward {
     pub delegator: Address,
     pub validator: Address,

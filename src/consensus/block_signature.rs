@@ -16,7 +16,7 @@ use crate::crypto::scheme::{SchemeStatusRegistry, SuiteId};
 
 /// Why a block signature was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave - production callers land with that wave.
 pub enum BlockSignatureError {
     /// The public key or signature bytes do not decode.
     Malformed(String),
@@ -40,7 +40,7 @@ impl From<CompositeError> for BlockSignatureError {
 ///
 /// [`CompositeError`] when the suite is not signable under the genesis statuses or a component
 /// fails to sign.
-/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave - production callers land with that wave.
 pub fn sign_with_context(
     keypair: &CompositeKeypair,
     context: &[u8],
@@ -132,7 +132,7 @@ pub fn verify_poa(
 /// # Errors
 ///
 /// See [`verify_with_context`].
-/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave - production callers land with that wave.
 pub fn verify_evidence(
     registry: &SchemeStatusRegistry,
     signer: &[u8; 32],

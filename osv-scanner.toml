@@ -111,4 +111,4 @@ reason = "GHSA-qwgh-2vcv-g2f7 requires a panicking caller-supplied compress call
 
 [[IgnoredVulns]]
 id = "RUSTSEC-2026-0173"
-reason = "proc-macro-error2 unmaintained (a maintenance warning, not a vulnerability); a proc-macro helper reached only through hax-lib-macros at compile time, no runtime surface."
+reason = "proc-macro-error2 unmaintained (a maintenance warning, not a vulnerability); a proc-macro helper reached only through a third-party macro crate at compile time, no runtime surface."
