@@ -25,17 +25,23 @@ use hpke::{
 use zeroize::Zeroizing;
 
 /// HPKE KEM identifier of MLKEM768-X25519.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const HPKE_KEM_ID: u16 = 0x647a;
 /// HPKE KDF identifier of HKDF-SHA256.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const HPKE_KDF_ID: u16 = 0x0001;
 /// HPKE AEAD identifier of ChaCha20-Poly1305.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const HPKE_AEAD_ID: u16 = 0x0003;
 
 /// Length of a KEM public key: ML-KEM-768 (1,184) plus X25519 (32).
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const HPKE_PUBLIC_KEY_LEN: usize = 1216;
 /// Length of the encapsulated key: ML-KEM-768 ciphertext (1,088) plus X25519 (32).
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const HPKE_ENCAPPED_KEY_LEN: usize = 1120;
 /// Length of the KEM secret key, which is also its derivation seed.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const HPKE_SECRET_KEY_LEN: usize = 32;
 
 /// Length of the Poly1305 tag the AEAD appends.
