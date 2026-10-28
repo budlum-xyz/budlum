@@ -344,6 +344,10 @@ fn a_transfer_row_opened_by_a_local_lock_cannot_be_minted_through_a_relayer_resu
     let message = lock_event.message.expect("lock carries its message");
 
     state.add_balance(&owner, 1_000);
+    // The gate refusal only surfaces for a transaction that passes the
+    // balance check first: the relayer is the signer here, so the fixture
+    // funds it the way the accepting tests do.
+    state.add_balance(&relayer_addr(), 1_000);
     let recipient_before = state.get_balance(&recipient);
     let relayer_before = state.get_balance(&relayer_addr());
 
@@ -359,11 +363,13 @@ fn a_transfer_row_opened_by_a_local_lock_cannot_be_minted_through_a_relayer_resu
         .external_roots
         .insert(ExternalChain::Custom(0xC0DE).domain_id(), root);
 
-    let err = Executor::apply_transaction(&mut state, &tx)
+    let err = Executor::apply_transaction_checked(&mut state, &tx)
         .expect_err("a local lock cannot be settled through a relayer result");
-    assert!(
-        err.contains("relayer_bridge_effect_requires_domain_event"),
-        "the refusal must come from the domain-event gate, got: {err}"
+    assert_eq!(
+        err.code(),
+        "relayer_bridge_effect_requires_domain_event",
+        "the refusal must come from the domain-event gate, got: {}",
+        err.message()
     );
     let transfer = state
         .bridge_state
@@ -427,6 +433,10 @@ fn a_custom_domain_cannot_settle_value_through_a_relayer_result() {
         .expect("lock succeeds");
     let _message = lock_event.message.expect("lock carries its message");
     state.add_balance(&owner, 1_000);
+    // The gate refusal only surfaces for a transaction that passes the
+    // balance check first: the relayer signs this transaction, so the
+    // fixture funds it before the apply.
+    state.add_balance(&relayer_addr(), 1_000);
     let owner_before = state.get_balance(&owner);
     let recipient_before = state.get_balance(&recipient);
 
@@ -459,11 +469,13 @@ fn a_custom_domain_cannot_settle_value_through_a_relayer_result() {
         .external_roots
         .insert(ExternalChain::Custom(0xC0DE).domain_id(), root);
 
-    let err = Executor::apply_transaction(&mut state, &tx)
+    let err = Executor::apply_transaction_checked(&mut state, &tx)
         .expect_err("a burn carried by a relayer result cannot unlock value");
-    assert!(
-        err.contains("relayer_bridge_effect_requires_domain_event"),
-        "the refusal must come from the domain-event gate, got: {err}"
+    assert_eq!(
+        err.code(),
+        "relayer_bridge_effect_requires_domain_event",
+        "the refusal must come from the domain-event gate, got: {}",
+        err.message()
     );
     let kept = state
         .bridge_state
