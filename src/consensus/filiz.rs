@@ -25,15 +25,20 @@ use zeroize::Zeroize;
 /// Links in a full chain (`L = 2^20`).
 pub const FILIZ_CHAIN_LENGTH: u64 = 1 << 20;
 /// One stored link per this many positions (32 KiB for a full chain).
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub const FILIZ_CHECKPOINT_INTERVAL: u64 = 1024;
 /// A validator registers a new chain once fewer links than this remain.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub const FILIZ_EXHAUSTION_FLOOR: u64 = 1 << 16;
 /// Epochs between a registration and the first proposal it can open.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub const FILIZ_ACTIVATION_DELAY_EPOCHS: u64 = 3;
 /// Links in the chain of a development or test key set. Mainnet registrations
 /// carry [`FILIZ_CHAIN_LENGTH`]; a full chain costs a million hashes to build.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub const FILIZ_DEV_CHAIN_LENGTH: u64 = 1 << 12;
 /// Checkpoint interval of a development chain.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub const FILIZ_DEV_CHECKPOINT_INTERVAL: u64 = 1 << 6;
 
 const LINK_TAG: &[u8] = b"BDLM_FILIZ_LINK_V1";
@@ -44,6 +49,7 @@ const EPOCH_TAG: &[u8] = b"BDLM_FILIZ_EPOCH_V1";
 pub type Link = [u8; 32];
 
 /// The identity a chain is bound to: the validator address bytes.
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub type ValidatorId = [u8; 32];
 
 fn absorb(hasher: &mut Sha3_256, field: &[u8]) {
@@ -53,6 +59,7 @@ fn absorb(hasher: &mut Sha3_256, field: &[u8]) {
 
 /// `x_{j+1}` from `x_j`, for one validator.
 #[must_use]
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub fn next_link(validator: &ValidatorId, x: &Link) -> Link {
     let mut hasher = Sha3_256::new();
     absorb(&mut hasher, LINK_TAG);
@@ -63,6 +70,7 @@ pub fn next_link(validator: &ValidatorId, x: &Link) -> Link {
 
 /// Whether `reveal` is the preimage of `commitment` for this validator.
 #[must_use]
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub fn reveal_matches(validator: &ValidatorId, commitment: &Link, reveal: &Link) -> bool {
     next_link(validator, reveal) == *commitment
 }
@@ -104,6 +112,7 @@ pub fn epoch_randomness(chain_id: u64, epoch: u64, reveals: &[Link]) -> [u8; 32]
 
 /// Why a chain could not be built or advanced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub enum FilizError {
     /// The length is zero, above [`FILIZ_CHAIN_LENGTH`], or not a multiple of
     /// the checkpoint interval.
@@ -153,6 +162,7 @@ impl FilizChain {
     /// # Errors
     ///
     /// Never for the fixed parameters.
+    /// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
     pub fn new_dev(validator: ValidatorId, seed: Link) -> Result<Self, FilizError> {
         Self::with_parameters(
             validator,
@@ -169,6 +179,7 @@ impl FilizChain {
     ///
     /// [`FilizError::BadLength`] unless `0 < length <= FILIZ_CHAIN_LENGTH`,
     /// `interval > 0` and `interval` divides `length`.
+    /// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
     pub fn with_parameters(
         validator: ValidatorId,
         seed: Link,
@@ -225,6 +236,7 @@ impl FilizChain {
     /// # Errors
     ///
     /// [`FilizError::Exhausted`] when no link is left.
+    /// WIRING: the reveal tick calls this through the health and authority loop - the production caller lands with the filiz wiring wave.
     pub fn next_reveal(&self) -> Result<Link, FilizError> {
         if self.spent >= self.length {
             return Err(FilizError::Exhausted);
@@ -303,6 +315,7 @@ impl std::fmt::Debug for FilizChain {
 
 /// The chain side: one validator's registered commitment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub struct FilizCommitment {
     validator: ValidatorId,
     commitment: Link,

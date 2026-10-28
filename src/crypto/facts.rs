@@ -157,6 +157,7 @@ impl CryptoObserver for NullObserver {
 
 /// A scheme and how many times it was observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub struct ObservedCount {
     /// What was seen.
     pub scheme: ObservedScheme,
@@ -182,6 +183,7 @@ impl CryptoFacts {
     }
 
     /// Adds `count` observations of `scheme`. The count saturates.
+    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn record_many(&mut self, scheme: ObservedScheme, count: u64) {
         if count == 0 {
             return;

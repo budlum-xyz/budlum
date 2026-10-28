@@ -60,6 +60,7 @@ fn field<'a>(answer: &'a str, key: &str) -> Option<&'a str> {
 /// # Errors
 ///
 /// The answer carries an `error`, or no `result`.
+/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
 pub fn string_result(answer: &str) -> Result<String, String> {
     if answer.contains("\"error\":") && !answer.contains("\"error\":null") {
         return Err(format!("the node refused: {answer}"));
@@ -74,6 +75,7 @@ pub fn string_result(answer: &str) -> Result<String, String> {
 /// # Errors
 ///
 /// As [`string_result`], or a result that is not a number.
+/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
 pub fn quantity_result(answer: &str) -> Result<u64, String> {
     let text = string_result(answer)?;
     match text.strip_prefix("0x") {

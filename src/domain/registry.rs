@@ -89,6 +89,7 @@ impl ConsensusDomainRegistry {
     /// across every restart. Every other registration shape check still
     /// runs: a malformed stored record is refused here exactly as a
     /// malformed fresh registration would be.
+    /// WIRING: domain surface — the producer/registry doors that read it land with their wiring wave.
     pub fn restore_persisted(&mut self, domain: ConsensusDomain) -> Result<(), String> {
         self.register_inner(domain, false)
     }
