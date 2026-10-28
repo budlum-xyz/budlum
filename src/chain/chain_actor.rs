@@ -3083,7 +3083,7 @@ impl ChainActor {
     }
 
     fn social_delete_rpc_mutation_error() -> String {
-        "social delete changes state-root bearing rows and cannot be applied over RPC; it must ride a block transaction".into()
+        "social delete changes state-root bearing rows and cannot be applied over RPC; submit StorageTx::SocialDelete through bud_sendRawTransaction".into()
     }
 
     fn run_storage_maintenance(&mut self, block_height: u64) {
