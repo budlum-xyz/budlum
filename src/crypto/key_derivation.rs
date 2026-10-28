@@ -36,24 +36,32 @@ use zeroize::Zeroizing;
 pub const ENTROPY_LEN: usize = 32;
 
 /// The length of the root secret `E`.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const ROOT_LEN: usize = 64;
 
 /// The SLH-DSA-SHAKE-256s seed length (three `n = 32` values).
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const SLH_SEED_LEN: usize = 96;
 
 /// Tag of the root secret.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const ROOT_TAG: &[u8] = b"BDLM_KDF_ROOT_V1";
 /// Tag of the ML-DSA-87 branch.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const MLDSA87_TAG: &[u8] = b"BDLM_KDF_MLDSA87_V1";
 /// Tag of the Ed25519 branch.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const ED25519_TAG: &[u8] = b"BDLM_KDF_ED25519_V1";
 /// Tag of the SLH-DSA-SHAKE-256s branch.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const SLHDSA256S_TAG: &[u8] = b"BDLM_KDF_SLHDSA256S_V1";
 /// Tag of the X-Wing branch.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const XWING_TAG: &[u8] = b"BDLM_KDF_XWING_V1";
 
 /// Why a derivation failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub enum KdfError {
     /// The entropy is not 32 bytes (24 words).
     EntropyLength(usize),
@@ -147,24 +155,28 @@ impl RootSecret {
 
     /// The ML-DSA-87 seed `xi` of `(account, index)`.
     #[must_use]
+    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn xi_mldsa87(&self, account: u32, index: u32) -> Zeroizing<[u8; 32]> {
         self.branch::<32>(MLDSA87_TAG, account, index)
     }
 
     /// The Ed25519 seed of `(account, index)`.
     #[must_use]
+    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn seed_ed25519(&self, account: u32, index: u32) -> Zeroizing<[u8; ED25519_SEED_LEN]> {
         self.branch::<ED25519_SEED_LEN>(ED25519_TAG, account, index)
     }
 
     /// The SLH-DSA-SHAKE-256s seed of `(account, index)`.
     #[must_use]
+    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn seed_slh_dsa_256s(&self, account: u32, index: u32) -> Zeroizing<[u8; SLH_SEED_LEN]> {
         self.branch::<SLH_SEED_LEN>(SLHDSA256S_TAG, account, index)
     }
 
     /// The X-Wing seed of `(account, index)`.
     #[must_use]
+    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn seed_xwing(&self, account: u32, index: u32) -> Zeroizing<[u8; 32]> {
         self.branch::<32>(XWING_TAG, account, index)
     }

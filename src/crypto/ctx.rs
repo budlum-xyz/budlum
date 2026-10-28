@@ -47,6 +47,7 @@ pub const POA_V2: &[u8] = b"BDLM/POA/V2";
 /// Storage deal and channel.
 pub const STORAGE_V2: &[u8] = b"BDLM/STORAGE/V2";
 /// Pollen.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const POLLEN_V2: &[u8] = b"BDLM/POLLEN/V2";
 /// Identity registry.
 pub const IDENTITY_V2: &[u8] = b"BDLM/IDENTITY/V2";
@@ -55,12 +56,14 @@ pub const PEER_V1: &[u8] = b"BDLM/PEER/V1";
 /// Recovery key (SLH-DSA).
 pub const RECOVERY_V1: &[u8] = b"BDLM/RECOVERY/V1";
 /// Filiz commitment record.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const FILIZ_V1: &[u8] = b"BDLM/FILIZ/V1";
 /// Canary proof.
 pub const CANARY_V1: &[u8] = b"BDLM/CANARY/V1";
 /// Reseal certificate.
 pub const RESEAL_V1: &[u8] = b"BDLM/RESEAL/V1";
 /// Release signature.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const RELEASE_V1: &[u8] = b"BDLM/RELEASE/V1";
 
 /// V5 user transaction (ML-DSA-87 alone). Devnet only: TxV7 replaces it.
@@ -114,6 +117,7 @@ pub const TABLE: &[&[u8]] = &[
 
 /// Registered extras for signing surfaces that exist today and have no row in
 /// table.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const EXTRAS: &[&[u8]] = &[
     TX_V5,
     TX_V6,
