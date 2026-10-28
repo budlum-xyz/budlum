@@ -16,6 +16,12 @@ interface Vm {
     function prank(address sender) external;
     function deal(address who, uint256 amount) external;
     function chainId(uint256 newChainId) external;
+    /// Mock a callee's response: every call to `callee` (any calldata when
+    /// `data` is empty) returns `returnData` instead of running code at the
+    /// address. The mock places no code at the address, so the verifier's
+    /// constructor probes still see a reserved address as codeless; the test
+    /// suite uses it to present the BLS suite on a profile that lacks it.
+    function mockCall(address callee, bytes calldata data, bytes calldata returnData) external;
 }
 
 /// @notice A minimal test base: the cheat-code handle and assertions that

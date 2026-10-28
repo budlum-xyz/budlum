@@ -82,6 +82,7 @@ impl BlockBudget {
     /// # Errors
     ///
     /// [`BudgetError::TxTooLarge`] or [`BudgetError::OverBudget`]; nothing is charged on error.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn charge_tx(
         &mut self,
         body_bytes: usize,

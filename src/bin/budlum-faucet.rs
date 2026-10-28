@@ -487,7 +487,7 @@ fn keygen(out: &str) -> Result<(), String> {
     let mut file = options
         .open(out)
         .map_err(|e| format!("cannot create {out} (it is never overwritten): {e}"))?;
-    file.write_all(hex::encode(&*seed).as_bytes())
+    file.write_all(hex::encode(*seed).as_bytes())
         .and_then(|()| file.write_all(b"\n"))
         .map_err(|e| format!("cannot write {out}: {e}"))?;
     let address = WalletKeyPair::from_seed(&seed).address();

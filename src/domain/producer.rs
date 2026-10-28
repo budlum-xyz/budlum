@@ -314,6 +314,9 @@ pub fn build_poa_commitment(
         spec.domain.id,
         spec.height,
         &spec.block_hash,
+        &spec.state_root,
+        &spec.tx_root,
+        &spec.event_root,
         &std::collections::BTreeMap::new(),
     );
     let mut signatures = Vec::with_capacity(signers.len());

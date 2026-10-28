@@ -38,6 +38,7 @@ pub fn install_default_provider() {
 ///
 /// Fails when the provider rejects TLS 1.3, which does not happen with the
 /// bundled provider.
+/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
 pub fn client_config(roots: RootCertStore) -> Result<ClientConfig, rustls::Error> {
     Ok(
         ClientConfig::builder_with_provider(Arc::new(hybrid_only_provider()))

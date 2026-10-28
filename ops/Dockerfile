@@ -51,6 +51,12 @@ COPY crates/note-packing/ ./crates/note-packing/
 # Optional feature-gated research crate (`bpqs-research`); path dependencies
 # must exist in the build context even when their feature is off.
 COPY crates/bpqs/ ./crates/bpqs/
+# The BIP-39 wordlist is compiled straight into the wallet crate
+# (`mod bip39_wordlist` in `crates/wallet-core/src/lib.rs`), so a context
+# without the crate cannot build the node's wallet feature at all: the
+# include resolves a path that does not exist in the image. Path
+# dependencies are copied, not vendored - same rule as note-packing above.
+COPY crates/wallet-core/ ./crates/wallet-core/
 
 # Is the compiler really the pinned version: BEFORE the build, inside the image.
 # Without this line a binary produced by the wrong compiler would be published

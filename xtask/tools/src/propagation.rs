@@ -22,6 +22,7 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::fmt::Write;
 use std::path::Path;
 
 const DOC: &str = "docs/pq/PROPAGATION.md";
@@ -206,28 +207,28 @@ pub fn render(params: &Params) -> String {
          testnet once it runs at full witness budget.\n\n",
     );
     out.push_str("| Parameter | Value |\n|---|---|\n");
-    out.push_str(&format!("| Nodes | {} |\n", params.nodes));
-    out.push_str(&format!("| Peers per node | {} |\n", params.degree));
-    out.push_str(&format!(
-        "| One-way link latency | {} to {} ms |\n",
+    let _ = writeln!(out, "| Nodes | {} |", params.nodes);
+    let _ = writeln!(out, "| Peers per node | {} |", params.degree);
+    let _ = writeln!(
+        out,
+        "| One-way link latency | {} to {} ms |",
         params.min_latency_ms, params.max_latency_ms
-    ));
-    out.push_str(&format!(
-        "| Uplink per node | {} Mbit/s |\n",
-        params.uplink_mbit
-    ));
-    out.push_str(&format!(
-        "| Validation before relay | {} ms |\n",
+    );
+    let _ = writeln!(out, "| Uplink per node | {} Mbit/s |", params.uplink_mbit);
+    let _ = writeln!(
+        out,
+        "| Validation before relay | {} ms |",
         params.validate_ms
-    ));
-    out.push_str(&format!("| Body budget | {BODY_BUDGET} B |\n"));
-    out.push_str(&format!("| Target | p95 < {TARGET_P95_MS} ms |\n\n"));
+    );
+    let _ = writeln!(out, "| Body budget | {BODY_BUDGET} B |");
+    let _ = write!(out, "| Target | p95 < {TARGET_P95_MS} ms |\n\n");
     out.push_str(
         "| Witness budget (B) | Block (B) | p95 (ms) | Meets target |\n|---|---|---|---|\n",
     );
     for row in &rows {
-        out.push_str(&format!(
-            "| {} | {} | {} | {} |\n",
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} |",
             row.witness,
             BODY_BUDGET + row.witness,
             row.p95_ms,
@@ -236,15 +237,18 @@ pub fn render(params: &Params) -> String {
             } else {
                 "no"
             }
-        ));
+        );
     }
     out.push('\n');
     match chosen {
-        Some(witness) => out.push_str(&format!(
-            "Result: the largest witness budget that meets the target is **{witness} bytes**.\n"
-        )),
+        Some(witness) => {
+            let _ = writeln!(
+                out,
+                "Result: the largest witness budget that meets the target is **{witness} bytes**."
+            );
+        }
         None => {
-            out.push_str("Result: no witness budget meets the target under these parameters.\n")
+            out.push_str("Result: no witness budget meets the target under these parameters.\n");
         }
     }
     out
@@ -291,7 +295,7 @@ pub fn self_test() -> Result<String, String> {
     };
     let small = arrivals(&params, 10_000);
     let large = arrivals(&params, 3_000_000);
-    if small.iter().any(|t| *t == u64::MAX) {
+    if small.contains(&u64::MAX) {
         return Err("a node was never reached".into());
     }
     if small.iter().zip(&large).any(|(s, l)| s > l) {

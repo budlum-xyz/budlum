@@ -1,3 +1,4 @@
+//! WIRING: unwired - verify_chain is reached in this tree only through adapter.rs and evm/verify.rs, both of which declare themselves unwired; the relayer wave wires it.
 //! Minimal Ethereum block header decode + chain-link + N-confirmation finality.
 //!
 //! Sync-committee light-client finality = **F10.3** (PoS, BLS12-381 sync-aggregate).

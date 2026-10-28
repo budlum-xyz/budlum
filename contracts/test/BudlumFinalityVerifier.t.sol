@@ -21,10 +21,12 @@ contract FraudVerifierStub is IExternalFraudProofVerifier {
     }
 }
 
-/// F01-F06 negative tests. The default
-/// profile runs on Cancun, which has neither the BLS nor the ML-DSA
-/// precompile, so every attestation takes the optimistic path. The
-/// deployment rule (item 2): no deployment while any of these is red.
+/// F01-F06 negative tests. The default profile runs on Cancun, which has
+/// neither the BLS nor the ML-DSA precompile: an attestation with no
+/// verification path at all is refused, and the window tests deploy a
+/// verifier against mocked BLS precompiles to exercise the BLS-only regime
+/// (ML-DSA still absent). The deployment rule (item 2): no deployment while
+/// any of these is red.
 contract BudlumFinalityVerifierTest is Harness {
     uint64 internal constant CHAIN = 45_261;
     uint256 internal constant WINDOW = 10;
@@ -65,6 +67,23 @@ contract BudlumFinalityVerifierTest is Harness {
         });
     }
 
+    /// A verifier constructed where only the BLS suite answers: pairing,
+    /// G1 add and map-Fp-to-G1 mocked on the reserved addresses (Cancun has
+    /// none of them), ML-DSA left absent. The constructor probes the pairing
+    /// while the mocks are active, so `hasBlsPrecompile` latches true and
+    /// `hasMlDsaPrecompile` stays false - the BLS-only regime. The mocks
+    /// place no code at the addresses, so the probes still see them as
+    /// codeless reserved addresses.
+    function _blsOnlyVerifier() internal returns (BudlumFinalityVerifier) {
+        bytes memory g1 = new bytes(128);
+        vm.mockCall(address(0x0b), bytes(""), g1);
+        vm.mockCall(address(0x10), bytes(""), g1);
+        vm.mockCall(address(0x0f), bytes(""), abi.encode(uint256(1)));
+        return new BudlumFinalityVerifier(
+            CHAIN, WINDOW, address(fraud), keccak256(committee), keccak256(generator), keccak256(mlDsaKey)
+        );
+    }
+
     // F01: the trust anchor is the constructor; zero hashes and an EOA fraud
     // verifier are refused.
     function test_F01_constructor_refuses_zero_key_hashes() public {
@@ -81,15 +100,27 @@ contract BudlumFinalityVerifierTest is Harness {
 
     // F02: a missing precompile leaves the attestation pending, never accepted,
     // until the window closes.
-    function test_F02_missing_precompiles_keep_the_attestation_pending() public {
-        bytes32 digest = verifier.verify(_attestation(42, bytes32(uint256(7))));
-        assertTrue(!verifier.isAccepted(digest), "pending is not accepted");
+    // F02: a chain with no verification precompile for either half refuses
+    // the attestation outright; it does not open a window nothing could
+    // ever have checked.
+    function test_F02_an_attestation_with_no_verification_path_is_refused() public {
+        vm.expectPartialRevert(BudlumFinalityVerifier.NoVerificationPath.selector);
+        verifier.verify(_attestation(42, bytes32(uint256(7))));
+    }
+
+    // F02 (BLS-only regime): with the classical half verified and ML-DSA
+    // still absent, the post-quantum half takes the window and settles after
+    // it, the event's weaker guarantee made explicit by the pending state.
+    function test_F02_a_chain_without_ml_dsa_keeps_the_attestation_pending() public {
+        BudlumFinalityVerifier bls = _blsOnlyVerifier();
+        bytes32 digest = bls.verify(_attestation(42, bytes32(uint256(7))));
+        assertTrue(!bls.isAccepted(digest), "pending is not accepted");
         vm.expectPartialRevert(BudlumFinalityVerifier.ChallengeWindowOpen.selector);
-        verifier.settle(digest);
+        bls.settle(digest);
         vm.roll(block.number + WINDOW);
-        verifier.settle(digest);
-        assertTrue(verifier.isAccepted(digest), "accepted after the window");
-        assertTrue(verifier.heightFinal(42), "height final");
+        bls.settle(digest);
+        assertTrue(bls.isAccepted(digest), "accepted after the window");
+        assertTrue(bls.heightFinal(42), "height final");
     }
 
     // F03: the probes do not mistake an empty address for a precompile.
@@ -115,35 +146,39 @@ contract BudlumFinalityVerifierTest is Harness {
 
     // F05: a proven fraud is terminal: no settle, no re-verify.
     function test_F05_a_proven_fraud_is_terminal() public {
+        BudlumFinalityVerifier bls = _blsOnlyVerifier();
         Attestation memory a = _attestation(42, bytes32(uint256(7)));
-        bytes32 digest = verifier.verify(a);
+        bytes32 digest = bls.verify(a);
         fraud.set(true);
-        verifier.challenge(digest, hex"01");
+        bls.challenge(digest, hex"01");
         vm.roll(block.number + WINDOW);
         vm.expectPartialRevert(BudlumFinalityVerifier.ChallengeResolved.selector);
-        verifier.settle(digest);
+        bls.settle(digest);
         vm.expectPartialRevert(BudlumFinalityVerifier.AlreadyFraudulent.selector);
-        verifier.verify(a);
+        bls.verify(a);
     }
 
     function test_F05_a_rejected_fraud_proof_leaves_the_window_open() public {
-        bytes32 digest = verifier.verify(_attestation(42, bytes32(uint256(7))));
+        BudlumFinalityVerifier bls = _blsOnlyVerifier();
+        bytes32 digest = bls.verify(_attestation(42, bytes32(uint256(7))));
         vm.expectPartialRevert(BudlumFinalityVerifier.FraudProofRejected.selector);
-        verifier.challenge(digest, hex"01");
+        bls.challenge(digest, hex"01");
     }
 
     // F06: one pending claim per height.
     function test_F06_a_second_root_for_a_pending_height_is_refused() public {
-        verifier.verify(_attestation(42, bytes32(uint256(7))));
+        BudlumFinalityVerifier bls = _blsOnlyVerifier();
+        bls.verify(_attestation(42, bytes32(uint256(7))));
         vm.expectPartialRevert(BudlumFinalityVerifier.PendingAttestation.selector);
-        verifier.verify(_attestation(42, bytes32(uint256(8))));
+        bls.verify(_attestation(42, bytes32(uint256(8))));
     }
 
     function test_F06_a_conflicting_root_after_finality_is_refused() public {
-        bytes32 digest = verifier.verify(_attestation(42, bytes32(uint256(7))));
+        BudlumFinalityVerifier bls = _blsOnlyVerifier();
+        bytes32 digest = bls.verify(_attestation(42, bytes32(uint256(7))));
         vm.roll(block.number + WINDOW);
-        verifier.settle(digest);
+        bls.settle(digest);
         vm.expectPartialRevert(BudlumFinalityVerifier.ConflictingRoot.selector);
-        verifier.verify(_attestation(42, bytes32(uint256(8))));
+        bls.verify(_attestation(42, bytes32(uint256(8))));
     }
 }

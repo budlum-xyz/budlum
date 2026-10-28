@@ -296,12 +296,11 @@ fn prose_of(line: &str) -> String {
     let mut rest = line;
     while let Some(start) = rest.find("<!--") {
         out.push_str(&rest[..start]);
-        match rest[start..].find("-->") {
-            Some(end) => rest = &rest[start + end + 3..],
-            None => {
-                rest = "";
-                break;
-            }
+        if let Some(end) = rest[start..].find("-->") {
+            rest = &rest[start + end + 3..];
+        } else {
+            rest = "";
+            break;
         }
     }
     out.push_str(rest);

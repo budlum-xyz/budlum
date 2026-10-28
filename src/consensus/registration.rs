@@ -1,3 +1,4 @@
+//! WIRING: unwired - verify_registration is reached only from the registration tests in this tree; the block path validates registrations through its own inline check.
 //! The validator key binding of a registration.
 //!
 //! A validator's address is its Ed25519 public key. Its primary signing key is ML-DSA-65. The

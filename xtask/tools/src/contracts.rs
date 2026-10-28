@@ -15,6 +15,7 @@
 //! config file.
 
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -106,7 +107,9 @@ pub fn write_addresses(text: &str, written: &BTreeMap<&str, String>) -> String {
             .flatten()
             .and_then(|(key, _)| written.get(key.trim()).map(|v| (key.trim(), v)));
         match replaced {
-            Some((key, value)) => out.push_str(&format!("{key} = \"{value}\"")),
+            Some((key, value)) => {
+                let _ = write!(out, "{key} = \"{value}\"");
+            }
             None => out.push_str(raw),
         }
         out.push('\n');

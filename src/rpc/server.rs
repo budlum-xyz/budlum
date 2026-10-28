@@ -3584,18 +3584,12 @@ impl BudlumApiServer for RpcServer {
         // event is filed under, so a sink sees who spoke rather than a caller's
         // claim about it.
         let actor = auth.derived_owner().map_err(grant_auth_error)?;
-        // Bump the revoke generation BEFORE the chain mutation: a frame or
-        // open call whose grant question is in flight right now would
-        // otherwise apply a stale `true` after this revoke commits. The
-        // bump invalidates every in-flight answer; the reveal paths refuse
-        // and retry against the new state. A revoke that fails below keeps
-        // the bump - one harmless retry is the price of closing the race.
-        {
-            let mut gw = self.reveal_gateway.lock().map_err(|_| {
-                ErrorObjectOwned::owned(-32603, "reveal gateway lock poisoned", None::<()>)
-            })?;
-            gw.bump_revoke_generation();
-        }
+        // No gateway state moves before the chain has accepted the revoke:
+        // an unauthorised attempt reaches this boundary, is refused at
+        // `revoke_view_grant` below, and must not perturb what in-flight
+        // frame and open calls read. A revoke that does land drops this
+        // content's sessions after the chain call, and the reveal paths ask
+        // the chain again before they emit.
         let revoked = self
             .chain
             .revoke_view_grant(grant_id, auth, at_epoch)

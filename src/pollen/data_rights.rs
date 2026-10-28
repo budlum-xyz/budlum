@@ -76,6 +76,7 @@ impl EncryptionPolicy {
     }
 
     /// The post-quantum default: KEM 0x647a with the full public key size.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn post_quantum(
         version: u32,
         max_grant_duration_blocks: u64,

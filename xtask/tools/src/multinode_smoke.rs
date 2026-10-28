@@ -21,7 +21,7 @@
 //!    its own `/metrics` inside the container.
 //! 7. Every one of the four validators produced at least one block: `PoS`
 //!    leadership rotates by VRF, it is not one node producing for everyone
-//!.
+//!    .
 //! 8. `bud_getStatus.finalizedHeight` is above 0 and grows: finality
 //!    certificates form at the checkpoints.
 //! 9. A validator joins while the chain runs: node5, funded at genesis but

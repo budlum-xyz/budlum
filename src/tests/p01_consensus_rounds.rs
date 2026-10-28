@@ -201,8 +201,7 @@ mod p01_consensus_rounds_tests {
         engine.note_block_seen(&parent.hash, parent.timestamp);
         if let Err(error) = engine.validate_block(&block, &[parent], &state) {
             assert!(
-                !round_not_elapsed(&error.0)
-                    && !error.0.contains("claimed too early"),
+                !round_not_elapsed(&error.0) && !error.0.contains("claimed too early"),
                 "an elapsed round must clear the pricing gates, got: {error:?}"
             );
         }

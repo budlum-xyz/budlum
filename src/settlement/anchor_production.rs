@@ -614,6 +614,22 @@ impl AnchorEmission {
         })
     }
 
+    /// The same constructor in a build without [`wallet-ml-dsa`](crate): the
+    /// devnet pipeline is ML-DSA keys, so the method still exists and still
+    /// refuses - fail closed instead of leaving the caller with a name that
+    /// only sometimes resolves (cargo-hack builds every feature combo).
+    ///
+    /// # Errors
+    ///
+    /// [`AnchorError::ProductionBlocked`]: the feature that provides the
+    /// devnet anchor keys is not enabled in this build.
+    #[cfg(not(feature = "wallet-ml-dsa"))]
+    pub fn devnet(_chain_id: u64, _log_path: std::path::PathBuf) -> Result<Self, AnchorError> {
+        Err(AnchorError::ProductionBlocked {
+            blocker: "wallet-ml-dsa-feature-required-for-devnet-anchors",
+        })
+    }
+
     /// The production pipeline. The grant comes from [`enforce_production`];
     /// without it the constructor does not exist.
     #[must_use]
@@ -793,6 +809,7 @@ impl AnchorEmission {
     ///
     /// [`AnchorError::Ledger`] when no ledger is loaded or the pair is no
     /// evidence.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn report_equivocation(
         &mut self,
         first: &PqAnchor,

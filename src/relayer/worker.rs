@@ -269,6 +269,7 @@ impl RelayerWorker {
     /// from its Address V3, which replaces the address the worker was built
     /// with so the nonce and the sender agree.
     #[must_use]
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn with_account(
         mut self,
         account: Arc<crate::crypto::key_derivation::UserAccount>,

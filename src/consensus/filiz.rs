@@ -215,6 +215,7 @@ impl FilizChain {
 
     /// Whether the validator should register a new chain.
     #[must_use]
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn needs_rotation(&self) -> bool {
         self.remaining() < FILIZ_EXHAUSTION_FLOOR.min(self.length)
     }

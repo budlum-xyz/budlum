@@ -231,6 +231,7 @@ pub fn vote_message_epoch(vote_msg: &[u8]) -> Option<u64> {
 /// chain id sits directly before the epoch in the preimage, so the two readers
 /// walk the same prefix through `vote_preimage_after_chain_id` and cannot drift
 /// apart.
+/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
 pub fn vote_message_chain_id(vote_msg: &[u8]) -> Option<u64> {
     let scheme = BLS_SCHEME_RFC9380_V1.as_bytes();
     let rest = vote_msg

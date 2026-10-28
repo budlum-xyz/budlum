@@ -1074,12 +1074,27 @@ fn run_validator_init(
 }
 
 /// Sign `tx_type` from `keys` against the node at `rpc_url` and send it.
+/// How `send_signed` signs a validator transaction.
+///
+/// `Auto` picks V7 when the key set carries an ML-DSA-65 key - the form a
+/// mainnet node admits from a validator registered with that key. `Enrol`
+/// always signs the Ed25519-authorised legacy form: enrolment happens before
+/// any ML-DSA-65 key is registered, and a V7 validator transaction from an
+/// unregistered sender is refused at the binding gate (both halves of an
+/// unregistered pair are chosen by whoever presents them).
+#[derive(Clone, Copy)]
+enum ValidatorSigning {
+    Auto,
+    Enrol,
+}
+
 fn send_signed(
     rpc_url: &str,
     keys: &budlum_core::crypto::primitives::ValidatorKeys,
     amount: u64,
     fee: u64,
     tx_type: TransactionType,
+    signing: ValidatorSigning,
 ) -> Result<String, String> {
     let from = keys.address();
     let nonce_value = rpc_call(rpc_url, "bud_getNonce", serde_json::json!([from.to_hex()]))?;
@@ -1097,8 +1112,11 @@ fn send_signed(
         tx_type,
     );
     // A key set with an ML-DSA-65 key signs the V7 validator form,
-    // the only one a mainnet node admits; a legacy set signs V4.
-    if keys.pq_key.is_some() {
+    // the only one a mainnet node admits; a legacy set signs V4. Enrolment
+    // always signs V4: the V7 binding gate refuses a validator transaction
+    // from a sender with no registered ML-DSA-65 key, which is exactly the
+    // state `bud validator join` starts from.
+    if keys.pq_key.is_some() && matches!(signing, ValidatorSigning::Auto) {
         use rand::Rng;
         let keypair = keys.composite_keypair().map_err(|e| e.to_string())?;
         let mut rnd = [0u8; 32];
@@ -1133,7 +1151,14 @@ fn run_validator_join(
     let registration = keys
         .consensus_key_registration(chain_id)
         .map_err(|e| format!("consensus keys: {e}"))?;
-    let staked = send_signed(rpc_url, &keys, stake, fee, TransactionType::Stake)?;
+    let staked = send_signed(
+        rpc_url,
+        &keys,
+        stake,
+        fee,
+        TransactionType::Stake,
+        ValidatorSigning::Enrol,
+    )?;
     println!("stake sent: {staked}");
     let registered = send_signed(
         rpc_url,
@@ -1141,6 +1166,7 @@ fn run_validator_join(
         0,
         fee,
         TransactionType::RegisterConsensusKeys(registration),
+        ValidatorSigning::Enrol,
     )?;
     println!("consensus keys sent: {registered}");
     println!(
@@ -1176,6 +1202,7 @@ fn run_validator_filiz(
             commitment: chain.commitment(),
             length: chain.length(),
         },
+        ValidatorSigning::Auto,
     )?;
     println!("Filiz registration sent: {sent}");
     println!(
@@ -1204,6 +1231,7 @@ fn run_validator_commission(
         TransactionType::SetValidatorCommission {
             commission_ppm: rate_ppm,
         },
+        ValidatorSigning::Auto,
     )?;
     println!("commission sent: {sent}");
     Ok(())

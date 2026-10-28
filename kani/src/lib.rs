@@ -255,7 +255,6 @@ pub fn merkle_rebuild_root_u64(
     Some(cur)
 }
 
-
 // ---------------------------------------------------------------------------
 // PQ signature length classification (mirrors `crypto::primitives`)
 // ---------------------------------------------------------------------------

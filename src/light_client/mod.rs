@@ -254,6 +254,7 @@ impl LightClient {
 
     /// Whether this client refuses BLS-only checkpoints.
     #[must_use]
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub const fn requires_pq(&self) -> bool {
         self.require_pq
     }

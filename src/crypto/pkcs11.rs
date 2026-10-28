@@ -1433,6 +1433,7 @@ impl Pkcs11PqToken {
     ///
     /// [`CryptoError::KeyGeneration`] when the token lacks the 3.2 mechanism,
     /// refuses the template, or returns a public key of the wrong length.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn generate_key(
         self: &Arc<Self>,
         label: &str,

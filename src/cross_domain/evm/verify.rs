@@ -1,3 +1,4 @@
+//! WIRING: unwired - verify_evm_receipt's production caller is adapter.rs, which declares itself unwired in this tree; the observed relayer path that wires it lands with its wave.
 //! F10.2 security core: `verify_evm_receipt`, the deterministic orchestrator.
 //!
 //! Combines the steps of RFC section 4.1 (the ETH -> Budlum mint flow) into a

@@ -127,9 +127,9 @@ mod tests {
     /// The schoolbook product modulo `X^256 + 1`: `X^256 = -1`.
     fn negacyclic(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
         let mut out = [0u64; N];
-        for i in 0..N {
-            for j in 0..N {
-                let term = a[i] * b[j] % Q;
+        for (i, &ai) in a.iter().enumerate() {
+            for (j, &bj) in b.iter().enumerate() {
+                let term = ai * bj % Q;
                 let k = i + j;
                 if k < N {
                     out[k] = (out[k] + term) % Q;

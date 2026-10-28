@@ -570,6 +570,7 @@ impl ChainHandle {
 
     /// Read `count` contiguous local blocks starting at `from`, in one
     /// round trip. Returns fewer than `count` when the chain is shorter.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub async fn get_blocks_range(&self, from: u64, count: usize) -> Vec<Block> {
         let (tx, rx) = oneshot::channel();
         let _ = self

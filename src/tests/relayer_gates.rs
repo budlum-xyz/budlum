@@ -311,17 +311,22 @@ fn test_bns_register_fee_enforced_regression_m4() {
 
 /// The bridge mint inside a `RelayerResult` asks the supply ceiling.
 ///
-/// A `RelayerResult` carrying a `BridgeLock` message is the block-path
-/// counterpart of `Blockchain::mint_bridge_transfer_from_verified_event`: it
-/// mints the arriving asset on Budlum. The RPC path credits the recipient and
-/// the relayer through `try_mint_balance`, which refuses to cross
-/// `BUD_TOTAL_SUPPLY`. The executor path credited both through
-/// `try_add_balance`, which only guards `u64` overflow, so a chain already at
-/// the ceiling still minted: the cap held on one entry point and not on the
-/// other. With the state one unit under the cap, a 100-unit bridge mint must
-/// be refused, and neither the recipient nor the relayer may be credited.
+/// A transfer row opened by a local lock cannot be settled through a bare
+/// `RelayerResult`.
+///
+/// The `RelayerResult` handler used to mint from its own message field plus
+/// any transfer row carrying that message id, gated only by the external-root
+/// anchor map. Nothing bound the message to a lock the source chain actually
+/// emitted: any account could open a row with its own outbound
+/// `BridgeTx::Lock` (owner and recipient its own, amount debited) and then
+/// settle the same lock back to itself here, crediting the units on Budlum
+/// while the lock's claim on the target domain stayed live - the same locked
+/// units spent twice. Value effects now go only through the door that proves
+/// the domain event against a committed block hash, so this path refuses the
+/// message outright: the row stays locked, the replay id stays unspent and
+/// neither the recipient nor the relayer is credited.
 #[test]
-fn relayer_result_bridge_mint_is_bound_to_the_supply_ceiling() {
+fn a_transfer_row_opened_by_a_local_lock_cannot_be_minted_through_a_relayer_result() {
     use crate::cross_domain::bridge::AssetId;
 
     let owner = Address::from([0x0B; 32]);
@@ -338,91 +343,11 @@ fn relayer_result_bridge_mint_is_bound_to_the_supply_ceiling() {
         .expect("lock succeeds");
     let message = lock_event.message.expect("lock carries its message");
 
-    // Everything except one unit is already committed.
-    let headroom_before = state.supply_capacity_remaining();
-    state.add_balance(&owner, headroom_before - 1);
-    assert_eq!(state.supply_capacity_remaining(), 1);
-    // The relayer pays the tx fee out of that last unit.
-    let fee_payer_balance = state.get_balance(&relayer_addr());
-    state.add_balance(&relayer_addr(), 1);
-    assert_eq!(state.supply_capacity_remaining(), 0);
+    state.add_balance(&owner, 1_000);
+    let recipient_before = state.get_balance(&recipient);
+    let relayer_before = state.get_balance(&relayer_addr());
 
     let mut res = make_result("0xLOCK_ON_ETHEREUM");
-    res.message = Some(message);
-    seal_result_proof(&mut res);
-    let tx = relayer_tx(res, 1);
-    let root = match &tx.tx_type {
-        TransactionType::RelayerResult(result) => result.external_state_root,
-        _ => unreachable!(),
-    };
-    state
-        .external_roots
-        .insert(ExternalChain::Custom(0xC0DE).domain_id(), root);
-
-    let err = Executor::apply_transaction(&mut state, &tx)
-        .expect_err("a bridge mint above the supply ceiling must be refused");
-    assert!(
-        err.contains("supply cap"),
-        "the refusal must come from the ceiling check, got: {err}"
-    );
-    assert_eq!(
-        state.get_balance(&recipient),
-        0,
-        "the recipient must not be credited past the ceiling"
-    );
-    assert_eq!(
-        state.get_balance(&relayer_addr()),
-        fee_payer_balance + 1,
-        "the relayer fee must not be credited past the ceiling"
-    );
-}
-
-/// The mint is one supply event, checked once, before the bridge state moves.
-///
-/// The ceiling used to be asked credit by credit. With headroom for the
-/// recipient's share and not for the relayer's fee, the transfer was marked
-/// minted, the replay id was spent, the recipient was credited, and then the
-/// fee credit failed. The block producer's projection kept that half-applied
-/// state and went on validating later transactions against it. Now the whole
-/// `final_amount + fee` is checked first, and a refusal leaves the transfer
-/// locked, the replay id unspent and both balances untouched.
-#[test]
-fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
-    use crate::cross_domain::bridge::{AssetId, BridgeStatus};
-
-    let owner = Address::from([0x1B; 32]);
-    let recipient = Address::from([0x1C; 32]);
-    let mut state = AccountState::new();
-    let asset = AssetId([0x7B; 32]);
-    state
-        .bridge_state
-        .register_asset(asset, 1)
-        .expect("asset registers");
-    let (_transfer, lock_event) = state
-        .bridge_state
-        .lock(1, 2, 20, 0, asset, owner, recipient, 100, 1_000)
-        .expect("lock succeeds");
-    let message = lock_event.message.expect("lock carries its message");
-    let params = *state.registry.params();
-    let (final_amount, fee) = crate::cross_domain::bridge::split_bridge_fee(
-        crate::core::money::Bud::new(100),
-        params.bridge_relayer_fee_ppm,
-        params.bridge_relayer_min_fee,
-    )
-    .expect("100 units cover the minimum fee");
-    assert!(!fee.is_zero(), "the case needs a nonzero fee");
-
-    // Headroom for the recipient's share exactly, and nothing for the fee.
-    // Balances and the supply ceiling are u64 end to end, so the headroom
-    // arithmetic stays in u64: there is no widening to undo any more.
-    let headroom_before = state.supply_capacity_remaining();
-    let fill = headroom_before - final_amount.get() - 1;
-    state.add_balance(&owner, fill);
-    let fee_payer_balance = state.get_balance(&relayer_addr());
-    state.add_balance(&relayer_addr(), 1);
-    assert_eq!(state.supply_capacity_remaining(), final_amount.get());
-
-    let mut res = make_result("0xLOCK_ON_ETHEREUM_2");
     res.message = Some(message.clone());
     seal_result_proof(&mut res);
     let tx = relayer_tx(res, 1);
@@ -435,21 +360,20 @@ fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
         .insert(ExternalChain::Custom(0xC0DE).domain_id(), root);
 
     let err = Executor::apply_transaction(&mut state, &tx)
-        .expect_err("a mint whose fee does not fit under the ceiling must be refused");
-    assert!(err.contains("supply cap"), "got: {err}");
-    assert_eq!(state.get_balance(&recipient), 0, "recipient not credited");
-    assert_eq!(
-        state.get_balance(&relayer_addr()),
-        fee_payer_balance + 1,
-        "relayer neither credited nor charged"
+        .expect_err("a local lock cannot be settled through a relayer result");
+    assert!(
+        err.contains("relayer_bridge_effect_requires_domain_event"),
+        "the refusal must come from the domain-event gate, got: {err}"
     );
     let transfer = state
         .bridge_state
         .get_transfer(&message.message_id)
         .expect("the transfer row stays");
-    assert_eq!(
-        transfer.status,
-        BridgeStatus::Locked { domain: 1 },
+    assert!(
+        matches!(
+            transfer.status,
+            crate::cross_domain::bridge::BridgeStatus::Locked { .. }
+        ),
         "the lock is still open"
     );
     assert!(
@@ -460,6 +384,100 @@ fn a_bridge_mint_the_fee_does_not_fit_leaves_nothing_behind() {
             message.nonce
         ),
         "the replay high water is not advanced by a refused mint"
+    );
+    assert_eq!(
+        state.get_balance(&recipient),
+        recipient_before,
+        "recipient untouched"
+    );
+    assert_eq!(
+        state.get_balance(&relayer_addr()),
+        relayer_before,
+        "the relayer is not credited by the refused effect"
+    );
+}
+
+/// A custom, self-anchored domain cannot settle value through a relayer
+/// result either.
+///
+/// The anchor map entry only says which 32-byte root the domain's light
+/// client finalized; the result's message stays the caller's own field. For
+/// a `BridgeBurn` (the unlock side of the value bridge) the handler would
+/// have correlated the caller's message against an existing row and released
+/// the refund from nothing but that row - no domain event, no committed
+/// source block. The fail-closed gate refuses the message kind before any
+/// bridge state moves: with the chain's own anchor registered and a row
+/// present, the unlock still does not happen and no balance changes.
+#[test]
+fn a_custom_domain_cannot_settle_value_through_a_relayer_result() {
+    use crate::cross_domain::bridge::{AssetId, BridgeStatus};
+    use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams};
+
+    let owner = Address::from([0x1B; 32]);
+    let recipient = Address::from([0x1C; 32]);
+    let mut state = AccountState::new();
+    let asset = AssetId([0x7B; 32]);
+    state
+        .bridge_state
+        .register_asset(asset, 1)
+        .expect("asset registers");
+    let (transfer, lock_event) = state
+        .bridge_state
+        .lock(1, 2, 20, 0, asset, owner, recipient, 100, 1_000)
+        .expect("lock succeeds");
+    let _message = lock_event.message.expect("lock carries its message");
+    state.add_balance(&owner, 1_000);
+    let owner_before = state.get_balance(&owner);
+    let recipient_before = state.get_balance(&recipient);
+
+    let burn = CrossDomainMessage::new_correlated(
+        CrossDomainMessageParams {
+            source_domain: 1,
+            target_domain: ExternalChain::Custom(0xC0DE).domain_id(),
+            source_height: 9,
+            event_index: 0,
+            nonce: 0,
+            sender: owner,
+            recipient,
+            payload_hash: [0u8; 32],
+            kind: crate::cross_domain::message::MessageKind::BridgeBurn,
+            expiry_height: 0,
+        },
+        transfer.message_id,
+    );
+    let mut res = make_result("0xBURN_ON_ETHEREUM");
+    res.message = Some(burn);
+    seal_result_proof(&mut res);
+    let tx = relayer_tx(res, 1);
+    let root = match &tx.tx_type {
+        TransactionType::RelayerResult(result) => result.external_state_root,
+        _ => unreachable!(),
+    };
+    // The anchor the light client would have registered: consensus-owned in
+    // production, and still not enough to settle value from a result alone.
+    state
+        .external_roots
+        .insert(ExternalChain::Custom(0xC0DE).domain_id(), root);
+
+    let err = Executor::apply_transaction(&mut state, &tx)
+        .expect_err("a burn carried by a relayer result cannot unlock value");
+    assert!(
+        err.contains("relayer_bridge_effect_requires_domain_event"),
+        "the refusal must come from the domain-event gate, got: {err}"
+    );
+    let kept = state
+        .bridge_state
+        .get_transfer(&transfer.message_id)
+        .expect("the transfer row stays");
+    assert!(
+        matches!(kept.status, BridgeStatus::Locked { .. }),
+        "the lock is untouched"
+    );
+    assert_eq!(state.get_balance(&owner), owner_before, "owner untouched");
+    assert_eq!(
+        state.get_balance(&recipient),
+        recipient_before,
+        "recipient untouched"
     );
 }
 

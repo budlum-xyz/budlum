@@ -216,6 +216,9 @@ mod settlement_prod_tests {
             domain_id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.state_root,
+            &commitment.tx_root,
+            &commitment.event_root,
             &commitment.state_updates,
         );
         let mut signatures = Vec::new();

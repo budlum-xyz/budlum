@@ -268,7 +268,7 @@ jobs:
           else
             cargo test --release --manifest-path crates/wallet-core/Cargo.toml --lib pq_vectors_ -- --nocapture 2>&1 | tee "pq-$PQ_PLATFORM.txt"
           fi
-          grep -E "^PQ_VECTOR_DIGEST=[0-9a-f]{64}$" "pq-$PQ_PLATFORM.txt" | tail -1 | cut -d= -f2 > "pq-digest-$PQ_PLATFORM.hex"
+          grep -oE "PQ_VECTOR_DIGEST=[0-9a-f]{64}" "pq-$PQ_PLATFORM.txt" | tail -1 | cut -d= -f2 > "pq-digest-$PQ_PLATFORM.hex"
           test -s "pq-digest-$PQ_PLATFORM.hex"
           D=$(cat "pq-digest-$PQ_PLATFORM.hex")
           echo "PQ_VECTOR_DIGEST ($PQ_PLATFORM): $D"

@@ -1290,9 +1290,9 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // The word index is one-hot on expansion rows (and zero elsewhere), it rotates by
         // one each row, and `COL_MERKLE_HASH` is the last word of a path group.
         let mut oh_sum: AB::Expr = AB::Expr::ZERO;
-        for k in 0..4 {
-            builder.assert_bool(oh[k].clone());
-            oh_sum += oh[k].clone();
+        for o in oh.iter().take(4) {
+            builder.assert_bool(o.clone());
+            oh_sum += o.clone();
         }
         builder.assert_eq(oh_sum, is_expand.clone());
         let path_g: AB::Expr = is_expand.clone() - leafg.clone() - rootg.clone();
@@ -1357,8 +1357,8 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         }
         // The word this row reads is the slot of the buffer its index names.
         let mut buffered: AB::Expr = AB::Expr::ZERO;
-        for k in 0..4 {
-            buffered += oh[k].clone() * cu(COL_MERKLE_BUF + k);
+        for (k, o) in oh.iter().enumerate().take(4) {
+            buffered += o.clone() * cu(COL_MERKLE_BUF + k);
         }
         builder
             .when(is_expand.clone())
@@ -1469,8 +1469,8 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // index names, `diff` its difference from the word read, and `COL_MERKLE_EQ` is 1
         // exactly when they are equal (an inverse witness, as for `Eq`).
         let mut held: AB::Expr = AB::Expr::ZERO;
-        for k in 0..4 {
-            held += oh[k].clone() * cu(COL_MERKLE_CUR + k);
+        for (k, o) in oh.iter().enumerate().take(4) {
+            held += o.clone() * cu(COL_MERKLE_CUR + k);
         }
         let diff: AB::Expr = held - merkle_word.clone();
         let eq: AB::Expr = cur[COL_MERKLE_EQ].into();

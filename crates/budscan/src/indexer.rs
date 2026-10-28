@@ -187,11 +187,11 @@ mod tests {
             assert_eq!(path, "/v1/bns/ayaz.bud");
             Ok(ANSWER.to_string())
         });
-        let (resolved, proof) = resolver.resolve_bud("ayaz.bud").expect("resolves");
-        assert_eq!(resolved.name, "ayaz.bud");
-        assert_eq!(resolved.owner, [1u8; 32]);
-        assert_eq!(resolved.content_id, Some(ContentId([2u8; 32])));
-        assert!(!resolved.is_expired);
+        let (answer, proof) = resolver.resolve_bud("ayaz.bud").expect("resolves");
+        assert_eq!(answer.name, "ayaz.bud");
+        assert_eq!(answer.owner, [1u8; 32]);
+        assert_eq!(answer.content_id, Some(ContentId([2u8; 32])));
+        assert!(!answer.is_expired);
         assert_eq!(proof, BnsInclusionProof::None);
     }
 
