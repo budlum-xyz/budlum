@@ -85,8 +85,24 @@ jobs:
 
       # Deployment rule: no Sepolia deployment while any of
       # these is red.
-      - name: forge test through the Rust wrapper
-        run: cargo run --locked --manifest-path xtask/tools/Cargo.toml -- contracts test --offline
+      # Cancun carries neither EIP-2537 nor ML-DSA: refusal and pin tests run
+      # here, where a chain with no verification path must refuse.
+      - name: "forge test (cancun: refusals, pins, constructor)"
+        run: >-
+          cargo run --locked --manifest-path xtask/tools/Cargo.toml --
+          contracts test --offline
+          --no-match-test "a_chain_without_ml_dsa|test_F05_|test_F06_"
+
+      # The BLS-only challenge window needs the real pairing precompile:
+      # under prague the classical half verifies for the Rust-generated
+      # fixture and ML-DSA stays absent, which is the regime F02/F05/F06
+      # pin (pending -> challenge -> settle).
+      - name: "forge test (prague: BLS-only challenge window)"
+        run: >-
+          FOUNDRY_PROFILE=prague
+          cargo run --locked --manifest-path xtask/tools/Cargo.toml --
+          contracts test --offline
+          --match-test "a_chain_without_ml_dsa|test_F05_|test_F06_"
 
       # Dev EVM: deploy the parameterless contracts to a local anvil
       # chain from an unlocked dev account. No key is used or stored (K7).
