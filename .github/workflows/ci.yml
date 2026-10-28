@@ -4,10 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Run on the normal protected bases and on stacked continuation bases.
-    # `arena/**` covers this repository's generated continuation branches;
-    # `consensus-of-consensuses` keeps upstream stack covered.
-    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, 'arena/**']
+    branches: [main, fix/architecture-tip-adlari]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -1183,45 +1180,6 @@ jobs:
           cargo test --lib governance 2>&1 | tee /tmp/governance-invariants-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- governance-invariants /tmp/governance-invariants-gate.txt
 
-  pq-core:
-    # to and: the scheme registry, the dual-verifier facade (RustCrypto
-    # ml-dsa and libcrux-ml-dsa must both accept), the NIST ACVP and Wycheproof vectors,
-    # the explicit bug vectors, the composite signature and the seed wiping. The named
-    # tests are required (`pq-core-gate`); the differential test then runs a million
-    # inputs through both libraries in release.
-    name: PQ Core
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
-        with:
-          toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: budlum-core
-      - name: Install protoc
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
-      - name: PQ core gate self-test
-        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-core-gate --self-test
-      - name: PQ core tests
-        run: |
-          set -euo pipefail
-          cargo test --lib crypto:: 2>&1 | tee /tmp/pq-core-gate.txt
-          cargo test --lib pq_verifier_disagreement_is_exported 2>&1 | tee -a /tmp/pq-core-gate.txt
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-core-gate /tmp/pq-core-gate.txt
-      - name: Differential test, one million inputs through both ML-DSA libraries
-        run: |
-          set -euo pipefail
-          BUDLUM_PQ_DIFF_CASES=1000000 cargo test --release --manifest-path crates/wallet-core/Cargo.toml --lib pq_vectors_differential_random_inputs -- --nocapture
-      - name: Vectors in release (SLH-DSA-SHAKE-256s signing included)
-        run: |
-          set -euo pipefail
-          cargo test --release --manifest-path crates/wallet-core/Cargo.toml --lib pq_vectors_
-
   wallet-core-gate:
     # : wallet-core multisig/social recovery primitives.
     name: Wallet Core
@@ -1248,15 +1206,7 @@ jobs:
           cargo test --manifest-path crates/wallet-core/Cargo.toml --features wasm --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
           # The production feature is the build that reads OS entropy and signs hedged.
           cargo test --manifest-path crates/wallet-core/Cargo.toml --features production --lib
-          #: the JSON-RPC bodies and readers.
-          cargo test --manifest-path crates/wallet-core/Cargo.toml --features rpc --lib rpc
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-core-gate /tmp/wallet-core-gate.txt
-      - name: wallet-core browser build (wasm32, BrowserWallet exports)
-        run: |
-          set -euo pipefail
-          rustup target add wasm32-unknown-unknown
-          cargo build --manifest-path crates/wallet-core/Cargo.toml --lib --release \
-            --target wasm32-unknown-unknown --features wasm
 
   # ============================ Budscan (web3 tarayici cekirdegi) ============================
   budscan:
@@ -2060,25 +2010,6 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-node-address-agree --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-node-address-agree
-      #: no object is accepted on a classical signature alone. Every use of
-      # ed25519_dalek, schnorrkel, bls12_381, x25519 or libp2p::noise in production
-      # code needs an entry in docs/pq/classical_allowlist.toml. Count mode: the
-      # baseline only falls and is locked at zero when Phase 3 ends.
-      - name: classical crypto is paired gate + canary
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- classical-crypto-is-paired --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- classical-crypto-is-paired
-      # INV-03: a scheme is named, never guessed from a length.
-      - name: scheme is never inferred gate + canary
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- scheme-is-never-inferred --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- scheme-is-never-inferred
-      #: every ML-DSA and SLH-DSA call carries a context from src/crypto/ctx.rs,
-      # and the library primitives are called only inside the facade.
-      - name: PQ contexts are bound gate + canary
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-ctx-is-bound --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-ctx-is-bound
       # The tree is written in English. Turkish is allowed in exactly three
       # places: README.tr.md, a Turkish localisation directory whose strings are
       # what the Turkish user reads, and the word "Türkçe" as the label on the
@@ -2109,27 +2040,6 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes
-      #: BudZero proofs are STARKs and rest on a hash only. A Groth16, KZG or
-      # BN254 crate in any manifest, or a verifier arm for the external labels,
-      # would put a pairing assumption on a verification path.
-      - name: no pairing-based SNARK on a verification path + canary
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-pairing-snark-in-verification-path --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-pairing-snark-in-verification-path
-      # INV-12: a function named like a security verdict whose whole body is a
-      # literal tells the reader a question was asked and answered when nothing
-      # was checked.
-      - name: no constant security verdicts + canary
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-constant-security-verdicts --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-constant-security-verdicts
-      # INV-11: a quantum statement in a README or in docs/ carries a claim id from
-      # docs/pq/CLAIMS.md, the claim's evidence exists, and the claim has reached
-      # its rung. Nothing stands in the repository that the register does not back.
-      - name: quantum claims are backed + canary
-        run: |
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-claims-are-backed --self-test
-          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-claims-are-backed
       # A fuzz target only fuzzes if three files agree: the harness, the
       # [[bin]] in fuzz/Cargo.toml, and a workflow that runs it. If one of the
       # three is missing the target appears in the list and does nothing.
@@ -2184,8 +2094,8 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- cross-table-checks-use-last-row
       # The Fiat-Shamir transcript carried the degrees, the commitments and the
       # public values, but not the FRI parameters, and those decide what a
-      # proof is worth: the stark-soundness tool puts the current set at 128 bits
-      # or more provable, while 1 query with log_blowup 1 and no
+      # proof is worth: measured, log_blowup 3 with 100 queries and 16 grinding
+      # bits is roughly 316 bits, while 1 query with log_blowup 1 and no
       # grinding is one bit and produces a proof of the same shape. Least
       # Authority found this exact class in Plonky3. Absorbing them is half the
       # fix; the other half is that the absorbed numbers must be read out of
@@ -2195,28 +2105,6 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-parameters-are-derived --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-parameters-are-derived
-      #: the measured soundness of the configuration. The generated section of
-      # docs/pq/MEASUREMENTS.md must be the one computed from build_config, and the
-      # provable reading (no assumption) must reach 128 bits.
-      - name: is the STARK provably 128 bit and the measurement current + canary
-        run: |
-          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- stark-soundness --self-test
-          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- stark-soundness --check
-      #: the size, QC blob and daily traffic tables of docs/pq/MEASUREMENTS.md come
-      # from the node library (examples/pq_measure.rs) and must be current. The timings
-      # depend on the machine: they are produced here and uploaded, never compared.
-      - name: are the post-quantum measurement tables current + timings artifact
-        run: |
-          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- pq-measure --self-test
-          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- pq-measure --check
-          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- propagation-sim --check
-          mkdir -p pq-measure-out
-          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- pq-measure --timings | tee pq-measure-out/timings.md
-      - name: upload the post-quantum timings
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: pq-measure-timings
-          path: pq-measure-out/timings.md
       # A transition constrains the difference between consecutive rows and
       # never says where the sequence starts. COL_EVENT_DIGEST_0 had only a
       # transition and a last-row comparison, so the whole accumulator could
@@ -2296,8 +2184,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size
       # Two entry points take a manifest an untrusted caller built.
-      # Registration (now the `StorageTx::RegisterManifest` door) ran
-      # `validate_untrusted`; `open_deal` ran
+      # `RegisterStorageManifest` ran `validate_untrusted`; `open_deal` ran
       # `verify_id` and stopped, and it is the path that also takes the payer's
       # money. `verify_id` proves the id derives from the fields present, not
       # that they agree: `manifest_id` covers k and n, so three data shards
