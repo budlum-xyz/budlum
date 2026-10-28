@@ -384,7 +384,7 @@ pub fn slash_penalty(stake: u64, slash_ratio_fixed: u64) -> u64 {
     }
 }
 pub const QC_BLOB_TTL_EPOCHS: u64 = 10;
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const MAX_QC_BLOB_BYTES: usize = 1_048_576;
 pub const MAX_VOTES_PER_MSG: usize = 128;
 

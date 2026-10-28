@@ -40,7 +40,7 @@ impl UnsignedTransfer {
 
     /// The hash of the V7 composite transaction (`BDLM_TX_V7`).
     #[must_use]
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
     pub fn signing_hash_v7(&self) -> [u8; 32] {
         self.signing_hash_for(SIGNATURE_VERSION_V7, b"BDLM_TX_V7")
     }
@@ -120,7 +120,7 @@ pub fn signed_transfer_json(wallet: &Wallet, transfer: &UnsignedTransfer) -> Str
 /// # Errors
 ///
 /// The signing error text when the suite cannot sign.
-/// exposed for: the wallet crate's SDK surface — in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
 pub fn signed_transfer_v7_json(
     account: &crate::crypto::key_derivation::UserAccount,
     transfer: &UnsignedTransfer,

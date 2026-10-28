@@ -12,7 +12,7 @@ const DENOMINATOR: u128 = 2;
 
 /// The outcome of the rule for one batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
 pub enum PulDecision {
     /// Produce a Pul-Full aggregate for the batch.
     ProduceFull,
