@@ -4743,6 +4743,23 @@ impl Blockchain {
                     return None;
                 }
             };
+
+        // The block carried slashing evidence and the state move above
+        // applied it (same-chain only, exactly what apply_system_effects
+        // slashes): one counter step per applied evidence.
+        if let Some(ref m) = self.metrics {
+            if let Some(evidences) = &block.slashing_evidence {
+                let applied = evidences
+                    .iter()
+                    .filter(|e| {
+                        e.header1.chain_id == block.chain_id && e.header2.chain_id == block.chain_id
+                    })
+                    .count() as u64;
+                if applied > 0 {
+                    m.slashing_events_total.inc_by(applied);
+                }
+            }
+        }
         Self::apply_block_end_roots(&mut committed_state, &block, &self.chain, self.chain_id);
         block.state_root = committed_state.calculate_state_root();
         if self.sharding.is_active_at(block.index) {
@@ -5233,6 +5250,20 @@ impl Blockchain {
         let ai_outcomes_before = self.state.ai_registry.outcomes.len();
         let (mut commit_state, unfrozen_domains) =
             Self::apply_block_effects_with_unfreezes(&self.state, &block, &self.chain)?;
+
+        if let Some(ref m) = self.metrics {
+            if let Some(evidences) = &block.slashing_evidence {
+                let applied = evidences
+                    .iter()
+                    .filter(|e| {
+                        e.header1.chain_id == block.chain_id && e.header2.chain_id == block.chain_id
+                    })
+                    .count() as u64;
+                if applied > 0 {
+                    m.slashing_events_total.inc_by(applied);
+                }
+            }
+        }
 
         if block.index > 0 {
             Self::apply_block_end_roots(&mut commit_state, &block, &self.chain, self.chain_id);
