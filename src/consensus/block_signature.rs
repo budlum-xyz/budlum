@@ -79,6 +79,7 @@ pub fn sign_poa(
 /// # Errors
 ///
 /// See [`sign_with_context`].
+/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
 pub fn sign_evidence(
     keypair: &CompositeKeypair,
     digest: &[u8; 32],
@@ -151,6 +152,7 @@ pub fn verify_evidence(
 /// # Errors
 ///
 /// See [`sign_with_context`].
+/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
 pub fn sign_snapshot(
     keypair: &CompositeKeypair,
     manifest_digest: &[u8; 32],

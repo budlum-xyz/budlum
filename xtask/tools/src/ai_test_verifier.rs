@@ -17,6 +17,7 @@
 use crate::json::{self, Value};
 use crate::rpc;
 use std::collections::BTreeSet;
+use std::fmt::Write;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -32,7 +33,7 @@ pub fn test_output(input_commitment_hex: &str) -> Option<String> {
     let mut out = String::with_capacity(64);
     for i in 0..32 {
         let byte = u8::from_str_radix(text.get(i * 2..i * 2 + 2)?, 16).ok()?;
-        out.push_str(&format!("{:02x}", byte ^ 0xA5));
+        let _ = write!(out, "{:02x}", byte ^ 0xA5);
     }
     Some(out)
 }
@@ -72,7 +73,7 @@ pub fn run(root: &Path, args: &[&str]) -> Result<String, String> {
                 port = it
                     .next()
                     .and_then(|v| v.parse().ok())
-                    .ok_or("--port needs a number")?
+                    .ok_or("--port needs a number")?;
             }
             "--key-file" => key_file = it.next().copied(),
             "--password-file" => password_file = it.next().copied(),
@@ -80,7 +81,7 @@ pub fn run(root: &Path, args: &[&str]) -> Result<String, String> {
                 rounds = it
                     .next()
                     .and_then(|v| v.parse().ok())
-                    .ok_or("--rounds needs a number")?
+                    .ok_or("--rounds needs a number")?;
             }
             other => return Err(format!("ai-test-verifier: unknown argument `{other}`")),
         }

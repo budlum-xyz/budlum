@@ -211,7 +211,7 @@ fn poseidon_lanes(head: &[u64]) -> [u64; POSEIDON_WIDTH] {
 /// the key bit, left child in lanes 0..4 and right child in lanes 4..8.
 fn merkle_hash_lanes(step: &Step) -> Option<[u64; POSEIDON_WIDTH]> {
     let round = usize::from(step.merkle_round?);
-    if round % 4 != 3 || round < 4 || round >= bud_vm::MERKLE_ROOT_ROUND {
+    if round % 4 != 3 || !(4..bud_vm::MERKLE_ROOT_ROUND).contains(&round) {
         return None;
     }
     let level = round / 4 - 1;
