@@ -17,6 +17,7 @@
 //! not bound to those inputs inside the AIR; and the ML-DSA verification
 //! is not part of the trace. Both are the remaining
 //! work.
+//! WIRING: unwired - the AIR-shape helpers here are the proof-side surface its wave wires up; no production module calls them yet (the prover paths consume the concrete columns directly until that wave lands).
 
 use crate::keccak_chip::{prove_keccak_f, verify_keccak_f, KeccakChipError};
 use bud_proof::plonky3_prover::ChipProof;

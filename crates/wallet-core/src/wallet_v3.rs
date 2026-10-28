@@ -7,6 +7,7 @@
 //!
 //! A watch-only wallet holds no secret and derives no public key; it keeps the
 //! address list this wallet exports with [`WalletV3::address_list`].
+//! WIRING: unwired - the v3 wallet surface is the custody wave's; in-tree readers land with that wave (the crate binary and SDK callers are not wired yet).
 
 use crate::crypto::key_derivation::{RootSecret, UserAccount, ENTROPY_LEN};
 use crate::{entropy_to_mnemonic, mnemonic_to_entropy, WalletError};
