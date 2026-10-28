@@ -727,6 +727,10 @@ impl CanaryBook {
     ///
     /// The first rule the reveal breaks. A refused reveal leaves the book
     /// unchanged.
+    /// PARTIAL: allowed - the expiry sweep and the refusal are one act: an
+    /// expired commit is purged on its own way out, and restoring it would
+    /// keep a key that can never be revealed; the delay and proof refusals
+    /// above leave the map untouched.
     pub fn reveal(
         &mut self,
         height: u64,

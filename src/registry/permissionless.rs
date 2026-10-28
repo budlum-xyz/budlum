@@ -1204,10 +1204,12 @@ impl PermissionlessRegistry {
             .iter()
             .position(|reward| reward.delegator == delegator && reward.validator == validator)
             .ok_or_else(|| "no claimable reward for this delegator and validator".to_string())?;
-        let amount = self.claimable_rewards.remove(index).amount;
-        if amount == 0 {
+        // Decide before the remove: a zero reward refuses with its row still
+        // in place, so a failed claim cannot drop what it refused to pay.
+        if self.claimable_rewards[index].amount == 0 {
             return Err("the claimable reward is zero".into());
         }
+        let amount = self.claimable_rewards.remove(index).amount;
         Ok(amount)
     }
 
