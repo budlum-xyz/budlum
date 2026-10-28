@@ -57,7 +57,16 @@ fn f02_missing_verifiers_remain_pending_not_accepted() {
     assert!(source.contains("accepted[digest] = true;\n            rootAtHeight"));
     assert!(source.contains("accepted[digest] = true;\n        rootAtHeight"));
     assert!(source.contains("ChallengeWindowOpen"));
-    assert!(source.contains("marked accepted only when the window closes, via `settle`"));
+    // The acceptance sentence wraps across the comment's line break in the
+    // current source, so it is pinned as the two fragments it is written
+    // in — acceptance still happens only in `settle`, when the window
+    // closes.
+    assert!(source.contains("marked accepted only when the window"));
+    assert!(source.contains("closes, via `settle`"));
+    // And an attestation neither half could verify never reaches the
+    // window at all: the no-precompile chain is refused outright.
+    assert!(source.contains("if (!blsOk && !pqOk) {"));
+    assert!(source.contains("revert NoVerificationPath();"));
 }
 
 #[test]
