@@ -321,11 +321,15 @@ impl SignedPact {
     /// [`SignedRecordError::WrongSuite`] or [`SignedRecordError::SigningFailed`].
     pub fn sign(pact: PactRecord, signer: &dyn SuiteSigner) -> Result<Self, SignedRecordError> {
         if signer.suite() != PACT_SUITE {
-            return Err(SignedRecordError::WrongSuite { got: signer.suite() });
+            return Err(SignedRecordError::WrongSuite {
+                got: signer.suite(),
+            });
         }
         let signer_id = signer.signer_id();
         let payload = Self::payload(PACT_SUITE, &signer_id, &pact);
-        let signature = signer.sign(&payload).ok_or(SignedRecordError::SigningFailed)?;
+        let signature = signer
+            .sign(&payload)
+            .ok_or(SignedRecordError::SigningFailed)?;
         Ok(Self {
             pact,
             signer_id,
@@ -352,7 +356,6 @@ impl SignedPact {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -549,7 +552,13 @@ mod signed_tests {
     }
 
     impl SuiteVerifier for Toy {
-        fn verify(&self, _suite: u16, signer_id: &[u8; 32], payload: &[u8], signature: &[u8]) -> bool {
+        fn verify(
+            &self,
+            _suite: u16,
+            signer_id: &[u8; 32],
+            payload: &[u8],
+            signature: &[u8],
+        ) -> bool {
             mac(signer_id, payload) == signature
         }
     }
@@ -560,12 +569,18 @@ mod signed_tests {
 
     #[test]
     fn a_pact_is_signed_under_suite_0001_only() {
-        let good = Toy { suite: PACT_SUITE, id: [9u8; 32] };
+        let good = Toy {
+            suite: PACT_SUITE,
+            id: [9u8; 32],
+        };
         let signed = SignedPact::sign(pact(), &good).expect("suite 0x0001 signs");
         assert_eq!(signed.suite, 0x0001);
         assert_eq!(signed.verify(&good), Ok(()));
         // A validator-suite signer cannot sign a PACT.
-        let other = Toy { suite: 0x0002, id: [9u8; 32] };
+        let other = Toy {
+            suite: 0x0002,
+            id: [9u8; 32],
+        };
         assert_eq!(
             SignedPact::sign(pact(), &other),
             Err(SignedRecordError::WrongSuite { got: 0x0002 })
@@ -574,14 +589,20 @@ mod signed_tests {
 
     #[test]
     fn a_pact_signature_binds_the_record_the_signer_and_the_suite() {
-        let good = Toy { suite: PACT_SUITE, id: [9u8; 32] };
+        let good = Toy {
+            suite: PACT_SUITE,
+            id: [9u8; 32],
+        };
         let signed = SignedPact::sign(pact(), &good).expect("signs");
         let mut edited = signed.clone();
         edited.pact.ts_unix += 1;
         assert_eq!(edited.verify(&good), Err(SignedRecordError::BadSignature));
         let mut other_signer = signed.clone();
         other_signer.signer_id = [8u8; 32];
-        assert_eq!(other_signer.verify(&good), Err(SignedRecordError::BadSignature));
+        assert_eq!(
+            other_signer.verify(&good),
+            Err(SignedRecordError::BadSignature)
+        );
         let mut other_suite = signed;
         other_suite.suite = 0x0002;
         assert_eq!(

@@ -83,6 +83,7 @@ fn word_as_usize(w: &[u8; 32]) -> Result<usize, OutboundError> {
 /// # Errors
 ///
 /// [`OutboundError`] when the log is not exactly the outbound event.
+/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
 pub fn message_from_log(
     log: &EthLog,
     position: OutboundPosition,

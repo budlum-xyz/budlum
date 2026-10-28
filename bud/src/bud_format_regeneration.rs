@@ -283,11 +283,15 @@ impl SignedRegenerationResult {
         signer: &dyn SuiteSigner,
     ) -> Result<Self, SignedRecordError> {
         if signer.suite() != RESULT_SUITE {
-            return Err(SignedRecordError::WrongSuite { got: signer.suite() });
+            return Err(SignedRecordError::WrongSuite {
+                got: signer.suite(),
+            });
         }
         let validator = signer.signer_id();
         let payload = Self::payload(RESULT_SUITE, &validator, &record);
-        let signature = signer.sign(&payload).ok_or(SignedRecordError::SigningFailed)?;
+        let signature = signer
+            .sign(&payload)
+            .ok_or(SignedRecordError::SigningFailed)?;
         Ok(Self {
             record,
             validator,
@@ -362,7 +366,6 @@ impl ReputationLedger {
         Ok(*score)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -527,7 +530,13 @@ mod consensus_tests {
     }
 
     impl SuiteVerifier for Toy {
-        fn verify(&self, _suite: u16, signer_id: &[u8; 32], payload: &[u8], signature: &[u8]) -> bool {
+        fn verify(
+            &self,
+            _suite: u16,
+            signer_id: &[u8; 32],
+            payload: &[u8],
+            signature: &[u8],
+        ) -> bool {
             mac(signer_id, payload) == signature
         }
     }
@@ -551,8 +560,16 @@ mod consensus_tests {
         sorted.dedup();
         assert_eq!(sorted.len(), 8, "distinct");
         assert!(a.iter().all(|i| *i < 50));
-        assert_ne!(a, select_challenges(&[2u8; 32], 9, &list, 8), "randomness binds");
-        assert_ne!(a, select_challenges(&[1u8; 32], 10, &list, 8), "epoch binds");
+        assert_ne!(
+            a,
+            select_challenges(&[2u8; 32], 9, &list, 8),
+            "randomness binds"
+        );
+        assert_ne!(
+            a,
+            select_challenges(&[1u8; 32], 10, &list, 8),
+            "epoch binds"
+        );
     }
 
     #[test]
@@ -562,17 +579,28 @@ mod consensus_tests {
         let all = select_challenges(&[0u8; 32], 1, &pacts(3), 10);
         let mut sorted = all.clone();
         sorted.sort_unstable();
-        assert_eq!(sorted, vec![0, 1, 2], "asking for more than exist returns all");
+        assert_eq!(
+            sorted,
+            vec![0, 1, 2],
+            "asking for more than exist returns all"
+        );
     }
 
     #[test]
     fn a_result_is_signed_under_suite_0002_only() {
-        let validator = Toy { suite: RESULT_SUITE, id: [4u8; 32] };
-        let signed = SignedRegenerationResult::sign(record(RegenerationOutcome::Verified), &validator)
-            .expect("suite 0x0002 signs");
+        let validator = Toy {
+            suite: RESULT_SUITE,
+            id: [4u8; 32],
+        };
+        let signed =
+            SignedRegenerationResult::sign(record(RegenerationOutcome::Verified), &validator)
+                .expect("suite 0x0002 signs");
         assert_eq!(signed.suite, 0x0002);
         assert_eq!(signed.verify(&validator), Ok(()));
-        let wrong = Toy { suite: 0x0001, id: [4u8; 32] };
+        let wrong = Toy {
+            suite: 0x0001,
+            id: [4u8; 32],
+        };
         assert_eq!(
             SignedRegenerationResult::sign(record(RegenerationOutcome::Verified), &wrong),
             Err(SignedRecordError::WrongSuite { got: 0x0001 })
@@ -587,11 +615,15 @@ mod consensus_tests {
 
     #[test]
     fn reputation_moves_only_from_a_verified_signed_result() {
-        let validator = Toy { suite: RESULT_SUITE, id: [4u8; 32] };
+        let validator = Toy {
+            suite: RESULT_SUITE,
+            id: [4u8; 32],
+        };
         let provider = [7u8; 32];
         let mut ledger = ReputationLedger::new();
-        let good = SignedRegenerationResult::sign(record(RegenerationOutcome::Verified), &validator)
-            .expect("signs");
+        let good =
+            SignedRegenerationResult::sign(record(RegenerationOutcome::Verified), &validator)
+                .expect("signs");
         assert_eq!(ledger.apply(provider, &good, &validator), Ok(1));
         let bad = SignedRegenerationResult::sign(record(RegenerationOutcome::Mismatch), &validator)
             .expect("signs");

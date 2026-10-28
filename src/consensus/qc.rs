@@ -1,3 +1,4 @@
+//! WIRING: unwired - verify_against_blob is reached only from the certificate-replay tests in this tree; the quorum path itself verifies the aggregated signature, and this blob comparison is the cross-check the tests pin.
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -350,6 +351,7 @@ impl QcBlob {
     /// # Errors
     ///
     /// The encoding errors of [`Self::to_bytes`].
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn to_chunks(&self) -> Result<Vec<Vec<u8>>, String> {
         Ok(self
             .to_bytes()?

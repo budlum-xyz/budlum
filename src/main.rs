@@ -1425,43 +1425,45 @@ async fn main() {
     );
 
     // B.U.D. Storage Node Initialization (Monolithic Architecture)
-    let (storage_node, sharding_config, content_metrics_store): (
+    type StorageParts = (
         Option<Arc<bud_node::BudBitswap>>,
         Option<bud_node::ShardingConfig>,
         Option<Arc<dyn bud_node::ContentStore>>,
-    ) = if config.storage_enabled {
-        // Content bytes are node-local service state, not consensus state, but
-        // losing them on restart strands the manifests and active deals that
-        // the chain still advertises. Keep the store beside the chain DB and
-        // fail closed if it cannot be opened; silently falling back to memory
-        // would turn a restart into data loss again.
-        let content_path = std::path::Path::new(&config.db_path).with_extension("content");
-        let store = Arc::new(
-            bud_node::FileContentStore::with_default_capacity_at(&content_path).unwrap_or_else(
-                |error| {
-                    eprintln!(
-                        "Error: could not open persistent B.U.D. content store at {}: {error}",
-                        content_path.display()
-                    );
-                    std::process::exit(1);
-                },
-            ),
-        );
-        let bitswap = Arc::new(bud_node::BudBitswap::new(store.clone()));
+    );
+    let (storage_node, sharding_config, content_metrics_store): StorageParts =
+        if config.storage_enabled {
+            // Content bytes are node-local service state, not consensus state, but
+            // losing them on restart strands the manifests and active deals that
+            // the chain still advertises. Keep the store beside the chain DB and
+            // fail closed if it cannot be opened; silently falling back to memory
+            // would turn a restart into data loss again.
+            let content_path = std::path::Path::new(&config.db_path).with_extension("content");
+            let store = Arc::new(
+                bud_node::FileContentStore::with_default_capacity_at(&content_path).unwrap_or_else(
+                    |error| {
+                        eprintln!(
+                            "Error: could not open persistent B.U.D. content store at {}: {error}",
+                            content_path.display()
+                        );
+                        std::process::exit(1);
+                    },
+                ),
+            );
+            let bitswap = Arc::new(bud_node::BudBitswap::new(store.clone()));
 
-        let mut s_config = if config.mobile_mode {
-            bud_node::ShardingConfig::mobile_default()
+            let mut s_config = if config.mobile_mode {
+                bud_node::ShardingConfig::mobile_default()
+            } else {
+                bud_node::ShardingConfig::default()
+            };
+
+            s_config.replication_factor = config.storage_replication_factor;
+            s_config.mandatory = config.storage_mandatory_sharding;
+
+            (Some(bitswap), Some(s_config), Some(store))
         } else {
-            bud_node::ShardingConfig::default()
+            (None, None, None)
         };
-
-        s_config.replication_factor = config.storage_replication_factor;
-        s_config.mandatory = config.storage_mandatory_sharding;
-
-        (Some(bitswap), Some(s_config), Some(store))
-    } else {
-        (None, None, None)
-    };
 
     if let Some(store) = content_metrics_store {
         let metrics = metrics.clone();

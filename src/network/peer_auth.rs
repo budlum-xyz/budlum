@@ -1,15 +1,17 @@
-//! ML-DSA-65 peer identity bound to the TLS channel.
+//! WIRING: unwired - verify_peer_proof is reached only from the peer-auth tests in this tree; the handshake performs the same proof check inline.
+//! ML-DSA-65 peer identity proof (`EXPORTER-budlum-pq-auth-v1`).
 //!
-//! After the TLS 1.3 handshake each side signs the TLS exporter value
-//! (`EXPORTER-budlum-pq-auth-v1`, 32 bytes) together with both peer ids, under the FIPS 204
-//! context `BDLM/PEER/V1`. A man in the middle holds two different TLS sessions, so the exporter
-//! value it can present to either victim differs from the one the other side signed: the proof
-//! does not verify and the peer is dropped. A validator peer that has not proven its identity
-//! within [`PROOF_DEADLINE`] is dropped as well.
+//! After the TLS 1.3 handshake each side signs the TLS exporter value (32
+//! bytes) together with both peer ids, under the FIPS 204 context
+//! `BDLM/PEER/V1`. A man in the middle holds two different TLS sessions, so
+//! the exporter value it can present to either victim differs from the one
+//! the other side signed: the proof would not verify.
 //!
-//! This file is the pure part: the signed payload, the verification and the drop rule. The
-//! security upgrade wrapper that reads the exporter from the live session lives with the
-//! transport.
+//! The signed payload, verification and drop rule live here. The proof is
+//! not yet called from the transport, so it is not yet an enforced part of
+//! peer identity; this module documents the intended binding and tests its
+//! mechanics. [`PROOF_DEADLINE`] is the deadline the enforcement will apply
+//! once the transport wires the proof in.
 
 use std::time::Duration;
 
@@ -69,6 +71,7 @@ pub fn verify_peer_proof(
 /// Whether a connection must be dropped now: a validator peer that is still unproven after
 /// [`PROOF_DEADLINE`]. A peer that is not a validator is never dropped by this rule.
 #[must_use]
+/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
 pub fn must_drop(is_validator_peer: bool, proven: bool, connected_for: Duration) -> bool {
     is_validator_peer && !proven && connected_for >= PROOF_DEADLINE
 }

@@ -53,17 +53,13 @@ pub fn keccak_f_trace(inputs: &[[u64; 25]]) -> Result<RowMajorMatrix<Goldilocks>
 /// The input state of permutation `index`, read back from a chip trace.
 pub fn input_state(trace: &RowMajorMatrix<Goldilocks>, index: usize) -> [u64; 25] {
     let row = index * ROWS_PER_PERMUTATION;
-    read_state(trace, row, |y, x, limb| {
-        p3_keccak_air::input_limb((y * 5 + x) * U64_LIMBS + limb)
-    })
+    read_state(trace, row, cols::preimage)
 }
 
 /// The output state of permutation `index`, read back from a chip trace.
 pub fn output_state(trace: &RowMajorMatrix<Goldilocks>, index: usize) -> [u64; 25] {
     let row = index * ROWS_PER_PERMUTATION + (ROWS_PER_PERMUTATION - 1);
-    read_state(trace, row, |y, x, limb| {
-        p3_keccak_air::output_limb((y * 5 + x) * U64_LIMBS + limb)
-    })
+    read_state(trace, row, cols::output)
 }
 
 fn read_state(
@@ -86,6 +82,50 @@ fn read_state(
         }
     }
     state
+}
+
+/// Column indices into `KeccakCols` laid out `repr(C)` with `T = u8`, derived
+/// from the struct itself: `step_flags`, `export`, `preimage`, `a`, `c`,
+/// `c_prime`, `a_prime`, `a_prime_prime`, `a_prime_prime_0_0_bits`,
+/// `a_prime_prime_prime_0_0_limbs`.
+///
+/// `p3_keccak_air::input_limb` / `output_limb` are the SPONGE rate map: they
+/// `debug_assert!(i < RATE_LIMBS)` and this chip reads the whole 25-lane
+/// state, capacity included (the permutation AIR commits all of it). The
+/// layout is pinned by `=0.7.0` in Cargo.toml and by the const assert below,
+/// which is the guard that the numbers above were re-derived if the struct
+/// ever moves.
+mod cols {
+    use super::*;
+
+    /// Bytes after `step_flags` and `export`: the start of `preimage`.
+    const PREIMAGE: usize = NUM_ROUNDS + 1;
+    /// Start of `a_prime_prime` (bytes, `T = u8`).
+    const A_PRIME_PRIME: usize =
+        PREIMAGE + 25 * U64_LIMBS + 25 * U64_LIMBS + 5 * 64 + 5 * 64 + 5 * 5 * 64;
+    /// Start of `a_prime_prime_prime_0_0_limbs`.
+    const A_PRIME_PRIME_PRIME_0_0: usize = A_PRIME_PRIME + 25 * U64_LIMBS + 64;
+
+    const _: () = assert!(
+        NUM_KECCAK_COLS == A_PRIME_PRIME_PRIME_0_0 + U64_LIMBS,
+        "p3-keccak-air KeccakCols moved; re-derive the column constants from the struct"
+    );
+
+    /// The preimage cell of lane `(y, x)`, limb `limb`.
+    pub fn preimage(y: usize, x: usize, limb: usize) -> usize {
+        PREIMAGE + (y * 5 + x) * U64_LIMBS + limb
+    }
+
+    /// The output cell of lane `(y, x)`, limb `limb`: lane 0 is stored in the
+    /// dedicated tail register, the rest in `a_prime_prime`, matching
+    /// `KeccakCols::a_prime_prime_prime`.
+    pub fn output(y: usize, x: usize, limb: usize) -> usize {
+        if y == 0 && x == 0 {
+            A_PRIME_PRIME_PRIME_0_0 + limb
+        } else {
+            A_PRIME_PRIME + (y * 5 + x) * U64_LIMBS + limb
+        }
+    }
 }
 
 /// Proves the given permutations with the BudZero STARK parameters.
