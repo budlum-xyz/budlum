@@ -80,7 +80,7 @@ pub struct Plonky3Adapter;
 /// The STARK configuration of every BudZero proof, exposed so that an AIR outside the
 /// VM trace is proven and verified with
 /// the same field, hash, FRI parameters and transcript binding, never with a second set.
-/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
 pub type ChipStarkConfig = MyConfig;
 
 /// A proof of a chip AIR under [`ChipStarkConfig`].

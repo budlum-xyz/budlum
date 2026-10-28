@@ -727,7 +727,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    /// WIRING: chain surface — the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
     pub async fn import_pruned_segment(
         &self,
         blocks: Vec<Block>,
@@ -931,7 +931,7 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
-    /// WIRING: chain surface — the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
     pub async fn try_reorg(&self, fork: Vec<Block>) -> Result<bool, String> {
         let (res_tx, res_rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::TryReorg(fork, res_tx)).await;

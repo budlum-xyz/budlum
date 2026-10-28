@@ -141,7 +141,7 @@ struct StoreState {
 /// `MAX_CHUNK_BYTES` is refused, and when either bound is reached the
 /// oldest inserted chunks are evicted first.
 #[derive(Clone)]
-/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
 pub struct MemoryContentStore {
     inner: Arc<RwLock<StoreState>>,
     /// Maximum number of chunks to store.
@@ -170,7 +170,7 @@ impl MemoryContentStore {
 
     /// Create a store with default capacity (10,000 chunks, at most 2.5 GiB
     /// of data: 256 KiB per chunk on average).
-    /// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+    /// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
     pub fn with_default_capacity() -> Self {
         Self::new(10_000)
     }

@@ -18,16 +18,16 @@ use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 
 /// Trace rows used by one permutation.
-/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
 pub const ROWS_PER_PERMUTATION: usize = NUM_ROUNDS;
 
 /// Trace columns of the chip.
-/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
 pub const COLUMNS: usize = NUM_KECCAK_COLS;
 
 /// The most permutations one chip trace accepts. A proof over more rows is split by the
 /// caller; the bound keeps a hostile input from sizing the trace.
-/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
 pub const MAX_PERMUTATIONS: usize = 1 << 14;
 
 /// Why a chip operation was refused.
@@ -43,7 +43,7 @@ pub enum KeccakChipError {
 
 /// Builds the trace of the given permutation inputs (state words in the standard
 /// `x + 5 * y` order).
-/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
 pub fn keccak_f_trace(inputs: &[[u64; 25]]) -> Result<RowMajorMatrix<Goldilocks>, KeccakChipError> {
     if inputs.is_empty() {
         return Err(KeccakChipError::Empty);
@@ -55,14 +55,14 @@ pub fn keccak_f_trace(inputs: &[[u64; 25]]) -> Result<RowMajorMatrix<Goldilocks>
 }
 
 /// The input state of permutation `index`, read back from a chip trace.
-/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
 pub fn input_state(trace: &RowMajorMatrix<Goldilocks>, index: usize) -> [u64; 25] {
     let row = index * ROWS_PER_PERMUTATION;
     read_state(trace, row, cols::preimage)
 }
 
 /// The output state of permutation `index`, read back from a chip trace.
-/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
 pub fn output_state(trace: &RowMajorMatrix<Goldilocks>, index: usize) -> [u64; 25] {
     let row = index * ROWS_PER_PERMUTATION + (ROWS_PER_PERMUTATION - 1);
     read_state(trace, row, cols::output)
