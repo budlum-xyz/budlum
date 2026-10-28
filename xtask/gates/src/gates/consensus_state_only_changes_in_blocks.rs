@@ -11,9 +11,11 @@
 //!      mutation into blocks; it does not drop the fields from the root, which
 //!      would hide the divergence instead of fixing it.
 //!   2. `apply_pending_commitments` no longer writes account nonces out of
-//!      block; the executor's `StateUpdate` arm validates before it writes.
-//!   3. The validation itself rejects non-monotonic, near-`u64::MAX` and
-//!      over-ceiling updates.
+//!      block; the executor's `StateUpdate` arm is retired and refuses
+//!      every StateUpdate outright (431d7fb).
+//!   3. `validate_commitment_state_updates` still rejects non-monotonic,
+//!      near-`u64::MAX` and over-ceiling updates for whatever door ends up
+//!      carrying the writes.
 //!   4. `message_registry` and `bridge_state` only change inside a block: the
 //!      executor's `BridgeBurn` and `CrossDomainMessage` arms are the only
 //!      writers, and the old request-path doors
@@ -60,8 +62,8 @@ fn slice_of<'a>(src: &'a str, start: &str, end: &str) -> Result<&'a str, String>
 ///
 /// Returns the first violated claim.
 /// Checks 1 and 2: the state root still covers the consensus fields, and
-/// the nonce writes are block-scoped (no out-of-block write, the executor
-/// validates before it writes).
+/// the nonce writes are block-scoped (no out-of-block write; the executor
+/// refuses StateUpdate entirely).
 fn check_root_covers_and_nonces_are_block_scoped(
     bc: &str,
     acc: &str,
@@ -111,29 +113,21 @@ fn check_root_covers_and_nonces_are_block_scoped(
         );
     }
 
-    let arm = slice_of(ex, "TransactionType::StateUpdate", "Ok(())")?;
-    let val = arm
-        .find("*new_nonce <= current")
-        .ok_or("executor StateUpdate arm lost the monotonic nonce check")?;
-    let write = arm
-        .find("account.nonce = *new_nonce")
-        .ok_or("executor StateUpdate arm lost the nonce write")?;
-    if val > write {
-        return Err("executor StateUpdate arm writes nonces before validating".to_string());
+    let arm = slice_of(ex, "TransactionType::StateUpdate { domain_id", "Ok(())")?;
+    // The arm is RETIRED (431d7fb, BLG-0286 / P18-F01): it refuses every
+    // StateUpdate instead of validating and writing, so the strongest form
+    // of the block-scoping claim is that the arm carries the refusal and
+    // contains no nonce write at all. A write that reappears here without
+    // the validation stack around it is exactly the regression this gate
+    // exists for.
+    if !arm.contains("return Err") {
+        return Err("executor StateUpdate arm no longer refuses every StateUpdate".to_string());
     }
-    for (needle, msg) in [
-        (
-            "MAX_STATE_UPDATES",
-            "executor StateUpdate arm lost the update ceiling check",
-        ),
-        (
-            "u64::MAX - 1000",
-            "executor StateUpdate arm lost the near-u64::MAX nonce guard",
-        ),
-    ] {
-        if !arm.contains(needle) {
-            return Err(msg.to_string());
-        }
+    if arm.contains("*new_nonce") {
+        return Err(
+            "executor StateUpdate arm regained nonce logic; the arm must refuse every StateUpdate (431d7fb)"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -306,14 +300,17 @@ pub fn self_test() -> Result<String, String> {
         "a state root without settlement_root passed",
     )?;
 
-    // Break 2: the executor StateUpdate arm accepts equal nonce.
+    // Break 2: the executor StateUpdate arm regains nonce logic. The arm
+    // is retired (431d7fb), so the canary plants a nonce touch inside it
+    // and the gate must refuse any StateUpdate arm that is not a pure
+    // refusal.
     break_and_expect_refusal(
         &tmp,
         &root,
         "src/execution/executor.rs",
-        "*new_nonce <= current",
-        "*new_nonce < current",
-        "an executor StateUpdate arm that accepts equal nonce passed",
+        "TransactionType::StateUpdate { domain_id, .. } => {",
+        "TransactionType::StateUpdate { domain_id, .. } => { let planted: u64 = *new_nonce; let _ = planted;",
+        "an executor StateUpdate arm that regained nonce logic passed",
     )?;
 
     // Break 3: apply_pending_commitments regains an out-of-block nonce write.
