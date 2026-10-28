@@ -154,7 +154,11 @@ fn check_root_hashes_both_maps(deal_code: &str, problems: &mut Vec<String>) -> u
     let mut checked = 0usize;
     // 4. root hashes both maps.
     checked += 1;
-    let root_fn = body_of(deal_code, "pub fn root(");
+    // Anchor inside the registry impl: the file's economics ledger has its
+    // own `pub fn root(` earlier, and that one folds no operator maps.
+    let root_fn = deal_code
+        .find("impl StorageRegistry")
+        .and_then(|at| body_of(&deal_code[at..], "pub fn root("));
     match root_fn {
         None => problems
             .push("cannot find `StorageRegistry::root` to check what it commits to.".to_string()),
@@ -429,6 +433,12 @@ pub fn run(root: &Path) -> Result<String, String> {
     let open_src = std::fs::read_to_string(&open).map_err(|e| e.to_string())?;
     let deal_src = std::fs::read_to_string(&deal).map_err(|e| e.to_string())?;
     let chain_src = std::fs::read_to_string(&chain).map_err(|e| e.to_string())?;
+    // The expiry maintenance moved the cooldown prune call into
+    // storage_maintenance.rs; both chain files count as production callers.
+    let chain_src = match std::fs::read_to_string(root.join("src/chain/storage_maintenance.rs")) {
+        Ok(extra) => format!("{chain_src}\n{extra}"),
+        Err(_) => chain_src,
+    };
     let deal_code = strip_comments_and_literals(&deal_src);
     let chain_code = strip_comments_and_literals(&chain_src);
     let open_code = strip_comments_and_literals(&open_src);
