@@ -195,8 +195,10 @@ use crate::bud_format_pact::{SignedRecordError, SuiteSigner, SuiteVerifier};
 use std::collections::BTreeMap;
 
 /// The composite suite of a regeneration result.
+/// exposed for: the bud format crate's signed-record surface — the consumers land with the format adoption wave.
 pub const RESULT_SUITE: u16 = 0x0002;
 /// Domain tag of the signed result payload.
+/// exposed for: the bud format crate's signed-record surface — the consumers land with the format adoption wave.
 pub const RESULT_SIGN_DOMAIN: &[u8] = b"BDLM_BUD_REGEN_RESULT_V1";
 const SELECT_DOMAIN: &[u8] = b"BDLM_BUD_REGEN_SELECT_V1";
 
@@ -208,6 +210,7 @@ const SELECT_DOMAIN: &[u8] = b"BDLM_BUD_REGEN_SELECT_V1";
 /// (sorted) order every validator holds. The result is a list of indexes into
 /// it, in selection order; the same inputs give the same list everywhere.
 #[must_use]
+/// exposed for: the bud format crate's signed-record surface — the consumers land with the format adoption wave.
 pub fn select_challenges(
     epoch_randomness: &[u8; 32],
     epoch: u64,
@@ -253,6 +256,7 @@ pub fn select_challenges(
 
 /// A regeneration result with the validator's suite 0x0002 signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// exposed for: the bud format crate's signed-record surface — the consumers land with the format adoption wave.
 pub struct SignedRegenerationResult {
     pub record: RegenerationRecord,
     pub validator: [u8; 32],
@@ -323,14 +327,17 @@ impl SignedRegenerationResult {
 /// takes a verified [`SignedRegenerationResult`]: an unsigned, wrongly signed
 /// or classically signed result changes nothing.
 #[derive(Debug, Clone, Default)]
+/// exposed for: the bud format crate's signed-record surface — the consumers land with the format adoption wave.
 pub struct ReputationLedger {
     scores: BTreeMap<[u8; 32], i64>,
 }
 
 impl ReputationLedger {
     /// Score gained for a verified production.
+/// exposed for: the bud format crate's signed-record surface — the consumers land with the format adoption wave.
     pub const REWARD: i64 = 1;
     /// Score lost for a mismatch or a producer that cannot produce.
+/// exposed for: the bud format crate's signed-record surface — the consumers land with the format adoption wave.
     pub const PENALTY: i64 = 10;
 
     #[must_use]

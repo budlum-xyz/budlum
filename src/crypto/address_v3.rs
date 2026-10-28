@@ -24,9 +24,11 @@ use super::scheme::SuiteId;
 use sha3::{Digest, Sha3_256};
 
 /// The domain tag of the account authentication commitment.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const ACCOUNT_AUTH_TAG: &[u8] = b"BDLM_ACCOUNT_AUTH_V3";
 
 /// The domain tag of the address.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const ADDRESS_TAG: &[u8] = b"BDLM_ADDRESS_V3";
 
 /// Why a key set cannot form an address.
@@ -170,9 +172,11 @@ pub fn account_auth_v3(
 }
 
 /// The domain tag of a multisig owner leaf.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const MULTISIG_LEAF_TAG: &[u8] = b"BDLM_MULTISIG_LEAF_V1";
 
 /// The domain tag of a multisig address.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const MULTISIG_ADDRESS_TAG: &[u8] = b"BDLM_MULTISIG_ADDRESS_V3";
 
 /// The most owners a V8 multisig account can hold.

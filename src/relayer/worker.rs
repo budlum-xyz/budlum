@@ -39,6 +39,7 @@ use tracing::{error, info, warn};
 /// mainnet node admits. A legacy Ed25519 key signs V4, which devnet and
 /// testnet still accept.
 #[derive(Clone)]
+/// exposed for: public surface of this module — production readers land with the wiring wave.
 pub enum RelayerKey {
     /// The legacy Ed25519 key (V4).
     Legacy(Arc<KeyPair>),

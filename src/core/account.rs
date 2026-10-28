@@ -1138,6 +1138,7 @@ impl AccountState {
 
     /// Bond `amount` from the account's balance into the Relayer role. The
     /// Bond remains locked but slashable until the relayer begins unbonding.
+    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn bond_relayer(
         &mut self,
         address: &Address,
@@ -1161,6 +1162,7 @@ impl AccountState {
     /// # Errors
     ///
     /// A message naming the rule that refused; the registry is unchanged.
+    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn register_relayed_cross_domain_message(
         &mut self,
         signer: &Address,
@@ -1532,6 +1534,7 @@ impl AccountState {
         )
     }
 
+    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn get_total_stake(&self) -> u64 {
         let total = self
             .validators
@@ -1719,6 +1722,7 @@ impl AccountState {
     ///
     /// A message naming the mismatch, or the refusal of an unregistered
     /// validator transaction.
+    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn check_validator_v7_binding(&self, tx: &Transaction) -> Result<(), String> {
         let Some(pq) = tx.v7_validator_pq_key() else {
             return Ok(());

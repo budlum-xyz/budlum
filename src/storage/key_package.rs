@@ -25,6 +25,7 @@ use crate::storage::content_id::ContentId;
 use crate::storage::view_grant::{ViewGrant, ViewPolicy};
 
 /// Length of a content key: 256 bits.
+/// exposed for: storage surface — the key-package door's readers land with the custody wave.
 pub const CONTENT_KEY_LEN: usize = 32;
 
 const PACKAGE_HASH_TAG: &[u8] = b"BDLM_KEY_PACKAGE_V1";
@@ -32,6 +33,7 @@ const PACKAGE_INFO_TAG: &[u8] = b"BDLM_KEY_PACKAGE_INFO_V1";
 
 /// Why a key package was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// exposed for: storage surface — the key-package door's readers land with the custody wave.
 pub enum KeyPackageError {
     /// The grant is revoked: no new opens.
     GrantRevoked,
@@ -72,6 +74,7 @@ impl std::error::Error for KeyPackageError {}
 
 /// A content key sealed to one grantee.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// exposed for: storage surface — the key-package door's readers land with the custody wave.
 pub struct KeyPackage {
     content_id: ContentId,
     grantee: Address,
@@ -112,6 +115,7 @@ impl KeyPackage {
 
     /// The hash the chain keeps. Use it as the grant's `key_id`.
     #[must_use]
+    /// exposed for: storage surface — the key-package door's readers land with the custody wave.
     pub fn package_hash(&self) -> [u8; 32] {
         hash_fields_bytes(&[
             PACKAGE_HASH_TAG,

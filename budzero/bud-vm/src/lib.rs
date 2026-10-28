@@ -1006,6 +1006,7 @@ impl Vm {
 
 /// Expansion rows of one `VerifyMerkle`: 4 leaf words, 64 levels of 4 sibling
 /// words, 4 root words.
+/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
 pub const MERKLE_ROUNDS: usize = 4 + 64 * 4 + 4;
 
 /// Words in the path window: the key, then the expansion words.
@@ -1076,12 +1077,14 @@ pub const POSEIDON_MDS: [[u64; POSEIDON_WIDTH]; POSEIDON_WIDTH] =
 pub const POSEIDON_RC_FULL: [[u64; 12]; 30] = budlum_note_packing::poseidon::RC;
 
 /// Full rounds (4 leading + 4 trailing).
+/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
 pub const POSEIDON_FULL_ROUNDS: usize = budlum_note_packing::poseidon::FULL_ROUNDS;
 
 /// Partial rounds: the S-box runs on lane 0 only. The count comes from the
 /// interpolation bound of the Poseidon paper (Eq. 3) for this field and
 /// S-box, `ceil(64 / log2(7)) + ceil(log_7(12)) - 5 = 20`, plus the paper's
 /// 7.5% margin: `ceil(1.075 * 20) = 22`.
+/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
 pub const POSEIDON_PARTIAL_ROUNDS: usize = budlum_note_packing::poseidon::PARTIAL_ROUNDS;
 
 /// S-box exponent. `gcd(7, P - 1) = 1` over Goldilocks, so `x -> x^7` is a
