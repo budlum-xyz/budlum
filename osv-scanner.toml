@@ -108,3 +108,7 @@ ecosystem = "crates.io"
 vulnerability.ignore = true
 effectiveUntil = 2027-01-31
 reason = "GHSA-qwgh-2vcv-g2f7 requires a panicking caller-supplied compress callback whose caught panic leaves the buffer cursor corrupted; the only 0.10 instantiation is ExpandMsgXmd<Sha256> in bls12_381's hash_to_curve, which uses sha2's infallible compression and never runs under catch_unwind. Not upgradable in place: the fix (block-buffer 0.12.1) is incompatible with digest 0.10, which is pinned for the bls12_381 0.9 API."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0173"
+reason = "proc-macro-error2 unmaintained (a maintenance warning, not a vulnerability); a proc-macro helper reached only through hax-lib-macros at compile time, no runtime surface."
