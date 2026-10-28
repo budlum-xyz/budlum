@@ -680,9 +680,15 @@ mod byzantine_settlement_tests {
             res.is_err(),
             "Equivocation (same height, different hash) must be rejected"
         );
-        // The first commitment advanced the domain and spent the nonce; the
-        // equivocating one froze the domain and moved nothing.
-        assert_eq!(node.state.get_nonce(&alice), 1);
+        // The first commitment advanced the domain; the accept path applies
+        // no nonce writes out of block (they ride the settlement door inside
+        // a block), so the account is untouched. The equivocating one froze
+        // the domain and moved nothing either.
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            1
+        );
+        assert_eq!(node.state.get_nonce(&alice), 0);
         assert_eq!(
             node.domain_registry.get(1).unwrap().status,
             DomainStatus::Frozen
@@ -707,9 +713,14 @@ mod byzantine_settlement_tests {
         }
         assert_eq!(accepted, 20);
         assert_eq!(rejected, 0);
-        // The first copy advanced the domain and moved the nonce once; the
-        // duplicates are idempotent.
-        assert_eq!(node.state.get_nonce(&alice), 1);
+        // The first copy advanced the domain once; every duplicate is
+        // idempotent. The accept path applies no nonce writes out of block,
+        // so the account is untouched.
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            1
+        );
+        assert_eq!(node.state.get_nonce(&alice), 0);
     }
 
     #[tokio::test]
@@ -723,11 +734,21 @@ mod byzantine_settlement_tests {
         assert!(node.submit_domain_commitment(c1.clone()).is_ok());
         assert!(node.submit_domain_commitment(c2).is_ok());
         assert!(node.submit_domain_commitment(c3).is_ok());
-        assert_eq!(node.state.get_nonce(&alice), 3);
+        // The heights chained 1 -> 2 -> 3; the accept path applies no nonce
+        // writes out of block, so the account is untouched.
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            3
+        );
+        assert_eq!(node.state.get_nonce(&alice), 0);
 
         let replay = node.submit_domain_commitment(c1);
         assert!(replay.is_ok(), "Exact duplicate should be idempotent (Ok)");
-        assert_eq!(node.state.get_nonce(&alice), 3);
+        assert_eq!(
+            node.domain_registry.get(1).unwrap().last_committed_height,
+            3
+        );
+        assert_eq!(node.state.get_nonce(&alice), 0);
     }
 
     #[tokio::test]
@@ -820,20 +841,31 @@ mod byzantine_settlement_tests {
         let com_pos = make_commitment_for_account(&nodes[0], 2, alice, 1, 1);
         let _ = nodes[0].submit_domain_commitment(com_pow.clone());
         let _ = nodes[1].submit_domain_commitment(com_pos.clone());
-        // Partial propagation: node 0 spent the nonce through domain 1, node
-        // 1 through domain 2, node 2 has seen neither.
-        assert_eq!(nodes[0].state.get_nonce(&alice), 1);
-        assert_eq!(nodes[1].state.get_nonce(&alice), 1);
+        // Partial propagation: node 0 saw domain 1's claim, node 1 domain
+        // 2's, node 2 has seen neither. No accept moves a nonce out of
+        // block, so every account is untouched so far.
+        assert_eq!(nodes[0].state.get_nonce(&alice), 0);
+        assert_eq!(nodes[1].state.get_nonce(&alice), 0);
         assert_eq!(nodes[2].state.get_nonce(&alice), 0);
 
         for node in nodes.iter_mut() {
             let _ = node.submit_domain_commitment(com_pow.clone());
             let _ = node.submit_domain_commitment(com_pos.clone());
         }
-        // Whichever claim arrived first spent the nonce and the other was
-        // refused: the nonce is spent exactly once on every node.
+        // Every node ends with both domains at height 1 - whichever claim
+        // arrived first, the other lands under its own domain - and the
+        // deterministic header follows from that convergence. No accept
+        // moves a nonce out of block: the accounts stay untouched.
         for node in &nodes {
-            assert_eq!(node.state.get_nonce(&alice), 1);
+            assert_eq!(
+                node.domain_registry.get(1).unwrap().last_committed_height,
+                1
+            );
+            assert_eq!(
+                node.domain_registry.get(2).unwrap().last_committed_height,
+                1
+            );
+            assert_eq!(node.state.get_nonce(&alice), 0);
         }
     }
 
