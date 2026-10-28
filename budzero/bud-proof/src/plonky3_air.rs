@@ -289,7 +289,7 @@ pub const COL_MERKLE_DINV: usize = 912; // root rows: inverse witness of the wor
 pub const COL_MERKLE_ACC: usize = 913; // root rows: running product of `COL_MERKLE_EQ`
 
 /// Expansion rows of one `VerifyMerkle`. Mirrors `bud_vm::MERKLE_ROUNDS`.
-/// exposed for: the proof/VM crate's test-and-tooling surface — production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
 pub const MERKLE_ROUNDS: usize = 4 + 64 * 4 + 4;
 
 /// Remaining path key on a Merkle expansion row: `key >> round`.
