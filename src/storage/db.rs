@@ -974,7 +974,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns the underlying I/O error when encoding or the write fails.
-    /// exposed for: storage surface — the key-package door's readers land with the custody wave.
+    /// exposed for: storage surface - the key-package door's readers land with the custody wave.
     pub fn save_handoff_cert(
         &self,
         cert: &crate::consensus::handoff::HandoffCertificate,

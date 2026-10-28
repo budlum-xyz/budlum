@@ -92,7 +92,7 @@ pub struct CrossDomainMessage {
 
 /// The envelope version: the tag the message id is hashed under. Version 3
 /// added `source_quantum_class`.
-/// WIRING: cross-domain surface — the relayer/bridge doors that read it land with their wiring wave.
+/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring wave.
 pub const MESSAGE_ENVELOPE_VERSION: u8 = 3;
 
 /// The byte a class takes in the id and in the signed relay preimage:
@@ -146,7 +146,7 @@ impl CrossDomainMessage {
     /// The message with the source domain's quantum class set and the id
     /// recomputed over it.
     #[must_use]
-    /// WIRING: cross-domain surface — the relayer/bridge doors that read it land with their wiring wave.
+    /// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring wave.
     pub fn with_source_quantum_class(mut self, class: Option<QuantumClass>) -> Self {
         self.source_quantum_class = class;
         self.message_id = self.calculate_message_id();

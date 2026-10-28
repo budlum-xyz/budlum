@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 /// The content of one domain block: what its header commits to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-/// WIRING: domain surface — the producer/registry doors that read it land with their wiring wave.
+/// WIRING: domain surface - the producer/registry doors that read it land with their wiring wave.
 pub struct PowBlockContent {
     pub state_root: Hash32,
     pub tx_root: Hash32,
@@ -44,7 +44,7 @@ pub struct PowChainSpec {
 
 /// The nonce search bound: past it the difficulty is not one a producer can
 /// meet, and the search refuses instead of spinning.
-/// WIRING: domain surface — the producer/registry doors that read it land with their wiring wave.
+/// WIRING: domain surface - the producer/registry doors that read it land with their wiring wave.
 pub const MAX_NONCE_ATTEMPTS: u64 = 1 << 32;
 
 /// Mine `header` until its hash meets its own `difficulty_bits` under the
@@ -54,7 +54,7 @@ pub const MAX_NONCE_ATTEMPTS: u64 = 1 << 32;
 ///
 /// The domain's hash scheme is not one the light client implements, or no
 /// nonce within [`MAX_NONCE_ATTEMPTS`] meets the difficulty.
-/// WIRING: domain surface — the producer/registry doors that read it land with their wiring wave.
+/// WIRING: domain surface - the producer/registry doors that read it land with their wiring wave.
 pub fn mine_pow_header(
     domain: &ConsensusDomain,
     mut header: PoWHeader,

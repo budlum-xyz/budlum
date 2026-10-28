@@ -180,7 +180,7 @@ const RELAY_RETENTION_BLOCKS: u64 = 10 * crate::cross_domain::nonce::FINALITY_PR
 /// them, and a config field nobody reads is a promise nobody keeps. Serde
 /// ignores them if an old config still carries them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// WIRING: cross-domain surface — the relayer/bridge doors that read it land with their wiring wave.
+/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring wave.
 pub struct RelayerConfig {}
 
 /// The Universal Relayer orchestrator.
