@@ -41,8 +41,7 @@ const CHAIN_ID: u64 = 45262;
 /// before signatures are ever looked at, so the fixture signs and stores the
 /// derived epoch rather than a literal.
 fn checkpoint_epoch() -> u64 {
-    CHECKPOINT_HEIGHT
-        / crate::core::chain_config::epoch_len_for_chain_id(CHAIN_ID).max(1)
+    CHECKPOINT_HEIGHT / crate::core::chain_config::epoch_len_for_chain_id(CHAIN_ID).max(1)
 }
 
 fn validator_address(i: u8) -> Address {
