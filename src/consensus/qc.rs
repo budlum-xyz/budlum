@@ -1,4 +1,4 @@
-//! WIRING: verify_against_blob is reached from the certificate-replay tests in this tree; the quorum path itself verifies the aggregated signature, and this blob comparison is the cross-check those tests pin.
+//! WIRING: unwired - verify_against_blob is reached only from the certificate-replay tests in this tree; the quorum path itself verifies the aggregated signature, and this blob comparison is the cross-check the tests pin.
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};

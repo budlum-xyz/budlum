@@ -1,4 +1,4 @@
-//! WIRING: verify_execution_block_finality is reached in this tree through the adapter modules' fixtures; the relayer wave carries the live call.
+//! WIRING: unwired - verify_execution_block_finality is reached in this tree only through the adapter modules that declare themselves unwired; the relayer wave wires it.
 //! F10.3 Ethereum PoS sync committee light client, Altair-and-later finality.
 //!
 //! **BLS variant.** This module follows the Altair *structure* - 512 keys,
