@@ -700,6 +700,10 @@ impl Node {
     /// A message when the chunk is out of range, repeated, oversize, the
     /// assembly table is full of other blobs, or the finished bytes do not
     /// decode.
+    /// PARTIAL: allowed - a chunk that fails to push discards the whole
+    /// assembly on purpose: a half-assembled blob whose failed chunk
+    /// vanished could later complete from chunks the failure already
+    /// rejected; the error tells the peer to restart the transfer.
     fn assemble_qc_chunk(
         &mut self,
         peer: PeerId,
@@ -779,6 +783,11 @@ impl Node {
     }
 
     /// Continue a peer-bound fetch, importing only a complete, matching blob.
+    /// PARTIAL: allowed - the removes are branch-local: the missing-response
+    /// path discards the assembly and returns before any later error, and
+    /// the metadata errors below run only on the found path, where no remove
+    /// has happened yet; text order after a remove is not control flow after
+    /// it.
     async fn accept_qc_response(
         &mut self,
         fetch: QcFetch,
