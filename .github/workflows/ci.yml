@@ -242,33 +242,22 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core-quality
-      - name: Feature canary - --all-features MUST BE REFUSED
+      # pq-dilithium took the mutually-exclusive pair with it (304cfe8): the
+      # remaining backends coexist, so --all-features MUST BUILD. A refusal
+      # here now means a feature broke, and a guard that no longer exists
+      # cannot be what refused it.
+      - name: "Feature canary - --all-features MUST BUILD"
         if: always() && steps.rust.outcome == 'success'
         run: |
           set -uo pipefail
-          # The canary asserts that `--all-features` is REFUSED. With stderr
-          # sent to /dev/null it asserted only that cargo exited non-zero, and
-          # cargo exits non-zero for a hundred reasons that have nothing to do
-          # with the guard: a syntax error, a missing protoc, an unresolved
-          # dependency. In every one of those states this step printed
-          # "Canary OK" - the guard could have been deleted and this gate would
-          # still have said it was there. The reason is read instead of
-          # discarded: the refusal must be the `compile_error!` in
-          # src/crypto/primitives.rs, by its own text.
-          set +e
           cargo check --all-features > /tmp/all-features.log 2>&1
           status=$?
-          set -e
-          if [ "$status" -eq 0 ]; then
-            echo "ERROR: --all-features compiled -> no compile_error guard (vacuous gate!)"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::--all-features failed to build - a feature combination is broken."
+            tail -n 30 /tmp/all-features.log | sed -e 's/^/::error::/'
             exit 1
           fi
-          if ! grep -q "mutually exclusive validator backends" /tmp/all-features.log; then
-            echo "::error::--all-features failed (exit $status) but NOT on the compile_error guard - this canary cannot tell a working guard from a broken build."
-            tail -n 20 /tmp/all-features.log | sed -e 's/^/::error::/'
-            exit 1
-          fi
-          echo "Canary OK: --all-features was refused with compile_error as expected (PQ backends are mutually exclusive)."
+          echo "Canary OK: --all-features builds (all validator backends coexist)."
       - name: cargo doc (Item 6 - public API documentation)
         if: always() && steps.rust.outcome == 'success'
         run: |
