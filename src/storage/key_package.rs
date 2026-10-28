@@ -17,6 +17,7 @@
 //! Packages are for [`ViewPolicy::NamedGrantee`](crate::storage::view_grant::ViewPolicy): the key
 //! is sealed to one recipient. A public-link grant has no recipient, so its
 //! key travels in the link and this module does not apply.
+//! WIRING: unwired - the key-package surface is the custody wave's; the grant and ceremony doors that read it land with that wave.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
