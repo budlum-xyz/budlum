@@ -53,62 +53,103 @@ const MOVE_FN: &str = "try_add_balance";
 const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     (
         "src/chain/blockchain.rs",
-        9,
-        "nine calls, each one puts back or splits money this ledger already \
+        5,
+        "five calls, each one puts back or splits money this ledger already \
          took from another place. \
-         One in the verified-burn unlock: the owner gets back \
-         the burned amount, which the lock debited from the owner less the \
-         relayer fee the mint paid out of the arriving asset. \
-         One in the relay unlock of a burned bridge transfer: the owner share \
-         returned on burn (the relayer cut was already paid at mint). \
          One in `apply_bridge_sweep_to_state`: the refund of an expired lock \
          to its owner, again the amount the lock debited. \
-         One in the storage reward tick: the operator is paid out of the fee \
-         that `open_deal` debited from the payer, as the difference of two \
-         cumulative totals so the sum cannot pass the escrowed fee. \
          Two in `distribute_bud_boost_share_in_state`: the operator shares and \
          the rounding dust of the 4 percent share that the NFT boost carved \
          out of the booster's debit, and the shares plus dust equal exactly \
          that pending amount. \
-         One in `refund_opener_bond`: the challenge bond that \
-         `debit_opener_bond` took from the opener. \
-         One in the storage deal expiry sweep: the operator bond that \
-         `open_deal` debited. \
-         One in the block-application storage prune: the operator bond that \
-         `open_deal` debited, returned when the owner burns the content and \
-         the prune ends the deal early. \
-         One in that same prune: the storage fee for the epochs the ended \
-         deal will no longer serve, which `open_deal` debited from the payer \
-         up front, returned to that payer; what the operator already earned \
-         for the served epochs came out of the same escrowed fee, so the \
-         refund cannot exceed what was taken. \
+         Two in the block-application storage prune (`prune_storage_content_in_state`): \
+         the operator bond that `open_deal` debited, returned when the owner \
+         burns the content and the prune ends the deal early, and the storage \
+         fee for the epochs the ended deal will no longer serve, which \
+         `open_deal` debited from the payer up front, returned to that payer; \
+         what the operator already earned for the served epochs came out of \
+         the same escrowed fee, so the refund cannot exceed what was taken. \
          None of these create new supply. The bridge mint paths use \
          `try_mint_balance` and are not on this list.",
     ),
     (
         "src/execution/executor.rs",
-        2,
+        3,
         "bridge unlock inside a RelayerResult (the owner's burned share is \
          returned; the relayer's cut was already minted on target arrival) and \
-         the producer's share of a transaction fee that was already paid. The \
-         bridge mint inside a RelayerResult is not on this list: it creates \
-         supply and goes through `try_mint_balance`.",
+         the two fee-split recipients of a transaction fee that was already \
+         paid - the application share to the recipient and the protocol share \
+         to the producer. The bridge mint inside a RelayerResult is not on \
+         this list: it creates supply and goes through `try_mint_balance`.",
+    ),
+    (
+        "src/settlement/domains.rs",
+        5,
+        "three in `execute_relayer_intent_tx`: the unused paid fee returned to \
+         the sender, the owner's unspent escrow returned on the outcomes that \
+         cancel or expire the intent, and the bond returned out of the same \
+         recorded escrow; two in `execute_proof_market_tx`: the task creator's \
+         reward paid out of the fees the requester already paid into the task. \
+         Every line moves recorded value back to the party that paid it in.",
+    ),
+    (
+        "src/settlement/graft.rs",
+        1,
+        "one in `credit`: the intent payment moves the user's own escrowed \
+         funds to the solver on fulfilment - the amount the intent locked, \
+         not new supply.",
     ),
     (
         "src/core/account.rs",
-        4,
+        5,
         "one is the release of the unbonding queue (money already committed as stake \
          and already counted against the ceiling is returned - not new supply \
          but supply changing category); one is the body of `try_mint_balance` itself, \
          the line that performs the actual addition after checking the ceiling. \
-         The other two are the external-domain bond escrow (BLG-0155): \
+         Two are the external-domain bond escrow (BLG-0155): \
          `release_external_bond` returns what `lock_external_bond` took out \
          of the same poster's balance, capped at what the escrow actually \
          holds, and `slash_external_bond` pays the challenger a reward no \
          larger than the amount the same call takes out of the prover's \
          escrow, with the remainder recorded in `burned_total`. The escrow \
          counts in `total_bud_committed` the whole time it is held, so \
-         neither line opens minting headroom.",
+         neither line opens minting headroom. The fifth is \
+         `claim_delegator_rewards`: it pays out the delegation reward row that \
+         the distribution already booked against fees taken in - recorded \
+         value changing hands, not new supply.",
+    ),
+    (
+        "src/chain/storage_maintenance.rs",
+        2,
+        "the storage reward tick pays the operator out of the fee that \
+         `open_deal` debited from the payer, as the difference of two \
+         cumulative totals so the sum cannot pass the escrowed fee, and the \
+         storage deal expiry sweep returns the operator bond that `open_deal` \
+         debited when the deal's term ends unrenewed.",
+    ),
+    (
+        "src/cross_domain/bridge_tx.rs",
+        2,
+        "the verified-burn unlock returns the owner the burned amount the lock \
+         debited from the owner less the relayer fee the mint paid out of the \
+         arriving asset, and the relay unlock of a burned bridge transfer \
+         returns the owner share recorded on burn (the relayer cut was \
+         already paid at mint).",
+    ),
+    (
+        "src/domain/storage_tx.rs",
+        1,
+        "the challenge settlement returns the opener's bond to the opener: the \
+         amount `answer_challenge`'s debit side took out of the opener's \
+         escrow when the challenge was opened, so the refund cannot exceed \
+         what was taken.",
+    ),
+    (
+        "src/tokenomics/reward_pool.rs",
+        1,
+        "one in `pay_epoch`: the epoch payout moves the pool account's own \
+         pre-funded balance to the validators, capped by what the pool holds - \
+         recorded value changing hands, and nothing is minted.",
     ),
 ];
 
