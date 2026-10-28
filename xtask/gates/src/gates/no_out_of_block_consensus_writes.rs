@@ -68,6 +68,13 @@ const CALLS: &[(&str, Class)] = &[
     ("get_state_root", Read),
     ("get_state_snapshot", Read),
     ("get_transaction_by_hash", Read),
+    ("graft_payment_proof", Read),
+    ("import_pruned_segment", Sync),
+    ("pq_sealed_heights", Read),
+    ("pq_stage_observation", NodeLocal),
+    ("quantum_view", Read),
+    ("storage_economics_events", Read),
+    ("try_reorg_suffix", BlockPath),
     ("get_transaction_receipt", Read),
     ("get_validator_set_hash", Read),
     ("handle_finality_cert", NodeLocal),
@@ -120,7 +127,18 @@ const READ_PREFIXES: &[&str] = &[
 /// identity record and credential lookup, a protected-content lookup, and
 /// the coding-audit answer check (`&self`, it judges an answer and stores
 /// nothing).
-const READ_NAMES: &[&str] = &["record", "credential", "asset_for", "verify_coding_audit"];
+const READ_NAMES: &[&str] = &[
+    "record",
+    "credential",
+    "asset_for",
+    "verify_coding_audit",
+    "delegations_for",
+    "delegation_unbonding_for",
+    "latest",
+    "deals_for_manifest",
+    "deals_for_shard",
+    "under_replicated_shards",
+];
 
 /// Calls on `self.state` inside a `Blockchain` method body that write it.
 const STATE_WRITERS: &[&str] = &[
