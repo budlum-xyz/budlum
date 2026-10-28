@@ -608,7 +608,11 @@ fn a_bridge_burn_moves_balance_in_block_and_defers_the_relay_enqueue() {
     refused.get_or_create(&recipient).balance += bc.state.base_fee;
     let err = Executor::apply_transaction(&mut refused, &late_tx).unwrap_err();
     assert!(
-        err.to_string().contains("bridge_burn_expiry_base_ahead_of_chain"),
+        err.to_string()
+            .contains("bridge burn domain height is ahead of the executing block")
+            && err
+                .to_string()
+                .contains("refund window must be measured from a height the chain has reached"),
         "an expiry base ahead of the chain must be refused: {err}"
     );
     assert_eq!(
