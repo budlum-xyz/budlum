@@ -1047,6 +1047,7 @@ impl ChainHandle {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// WIRING: the chain-actor surface behind the `StorageTx::OpenDeal` door (the refusals name that transaction); production callers land with the settlement rollout that reaches back into these.
     pub async fn open_storage_deal(
         &self,
         domain_id: u32,
@@ -1086,6 +1087,7 @@ impl ChainHandle {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// WIRING: the chain-actor surface behind the `StorageTx::AcceptReallocation` door (the refusals name that transaction); production callers land with the settlement rollout that reaches back into these.
     pub async fn accept_storage_reallocation(
         &self,
         ticket_id: u64,
@@ -1118,6 +1120,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    /// WIRING: the chain-actor surface behind the `StorageTx::RegisterManifest` door (the refusals name that transaction); production callers land with the settlement rollout that reaches back into these.
     pub async fn register_storage_manifest(
         &self,
         manifest: crate::storage::ContentManifest,
@@ -1339,6 +1342,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    /// WIRING: the chain-actor surface behind the `StorageTx::OpenChallenge` door (the refusals name that transaction); production callers land with the settlement rollout that reaches back into these.
     pub async fn open_storage_challenge(
         &self,
         request: crate::domain::storage_deal::RetrievalChallengeRequest,
@@ -1355,6 +1359,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    /// WIRING: the chain-actor surface behind the `StorageTx::AnswerChallenge` door (the refusals name that transaction); production callers land with the settlement rollout that reaches back into these.
     pub async fn answer_storage_challenge(
         &self,
         response_data: crate::domain::storage_deal::RetrievalResponse,
@@ -1678,19 +1683,6 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    pub async fn verify_verified_domain_commitment(
-        &self,
-        payload: crate::domain::VerifiedDomainCommitment,
-    ) -> Result<(), String> {
-        let (tx, rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::VerifyVerifiedDomainCommitment(payload, tx))
-            .await;
-        rx.await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
     pub async fn submit_verified_domain_commitment(
         &self,
         payload: crate::domain::VerifiedDomainCommitment,
@@ -1704,6 +1696,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
+    /// Convenience: the StateUpdate carrier builder - callers land with the settlement rollout whose doors name it.
     pub async fn build_state_update_transaction(
         &self,
         commitment: crate::domain::DomainCommitment,
@@ -2651,6 +2644,7 @@ impl ChainHandle {
         rx.await.map_err(|_| "Actor dropped".to_string())
     }
 
+    /// WIRING: the read-side companion of the challenge doors; the callers land with the settlement rollout that reaches back into these.
     /// Query all storage challenges.
     pub async fn get_storage_challenges(
         &self,

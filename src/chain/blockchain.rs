@@ -1908,6 +1908,7 @@ impl Blockchain {
     /// consensus signer, so the transaction is a normal V4 Ed25519 transaction
     /// paying the base fee from the signer's account. Read-only: it does not
     /// mutate state; the caller decides whether to enqueue it.
+    /// Convenience: the StateUpdate carrier builder - callers land with the settlement rollout whose doors name it.
     pub fn build_state_update_transaction(
         &self,
         commitment: &DomainCommitment,
