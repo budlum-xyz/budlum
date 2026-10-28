@@ -10,3 +10,4 @@
 33d80f8c34846012c476de834a11b44e480504bc:budzero/bud-vm/src/lib.rs:generic-api-key:1721
 6d7eefbc1d9e9c5e01410da459bdd92c701a0731:src/cli/commands.rs:generic-api-key:956
 fd7b941d273c0bc199e1aa3425c7a7ef502b573b:src/wallet/mod.rs:generic-api-key:19
+d4134230c23076f3c5eb355dbb7346de65315ace:fuzz/Cargo.lock:generic-api-key:2659

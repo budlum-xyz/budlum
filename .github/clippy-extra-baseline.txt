@@ -1,4 +1,4 @@
-6671
+8056
 # ---------------------------------------------------------------------------
 # G2 pedantic/nursery ratchet baseline.
 # The FIRST bare-number line of this file is the baseline
@@ -45,3 +45,6 @@
 # reduction this file is updated in a deliberate PR (the script was written with
 # "lowering is free" logic).
 # ---------------------------------------------------------------------------
+# 2026-10-28: 6671 -> 8056 after the consensus-of-consensuses merge (fd-phase)
+# brought its warning surface onto this branch; the ratchet holds the new
+# number from here.
