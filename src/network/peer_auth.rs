@@ -1,3 +1,4 @@
+//! WIRING: unwired - the peer-proof module is not reached by the transport yet; the enforcement wave wires it.
 //! WIRING: unwired - no transport code reads the TLS exporter value (`EXPORTER-budlum-pq-auth-v1`, 32 bytes) from the live session and calls [`verify_peer_proof`] or [`must_drop`], so no peer is asked for a proof and no unproven validator peer is dropped; peer identity on the p2p path stays libp2p's own `PeerId` identity key until the wrapper lands.
 //! ML-DSA-65 peer identity proof (`EXPORTER-budlum-pq-auth-v1`).
 //!
