@@ -345,7 +345,9 @@ contract BudlumFinalityVerifier {
     ///      - BLS only: verifies the classical half cryptographically and opens
     ///        a challenge window for the post-quantum half. This is a weaker
     ///        guarantee and the event says so;
-    ///      - neither: optimistic, window open, event says so.
+    ///      - neither: refused (`NoVerificationPath`): nothing on this chain
+    ///        could check either half, so the attestation does not enter the
+    ///        window and no event claims otherwise.
     ///      A window opens only for a half whose precompile is missing. If a
     ///      precompile is present and its check fails, `verify` reverts.
     ///
@@ -430,13 +432,23 @@ contract BudlumFinalityVerifier {
             return digest;
         }
 
-        // Optimistic path, reached only when a precompile is missing. The
-        // attestation is NOT marked accepted here; it is
-        // marked accepted only when the window closes, via `settle`. A caller
-        // that treats an open window as accepted is reading the wrong function.
-        string memory reason = !hasBlsPrecompile && !hasMlDsaPrecompile
-            ? "no verification precompile on this chain"
-            : (blsOk ? "post-quantum half unverified" : "classical half unverified");
+        // Neither half verified: the chain carries no verification
+        // precompile for either half, so nothing about this attestation has
+        // been checked. Such an attestation must not enter the challenge
+        // window either - the window would accept it after silence, on a
+        // chain where neither half could ever have been verified, and the
+        // event would describe a check that never happened. Refuse: a
+        // deployment where no verification path runs must not be relied on.
+        if (!blsOk && !pqOk) {
+            revert NoVerificationPath();
+        }
+
+        // Optimistic path, reached only when exactly one half verified and
+        // the other half's precompile is missing. The attestation is NOT
+        // marked accepted here; it is marked accepted only when the window
+        // closes, via `settle`. A caller that treats an open window as
+        // accepted is reading the wrong function.
+        string memory reason = blsOk ? "post-quantum half unverified" : "classical half unverified";
         challenges[digest] = Challenge({
             attestationDigest: digest,
             challenger: address(0),

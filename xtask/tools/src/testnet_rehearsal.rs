@@ -1,7 +1,7 @@
 //! The local testnet rehearsal.
 //!
 //! Without `--compose` the tool is a dependency-free preflight: it checks the
-//! ceremony, the four-validator PoS topology, the public services, the
+//! ceremony, the four-validator `PoS` topology, the public services, the
 //! monitoring files and the documented endpoints. CI runs it on every pull
 //! request.
 //!
@@ -20,7 +20,7 @@
 //! 6. A transfer between two wallets lands and the explorer API serves it.
 //! 7. A delegation to a genesis validator appears in its delegations.
 //! 8. A `.bud` name is registered and resolves to its owner.
-//! 9. A PoW domain is registered; a Graft application on it is registered
+//! 9. A `PoW` domain is registered; a Graft application on it is registered
 //!    and paid; the payment sits in the application's mirror account.
 //!
 //! Each scenario's verdict and measurements go to the report file (default
@@ -804,6 +804,10 @@ pub fn run(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// The tool canary used by `budlum-tools --self-test`.
+///
+/// # Errors
+///
+/// Returns the checked-repository or preflight failure unchanged.
 pub fn self_test() -> Result<String, String> {
     let root = checked_repo_root()?;
     let checks = preflight(&root)?;

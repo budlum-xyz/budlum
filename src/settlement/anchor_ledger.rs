@@ -419,6 +419,7 @@ impl AnchorKeyLedger {
 
     /// The anchor keys that may count at `key_epoch`: not suspended.
     #[must_use]
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn live_anchor_slots(&self, key_epoch: u32) -> Vec<u8> {
         self.anchor_keys
             .iter()

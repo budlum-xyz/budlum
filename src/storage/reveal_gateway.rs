@@ -219,15 +219,6 @@ impl RevealGateway {
         self.revoke_generation
     }
 
-    /// Start a revoke flow: call this BEFORE the chain mutation is
-    /// submitted, so every grant decision already in flight is stale by the
-    /// time the mutation can land. A revoke that fails keeps the bump; the
-    /// only cost is one retry of the racing reveal call, and its next chain
-    /// question gets the truthful answer.
-    pub const fn bump_revoke_generation(&mut self) {
-        self.revoke_generation = self.revoke_generation.wrapping_add(1);
-    }
-
     /// Derive the public id for an internal counter value: a keyed hash, so
     /// ids look random to anyone without the nonce yet never repeat for one
     /// gateway instance.

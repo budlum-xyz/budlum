@@ -2378,7 +2378,11 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.get_balance(&owner), 50 + FEE, "the escrow is refunded");
+        assert_eq!(
+            state.get_balance(&owner),
+            50 + FEE,
+            "the escrow is refunded"
+        );
         assert_eq!(
             state
                 .registry

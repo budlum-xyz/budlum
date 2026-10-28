@@ -640,7 +640,9 @@ mod tests {
         assert_eq!(mds_entry(1, 0), 10, "row 1 is row 0 rotated right by one");
         assert_eq!(mds_entry(1, 1), 1);
         assert_eq!(mds_entry(11, 0), 1);
-        assert_eq!(mds_entry(11, 11), 10);
+        // Row 11 is row 0 rotated right by 11, so column 11 lands on column
+        // 0 of the first row: the far corner mirrors (0, 0), not (0, 11).
+        assert_eq!(mds_entry(11, 11), 1);
     }
 
     #[test]

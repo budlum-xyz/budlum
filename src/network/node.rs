@@ -1082,6 +1082,7 @@ impl Node {
     /// Ask `peer` for the witnesses of transactions of one block. The answer is
     /// admitted only when it hashes to `witness_root` (the root the block
     /// header commits); a peer that answers anything else is reported.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn request_witnesses(
         &mut self,
         peer: PeerId,

@@ -22,110 +22,169 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
-# --- the git sourced libp2p tree: audit it as its crates.io counterpart ---
-#
-# libp2p is taken from the rust-libp2p tree rather than crates.io (Cargo.toml:32).
-# cargo-vet cannot know on its own which crates.io package a git dependency
-# corresponds to, so it cannot bind the audit records (including the
-# mozilla/google/isrg imports) to those packages and says "There are some issues
-# with your policy.audit-as-crates-io entries", RUNNING NO SCAN AT ALL.
-#
-# This was a case the gate caught correctly: `cargo vet check` printed neither an
-# unvetted dependency count nor "Vetting Succeeded!", and the gate refused to treat
-# the output as clean. What was missing was not the gate but the mapping below.
-#
-# `audit-as-crates-io = true` means "count this git checkout as the crates.io
-# package of the same name"; the existing audits become reusable. It adds no new
-# trust assumption: the versions are pinned in Cargo.lock and the commit they came
-# from is visible in the report.
-
-[policy."libp2p"]
+[policy.libp2p]
 audit-as-crates-io = true
 
-[policy."libp2p-allow-block-list"]
+[policy.libp2p-allow-block-list]
 audit-as-crates-io = true
 
-# libp2p-connection-limits: the git checkout says 0.7.0 while crates.io has
-# published up to 0.6.0. cargo-vet handles this precisely for a git
-# dependency: the base audit covers the published 0.6.0 and a delta audit
-# covers `0.6.0 -> 0.7.0@git:<rev>` (both recorded in audits.toml), so the
-# package stays under enforcement instead of being counted as first party.
-[policy."libp2p-connection-limits"]
+[policy.libp2p-connection-limits]
 audit-as-crates-io = true
 
-[policy."libp2p-core"]
+[policy.libp2p-core]
 audit-as-crates-io = true
 
-[policy."libp2p-dns"]
+[policy.libp2p-dns]
 audit-as-crates-io = true
 
-[policy."libp2p-gossipsub"]
+[policy.libp2p-gossipsub]
 audit-as-crates-io = true
 
-[policy."libp2p-identify"]
+[policy.libp2p-identify]
 audit-as-crates-io = true
 
-[policy."libp2p-kad"]
+[policy.libp2p-kad]
 audit-as-crates-io = true
 
-[policy."libp2p-mdns"]
+[policy.libp2p-mdns]
 audit-as-crates-io = true
 
-[policy."libp2p-metrics"]
+[policy.libp2p-metrics]
 audit-as-crates-io = true
 
-[policy."libp2p-noise"]
+[policy.libp2p-noise]
 audit-as-crates-io = true
 
-[policy."libp2p-ping"]
+[policy.libp2p-ping]
 audit-as-crates-io = true
 
-[policy."libp2p-quic"]
+[policy.libp2p-quic]
 audit-as-crates-io = true
 
-[policy."libp2p-request-response"]
+[policy.libp2p-request-response]
 audit-as-crates-io = true
 
-[policy."libp2p-swarm"]
+[policy.libp2p-swarm]
 audit-as-crates-io = true
 
-[policy."libp2p-swarm-derive"]
+[policy.libp2p-swarm-derive]
 audit-as-crates-io = true
 
-[policy."libp2p-tcp"]
+[policy.libp2p-tcp]
 audit-as-crates-io = true
 
-[policy."libp2p-tls"]
+[policy.libp2p-tls]
 audit-as-crates-io = true
 
-[policy."libp2p-upnp"]
+[policy.libp2p-upnp]
 audit-as-crates-io = true
 
-[policy."libp2p-yamux"]
+[policy.libp2p-yamux]
 audit-as-crates-io = true
 
-[policy."multistream-select"]
+[policy.multistream-select]
 audit-as-crates-io = true
 
-[policy."prost-codec"]
+[policy.prost-codec]
 audit-as-crates-io = true
 
-[policy."rw-stream-sink"]
+[policy.rw-stream-sink]
 audit-as-crates-io = true
 
-# --- the post-quantum core ---
-#
-# Exemptions, not audits: the repository has not reviewed these crates line by
-# line, and writing "safe-to-deploy" under an auditor name would claim that it
-# had. An exemption says "accepted into the dependency set under the reasons
-# below"; each one is a version that `Cargo.lock` pins exactly. The crates that
-# only exist for cfg(hax) or valgrind builds are listed because `cargo vet`
-# walks every target of the graph.
-
-[[exemptions.libcrux-ml-dsa]]
-version = "0.0.11"
+[[exemptions.bindgen]]
+version = "0.72.1"
 criteria = "safe-to-deploy"
-notes = "Second ML-DSA verifier (portable backend only),. Formally verified (hax/F*) Cryspen code; pinned exactly. The AVX2 advisories RUSTSEC-2026-0125 and RUSTSEC-2026-0126 need simd256, which is off."
+notes = "Build-time dependency of crabgrind; never part of a shipped binary."
+
+[[exemptions.cexpr]]
+version = "0.6.0"
+criteria = "safe-to-deploy"
+notes = "Build-time dependency of bindgen."
+
+[[exemptions.clang-sys]]
+version = "1.9.1"
+criteria = "safe-to-deploy"
+notes = "Build-time dependency of bindgen."
+
+[[exemptions.core-models]]
+version = "0.0.7"
+criteria = "safe-to-deploy"
+notes = "Models of core used by libcrux under cfg(hax) only."
+
+[[exemptions.crabgrind]]
+version = "0.3.1"
+criteria = "safe-to-deploy"
+notes = "Valgrind client requests of libcrux-secrets, constant-time testing only (cfg valgrind_ct_test)."
+
+[[exemptions.crypto-bigint]]
+version = "0.7.10"
+criteria = "safe-to-deploy"
+notes = "RustCrypto (RustCrypto/traits) bignum; the 0.14 elliptic-curve line requires >=0.7.6 for RUSTSEC-2026-0387, so this version is the one the advisory names as fixed. No build script, no unsafe beyond reviewed Montgomery arithmetic."
+
+[[exemptions.elliptic-curve]]
+version = "0.14.3"
+criteria = "safe-to-deploy"
+notes = "RustCrypto trait crate for the curve stack; pulled by k256/p256/p192/p224 for the quantum-canary and secp256k1 surfaces. Version-pinned to the 0.14 line that carries crypto-bigint 0.7 (RUSTSEC-2026-0387 fix)."
+
+[[exemptions.ff]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+notes = "zkcrypto field traits, the interface layer of the curve stack; pure trait definitions plus derive, no runtime code of its own."
+
+[[exemptions.ff_derive]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+notes = "Proc macro of ff 0.14 (macro-only, no unsafe, no build script)."
+
+[[exemptions.group]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+notes = "zkcrypto group traits (semigroups/prime-order groups), interface-only, follows ff 0.14."
+
+[[exemptions.hash2curve]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+notes = "RustCrypto hash-to-curve crate extracted from elliptic-curve 0.14; RFC 9380 expand-and-map helpers used by the quantum-canary K1/R1 path."
+
+[[exemptions.hax-lib]]
+version = "0.3.7"
+criteria = "safe-to-deploy"
+notes = "Verification annotations of libcrux; compiled only under cfg(hax)."
+
+[[exemptions.hax-lib]]
+version = "0.4.2"
+criteria = "safe-to-deploy"
+notes = "Verification annotations of libcrux; compiled only under cfg(hax)."
+
+[[exemptions.hax-lib-macros]]
+version = "0.3.7"
+criteria = "safe-to-deploy"
+notes = "Proc macros of hax-lib; compiled only under cfg(hax)."
+
+[[exemptions.hax-lib-macros]]
+version = "0.4.2"
+criteria = "safe-to-deploy"
+notes = "Proc macros of hax-lib; compiled only under cfg(hax)."
+
+[[exemptions.hax-lib-macros-types]]
+version = "0.3.7"
+criteria = "safe-to-deploy"
+notes = "Types of hax-lib-macros; compiled only under cfg(hax)."
+
+[[exemptions.hax-lib-macros-types]]
+version = "0.4.2"
+criteria = "safe-to-deploy"
+notes = "Types of hax-lib-macros; compiled only under cfg(hax)."
+
+[[exemptions.hmac]]
+version = "0.13.0"
+criteria = "safe-to-deploy"
+notes = "Dependency of slh-dsa 0.2 (HMAC for the randomized signing path)."
+
+[[exemptions.k256]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+notes = "secp256k1 (RustCrypto), same audited codebase as the previous 0.13.4 pin (NCC Group audit of the ECDSA/Schnorr paths); 0.14 is the line whose dependency graph carries crypto-bigint 0.7 (RUSTSEC-2026-0387 fix)."
 
 [[exemptions.libcrux-intrinsics]]
 version = "0.0.9"
@@ -136,6 +195,11 @@ notes = "Dependency of libcrux-ml-dsa; the SIMD features that use it are off."
 version = "0.0.4"
 criteria = "safe-to-deploy"
 notes = "Proc macros of libcrux-ml-dsa."
+
+[[exemptions.libcrux-ml-dsa]]
+version = "0.0.11"
+criteria = "safe-to-deploy"
+notes = "Second ML-DSA verifier (portable backend only),. Formally verified (hax/F*) Cryspen code; pinned exactly. The AVX2 advisories RUSTSEC-2026-0125 and RUSTSEC-2026-0126 need simd256, which is off."
 
 [[exemptions.libcrux-platform]]
 version = "0.0.4"
@@ -157,6 +221,66 @@ version = "0.0.9"
 criteria = "safe-to-deploy"
 notes = "Traits crate of libcrux."
 
+[[exemptions.p192]]
+version = "0.14.0-rc.15"
+criteria = "safe-to-deploy"
+notes = "RustCrypto NIST P-192 for the quantum canary; pinned exact (pre-release) to match the elliptic-curve 0.14 stack. No stable 0.14 exists yet; 0.13 would drag crypto-bigint 0.5 back into the graph (RUSTSEC-2026-0387)."
+
+[[exemptions.p224]]
+version = "0.14.0-rc.15"
+criteria = "safe-to-deploy"
+notes = "RustCrypto NIST P-224 for the quantum canary; pinned exact (pre-release) to match the elliptic-curve 0.14 stack (same RUSTSEC-2026-0387 reason as p192)."
+
+[[exemptions.p256]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+notes = "RustCrypto NIST P-256 (R1 canary + RFC 9380 suite); same audited codebase line as the 0.13.2 pin, now on the 0.14 graph with crypto-bigint 0.7."
+
+[[exemptions.pastey]]
+version = "0.2.3"
+criteria = "safe-to-deploy"
+notes = "Proc macro dependency of libcrux-sha3."
+
+[[exemptions.pkg-config]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "Build-time dependency of bindgen and crabgrind."
+
+[[exemptions.primefield]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+notes = "RustCrypto prime-field arithmetic shared by the 0.14 curve crates; pure arithmetic, no build script."
+
+[[exemptions.primeorder]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+notes = "RustCrypto complete-addition-formulas layer under p192/p224/p256; follows the same audited curve code lineage as 0.13.6."
+
+[[exemptions.proc-macro-error-attr2]]
+version = "2.0.0"
+criteria = "safe-to-deploy"
+notes = "Proc macro helper of proc-macro-error2."
+
+[[exemptions.proc-macro-error2]]
+version = "2.0.1"
+criteria = "safe-to-deploy"
+notes = "Proc macro helper of hax-lib-macros."
+
+[[exemptions.sec1]]
+version = "0.8.1"
+criteria = "safe-to-deploy"
+notes = "RustCrypto SEC1 point-encoding crate (compressed/uncompressed points); serialization only, no unsafe."
+
+[[exemptions.sha3]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+notes = "Dependency of slh-dsa 0.2 (SHAKE hash functions)."
+
+[[exemptions.shlex]]
+version = "1.3.0"
+criteria = "safe-to-deploy"
+notes = "Build-time dependency of bindgen."
+
 [[exemptions.slh-dsa]]
 version = "0.2.0-rc.5"
 criteria = "safe-to-deploy"
@@ -172,95 +296,10 @@ version = "0.5.0"
 criteria = "safe-to-deploy"
 notes = "Proc macro of tls_codec, never expanded here."
 
-[[exemptions.hax-lib]]
-version = "0.3.7"
+[[exemptions.wnaf]]
+version = "0.14.1"
 criteria = "safe-to-deploy"
-notes = "Verification annotations of libcrux; compiled only under cfg(hax)."
-
-[[exemptions.hax-lib]]
-version = "0.4.2"
-criteria = "safe-to-deploy"
-notes = "Verification annotations of libcrux; compiled only under cfg(hax)."
-
-[[exemptions.hax-lib-macros]]
-version = "0.3.7"
-criteria = "safe-to-deploy"
-notes = "Proc macros of hax-lib; compiled only under cfg(hax)."
-
-[[exemptions.hax-lib-macros]]
-version = "0.4.2"
-criteria = "safe-to-deploy"
-notes = "Proc macros of hax-lib; compiled only under cfg(hax)."
-
-[[exemptions.hax-lib-macros-types]]
-version = "0.3.7"
-criteria = "safe-to-deploy"
-notes = "Types of hax-lib-macros; compiled only under cfg(hax)."
-
-[[exemptions.hax-lib-macros-types]]
-version = "0.4.2"
-criteria = "safe-to-deploy"
-notes = "Types of hax-lib-macros; compiled only under cfg(hax)."
-
-[[exemptions.core-models]]
-version = "0.0.7"
-criteria = "safe-to-deploy"
-notes = "Models of core used by libcrux under cfg(hax) only."
-
-[[exemptions.crabgrind]]
-version = "0.3.1"
-criteria = "safe-to-deploy"
-notes = "Valgrind client requests of libcrux-secrets, constant-time testing only (cfg valgrind_ct_test)."
-
-[[exemptions.bindgen]]
-version = "0.72.1"
-criteria = "safe-to-deploy"
-notes = "Build-time dependency of crabgrind; never part of a shipped binary."
-
-[[exemptions.cexpr]]
-version = "0.6.0"
-criteria = "safe-to-deploy"
-notes = "Build-time dependency of bindgen."
-
-[[exemptions.clang-sys]]
-version = "1.9.1"
-criteria = "safe-to-deploy"
-notes = "Build-time dependency of bindgen."
-
-[[exemptions.pkg-config]]
-version = "0.3.34"
-criteria = "safe-to-deploy"
-notes = "Build-time dependency of bindgen and crabgrind."
-
-[[exemptions.shlex]]
-version = "1.3.0"
-criteria = "safe-to-deploy"
-notes = "Build-time dependency of bindgen."
-
-[[exemptions.pastey]]
-version = "0.2.3"
-criteria = "safe-to-deploy"
-notes = "Proc macro dependency of libcrux-sha3."
-
-[[exemptions.proc-macro-error2]]
-version = "2.0.1"
-criteria = "safe-to-deploy"
-notes = "Proc macro helper of hax-lib-macros."
-
-[[exemptions.proc-macro-error-attr2]]
-version = "2.0.0"
-criteria = "safe-to-deploy"
-notes = "Proc macro helper of proc-macro-error2."
-
-[[exemptions.hmac]]
-version = "0.13.0"
-criteria = "safe-to-deploy"
-notes = "Dependency of slh-dsa 0.2 (HMAC for the randomized signing path)."
-
-[[exemptions.sha3]]
-version = "0.11.0"
-criteria = "safe-to-deploy"
-notes = "Dependency of slh-dsa 0.2 (SHAKE hash functions)."
+notes = "zkcrypto windowed-NAF scalar multiplication tables, pure arithmetic used by k256 0.14."
 
 [[exemptions.zeroize]]
 version = "1.9.1"

@@ -794,8 +794,12 @@ mod rpc_tests {
         assert_eq!(commitments3.as_array().unwrap().len(), 1);
 
         // The relayed submit path requires the sender to be an active relayer.
-        // Fund and register a relayer (staking == registration), then use it as
-        // The message sender.
+        // Bonding on this node alone would change the registry outside a
+        // block, so the RPC door refuses and names the transaction that does
+        // the work (BLG-0134). The test bonds the relayer directly in the
+        // chain state it owns - the same row a signed RoleBond transaction
+        // would write inside block execution - and then uses it as the
+        // message sender.
         // The message envelope is signed (BLG-0113): the V4 address IS the
         // Ed25519 public key, so the relayer is derived from the key that
         // signs.
@@ -805,10 +809,17 @@ mod rpc_tests {
             .credit_development_account(&relayer, 5_000)
             .await
             .expect("devnet credit");
-        server
+        let bond_refusal = server
             .registry_bond_relayer(format!("0x{}", relayer.to_hex()), 2_000)
             .await
-            .unwrap();
+            .expect_err("out-of-block relayer bonding is refused");
+        assert!(
+            bond_refusal
+                .message()
+                .contains("signed RoleBond transaction with role 3"),
+            "the refusal names the transaction door: {}",
+            bond_refusal.message()
+        );
 
         let mut cross_domain_msg = crate::cross_domain::CrossDomainMessage::new(
             crate::cross_domain::message::CrossDomainMessageParams {
@@ -826,23 +837,27 @@ mod rpc_tests {
         );
         cross_domain_msg.sign_sender_ed25519(&relayer_keys);
 
-        // The relay is a transaction now, and a transaction is signed by the
-        // node's consensus signer. This chain runs PoW with no signer (by
-        // design), so the door must refuse with that reason rather than
-        // half-register anything.
+        // The relay is a transaction now: the RPC method registers nothing
+        // itself, so it refuses and names the transaction door that does the
+        // work. The door is out-of-block registration, refused for every
+        // caller - on this PoW chain without a signer just as on any other.
         let signerless = server
             .submit_cross_domain_message(cross_domain_msg.clone())
             .await
-            .expect_err("a node with no consensus signer cannot build a transaction");
+            .expect_err("out-of-block message registration is refused");
         assert!(
-            signerless.message().contains("No consensus signer"),
-            "the refusal names the missing signer: {}",
+            signerless
+                .message()
+                .contains("Out-of-block cross-domain message registration")
+                && signerless.message().contains("RelayCrossDomainMessage"),
+            "the refusal names the transaction door: {}",
             signerless.message()
         );
 
-        // The same call on a chain whose node holds a signer answers with the
-        // TRANSACTION hash, not the message id: `message_registry` is in the
-        // state root, so nothing is registered until a block carries it.
+        // The relay travels as a signed transaction: `message_registry` is
+        // in the state root, so nothing is registered until a block carries
+        // it. The chain below holds a signer, so the transaction can be
+        // built at all - but the door above stays shut either way.
         let node_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
         let node_addr = Address::from(node_keys.public_key_bytes());
         let node_signer = Arc::new(crate::crypto::signer::KeyPairSigner::new(node_keys));
@@ -862,28 +877,42 @@ mod rpc_tests {
             .bond_relayer(&relayer, 2_000)
             .expect("the relayer bonds");
         relay_bc.state.add_balance(&node_addr, 5_000);
+        relay_bc.state.add_balance(&relayer, 100_000_000);
         let (relay_server, relay_chain) = setup_with_blockchain(relay_bc).await;
-        let msg_result = relay_server
-            .submit_cross_domain_message(cross_domain_msg.clone())
+        // The relayed message is carried by a signed transaction whose
+        // signer is the message sender (BLG-0113: the V4 address IS the
+        // Ed25519 public key) and an active relayer. The direct RPC door
+        // stays shut; the transaction path is the one that works.
+        let base_fee = relay_chain.get_base_fee().await;
+        let mut relay_tx = crate::core::transaction::Transaction::new_with_chain_id(
+            relayer,
+            Address::zero(),
+            0,
+            base_fee,
+            0,
+            Vec::new(),
+            relay_chain.get_chain_id().await,
+            crate::core::transaction::TransactionType::RelayCrossDomainMessage(
+                cross_domain_msg.clone(),
+            ),
+        );
+        relay_tx.sign(&relayer_keys);
+        relay_chain
+            .add_transaction(relay_tx)
             .await
-            .expect("a signed transaction is built and queued");
-        let hash_hex = msg_result
-            .strip_prefix("0x")
-            .expect("an RPC transaction hash is 0x-prefixed");
-        assert_eq!(
-            hex::decode(hash_hex).expect("valid hex").len(),
-            32,
-            "the answer is the 32-byte transaction hash: {msg_result}"
-        );
-        assert_ne!(
-            msg_result,
-            format!("0x{}", hex::encode(cross_domain_msg.message_id)),
-            "the message id is not a receipt: registration needs a block"
-        );
+            .expect("the relay is queued as a transaction");
         assert_eq!(
             relay_chain.get_mempool_size().await,
             1,
             "the relay is queued as a transaction"
+        );
+        let queued = relay_server
+            .get_cross_domain_message(format!("0x{}", hex::encode(cross_domain_msg.message_id)))
+            .await
+            .expect("the read answers");
+        assert!(
+            queued.is_null(),
+            "registration needs a block: the queued relay is not in the state root: {queued}"
         );
 
         let asset_id = crate::cross_domain::AssetId([42u8; 32]);

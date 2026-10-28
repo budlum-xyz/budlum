@@ -100,8 +100,9 @@ and AIR parity tests.
 Scope: `src/crypto/tls.rs` (rustls with aws-lc-rs, X25519MLKEM768 only), the
 RPC TLS listener, `src/crypto/hpke.rs` (KEM 0x647a, HKDF-SHA256,
 ChaCha20-Poly1305), the B.U.D. key package (`src/storage/view_grant.rs`), the
-Pollen policy (`src/pollen/data_rights.rs`), and the peer identity binding
-.
+Pollen policy (`src/pollen/data_rights.rs`). The ML-DSA peer identity proof
+in `src/network/peer_auth.rs` is not called from the transport and is
+therefore outside the layer that is enforced today.
 
 Threat: a classical-only key exchange, a downgrade, a recipient confusion in
 HPKE, a gossip author signature treated as consensus input.

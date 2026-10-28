@@ -4,7 +4,7 @@
 //!
 //! Groth16, KZG-based PLONK and any proof system over BN254 rest on pairings,
 //! and a quantum adversary running Shor's algorithm breaks pairings. The
-//! chain's own proofs are BudZero STARKs, which rest on a hash only. Two things
+//! chain's own proofs are `BudZero` STARKs, which rest on a hash only. Two things
 //! would let a pairing system back in without anyone deciding to:
 //!
 //! 1. **A dependency.** A crate that implements such a system, in any
@@ -85,7 +85,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Product code: a `src` tree of the node, of a crate or of BudZero. The tools and
+/// Product code: a `src` tree of the node, of a crate or of `BudZero`. The tools and
 /// the gates under `xtask/` name the labels in their own deny lists and canaries.
 fn is_product_source(rel: &str) -> bool {
     !rel.starts_with("xtask/") && (rel.starts_with("src/") || rel.contains("/src/"))
@@ -275,8 +275,9 @@ fn fixture(root: &Path, files: &[(&str, &str)]) -> Result<(), String> {
 /// pairing system can enter must be caught, and Plonky3 must not be mistaken
 /// for PLONK.
 pub fn self_test() -> Result<String, String> {
+    type Case = (&'static str, &'static [(&'static str, &'static str)], bool);
     let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-pairing")?;
-    let cases: &[(&str, &[(&str, &str)], bool)] = &[
+    let cases: &[Case] = &[
         (
             "clean tree",
             &[(

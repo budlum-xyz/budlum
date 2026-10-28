@@ -1705,13 +1705,20 @@ impl AccountState {
     /// The stateless verifier only knows that the Ed25519 half is the sender
     /// and that both halves signed. Without this check an attacker who can
     /// forge the Ed25519 half would pair it with an ML-DSA-65 key of its own.
-    /// Once `RegisterConsensusKeys` recorded a key, only that key signs. Before
-    /// it, a validator transaction may only bond stake or register the very
-    /// key it is signed with, which is the order `bud validator join` sends.
+    /// Once `RegisterConsensusKeys` recorded a key, only that key signs.
+    /// Before it there is nothing to hold the halves to: an unregistered
+    /// pair is chosen by whoever presents it, so a self-signed stake
+    /// attestation binds the transaction to no identity the chain trusts,
+    /// and a registration of "the key it signs with" is a tautology, not a
+    /// claim. An unregistered sender therefore cannot present a V7
+    /// validator transaction at all: enrolment goes through the
+    /// Ed25519-authorised path `bud validator join` sends (testnet), or
+    /// through the genesis ceremony (mainnet).
     ///
     /// # Errors
     ///
-    /// A message naming the mismatch.
+    /// A message naming the mismatch, or the refusal of an unregistered
+    /// validator transaction.
     pub fn check_validator_v7_binding(&self, tx: &Transaction) -> Result<(), String> {
         let Some(pq) = tx.v7_validator_pq_key() else {
             return Ok(());
@@ -1726,19 +1733,12 @@ impl AccountState {
             Some(_) => Err(
                 "the ML-DSA-65 key of this validator transaction is not the registered one".into(),
             ),
-            None => match &tx.tx_type {
-                TransactionType::Stake => Ok(()),
-                TransactionType::RegisterConsensusKeys(registration)
-                    if registration.pq_public_key == pq =>
-                {
-                    Ok(())
-                }
-                _ => Err(
-                    "a validator with no registered ML-DSA-65 key may only stake or register \
-                     the key it signs with"
-                        .into(),
-                ),
-            },
+            None => Err(
+                "a validator with no registered ML-DSA-65 key cannot authorise a V7 \
+                 validator transaction; enrol through the Ed25519-authorised path or the \
+                 genesis ceremony"
+                    .into(),
+            ),
         }
     }
 
@@ -3614,6 +3614,7 @@ impl AccountState {
     ///
     /// [`crate::crypto::scheme::SchemeError`] when the step is not one rung
     /// forward.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn scheme_transition_from_alarm(
         &mut self,
         id: crate::crypto::scheme::SchemeId,
@@ -3633,6 +3634,7 @@ impl AccountState {
     ///
     /// [`crate::crypto::scheme::SchemeError`] when the step is not one rung
     /// forward.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn scheme_transition_from_cold_committee(
         &mut self,
         id: crate::crypto::scheme::SchemeId,
@@ -3651,6 +3653,7 @@ impl AccountState {
     /// # Errors
     ///
     /// [`crate::crypto::scheme::SchemeError`] when the scheme is not `Reserved`.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn scheme_activate_by_governance(
         &mut self,
         id: crate::crypto::scheme::SchemeId,
@@ -5813,15 +5816,65 @@ mod validator_v7_binding_tests {
     }
 
     #[test]
-    fn an_unregistered_validator_may_only_stake() {
+    fn an_unregistered_validator_transaction_is_refused() {
         let state = AccountState::new();
         let key = validator_key(3);
+        // Nothing about an unregistered key pair is attested: the sender
+        // presents both halves and the chain has registered neither.
         assert!(state
             .check_validator_v7_binding(&signed(&key, TransactionType::Stake))
-            .is_ok());
+            .is_err());
         assert!(state
             .check_validator_v7_binding(&signed(&key, TransactionType::Transfer))
             .is_err());
+    }
+
+    /// Regression: a stake was admitted before registration because
+    /// `StakingAttributes` carries the public key the stake names. The pair
+    /// is self-signed end to end - the ed25519 half and the ML-DSA-65 half
+    /// are chosen together by whoever sends it - so the attestation binds to
+    /// no identity the chain trusts. Fail closed instead.
+    #[test]
+    fn a_stake_before_registration_is_refused_at_the_binding_gate() {
+        let state = AccountState::new();
+        let key = validator_key(5);
+        let err = state
+            .check_validator_v7_binding(&signed(&key, TransactionType::Stake))
+            .expect_err("a pre-registration V7 stake must be refused");
+        assert!(
+            err.contains("no registered ML-DSA-65 key"),
+            "the refusal must name the missing registration, got: {err}"
+        );
+    }
+
+    /// Regression: registering "the very key it is signed with" was admitted
+    /// when the registration's ML-DSA-65 key equalled the key signing the
+    /// transaction. That equality is decided by the same sender, so it
+    /// proves nothing: the attacker generates both halves and satisfies the
+    /// check by construction. Fail closed instead; enrolment signs the
+    /// registration with the Ed25519-authorized key set.
+    #[test]
+    fn a_self_signed_key_registration_before_registration_is_refused() {
+        let state = AccountState::new();
+        let key = validator_key(6);
+        let public = key.public_key().expect("public");
+        let registration = crate::core::transaction::ConsensusKeyRegistration {
+            scheme_id: crate::chain::finality::BLS_SCHEME_RFC9380_V1.to_string(),
+            vrf_public_key: Vec::new(),
+            bls_public_key: Vec::new(),
+            pop_signature: Vec::new(),
+            pq_public_key: public.pq.clone(),
+        };
+        let err = state
+            .check_validator_v7_binding(&signed(
+                &key,
+                TransactionType::RegisterConsensusKeys(registration),
+            ))
+            .expect_err("a pre-registration V7 key registration must be refused");
+        assert!(
+            err.contains("no registered ML-DSA-65 key"),
+            "the refusal must name the missing registration, got: {err}"
+        );
     }
 
     #[test]

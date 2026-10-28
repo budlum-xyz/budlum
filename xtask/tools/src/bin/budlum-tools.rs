@@ -103,6 +103,28 @@ fn run_self_tests() {
         std::process::exit(1);
     }
 }
+/// The tools ported from scripts keep the exact stdout, stderr and exit code
+/// of the script, so they return a full report; the process exits here when a
+/// ported tool matched, and control returns to the caller when none did.
+fn dispatch_ported(refs: &[&str], root: &std::path::Path) {
+    let Some((name, rest)) = refs.split_first() else {
+        return;
+    };
+    let ported = match *name {
+        "audit-guard" => Some(audit_guard::cli(rest, root)),
+        "step-reachability" => Some(step_reachability::cli(rest, root)),
+        "clippy-extra-report" => Some(clippy_extra_report::cli(rest, root)),
+        "fsf-project-fit" => Some(fsf_fit::cli(rest, root)),
+        "stark-soundness" => Some(stark_soundness::cli(rest, root)),
+        "pq-measure" => Some(pq_measure::cli(rest, root)),
+        _ => None,
+    };
+    if let Some(report) = ported {
+        print!("{}", report.stdout);
+        eprint!("{}", report.stderr);
+        std::process::exit(report.code);
+    }
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -115,24 +137,7 @@ fn main() {
         }
     };
 
-    // The tools ported from scripts keep the exact stdout, stderr and exit
-    // code of the script, so they return a full report.
-    if let Some((name, rest)) = refs.split_first() {
-        let ported = match *name {
-            "audit-guard" => Some(audit_guard::cli(rest, &root)),
-            "step-reachability" => Some(step_reachability::cli(rest, &root)),
-            "clippy-extra-report" => Some(clippy_extra_report::cli(rest, &root)),
-            "fsf-project-fit" => Some(fsf_fit::cli(rest, &root)),
-            "stark-soundness" => Some(stark_soundness::cli(rest, &root)),
-            "pq-measure" => Some(pq_measure::cli(rest, &root)),
-            _ => None,
-        };
-        if let Some(report) = ported {
-            print!("{}", report.stdout);
-            eprint!("{}", report.stderr);
-            std::process::exit(report.code);
-        }
-    }
+    dispatch_ported(&refs, &root);
 
     let outcome: Result<String, String> = match refs.first() {
         None => {

@@ -65,7 +65,7 @@ pub fn encode_batch(statements: &[PulStatement]) -> Vec<u8> {
 pub fn absorb_states(bytes: &[u8]) -> Vec<[u64; 25]> {
     let mut padded = bytes.to_vec();
     padded.push(0x01);
-    while padded.len() % RATE_BYTES != 0 {
+    while !padded.len().is_multiple_of(RATE_BYTES) {
         padded.push(0);
     }
     if let Some(last) = padded.last_mut() {
@@ -197,7 +197,10 @@ mod tests {
             from_address: [2; 32],
             suite_id: 1,
         };
-        assert_eq!(absorb_states(&encode_batch(&[statement.clone()])).len(), 1);
+        assert_eq!(
+            absorb_states(&encode_batch(std::slice::from_ref(&statement))).len(),
+            1
+        );
         let proof = prove_batch(vec![statement]).expect("proves");
         assert!(verify_batch(&proof).is_ok());
         assert!(prove_batch(Vec::new()).is_err());

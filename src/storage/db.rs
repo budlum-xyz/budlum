@@ -770,6 +770,7 @@ impl Storage {
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the read.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn is_witness_pruned(&self, height: u64) -> std::io::Result<bool> {
         Ok(self
             .db
@@ -988,6 +989,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns the underlying I/O error when the scan or a decode fails.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn load_handoff_certs(
         &self,
     ) -> std::io::Result<Vec<crate::consensus::handoff::HandoffCertificate>> {
@@ -1284,6 +1286,7 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn save_storage_registry(
         &self,
         registry: &crate::domain::storage_deal::StorageRegistry,
@@ -1302,6 +1305,7 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn load_storage_registry(
         &self,
     ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {

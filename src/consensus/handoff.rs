@@ -190,6 +190,7 @@ impl HandoffCertificate {
     }
 
     /// Add one member's signature, keeping the index order.
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn insert_signature(&mut self, index: u32, signature: Vec<u8>) {
         match self.signatures.binary_search_by_key(&index, |s| s.index) {
             Ok(at) => self.signatures[at].signature = signature,

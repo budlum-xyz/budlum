@@ -307,23 +307,23 @@ fn collision_check(proof: &[u8], digest: impl Fn(&[u8]) -> Vec<u8>) -> bool {
 
 mod weierstrass {
     use super::{label, CanaryId, K1_DST, R1_DST};
-    use k256::elliptic_curve::generic_array::typenum::Unsigned;
+    use hash2curve::ExpandMsgXmd;
+    use k256::elliptic_curve::array::typenum::Unsigned;
     use k256::elliptic_curve::group::Group;
-    use k256::elliptic_curve::hash2curve::{ExpandMsgXmd, GroupDigest};
-    use k256::elliptic_curve::sec1::{FromEncodedPoint, ModulusSize, ToEncodedPoint};
+    use k256::elliptic_curve::sec1::{FromSec1Point, ModulusSize, ToSec1Point};
     use k256::elliptic_curve::{CurveArithmetic, Field, FieldBytes, FieldBytesSize, PrimeField};
     use sha3::{Digest, Sha3_256};
 
-    type Encoded<C> = k256::elliptic_curve::sec1::EncodedPoint<C>;
+    type Encoded<C> = k256::elliptic_curve::sec1::Sec1Point<C>;
 
     fn decode<C>(bytes: &[u8]) -> Option<C::AffinePoint>
     where
         C: CurveArithmetic,
-        C::AffinePoint: FromEncodedPoint<C>,
+        C::AffinePoint: FromSec1Point<C>,
         FieldBytesSize<C>: ModulusSize,
     {
         let encoded = Encoded::<C>::from_bytes(bytes).ok()?;
-        Option::from(C::AffinePoint::from_encoded_point(&encoded))
+        Option::from(C::AffinePoint::from_sec1_point(&encoded))
     }
 
     /// Try-and-increment (no RFC 9380 suite exists for P-192 and P-224):
@@ -333,7 +333,7 @@ mod weierstrass {
     pub(super) fn try_and_increment<C>(id: CanaryId) -> Vec<u8>
     where
         C: CurveArithmetic,
-        C::AffinePoint: FromEncodedPoint<C> + ToEncodedPoint<C>,
+        C::AffinePoint: FromSec1Point<C> + ToSec1Point<C>,
         FieldBytesSize<C>: ModulusSize,
     {
         let size = <FieldBytesSize<C> as Unsigned>::USIZE;
@@ -346,30 +346,32 @@ mod weierstrass {
             compressed.push(0x02);
             compressed.extend_from_slice(&digest[..size]);
             if let Some(point) = decode::<C>(&compressed) {
-                return point.to_encoded_point(true).as_bytes().to_vec();
+                return point.to_sec1_point(true).as_bytes().to_vec();
             }
         }
         unreachable!("the counter space is not exhausted")
     }
 
     pub(super) fn hash_to_curve_k1() -> Vec<u8> {
-        let point = <k256::Secp256k1 as GroupDigest>::hash_from_bytes::<
-            ExpandMsgXmd<sha2_010::Sha256>,
-        >(&[&label(CanaryId::EccK1)], &[K1_DST])
+        let point = hash2curve::hash_from_bytes::<k256::Secp256k1, ExpandMsgXmd<sha2::Sha256>>(
+            &[&label(CanaryId::EccK1)],
+            &[K1_DST],
+        )
         .unwrap_or_else(|_| unreachable!("expand_message_xmd accepts these lengths"));
         k256::AffinePoint::from(point)
-            .to_encoded_point(true)
+            .to_sec1_point(true)
             .as_bytes()
             .to_vec()
     }
 
     pub(super) fn hash_to_curve_r1() -> Vec<u8> {
-        let point = <p256::NistP256 as GroupDigest>::hash_from_bytes::<
-            ExpandMsgXmd<sha2_010::Sha256>,
-        >(&[&label(CanaryId::EccR1)], &[R1_DST])
+        let point = hash2curve::hash_from_bytes::<p256::NistP256, ExpandMsgXmd<sha2::Sha256>>(
+            &[&label(CanaryId::EccR1)],
+            &[R1_DST],
+        )
         .unwrap_or_else(|_| unreachable!("expand_message_xmd accepts these lengths"));
         p256::AffinePoint::from(point)
-            .to_encoded_point(true)
+            .to_sec1_point(true)
             .as_bytes()
             .to_vec()
     }
@@ -379,7 +381,7 @@ mod weierstrass {
     pub(super) fn check<C>(point: &[u8], proof: &[u8]) -> bool
     where
         C: CurveArithmetic,
-        C::AffinePoint: FromEncodedPoint<C>,
+        C::AffinePoint: FromSec1Point<C>,
         FieldBytesSize<C>: ModulusSize,
     {
         let Some(target) = decode::<C>(point) else {
@@ -388,7 +390,10 @@ mod weierstrass {
         if proof.len() != <FieldBytesSize<C> as Unsigned>::USIZE {
             return false;
         }
-        let repr = FieldBytes::<C>::clone_from_slice(proof);
+        let repr = match FieldBytes::<C>::try_from(proof) {
+            Ok(repr) => repr,
+            Err(_) => return false,
+        };
         let scalar: Option<C::Scalar> = Option::from(C::Scalar::from_repr(repr));
         let Some(scalar) = scalar else {
             return false;
@@ -587,6 +592,7 @@ impl QuantumAlarmState {
 
     /// Whether any canary is solved.
     #[must_use]
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn is_alarmed(&self) -> bool {
         !self.solved.is_empty()
     }
@@ -630,6 +636,7 @@ impl CanaryBook {
 
     /// Commits pending now.
     #[must_use]
+    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }

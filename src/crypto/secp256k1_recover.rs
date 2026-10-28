@@ -10,9 +10,9 @@
 
 use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::point::DecompressPoint;
-use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::elliptic_curve::sec1::ToSec1Point;
 use k256::elliptic_curve::PrimeField;
-use k256::{AffinePoint, FieldBytes, ProjectivePoint, Scalar, U256};
+use k256::{AffinePoint, FieldBytes, ProjectivePoint, Scalar};
 use sha3::{Digest, Keccak256};
 
 /// Why a signature recovers no address.
@@ -60,8 +60,8 @@ pub fn recover_address(digest: &[u8; 32], signature: &[u8]) -> Result<[u8; 20], 
         28 | 1 => true,
         _ => return Err(RecoverError::RecoveryId),
     };
-    let r_bytes = FieldBytes::clone_from_slice(&signature[..32]);
-    let s_bytes = FieldBytes::clone_from_slice(&signature[32..64]);
+    let r_bytes = FieldBytes::try_from(&signature[..32]).map_err(|_| RecoverError::Length)?;
+    let s_bytes = FieldBytes::try_from(&signature[32..64]).map_err(|_| RecoverError::Length)?;
     if signature[32..64] > HALF_ORDER[..] {
         return Err(RecoverError::HighS);
     }
@@ -77,10 +77,10 @@ pub fn recover_address(digest: &[u8; 32], signature: &[u8]) -> Result<[u8; 20], 
         k256::elliptic_curve::subtle::Choice::from(u8::from(y_is_odd)),
     ))
     .ok_or(RecoverError::NoPoint)?;
-    let e = <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::clone_from_slice(digest));
+    let e = <Scalar as Reduce<FieldBytes>>::reduce(&FieldBytes::from(*digest));
     let r_inv = Option::<Scalar>::from(r.invert()).ok_or(RecoverError::Range)?;
     let q = (ProjectivePoint::from(big_r) * s - ProjectivePoint::GENERATOR * e) * r_inv;
-    let encoded = q.to_affine().to_encoded_point(false);
+    let encoded = q.to_affine().to_sec1_point(false);
     let bytes = encoded.as_bytes();
     if bytes.len() != 65 {
         return Err(RecoverError::NoPoint);
