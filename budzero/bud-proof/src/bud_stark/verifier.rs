@@ -1,3 +1,4 @@
+//! WIRING: unwired - this verifier surface is reached through the prover pipeline tests; the production call sites land with the verifier wiring wave.
 //! See [`crate::prover`] for an overview of the protocol and a more detailed soundness analysis.
 //!
 //! WIRING: unwired - reached through the `verify` entry points re-exported by
