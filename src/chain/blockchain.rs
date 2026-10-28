@@ -8699,12 +8699,10 @@ impl Blockchain {
                     self.hold_expiry_that_would_strand(deal_id, current_epoch);
                     continue;
                 }
-                Err(
-                    crate::domain::storage_deal::StorageError::OpenChallengeBlocksExpiry {
-                        open_challenges,
-                        ..
-                    },
-                ) => {
+                Err(crate::domain::storage_deal::StorageError::OpenChallengeBlocksExpiry {
+                    open_challenges,
+                    ..
+                }) => {
                     // The term is over but a question about these bytes is
                     // still open. The missed-answer slash settles only an
                     // `Active` deal, so the row is held and the next sweep
