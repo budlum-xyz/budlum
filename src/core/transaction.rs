@@ -60,7 +60,7 @@ pub const SIGNATURE_VERSION_V7: u32 = 7;
 /// First byte of a V7 recovery witness. A composite key blob starts with
 /// its encoding version (1); the recovery witness starts with 2, so the two
 /// forms are told apart by an explicit byte, never by a length.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const V7_WITNESS_RECOVERY: u8 = 2;
 /// The composite multi-signature form.
 ///
@@ -71,16 +71,16 @@ pub const V7_WITNESS_RECOVERY: u8 = 2;
 /// and each revealed key must hash to a leaf of the set. `from` commits to the
 /// suite, the threshold, the sorted leaves and the recovery key digest, which
 /// travels in `signer_public_key` (32 bytes).
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const SIGNATURE_VERSION_V8: u32 = 8;
 /// The explicit profile id of V8 authorizations. Missing or different ids are
 /// refused; the verifier never infers the profile from a length.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const COMPOSITE_MULTISIG_SCHEME_ID: &str = "composite-0001-multisig-v1";
 /// The most owner signatures one V8 transaction carries. Each entry is about
 /// 7.3 KB (composite key and signature), which keeps the transaction under
 /// `MAX_TX_SIZE`.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const MAX_V8_SIGNERS: usize = 16;
 /// Explicit wire/profile identifier for V6 authorizations. The feature gate
 /// selects whether this verifier exists; this identifier selects the exact
@@ -855,7 +855,7 @@ pub struct TxWitness {
 }
 
 /// The domain tag of a witness hash.
-/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const TX_WITNESS_TAG: &[u8] = b"BDLM_TX_WITNESS_V1";
 
 impl TxWitness {
@@ -1134,7 +1134,7 @@ impl Transaction {
     /// The zero-recipient constructor remains the compatibility form for
     /// bytecode-only calls. A non-zero `to` is an explicit application identity
     /// and enables the testnet application revenue split at block settlement.
-    /// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn new_contract_call_to(
         from: Address,
         to: Address,

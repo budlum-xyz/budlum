@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 /// One value of a flat JSON object.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// exposed for: the scanner crate's API surface — its CLI consumers land with the scan rollout wave.
+/// exposed for: the scanner crate's API surface - its CLI consumers land with the scan rollout wave.
 pub enum FlatValue {
     Str(String),
     Bool(bool),
@@ -31,7 +31,7 @@ pub enum FlatValue {
 /// # Errors
 ///
 /// Anything that is not one flat object of string keys.
-/// exposed for: the scanner crate's API surface — its CLI consumers land with the scan rollout wave.
+/// exposed for: the scanner crate's API surface - its CLI consumers land with the scan rollout wave.
 pub fn flat_object(text: &str) -> Result<BTreeMap<String, FlatValue>, String> {
     let mut chars = text.trim().chars().peekable();
     let mut out = BTreeMap::new();
@@ -125,7 +125,7 @@ fn hex32(value: Option<&FlatValue>) -> Result<Option<[u8; 32]>, String> {
 /// # Errors
 ///
 /// A `null` answer (the name is not registered) or a malformed one.
-/// exposed for: the scanner crate's API surface — its CLI consumers land with the scan rollout wave.
+/// exposed for: the scanner crate's API surface - its CLI consumers land with the scan rollout wave.
 pub fn resolution_from_indexer(text: &str) -> Result<ResolvedName, String> {
     if text.trim() == "null" {
         return Err("the name is not registered".into());
@@ -149,7 +149,7 @@ pub fn resolution_from_indexer(text: &str) -> Result<ResolvedName, String> {
 
 /// A [`NameResolver`] over the indexer. `get` performs `GET <base><path>`
 /// and returns the body.
-/// exposed for: the scanner crate's API surface — its CLI consumers land with the scan rollout wave.
+/// exposed for: the scanner crate's API surface - its CLI consumers land with the scan rollout wave.
 pub struct IndexerResolver<F: Fn(&str) -> Result<String, String>> {
     get: F,
 }

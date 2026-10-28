@@ -761,7 +761,7 @@ pub enum SnapshotTrustPolicy {
 /// The scheme registry as a snapshot stores it: `(identifier, status byte)`
 /// pairs for schemes and for suites, in ascending identifier order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-/// WIRING: chain surface — the block/snapshot paths that read it land with their wiring wave.
+/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
 pub struct SchemeRegistrySnapshot {
     pub schemes: Vec<(u16, u8)>,
     pub suites: Vec<(u16, u8)>,

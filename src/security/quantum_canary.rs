@@ -32,26 +32,26 @@ use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
 
 /// Blocks a commit must age before its reveal counts.
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub const CANARY_REVEAL_DELAY: u64 = 100;
 /// Blocks after which an unrevealed commit expires.
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub const CANARY_REVEAL_WINDOW: u64 = 10_000;
 /// Commits the book holds at once.
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub const MAX_PENDING_COMMITS: usize = 4096;
 /// Commits one claimer may hold at once. A flood from one address cannot push
 /// an honest commit out of the book.
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub const MAX_PENDING_PER_CLAIMER: usize = 16;
 /// Longest message of a collision proof.
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub const MAX_COLLISION_MESSAGE_LEN: usize = 64 * 1024;
 /// Largest proof a `CanaryReveal` carries: two collision messages and their
 /// length prefixes, the largest proof of any puzzle.
 pub const MAX_CANARY_PROOF_BYTES: usize = 2 * MAX_COLLISION_MESSAGE_LEN + 8;
 /// Reward for the first valid claim, in atoms. Zero until governance sets it.
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub const QUANTUM_CANARY_BOUNTY_ATOMS: u64 = 0;
 
 const GENESIS_LABEL: &[u8] = b"BDLM_QUANTUM_CANARY_V1";
@@ -117,7 +117,7 @@ pub enum AlarmKind {
 
 /// What a solved canary changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub enum CanaryEffect {
     /// Raises the curve alarm level to at least this.
     Level(AlarmLevel),
@@ -127,7 +127,7 @@ pub enum CanaryEffect {
 
 impl CanaryId {
     /// Every puzzle, in the order genesis lists them.
-    /// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+    /// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
     pub const ALL: [Self; 12] = [
         Self::Ecc192,
         Self::Ecc224,
@@ -208,7 +208,7 @@ impl CanaryId {
     /// The puzzle: a compressed point, a public key, or empty for a collision
     /// puzzle (the hash function is the puzzle).
     #[must_use]
-    /// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+    /// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
     pub fn puzzle(self) -> Vec<u8> {
         match self {
             Self::Ecc192 => weierstrass::try_and_increment::<p192::NistP192>(self),
@@ -343,7 +343,7 @@ mod weierstrass {
     /// `x = SHA3-256(label || counter)` cut to the field size, even `y`, the
     /// counter rises until `x` is on the curve. A cut `x` at or above the
     /// prime is not a field element and simply fails to decode.
-    /// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+    /// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
     pub(super) fn try_and_increment<C>(id: CanaryId) -> Vec<u8>
     where
         C: CurveArithmetic,
@@ -366,7 +366,7 @@ mod weierstrass {
         unreachable!("the counter space is not exhausted")
     }
 
-    /// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+    /// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
     pub(super) fn hash_to_curve_k1() -> Vec<u8> {
         let point = hash2curve::hash_from_bytes::<k256::Secp256k1, ExpandMsgXmd<sha2::Sha256>>(
             &[&label(CanaryId::EccK1)],
@@ -379,7 +379,7 @@ mod weierstrass {
             .to_vec()
     }
 
-    /// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+    /// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
     pub(super) fn hash_to_curve_r1() -> Vec<u8> {
         let point = hash2curve::hash_from_bytes::<p256::NistP256, ExpandMsgXmd<sha2::Sha256>>(
             &[&label(CanaryId::EccR1)],
@@ -489,7 +489,7 @@ fn bls_check(point: &[u8], proof: &[u8]) -> bool {
 
 /// The set digest pinned at genesis: every puzzle, in order, length prefixed.
 #[must_use]
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub fn genesis_digest() -> [u8; 32] {
     let mut hasher = Sha3_256::new();
     absorb(&mut hasher, SET_TAG);
@@ -518,7 +518,7 @@ pub fn commit_hash(id: CanaryId, proof: &[u8], claimer: &Address) -> [u8; 32] {
 
 /// Why a commit or reveal was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub enum CanaryError {
     /// The same commitment is already pending for this claimer.
     DuplicateCommit,
@@ -566,7 +566,7 @@ type PendingKey = ([u8; 32], [u8; 32]);
 
 /// A solved canary and who solved it first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub struct CanaryClaim {
     /// Height of the winning commit.
     pub commit_height: u64,
@@ -766,7 +766,7 @@ impl CanaryBook {
     }
 
     /// Drops commits older than the reveal window.
-    /// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+    /// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
     pub fn prune(&mut self, height: u64) {
         self.pending
             .retain(|_, committed| height.saturating_sub(*committed) <= CANARY_REVEAL_WINDOW);
@@ -775,7 +775,7 @@ impl CanaryBook {
 
 /// One solved canary as the RPC shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub struct SolvedCanaryView {
     /// The puzzle name.
     pub canary: &'static str,
@@ -790,7 +790,7 @@ pub struct SolvedCanaryView {
 /// The alarm as the RPC shows it: level, breaks, solved canaries, pending
 /// commits and the rules the level sets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-/// WIRING: the canary surface — the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
+/// WIRING: the canary surface - the reveal/bounty doors that consume these are the guard-execution wave's, wiring pending.
 pub struct QuantumAlarmView {
     /// The level name.
     pub level: &'static str,

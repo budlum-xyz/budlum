@@ -49,7 +49,7 @@ impl std::fmt::Display for PrivacyLevel {
 }
 
 /// Archive bootnodes a mainnet node must list.
-/// exposed for: the CLI surface — the commands that read these land with their subcommand wiring wave.
+/// exposed for: the CLI surface - the commands that read these land with their subcommand wiring wave.
 pub const MAINNET_MIN_ARCHIVE_BOOTNODES: usize = 5;
 
 #[derive(Parser, Debug, Clone)]
@@ -476,7 +476,7 @@ pub struct FileConfig {
 /// ceremony record attested by the cold committee and a passing self-test.
 #[derive(Debug, serde::Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
-/// exposed for: the CLI surface — the commands that read these land with their subcommand wiring wave.
+/// exposed for: the CLI surface - the commands that read these land with their subcommand wiring wave.
 pub struct AnchorSection {
     /// off | devnet | production
     pub mode: Option<String>,
@@ -493,7 +493,7 @@ pub struct AnchorSection {
 /// The token and the key objects of the anchor signers of this node.
 #[derive(Debug, serde::Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
-/// exposed for: the CLI surface — the commands that read these land with their subcommand wiring wave.
+/// exposed for: the CLI surface - the commands that read these land with their subcommand wiring wave.
 pub struct AnchorPkcs11Section {
     pub module_path: Option<String>,
     pub slot_id: Option<u64>,
@@ -507,7 +507,7 @@ pub struct AnchorPkcs11Section {
 /// The key object of one anchor ledger slot.
 #[derive(Debug, serde::Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
-/// exposed for: the CLI surface — the commands that read these land with their subcommand wiring wave.
+/// exposed for: the CLI surface - the commands that read these land with their subcommand wiring wave.
 pub struct AnchorKeyLabel {
     pub slot: u8,
     pub label: String,
@@ -1343,7 +1343,7 @@ impl NodeConfig {
     /// archive node lists at least [`MAINNET_MIN_ARCHIVE_BOOTNODES`] distinct
     /// archive bootnodes, none of them a ceremony placeholder.
     #[must_use]
-    /// exposed for: the CLI surface — the commands that read these land with their subcommand wiring wave.
+    /// exposed for: the CLI surface - the commands that read these land with their subcommand wiring wave.
     pub fn mainnet_archive_bootnode_violation(&self) -> Option<String> {
         if self.role == "archive" {
             return None;

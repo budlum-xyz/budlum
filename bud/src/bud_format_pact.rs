@@ -260,10 +260,10 @@ impl PactRecord {
 // checked on both sides).
 
 /// The composite suite of a PACT record.
-/// exposed for: the bud format crate's signed-record surface — the consumers land with the format adoption wave.
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
 pub const PACT_SUITE: u16 = 0x0001;
 /// Domain tag of the signed PACT payload.
-/// exposed for: the bud format crate's signed-record surface — the consumers land with the format adoption wave.
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
 pub const PACT_SIGN_DOMAIN: &[u8] = b"BDLM_BUD_PACT_SIG_V1";
 
 /// Signs a payload under one composite suite.
@@ -297,7 +297,7 @@ pub enum SignedRecordError {
 
 /// A PACT record with its suite 0x0001 signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// exposed for: the bud format crate's signed-record surface — the consumers land with the format adoption wave.
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
 pub struct SignedPact {
     pub pact: PactRecord,
     pub signer_id: [u8; 32],
