@@ -259,7 +259,11 @@ fn xof_key(id: CanaryId, scheme: crate::crypto::scheme::SchemeId) -> Vec<u8> {
     use shake::{ExtendableOutput, Update, XofReader};
     let len = crate::crypto::pq::public_key_len(scheme).unwrap_or(0);
     let mut hasher = shake::Shake256::default();
-    hasher.update(&label(id));
+    // The label is variable-length, so its length goes first: concatenation
+    // without lengths is not injective across the fields that follow.
+    let lbl = label(id);
+    hasher.update(&(lbl.len() as u64).to_le_bytes());
+    hasher.update(&lbl);
     let mut reader = hasher.finalize_xof();
     let mut key = vec![0u8; len];
     reader.read(&mut key);

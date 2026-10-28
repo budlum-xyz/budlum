@@ -59,7 +59,7 @@ fn f02_missing_verifiers_remain_pending_not_accepted() {
     assert!(source.contains("ChallengeWindowOpen"));
     // The acceptance sentence wraps across the comment's line break in the
     // current source, so it is pinned as the two fragments it is written
-    // in — acceptance still happens only in `settle`, when the window
+    // in; acceptance still happens only in `settle`, when the window
     // closes.
     assert!(source.contains("marked accepted only when the window"));
     assert!(source.contains("closes, via `settle`"));

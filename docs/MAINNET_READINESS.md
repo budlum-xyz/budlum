@@ -40,7 +40,7 @@ repository), `external` (a third party has to deliver it).
 | `VerifyMerkle` production gate opened, after the external opcode audit | the audit report and the gate change | external | decision |
 | Wallet and validator key ceremony documented and rehearsed (generate, back up, restore) | `docs/OPERATIONS.md` plus a restore drill run | agent | code |
 | `bincode` 1.x migration decided (it is the consensus encoding and is built into every block) | a written decision, with the activation-height plan if it changes | owner | decision |
-| V4 (Ed25519) transaction retirement scheduled | the quantum workstream's decision, activation height and migration window | owner | decision |
+| V4 (Ed25519) transaction retirement scheduled <!-- claim:S-I0 --> | the quantum workstream's decision, activation height and migration window | owner | decision |
 
 ## 4. Genesis and operations
 
