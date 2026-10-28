@@ -763,6 +763,7 @@ pub const PQ_ML_DSA_65_SIGNATURE_LEN: usize = 3309;
 /// `pq_signature_acceptability_agrees_with_classification`); the raw
 /// signature arithmetic stays behind the PQ backend crates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub enum PqSignatureClass {
     Dilithium5,
     MlDsa65,
@@ -774,6 +775,7 @@ pub enum PqSignatureClass {
 /// never a panic. When a scheme is named, the length is exactly that scheme's
 /// constant (proved by the Kani round-trip harness).
 #[must_use]
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub fn classify_pq_signature_len(len: usize) -> PqSignatureClass {
     if len == PQ_DILITHIUM5_SIGNATURE_LEN {
         PqSignatureClass::Dilithium5

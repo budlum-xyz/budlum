@@ -15,9 +15,11 @@ use rustls::crypto::{aws_lc_rs, CryptoProvider};
 use rustls::{ClientConfig, RootCertStore, ServerConfig, SupportedProtocolVersion};
 
 /// TLS 1.3 only. TLS 1.2 has no hybrid key exchange.
+/// exposed for: the crypto registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub static TLS_VERSIONS: &[&SupportedProtocolVersion] = &[&rustls::version::TLS13];
 
 /// The provider with X25519MLKEM768 as its only key-exchange group.
+/// exposed for: the crypto/key registry's public labels and shapes — production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub fn hybrid_only_provider() -> CryptoProvider {
     let mut provider = aws_lc_rs::default_provider();
     provider.kx_groups = vec![aws_lc_rs::kx_group::X25519MLKEM768];

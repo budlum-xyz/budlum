@@ -181,6 +181,7 @@ pub struct LightClient {
 /// What a light client's verified checkpoints rest on (Section 6.2 of the PQ
 ///). Shown to the user beside every answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// WIRING: light-client surface — the sync doors that read it land with their wiring wave.
 pub enum TrustMode {
     /// The validator majority: the trusted set's finality certificates (BLS
     /// and ML-DSA-65 QC) and, across set changes, the handoff chain.
@@ -598,6 +599,7 @@ impl LightClient {
     /// [`LightClientError::TrustBinding`] when `outgoing` is not the trusted
     /// set or a snapshot is not self-consistent, and
     /// [`LightClientError::VerificationFailed`] when the chain does not verify.
+    /// WIRING: light-client surface — the sync doors that read it land with their wiring wave.
     pub fn follow_handoffs(
         &mut self,
         registry: &crate::crypto::scheme::SchemeStatusRegistry,

@@ -57,6 +57,7 @@ use serde::{Deserialize, Serialize};
 /// The registry uses this to decide whether it may act on a report without
 /// Re-implementing consensus-specific checks it cannot perform generically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// WIRING: registry surface — the delegation door that reads it lands with its wiring wave.
 pub enum ProofProvenance {
     /// Verified by the local consensus engine (signatures/quorum checked).
     ConsensusVerified,
@@ -675,6 +676,7 @@ impl SlashingReport {
     /// Production again (BLG-0102/P04-F24): the permissionless route earns
     /// its promotion HERE, by opening the signatures - not by claiming a
     /// provenance (CWE-347's rule stands: claims certify nothing).
+    /// WIRING: registry surface — the delegation door that reads it lands with its wiring wave.
     pub fn verify_double_sign(&self) -> Result<(), EvidenceError> {
         self.validate_shape()?;
 

@@ -6,9 +6,11 @@
 //! a consensus fact before then.
 
 /// The body budget in bytes (transactions, evidence, headers).
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub const BODY_BUDGET_BYTES: usize = 1_000_000;
 
 /// The witness budget in bytes (composite signatures and their witnesses).
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub const WITNESS_BUDGET_BYTES: usize = 2_000_000;
 
 /// The largest single transaction, in binary bytes.
@@ -16,6 +18,7 @@ pub const MAX_TX_BYTES: usize = 160 * 1024;
 
 /// Which budget an item is charged to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub enum Section {
     /// The block body.
     Body,
@@ -25,6 +28,7 @@ pub enum Section {
 
 /// Why an item was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub enum BudgetError {
     /// One transaction is larger than [`MAX_TX_BYTES`].
     TxTooLarge(usize),
@@ -34,6 +38,7 @@ pub enum BudgetError {
 
 /// Running binary size of a block under construction or validation.
 #[derive(Debug, Default, Clone, Copy)]
+/// WIRING: consensus surface kept public for the QC/filiz/handoff wiring wave — production callers land with that wave.
 pub struct BlockBudget {
     body: usize,
     witness: usize,
