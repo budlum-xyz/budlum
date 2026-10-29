@@ -1191,7 +1191,7 @@ fn forged_or_duplicated_invalid_signature_spam_reports_fail_block_validation() {
         one_bad.signing_message(),
         one_bad.sig_bls.clone(),
     );
-    let mut dup_block = template;
+    let mut dup_block = template.clone();
     dup_block.slashing_reports = Some(vec![
         crate::registry::evidence::SlashingReport::consensus_invalid_signature_spam_with_samples(
             honest,
@@ -1208,6 +1208,42 @@ fn forged_or_duplicated_invalid_signature_spam_reports_fail_block_validation() {
         .validate_and_add_block(dup_block)
         .expect_err("duplicate spam samples must be rejected");
     assert!(dup_err.contains("duplicate"), "got: {dup_err}");
+
+    // A complete, distinct and genuinely authenticated set from another
+    // chain is not evidence of a local-chain offence.
+    let foreign_samples: Vec<_> = (0..3u64)
+        .map(|i| {
+            let mut vote = Prevote {
+                chain_id: OTHER_CHAIN_ID,
+                epoch: 0,
+                checkpoint_height: 10 + i,
+                checkpoint_hash: "ef".repeat(32),
+                voter_id: honest,
+                sig_bls: vec![7u8; 48],
+                auth_sig: Vec::new(),
+            };
+            vote.auth_sig = sign_bls(&honest_bls, &vote.auth_signing_message());
+            let auth_message = vote.auth_signing_message();
+            let vote_message = vote.signing_message();
+            (auth_message, vote.auth_sig, vote_message, vote.sig_bls)
+        })
+        .collect();
+    let mut foreign_block = template;
+    foreign_block.slashing_reports =
+        Some(vec![
+        crate::registry::evidence::SlashingReport::consensus_invalid_signature_spam_with_samples(
+            honest, roles::VALIDATOR, 0, 3, 3, foreign_samples, None,
+        ),
+    ]);
+    foreign_block.hash = foreign_block.calculate_hash();
+    let foreign_err = node_b
+        .validate_and_add_block(foreign_block)
+        .expect_err("foreign-chain votes cannot slash on this chain");
+    assert!(
+        foreign_err.contains("does not bind this chain"),
+        "got: {foreign_err}"
+    );
+    assert_eq!(node_b.state.validators[&honest].stake, 10_000);
 }
 
 #[test]

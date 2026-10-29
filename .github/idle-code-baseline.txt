@@ -1686,6 +1686,7 @@ src/settlement/proof_market.rs	const	MAX_PROOF_TASK_EPOCH_SPAN
 src/settlement/proof_market.rs	enum	ReceiptStatus
 src/settlement/proof_market.rs	fn	assign
 src/settlement/proof_market.rs	fn	enforce_max_sizes
+src/settlement/proof_market.rs	fn	expire
 src/settlement/proof_market.rs	fn	is_paid
 src/settlement/proof_market.rs	fn	is_payable
 src/settlement/proof_market.rs	fn	mark_paid
