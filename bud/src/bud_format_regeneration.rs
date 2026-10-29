@@ -192,14 +192,17 @@ impl RegenerationRecord {
 // suite), and reputation that moves only on a verified signed result.
 
 use crate::bud_format_pact::{SignedRecordError, SuiteSigner, SuiteVerifier};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The composite suite of a regeneration result.
 /// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
 pub const RESULT_SUITE: u16 = 0x0002;
 /// Domain tag of the signed result payload.
 /// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
-pub const RESULT_SIGN_DOMAIN: &[u8] = b"BDLM_BUD_REGEN_RESULT_V1";
+pub const RESULT_SIGN_DOMAIN: &[u8] = b"BDLM_BUD_REGEN_RESULT_V2";
+/// Tag of the digest a ledger remembers for a signed result it has applied, so
+/// replaying the same envelope cannot move a score twice.
+const APPLIED_DOMAIN: &[u8] = b"BDLM_BUD_REGEN_APPLIED_V1";
 const SELECT_DOMAIN: &[u8] = b"BDLM_BUD_REGEN_SELECT_V1";
 
 /// Pick `count` distinct PACT records to challenge in `epoch`.
@@ -255,24 +258,37 @@ pub fn select_challenges(
 }
 
 /// A regeneration result with the validator's suite 0x0002 signature.
+///
+/// The envelope names the provider the result is about, and the signature
+/// covers that name. A result signed for one provider therefore cannot move
+/// another provider's reputation: the provider is read from the envelope, never
+/// from a caller argument.
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
 pub struct SignedRegenerationResult {
     pub record: RegenerationRecord,
     pub validator: [u8; 32],
+    /// The provider this result scores, attested by the signature.
+    pub provider: [u8; 32],
     pub suite: u16,
     pub signature: Vec<u8>,
 }
 
 impl SignedRegenerationResult {
-    /// The bytes that are signed: tag, suite, validator, record blob.
+    /// The bytes that are signed: tag, suite, validator, provider, record blob.
     #[must_use]
-    pub fn payload(suite: u16, validator: &[u8; 32], record: &RegenerationRecord) -> Vec<u8> {
+    pub fn payload(
+        suite: u16,
+        validator: &[u8; 32],
+        provider: &[u8; 32],
+        record: &RegenerationRecord,
+    ) -> Vec<u8> {
         let blob = record.to_blob();
-        let mut out = Vec::with_capacity(RESULT_SIGN_DOMAIN.len() + 2 + 32 + blob.len());
+        let mut out = Vec::with_capacity(RESULT_SIGN_DOMAIN.len() + 2 + 32 + 32 + blob.len());
         out.extend_from_slice(RESULT_SIGN_DOMAIN);
         out.extend_from_slice(&suite.to_be_bytes());
         out.extend_from_slice(validator);
+        out.extend_from_slice(provider);
         out.extend_from_slice(&blob);
         out
     }
@@ -284,6 +300,7 @@ impl SignedRegenerationResult {
     /// [`SignedRecordError::WrongSuite`] or [`SignedRecordError::SigningFailed`].
     pub fn sign(
         record: RegenerationRecord,
+        provider: [u8; 32],
         signer: &dyn SuiteSigner,
     ) -> Result<Self, SignedRecordError> {
         if signer.suite() != RESULT_SUITE {
@@ -292,13 +309,14 @@ impl SignedRegenerationResult {
             });
         }
         let validator = signer.signer_id();
-        let payload = Self::payload(RESULT_SUITE, &validator, &record);
+        let payload = Self::payload(RESULT_SUITE, &validator, &provider, &record);
         let signature = signer
             .sign(&payload)
             .ok_or(SignedRecordError::SigningFailed)?;
         Ok(Self {
             record,
             validator,
+            provider,
             suite: RESULT_SUITE,
             signature,
         })
@@ -314,7 +332,7 @@ impl SignedRegenerationResult {
         if self.suite != RESULT_SUITE {
             return Err(SignedRecordError::WrongSuite { got: self.suite });
         }
-        let payload = Self::payload(self.suite, &self.validator, &self.record);
+        let payload = Self::payload(self.suite, &self.validator, &self.provider, &self.record);
         if verifier.verify(self.suite, &self.validator, &payload, &self.signature) {
             Ok(())
         } else {
@@ -324,20 +342,22 @@ impl SignedRegenerationResult {
 }
 
 /// The reputation of providers. It moves only through [`Self::apply`], which
-/// takes a verified [`SignedRegenerationResult`]: an unsigned, wrongly signed
-/// or classically signed result changes nothing.
+/// takes a verified [`SignedRegenerationResult`] for the provider the signature
+/// names, once: an unsigned, wrongly signed or classically signed result changes
+/// nothing, and a result that was already applied moves nothing.
 #[derive(Debug, Clone, Default)]
 /// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
 pub struct ReputationLedger {
     scores: BTreeMap<[u8; 32], i64>,
+    applied: BTreeSet<[u8; 32]>,
 }
 
 impl ReputationLedger {
     /// Score gained for a verified production.
-/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
+    /// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
     pub const REWARD: i64 = 1;
     /// Score lost for a mismatch or a producer that cannot produce.
-/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
+    /// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
     pub const PENALTY: i64 = 10;
 
     #[must_use]
@@ -351,7 +371,12 @@ impl ReputationLedger {
         self.scores.get(provider).copied().unwrap_or(0)
     }
 
-    /// Apply a result to `provider`, only after its signature verifies.
+    /// Apply `result` to the provider the signature attests, at most once.
+    ///
+    /// The provider is read from the signed envelope, never from a caller
+    /// argument, so a result signed for one provider cannot move the score of
+    /// another. The digest of the signed payload is remembered, so the same
+    /// signed result moves a score exactly once.
     ///
     /// # Errors
     ///
@@ -359,16 +384,28 @@ impl ReputationLedger {
     /// unchanged then.
     pub fn apply(
         &mut self,
-        provider: [u8; 32],
         result: &SignedRegenerationResult,
         verifier: &dyn SuiteVerifier,
     ) -> Result<i64, SignedRecordError> {
         result.verify(verifier)?;
+        let mut h = Sha3_256::new();
+        h.update(APPLIED_DOMAIN);
+        h.update(SignedRegenerationResult::payload(
+            result.suite,
+            &result.validator,
+            &result.provider,
+            &result.record,
+        ));
+        let digest: [u8; 32] = h.finalize().into();
+        if !self.applied.insert(digest) {
+            // Already counted. Report the score as it stands; nothing moves.
+            return Ok(self.score(&result.provider));
+        }
         let delta = match result.record.outcome {
             RegenerationOutcome::Verified => Self::REWARD,
             RegenerationOutcome::Mismatch | RegenerationOutcome::NotProducible => -Self::PENALTY,
         };
-        let score = self.scores.entry(provider).or_insert(0);
+        let score = self.scores.entry(result.provider).or_insert(0);
         *score = score.saturating_add(delta);
         Ok(*score)
     }
@@ -599,17 +636,22 @@ mod consensus_tests {
             suite: RESULT_SUITE,
             id: [4u8; 32],
         };
-        let signed =
-            SignedRegenerationResult::sign(record(RegenerationOutcome::Verified), &validator)
-                .expect("suite 0x0002 signs");
+        let provider = [7u8; 32];
+        let signed = SignedRegenerationResult::sign(
+            record(RegenerationOutcome::Verified),
+            provider,
+            &validator,
+        )
+        .expect("suite 0x0002 signs");
         assert_eq!(signed.suite, 0x0002);
+        assert_eq!(signed.provider, provider, "the provider is attested");
         assert_eq!(signed.verify(&validator), Ok(()));
         let wrong = Toy {
             suite: 0x0001,
             id: [4u8; 32],
         };
         assert_eq!(
-            SignedRegenerationResult::sign(record(RegenerationOutcome::Verified), &wrong),
+            SignedRegenerationResult::sign(record(RegenerationOutcome::Verified), provider, &wrong),
             Err(SignedRecordError::WrongSuite { got: 0x0001 })
         );
         let mut relabelled = signed;
@@ -617,6 +659,14 @@ mod consensus_tests {
         assert_eq!(
             relabelled.verify(&validator),
             Err(SignedRecordError::WrongSuite { got: 0x0001 })
+        );
+        // A provider swapped after signing does not verify: the name is covered.
+        let mut moved = relabelled;
+        moved.suite = RESULT_SUITE;
+        moved.provider = [8u8; 32];
+        assert_eq!(
+            moved.verify(&validator),
+            Err(SignedRecordError::BadSignature)
         );
     }
 
@@ -628,28 +678,62 @@ mod consensus_tests {
         };
         let provider = [7u8; 32];
         let mut ledger = ReputationLedger::new();
-        let good =
-            SignedRegenerationResult::sign(record(RegenerationOutcome::Verified), &validator)
-                .expect("signs");
-        assert_eq!(ledger.apply(provider, &good, &validator), Ok(1));
-        let bad = SignedRegenerationResult::sign(record(RegenerationOutcome::Mismatch), &validator)
-            .expect("signs");
-        assert_eq!(ledger.apply(provider, &bad, &validator), Ok(1 - 10));
+        let good = SignedRegenerationResult::sign(
+            record(RegenerationOutcome::Verified),
+            provider,
+            &validator,
+        )
+        .expect("signs");
+        assert_eq!(ledger.apply(&good, &validator), Ok(1));
+        let bad = SignedRegenerationResult::sign(
+            record(RegenerationOutcome::Mismatch),
+            provider,
+            &validator,
+        )
+        .expect("signs");
+        assert_eq!(ledger.apply(&bad, &validator), Ok(1 - 10));
         // A tampered outcome (flip the record) is refused and changes nothing.
         let mut forged = good.clone();
         forged.record = record(RegenerationOutcome::Mismatch);
         assert_eq!(
-            ledger.apply(provider, &forged, &validator),
+            ledger.apply(&forged, &validator),
             Err(SignedRecordError::BadSignature)
         );
         // An unsigned result (empty signature) is refused.
-        let mut unsigned = good;
+        let mut unsigned = good.clone();
         unsigned.signature = Vec::new();
         assert_eq!(
-            ledger.apply(provider, &unsigned, &validator),
+            ledger.apply(&unsigned, &validator),
             Err(SignedRecordError::BadSignature)
         );
         assert_eq!(ledger.score(&provider), -9);
         assert_eq!(ledger.score(&[0u8; 32]), 0);
+    }
+
+    /// The same signed envelope cannot move a score twice, and a result signed
+    /// for one provider cannot move another provider's score.
+    #[test]
+    fn a_result_scores_only_the_provider_it_names_and_only_once() {
+        let validator = Toy {
+            suite: RESULT_SUITE,
+            id: [4u8; 32],
+        };
+        let provider = [7u8; 32];
+        let other = [9u8; 32];
+        let mut ledger = ReputationLedger::new();
+        let good = SignedRegenerationResult::sign(
+            record(RegenerationOutcome::Verified),
+            provider,
+            &validator,
+        )
+        .expect("signs");
+        assert_eq!(ledger.apply(&good, &validator), Ok(1));
+        // Replaying the same envelope moves nothing, and says so by reporting
+        // the score as it stands.
+        assert_eq!(ledger.apply(&good, &validator), Ok(1));
+        assert_eq!(ledger.score(&provider), 1);
+        // The worker names the provider; there is no argument to point a signed
+        // result at somebody else.
+        assert_eq!(ledger.score(&other), 0);
     }
 }
