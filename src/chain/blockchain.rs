@@ -5077,6 +5077,10 @@ impl Blockchain {
             }
             parent_hash = block.hash.clone();
         }
+        // Verify the policy for the entire segment before mutating the chain.
+        // The certified end is the newest authenticated tip in this segment;
+        // the peer cannot select whether recently finalized witnesses are kept.
+        self.check_pruned_segment_witness_policy(&blocks, cert.checkpoint_height)?;
         let mut added = 0;
         for block in blocks {
             let pruned = block.witness_is_stripped();
@@ -5092,6 +5096,34 @@ impl Blockchain {
             added += 1;
         }
         Ok(added)
+    }
+
+    fn check_pruned_segment_witness_policy(
+        &self,
+        blocks: &[Block],
+        certified_tip: u64,
+    ) -> Result<(), String> {
+        use crate::storage::witness_retention::{may_prune, NodeKind, DEFAULT_RETENTION_BLOCKS};
+
+        let (kind, retention) = match &self.pruning_manager {
+            Some(pm) if !pm.archive_mode => (
+                NodeKind::Normal,
+                DEFAULT_RETENTION_BLOCKS.max(pm.min_blocks_to_keep),
+            ),
+            // No pruning manager means witness deletion was not enabled.
+            _ => (NodeKind::Archive, DEFAULT_RETENTION_BLOCKS),
+        };
+        for block in blocks {
+            if block.witness_is_stripped()
+                && !may_prune(kind, block.index, certified_tip, certified_tip, retention)
+            {
+                return Err(format!(
+                    "pruned witness at height {} violates local retention policy",
+                    block.index
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Prune the witnesses the Pul-Lite rule releases: final,
@@ -5113,6 +5145,7 @@ impl Blockchain {
             NodeKind::Normal
         };
         let tip = self.chain.len().saturating_sub(1) as u64;
+        let retention_blocks = retention_blocks.max(pm.min_blocks_to_keep);
         let bound = self
             .finalized_height
             .min(tip.saturating_sub(retention_blocks));
@@ -7545,6 +7578,43 @@ impl Clone for Blockchain {
 mod tests {
     use super::*;
     use crate::consensus::poa::{PoAConfig, PoAEngine};
+
+    #[test]
+    fn pruned_segment_witnesses_obey_the_local_retention_policy() {
+        let mut chain = Blockchain::new(
+            Arc::new(crate::consensus::pow::PoWEngine::new(0)),
+            None,
+            45262,
+            None,
+        );
+        let tx = Transaction::new(Address::from([1; 32]), Address::from([2; 32]), 1, vec![]);
+        let stripped = Block::new(1, "00".repeat(32), vec![tx]);
+        assert!(stripped.witness_is_stripped());
+        let retention = crate::storage::witness_retention::DEFAULT_RETENTION_BLOCKS + 10;
+        let finalized_tip = 1 + retention;
+        // An unconfigured or archive node never accepts missing witnesses.
+        assert!(chain
+            .check_pruned_segment_witness_policy(&[stripped.clone()], finalized_tip)
+            .is_err());
+        chain.pruning_manager = Some(PruningManager::new(retention, 100, String::new()));
+        assert!(chain
+            .check_pruned_segment_witness_policy(&[stripped.clone()], finalized_tip - 1)
+            .is_err());
+        assert!(chain
+            .check_pruned_segment_witness_policy(&[stripped.clone()], finalized_tip)
+            .is_ok());
+        chain.pruning_manager.as_mut().unwrap().archive_mode = true;
+        assert!(chain
+            .check_pruned_segment_witness_policy(&[stripped.clone()], finalized_tip)
+            .is_err());
+        // A block carrying witnesses continues through full validation even on an archive.
+        let mut complete = stripped;
+        complete.transactions[0].signature = Some(vec![1]);
+        assert!(!complete.witness_is_stripped());
+        assert!(chain
+            .check_pruned_segment_witness_policy(&[complete], finalized_tip)
+            .is_ok());
+    }
 
     /// testnet item 8: the reward pool is paid only when the genesis flag
     /// says so AND the profile has a schedule. Neither condition implies the
