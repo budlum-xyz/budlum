@@ -3453,11 +3453,11 @@ impl Executor {
                         height,
                         "QUANTUM CANARY SOLVED: a cryptographic assumption is broken, alarm raised"
                     );
-                    //: the effects land in the block that accepts the
-                    // proof, not in a later one.
-                    let report = crate::security::alarm_effects::apply_to_state(state);
-                    tracing::error!(?report, "quantum alarm effects applied");
                 }
+                // A proof without a credited claim still raises an alarm. Its
+                // consensus effects must land in this block as well.
+                let report = crate::security::alarm_effects::apply_to_state(state);
+                tracing::error!(?report, "quantum alarm effects applied");
                 let sender = state.get_or_create(&tx.from);
                 sender.balance = sender.balance.checked_sub(tx.fee).ok_or_else(|| {
                     BudlumError::validation("balance_underflow", "balance underflow")

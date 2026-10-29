@@ -10,14 +10,15 @@
 //!
 //! # Claim protocol
 //!
-//! A solver cannot be front-run by whoever sees the proof in the mempool:
-//!
 //! 1. `CanaryCommit` publishes `H(canary, proof, claimer)`.
-//! 2. At least [`CANARY_REVEAL_DELAY`] and at most [`CANARY_REVEAL_WINDOW`]
-//!    blocks later, `CanaryReveal` carries the proof.
-//! 3. The chain verifies the proof against the puzzle. The earliest valid
-//!    commit wins the claim.
-//! 4. The effect applies in the block that accepts the reveal.
+//! 2. A reveal with a commitment aged at least [`CANARY_REVEAL_DELAY`] and
+//!    at most [`CANARY_REVEAL_WINDOW`] blocks may receive claim credit.
+//! 3. Any valid proof raises the alarm immediately, even if the commit book
+//!    is full or the publisher has no eligible commitment. A proof copied from
+//!    the mempool cannot earn claim credit without an earlier commitment.
+//! 4. If an uncredited proof raised the alarm first, only a commitment that
+//!    was already mature when the proof appeared on chain may claim it later;
+//!    the first eligible reveal wins. Publishing early can sacrifice credit.
 //!
 //! This module holds the puzzles, the proof checks, the claim book and the
 //! alarm state machine. The transaction types that carry commit and reveal
@@ -534,6 +535,8 @@ pub enum CanaryError {
     RevealExpired,
     /// The proof does not solve the puzzle.
     InvalidProof,
+    /// The zero address is reserved for an alarm without a credited claim.
+    ZeroClaimer,
 }
 
 impl AlarmLevel {
@@ -605,10 +608,13 @@ impl QuantumAlarmState {
         self.kinds.contains(&kind)
     }
 
-    /// The claim that solved `id`, if any.
+    /// The credited claim for `id`, if any. A solved canary may have no
+    /// credited claim when its alarm was raised by an uncommitted proof.
     #[must_use]
     pub fn claim(&self, id: CanaryId) -> Option<&CanaryClaim> {
-        self.solved.get(&id)
+        self.solved
+            .get(&id)
+            .filter(|claim| claim.claimer != Address::zero())
     }
 
     /// Whether any canary is solved.
@@ -668,14 +674,18 @@ impl CanaryBook {
     ///
     /// [`CanaryError::DuplicateCommit`] for a commitment this claimer already
     /// has pending, [`CanaryError::ClaimerQuota`] past the per-claimer limit,
-    /// or [`CanaryError::BookFull`] when all unexpired slots are occupied.
-    /// A full book refuses the newcomer; it never revokes an unexpired commit.
+    /// [`CanaryError::BookFull`] when all unexpired slots are occupied, or
+    /// [`CanaryError::ZeroClaimer`] for the reserved zero address. A full
+    /// book refuses the newcomer; it never revokes an unexpired commit.
     pub fn commit(
         &mut self,
         height: u64,
         claimer: Address,
         commitment: [u8; 32],
     ) -> Result<(), CanaryError> {
+        if claimer == Address::zero() {
+            return Err(CanaryError::ZeroClaimer);
+        }
         self.prune(height);
         let key = (*claimer.as_bytes(), commitment);
         if self.pending.contains_key(&key) {
@@ -695,19 +705,14 @@ impl CanaryBook {
         Ok(())
     }
 
-    /// Applies a `CanaryReveal` accepted at `height`. Returns the claim when
-    /// this reveal is the one that solved the canary, and `None` when the
-    /// canary was already solved (the proof is still valid, the effect is
-    /// already in).
+    /// Accept a valid proof and immediately raise the alarm, irrespective of
+    /// the commitment book. Returns a claim only for an eligible commitment;
+    /// an uncommitted or premature publisher cannot take a solver's credit.
     ///
     /// # Errors
     ///
-    /// The first rule the reveal breaks. A refused reveal leaves the book
-    /// unchanged.
-    /// PARTIAL: allowed - the expiry sweep and the refusal are one act: an
-    /// expired commit is purged on its own way out, and restoring it would
-    /// keep a key that can never be revealed; the delay and proof refusals
-    /// above leave the map untouched.
+    /// [`CanaryError::InvalidProof`] if the proof does not solve the puzzle.
+    /// A refused reveal leaves the book unchanged.
     pub fn reveal(
         &mut self,
         height: u64,
@@ -715,29 +720,75 @@ impl CanaryBook {
         id: CanaryId,
         proof: &[u8],
     ) -> Result<Option<CanaryClaim>, CanaryError> {
-        let commitment = commit_hash(id, proof, &claimer);
-        let key = (*claimer.as_bytes(), commitment);
-        let commit_height = *self.pending.get(&key).ok_or(CanaryError::UnknownCommit)?;
-        let age = height.saturating_sub(commit_height);
-        if age < CANARY_REVEAL_DELAY {
-            return Err(CanaryError::RevealTooEarly);
-        }
-        if age > CANARY_REVEAL_WINDOW {
-            self.pending.remove(&key);
-            return Err(CanaryError::RevealExpired);
-        }
-        if !id.verify(proof) {
+        self.reveal_with_verifier(height, claimer, id, proof, |id, proof| id.verify(proof))
+    }
+
+    // Kept private: production always passes the actual puzzle verifier above.
+    // Injecting it here lets tests exercise the alarm without a real break of
+    // a genesis-pinned cryptographic puzzle.
+    fn reveal_with_verifier(
+        &mut self,
+        height: u64,
+        claimer: Address,
+        id: CanaryId,
+        proof: &[u8],
+        verify: impl FnOnce(CanaryId, &[u8]) -> bool,
+    ) -> Result<Option<CanaryClaim>, CanaryError> {
+        if !verify(id, proof) {
             return Err(CanaryError::InvalidProof);
         }
-        self.pending.remove(&key);
-        let claim = CanaryClaim {
-            commit_height,
-            claimer,
-            accepted_height: height,
-        };
-        let fresh = self.alarm.claim(id).is_none();
-        self.alarm.apply(id, claim);
-        Ok(fresh.then_some(claim))
+        let key = (*claimer.as_bytes(), commit_hash(id, proof, &claimer));
+        let pending = self.pending.get(&key).copied();
+        let eligible = pending.filter(|commit_height| {
+            let age = height.saturating_sub(*commit_height);
+            (CANARY_REVEAL_DELAY..=CANARY_REVEAL_WINDOW).contains(&age)
+        });
+        if pending.is_some_and(|committed| height.saturating_sub(committed) > CANARY_REVEAL_WINDOW)
+        {
+            self.pending.remove(&key);
+        }
+
+        let previous = self.alarm.solved.get(&id).copied();
+        let creditable = eligible.filter(|commit_height| match previous {
+            None => true,
+            // A commitment created after the proof was seen must not earn
+            // credit merely by waiting out the delay. It had to be mature
+            // before the alarm made that proof public on chain.
+            Some(record) if record.claimer == Address::zero() => record
+                .accepted_height
+                .checked_sub(*commit_height)
+                .is_some_and(|age| age >= CANARY_REVEAL_DELAY),
+            Some(_) => false,
+        });
+        if let Some(commit_height) = eligible {
+            self.pending.remove(&key);
+            if creditable.is_some() {
+                let claim = CanaryClaim {
+                    commit_height,
+                    claimer,
+                    accepted_height: height,
+                };
+                if previous.is_none() {
+                    self.alarm.apply(id, claim);
+                } else {
+                    // The alarm effect already applies; replace only its
+                    // explicitly uncredited record with the qualifying claim.
+                    self.alarm.solved.insert(id, claim);
+                }
+                return Ok(Some(claim));
+            }
+        }
+        if previous.is_none() {
+            self.alarm.apply(
+                id,
+                CanaryClaim {
+                    commit_height: 0,
+                    claimer: Address::zero(),
+                    accepted_height: height,
+                },
+            );
+        }
+        Ok(None)
     }
 
     /// Marks `id` solved without a proof, for tests of what the alarm changes.
@@ -760,7 +811,7 @@ impl CanaryBook {
 pub struct SolvedCanaryView {
     /// The puzzle name.
     pub canary: &'static str,
-    /// The claimer, hex.
+    /// The credited claimer, hex; all zeroes means the alarm has no claim.
     pub claimer: String,
     /// Height of the winning commit.
     pub commit_height: u64,
@@ -1080,6 +1131,10 @@ mod tests {
     #[test]
     fn duplicate_commit_is_refused() {
         let mut book = CanaryBook::new();
+        assert_eq!(
+            book.commit(1, Address::zero(), [1u8; 32]),
+            Err(CanaryError::ZeroClaimer)
+        );
         book.commit(1, addr(1), [1u8; 32]).unwrap();
         assert_eq!(
             book.commit(2, addr(1), [1u8; 32]),
@@ -1123,7 +1178,9 @@ mod tests {
     fn full_book_never_evicts_an_unexpired_commit() {
         let mut book = CanaryBook::new();
         // The lowest address would lose the former one-per-address tie-break.
-        let honest_claimer = addr(0);
+        let mut honest_address = [0u8; 32];
+        honest_address[31] = 1;
+        let honest_claimer = Address(honest_address);
         let proof = b"honest";
         let honest = commit_hash(CanaryId::Ecc192, proof, &honest_claimer);
         book.commit(0, honest_claimer, honest).unwrap();
@@ -1145,6 +1202,18 @@ mod tests {
             Err(CanaryError::InvalidProof),
             "the honest commitment must still be found"
         );
+        assert_eq!(
+            book.reveal_with_verifier(500, Address(newcomer), CanaryId::Ecc192, proof, |_, _| true),
+            Ok(None),
+            "a full book cannot suppress the alarm"
+        );
+        assert!(book.alarm().is_alarmed());
+        assert!(book.alarm().claim(CanaryId::Ecc192).is_none());
+        let credited = book
+            .reveal_with_verifier(501, honest_claimer, CanaryId::Ecc192, proof, |_, _| true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(credited.claimer, honest_claimer);
 
         // Expiry, not a newcomer, releases slots and makes admission possible.
         book.commit(CANARY_REVEAL_WINDOW + 1, Address(newcomer), [0xcd; 32])
@@ -1153,16 +1222,17 @@ mod tests {
     }
 
     #[test]
-    fn reveal_without_a_commit_is_refused() {
+    fn invalid_proof_without_a_commit_is_refused() {
         let mut book = CanaryBook::new();
         assert_eq!(
             book.reveal(500, addr(1), CanaryId::Ecc192, b"proof"),
-            Err(CanaryError::UnknownCommit)
+            Err(CanaryError::InvalidProof)
         );
+        assert!(!book.alarm().is_alarmed());
     }
 
     #[test]
-    fn reveal_by_another_claimer_finds_no_commit() {
+    fn invalid_reveal_by_another_claimer_cannot_take_a_commit() {
         let mut book = CanaryBook::new();
         let proof = b"front-run attempt".to_vec();
         book.commit(10, addr(1), commit_hash(CanaryId::Ecc192, &proof, &addr(1)))
@@ -1171,47 +1241,75 @@ mod tests {
         // address and has no commit.
         assert_eq!(
             book.reveal(500, addr(2), CanaryId::Ecc192, &proof),
-            Err(CanaryError::UnknownCommit)
+            Err(CanaryError::InvalidProof)
         );
     }
 
     #[test]
-    fn reveal_timing_window() {
+    fn reveal_timing_window_controls_credit_not_the_alarm() {
         let proof = b"p".to_vec();
         let commitment = commit_hash(CanaryId::Ecc192, &proof, &addr(1));
+        let mut early = CanaryBook::new();
+        early.commit(1000, addr(1), commitment).unwrap();
+        assert_eq!(
+            early.reveal_with_verifier(
+                1000 + CANARY_REVEAL_DELAY - 1,
+                addr(1),
+                CanaryId::Ecc192,
+                &proof,
+                |_, _| true
+            ),
+            Ok(None),
+            "a premature proof raises an uncredited alarm"
+        );
+        assert!(early.alarm().is_alarmed());
+        assert!(early.alarm().claim(CanaryId::Ecc192).is_none());
+        assert_eq!(
+            early.reveal_with_verifier(1200, addr(1), CanaryId::Ecc192, &proof, |_, _| true),
+            Ok(None),
+            "a commitment not mature when proof became public cannot claim later"
+        );
 
         let mut book = CanaryBook::new();
         book.commit(1000, addr(1), commitment).unwrap();
         assert_eq!(
-            book.reveal(
-                1000 + CANARY_REVEAL_DELAY - 1,
-                addr(1),
-                CanaryId::Ecc192,
-                &proof
-            ),
-            Err(CanaryError::RevealTooEarly)
+            book.reveal_with_verifier(1100, addr(9), CanaryId::Ecc192, &proof, |_, _| true),
+            Ok(None),
+            "an uncommitted publisher raises the alarm without taking credit"
         );
-        // Exactly at the delay the reveal is timely; the proof itself is bad.
+        let copy = commit_hash(CanaryId::Ecc192, &proof, &addr(2));
+        book.commit(1101, addr(2), copy).unwrap();
+        let saved = serde_json::to_string(&book).unwrap();
+        let mut restored: CanaryBook = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.state_root(), book.state_root());
         assert_eq!(
-            book.reveal(
-                1000 + CANARY_REVEAL_DELAY,
-                addr(1),
-                CanaryId::Ecc192,
-                &proof
-            ),
-            Err(CanaryError::InvalidProof)
+            restored.reveal_with_verifier(1201, addr(2), CanaryId::Ecc192, &proof, |_, _| true),
+            Ok(None),
+            "a commitment made after the proof was public cannot earn credit"
         );
+        let claim = restored
+            .reveal_with_verifier(1201, addr(1), CanaryId::Ecc192, &proof, |_, _| true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.claimer, addr(1));
+        assert_eq!(restored.alarm().claim(CanaryId::Ecc192), Some(&claim));
+        assert_eq!(restored.pending_len(), 0);
+
+        let mut expired = CanaryBook::new();
+        expired.commit(1, addr(1), commitment).unwrap();
         assert_eq!(
-            book.reveal(
-                1000 + CANARY_REVEAL_WINDOW + 1,
+            expired.reveal_with_verifier(
+                CANARY_REVEAL_WINDOW + 2,
                 addr(1),
                 CanaryId::Ecc192,
-                &proof
+                &proof,
+                |_, _| true
             ),
-            Err(CanaryError::RevealExpired)
+            Ok(None)
         );
-        assert_eq!(book.pending_len(), 0);
-        assert!(!book.alarm().is_alarmed());
+        assert!(expired.alarm().is_alarmed());
+        assert!(expired.alarm().claim(CanaryId::Ecc192).is_none());
+        assert_eq!(expired.pending_len(), 0);
     }
 
     #[test]
