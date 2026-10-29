@@ -444,7 +444,8 @@ mod p01_consensus_rounds_tests {
         let mut block = Block::new(1, parent.hash.clone(), vec![]);
         block.timestamp = parent.timestamp + MIN_BLOCK_INTERVAL_MS;
         block.producer = Some(address);
-        let result = engine.preview_block_with_chain(&mut block, &state, &[parent.clone()]);
+        let result =
+            engine.preview_block_with_chain(&mut block, &state, std::slice::from_ref(&parent));
         if result.is_ok() {
             assert!(
                 block.nonce <= MAX_LEADER_ROUNDS,
@@ -582,7 +583,7 @@ mod p01_poa_round_pricing_tests {
         // lag in its stamp are not time anyone observed, so round 6 is refused.
         engine.note_block_seen(&parent.hash, now_ms);
         let error = engine
-            .validate_block(&block, &[parent.clone()], &state)
+            .validate_block(&block, std::slice::from_ref(&parent), &state)
             .expect_err("schedule lag must not buy a leader round");
         assert!(
             round_not_elapsed(&error.0),
@@ -595,7 +596,7 @@ mod p01_poa_round_pricing_tests {
         // something else.
         let engine = PoAEngine::new(PoAConfig::default(), None);
         engine.note_block_seen(&parent.hash, parent.timestamp);
-        if let Err(error) = engine.validate_block(&block, &[parent.clone()], &state) {
+        if let Err(error) = engine.validate_block(&block, std::slice::from_ref(&parent), &state) {
             assert!(
                 !round_not_elapsed(&error.0),
                 "a genuinely stalled slot must walk the ladder, got: {error:?}"
