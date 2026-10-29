@@ -5353,7 +5353,7 @@ mod tests {
     /// Strip the aux (LogUp) trace from an honest proof: the commitment and
     /// both openings together.
     ///
-    /// This is the shape of , but built from a proof that was made
+    /// This is the shape of, but built from a proof that was made
     /// with the aux trace, so the PCS opening argument still covers it and
     /// the verifier must refuse. The forged shape, a proof that the prover
     /// built with no aux generator at all, is not tested here: it needs the
@@ -9640,7 +9640,7 @@ mod tests {
     /// reject. Fields whose AIR binding is an equality to the public inputs
     /// the prover itself copies (gas_limit, chain_id, exit_code, trace_len,
     /// event digest limbs 1..7) would PASS such a test - that gap is the
-    /// AIR-side finding , tracked there, not papered over
+    /// AIR-side finding, tracked there, not papered over
     /// by a test that asserts acceptance.
     fn build_arith_proof() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
         build_arith_proof_forged(|_| {})

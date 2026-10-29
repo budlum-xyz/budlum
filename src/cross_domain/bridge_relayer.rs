@@ -9,7 +9,7 @@
 //! `CrossDomainMessageRegistry` into a coherent pipeline.
 //!
 //! WIRING: partially wired - the relay-enqueue stage runs in production
-//! through `Blockchain::enqueue_bridge_relay` , which builds the
+//! through `Blockchain::enqueue_bridge_relay`, which builds the
 //! pipeline around the chain's own bridge, relayer and registry state. The
 //! remaining stages (lock, relay, mint, burn, unlock) still have no
 //! production loop sequencing them end to end: the components are reached
@@ -81,7 +81,7 @@ impl From<RelayerError> for PipelineError {
 /// Machine through each stage of a cross-domain transfer.
 pub struct BridgeRelayerPipeline<'a> {
     /// The bridge state machine (lock/mint/burn/unlock lifecycle). Borrowed:
-    /// production lends the pipeline ITS OWN state , so
+    /// production lends the pipeline ITS OWN state, so
     /// there is no second copy of the bridge to keep in sync.
     pub bridge: &'a mut BridgeState,
     /// The universal relayer (pending relays, proof verification).

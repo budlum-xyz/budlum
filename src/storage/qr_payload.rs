@@ -1,6 +1,6 @@
 //! B.U.D. 3.0 payload container.
 //!
-//! First stage of the real edition-Three pipe , not the
+//! First stage of the real edition-Three pipe, not the
 //! catalogue avatar generators:
 //!
 //! ```text

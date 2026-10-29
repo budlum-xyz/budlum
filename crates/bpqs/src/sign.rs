@@ -397,7 +397,7 @@ mod sign_tests {
     #[test]
     fn roundtrip_across_epochs() {
         let mut signer = committee();
-        // One mint per epoch: Q_MAX is 1 , and the device now
+        // One mint per epoch: Q_MAX is 1, and the device now
         // enforces the quota itself.
         for height in [0u64, 8, 16, 24, 32, 40] {
             let sig = signer

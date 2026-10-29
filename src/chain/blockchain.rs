@@ -4040,7 +4040,7 @@ impl Blockchain {
     /// pays from. A chain that turned the pool off pays nothing even if
     /// someone transferred BUD to the pool account later - the flag, not the
     /// balance, is the permission - and a chain whose profile has no schedule
-    /// (mainnet until , devnet) has nothing to pay from whatever the flag
+    /// (mainnet until, devnet) has nothing to pay from whatever the flag
     /// says. Genesis refuses the one combination that disagrees
     /// (`GenesisConfig::validate_reward_pool_flag`).
     fn payable_reward_pool(

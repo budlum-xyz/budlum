@@ -68,7 +68,7 @@ mod rpc_tests {
             MethodKind, SlotDisclosure, VerificationMethod,
         };
         let poa = crate::domain::ConsensusKind::PoA;
-        // The receipt is signed by the subject's account key , and
+        // The receipt is signed by the subject's account key, and
         // the V4 address IS that key, so the subject is derived from it.
         let subject_keys = crate::crypto::primitives::KeyPair::generate().expect("keypair");
         let subject = Address::from(subject_keys.public_key_bytes());

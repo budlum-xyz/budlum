@@ -688,7 +688,7 @@ impl IntakeState {
         // quorum module's own docs name the rule: `AcceptMostCommon` is
         // "never for a state root that will be committed to". A policy that
         // shrugs at disputes is not protection, it is the appearance of it.
-        // `QuorumRounds::set_policy` is `pub(super)` , so
+        // `QuorumRounds::set_policy` is `pub(super)`, so
         // this refusal cannot be bypassed from outside the module. It is
         // categorical - refused whatever the bonded seats are - so it is
         // named before the state-dependent feasibility check below, which

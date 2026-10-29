@@ -2186,7 +2186,7 @@ this transformation add to storage?**
 The answer: nothing. `RenderFormat::QrStream` is not a storage format, it is a
 **transport representation**. Frames are produced on demand and no intermediate
 product is stored. The persistent form of the content is still what the manifest
-says - the recipe for recipe-bearing content , the bytes for organic content.
+says - the recipe for recipe-bearing content, the bytes for organic content.
 A derived representation ADDS storage in no regime; the test measures that
 property directly.
 

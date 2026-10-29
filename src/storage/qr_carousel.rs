@@ -426,7 +426,7 @@ impl CarouselEncoder {
 /// How many drops a fixed-length channel should carry for loss rate `p_milli`
 /// (loss probability in thousandths, e.g. 300 = 30%).
 ///
-/// Formula (spec , carousel): `n >= k * T * 1.02` with
+/// Formula (spec, carousel): `n >= k * T * 1.02` with
 /// `T ≥ 1/(1-p)`, floored as integer arithmetic in milli-units.
 #[must_use]
 pub fn planned_drop_count(k: u16, p_milli: u32) -> u32 {

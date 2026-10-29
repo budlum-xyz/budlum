@@ -91,7 +91,7 @@ impl SocialBridgeRecord {
         matches!(self.ownership, OwnershipKind::Licensed)
     }
     pub fn is_transferable(&self) -> bool {
-        true // a B.U.D. record is machine-readable and an open format , so it is portable
+        true // a B.U.D. record is machine-readable and an open format, so it is portable
     }
 
     /// The record identity: source URI + owner + content hash + OWNERSHIP +

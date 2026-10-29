@@ -16,7 +16,7 @@ pub trait ConsensusSigner: Send + Sync {
         tagged.extend_from_slice(msg);
         self.sign_block(&crate::core::hash::calculate_hash_bytes(&tagged))
     }
-    /// Domain-separated default , see [`Self::sign_prevote`].
+    /// Domain-separated default, see [`Self::sign_prevote`].
     fn sign_precommit(&self, msg: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let mut tagged = b"BDLM_PRECOMMIT_ED25519_V1".to_vec();
         tagged.extend_from_slice(msg);

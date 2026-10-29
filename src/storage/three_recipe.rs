@@ -3,7 +3,7 @@
 //! WIRING: `storage::emit::qr_feed_preview` writes a recipe over the feed it
 //! just encoded, seals it, and `qr_feed_frames_burst` serves frames through
 //! `frame_stream` / `reemit` rather than holding a video. What is still ahead
-//! of that is the reveal session's own encode loop , which has to
+//! of that is the reveal session's own encode loop, which has to
 //! adopt the same recipe path to stop producing videos it then throws away.
 //!
 //! # What this module is

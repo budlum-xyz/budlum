@@ -341,7 +341,7 @@ pub mod test_adapter {
         }
 
         // A STUB: it stands in for plumbing, so it self-checks on purpose.
-        // The default now fails closed , and the stub has no
+        // The default now fails closed, and the stub has no
         // anchor to give.
         fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
             let proof: MerkleProof = bincode::options()

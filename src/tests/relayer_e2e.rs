@@ -210,7 +210,7 @@ fn burn_bridge_transfer_with_event_auto_enqueues_pending_relay() {
     let lock_message = lock_event.message.unwrap();
     bc.state.bridge_state.mint(&lock_message, 0).unwrap();
     // The state-level mint is the row flip only; the credit half is the
-    // caller's , and the burn debits what was credited.
+    // caller's, and the burn debits what was credited.
     bc.state.add_balance(&recipient(), 100);
 
     let burn_event = bc
