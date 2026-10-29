@@ -1,15 +1,14 @@
 ![Budlum](assets/budlum-consensus-of-consensuses.png)
 
-Budlum is the next layer of the internet, focused on data sovereignty and social flourishing.
+Budlum is the consensus of consensuses.
 
-Budlum is a permissionless Universal Settlement Layer. It does not compete with other chains, it *settles* them.
+Every network keeps its own rules. Budlum unifies their finality into a single proof.
+
 PoW, PoS, PoA, BFT and ZK domains each keep their own consensus; Budlum verifies their
 finality proofs and records cross-domain value transfer as a cryptographic fact on a single
-`GlobalBlockHeader`. Sovereignty over data, keys and computation stays with the participants.
-
-The Universal Settlement Layer is the common ground beneath heterogeneous networks: it does
-not ask which consensus produced a fact, only whether the finality proof for that fact holds,
-so value moves between domains without trusting an intermediary.
+`GlobalBlockHeader`. Sovereignty over data, keys and computation stays with the participants:
+the layer asks which finality proof holds for a fact, never which consensus produced it, so
+value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Tests](https://img.shields.io/badge/tests-4322%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
