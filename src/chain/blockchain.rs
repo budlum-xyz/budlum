@@ -7594,18 +7594,18 @@ mod tests {
         let finalized_tip = 1 + retention;
         // An unconfigured or archive node never accepts missing witnesses.
         assert!(chain
-            .check_pruned_segment_witness_policy(&[stripped.clone()], finalized_tip)
+            .check_pruned_segment_witness_policy(std::slice::from_ref(&stripped), finalized_tip)
             .is_err());
         chain.pruning_manager = Some(PruningManager::new(retention, 100, String::new()));
         assert!(chain
-            .check_pruned_segment_witness_policy(&[stripped.clone()], finalized_tip - 1)
+            .check_pruned_segment_witness_policy(std::slice::from_ref(&stripped), finalized_tip - 1)
             .is_err());
         assert!(chain
-            .check_pruned_segment_witness_policy(&[stripped.clone()], finalized_tip)
+            .check_pruned_segment_witness_policy(std::slice::from_ref(&stripped), finalized_tip)
             .is_ok());
         chain.pruning_manager.as_mut().unwrap().archive_mode = true;
         assert!(chain
-            .check_pruned_segment_witness_policy(&[stripped.clone()], finalized_tip)
+            .check_pruned_segment_witness_policy(std::slice::from_ref(&stripped), finalized_tip)
             .is_err());
         // A block carrying witnesses continues through full validation even on an archive.
         let mut complete = stripped;
