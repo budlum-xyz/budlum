@@ -1545,52 +1545,47 @@ impl PermissionlessRegistry {
             || self.params != RegistryParams::default()
     }
 
+    /// Framed, versioned consensus commitment. Each section has a distinct
+    /// tag and an explicit count; each encoded record has a length prefix.
+    /// V1 concatenated records from different sections without boundaries, so
+    /// e.g. a delegation and a claimable reward with identical fields collided.
+    /// V2 changes nonempty registry state roots and requires a coordinated chain
+    /// upgrade (or a fresh testnet genesis) rather than mixed-version replay.
     pub fn root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
+
+        fn field(hasher: &mut Sha256, bytes: &[u8]) {
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_PERMISSIONLESS_REGISTRY_V1");
-        hasher.update(
-            bincode::serialize(&self.params).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
+        field(&mut hasher, b"BDLM_PERMISSIONLESS_REGISTRY_V2");
+        field(&mut hasher, b"params");
+        field(
+            &mut hasher,
+            &bincode::serialize(&self.params)
+                .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
         );
-        for registration in self.registrations.values() {
-            hasher.update(
-                bincode::serialize(registration)
-                    .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
-            );
+        macro_rules! section {
+            ($name:expr, $records:expr) => {{
+                let records = $records;
+                field(&mut hasher, $name);
+                hasher.update((records.len() as u64).to_le_bytes());
+                for record in records {
+                    let bytes = bincode::serialize(&record)
+                        .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec());
+                    field(&mut hasher, &bytes);
+                }
+            }};
         }
-        for record in &self.slashing_history {
-            hasher.update(
-                bincode::serialize(record).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
-            );
-        }
-        for delegation in &self.delegations {
-            hasher.update(
-                bincode::serialize(delegation)
-                    .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
-            );
-        }
-        for entry in &self.delegation_unbonding {
-            hasher.update(
-                bincode::serialize(entry).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
-            );
-        }
-        for commission in &self.validator_commissions {
-            hasher.update(
-                bincode::serialize(commission)
-                    .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
-            );
-        }
-        for reward in &self.claimable_rewards {
-            hasher.update(
-                bincode::serialize(reward).unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
-            );
-        }
-        if !self.charged_offences.is_empty() {
-            hasher.update(
-                bincode::serialize(&self.charged_offences)
-                    .unwrap_or_else(|_| REGISTRY_SERIALIZE_FAILED.to_vec()),
-            );
-        }
+        section!(b"registrations", self.registrations.values());
+        section!(b"slashing_history", self.slashing_history.iter());
+        section!(b"delegations", self.delegations.iter());
+        section!(b"delegation_unbonding", self.delegation_unbonding.iter());
+        section!(b"validator_commissions", self.validator_commissions.iter());
+        section!(b"claimable_rewards", self.claimable_rewards.iter());
+        section!(b"charged_offences", self.charged_offences.iter());
         hasher.finalize().into()
     }
 
@@ -1607,6 +1602,31 @@ mod tests {
 
     fn addr(b: u8) -> Address {
         Address::from([b; 32])
+    }
+
+    #[test]
+    fn registry_root_distinguishes_identical_records_in_different_sections() {
+        let mut base = PermissionlessRegistry::new();
+        base.register_validator(addr(1), MIN_REGISTRATION_STAKE, 0)
+            .unwrap();
+        let mut stake = base.clone();
+        stake.delegate(addr(9), addr(1), 100).unwrap();
+        let mut reward = base;
+        reward
+            .credit_claimable_reward(addr(9), addr(1), 100)
+            .unwrap();
+
+        // The old V1 transcript was identical: same params and registrations,
+        // followed by these indistinguishable raw record bytes.
+        assert_eq!(
+            bincode::serialize(&stake.delegations[0]).unwrap(),
+            bincode::serialize(&reward.claimable_rewards[0]).unwrap()
+        );
+        assert_ne!(stake.root(), reward.root());
+        assert_eq!(stake.root(), stake.clone().root());
+        let decoded: PermissionlessRegistry =
+            bincode::deserialize(&bincode::serialize(&stake).unwrap()).unwrap();
+        assert_eq!(stake.root(), decoded.root());
     }
 
     #[test]

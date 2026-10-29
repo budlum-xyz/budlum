@@ -166,3 +166,13 @@ cargo run --manifest-path xtask/tools/Cargo.toml -- resource-sample --pid <node 
 |---|---|---|---|---|
 | Server validator | not yet measured | not yet measured | not yet measured | not yet measured |
 | Personal validator (mini PC, phone) | not yet measured | not yet measured | not yet measured | not yet measured |
+
+## Coordinated registry-root upgrade
+
+The framed `BDLM_PERMISSIONLESS_REGISTRY_V2` root replaces the ambiguous V1
+encoding for nonempty registries. It is a consensus change: all validators,
+replayers, snapshot producers and bridge consumers must run the same version.
+Use a fresh testnet genesis; do not mix V1/V2 nodes or replay a V1 history as
+V2 without an explicitly scheduled, consensus-wide activation/migration.
+Canary commit books refuse new entries at capacity until an existing entry
+expires or is revealed; accepted commits are never evicted to admit newcomers.
