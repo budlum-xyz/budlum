@@ -1615,9 +1615,9 @@ impl Blockchain {
             .domain_commitment_registry
             .find_by_height(commitment.domain_id, commitment.domain_height)
         {
-            if existing.domain_block_hash == commitment.domain_block_hash
-                && existing.sequence == commitment.sequence
-            {
+            // Rewrapping the same block with another sequence is a replay,
+            // not evidence that two different blocks were finalized.
+            if existing.domain_block_hash == commitment.domain_block_hash {
                 return Ok(());
             } else {
                 let d_mut = self
@@ -1876,12 +1876,22 @@ impl Blockchain {
             ));
         }
         self.accept_domain_commitment(commitment)?;
-        // An idempotent resubmission of an old commitment returns Ok without
-        // advancing the domain. It must not move the anchor back to that
-        // commitment's older state root (BLG-0169).
-        if domain_height <= height_before {
+        // A future commitment can be stored without advancing the applied
+        // tip. Conversely, filling a gap can advance past the submitted
+        // height. Only the actual applied tip is safe to anchor.
+        let applied_height = self
+            .domain_registry
+            .get(domain_id)
+            .ok_or_else(|| format!("Unknown consensus domain {domain_id}"))?
+            .last_committed_height;
+        if applied_height <= height_before {
             return Ok(());
         }
+        let state_root = self
+            .domain_commitment_registry
+            .find_by_height(domain_id, applied_height)
+            .ok_or_else(|| format!("Domain {domain_id} applied tip has no commitment"))?
+            .state_root;
         // AR-GE-6: the only production writer of the consensus-owned
         // external-root registry. The anchor lands only after the domain's
         // own adapter has proven finality AND the commitment was accepted,
@@ -2166,7 +2176,17 @@ impl Blockchain {
         .map_err(|e| e.to_string())?;
 
         match status {
-            FinalityStatus::Finalized => Ok(()),
+            FinalityStatus::Finalized => {
+                if !commitment.state_updates.is_empty()
+                    && !matches!(proof, FinalityProof::PoA { .. })
+                {
+                    return Err(format!(
+                        "Domain {} height {}: commitment nonce writes are not attested by the proof",
+                        commitment.domain_id, commitment.domain_height
+                    ));
+                }
+                Ok(())
+            }
             FinalityStatus::Pending {
                 required_depth,
                 observed_depth,
@@ -9140,9 +9160,19 @@ mod tests {
         let root2 = c2.state_root;
         assert_ne!(root1, root2);
 
+        bc.accept_verified_domain_commitment(c2.clone()).unwrap();
+        assert_eq!(
+            bc.state.external_roots.get(&1),
+            None,
+            "a pending root is not anchored"
+        );
         bc.accept_verified_domain_commitment(c1.clone()).unwrap();
+        assert_eq!(
+            bc.state.external_roots.get(&1),
+            Some(&root2),
+            "closing the gap anchors the actual applied tip"
+        );
         bc.accept_verified_domain_commitment(c2).unwrap();
-        assert_eq!(bc.state.external_roots.get(&1), Some(&root2));
 
         // The idempotent branch returns Ok, and the anchor must stay at root2.
         bc.accept_verified_domain_commitment(c1).unwrap();
