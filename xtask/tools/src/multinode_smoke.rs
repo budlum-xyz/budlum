@@ -182,7 +182,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     step5_isolation()?;
     step6_sync(root)?;
     step7_producers()?;
-    step8_finality()?;
+    step8_finality(root)?;
     step9_join(root)?;
     step10_restart(root)?;
     Ok("DEVNET-MULTINODE-SMOKE: 10/10 PASS".to_string())
@@ -460,7 +460,7 @@ pub fn finalized_height(body: &str) -> Option<u64> {
     }
 }
 
-fn step8_finality() -> Result<(), String> {
+fn step8_finality(root: &Path) -> Result<(), String> {
     println!("== [8/10] finality: bud_getStatus.finalizedHeight > 0 and grows (max 240 s) ==");
     let mut first = None;
     for _ in 0..120 {
@@ -478,9 +478,47 @@ fn step8_finality() -> Result<(), String> {
         }
         pause(PAUSE);
     }
+    finality_log_witness(root);
     Err(format!(
         "finality did not advance (first finalized height seen: {first:?})"
     ))
+}
+
+/// The last finality-relevant lines of every node, printed when step 8 fails.
+///
+/// Without them the job log carries only the last 150 lines each container
+/// wrote, which on a producing chain is block gossip: a vote that was never
+/// cast and a vote that was rejected look identical from the assertion above,
+/// and it only ever says the height stayed zero.
+fn finality_log_witness(root: &Path) {
+    const NEEDLES: [&str; 6] = [
+        "prevote",
+        "precommit",
+        "finality",
+        "finaliz",
+        "quorum",
+        "qc",
+    ];
+    for node in ["node1", "node2", "node3", "node4", "node5"] {
+        let Some(logs) = compose(root, &["logs", "--no-color", "--no-log-prefix", node]) else {
+            println!("[{node}] logs unavailable");
+            continue;
+        };
+        let mut printed = 0usize;
+        for line in logs.lines() {
+            let lower = line.to_ascii_lowercase();
+            if NEEDLES.iter().any(|needle| lower.contains(needle)) {
+                println!("[{node}] {line}");
+                printed += 1;
+                if printed >= 80 {
+                    break;
+                }
+            }
+        }
+        if printed == 0 {
+            println!("[{node}] no finality lines");
+        }
+    }
 }
 
 /// The address `bud validator join` reports: the hex word after

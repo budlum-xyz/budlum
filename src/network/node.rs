@@ -2536,7 +2536,17 @@ impl Node {
                                 self.last_precommit_height = agg_state.checkpoint_height;
                                 self.save_vote_history();
                                 let topic = gossipsub::IdentTopic::new("blocks");
-                                let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
+                                if let Err(e) = self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(topic, vote_msg.to_bytes())
+                                {
+                                    // A vote that never reaches the mesh is
+                                    // indistinguishable from a vote that was
+                                    // never cast, and finality simply stops.
+                                    warn!("Failed to gossip a finality vote: {e}");
+                                }
                             }
                             Err(e) => {
                                 warn!("Failed to sign precommit: {e}");
@@ -2582,7 +2592,17 @@ impl Node {
                                     self.last_prevote_height = checkpoint_height;
                                     self.save_vote_history();
                                     let topic = gossipsub::IdentTopic::new("blocks");
-                                    let _ = self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes());
+                                    if let Err(e) = self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(topic, vote_msg.to_bytes())
+                                {
+                                    // A vote that never reaches the mesh is
+                                    // indistinguishable from a vote that was
+                                    // never cast, and finality simply stops.
+                                    warn!("Failed to gossip a finality vote: {e}");
+                                }
                                 }
                                 Err(e) => {
                                     warn!("Failed to sign prevote: {e}");
