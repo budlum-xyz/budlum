@@ -87,6 +87,25 @@ impl DomainCommitmentRegistry {
             .map(|(_, commitment)| commitment)
     }
 
+    /// Drop one stored commitment, with its block marker, so a height can be
+    /// committed again. Used for a commitment whose linkage the finality proof
+    /// never bound: it is not evidence of anything the domain did, so it must
+    /// not be able to block the honest commitment at the same height. Returns
+    /// the row that was removed, or `None` when the key was not stored.
+    pub fn remove(
+        &mut self,
+        domain_id: DomainId,
+        domain_height: u64,
+        sequence: u64,
+    ) -> Option<DomainCommitment> {
+        let commitment = self
+            .commitments
+            .remove(&(domain_id, domain_height, sequence))?;
+        self.seen_blocks
+            .remove(&(domain_id, domain_height, commitment.domain_block_hash));
+        Some(commitment)
+    }
+
     pub fn len(&self) -> usize {
         self.commitments.len()
     }
