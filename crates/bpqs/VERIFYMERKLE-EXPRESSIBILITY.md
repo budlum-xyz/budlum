@@ -123,7 +123,7 @@ research; the anchor flow keeps its current PQ family. Honest and
 available; recorded so the cost of is visible against it.
 
 Registered recommendation (this document's own weighing, pending the
-user's decision on item 7 and the review-call issue): , queued as
+user's decision on item 7 and the review-call issue):, queued as
 manifest items / below so the review assesses the widened chip
 set in the same engagement as the VerifyMerkle binding re-review.
 
