@@ -76,3 +76,10 @@ type_mismatched_generic_lifetimes | PR #95: BridgeRelayerPipeline gained a stage
 # the CI run for 405b00c.
 derive_trait_impl_removed | PR #110: regen_health_tick Checkpoint lost Copy with the view-caching rework (1 item) | PR #110 approval (110)
 trait_method_added | PR #110: AnchorSigner gained key_index and backend so the anchor ledger records which key signed (4 items) | PR #110 approval (110)
+
+# INV-03 (a scheme is never inferred): the PQ facade used to carry a class
+# named after a signature's byte length. The length-to-scheme inference it
+# encoded is what the `scheme-is-never-inferred` gate forbids, and the facade
+# now takes an explicit `SchemeId` from the registry, so the type had no caller
+# left. Removing it is a public API break by construction.
+PqSignatureClass | removed: a type that classified a signature by its byte length was the scheme inference INV-03 forbids (the scheme-is-never-inferred gate names it), and every caller moved to an explicit scheme id | PR #110 directive INV-03 (scheme is never inferred), approved 2026-10-29
