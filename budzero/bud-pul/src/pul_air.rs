@@ -17,18 +17,18 @@
 //! not bound to those inputs inside the AIR; and the ML-DSA verification
 //! is not part of the trace. Both are the remaining
 //! work.
-//! WIRING: unwired - the AIR-shape helpers here are the proof-side surface its wave wires up; no production module calls them yet (the prover paths consume the concrete columns directly until that wave lands).
+//! WIRING: unwired - the AIR-shape helpers here are the proof-side surface a later caller wires up; no production module calls them yet (the prover paths consume the concrete columns directly until that wiring lands).
 
 use crate::keccak_chip::{prove_keccak_f, verify_keccak_f, KeccakChipError};
 use bud_proof::plonky3_prover::ChipProof;
 
 /// The Keccak-256 rate in bytes.
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub const RATE_BYTES: usize = 136;
 
 /// One proven transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub struct PulStatement {
     pub txid: [u8; 32],
     pub from_address: [u8; 32],
@@ -55,7 +55,7 @@ impl PulStatement {
 
 /// The encoded batch: the statement count, then every statement.
 #[must_use]
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn encode_batch(statements: &[PulStatement]) -> Vec<u8> {
     let mut out = (statements.len() as u64).to_le_bytes().to_vec();
     for statement in statements {
@@ -66,7 +66,7 @@ pub fn encode_batch(statements: &[PulStatement]) -> Vec<u8> {
 
 /// The Keccak-f input state of every absorption of the sponge over `bytes`.
 #[must_use]
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn absorb_states(bytes: &[u8]) -> Vec<[u64; 25]> {
     let mut padded = bytes.to_vec();
     padded.push(0x01);
@@ -151,7 +151,7 @@ fn keccak_f(a: &mut [u64; 25]) {
 }
 
 /// A batch proof: the statements and the chip proof over their sponge.
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub struct PulBatchProof {
     pub statements: Vec<PulStatement>,
     pub keccak: ChipProof,
@@ -162,7 +162,7 @@ pub struct PulBatchProof {
 /// # Errors
 ///
 /// An empty batch or a chip refusal.
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn prove_batch(statements: Vec<PulStatement>) -> Result<PulBatchProof, KeccakChipError> {
     if statements.is_empty() {
         return Err(KeccakChipError::Empty);
@@ -177,7 +177,7 @@ pub fn prove_batch(statements: Vec<PulStatement>) -> Result<PulBatchProof, Kecca
 /// # Errors
 ///
 /// An empty batch or a chip proof that does not verify.
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn verify_batch(proof: &PulBatchProof) -> Result<(), KeccakChipError> {
     if proof.statements.is_empty() {
         return Err(KeccakChipError::Empty);

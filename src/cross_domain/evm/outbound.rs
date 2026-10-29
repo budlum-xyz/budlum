@@ -22,22 +22,22 @@ use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams,
 use sha3::{Digest, Keccak256};
 
 /// The event signature.
-/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring wave.
+/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
 pub const OUTBOUND_EVENT_SIGNATURE: &str = "BudlumOutbound(bytes,bytes32,bytes32,bytes32)";
 /// Longest `kind` a log may carry.
-/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring wave.
+/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
 pub const MAX_OUTBOUND_KIND_BYTES: usize = 128;
 
 /// `topic0` of the outbound event.
 #[must_use]
-/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring wave.
+/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
 pub fn outbound_topic0() -> [u8; 32] {
     Keccak256::digest(OUTBOUND_EVENT_SIGNATURE.as_bytes()).into()
 }
 
 /// Where a message built from a log sits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring wave.
+/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
 pub struct OutboundPosition {
     /// The Budlum domain id of the EVM chain.
     pub source_domain: u32,
@@ -55,7 +55,7 @@ pub struct OutboundPosition {
 
 /// Why a log is not an outbound message.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring wave.
+/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
 pub enum OutboundError {
     #[error("the log is not a BudlumOutbound event")]
     NotOutbound,
@@ -88,7 +88,7 @@ fn word_as_usize(w: &[u8; 32]) -> Result<usize, OutboundError> {
 /// # Errors
 ///
 /// [`OutboundError`] when the log is not exactly the outbound event.
-/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+/// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
 pub fn message_from_log(
     log: &EthLog,
     position: OutboundPosition,

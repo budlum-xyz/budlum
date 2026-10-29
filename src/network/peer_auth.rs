@@ -1,4 +1,4 @@
-//! WIRING: unwired - the peer-proof module is not reached by the transport yet; the enforcement wave wires it.
+//! WIRING: unwired - the peer-proof module is not reached by the transport yet; the enforcement change wires it.
 //! WIRING: unwired - no transport code reads the TLS exporter value (`EXPORTER-budlum-pq-auth-v1`, 32 bytes) from the live session and calls [`verify_peer_proof`] or [`must_drop`], so no peer is asked for a proof and no unproven validator peer is dropped; peer identity on the p2p path stays libp2p's own `PeerId` identity key until the wrapper lands.
 //! ML-DSA-65 peer identity proof (`EXPORTER-budlum-pq-auth-v1`).
 //!
@@ -72,7 +72,7 @@ pub fn verify_peer_proof(
 /// Whether a connection must be dropped now: a validator peer that is still unproven after
 /// [`PROOF_DEADLINE`]. A peer that is not a validator is never dropped by this rule.
 #[must_use]
-/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+/// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
 pub fn must_drop(is_validator_peer: bool, proven: bool, connected_for: Duration) -> bool {
     is_validator_peer && !proven && connected_for >= PROOF_DEADLINE
 }

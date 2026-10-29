@@ -1,4 +1,4 @@
-//! WIRING: unwired - verify_anchor_light is reached only from the anchor-ledger tests in this tree; the finality consumer that will call it lands with its wave.
+//! WIRING: unwired - verify_anchor_light is reached only from the anchor-ledger tests in this tree; the finality consumer that will call it is not in this tree yet.
 //! Verification of the post-quantum anchors [`super::pq_anchor`] emits.
 //!
 //! WIRING: the node verifies the anchors it emits before it logs them

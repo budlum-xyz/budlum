@@ -7,18 +7,18 @@
 //!
 //! A watch-only wallet holds no secret and derives no public key; it keeps the
 //! address list this wallet exports with [`WalletV3::address_list`].
-//! WIRING: unwired - the v3 wallet surface is the custody wave's; in-tree readers land with that wave (the crate binary and SDK callers are not wired yet).
+//! WIRING: unwired - the v3 wallet surface belongs to the custody path; in-tree readers land with it (the crate binary and SDK callers are not wired yet).
 
 use crate::crypto::key_derivation::{RootSecret, UserAccount, ENTROPY_LEN};
 use crate::{entropy_to_mnemonic, mnemonic_to_entropy, WalletError};
 use zeroize::{Zeroize, Zeroizing};
 
 /// The word count of a V3 wallet.
-/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
 pub const WORD_COUNT: usize = 24;
 
 /// A V3 wallet: the mnemonic and the root secret, both wiped on drop.
-/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
 pub struct WalletV3 {
     mnemonic: Zeroizing<String>,
     root: RootSecret,
@@ -70,7 +70,7 @@ impl WalletV3 {
     ///
     /// [`WalletError::InvalidWordCount`] for any count but 24 (12 words are
     /// refused), [`WalletError::InvalidMnemonic`] for a bad checksum.
-/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
     pub fn from_mnemonic(mnemonic: &str, password: &str) -> Result<Self, WalletError> {
         let words = mnemonic.split_whitespace().count();
         if words != WORD_COUNT {
@@ -105,7 +105,7 @@ impl WalletV3 {
     /// # Errors
     ///
     /// [`WalletError::InvalidSeed`] when a component cannot be derived.
-/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring wave.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
     pub fn address_list(&self, account: u32, count: u32) -> Result<Vec<[u8; 32]>, WalletError> {
         (0..count)
             .map(|index| self.account(account, index).map(|a| a.address))

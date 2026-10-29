@@ -570,7 +570,7 @@ impl ChainHandle {
 
     /// Read `count` contiguous local blocks starting at `from`, in one
     /// round trip. Returns fewer than `count` when the chain is shorter.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub async fn get_blocks_range(&self, from: u64, count: usize) -> Vec<Block> {
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -727,7 +727,7 @@ impl ChainHandle {
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
     }
 
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub async fn import_pruned_segment(
         &self,
         blocks: Vec<Block>,
@@ -931,7 +931,7 @@ impl ChainHandle {
         rx.await.unwrap_or_default()
     }
 
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub async fn try_reorg(&self, fork: Vec<Block>) -> Result<bool, String> {
         let (res_tx, res_rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::TryReorg(fork, res_tx)).await;

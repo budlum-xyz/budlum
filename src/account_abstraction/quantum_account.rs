@@ -420,7 +420,7 @@ impl BftGuardianFinality {
     /// # Errors
     ///
     /// See [`Self::finalize`].
-    /// exposed for: public surface of this module - production readers land with the wiring wave.
+    /// exposed for: public surface of this module - production readers land with the wiring change.
     pub fn finalize_in(
         registry: &crate::crypto::scheme::SchemeStatusRegistry,
         votes: Vec<GuardianVote>,

@@ -375,7 +375,7 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
-    /// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout wave.
+    /// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
     pub fn create_access_grant(&mut self, grant: AccessGrant) -> Result<GrantId, String> {
         self.create_access_grant_checked(grant, true)
     }

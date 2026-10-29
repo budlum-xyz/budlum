@@ -117,7 +117,7 @@ const BASELINE: &[&str] = &[
     "src/storage/provider.rs",
     "src/storage/render.rs",
     "src/tokenomics/mod.rs",
-    // The wave of 2026-10-27: fourteen more files, each measured against the
+    // The 2026-10-27 change: fourteen more files, each measured against the
     // bound that makes its index unreachable at runtime, cited beside it.
     "src/bin/budlum-domain-producer.rs", // "one BLS seed per member is required" above the loop: index < members.len() <= bls_seeds.len()
     "src/bin/budlum-indexer.rs", // serde_json string-key indexing on Value never panics: objects insert, anything else reads null

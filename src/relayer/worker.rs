@@ -39,7 +39,7 @@ use tracing::{error, info, warn};
 /// mainnet node admits. A legacy Ed25519 key signs V4, which devnet and
 /// testnet still accept.
 #[derive(Clone)]
-/// exposed for: public surface of this module - production readers land with the wiring wave.
+/// exposed for: public surface of this module - production readers land with the wiring change.
 pub enum RelayerKey {
     /// The legacy Ed25519 key (V4).
     Legacy(Arc<KeyPair>),
@@ -270,7 +270,7 @@ impl RelayerWorker {
     /// from its Address V3, which replaces the address the worker was built
     /// with so the nonce and the sender agree.
     #[must_use]
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn with_account(
         mut self,
         account: Arc<crate::crypto::key_derivation::UserAccount>,
