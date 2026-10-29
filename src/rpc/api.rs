@@ -421,7 +421,7 @@ pub trait BudlumApi {
         domain_height: u64,
         event_index: u32,
         expiry_height: u64,
-        // BLG-0116 (P05-F09): the burner declares the Ethereum destination
+        // The burner declares the Ethereum destination
         // at burn time.
         recipient_eth: [u8; 20],
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
@@ -574,9 +574,9 @@ pub trait BudlumApi {
         report: crate::registry::SlashingReport,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// (security audit §4) submit a QC fault proof.
+    /// (security audit) submit a QC fault proof.
     ///
-    /// Fail-closed (P01-F22): every reachable proof shape is refused with a
+    /// Fail-closed: every reachable proof shape is refused with a
     /// named reason. A proof naming a signature that verifies targets a
     /// valid attestation; one naming a signature that does not verify is not
     /// evidence against the named validator - garbage bytes naming anyone
@@ -615,14 +615,14 @@ pub trait BudlumApi {
     // === B.U.D. Storage RPC surface ============================
     // The 7 RPCs below are the public, permissionless query/mutation surface
     // For the storage domain. Per the data-sovereignty rule (plan
-    // §0.5) every endpoint is callable by any account on a standard node
+    //) every endpoint is callable by any account on a standard node
     // No team-gated "official indexer" or admin-only RPC exists.
     //
     // IMPORTANT: `StorageTx::AnswerChallenge` carries a `range_hash` only;
     // It does NOT carry shard bytes. The chain does not store the bytes
     // (only the ContentId/manifest commitments), and the retrieval
     // Challenge is *interim* (not full Proof-of-Storage
-    // §2.5 / vision §9.1). Off-chain verifiers must recompute the
+    // / vision). Off-chain verifiers must recompute the
     // Expected range hash from the public shard bytes.
 
     /// Refused: manifest registration is a signed
@@ -1217,7 +1217,7 @@ pub trait BudlumApi {
         min_blocks_to_keep: Option<u64>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    // --- (§1): AI Inference & Verifier Layer ---
+    // ---: AI Inference & Verifier Layer ---
 
     /// Query registered AI model specification by model_id hex.
     #[method(name = "bud_aiGetModel")]
@@ -1417,11 +1417,11 @@ pub trait BudlumApi {
     #[method(name = "bud_getStatus")]
     async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    ///: Active validator set snapshot.
+    /// Active validator set snapshot.
     #[method(name = "bud_getValidatorSet")]
     async fn get_validator_set(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    ///: Domain info by ID.
+    /// Domain info by ID.
     #[method(name = "bud_getDomainInfo")]
     async fn get_domain_info(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -1431,7 +1431,7 @@ pub trait BudlumApi {
     #[method(name = "bud_getQuantumAlarm")]
     async fn get_quantum_alarm(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    ///: Slashing history (audit trail).
+    /// Slashing history (audit trail).
     #[method(name = "bud_getSlashingHistory")]
     async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 

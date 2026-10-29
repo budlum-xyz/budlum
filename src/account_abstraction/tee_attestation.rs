@@ -254,7 +254,7 @@ impl TeeRuntime {
     }
 }
 
-/// The KQ-* gate surface: the single entry point the production path calls.
+/// The gate surface: the single entry point the production path calls.
 pub struct TeeGates;
 
 impl TeeGates {

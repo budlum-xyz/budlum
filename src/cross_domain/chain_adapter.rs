@@ -26,7 +26,7 @@ use bincode::Options;
 const MAX_RECEIPT_PROOF_BYTES: u64 = 4 * 1024;
 
 /// Test adapters have no external anchor to give, so the default
-/// `verify_observation` (BLG-0129) refuses them. This is the self-check they
+/// `verify_observation` refuses them. This is the self-check they
 /// stand in with: decode the proof and verify it against the root the result
 /// itself carries. Valid for a stub only - it proves the result is
 /// self-consistent, nothing about the external chain.
@@ -160,7 +160,7 @@ pub trait ChainAdapter: Send + Sync {
     }
 
     fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
-        // BLG-0129 (P05-F22): the root must NOT come from the same result
+        // The root must NOT come from the same result
         // being verified - that only proved the result is self-consistent.
         // The default fails closed: an adapter without a trusted anchor
         // overrides this method with a real check.
@@ -341,7 +341,7 @@ pub mod test_adapter {
         }
 
         // A STUB: it stands in for plumbing, so it self-checks on purpose.
-        // The default now fails closed (BLG-0129), and the stub has no
+        // The default now fails closed , and the stub has no
         // anchor to give.
         fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
             let proof: MerkleProof = bincode::options()

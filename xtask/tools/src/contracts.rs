@@ -11,7 +11,7 @@
 //! `deploy` reads the RPC endpoint from `BUDLUM_ETH_RPC_URL` and the deployer
 //! keystore path from `BUDLUM_ETH_KEYSTORE`; `forge` reads the keystore
 //! password from `ETH_PASSWORD` itself. None of the three is printed or
-//! written (K7). The addresses go into the `[addresses]` section of the
+//! written. The addresses go into the `[addresses]` section of the
 //! config file.
 
 use std::collections::BTreeMap;

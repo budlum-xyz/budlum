@@ -1,6 +1,6 @@
 //! Every classical cryptographic use in production code is on the list.
 //!
-//!: no object is accepted on a classical signature alone. The
+//! no object is accepted on a classical signature alone. The
 //! only classical components allowed are (a) the Ed25519 half of a composite
 //! signature, (b) the BLS12-381 finality peer, (c) X25519 inside a hybrid KEM,
 //! (d) proofs of external networks, marked in the profile, and (e) TEE
@@ -49,7 +49,7 @@ const CLASSICAL_TOKENS: &[&str] = &[
 ];
 
 /// The five permitted items.
-const K02_ITEMS: &[&str] = &["a", "b", "c", "d", "e"];
+const ALLOWED_CATEGORIES: &[&str] = &["a", "b", "c", "d", "e"];
 
 /// A classical use: a file and the function it sits in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -70,7 +70,7 @@ pub struct Entry {
     /// The post-quantum component that pairs this use.
     pub pq_companion: String,
     /// The item, `a` to `e`.
-    pub k02: String,
+    pub category: String,
 }
 
 impl Entry {
@@ -92,22 +92,22 @@ pub fn parse_allowlist(text: &str) -> Result<(u64, Vec<Entry>), String> {
     let mut current: Option<[Option<String>; 4]> = None;
     let finish =
         |slot: Option<[Option<String>; 4]>, entries: &mut Vec<Entry>| -> Result<(), String> {
-            let Some([path, function, pq_companion, k02]) = slot else {
+            let Some([path, function, pq_companion, category]) = slot else {
                 return Ok(());
             };
             let entry = Entry {
                 path: path.ok_or("an entry has no `path`")?,
                 function: function.ok_or("an entry has no `function`")?,
                 pq_companion: pq_companion.ok_or("an entry has no `pq_companion`")?,
-                k02: k02.ok_or("an entry has no `k02`")?,
+                category: category.ok_or("an entry has no `category`")?,
             };
             if entry.pq_companion.trim().is_empty() {
                 return Err(format!("entry {} has an empty `pq_companion`", entry.path));
             }
-            if !K02_ITEMS.contains(&entry.k02.as_str()) {
+            if !ALLOWED_CATEGORIES.contains(&entry.category.as_str()) {
                 return Err(format!(
                     "entry {} namesitem `{}`; the items are a to e",
-                    entry.path, entry.k02
+                    entry.path, entry.category
                 ));
             }
             entries.push(entry);
@@ -147,7 +147,7 @@ pub fn parse_allowlist(text: &str) -> Result<(u64, Vec<Entry>), String> {
             "path" => 0,
             "function" => 1,
             "pq_companion" => 2,
-            "k02" => 3,
+            "category" => 3,
             other => return Err(format!("line {}: unknown key `{other}`", n + 1)),
         };
         if let Some(cell) = slot.get_mut(index) {
@@ -309,7 +309,7 @@ pub fn self_test() -> Result<String, String> {
         return Err(format!("site extraction is off: {names:?}"));
     }
 
-    let list = "unregistered_baseline = 1\n[[entry]]\npath = \"src/x.rs\"\nfunction = \"verify_it\"\npq_companion = \"ML-DSA-65\"\nk02 = \"a\"\n";
+    let list = "unregistered_baseline = 1\n[[entry]]\npath = \"src/x.rs\"\nfunction = \"verify_it\"\npq_companion = \"ML-DSA-65\"\ncategory = \"a\"\n";
     let (baseline, entries) = parse_allowlist(list)?;
     if evaluate(&sites, &entries, baseline).is_err() {
         return Err(String::from(
@@ -331,17 +331,17 @@ pub fn self_test() -> Result<String, String> {
         path: String::from("src/gone.rs"),
         function: String::from("*"),
         pq_companion: String::from("none"),
-        k02: String::from("b"),
+        category: String::from("b"),
     });
     if evaluate(&sites, &stale, baseline).is_ok() {
         return Err(String::from("a stale entry passed"));
     }
-    let whole_file = "unregistered_baseline = 0\n[[entry]]\npath = \"src/x.rs\"\nfunction = \"*\"\npq_companion = \"ML-DSA-65\"\nk02 = \"a\"\n";
+    let whole_file = "unregistered_baseline = 0\n[[entry]]\npath = \"src/x.rs\"\nfunction = \"*\"\npq_companion = \"ML-DSA-65\"\ncategory = \"a\"\n";
     let (b0, e0) = parse_allowlist(whole_file)?;
     if evaluate(&sites, &e0, b0).is_err() {
         return Err(String::from("a whole-file entry did not cover its sites"));
     }
-    if parse_allowlist("unregistered_baseline = 0\n[[entry]]\npath = \"p\"\nfunction = \"*\"\npq_companion = \"x\"\nk02 = \"z\"\n").is_ok() {
+    if parse_allowlist("unregistered_baseline = 0\n[[entry]]\npath = \"p\"\nfunction = \"*\"\npq_companion = \"x\"\ncategory = \"z\"\n").is_ok() {
         return Err(String::from("aitem outside a to e was accepted"));
     }
     Ok(String::from(

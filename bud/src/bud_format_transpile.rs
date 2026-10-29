@@ -1,6 +1,6 @@
 //! .bud transpile - compiles to bash, plus the AST transform.
 //!
-//! HONESTY (K19/K38): the claim "bash transpile 10x" DID NOT HOLD UP UNDER
+//! HONESTY: the claim "bash transpile 10x" DID NOT HOLD UP UNDER
 //! MEASUREMENT - an echo script makes the code bigger (the ratio is below 1) and
 //! the gate REFUSES it (the canary test). The AST part is a stub; no ratio is
 //! claimed for it.
@@ -65,7 +65,7 @@ pub struct AstTransform {
 impl AstTransform {
     pub fn transform(code: &str) -> Self {
         // stub: AST = {"type":"File","body":[...]}
-        // K38: UTF-8 safe truncation - a byte slice must NOT split a multi-byte character, so no panic.
+        // UTF-8 safe truncation - a byte slice must NOT split a multi-byte character, so no panic.
         let snippet: String = code.chars().take(100).collect();
         // The snippet is JSON-escaped, so quotes and backslashes in the code
         // still give valid JSON.

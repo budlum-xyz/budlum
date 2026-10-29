@@ -310,7 +310,7 @@ fn main() -> ExitCode {
 
         match verified {
             Ok(verified) => {
-                // The anchorable external root (AR-GE-6 / F-12): the
+                // The anchorable external root (AR-GE-6 /): the
                 // full-node consensus path anchors exactly this root via
                 // `AccountState::anchor_external_root` once the matching
                 // domain commitment finalizes, and the executor's relayer
@@ -382,7 +382,7 @@ mod tests {
         assert!(decode_hash32(&"zz".repeat(32)).is_err());
     }
 
-    /// BLG-0705: a run that verifies nothing must not end as trusted.
+    /// A run that verifies nothing must not end as trusted.
     #[test]
     fn an_unverified_run_is_refused() {
         assert!(check_interval(0).is_err());

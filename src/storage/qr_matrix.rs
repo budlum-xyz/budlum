@@ -1,4 +1,4 @@
-//! Real ISO QR module matrix for Three optical frames (plan §CI / K-QR §7).
+//! Real ISO QR module matrix for Three optical frames.
 //!
 //! Pin: byte mode, EC=L, deterministic mask order 0..=7 - matrices come from
 //! our own `qr_encode`, so a recipe regenerates the exact same modules on every

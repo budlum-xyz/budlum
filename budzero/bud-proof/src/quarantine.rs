@@ -1,4 +1,4 @@
-//! Derived quarantine ledger (K4 of the BudZero regeneration design).
+//! Derived quarantine ledger ( of the BudZero regeneration design).
 //!
 //! When a proof alarms, the node must not only refuse it once - the code that
 //! produced it must be refused every time it appears again, without a gossip

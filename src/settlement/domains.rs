@@ -116,7 +116,7 @@ impl PartialEq for SettlementTx {
 impl Eq for SettlementTx {}
 
 /// Mainnet refuses a quorum proof that carries only classical signatures
-///: a PoS or BFT proof needs the ML-DSA QC of the same
+/// a PoS or BFT proof needs the ML-DSA QC of the same
 /// signers (`FinalityProof::PoSPq`, `FinalityProof::BftPq`), and a PoA proof
 /// needs composite authority signatures (`FinalityProof::PoAPq`).
 fn refuse_classical_only_quorum_on_mainnet(
@@ -496,7 +496,7 @@ pub fn verify_commitment_finality_observed(
                 crate::cross_domain::external::AdapterSpec::EthereumSync { .. }
             )
             .then(bls);
-            // BLG-0132 (P06-F03): the policy's `now` is the verification
+            // The policy's `now` is the verification
             // time: the domain's committed external height, the only clock
             // with evidence behind it.
             let mut policy = entry.policy.clone();
@@ -902,7 +902,7 @@ pub fn accept_verified_commitment(
     };
     let outcome = accept_commitment(state, commitment)?;
     // An idempotent resubmission of an old commitment must not move the
-    // anchor back to its older state root (BLG-0169), and a frozen domain
+    // anchor back to its older state root , and a frozen domain
     // anchors nothing.
     if domain_height <= height_before || outcome != CommitmentOutcome::Advanced {
         return Ok(outcome);

@@ -309,7 +309,7 @@ impl SocialDataRef {
 
 /// Build a closed-loop Pollen AccessGrant for an AI inference layer inference.
 ///
-/// F-12: the production AI read path (`validate_ai_read_ref`) is
+/// The production AI read path (`validate_ai_read_ref`) is
 /// requester-bound. `grantee` must be the inference requester, not the
 /// operator. The operator executes the job; it is not the account that
 /// holds the data grant. `payer` is the same requester: they are the

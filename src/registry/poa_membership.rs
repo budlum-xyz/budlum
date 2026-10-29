@@ -75,9 +75,9 @@ pub enum PoaMembershipError {
     /// Missing / zero KYC commitment.
     MissingKyc,
     /// The last admin of a domain may not be removed through the admin door
-    /// (BLG-0094); governance can.
+    ///governance can.
     LastAdmin,
-    /// The requested KYC validity horizon exceeds the bound (BLG-0094).
+    /// The requested KYC validity horizon exceeds the bound.
     InvalidValidityHorizon { requested: u64, max: u64 },
     /// The domain has no admin, so it is not running admission control and an
     /// application to it could never be decided.
@@ -161,7 +161,7 @@ impl PoaMembershipRegistry {
         self.admins.insert((domain, admin), ());
     }
 
-    /// BLG-0094 (P04-F12): an admin may be removed. Refusing to remove the
+    /// An admin may be removed. Refusing to remove the
     /// last admin keeps a permissioned domain from silently dropping back to
     /// unpermissioned with pending applications in flight - governance can
     /// still take the last seat away through its own action, where the
@@ -200,7 +200,7 @@ impl PoaMembershipRegistry {
         self.admins.remove(&(domain, admin));
     }
 
-    /// BLG-0093 (P04-F11): write the refreshed KYC commitment into the
+    /// Write the refreshed KYC commitment into the
     /// member record. `renew_kyc` used to push the expiry horizon forward
     /// and leave the commitment itself untouched, so the record kept naming
     /// the original dossier forever.
@@ -245,7 +245,7 @@ impl PoaMembershipRegistry {
         self.admins.contains_key(&(domain, *account))
     }
 
-    /// BLG-0090 (P04-F08): fold the registry (admins + members) together
+    /// Fold the registry (admins + members) together
     /// with the onboarding layer's KYC expiry map - one digest over the
     /// whole admission state, computed by
     /// [`crate::registry::poa_onboarding::PoAOnboarding::root`].

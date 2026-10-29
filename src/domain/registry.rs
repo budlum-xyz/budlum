@@ -139,7 +139,7 @@ impl ConsensusDomainRegistry {
         }
         // A new registration starts Active. Frozen and Retired are reached
         // only through `transition_status_checked`; registering straight into
-        // them would skip the lifecycle guard (P25-F10). Restoring persisted
+        // them would skip the lifecycle guard. Restoring persisted
         // state is the one caller exempt from this, by the argument on
         // `restore_persisted`.
         if require_active && domain.status != DomainStatus::Active {
@@ -198,7 +198,7 @@ impl ConsensusDomainRegistry {
             ));
         }
 
-        // (B.U.D. Storage ConsensusDomain, vision §8.1)
+        // (B.U.D. Storage ConsensusDomain, vision)
         // A `StorageAttestation` domain MUST use the dedicated
         // `STORAGE_ATTESTATION_ADAPTER` finality adapter, and the
         // Parameters must validate. This is the same fail-fast-at-the-edge
@@ -569,7 +569,7 @@ mod tests {
         assert_ne!(domain_leaf_hash(&listed), domain_leaf_hash(&pinned));
     }
 
-    ///: what an adapter observed is consensus data. It reaches the
+    /// what an adapter observed is consensus data. It reaches the
     /// progress root, it never touches a domain that reported nothing, and an
     /// unregistered id cannot park facts in the registry.
     #[test]

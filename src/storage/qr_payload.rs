@@ -1,11 +1,11 @@
-//! B.U.D. 3.0 payload container (plan §CH A1).
+//! B.U.D. 3.0 payload container.
 //!
-//! First stage of the real edition-Three pipe (user architecture §CG), not the
+//! First stage of the real edition-Three pipe , not the
 //! catalogue avatar generators:
 //!
 //! ```text
 //! transformed content bytes
-//!   → optional zlib-if-shrinks (K-QR-SIKISTIR)
+//!   → optional zlib-if-shrinks
 //!   → Three payload header + body
 //!   → (next slices) carousel / QR frames / recipe
 //! ```
@@ -141,7 +141,7 @@ impl std::error::Error for PayloadError {}
 ///
 /// Zlib level 9 is applied **only** when it strictly shrinks; otherwise the
 /// raw bytes are stored and the container's flag byte keeps bit 0 clear
-/// (K-QR-SIKISTIR). The flag is private to this module, so it is named by its
+/// The flag is private to this module, so it is named by its
 /// position in the packed bytes rather than by a link.
 ///
 /// # Errors

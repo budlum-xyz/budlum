@@ -9,9 +9,9 @@
 //! 1. It produces MULTIPLE expert candidates for EVERY format - a pipeline plus
 //!    a measured ratio.
 //! 2. Every candidate carries MEASUREMENT EVIDENCE (a production proof or
-//!    RealBench - an invented ratio is eliminated, K19).
+//!    RealBench - an invented ratio is eliminated).
 //! 3. The content class (static/moving/repetitive and so on) WEIGHTS the
-//!    candidates (K84: codec choice depends on the content - "x265 is not always
+//!    candidates (codec choice depends on the content - "x265 is not always
 //!    good").
 //! 4. The weighted candidates enter a BFT vote (more than two thirds) -> the FINAL ratio and
 //!    pipeline are chosen.
@@ -32,7 +32,7 @@ use sha3::{Digest, Sha3_256};
 pub const RATIO_CONS_MAGIC: [u8; 8] = *b"\xB5RCON\0\0\0";
 pub const RATIO_CONS_VERSION: u8 = 1;
 
-/// The content class (candidate weighting - K84: codec choice depends on the content).
+/// The content class (candidate weighting -: codec choice depends on the content).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentClass {
     Structured, // JSON/CSV/LOG - columnar/template is strong
@@ -41,7 +41,7 @@ pub enum ContentClass {
     Arbitrary,  // bilinmiyor - genel
 }
 
-/// A format expert candidate: a pipeline, a measured ratio and evidence (the K19 gate).
+/// A format expert candidate: a pipeline, a measured ratio and evidence (the gate).
 #[derive(Debug, Clone)]
 pub struct RatioCandidateAgent {
     pub format: FormatCodec,
@@ -66,8 +66,8 @@ impl RatioConsensus {
 
     /// The candidate pool: only the experts of the GIVEN format (multiple
     /// pipeline candidates). The ratios carry EVIDENCE
-    /// (RealBench/measure_ratios seed=7 - K19). The content class BONUS
-    /// decides between the pipelines of that format (K84).
+    /// (RealBench/measure_ratios seed=7 -). The content class BONUS
+    /// decides between the pipelines of that format.
     pub fn candidate_pool(format: FormatCodec, class: ContentClass) -> Vec<RatioCandidateAgent> {
         let mut pool = match format {
             FormatCodec::Json => vec![
@@ -133,7 +133,7 @@ impl RatioConsensus {
                 evidence: [0u8; 32],
             }],
         };
-        // The class bonus: a pipeline matching the class comes forward (K84).
+        // The class bonus: a pipeline matching the class comes forward.
         for c in &mut pool {
             let bonus = match class {
                 ContentClass::Structured => true, // the structured pipelines
@@ -162,7 +162,7 @@ impl RatioConsensus {
         if pool.is_empty() || n < 1 {
             return None;
         }
-        // the best candidate: the weighted score (total_cmp - no NaN panic, K38)
+        // the best candidate: the weighted score (total_cmp - no NaN panic)
         let best = pool
             .iter()
             .max_by(|a, b| Self::weighted_score(a).total_cmp(&Self::weighted_score(b)))?;
@@ -247,7 +247,7 @@ impl RatioConsensus {
         Some(rec)
     }
 
-    /// The KF1 gate: does the final ratio hold the cost ceiling? (K19 honesty)
+    /// The KF1 gate: does the final ratio hold the cost ceiling? ( honesty)
     pub fn holds_ceiling(&self, physical: f64, erasure: f64, ceiling: f64) -> bool {
         if self.final_ratio <= 0.0 || !self.final_ratio.is_finite() {
             return false;
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn temporal_class_picks_video_pipe() {
-        // Video content: AV1 with the high-motion bonus -> the video pipeline wins (K84)
+        // Video content: AV1 with the high-motion bonus -> the video pipeline wins
         let pool = RatioConsensus::candidate_pool(FormatCodec::Mp4, ContentClass::Temporal);
         let cons = RatioConsensus::finalize(pool, 7, 2).expect("consensus");
         assert!(

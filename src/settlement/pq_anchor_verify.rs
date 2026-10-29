@@ -62,12 +62,12 @@ pub(crate) fn verify_in_context(
         .map_err(|_| AnchorError::InvalidSignature)
 }
 
-/// BLG-0075 (P03-F18): how many signatures one anchor may carry: one per
+/// How many signatures one anchor may carry: one per
 /// ledger key. Each costs an ML-DSA-87 verification; an unbounded list is a
 /// DoS multiplier.
 pub const MAX_ANCHOR_SIGNATURES: usize = ANCHOR_KEY_COUNT;
 
-/// BLG-0075: refuse oversized or self-duplicate signature lists before any
+/// Refuse oversized or self-duplicate signature lists before any
 /// expensive verification runs. An empty list reaches no threshold.
 pub(crate) fn check_signature_list(signatures: &[AnchorSignature]) -> Result<(), AnchorError> {
     if signatures.is_empty() {
@@ -95,7 +95,7 @@ pub(crate) fn check_signature_list(signatures: &[AnchorSignature]) -> Result<(),
 }
 
 /// The checks both verification paths share, before any signature is
-/// verified: bounded list, the chain, and the key epoch (BLG-0070: an anchor
+/// verified: bounded list, the chain, and the key epoch (an anchor
 /// from a rotated-out epoch is dead on arrival).
 fn precheck(anchor: &PqAnchor, ledger: &AnchorKeyLedger) -> Result<(), AnchorError> {
     check_signature_list(&anchor.signatures)?;

@@ -185,7 +185,7 @@ pub enum ChainCommand {
         Box<crate::domain::sovereign::AuditExportBundle>,
         oneshot::Sender<Result<(), String>>,
     ),
-    // BLG-0199 (P10-F09): the raw, unverified-commitment path is test-only to
+    // The raw, unverified-commitment path is test-only to
     // the last hop. Production RPC answers `bud_submitDomainCommitment` with a
     // refusal, and there is no longer any command route from the actor into
     // `Blockchain::accept_domain_commitment` in a release build - a path that
@@ -297,7 +297,7 @@ pub enum ChainCommand {
         agent: crate::core::address::Address,
         response: oneshot::Sender<Option<crate::ai::types::AiAgentReputation>>,
     },
-    // BLG-0201 (P10-F11): fixed-point permyriad score, not an `f64` - the
+    // Fixed-point permyriad score, not an `f64` - the
     // actor boundary does not carry floats (Z8).
     GetAiAgentRanking(oneshot::Sender<Vec<(crate::core::address::Address, u64)>>),
     GetPruneStatus(oneshot::Sender<serde_json::Value>),
@@ -309,7 +309,7 @@ pub enum ChainCommand {
     ),
     #[cfg(test)]
     SealGlobalHeader(oneshot::Sender<Result<crate::settlement::GlobalBlockHeader, String>>),
-    ///: a committed checkpoint header with the material a light client
+    /// a committed checkpoint header with the material a light client
     /// checks it against: the checkpoint block and the state root opening.
     GetGlobalHeaderProof(
         u64,
@@ -2365,7 +2365,7 @@ pub struct ChainActor {
 }
 
 impl ChainActor {
-    /// BLG-0195 (P10-F05): after a successful reorg the old tip's finality
+    /// After a successful reorg the old tip's finality
     /// round is dead (0186 invalidated it), but nobody restarted voting - the
     /// node just sat there and the post-fork chain finalized nothing until the
     /// NEXT checkpoint block happened to arrive through AddBlock. Resume the
@@ -2698,7 +2698,7 @@ impl ChainActor {
                 }
                 ChainCommand::TryReorg(fork, res_tx) => {
                     let outcome = self.blockchain.try_reorg(fork).map_err(|e| e.to_string());
-                    // BLG-0195 (P10-F05): after a successful reorg the old tip's
+                    // After a successful reorg the old tip's
                     // finality round is dead (0186 invalidated it), but nobody
                     // restarted voting - the node just sat there and the post-
                     // fork chain finalized nothing until the NEXT checkpoint
@@ -3157,7 +3157,7 @@ impl ChainActor {
                         // (the old code) made the bound a no-op, so an
                         // operator prune deleted blocks the next restart
                         // needed to reach its snapshot: lasting data loss,
-                        // node unable to boot (P10-F03).
+                        // node unable to boot.
                         let prunable = pm.get_prunable_blocks_with_retention(
                             height,
                             pm.latest_snapshot_height(),
@@ -3210,7 +3210,7 @@ impl ChainActor {
                     // View grants are folded into the storage state root, so
                     // issuing one between blocks rewrites the local node's
                     // root alone: a peer that never saw this RPC call computes
-                    // a different root and rejects honest blocks (P30-F01).
+                    // a different root and rejects honest blocks.
                     // Until grants ride a block transaction, the RPC mutation
                     // path is refused on every chain, not only on mainnet.
                     let _ = response.send(Err(Self::view_grant_rpc_mutation_error()));

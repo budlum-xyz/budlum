@@ -1,16 +1,17 @@
 ![Budlum](assets/budlum-konsensuslerin-konsensusu.png)
 
-Budlum veri egemenliğine ve toplumsal yeşermeye odaklanmış internetin bir sonraki katmanıdır.
+Budlum, veri egemenliğine ve toplumsal yeşermeye odaklanmış, internetin bir sonraki katmanıdır.
 
-Budlum, izin gerektirmeyen bir Evrensel Uzlaşma Katmanıdır. Diğer zincirlerle yarışmaz, onları *uzlaştırır*.
+Budlum, konsensüslerin konsensüsüdür.
+
+Her ağ kendi kurallarını korur. Budlum, bu ağların kesinliğini tek bir kanıtta birleştirir.
+
 PoW, PoS, PoA, BFT ve ZK alanlarının her biri kendi konsensüsünü korur; Budlum bu alanların
 kesinlik kanıtlarını doğrular ve alanlar arası değer transferini tek bir `GlobalBlockHeader`
 üzerinde kriptografik bir olgu olarak kaydeder. Veri, anahtar ve hesaplama egemenliği
-katılımcılarda kalır.
-
-Evrensel Uzlaşma Katmanı, birbirinden farklı ağların altındaki ortak zemindir: bir olguyu
-hangi konsensüsün ürettiğini sormaz, yalnızca o olgunun kesinlik kanıtının geçerli olup
-olmadığını sorar. Böylece değer, bir aracıya güvenmeden alanlar arasında hareket eder.
+katılımcılarda kalır: katman, bir olguyu hangi konsensüsün ürettiğini değil, o olgu için
+hangi kesinlik kanıtının geçerli olduğunu sorar. Böylece değer, bir aracıya güvenmeden
+alanlar arasında hareket eder.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Tests](https://img.shields.io/badge/tests-4322%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)

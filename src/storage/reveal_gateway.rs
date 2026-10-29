@@ -1,4 +1,4 @@
-//! G4 reveal gateway (plan §CH G4): the bounded session table a gateway or
+//! G4 reveal gateway: the bounded session table a gateway or
 //! RPC handler owns on top of [`crate::storage::three_rpc`].
 //!
 //! `three_rpc::open_reveal_session` opens one session; a network-facing
@@ -550,7 +550,7 @@ mod gateway_tests {
         }
     }
 
-    /// P30-F04: the expensive half of an open needs no table, so a handler
+    /// The expensive half of an open needs no table, so a handler
     /// can run it before it takes the gateway lock. The prepared session is
     /// admitted later and is the same session an open would have made.
     #[test]

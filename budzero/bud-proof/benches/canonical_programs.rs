@@ -151,7 +151,7 @@ fn matmul_guest_program_2_3_2() -> Vec<u64> {
     prog.push(instruction(Opcode::Log, 0, R_HASH, 0, 0));
     prog.push(instruction(Opcode::Halt, 0, 0, 0, 0));
     assert_eq!(prog.len(), 90, "matmul [2,3,2] must be 90 instructions");
-    // BLG-0238 (P14-F08): the length is the shape of the emitter, not its
+    // The length is the shape of the emitter, not its
     // identity - an emitter that drifted in ORDER still measured 90 rows and
     // the benchmark proved a program that is not the canonical guest. Pin the
     // same hash the tree pins (src/ai/execution/guest.rs
@@ -171,7 +171,7 @@ fn matmul_guest_program_2_3_2() -> Vec<u64> {
     prog
 }
 
-/// BLG-0238 (P14-F08): seed the VerifyMerkle inputs into the VM. The
+/// Seed the VerifyMerkle inputs into the VM. The
 /// challenge used to run on an all-zero memory: 64 expansion rows over zero
 /// siblings measure the prover's cost for a run that no verifier would ever
 /// see (the honest path has real path data), and a zero-filled run can only

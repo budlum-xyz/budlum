@@ -139,7 +139,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     let src = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
     // `candidates_for_format` only measures the ratios; the list itself is
-    // written in `claimed_candidates` (BLG-0573).
+    // written in `claimed_candidates`.
     let body = body_of(&src, "claimed_candidates")
         .ok_or_else(|| "no `fn claimed_candidates` in `bud/src/bud_format.rs`".to_string())?;
     let list = candidates(&body);

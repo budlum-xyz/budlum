@@ -163,7 +163,7 @@ pub fn verify_account_proof(root: Hash, id: u64, account_hash: Hash, proof: &[Ha
 impl State {
     pub fn load(path: &str) -> Result<Self, String> {
         let accounts = if std::path::Path::new(path).exists() {
-            // P16-F17: bound the read. The file is JSON text of accounts, so a
+            // Bound the read. The file is JSON text of accounts, so a
             // file past the cap is a wrong file, not a state.
             let len = fs::metadata(path)
                 .map_err(|e| format!("Failed to stat state file: {e}"))?
@@ -205,7 +205,7 @@ impl State {
         drop(file);
         fs::rename(&temp_path, path)
             .map_err(|e| format!("Failed to rename temp state file to final: {e}"))?;
-        // P16-F17: sync the parent directory so the rename survives a crash.
+        // Sync the parent directory so the rename survives a crash.
         if let Some(parent) = std::path::Path::new(path).parent() {
             let dir = if parent.as_os_str().is_empty() {
                 std::path::Path::new(".")
@@ -275,7 +275,7 @@ impl StateBackend for State {
         // memory, and the next `load` would hand back a state nobody
         // committed.
         //
-        // P16-F16: the outermost frame is dropped only after the save
+        // The outermost frame is dropped only after the save
         // succeeded. Popping first left memory ahead of disk on a failed
         // save, with nothing for `rollback` to restore.
         if self.backup_stack.len() == 1 {
@@ -297,7 +297,7 @@ impl StateBackend for State {
 mod tests {
     use super::*;
 
-    /// P16-F16: a failed outermost commit keeps the backup, so the caller can
+    /// A failed outermost commit keeps the backup, so the caller can
     /// still roll the memory back to what is on disk.
     #[test]
     fn failed_commit_keeps_the_backup_for_rollback() {

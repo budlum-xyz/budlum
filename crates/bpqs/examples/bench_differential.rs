@@ -123,7 +123,7 @@ fn bench_bpqs_row<H: budlum_bpqs::BpqsHash>(label: &str) {
     let keygen_us = t0.elapsed().as_micros() as f64;
 
     // One mint per epoch: Q_MAX is 1 (one-time posture) and the device
-    // enforces the quota itself (BLG-0041), so the bench rotates epochs.
+    // enforces the quota itself , so the bench rotates epochs.
     let iters = 20u32;
     let t1 = Instant::now();
     for i in 0..iters {

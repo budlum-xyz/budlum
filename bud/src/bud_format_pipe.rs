@@ -1,15 +1,15 @@
 //! B.U.D. 2.0 Invention - An End-to-End Lossless Pipeline (format detection + container)
 //!
-//! K38 hardening: from raw bytes to a .bud v2 container, and back again.
+//! hardening: from raw bytes to a .bud v2 container, and back again.
 //! With `store(data) -> Option<Vec<u8>>` and `restore(bytes) -> Option<Vec<u8>>`
 //! the LOSSLESSNESS GUARANTEE is: `restore(store(d)) == d` for EVERY `d` (the
-//! K38 property).
+//! property).
 //!
 //! Layer model:
 //!   1. Format detection (heuristic, deterministic) - a wrong detection is NOT
 //!      a security problem, because losslessness is independent of the type;
 //!      the type only affects chunk granularity (dedup/proof efficiency).
-//!   2. Structural chunking + compaction (K35: against small-chunk amplification).
+//!   2. Structural chunking + compaction (against small-chunk amplification).
 //!   3. A full BudV2File: header + a content_id per chunk + bomb guards.
 //!
 //! Compression is NOT in this layer: the expert pipeline (structural+zstd19 and
@@ -27,13 +27,13 @@ use crate::bud_format_columnar::{
 };
 use crate::bud_format_container::{structural_split_compact, BudV2File, FormatCodec};
 
-/// Default compaction threshold (K35): adjacent chunks under 64 KiB are merged.
+/// Default compaction threshold: adjacent chunks under 64 KiB are merged.
 pub const DEFAULT_MIN_CHUNK: usize = 64 * 1024;
 
 /// Format detection (heuristic, deterministic, independent of losslessness).
 /// Order: JSON (first meaningful character `[`/`{`) -> CSV (comma + lines) ->
 /// LOG (a line starting with a year) -> Text (contains lines) -> Unknown
-/// (binary). A wrong match is safe: chunking is lossless for every type (K38),
+/// (binary). A wrong match is safe: chunking is lossless for every type ,
 /// only the granularity changes.
 pub fn detect(data: &[u8]) -> FormatCodec {
     if data.is_empty() {
@@ -76,7 +76,7 @@ pub fn detect(data: &[u8]) -> FormatCodec {
     }
     // Last signal: if it is all printable ASCII (line breaks included) it is
     // plain text. A wrong match is safe - losslessness is independent of the
-    // type (K38), only the granularity changes.
+    // type , only the granularity changes.
     let printable = data
         .iter()
         .all(|b| (0x20..0x7F).contains(b) || *b == b'\n' || *b == b'\t' || *b == b'\r');
@@ -101,7 +101,7 @@ pub fn store_with_min(data: &[u8], min_chunk: usize) -> Option<Vec<u8>> {
 }
 
 /// Store (HUFFMAN): every chunk is compressed with real lossless Huffman - the
-/// .bud file GENUINELY shrinks on repetitive content (K38). Losslessness:
+/// .bud file GENUINELY shrinks on repetitive content. Losslessness:
 /// `restore` returns the original.
 pub fn store_compressed(data: &[u8]) -> Option<Vec<u8>> {
     store_compressed_with_min(data, DEFAULT_MIN_CHUNK)
@@ -117,7 +117,7 @@ pub fn store_compressed_with_min(data: &[u8], min_chunk: usize) -> Option<Vec<u8
 }
 
 /// Store (ZSTD): every chunk is compressed with real zstd level 19 (the V21
-/// roadmap). A better ratio than Huffman; decompression is safe under the K25
+/// roadmap). A better ratio than Huffman; decompression is safe under the
 /// ceiling. Losslessness: `restore` returns the original.
 pub fn store_zstd(data: &[u8]) -> Option<Vec<u8>> {
     store_zstd_with_min(data, DEFAULT_MIN_CHUNK)
@@ -135,7 +135,7 @@ pub fn store_zstd_with_min(data: &[u8], min_chunk: usize) -> Option<Vec<u8>> {
 /// Restore: verify strictly + decompress the chunks (RAW/Huffman/Zstd detected automatically) + join -> the ORIGINAL.
 /// A LOSSLESS JSON COLUMNAR pipeline (invention): it splits a JSON array into
 /// columns and writes a zstd-compressed container. Exact -> byte-identical
-/// (K38); OrderFree -> the record set is preserved (KF2) at a higher ratio
+///OrderFree -> the record set is preserved (KF2) at a higher ratio
 /// (measured: 7.83x -> 8.53x / 11.49x, seed=7). Irregular JSON -> None
 /// (losslessness is preserved, the caller falls back to the raw path).
 pub fn store_json_columnar(data: &[u8], mode: ColumnarMode, _min_chunk: usize) -> Option<Vec<u8>> {
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn store_restore_roundtrip_all_samples() {
-        // K38: restore(store(d)) == d for EVERY sample
+        // Restore(store(d)) == d for EVERY sample
         for (i, data) in SAMPLES.iter().enumerate() {
             let enc = store(data).unwrap_or_else(|| panic!("sample {i} must store"));
             let dec = restore(&enc).unwrap_or_else(|| panic!("sample {i} must restore"));
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn store_restore_property_random() {
-        // 150 random inputs from a deterministic PRNG - the losslessness property (K38)
+        // 150 random inputs from a deterministic PRNG - the losslessness property
         struct Rng(u64);
         impl Rng {
             fn next(&mut self) -> u64 {
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn store_compressed_roundtrip_all_samples() {
-        // K38: the compressed pipeline is lossless on EVERY sample too; restore detects RAW/HFM/Zstd
+        // The compressed pipeline is lossless on EVERY sample too; restore detects RAW/HFM/Zstd
         for (i, data) in SAMPLES.iter().enumerate() {
             let enc = store_compressed(data).unwrap_or_else(|| panic!("sample {i} must store"));
             let dec = restore(&enc).unwrap_or_else(|| panic!("sample {i} must restore"));

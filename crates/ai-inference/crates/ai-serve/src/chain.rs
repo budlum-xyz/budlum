@@ -4,7 +4,7 @@
 //! query) go through the budlum node RPC. The skeleton has no real HTTP
 //! client; the `NotConnected` state is **fail-closed**: until a connection is
 //! established no chain query counts as successful, and a second copy of the
-//! permission rules is NOT WRITTEN here (the K3 decision).
+//! permission rules is NOT WRITTEN here.
 
 use ai_core::model::Hash32;
 

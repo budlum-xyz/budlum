@@ -49,7 +49,7 @@ pub fn epoch_secret_chains<H: BpqsHash, P: BpqsParams>(epoch_seed: &[u8; 32]) ->
 }
 
 /// One step of a chain: hash the lane's meaningful prefix with the chain id
-/// and the step's absolute position (P02-F19).
+/// and the step's absolute position.
 ///
 /// The step index is bound so a digest computed for position `k` can never
 /// be replayed as position `j`: the chain is a position-indexed sequence,

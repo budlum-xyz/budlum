@@ -1,6 +1,6 @@
-//! B.U.D. 2.0 - the JPEG recompression path (K80) (2026-08-16).
+//! B.U.D. 2.0 - the JPEG recompression path (2026-08-16).
 //!
-//! K80: JPEG XL can recompress an existing JPEG LOSSLESSLY (a 20 percent
+//! JPEG XL can recompress an existing JPEG LOSSLESSLY (a 20 percent
 //! saving with a bit-exact round trip - the original JPEG bytes can be
 //! reproduced). For B.U.D. this is the image leg of KF2, which says the format
 //! may change as long as the resolution is preserved.

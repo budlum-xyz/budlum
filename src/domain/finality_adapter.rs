@@ -2566,7 +2566,7 @@ mod tests {
         }
     }
 
-    ///: the native PoS and BFT adapters name BLS12-381 and ML-DSA-65.
+    /// the native PoS and BFT adapters name BLS12-381 and ML-DSA-65.
     /// ML-DSA-65 is named only when every signer's entry binds a PQ key; a
     /// signer without one leaves BLS as the only fact.
     #[test]
@@ -2662,7 +2662,7 @@ mod tests {
         assert!(facts.is_empty());
     }
 
-    ///: the ZK adapter shows a hash assumption, and the PoA adapter the
+    /// the ZK adapter shows a hash assumption, and the PoA adapter the
     /// Ed25519 signatures it verifies today.
     #[test]
     fn zk_and_poa_adapters_report_their_assumptions() {

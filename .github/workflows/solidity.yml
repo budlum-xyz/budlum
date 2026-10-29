@@ -105,7 +105,7 @@ jobs:
           --match-test "a_chain_without_ml_dsa|test_F05_|test_F06_"
 
       # Dev EVM: deploy the parameterless contracts to a local anvil
-      # chain from an unlocked dev account. No key is used or stored (K7).
+      # chain from an unlocked dev account. No key is used or stored.
       - name: Deploy to a local anvil chain
         run: |
           set -euo pipefail

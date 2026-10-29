@@ -16,7 +16,7 @@ pub const POW_HEADER_CHAIN_ADAPTER: &str = "pow-header-chain-v1";
 /// `StorageAttestation` domain. Distinct from the PoW header-chain adapter
 /// (`POW_HEADER_CHAIN_ADAPTER`) because storage finality is **not** the same
 /// Shape as bounded-PoW header finality (will introduce
-/// `StorageFinalityAdapter`, vision §3 + §8.3).
+/// `StorageFinalityAdapter`, vision +).
 pub const STORAGE_ATTESTATION_ADAPTER: &str = "storage-attestation-v1";
 
 /// Set as the `ConsensusDomain::finality_adapter` value when registering an
@@ -46,7 +46,7 @@ pub enum ConsensusKind {
     /// new bridge protocol" - but it IS a new domain kind that needs its own
     /// typing.
     StorageAttestation(StorageDomainParams),
-    /// AI Inference Consensus Domain (Paradigma §5).
+    /// AI Inference Consensus Domain (Paradigma).
     ///
     /// AI Inference operates as a first-class consensus domain in the
     /// Settlement layer. AI verifiers stake and attest to inference results;
@@ -223,7 +223,7 @@ pub struct ConsensusDomain {
     /// left this domain completely undefended.
     #[serde(default)]
     pub zk_program_allowlist: Vec<Hash32>,
-    /// E2: The code hash of the custom plugin allowed to execute/validate this domain.
+    /// The code hash of the custom plugin allowed to execute/validate this domain.
     /// When kind is `ConsensusKind::Custom(_)`, the plugin must match this committed hash.
     #[serde(default)]
     pub plugin_code_hash: Option<Hash32>,

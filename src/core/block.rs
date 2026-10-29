@@ -74,7 +74,7 @@ pub struct BlockHeader {
 const EVIDENCE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/slashing-evidence";
 
 /// Borrowed view of the fields both `BlockHeader` and `Block` fold into the
-/// block hash, so the preimage is written once (P20-F11).
+/// block hash, so the preimage is written once.
 struct BlockPreimage<'a> {
     index: u64,
     timestamp: u128,
@@ -793,7 +793,7 @@ impl Block {
     /// Searches nonces until the hash has `difficulty` leading zero hex digits.
     ///
     /// Returns `false` when the nonce space is exhausted without a hit, so the
-    /// search ends instead of wrapping or panicking on overflow (P20-F12). A
+    /// search ends instead of wrapping or panicking on overflow. A
     /// difficulty above 64 hex digits cannot be met by a 32-byte hash and
     /// returns `false` at once.
     pub fn mine(&mut self, difficulty: usize) -> bool {

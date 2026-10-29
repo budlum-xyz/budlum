@@ -286,7 +286,7 @@ fn seed_for_class(class_b: bool, rng: &mut XorShift, len: usize) -> Vec<u8> {
     seed
 }
 
-///: secret-dependent timing of the post-quantum signers.
+/// secret-dependent timing of the post-quantum signers.
 ///
 /// Classes are key classes (a near-zero seed against a random seed) with a random
 /// message in both, measured interleaved so drift loads them equally. The verdict
@@ -633,7 +633,7 @@ fn main() -> ExitCode {
         }
     }
 
-    //: the post-quantum signers, same verdict rule, own controls.
+    // the post-quantum signers, same verdict rule, own controls.
     if let Err(code) = pq_signer_classes() {
         return code;
     }

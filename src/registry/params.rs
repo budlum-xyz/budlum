@@ -326,7 +326,7 @@ impl RegistryParams {
         if self.min_stake < 100 {
             return Err("min_stake must be at least 100".into());
         }
-        // BLG-0101 (P04-F19): ceilings on the amount fields a proposal can
+        // Ceilings on the amount fields a proposal can
         // set. 10^18 is orders of magnitude past any honest value in base
         // units and still refuses u64::MAX - a governance proposal must not
         // be able to price every account out of existence or mint a fee
@@ -527,7 +527,7 @@ mod tests {
         let encoded =
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
         // 24 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
-        // (BLG-0102/P04-F20: the comment said 15; the pin now counts 24.)
+        // (the comment said 15; the pin now counts 24.)
         //
         // The count moved from 22 when the two delegation bounds
         // (`min_delegation_amount`, `max_delegations_per_validator`) were
@@ -942,7 +942,7 @@ mod tests {
         assert!(!RegistryParams::default().liveness_slashing_enabled);
     }
 
-    /// BLG-0101 (P04-F19): the amount fields a proposal can set are
+    /// The amount fields a proposal can set are
     /// bounded above - governance must not be able to price every account
     /// out of existence.
     #[test]

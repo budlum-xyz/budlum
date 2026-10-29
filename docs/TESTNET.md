@@ -30,7 +30,7 @@ TLS is terminated by Caddy (`ops/Caddyfile.testnet`); the node, the faucet
 and the indexer speak plain HTTP on loopback. The operator RPC listener
 (`127.0.0.1:18546`) is never exposed.
 
-The public RPC needs no API key (decision A-06). It serves reads,
+The public RPC needs no API key. It serves reads,
 `bud_sendRawTransaction`, `bud_estimateGas`, `bud_txPrecheck` and the
 `*Prepare*` methods that build unsigned transactions. Nothing on it can write
 consensus state outside a signed transaction (`src/rpc/method_class.rs`).
@@ -41,7 +41,7 @@ Each client IP is rate limited (600 requests per minute).
 1. **Open a wallet.** `bud wallet create --key-file ./secrets/wallet.json`
    prints 24 words once and seals the key with your password
    (`--password-file` or `BUD_WALLET_PASSWORD`). The key is ML-DSA-87 (V5);
-   12-word phrases are refused (A-07). `bud wallet import` restores from the
+   12-word phrases are refused. `bud wallet import` restores from the
    24 words (read from standard input); `bud wallet address` prints the
    address.
 2. **Get BUD.** Ask the faucet for 100 BUD (TESTNET-DEFAULT; one

@@ -109,7 +109,7 @@ fn all_ranges() -> Vec<ColRange> {
         },
         // Public-input bindings.
         //
-        // BLG-0229 (P13-F09): every range that HAS a named AIR constant is now
+        // Every range that HAS a named AIR constant is now
         // written from that constant instead of a mirrored number. A hand-kept
         // copy of the layout updates only when someone remembers to update it;
         // a derived copy moves with the layout and lets the coverage assertion
@@ -384,7 +384,7 @@ fn trace_layout_no_overlap_and_within_bounds() {
         max_end, TRACE_WIDTH
     );
 
-    // BLG-0229 (P13-F09): the check the table was missing. A layout
+    // The check the table was missing. A layout
     // lock that verifies "no overlaps, all in bounds, ends at the width" still
     // lets an UNMENTIONED block of columns slip by: the range list simply does
     // not name them, and nothing says so. Require every column of the trace to

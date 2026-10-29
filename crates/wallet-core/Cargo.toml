@@ -29,7 +29,7 @@ hex = "0.4"
 zeroize = { version = "=1.9.1", features = ["derive"] }
 # SHAKE256 of the key derivation, the same crate and pin as the root manifest.
 shake = "=0.1.0"
-#: the wallet password is NFKD normalized before the root derivation.
+# the wallet password is NFKD normalized before the root derivation.
 unicode-normalization = { version = "=0.1.24", default-features = false }
 # The wallet packs the field elements the chain will look up by. That packing
 # is the same rule the node and the zkVM state layer apply, so all three read

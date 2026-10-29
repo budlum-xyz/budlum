@@ -36,7 +36,7 @@ impl Default for PoSConfig {
     fn default() -> Self {
         PoSConfig {
             min_stake: 1000,
-            // P01-F21: the reward/penalty/unbonding knobs were never read by
+            // The reward/penalty/unbonding knobs were never read by
             // any code path and are gone; slashing ratios come from
             // `RegistryParams`, unbonding from `UNBONDING_EPOCHS`, rewards
             // from tokenomics. A knob nobody reads is a lie to operators.
@@ -88,7 +88,7 @@ use tracing::{info, warn};
 
 /// Slashing evidence seen for `(producer, height)`: the header and its
 /// signature. Named so `PoSEngine`'s fields stay readable without an
-/// `allow(clippy::type_complexity)` (P01-F26).
+/// `allow(clippy::type_complexity)`.
 type SeenBlocks = HashMap<(Address, u64), (BlockHeader, Vec<u8>)>;
 
 pub struct PoSEngine {
@@ -96,7 +96,7 @@ pub struct PoSEngine {
     seen_blocks: RwLock<SeenBlocks>,
     pub slashing_evidence: RwLock<Vec<SlashingEvidence>>,
     checkpoints: RwLock<Vec<Checkpoint>>,
-    /// Epoch-boundary checkpoints awaiting a quorum certificate (P01-F04).
+    /// Epoch-boundary checkpoints awaiting a quorum certificate.
     ///
     /// A checkpoint written at local commit time is a race: each node at a
     /// boundary height commits whichever block it saw first and then refuses
@@ -215,7 +215,7 @@ impl PoSEngine {
         Ok(before - guard.len())
     }
 
-    /// Test inspection of the committed checkpoint list (P01-F21: no
+    /// Test inspection of the committed checkpoint list (no
     /// production caller; the production surface is `last_checkpoint`).
     #[cfg(test)]
     pub fn get_checkpoints(&self) -> Result<Vec<Checkpoint>, ConsensusError> {
@@ -239,7 +239,7 @@ impl PoSEngine {
     }
 
     /// Durably record one checkpoint. Called by `add_checkpoint` and by the
-    /// finality promotion path (`note_finalized_height`, P01-F04).
+    /// finality promotion path (`note_finalized_height`).
     fn commit_checkpoint(
         &self,
         checkpoint: &Checkpoint,
@@ -413,7 +413,7 @@ impl PoSEngine {
 
     /// Canonical slot seed used by both local production and remote validation.
     ///
-    /// `round` is the leader-election retry term (P01-F01): slot `s` runs
+    /// `round` is the leader-election retry term: slot `s` runs
     /// rounds `0..MAX_LEADER_ROUNDS`, and each round draws a different VRF
     /// seed, so a slot with no eligible leader in round 0 re-rolls instead of
     /// stalling forever. Validation recovers the round from `block.nonce`.
@@ -449,7 +449,7 @@ impl PoSEngine {
     /// Backward-compatible diagnostic helper. Consensus production and
     /// Validation use `calculate_seed_with_chain`; this method only exposes the
     /// Latest replay-derived cache to callers that used the former API.
-    /// Test-only (P01-F21): no production caller.
+    /// Test-only: no production caller.
     #[cfg(test)]
     pub fn calculate_seed(
         &self,
@@ -477,7 +477,7 @@ impl PoSEngine {
         hasher.finalize().into()
     }
 
-    /// The leadership threshold for a slot (P01-F01).
+    /// The leadership threshold for a slot.
     ///
     /// Stake-proportional and **round-independent**. The round term re-rolls
     /// the election seed, which is what breaks a stalled slot's fixed draw; it
@@ -521,7 +521,7 @@ impl PoSEngine {
         let y = u64::from_le_bytes(hash[0..8].try_into().unwrap_or([0; 8]));
         y < threshold
     }
-    /// Test mirror of the validator-admission rule (P01-F21: no production
+    /// Test mirror of the validator-admission rule (no production
     /// caller; `validate_block` enforces the same predicate inline).
     #[cfg(test)]
     pub fn is_validator(&self, pubkey: &Address, state: &AccountState) -> bool {
@@ -530,7 +530,7 @@ impl PoSEngine {
             .is_some_and(|v| v.active && !v.slashed && v.stake >= self.config.min_stake)
     }
 
-    /// Lock-order fixture (P01-F21): the POS_STATE writer is gone; this
+    /// Lock-order fixture: the POS_STATE writer is gone; this
     /// stays only so `consensus_lock_order_loom` can pin the checkpoints ->
     /// slashing_evidence lock order.
     #[cfg(test)]
@@ -603,7 +603,7 @@ impl PoSEngine {
                     && validator.stake >= self.config.min_stake
                 {
                     if block.vrf_output.is_empty() || block.vrf_proof.is_empty() {
-                        // Leader rounds (P01-F01). A stalled slot widens the
+                        // Leader rounds. A stalled slot widens the
                         // threshold and re-rolls the seed as wall time
                         // advances, instead of retrying the same losing draw
                         // forever. The round a producer may claim is priced by
@@ -745,7 +745,7 @@ impl PoSEngine {
         ))
     }
 }
-/// The one structural check for double-sign evidence (P01-F25).
+/// The one structural check for double-sign evidence.
 ///
 /// `Blockchain::verify_slashing_evidence` and `PoSEngine::verify_evidence`
 /// used to restate this independently. Two copies of a consensus check drift,
@@ -925,11 +925,11 @@ impl ConsensusEngine for PoSEngine {
                 }
             }
 
-            // The block nonce carries the leader round (P01-F01). The round
+            // The block nonce carries the leader round. The round
             // is capped and time-priced: a block claiming round `r` must sit
             // at least `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS` after
             // its parent, so a later, wider round cannot be claimed on the
-            // cheap (P01-F20).
+            // cheap.
             let round = block.nonce;
             if round > MAX_LEADER_ROUNDS {
                 return Err(ConsensusError(format!(
@@ -1222,7 +1222,7 @@ impl ConsensusEngine for PoSEngine {
             }
         } else {
             if block.index > 0 && block.index.is_multiple_of(epoch_length) {
-                // P01-F04: the boundary block is parked, not checkpointed.
+                // The boundary block is parked, not checkpointed.
                 // A checkpoint written at local commit time splits the net
                 // whenever two leaders exist at the boundary: each node
                 // commits the block it saw first and then refuses the other
@@ -1290,7 +1290,7 @@ impl ConsensusEngine for PoSEngine {
     }
 
     /// Promote parked epoch-boundary checkpoints the chain has finalised
-    /// (P01-F04). Only a block the finalised chain actually holds is
+    /// Only a block the finalised chain actually holds is
     /// promoted; a parked checkpoint on a losing fork is dropped.
     fn note_finalized_height(
         &self,
@@ -1631,7 +1631,7 @@ mod tests {
         assert!(engine.verify_evidence(&evidence));
     }
 
-    /// BLG-0011: a signed rival block seen on the receive path (it never
+    /// A signed rival block seen on the receive path (it never
     /// commits) must still produce double-sign evidence, and a forged one must
     /// not.
     #[test]
@@ -1665,7 +1665,7 @@ mod tests {
         assert_eq!(engine.slashing_evidence.read().unwrap().len(), 1);
     }
 
-    /// BLG-0020: an unsigned block must fail on the cheap signature check,
+    /// An unsigned block must fail on the cheap signature check,
     /// before the validator set hash does BLS and PQ work for every validator.
     #[test]
     fn unsigned_block_fails_before_the_validator_set_hash() {
@@ -1692,7 +1692,7 @@ mod tests {
         );
     }
 
-    /// BLG-0021: the memory map of seen blocks was pruned to two epochs, but
+    /// The memory map of seen blocks was pruned to two epochs, but
     /// the SEEN records on disk stayed forever and were all loaded at start.
     #[test]
     fn pruning_seen_blocks_also_removes_the_persisted_records() {
@@ -1719,7 +1719,7 @@ mod tests {
         assert!(on_disk.keys().all(|(_, slot)| *slot == 21));
     }
 
-    /// BLG-0019: a node that is not the leader for the slot drops the block it
+    /// A node that is not the leader for the slot drops the block it
     /// tried to build. The evidence in the pool must stay in the pool then.
     #[test]
     fn failed_block_preview_keeps_the_evidence_pool() {
@@ -1746,7 +1746,7 @@ mod tests {
         );
     }
 
-    /// BLG-0010: a block below the local checkpoint is part of every candidate
+    /// A block below the local checkpoint is part of every candidate
     /// chain that honours it. `validate_block` must not reject it for that
     /// reason, or `try_reorg` and `is_valid` fail on block 1.
     #[test]
@@ -1926,7 +1926,7 @@ mod tests {
     }
 
     /// F-184/185/186: the consensus penalty constants are integer
-    /// fixed-point, not f64 expressions. P01-F21 removed the never-read
+    /// fixed-point, not f64 expressions. removed the never-read
     /// `PoSConfig` knobs this used to assert on; the live constants are the
     /// `RegistryParams` slash ratios, which are what is pinned now.
     #[test]

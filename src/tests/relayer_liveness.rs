@@ -136,7 +136,7 @@ fn active_relayer_registers_through_the_transaction_door() {
 
 /// The transaction signature is the authentication, so the message must
 /// name the signer as its sender. Naming another active relayer is the
-/// spoof BLG-0113 closed, and it stays closed at the new door.
+/// spoof closed, and it stays closed at the new door.
 #[test]
 fn a_relayed_message_must_name_its_signer_as_sender() {
     let mut bc = fresh_chain();
@@ -182,7 +182,7 @@ fn a_relayed_message_with_a_sender_envelope_is_refused() {
     assert_eq!(bc.state.message_registry.len(), 0);
 }
 
-///: the carried class must equal the class the chain derives for the
+/// the carried class must equal the class the chain derives for the
 /// source domain from what its adapter observed.
 #[test]
 fn a_relayed_message_must_carry_the_class_derived_for_its_source_domain() {
@@ -651,7 +651,7 @@ fn liveness_slash_applied_through_blockchain_flow() {
         assert_eq!(bc.record_liveness_epoch(e, &present), 0);
     }
     assert_eq!(bc.record_liveness_epoch(k, &present), 1);
-    // A liveness fault is a timed jail (BLG-0087, decision B): the validator
+    // A liveness fault is a timed jail: the validator
     // leaves the active set but is not slashed, so its release is possible.
     let jailed = bc.state.validators.get(&v).expect("still a validator");
     assert!(jailed.jailed && !jailed.active && !jailed.slashed);
@@ -717,7 +717,7 @@ fn liveness_does_not_affect_double_sign_flow() {
     assert_eq!(outcome.penalty, stake / 2);
 }
 
-// --- 4. Quarantine ledger persistence (E1 acceptance) ----------------------
+// --- 4. Quarantine ledger persistence ( acceptance) ----------------------
 
 #[test]
 fn quarantine_ledger_rows_survive_restart_after_slash() {

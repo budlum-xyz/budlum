@@ -234,7 +234,7 @@ fn live_path_snapshot_hash_distinguishes_sets() {
     assert_eq!(hash_a, hash_a2, "compute_hash has to be deterministic");
 }
 
-// 2.5 - The node's prevote epoch must be the aggregator's epoch (P10-F01)
+// 2.5 - The node's prevote epoch must be the aggregator's epoch
 
 /// Regression for the finality-dead bug: node.rs derived the periodic
 /// prevote epoch as `checkpoint_height / checkpoint_interval` while the

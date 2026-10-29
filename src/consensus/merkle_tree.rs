@@ -28,7 +28,7 @@ use sha3::{Digest, Sha3_256};
 /// SHA3-256 node combine, the production hash for QC blob Merkle trees.
 ///
 /// Mirrors the internal-node hash of `QcBlob::merkle_layers` exactly. The
-/// domain prefix (P01-F27) keeps an inner node out of the leaf preimage set:
+/// domain prefix keeps an inner node out of the leaf preimage set:
 /// without it, a leaf and a pair of children that concatenated to the same
 /// bytes produced one digest serving both roles.
 #[must_use]
@@ -265,7 +265,7 @@ pub fn merkle_root_from_proof(
         };
         idx /= 2;
     }
-    // BLG-0129 (P05-F22): the index must fit its path. Bits above the walk
+    // The index must fit its path. Bits above the walk
     // used to be ignored, so ONE proof verified under many index values and
     // the recorded proof_hash depended on which variant a node happened to
     // get. A leftover index is refused instead of silently narrowed.

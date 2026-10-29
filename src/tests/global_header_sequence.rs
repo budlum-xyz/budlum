@@ -1,4 +1,4 @@
-//!: the global header is a consensus object.
+//! the global header is a consensus object.
 //!
 //! The transition of every finality checkpoint block builds the header from
 //! the state at the end of that block, and the state root commits its hash.

@@ -239,16 +239,16 @@ pub enum AnchorError {
     InvalidSignature,
     /// The signature names a slot the ledger does not have.
     UnknownKeyIndex { index: u8 },
-    /// BLG-0070: the anchor carries a rotated-out key epoch.
+    /// The anchor carries a rotated-out key epoch.
     StaleAnchorEpoch {
         anchor_epoch: u32,
         current_epoch: u32,
     },
     /// The anchor belongs to another chain.
     WrongChain { expected: u64, got: u64 },
-    /// BLG-0075: the signature list is over its bound.
+    /// The signature list is over its bound.
     TooManySignatures { max: usize, presented: usize },
-    /// BLG-0075: the same ledger key signed twice in one list.
+    /// The same ledger key signed twice in one list.
     DuplicateSignature,
     /// Fewer than two distinct, live, valid keys signed: a single
     /// signature is never an anchor.
@@ -777,7 +777,7 @@ pub fn rotate_anchor_key_with_committee(
 
 /// The payload the cold committee devices sign to rotate the anchor key.
 ///
-/// BLG-0069 (P03-F12): the chain id is part of the signed payload. With the
+/// The chain id is part of the signed payload. With the
 /// same committee devices on two networks, a certificate without it could
 /// replay across them and force an epoch bump on the other chain.
 #[must_use]

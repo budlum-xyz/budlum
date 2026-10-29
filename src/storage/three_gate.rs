@@ -2,7 +2,7 @@
 //!
 //! WIRING: reference-enforced - the provider reference implementation checks
 //! this gate on every put; the emit path that produces the blobs is still not
-//! reachable from RPC (plan §CH.4), so the rule runs against the bytes a
+//! reachable from RPC , so the rule runs against the bytes a
 //! reader can bring, not against our own output.
 //!
 //! Optical frames, carousel drops, and raw-concat mux blobs are **transport**.

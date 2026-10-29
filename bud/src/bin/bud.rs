@@ -3,7 +3,7 @@
 //! Komutlar:
 //!   bud encode <in> <out> [--class json|csv|...] [--required-ratio 16.68]   v1 .bud encode
 //!   bud decode <in> <out>                                                    v1 .bud decode
-//!   bud store   <in> <out> [--min-chunk 65536]                               write v2 container (K38)
+//!   bud store   <in> <out> [--min-chunk 65536]                               write v2 container
 //!   bud restore <in> <out>                                                   read v2 container (verify)
 //!   bud bench   <file>                                                       speed + cost measurement
 //!   bud bft-vote --pipe-id 3 --ratio 17.19 --validator v [--n 7]             BFT finality (more than two thirds)
@@ -76,7 +76,7 @@ enum Commands {
         #[arg(short, long)]
         output: PathBuf,
     },
-    /// Write a v2 container: detect format + chunk structurally + .bud file (K38)
+    /// Write a v2 container: detect format + chunk structurally + .bud file
     /// --compress = Huffman; --zstd = real zstd (best ratio)
     Store {
         #[arg(short, long)]
@@ -90,7 +90,7 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         zstd: bool,
     },
-    /// Read a v2 container: strict verify + reassemble -> original (K38)
+    /// Read a v2 container: strict verify + reassemble -> original
     Restore {
         #[arg(short, long)]
         input: PathBuf,
@@ -181,7 +181,7 @@ enum Commands {
         #[arg(long, default_value_t = 16384)]
         chunk: usize,
     },
-    /// Segment ledger: gather records into a chain-compatible block (K89)
+    /// Segment ledger: gather records into a chain-compatible block
     Ledger {
         #[arg(short, long)]
         input: PathBuf,
@@ -197,7 +197,7 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         erasure: bool,
     },
-    /// Video pipeline: YUV sample + codec output -> .bud + proof (K84 class)
+    /// Video pipeline: YUV sample + codec output -> .bud + proof ( class)
     VideoPipe {
         #[arg(long)]
         yuv: PathBuf,
@@ -413,7 +413,7 @@ fn run(cli: Cli) -> Result<String, String> {
         Commands::Bench { file } => {
             let data = read_file(&file)?;
             let (enc, dec, cost) = BudCli::bench(&data);
-            // K19 honesty: the ceiling is $0.016/TB/month - report whether the model passes it
+            // honesty: the ceiling is $0.016/TB/month - report whether the model passes it
             let ceiling = 0.016;
             let gate = if cost <= ceiling { "PASS" } else { "FAIL" };
             Ok(format!(

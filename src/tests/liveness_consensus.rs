@@ -239,7 +239,7 @@ fn threshold_crossing_slashes_when_enabled_through_real_epoch_flow() {
         stake_before - expected_penalty,
         "stake must be reduced by the configured liveness ratio"
     );
-    // And the offender is in a TIMED jail (BLG-0087, decision B): out of the
+    // And the offender is in a TIMED jail: out of the
     // active set, not slashed, so the release loop can bring it back.
     let jailed = bc
         .state

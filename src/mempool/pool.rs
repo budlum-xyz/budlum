@@ -182,7 +182,7 @@ impl Mempool {
         // The cheap rejections run first. `Transaction::verify` can cost an
         // ML-DSA verification, so a duplicate or a below-floor flood must be
         // refused by a map lookup and an integer compare before it can make
-        // the node spend that CPU (audit P18-F06).
+        // the node spend that CPU (audit).
         if self.transactions.contains_key(&tx.hash) {
             return Err(MempoolError::DuplicateTransaction);
         }
@@ -499,7 +499,7 @@ impl Mempool {
     /// refuses the transaction would be the free-deletion primitive again,
     /// this time paid for in bytes. So the victims are chosen first and
     /// removed only once the sum is known to be enough.
-    /// BLG-0298 (P18-F13, accepted with the bound written down): this sweep
+    /// (accepted with the bound written down): this sweep
     /// is O(pool entries) in the worst case - it walks `by_fee` until the
     /// byte budget is met. The bound that makes that acceptable is the entry
     /// cap (20_000), and the sweep only runs when an admission is about to
@@ -858,7 +858,7 @@ mod tests {
         );
     }
 
-    /// Cheap checks run before the signature check (audit P18-F06): an
+    /// Cheap checks run before the signature check (audit): an
     /// unsigned transaction below the fee floor is refused as `FeeTooLow`,
     /// which proves `verify` did not run first.
     #[test]

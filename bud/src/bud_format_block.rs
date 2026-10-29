@@ -1,7 +1,7 @@
 //! A B.U.D. 2.0 INVENTION: the regeneration block, the blockchain power plant,
 //! 2026-08-16.
 //!
-//! The synthesis of I2 and K89: every epoch produces a REGENERATION BLOCK, made
+//! The synthesis of I2 and: every epoch produces a REGENERATION BLOCK, made
 //! of the epoch, the selected PACT exams, which are the regeneration consensus,
 //! the segment ledger root, the byte budget (I8) and the previous block hash,
 //! all hashed into the block hash that forms the chain.
@@ -40,7 +40,7 @@ pub struct RegenerationBlock {
     pub epoch: u64,
     pub prev_hash: [u8; 32],
     pub pact_challenges: Vec<PactChallengeInBlock>,
-    pub segment_root: [u8; 32], // the ledger root (K89)
+    pub segment_root: [u8; 32], // the ledger root
     pub byte_budget: u64,       // I8: the ceiling on the network's total physical load
     pub ts_unix: u64,
     pub hash: [u8; 32], // the chain anchor, deterministic

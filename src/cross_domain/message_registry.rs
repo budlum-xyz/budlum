@@ -28,7 +28,7 @@ impl CrossDomainMessageRegistry {
         }
     }
 
-    /// Drops messages whose useful life is over (BLG-0114/P05-F07): the
+    /// Drops messages whose useful life is over: the
     /// registry hashes EVERY message into the state root, so a registry
     /// that never forgets is unbounded per-block cost and unbounded state.
     /// A message past `expiry_height + retention` can never again be
@@ -180,7 +180,7 @@ mod tests {
         assert_ne!(r1.root(), r2.root());
     }
 
-    /// P05-F07: a Custom kind tag has a length bound.
+    /// A Custom kind tag has a length bound.
     #[test]
     fn an_oversized_custom_kind_is_rejected() {
         let mut registry = CrossDomainMessageRegistry::new();
@@ -203,7 +203,7 @@ mod tests {
         registry.insert(make(MAX_CUSTOM_KIND_BYTES)).unwrap();
     }
 
-    /// BLG-0114 (P05-F07): expired messages are pruned; live ones stay.
+    /// Expired messages are pruned; live ones stay.
     #[test]
     fn expired_messages_are_pruned_and_live_ones_stay() {
         let mut registry = CrossDomainMessageRegistry::new();

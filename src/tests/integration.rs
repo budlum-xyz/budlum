@@ -749,7 +749,7 @@ mod integration_tests {
             .verified_qc_blobs
             .insert(invalid_blob.checkpoint_height, invalid_blob);
 
-        // P01-F22: an unverifiable signature is not evidence against the
+        // An unverifiable signature is not evidence against the
         // named validator - garbage bytes naming anyone are free to produce,
         // so acting on them would make the permissionless challenge RPC a
         // frame-up rail. The challenge is refused and neither finality nor
@@ -796,7 +796,7 @@ mod integration_tests {
         let keypair = KeyPair::generate().unwrap();
         let validator_addr = Address::from(keypair.public_key_bytes());
 
-        //: votes now carry a real BLS signature verified at ingest,
+        // votes now carry a real BLS signature verified at ingest,
         // So the validator must have a registered BLS public key.
         let mut sk_bytes = [0u8; 64];
         sk_bytes[0] = 7;
@@ -1636,7 +1636,7 @@ mod integration_tests {
         assert_eq!(operator_default.max_connections, Some(10));
         assert!(operator_default.max_request_body_size.is_some());
 
-        // (security audit §5) public/Default config is now
+        // (security audit) public/Default config is now
         // Auth-required out of the box. Operators that want an
         // Unauthenticated RPC must opt in via `operator_default` (which
         // Also emits a loud startup warning).

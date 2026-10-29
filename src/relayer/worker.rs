@@ -2244,7 +2244,7 @@ mod pending_results {
         );
     }
 
-    /// BLG-0716: a finalized result must survive a restart while the cursor
+    /// A finalized result must survive a restart while the cursor
     /// still holds the request's block, so the replay does not repeat the
     /// external action.
     #[tokio::test]

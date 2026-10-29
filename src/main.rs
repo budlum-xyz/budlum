@@ -627,7 +627,7 @@ async fn main() {
         eprintln!("ERROR: {e}");
         std::process::exit(1);
     }
-    // P01-F23: min-stake is a consensus rule. A node started with a
+    // Min-stake is a consensus rule. A node started with a
     // divergent `--min-stake` would validate leaders and validators against a
     // parameter the rest of the network does not share and split off - while
     // the staking executor kept enforcing the network parameter, so the two
@@ -709,7 +709,7 @@ async fn main() {
                 );
                 std::process::exit(1);
             };
-            //: the PKCS#11 3.2 standard mechanism is the first path; a
+            // the PKCS#11 3.2 standard mechanism is the first path; a
             // vendor PQ mechanism is accepted only for a token without 3.2.
             let pq_raw = match (
                 config.pkcs11_pq_key_label.as_deref(),
@@ -774,7 +774,7 @@ async fn main() {
                 config.pkcs11_key_label.clone(),
             )
         };
-        // P02-F01 decision B: operator-configured consensus public keys are
+        // decision B: operator-configured consensus public keys are
         // cross-checked against the HSM-held objects at startup and then
         // pinned as the announced identity.
         let decode_expected = |raw: Option<&str>, what: &str| -> Option<Vec<u8>> {
@@ -881,7 +881,7 @@ async fn main() {
         }
         ConsensusType::PoS => {
             println!("PoS mode - min stake: {}", config.min_stake);
-            //: mainnet elects leaders with the Filiz Chain, which needs
+            // mainnet elects leaders with the Filiz Chain, which needs
             // no VRF key in the HSM. A mainnet validator must hold its chain.
             if config.network == budlum_core::core::chain_config::Network::Mainnet
                 && config.role == "validator"
@@ -920,7 +920,7 @@ async fn main() {
                 None
             };
             // Filiz Chain: the seed comes from the file the
-            // environment names, never from the config or a log (K7).
+            // environment names, never from the config or a log.
             let filiz_chain = std::env::var(budlum_core::consensus::filiz::FILIZ_SEED_FILE_ENV)
                 .ok()
                 .filter(|path| !path.is_empty())
@@ -1610,7 +1610,7 @@ async fn main() {
             }
         };
 
-        // (security audit §5 wiring) emit a prominent startup
+        // (security audit wiring) emit a prominent startup
         // Warning if the *resolved* `auth_required` is false. This block
         // Runs regardless of which constructor
         // (`RpcSecurityConfig::default`, `operator_default`,
@@ -1868,7 +1868,7 @@ async fn main() {
         let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
             .with_cursor_path(Some(cursor_path));
 
-        // BLG-0135 (P06-F06, decision B): the `--evm-bridge-address`
+        // The `--evm-bridge-address`
         // registration is removed. The EVM bridge leg has no live end-to-end
         // route - the off-chain half refuses at broadcast - so there is no
         // configuration to register and nothing safe to default. Outbound

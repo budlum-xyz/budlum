@@ -413,7 +413,7 @@ pub(crate) fn finalize_expired_deals(
 }
 
 /// Open a repair ticket for every shard of an object in its repair band
-/// that has no active replica (F-16): keyed off a historic deal when one
+/// that has no active replica: keyed off a historic deal when one
 /// exists, otherwise as a never-placed ticket. A shard with a live deal gets
 /// none, or accepting it would pay two operators for one slot.
 fn open_repair_band_tickets(state: &mut AccountState, epoch: u64) {

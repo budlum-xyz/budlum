@@ -487,7 +487,7 @@ mod tests {
         assert!(!SealId::new(SealKind::RootSeal, 3_600, &[]).is_post_quantum());
     }
 
-    ///: after a lattice break the anchors are Unsealed; a seal key
+    /// after a lattice break the anchors are Unsealed; a seal key
     /// reseals them and they count again, now behind the hash-based family.
     #[test]
     fn a_reseal_turns_unsealed_anchors_back_into_a_source() {

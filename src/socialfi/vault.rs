@@ -434,7 +434,7 @@ mod tests {
 
     #[test]
     fn cycle_check_survives_a_very_deep_folder_chain() {
-        // BLG-0712: the walk must not use native recursion.
+        // The walk must not use native recursion.
         let depth: u64 = 200_000;
         let mut vault = VaultRegistry::new();
         for id in 1..=depth {

@@ -708,7 +708,7 @@ impl ProofReceipt {
         matches!(self.status, ReceiptStatus::Paid)
     }
 
-    /// BLG-0066: revoked receipts can never be paid and must be clearable.
+    /// Revoked receipts can never be paid and must be clearable.
     ///
     /// The epoch-close sweep clears revoked receipts after a verifier has
     /// settled them; the receipt-submission and payment doors remain
@@ -734,13 +734,13 @@ pub struct ProofMarketState {
     pub total_rewards_paid: u64,
     /// Total number of completed tasks.
     pub total_tasks_completed: u64,
-    /// BLG-0062 (P03-F05): task IDs that have completed or expired. The
+    /// Task IDs that have completed or expired. The
     /// duplicate check must outlive the task's stay in `active_tasks` and its
     /// receipt's stay in `pending_receipts`, or the same fields open a second
     /// job and mint a second receipt once the first leaves the books.
     #[serde(default)]
     pub retired_task_ids: std::collections::BTreeSet<[u8; 32]>,
-    /// BLG-0064 (P03-F07): the escrow. A creator's reward is locked here at
+    /// The escrow. A creator's reward is locked here at
     /// `add_task`, released to the prover by `pay_receipt`, and refunded to
     /// the creator when the task expires. Without escrow the market promised
     /// rewards it never held and `pay_receipt` moved no money at all.
@@ -804,7 +804,7 @@ impl ProofMarketState {
             && self.total_tasks_completed == 0
     }
 
-    /// BLG-0064: credit a creator's escrow. The caller debits the account
+    /// Credit a creator's escrow. The caller debits the account
     /// balance in the same transaction; the market only holds the claim.
     ///
     /// The settlement transaction door debits the creator and credits escrow
@@ -818,7 +818,7 @@ impl ProofMarketState {
         Ok(())
     }
 
-    /// BLG-0064: the escrow a creator holds.
+    /// The escrow a creator holds.
     #[must_use]
     pub fn escrow_balance(&self, creator: &Address) -> u64 {
         self.escrowed.get(creator).copied().unwrap_or(0)
@@ -879,7 +879,7 @@ impl ProofMarketState {
         {
             return Err("ProofMarketState task already completed".into());
         }
-        // BLG-0062: the ID is retired forever once used, even after the
+        // The ID is retired forever once used, even after the
         // receipt is paid and pruned.
         if self.retired_task_ids.contains(&task.task_id) {
             return Err("ProofMarketState task already retired".into());
@@ -887,7 +887,7 @@ impl ProofMarketState {
         if self.retired_task_ids.len() >= MAX_PROOF_MARKET_PENDING_RECEIPTS {
             return Err("ProofMarketState retired task set full".into());
         }
-        // BLG-0064: the reward is escrowed before the job exists. A task
+        // The reward is escrowed before the job exists. A task
         // nobody paid for cannot promise a reward.
         let escrow = self.escrow_balance(&task.creator);
         if escrow < task.reward {
@@ -947,7 +947,7 @@ impl ProofMarketState {
         // vanished through a path that reported failure, and nothing rolls
         // back, since `apply_block_checked` propagates with `?`.
         if self.pending_receipts.len() >= MAX_PROOF_MARKET_PENDING_RECEIPTS {
-            // BLG-0066: settle what can be settled before refusing; the cap
+            // Settle what can be settled before refusing; the cap
             // must not jam forever behind paid or revoked receipts.
             self.prune_paid_receipts();
         }
@@ -988,7 +988,7 @@ impl ProofMarketState {
             .ok_or_else(|| "ProofMarketState total_rewards_paid overflow".to_string())?;
         receipt.mark_paid()?;
         self.total_rewards_paid = total_rewards_paid;
-        // BLG-0064: the return value is the escrowed reward released to the
+        // The return value is the escrowed reward released to the
         // prover; the caller credits the balance in the same transaction.
         Ok(reward)
     }
@@ -1096,8 +1096,8 @@ impl ProofMarketState {
             }
             keep
         });
-        // BLG-0062: an expired task's fields must not open a fresh task.
-        // BLG-0064: and its escrow goes back to the creator - the job never
+        // An expired task's fields must not open a fresh task.
+        // And its escrow goes back to the creator - the job never
         // happened, so the money must not stay locked in the market.
         for (id, creator, reward) in retired {
             self.retired_task_ids.insert(id);
@@ -1110,7 +1110,7 @@ impl ProofMarketState {
 
     /// Prune settled receipts (paid **and** revoked) from `pending_receipts`.
     ///
-    /// BLG-0066: revoked receipts can never be paid, so keeping them jammed
+    /// Revoked receipts can never be paid, so keeping them jammed
     /// the market at MAX_PROOF_MARKET_PENDING_RECEIPTS for good. Only
     /// genuinely unpaid receipts may hold the queue.
     pub fn prune_paid_receipts(&mut self) -> usize {
@@ -1207,7 +1207,7 @@ impl ProofMarketState {
             fields.push(receipt.prover.as_bytes().to_vec());
             fields.push(receipt.verification_hash.to_vec());
             fields.push(receipt.reward_claimed.to_le_bytes().to_vec());
-            // BLG-0067: the verification epoch is part of the receipt and
+            // The verification epoch is part of the receipt and
             // must be committed, or two views of one receipt can disagree.
             fields.push(receipt.verified_epoch.to_le_bytes().to_vec());
             fields.push(receipt.status.root_bytes());
@@ -1458,7 +1458,7 @@ mod tests {
         assert!(market.add_task(expired).is_err());
         assert!(market.is_empty());
         let pending = task_with(task_kind(), test_address(1), 10, 100, 5_000);
-        // BLG-0064: a task is escrowed before it can be listed.
+        // A task is escrowed before it can be listed.
         market.fund_escrow(test_address(1), 5_000).unwrap();
         market.add_task(pending).unwrap();
         assert_eq!(market.active_tasks.len(), 1);
@@ -1898,7 +1898,7 @@ mod tests {
              (before: {before})"
         );
     }
-    // ---- BLG-0062 / BLG-0066 (P03-F05, F09) ----
+    // ---- (F09) ----
 
     fn sample_task() -> ProofTask {
         ProofTask::new(
@@ -1950,7 +1950,7 @@ mod tests {
         assert_eq!(market.prune_paid_receipts(), 1);
         assert!(market.pending_receipts.is_empty());
     }
-    // ---- BLG-0064 (P03-F07) escrow ----
+    // ----escrow ----
 
     #[test]
     fn a_task_without_escrow_is_refused() {
