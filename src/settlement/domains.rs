@@ -570,6 +570,12 @@ pub fn verify_commitment_finality_observed(
                     commitment.state_updates.len()
                 ));
             }
+            // The same seam, applied to the roots' consumers rather than to
+            // the commitment itself: a root no proof binds is never anchored
+            // (`accept_verified_commitment`) and never trusted as an event
+            // root (`SettlementProofVerifier`, `submit_relay_proof`). See
+            // [`CommitmentAttestation`] for why a PoS or BFT certificate
+            // cannot make one trustworthy.
             Ok(())
         }
         FinalityStatus::Pending {
@@ -614,6 +620,56 @@ fn validate_commitment_state_updates(
         }
     }
     Ok(())
+}
+
+/// What a domain kind's finality proof binds beyond the checkpoint hash.
+///
+/// Every adapter checks the checkpoint `(chain_id, epoch, height, hash)`
+/// against the commitment. What differs is the rest of the commitment:
+///
+/// - a PoA (and the storage/AI attestation adapters that reuse it) signs
+///   `poa_commit_signing_message`, which covers the parent, all three roots,
+///   the sequence, the timestamp, the producer and the nonce writes;
+/// - a PoW header carries the parent and all three roots, and the adapter
+///   compares each one with the commitment;
+/// - a ZK claim binds the state root, through the accepted proof claim;
+/// - a PoS or BFT certificate is an aggregate of precommits over the
+///   checkpoint hash alone. Nothing else in the commitment is signed, so
+///   every other field is chosen by whoever submits it.
+///
+/// `Custom` is treated as the weakest case (a plugin or an external-domain
+/// framework decides its own proof, so this layer cannot claim a binding it
+/// has not checked): fail-closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitmentAttestation {
+    /// The proof binds `state_root`, `tx_root` and `event_root`.
+    pub roots: bool,
+    /// The proof binds `parent_domain_block_hash`.
+    pub parent: bool,
+}
+
+impl CommitmentAttestation {
+    /// What the proof family registered for `kind` binds.
+    #[must_use]
+    pub fn for_kind(kind: &ConsensusKind) -> Self {
+        match kind {
+            ConsensusKind::PoA
+            | ConsensusKind::PoW
+            | ConsensusKind::StorageAttestation(_)
+            | ConsensusKind::AiInference => Self {
+                roots: true,
+                parent: true,
+            },
+            ConsensusKind::Zk => Self {
+                roots: true,
+                parent: false,
+            },
+            ConsensusKind::PoS | ConsensusKind::Bft | ConsensusKind::Custom(_) => Self {
+                roots: false,
+                parent: false,
+            },
+        }
+    }
 }
 
 /// Freeze a domain for contradicting its committed history. A pending
@@ -706,6 +762,21 @@ pub fn accept_commitment(
     let next = domain.last_committed_height.saturating_add(1);
     if commitment.domain_height == next {
         validate_commitment_state_updates(state, &commitment)?;
+        // A parent link only means something when the proof binds it. For a
+        // PoS or BFT domain the certificate signs the checkpoint hash and not
+        // the parent, so a relayer can submit a genuine certificate for the
+        // next height with any parent it likes; storing that commitment would
+        // make the honest one a same-height conflict and freeze the domain.
+        // Refused before the store is touched.
+        if !CommitmentAttestation::for_kind(&commitment.consensus_kind).parent
+            && domain.last_committed_hash != [0u8; 32]
+            && commitment.parent_domain_block_hash != domain.last_committed_hash
+        {
+            return Err(format!(
+                "Domain {} height {}: parent link is not attested by a {} finality proof",
+                commitment.domain_id, commitment.domain_height, domain.finality_adapter
+            ));
+        }
     }
     let domain_id = commitment.domain_id;
     state.settlement.commitments.insert(commitment)?;
@@ -739,11 +810,23 @@ fn apply_pending_commitments(
             break;
         };
         if last_hash != [0u8; 32] && com.parent_domain_block_hash != last_hash {
-            return Ok(freeze_domain(
-                state,
-                domain_id,
-                format!("domain {domain_id} parent hash mismatch at height {next_height}"),
-            ));
+            if CommitmentAttestation::for_kind(&com.consensus_kind).parent {
+                return Ok(freeze_domain(
+                    state,
+                    domain_id,
+                    format!("domain {domain_id} parent hash mismatch at height {next_height}"),
+                ));
+            }
+            // The proof never bound this parent, so the mismatch says nothing
+            // about the domain: the commitment was submitted out of order with
+            // a parent the submitter chose. Dropping it (rather than freezing)
+            // leaves the domain free to advance on the honest commitment at
+            // this height.
+            state
+                .settlement
+                .commitments
+                .remove(domain_id, next_height, com.sequence);
+            break;
         }
         validate_commitment_state_updates(state, &com)?;
         for (addr, new_nonce) in &com.state_updates {
@@ -767,6 +850,14 @@ fn apply_pending_commitments(
 /// Accept a verified commitment and anchor its state root as the domain's
 /// external root, the value the relayer gate reads.
 ///
+/// Only a proof that binds the root can anchor one. A PoS or BFT certificate
+/// signs the checkpoint hash and nothing else, so a commitment under it carries
+/// no root this layer could honestly anchor - the anchor stays unwritten and
+/// the commitment advances the domain's height and hash alone. A relayer that
+/// carried a genuine certificate could otherwise claim any state root, and the
+/// map written here is the value the relayer gate reads when it accepts an
+/// "intent executed" result.
+///
 /// # Errors
 ///
 /// A zero state root, or any refusal of [`accept_commitment`].
@@ -777,6 +868,10 @@ pub fn accept_verified_commitment(
     let domain_id = commitment.domain_id;
     let domain_height = commitment.domain_height;
     let state_root = commitment.state_root;
+    if !CommitmentAttestation::for_kind(&commitment.consensus_kind).roots {
+        let outcome = accept_commitment(state, commitment)?;
+        return Ok(outcome);
+    }
     let height_before = state
         .settlement
         .domains
@@ -1902,6 +1997,134 @@ mod tests {
             state.external_roots.get(&1).copied(),
             Some(expected),
             "the domain of chain 1 anchors under id 1"
+        );
+    }
+
+    /// A PoS certificate is an aggregate of precommits over the checkpoint
+    /// hash; it signs no root. The commitment may therefore advance the
+    /// domain's height and hash, but no external-root anchor may be written
+    /// from a root the certificate never bound: that map is the value the
+    /// relayer gate reads when it accepts an intent-executed result.
+    #[test]
+    fn a_pos_commitment_anchors_no_root_its_certificate_does_not_sign() {
+        let mut state = AccountState::new();
+        let mut domain = default_domain(7, ConsensusKind::PoS, 45262, "pos-qc-finality", 1);
+        domain.bridge_enabled = false;
+        state.add_balance(&operator(&domain), MIN_DOMAIN_OPERATOR_BOND + FEE);
+        execute_settlement_tx(
+            &mut state,
+            &ctx(operator(&domain)),
+            &SettlementTx::RegisterDomain(Box::new(domain.clone())),
+        )
+        .unwrap();
+
+        let block_one = block(1, &"00".repeat(32), 0x41);
+        // The commitment carries a state root; the certificate binds only the
+        // hash, so that root is the submitter's claim, not evidence.
+        let com = commitment(&domain, &block_one, 0);
+        assert_ne!(com.state_root, [0u8; 32]);
+        assert_eq!(
+            accept_verified_commitment(&mut state, com).unwrap(),
+            CommitmentOutcome::Advanced,
+            "the height and hash the certificate binds still advance"
+        );
+        assert!(
+            !state.external_roots.contains_key(&7),
+            "a root no finality proof attests must not become the domain's anchor"
+        );
+    }
+
+    /// The parent link a PoS certificate does not sign cannot be used to freeze
+    /// the domain: a relayer that submits a genuine certificate for the next
+    /// height with a parent of its choosing is refused, and the honest
+    /// commitment for that height still advances.
+    #[test]
+    fn an_unattested_parent_cannot_freeze_a_pos_domain() {
+        let mut state = AccountState::new();
+        let mut domain = default_domain(8, ConsensusKind::PoS, 45262, "pos-qc-finality", 1);
+        domain.bridge_enabled = false;
+        state.add_balance(&operator(&domain), MIN_DOMAIN_OPERATOR_BOND + FEE);
+        execute_settlement_tx(
+            &mut state,
+            &ctx(operator(&domain)),
+            &SettlementTx::RegisterDomain(Box::new(domain.clone())),
+        )
+        .unwrap();
+
+        let block_one = block(1, &"00".repeat(32), 0x42);
+        let mut first = commitment(&domain, &block_one, 0);
+        first.state_root = [0u8; 32];
+        first.tx_root = [0u8; 32];
+        first.event_root = [0u8; 32];
+        accept_verified_commitment(&mut state, first).unwrap();
+
+        // A parent the submitter picked, under a certificate that never bound it.
+        let stranger_parent = "cd".repeat(32);
+        let bogus = block(2, &stranger_parent, 0x43);
+        let mut bogus_commitment = commitment(&domain, &bogus, 0);
+        bogus_commitment.state_root = [0u8; 32];
+        bogus_commitment.tx_root = [0u8; 32];
+        bogus_commitment.event_root = [0u8; 32];
+        assert!(
+            accept_verified_commitment(&mut state, bogus_commitment).is_err(),
+            "an unattested parent link is refused at the door"
+        );
+        assert_eq!(
+            state.settlement.domains.get(8).unwrap().status,
+            DomainStatus::Active,
+            "a submitter-chosen parent is not evidence of equivocation"
+        );
+
+        // The honest commitment for the same height still lands.
+        let honest = block(2, &block_one.hash, 0x44);
+        let mut honest_commitment = commitment(&domain, &honest, 0);
+        honest_commitment.state_root = [0u8; 32];
+        honest_commitment.tx_root = [0u8; 32];
+        honest_commitment.event_root = [0u8; 32];
+        assert_eq!(
+            accept_verified_commitment(&mut state, honest_commitment).unwrap(),
+            CommitmentOutcome::Advanced
+        );
+        assert_eq!(
+            state
+                .settlement
+                .domains
+                .get(8)
+                .unwrap()
+                .last_committed_height,
+            2
+        );
+    }
+
+    /// The other half of the rule: a parent the proof *does* bind (the PoW
+    /// header chain carries it) stays equivocation evidence, and a mismatch
+    /// freezes the domain exactly as before.
+    #[test]
+    fn an_attested_parent_mismatch_still_freezes_the_domain() {
+        let mut state = AccountState::new();
+        let domain = pow(9);
+        state.add_balance(&operator(&domain), MIN_DOMAIN_OPERATOR_BOND + FEE);
+        execute_settlement_tx(
+            &mut state,
+            &ctx(operator(&domain)),
+            &SettlementTx::RegisterDomain(Box::new(domain.clone())),
+        )
+        .unwrap();
+
+        let block_one = block(1, &"00".repeat(32), 0x45);
+        accept_verified_commitment(&mut state, commitment(&domain, &block_one, 0)).unwrap();
+
+        let stranger_parent = "ce".repeat(32);
+        let bogus = block(2, &stranger_parent, 0x46);
+        let outcome =
+            accept_verified_commitment(&mut state, commitment(&domain, &bogus, 0)).unwrap();
+        assert!(
+            matches!(outcome, CommitmentOutcome::Frozen(_)),
+            "a header-bound parent mismatch is still equivocation"
+        );
+        assert_eq!(
+            state.settlement.domains.get(9).unwrap().status,
+            DomainStatus::Frozen
         );
     }
 
