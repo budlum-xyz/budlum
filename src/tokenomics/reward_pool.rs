@@ -200,8 +200,12 @@ pub fn pay_epoch(
 
         let delegator_budget = delegated_reward.saturating_sub(commission);
         if delegator_budget > 0 && delegated > 0 {
-            let mut positions = state.registry.delegations_for(&address);
-            positions.sort_by_key(|position| position.delegator);
+            // `delegations_for` returns one validator's contiguous slice of
+            // the sorted delegation table, so this never walks another
+            // validator's positions and the list is already in delegator
+            // order - the order the split is defined in.
+            let positions = state.registry.delegations_for(&address);
+            let mut shares = Vec::with_capacity(positions.len());
             let mut distributed = 0u64;
             for (index, position) in positions.iter().enumerate() {
                 let share = if index + 1 == positions.len() {
@@ -213,18 +217,19 @@ pub fn pay_epoch(
                 if share == 0 {
                     continue;
                 }
-                // The delegator share is credited as a claimable debt rather
-                // than pushed into the balance: `ClaimRewards` is how it
-                // reaches the account, so a delegator cannot be paid twice and
-                // the payout is an explicit, signed transaction.
-                if state
-                    .registry
-                    .credit_claimable_reward(position.delegator, address, share)
-                    .is_ok()
-                {
-                    distributed = distributed.saturating_add(share);
-                    paid = paid.saturating_add(share);
-                }
+                distributed = distributed.saturating_add(share);
+                shares.push((position.delegator, share));
+            }
+            // The delegator shares are credited as claimable debts rather than
+            // pushed into the balances: `ClaimRewards` is how they reach an
+            // account, so a delegator cannot be paid twice and the payout is an
+            // explicit, signed transaction. One merge for the whole validator,
+            // not one table insert per position.
+            if let Ok(credited) = state
+                .registry
+                .credit_claimable_rewards(address, &shares)
+            {
+                paid = paid.saturating_add(credited);
             }
         }
     }

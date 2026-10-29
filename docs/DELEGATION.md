@@ -48,8 +48,20 @@ leaving matters most exactly then.
 | Maximum commission change per epoch | 10,000 ppm (one point), TESTNET-DEFAULT | `max_commission_change_ppm_per_epoch` |
 | Delegation unbonding | 100 epochs, TESTNET-DEFAULT | `delegation_unbonding_epochs` |
 | Positions and exits held in state | 100,000 each | `MAX_DELEGATIONS` |
+| Smallest new position | 100 base units, TESTNET-DEFAULT | `min_delegation_amount` |
+| Positions one validator may carry | 1,000, TESTNET-DEFAULT | `max_delegations_per_validator` |
 
 A commission may change once per epoch, by at most the per-epoch limit.
+
+Both delegation tables are kept sorted by `(validator, delegator)` and
+addressed by binary search, so a stake operation, a slash and the epoch close
+touch one validator's contiguous slice rather than the whole table, and the
+epoch close credits a validator's delegators in one merge. The two entry-side
+bounds are what keep that slice small: the fee for a delegation is flat, so
+without a floor and a per-validator cap a funded account could create
+positions a base unit at a time, recover the principal by undelegating, and
+leave every node paying the enlarged per-block work for the life of the
+chain.
 
 ## 4. Rewards
 
