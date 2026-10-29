@@ -773,7 +773,15 @@ impl AccountState {
             // Restore permissionless registry + liveness + invalid-vote
             // Tracker from snapshot when present, otherwise start empty (the
             // Snapshot may pre-date the registry, e.g. v1 chains).
-            registry: snapshot.registry.clone().unwrap_or_default(),
+            // The delegation tables are addressed by binary search over a
+            // sorted table, so the order a snapshot was written in is
+            // restored to the canonical one before anything reads or hashes
+            // it: two nodes holding the same rows must agree on the same root.
+            registry: {
+                let mut registry = snapshot.registry.clone().unwrap_or_default();
+                registry.reindex_delegations();
+                registry
+            },
             liveness: snapshot.liveness.clone().unwrap_or_default(),
             invalid_votes: snapshot.invalid_votes.clone().unwrap_or_default(),
             pending_bud_boost_share: 0,
