@@ -130,6 +130,7 @@ fn signed_precommit(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Add
         voter_id: voter,
         sig_bls: sign_bls(sk, &msg),
         auth_sig: Vec::new(),
+        pq_sig: Vec::new(),
     }
 }
 
@@ -173,6 +174,7 @@ fn signed_precommit_with_chain(
         voter_id: voter,
         sig_bls: sign_bls(sk, &msg),
         auth_sig: Vec::new(),
+        pq_sig: Vec::new(),
     }
 }
 
@@ -305,6 +307,7 @@ fn finality_recovers_honest_subset_after_invalid_signature() {
         voter_id: snap.validators[3].address,
         sig_bls: sign_bls(&sks[3], &wrong_msg),
         auth_sig: Vec::new(),
+        pq_sig: Vec::new(),
     };
     // REFUSED at ingest, never enters the aggregate.
     let err = agg
@@ -487,6 +490,7 @@ fn finality_honest_quorum_survives_byzantine_noise() {
                 ),
             ),
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         assert!(
             agg.add_precommit(noise).is_err(),
@@ -1329,6 +1333,7 @@ fn oversized_checkpoint_hash_is_refused_and_oversized_pending_report_is_dropped(
             voter_id: voter,
             sig_bls: vec![0; 48],
             auth_sig: vec![0; 48],
+            pq_sig: Vec::new(),
         })
         .expect_err("oversized precommit checkpoint_hash must be refused");
     assert!(

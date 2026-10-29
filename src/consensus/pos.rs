@@ -1110,6 +1110,19 @@ impl ConsensusEngine for PoSEngine {
             .map(|b| b.public_key.clone())
             .or_else(|| self.signer.as_ref().and_then(|s| s.bls_public_key()))
     }
+    fn pq_sign(&self, ctx: &[u8], msg: &[u8]) -> Result<Vec<u8>, String> {
+        if let Some(key) = self.validator_keys.as_ref().and_then(|k| k.pq_key.as_ref()) {
+            return key
+                .sign(ctx, msg)
+                .map_err(|e| format!("PQ signer failed: {e}"));
+        }
+        match self.signer() {
+            Some(signer) => signer
+                .pq_sign(ctx, msg)
+                .map_err(|e| format!("PQ signer backend failed: {e}")),
+            None => Err("no PQ signing key on this node".into()),
+        }
+    }
     fn info(&self) -> String {
         format!(
             "PoS (min_stake: {}, checkpoints: {})",
