@@ -96,7 +96,7 @@ pub struct EngineResult {
     pub chunk_mode: u8,                // 0=structural 16KB, 1=FastCDC (content-defined)
     pub original_len: u64,
     pub stored_len: u64,
-    pub measured_ratio: f64,             // K19: measured from the sizes
+    pub measured_ratio: f64,             // Measured from the sizes
     pub pact: PactRecord,                // the production contract (I1)
     pub production: BudProductionRecord, // the production proof
 }
@@ -417,7 +417,7 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
     } else {
         1.0
     };
-    // 6) PACT + the production proof (the measured ratio - K19)
+    // 6) PACT + the production proof (the measured ratio -)
     let pact = PactRecord::pure([0xE9u8; 32], [0x11u8; 32], &container_final, ts_unix);
     let production = BudProductionRecord::new(codec, "engine-pipeline", data, stored_len, ts_unix);
     Some(EngineResult {
@@ -437,7 +437,7 @@ fn engine_store_with(data: &[u8], erasure: bool, ts_unix: u64, fcdc: bool) -> Op
 
 /// THE CULLING LAYER: the engine plus access telemetry gives a tier plan.
 /// `access` = the access count per cluster; clusters never accessed become Culled
-/// (not stored) -> a storage multiplier of 1/(1-culling_ratio) (K106, measured: 2.52x).
+/// (not stored) -> a storage multiplier of 1/(1-culling_ratio) (measured: 2.52x).
 pub struct EngineTierResult {
     pub engine: EngineResult,
     pub plan: CullingPlan,
@@ -513,7 +513,7 @@ pub fn engine_restore_container(
     }
 }
 
-/// FULL RESTORE: open the container and invert the transform -> the ORIGINAL (K38).
+/// FULL RESTORE: open the container and invert the transform -> the ORIGINAL.
 /// `transform_kind` engine_store'dan gelir (0=none 1=columnar 2=logfield).
 pub fn engine_restore_full(raw: &[u8], transform_kind: u8, erasure: bool) -> Option<Vec<u8>> {
     // blob -> extract the container bytes (magic + version + chunk_mode + len + container)
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(&blob[..8], &ENGINE_MAGIC);
     }
 
-    /// BLG-0581: a JSON array whose records list their keys in another order
+    /// A JSON array whose records list their keys in another order
     /// restored to different bytes while the store reported success.
     #[test]
     fn json_that_does_not_roundtrip_exactly_is_stored_untransformed() {
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn engine_full_roundtrip_lossless() {
-        // K38: engine_store -> engine_restore_full = the ORIGINAL (JSON, columnar transform)
+        // Engine_store -> engine_restore_full = the ORIGINAL (JSON, columnar transform)
         let mut rows = Vec::new();
         for i in 0..300 {
             rows.push(format!(
@@ -779,7 +779,7 @@ mod tests {
         );
     }
 
-    /// BLG-0603: a cut tail or a damaged length field must not lose the
+    /// A cut tail or a damaged length field must not lose the
     /// records that are still whole.
     #[test]
     fn shard_pack_survives_truncation_and_bad_length_field() {
@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn i5_determinizm_makine_testi() {
-        // ideas2.0 §10.1: pinning the zstd version, parameters and input gives the SAME output.
+        // ideas2.0: pinning the zstd version, parameters and input gives the SAME output.
         // Machine test: the same input at the same level gives byte-identical container bytes.
         let data: Vec<u8> = (0u8..=255).cycle().take(200_000).collect();
         let a = engine_store(&data, false, 5).unwrap();
@@ -948,7 +948,7 @@ mod tests {
 
     #[test]
     fn tiered_engine_culling_carpani() {
-        // K106: access telemetry -> a CullingPlan -> the storage multiplier (measured 2.52x)
+        // Access telemetry -> a CullingPlan -> the storage multiplier (measured 2.52x)
         let data = b"tiered engine verisi ".repeat(2000);
         let mut access = vec![0u64; 100];
         for i in 0..100 {

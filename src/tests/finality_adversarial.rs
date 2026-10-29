@@ -784,7 +784,7 @@ fn repeated_invalid_signatures_trigger_slash() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // Threshold-1 invalid signatures: no slash yet. BLG-0083 (P04-F01): the
+    // Threshold-1 invalid signatures: no slash yet.: the
     // spam is self-authenticated under the spammer's key - only distinct votes
     // the validator's own key vouches for can count against the validator.
     for i in 0..(threshold - 1) {
@@ -809,7 +809,7 @@ fn repeated_invalid_signatures_trigger_slash() {
     );
     assert_eq!(mid.stake, 10_000);
 
-    // An invalid signature past the threshold -> slash (BLG-0083: the spam
+    // An invalid signature past the threshold -> slash (the spam
     // authenticates itself under the spammer's key).
     let mut final_bad_sig = vec![0u8; 48];
     final_bad_sig[0] = threshold as u8;
@@ -911,7 +911,7 @@ fn invalid_signatures_below_threshold_do_not_slash() {
             sig_bls: bad_sig,
             auth_sig: Vec::new(),
         };
-        // Authenticated, so the vote may incriminate its own sender (BLG-0083):
+        // Authenticated, so the vote may incriminate its own sender:
         // the vote signature is the invalid part.
         bad.auth_sig = sign_bls(&spammer_bls, &bad.auth_signing_message());
         let _ = bc.handle_prevote(bad);
@@ -958,7 +958,7 @@ fn blockchain_rejects_invalid_vote_signature_at_ingest() {
     bc.start_prevote_task(block.index, block.hash.clone());
     let epoch = bc.finality_aggregator.as_ref().unwrap().epoch;
 
-    // BLG-0083 (P04-F01): a garbage vote WITHOUT authentication is dropped
+    // A garbage vote WITHOUT authentication is dropped
     // without attributing anything to the named validator - anybody can put
     // any name in a message, so the tick is only reachable through the
     // voter's own authenticated signature (self-incrimination).

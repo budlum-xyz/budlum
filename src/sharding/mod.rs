@@ -172,7 +172,7 @@ pub fn shard_state_root(state: &AccountState, shard: ShardId, num_shards: u16) -
 ///
 /// This is the value a block header carries in `Block::shards_root` when
 /// sharding is active. Nothing computes or checks it during block validation
-/// yet (P20-F03): the commitment is a deterministic function of state that a
+/// yet: the commitment is a deterministic function of state that a
 /// future validator rule can recompute, but today no code rejects a mismatch.
 #[must_use]
 pub fn shards_commitment(state: &AccountState, num_shards: u16) -> [u8; 32] {
@@ -365,7 +365,7 @@ mod tests {
         assert_eq!(state.get_or_create(&addr(0)).nonce, 1);
     }
 
-    /// P20-F04: a rejected transfer must not create accounts.
+    /// A rejected transfer must not create accounts.
     #[test]
     fn p20_f04_rejected_transfer_creates_no_accounts() {
         let mut state = AccountState::new();

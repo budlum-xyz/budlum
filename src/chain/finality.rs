@@ -154,7 +154,7 @@ pub struct Prevote {
     pub chain_id: u64,
     pub voter_id: Address,
     pub sig_bls: Vec<u8>,
-    /// BLG-0083 (P04-F01): an authentication signature over
+    /// An authentication signature over
     /// [`Prevote::auth_signing_message`] under the voter's registered key.
     /// A vote without a valid `auth_sig` is dropped WITHOUT counting an
     /// invalid-vote tick against anyone: garbage cannot be attributed to a
@@ -174,7 +174,7 @@ pub struct Precommit {
     pub chain_id: u64,
     pub voter_id: Address,
     pub sig_bls: Vec<u8>,
-    /// BLG-0083 (P04-F01): the vote-authentication signature; see
+    /// The vote-authentication signature; see
     /// [`Prevote::auth_sig`].
     #[serde(default)]
     pub auth_sig: Vec<u8>,
@@ -284,7 +284,7 @@ impl Prevote {
         msg
     }
 
-    /// BLG-0083 (P04-F01): the message the voter authenticates with their
+    /// The message the voter authenticates with their
     /// registered key. Domain-separated from the vote message so one
     /// signature cannot serve as the other.
     ///
@@ -305,7 +305,7 @@ impl Precommit {
         )
     }
 
-    /// BLG-0083 (P04-F01): the vote-authentication message; shares the exact
+    /// The vote-authentication message; shares the exact
     /// length-framed V3 encoding with [`Prevote::auth_signing_message`].
     pub fn auth_signing_message(&self) -> Vec<u8> {
         vote_auth_signing_message(&self.signing_message(), &self.sig_bls)
@@ -509,7 +509,7 @@ pub fn verify_bls_sig(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<(), String> {
         return Err("Invalid BLS public key encoding".to_string());
     }
 
-    // (security audit §5) enforce that the public key is
+    // (security audit) enforce that the public key is
     // Actually in the correct prime-order subgroup. Without this
     // Check an attacker can supply a small-subgroup point as the
     // Public key, which makes the pairing produce values in a
@@ -567,7 +567,7 @@ pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
     let Some(pk_affine) = G2Affine::from_compressed_unchecked(&pk_bytes).into_option() else {
         return false;
     };
-    // (security audit §5) subgroup check on the PoP
+    // (security audit) subgroup check on the PoP
     // Public key (see `verify_bls_sig` for the full rationale).
     let is_on_curve: bool = pk_affine.is_torsion_free().into();
     if !is_on_curve || !bool::from(pk_affine.is_on_curve()) || bool::from(pk_affine.is_identity()) {
@@ -582,7 +582,7 @@ pub fn verify_pop(entry: &ValidatorEntry, chain_id: u64) -> bool {
     let Some(sig_affine) = G1Affine::from_compressed_unchecked(&sig_bytes).into_option() else {
         return false;
     };
-    // (security audit §5) subgroup check on the PoP
+    // (security audit) subgroup check on the PoP
     // Signature (see `verify_bls_sig` for the full rationale).
     let is_on_curve: bool = sig_affine.is_torsion_free().into();
     if !is_on_curve || !bool::from(sig_affine.is_on_curve()) || bool::from(sig_affine.is_identity())
@@ -646,7 +646,7 @@ pub struct FinalityAggregator {
     pub precommit_quorum_reached: bool,
     /// Equivocation (double-sign) evidence detected while ingesting votes.
     ///
-    ///: when a validly-signed vote conflicts with one we already
+    /// when a validly-signed vote conflicts with one we already
     /// Recorded from the same voter, we package both into a canonical
     /// [`SlashingReport`] here. The `Blockchain` drains this after each
     /// `add_prevote`/`add_precommit` and routes it through the SAME
@@ -846,7 +846,7 @@ impl FinalityAggregator {
             voter,
             crate::registry::evidence::SlashingProof::DoubleSign {
                 height: self.checkpoint_height,
-                // BLG-0196 (P10-F06): the kind and the epoch travel with the
+                // The kind and the epoch travel with the
                 // evidence so any third party can rebuild the signed root and
                 // re-open both signatures; a report that stands only on the
                 // local ConsensusVerified label is not a proof.
@@ -1022,7 +1022,7 @@ impl FinalityCert {
                     .ok_or_else(|| {
                         format!("Invalid BLS public key encoding for {}", validator.address)
                     })?;
-                // (security audit §5) subgroup check on
+                // (security audit) subgroup check on
                 // Every bitmap-claimed signer (see `verify_bls_sig`
                 // For the full rationale). Without this, a
                 // Malicious snapshot could insert a small-subgroup
@@ -1697,7 +1697,7 @@ mod tests {
         assert!(result.unwrap_err().contains("set hash mismatch"));
     }
 
-    /// A genuine on-curve small-subgroup G2 encoding (BLG-0200 / P10-F10).
+    /// A genuine on-curve small-subgroup G2 encoding.
     ///
     /// Perturbs the payload bytes of the canonical generator encoding until
     /// one decodes to a curve point that is NOT in the prime-order subgroup.
@@ -1729,7 +1729,7 @@ mod tests {
         panic!("payload perturbations produced no on-curve non-torsion-free G2 point")
     }
 
-    /// (security audit §5) `verify_bls_sig` must reject
+    /// (security audit) `verify_bls_sig` must reject
     /// Public keys and signatures that are not in the prime-order
     /// Subgroup. Without the subgroup check an attacker can supply
     /// A small-subgroup point as the public key, which makes the
@@ -1770,7 +1770,7 @@ mod tests {
             "valid pubkey+sig must pass the new subgroup check"
         );
 
-        // BLG-0200 (P10-F10): the case the check exists for - a small-subgroup
+        // The case the check exists for - a small-subgroup
         // point that DECODES. A pairing with it collapses to a subgroup that
         // verifies against any message, so the gate must reject it by name.
         let attack_pk = small_subgroup_g2_encoding();
@@ -1782,7 +1782,7 @@ mod tests {
         );
     }
 
-    /// (security audit §5) `verify_pop` must reject PoP
+    /// (security audit) `verify_pop` must reject PoP
     /// Entries whose public key is not in the prime-order
     /// Subgroup. The same subgroup check that protects
     /// `verify_bls_sig` must protect `verify_pop`, otherwise a
@@ -1818,7 +1818,7 @@ mod tests {
             "verify_pop must reject identity key/signature encodings"
         );
 
-        // BLG-0200 (P10-F10): the case the gate exists for. Both encodings
+        // The case the gate exists for. Both encodings
         // below decode to valid points, so a rejection can only come from the
         // torsion check - exactly the branch that stops a validator from
         // registering a small-subgroup key and farming trivially-passing

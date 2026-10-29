@@ -1721,7 +1721,7 @@ impl<AB: PermutationAirBuilder> Air<AB> for BudAir {
         // (2a) The final root is the storage-writes fold: last real row,
         //      COL_FINAL_ROOT_0..7 == COL_STATE_WRITES_0..7.
         //
-        //      The AIR has no final-image fold yet (BLG-0232): nothing
+        //      The AIR has no final-image fold yet: nothing
         //      derives a post-state root from last accesses, so on its own
         //      (2) compares a prover-copied column against the public input
         //      it was copied from and any root baked in before proving

@@ -9,7 +9,7 @@
 //! * [`content_id`] / [`manifest`] - the *B.U.D. on-chain content-addressing
 //!   Primitives* introduced. These are
 //!   Pure data shapes - no I/O, no admin hooks, no team-server dependency
-//!   (plan §0.5).
+//!.
 //!
 //! The domain-level deal / challenge accounting lives in
 //! `crate::domain::storage_deal::StorageRegistry` (kept under

@@ -356,7 +356,7 @@ mod settlement_prod_tests {
         assert_ne!(first.calculate_hash(), second.calculate_hash());
     }
 
-    ///: the domains, their commitments and the proof claims are
+    /// the domains, their commitments and the proof claims are
     /// settlement registries in the account state. Blocks write them and a
     /// restart replays the blocks; a node that syncs from a snapshot gets
     /// them from the snapshot, whose schema-10 digest commits them. No side
@@ -836,7 +836,7 @@ mod settlement_prod_tests {
         apply_chain_through(&mut blockchain, &pow, 55, 4);
         let mut commitment = commitment_for(&pow, 55, 0, 4);
         commitment.event_root = tree.root();
-        // (security audit §9) capture the block hash before
+        // (security audit) capture the block hash before
         // Submission so the bridge-mint forgery gate can bind the mint
         // To a specific commitment block.
         let commitment_block_hash = commitment.domain_block_hash;
@@ -1022,7 +1022,7 @@ mod settlement_prod_tests {
         assert_ne!(after_lock.calculate_hash(), after_mint.calculate_hash());
     }
 
-    /// K4: a lock applied in a block is rebuilt by the block replay after a
+    /// A lock applied in a block is rebuilt by the block replay after a
     /// restart, with the same bridge and replay-nonce roots.
     #[test]
     fn bridge_state_roots_round_trip_through_storage_after_lock() {
@@ -1045,7 +1045,7 @@ mod settlement_prod_tests {
         assert_eq!(reloaded.replay_nonce_root, expected_replay_root);
     }
 
-    /// K4: the cross-domain message a lock registers is account state. The
+    /// The cross-domain message a lock registers is account state. The
     /// lock is applied in a block, so the restart (a replay of the stored
     /// blocks) brings the message and the message root back.
     #[test]
@@ -2220,7 +2220,7 @@ mod zk_finality_real_proof {
         assert!(bc.submit_verified_domain_commitment(c, fproof).is_err());
     }
 
-    // BLG-0082 (P03-F25): the root folds are pure and deterministic, and the
+    // The root folds are pure and deterministic, and the
     // empty fold is domain-separated. Pinned so the finding's "roots are pure
     // and deterministic" claim stays true under later refactors.
     #[test]
@@ -2231,7 +2231,7 @@ mod zk_finality_real_proof {
         assert_ne!(merkle_root(&[]), [0u8; 32]);
     }
 
-    // BLG-0082 (P03-F25): live and replay share one fold - `build_global_header`
+    // Live and replay share one fold - `build_global_header`
     // is the single function, and two builds over the same state agree.
     #[test]
     fn live_and_replay_share_the_global_header_fold() {

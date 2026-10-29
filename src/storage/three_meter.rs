@@ -1,4 +1,4 @@
-//! A9 - Three pipe step / frame meter (plan §CH A9).
+//! A9 - Three pipe step / frame meter.
 //!
 //! WIRING: charged by `storage::emit::qr_feed_preview`, which spends this
 //! meter against the drop bound of a request before it transforms, packs or

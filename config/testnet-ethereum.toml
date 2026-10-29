@@ -5,9 +5,9 @@
 # parameters are all set, and writes the addresses into [addresses].
 # The RPC endpoint comes from BUDLUM_ETH_RPC_URL and the deployer key from the
 # keystore at BUDLUM_ETH_KEYSTORE (its password from ETH_PASSWORD). No key,
-# URL or password is ever written here (K7).
+# URL or password is ever written here.
 #
-# Deployment rule: no deployment while any F01-F06 negative
+# Deployment rule: no deployment while any negative
 # test is red in CI.
 
 [network]

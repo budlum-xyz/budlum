@@ -87,7 +87,7 @@ pub fn reward_for_epoch(
         .filter(|(_, stake)| *stake > 0)
         .collect();
     validators.sort_by_key(|(addr, _)| *addr);
-    // BLG-0079 (P03-F22): one address, one share. A repeated row used to be
+    // One address, one share. A repeated row used to be
     // paid twice; duplicates are merged into one stake before the split.
     validators.dedup_by(|a, b| {
         if a.0 == b.0 {

@@ -6,7 +6,7 @@
 //! node. Both implementations verify the content address, enforce the same
 //! chunk and byte limits, and expose the same Bitswap surface.
 //!
-//! # Data Sovereignty Rule (plan §0.5)
+//! # Data Sovereignty Rule
 //!
 //! Any node can independently compute `ContentId` from raw chunk
 //! bytes. No "Budlum Inc. indexer" or centralized service is

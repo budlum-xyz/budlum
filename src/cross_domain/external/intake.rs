@@ -140,7 +140,7 @@ impl BlsVerifier for PairingBls {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdapterSpec {
     /// Ethereum sync-committee finality, bound to one network and one PINNED
-    /// sync committee (BLG-0130/P06-F01). The BLS verifier is installed by
+    /// sync committee. The BLS verifier is installed by
     /// the node at construction; the spec carries only the data. A spec
     /// without a committee is the closed admission state (decision C,
     /// interim): `register_domain` refuses it.
@@ -150,7 +150,7 @@ pub enum AdapterSpec {
         committee: Option<crate::cross_domain::external::ethereum::PinnedCommittee>,
     },
     /// BudZKVM validity proofs for one network, pinned to one program and
-    /// one chain (BLG-0134/P06-F05, decision A). A spec without the pins is
+    /// one chain. A spec without the pins is
     /// the closed admission state: `register_domain` refuses it.
     ZkVm {
         network: String,
@@ -263,7 +263,7 @@ pub struct IntakeState {
     /// and two nodes cannot disagree about a round without disagreeing
     /// about the digest.
     ///
-    /// BLG-0154 (P07-F09): `serde(default)` does NOT keep old serialized
+    /// `serde(default)` does NOT keep old serialized
     /// states readable here. Storage is bincode, which is not
     /// self-describing - a state written before this field existed ends
     /// before it, and the decode fails rather than defaulting. The old doc
@@ -277,7 +277,7 @@ pub struct IntakeState {
 
 /// The clock `max_age` measures against at submission: the domain's most
 /// recent accepted height, never lower than the stored registration value
-/// (BLG-0153/P07-F08 - the same high-water-mark rule as the EVM relay's
+/// (the same high-water-mark rule as the EVM relay's
 /// policy clock).
 #[must_use]
 ///
@@ -385,7 +385,7 @@ impl IntakeState {
         if matches!(spec, AdapterSpec::EthereumSync { .. }) && bls.is_none() {
             return Err(IntakeError::MissingBlsVerifier);
         }
-        // BLG-0130 (P06-F01, decision C interim): EthereumSync admission is
+        // EthereumSync admission is
         // closed until a sync committee is pinned - the old shape let the
         // submitter name their own aggregate key.
         if let AdapterSpec::EthereumSync { committee, .. } = &spec {
@@ -393,7 +393,7 @@ impl IntakeState {
                 return Err(IntakeError::CommitteeNotPinned);
             }
         }
-        // BLG-0134 (P06-F05, decision A): ZkVm admission needs the pinned
+        // ZkVm admission needs the pinned
         // program and chain - canonical-set membership alone attested
         // anything the prover's inputs named.
         if let AdapterSpec::ZkVm {
@@ -477,7 +477,7 @@ impl IntakeState {
             return Err(IntakeError::MissingBlsVerifier);
         }
         let adapter = entry.spec.build(bls, None);
-        // BLG-0153 (P07-F08, decision B): `now` is the live clock, not the
+        // `now` is the live clock, not the
         // registration timestamp. A policy stored `now` forever, so
         // `max_age` was measured against a frozen instant and newer evidence
         // saturated the age subtraction to 0 - freshness was dead in
@@ -542,7 +542,7 @@ impl IntakeState {
             Err(other) => return Err(IntakeError::Registry(other.clone())),
         };
         let local_height = self.registry.height();
-        // BLG-0160 (P07-F15): the round is already AgreedClaim
+        // The round is already AgreedClaim
         // or Disputed when a later step fails, and the error path used to
         // persist that half-applied state - a round that says agreed with
         // nothing committed, refusing every later vote. The quorum fold is
@@ -657,8 +657,8 @@ impl IntakeState {
         }
         // The intake commits winning claims to the attestation book, and the
         // quorum module's own docs name the rule: `AcceptMostCommon` is
-        // "never for a state root that will be committed to". BLG-0163
-        // (P07-F18): that refusal is enforced by `QuorumRounds::set_policy`
+        // "never for a state root that will be committed to".
+        // That refusal is enforced by `QuorumRounds::set_policy`
         // itself - the pub setter used to bypass it - and the intake maps it
         // to its own named error. The shape rules below are this surface's
         // own: it is the surface that commits.
@@ -688,7 +688,7 @@ impl IntakeState {
         // quorum module's own docs name the rule: `AcceptMostCommon` is
         // "never for a state root that will be committed to". A policy that
         // shrugs at disputes is not protection, it is the appearance of it.
-        // `QuorumRounds::set_policy` is `pub(super)` (BLG-0163/P07-F18), so
+        // `QuorumRounds::set_policy` is `pub(super)` , so
         // this refusal cannot be bypassed from outside the module. It is
         // categorical - refused whatever the bonded seats are - so it is
         // named before the state-dependent feasibility check below, which
@@ -836,7 +836,7 @@ mod tests {
     fn eth_spec() -> AdapterSpec {
         AdapterSpec::EthereumSync {
             network: "testnet".to_string(),
-            // BLG-0130 (P06-F01): the happy-path tests pin the committee the
+            // The happy-path tests pin the committee the
             // golden sample carries ([0x11; 96], period 0).
             committee: Some(crate::cross_domain::external::ethereum::PinnedCommittee {
                 period: 0,
@@ -1212,7 +1212,7 @@ mod tests {
             .expect("a strict majority with enough bonded provers installs");
     }
 
-    /// BLG-0153 (P07-F08): the policy clock at submission is the domain's
+    /// The policy clock at submission is the domain's
     /// accepted tip, not the frozen registration instant.
     #[test]
     fn the_policy_clock_advances_with_the_accepted_tip() {
@@ -1305,7 +1305,7 @@ mod tests {
         );
     }
 
-    ///: an accepted attestation puts the scheme the adapter checked in
+    /// an accepted attestation puts the scheme the adapter checked in
     /// the profile, with the weakest class beside it. A domain that has
     /// accepted nothing shows no facts and no class.
     #[test]
@@ -1421,7 +1421,7 @@ mod tests {
         );
     }
 
-    /// BLG-0158 (P07-F13): the dispute-to-fault wiring through `IntakeState`
+    /// The dispute-to-fault wiring through `IntakeState`
     /// - the branch that calls `mark_faulted` when a round freezes in a
     ///   dispute - had no test through the intake at all. A three-way split
     ///   under a 3-of-3 policy reaches `Disputed` (no group can ever reach the
@@ -1646,7 +1646,7 @@ mod tests {
         );
     }
 
-    /// BLG-0130 (P06-F01, decision C interim): EthereumSync admission is
+    /// EthereumSync admission is
     /// closed until a sync committee is pinned - the old shape let the
     /// submitter name their own aggregate key.
     #[test]

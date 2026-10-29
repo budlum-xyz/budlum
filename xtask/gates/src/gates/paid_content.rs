@@ -18,7 +18,7 @@
 //! 5. The declaration path actually calls `check_content_may_be_public`.
 //! 6. Every RPC endpoint that publishes a shard id asks Pollen first.
 //! 7. The AI runtime cannot reach storage bytes except through Pollen.
-//! 8. The gateway asks Pollen before it serves or renders a name (P53-F12).
+//! 8. The gateway asks Pollen before it serves or renders a name.
 
 use std::fmt::Write as _;
 use std::path::Path;

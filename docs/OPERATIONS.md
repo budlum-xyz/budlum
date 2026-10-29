@@ -17,7 +17,7 @@ parameters are in `docs/TESTNET.md`; validator duties in
 Rules:
 
 - `secrets/` and `data/` are ignored by git; never commit, paste or log a
-  key (K7).
+  key.
 - Back up every secret file offline, encrypted, in two places.
 - A lost validator key cannot be recovered: unbond with it while you still
   have it, or the stake stays bonded to a validator nobody can run.

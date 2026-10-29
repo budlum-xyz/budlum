@@ -268,7 +268,7 @@ impl TokenomicsParams {
         // through this function re-deriving it. Devnet keeps its own
         // deterministic (faster) payout cadence through its own
         // `epochs_per_year` value.
-        // BLG-0077/0078 (P03-F20/F21): the yield ratio is capped at 100%
+        // (F21): the yield ratio is capped at 100%
         // here too, not only at genesis - the cap is a property of the
         // formula, so a hand-built parameter set cannot mint u64::MAX money.
         let ratio = self
@@ -286,7 +286,7 @@ impl TokenomicsParams {
 
     pub fn annual_burn_amount(&self) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        // BLG-0077 (P03-F20): no `as u64` truncation. With the ratio capped
+        // No `as u64` truncation. With the ratio capped
         // the quotient cannot exceed the reserve; the fallback says exactly
         // that rather than silently wrapping.
         let ratio = self.annual_burn_ratio_fixed.min(FIXED_POINT_SCALE);
@@ -298,7 +298,7 @@ impl TokenomicsParams {
     /// The metabolic burn taken from a single `fee`.
     pub fn metabolic_burn(&self, fee: u64) -> u64 {
         use crate::core::chain_config::FIXED_POINT_SCALE;
-        // BLG-0077: same rule - a burn can never exceed the fee it comes
+        // Same rule - a burn can never exceed the fee it comes
         // from, and the arithmetic says so instead of truncating.
         let ratio = self.tx_fee_burn_ratio_fixed.min(FIXED_POINT_SCALE);
         let amount = (u128::from(fee) * u128::from(ratio)) / u128::from(FIXED_POINT_SCALE);

@@ -26,7 +26,7 @@ impl Error for ConsensusError {}
 pub const MAX_FUTURE_BLOCK_TIME_MS: u128 = 15 * 1000;
 pub const MAX_PAST_BLOCK_TIME_MS: u128 = 2 * 60 * 60 * 1000;
 pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
-/// How many leader-election rounds one slot may run (P01-F01, P01-F02).
+/// How many leader-election rounds one slot may run.
 ///
 /// A slot with no elected leader used to stall forever: the VRF seed had no
 /// retry term, so every retry tick drew the same (empty) result. A round term
@@ -34,7 +34,7 @@ pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
 /// widens eligibility geometrically, so a slot fills after a bounded number
 /// of rounds even with a minority of the validators online.
 pub const MAX_LEADER_ROUNDS: u64 = 16;
-/// Wall-clock spacing between leader rounds of one slot (P01-F01, P01-F02).
+/// Wall-clock spacing between leader rounds of one slot.
 ///
 /// Claiming round `r` costs `r` timeouts, and the price is charged twice:
 /// the block timestamp must sit at least
@@ -44,7 +44,7 @@ pub const MAX_LEADER_ROUNDS: u64 = 16;
 /// straight to the widest round and the retry term would buy nothing but forks;
 /// without the clock the floor is free, because the producer writes both of the
 /// numbers it compares (CWE-807). The floor also removes the "stay 1 s ahead of
-/// the parent" steering channel (P01-F20): a later round can no longer be
+/// the parent" steering channel: a later round can no longer be
 /// claimed on the minimum step.
 pub const ROUND_TIMEOUT_MS: u128 = 3 * 1000;
 
@@ -309,12 +309,12 @@ pub trait ConsensusEngine: Send + Sync {
     /// rejects it, for proof of producer misbehaviour. It must not change
     /// chain state and must not write checkpoints: the block may never
     /// commit. The default is a no-op; `PoSEngine` turns a signed rival block
-    /// into double-sign evidence (BLG-0011).
+    /// into double-sign evidence.
     fn observe_received_block(&self, _block: &Block) -> Result<(), ConsensusError> {
         Ok(())
     }
 
-    /// (security audit §3) chain-aware variant of `record_block`.
+    /// (security audit) chain-aware variant of `record_block`.
     /// Called from `blockchain.rs` AFTER a block has been durably
     /// Committed and the chain is in its post-commit state. The
     /// Default implementation is a no-op; engines that need access to
@@ -331,7 +331,7 @@ pub trait ConsensusEngine: Send + Sync {
     }
 
     /// The chain reports the height finalised by quorum certificates
-    /// (P01-F04).
+    ///.
     ///
     /// A checkpoint written at local commit time is not a finality claim: two
     /// nodes commit different blocks at an epoch boundary and then reject each
@@ -440,7 +440,7 @@ pub trait ConsensusEngine: Send + Sync {
         }
         chains.iter().max_by_key(|c| c.len()).copied()
     }
-    /// Test-only depth probe (P01-F21: `try_reorg` enforces the depth limit
+    /// Test-only depth probe (`try_reorg` enforces the depth limit
     /// on the live path; nothing production-side calls this).
     #[cfg(test)]
     fn can_reorg(&self, current_chain: &[Block], new_chain: &[Block]) -> bool {

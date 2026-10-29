@@ -254,7 +254,7 @@ fn host_part(lower: &str) -> Option<&str> {
 /// Classify a target without resolving it or parsing mutable external state.
 ///
 /// Bracketed IPv6 literals and URL-style targets are classified by their host
-/// (P36-F10), so they cannot slip past a no-direct-DNS or no-direct-IP policy
+/// so they cannot slip past a no-direct-DNS or no-direct-IP policy
 /// as `Opaque`. A bare dotless name stays `Opaque` on purpose: it is an
 /// adapter target the chosen proxy interprets, except `localhost`.
 #[must_use]
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(classify_target("seed.example:4001"), TargetKind::DnsName);
         assert_eq!(classify_target("mdns://lan"), TargetKind::LocalDiscovery);
         assert_eq!(classify_target("adapter-target-1"), TargetKind::Opaque);
-        // P36-F10: shapes that used to fall through to Opaque.
+        // Shapes that used to fall through to Opaque.
         assert_eq!(classify_target("[2001:db8::1]:4001"), TargetKind::IpAddress);
         assert_eq!(
             classify_target("http://seed.example/x"),

@@ -27,7 +27,7 @@ pub fn epoch_of(height: u64, window: EpochWindow) -> Result<u32, BpqsError> {
     if window.0 == 0 {
         return Err(BpqsError::BadEpochWindow);
     }
-    // BLG-0053: the truncating cast wrapped heights at 2^32 back to small,
+    // The truncating cast wrapped heights at 2^32 back to small,
     // in-range epochs. A height the epoch arithmetic cannot hold is refused.
     u32::try_from(height / window.0)
         .map_err(|_| BpqsError::Malformed("epoch does not fit the tree's u32 headroom"))

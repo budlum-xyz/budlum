@@ -94,8 +94,8 @@ impl Executor {
     /// `validate_transaction` has already run over this transaction at the
     /// ingest gate, including the `tx.nonce == account.nonce` check - the
     /// per-arm nonce bump is `saturating_add(1)`, not a re-validation. Any
-    /// new caller that bypasses the gate owns the nonce invariant (BLG-0296,
-    /// P18-F11; stated in full at `Blockchain::apply_block_effects`).
+    /// new caller that bypasses the gate owns the nonce invariant (
+    ///stated in full at `Blockchain::apply_block_effects`).
     pub fn apply_transaction(state: &mut AccountState, tx: &Transaction) -> Result<(), String> {
         Self::apply_transaction_checked(state, tx).map_err(|e| e.message().to_string())
     }
@@ -155,7 +155,7 @@ impl Executor {
 
     /// Apply one transaction to `state`.
     ///
-    /// P18-F11: this does not compare `tx.nonce` with the account nonce; it
+    /// This does not compare `tx.nonce` with the account nonce; it
     /// only advances the nonce. The caller must have run
     /// `AccountState::validate_transaction` first (block validation, the
     /// mempool and the producer do). Replaying stored blocks is safe only
@@ -270,7 +270,7 @@ impl Executor {
                 // shrink). Letting the ledger half top the stake up would
                 // split the two views again and hand the offender its
                 // penalty back, so the top-up is refused outright - before
-                // any balance movement (P04-F02).
+                // any balance movement.
                 if state
                     .get_validator(&tx.from)
                     .is_some_and(|validator| validator.slashed)
@@ -690,7 +690,7 @@ impl Executor {
                         ));
                     }
                 }
-                // P18-F04: a governance vote from a non-validator is refused
+                // A governance vote from a non-validator is refused
                 // before the fee and nonce are touched. The callers keep the
                 // state of a failed transaction, so a refusal after the
                 // debit would leave a half-applied transaction behind.
@@ -819,7 +819,7 @@ impl Executor {
                         requester: tx.from,
                         model_id: crate::ai::types::AiModelId(model_id),
                         input_commitment: crate::core::transaction::Transaction::signing_hash(tx),
-                        // P18-F12: an oversized payload is refused, not
+                        // An oversized payload is refused, not
                         // replaced by an empty reference.
                         input_ref: crate::ai::types::BoundedBytes::try_new(tx.data.clone())
                             .map_err(|e| BudlumError::validation("ai_input_ref_too_large", e))?,
@@ -864,7 +864,7 @@ impl Executor {
                     // type. The instance was reported on one path, so the
                     // class is closed on all of them.
                     let sender_balance = state.spendable_balance(&tx.from);
-                    // P18-F04: the escrow and the call fee are both paid from
+                    // The escrow and the call fee are both paid from
                     // this balance. Checking the escrow alone let the escrow
                     // be deducted and the fee debit then fail, leaving a
                     // half-applied transaction in the callers' state.
@@ -1289,7 +1289,7 @@ impl Executor {
                     BudlumError::validation("balance_overflow", "NFT boost creator share overflow")
                 })?;
 
-                // F4 (Constitution §3): route 4% B.U.D. share to storage operator pool.
+                // F4 (Constitution): route 4% B.U.D. share to storage operator pool.
                 // Distributed by blockchain after block commit via distribute_bud_boost_share.
                 state.pending_bud_boost_share = state
                     .pending_bud_boost_share
@@ -1302,7 +1302,7 @@ impl Executor {
                     })?;
 
                 // F4 treasury_pool (Q-X4 config_driven): 80% protocol share goes to burn_reserve (treasury) if set,
-                // Otherwise implicit burn (honest fallback). This makes Treasury/Burn explicit per Constitution §3.
+                // Otherwise implicit burn (honest fallback). This makes Treasury/Burn explicit per Constitution
                 // Analysis: "Implicit burn" is CORRECT - the booster's
                 // Balance was already reduced by `amount`, and only `creator_share`
                 // + `bud_share` are credited elsewhere. The remaining `protocol_share`
@@ -1762,7 +1762,7 @@ impl Executor {
                     )
                     .map_err(|e| BudlumError::validation("hub_register_refused", e.to_string()))?;
                 // Balance check before deduction - spendable, not raw
-                //: the register fee is a spend, so
+                // the register fee is a spend, so
                 // the vesting lock applies. Read before the mutable borrow
                 // of get_or_create (E0502).
                 let hub_total = tx
@@ -2052,7 +2052,7 @@ impl Executor {
                 // Reclaim escrowed max_fee for expired unfinalized request.
                 // Only the original requester can reclaim their fee.
                 let current_block = state.current_block_height;
-                // P18-F04: the requester is checked before `reclaim_fee`
+                // The requester is checked before `reclaim_fee`
                 // marks the fee reclaimed. Refusing afterwards left the
                 // request marked in the state a failed transaction leaves
                 // behind, so a stranger could lock the real requester out.
@@ -2519,7 +2519,7 @@ impl Executor {
                         )
                         .is_ok()
                     }
-                    //: a V7 sender authorizes with the composite signature of its
+                    // a V7 sender authorizes with the composite signature of its
                     // account suite under the private transfer context. `Transaction::verify`
                     // has already derived `from` from this key.
                     crate::core::transaction::SIGNATURE_VERSION_V7 => {
@@ -2969,7 +2969,7 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::PoaOnboarding(poa_tx) => {
-                // BLG-0089 (P04-F07): one arm delegating to the one body
+                // One arm delegating to the one body
                 // (`poa_onboarding::execute_poa_onboarding_tx`) that holds
                 // every authority rule. Admission writes commit state; they
                 // never move value:
@@ -2993,7 +2993,7 @@ impl Executor {
                 sender.nonce = sender.nonce.saturating_add(1);
             }
             TransactionType::RoleBond { role } => {
-                // BLG-0092 (P04-F10): the verifier family's production
+                // The verifier family's production
                 // registration door. The bond is the signed amount; the role
                 // seat is the signed id; nothing else crosses.
                 if tx.to != Address::zero() || !tx.data.is_empty() {
@@ -3627,7 +3627,7 @@ impl Executor {
                     // The PoA admin and compliance decisions are applied by
                     // `AccountState::execute_proposal`, which reads the
                     // `ProposalType` directly, and `execute_passed_proposals`
-                    // does not emit them (BLG-0089/0091/0094). A second
+                    // does not emit them. A second
                     // writer would apply the same vote twice, so an arrival
                     // here stops the block, like `VerifyHubApp` above.
                     return Err(BudlumError::validation(
@@ -3662,7 +3662,7 @@ mod tests {
         assert!(check_ai_exec_dims(&[2, 1]).is_ok());
     }
 
-    /// P18-F04: a refused governance vote leaves the sender untouched. The
+    /// A refused governance vote leaves the sender untouched. The
     /// fee and nonce used to be taken before the voter check, and the block
     /// producer keeps the state of a transaction that returned an error.
     #[test]
@@ -3693,7 +3693,7 @@ mod tests {
         assert_eq!(state.get_nonce(&who), 0, "no nonce spent on a refused vote");
     }
 
-    /// BLG-0085: a jailed validator must not exit, or a later report finds
+    /// A jailed validator must not exit, or a later report finds
     /// no registry entry to cut.
     #[test]
     fn proof_market_settlement_transaction_debits_escrow_fee_and_nonce() {

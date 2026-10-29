@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(lt.decide(), "hot 3 replica");
         assert_eq!(lt.required_replicas(), 3);
     }
-    /// BLG-0605: parity must rebuild lost data shards, not only have a length.
+    /// Parity must rebuild lost data shards, not only have a length.
     #[test]
     fn erasure_parity_rebuilds_lost_shards() {
         let erasure = BudErasure::new(4, 3);
