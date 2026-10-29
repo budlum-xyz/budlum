@@ -1316,13 +1316,17 @@ impl PermissionlessRegistry {
                 (None, Some(_)) => false,
                 (None, None) => false,
             };
+            // `peek` is only ever read to decide, so neither arm has to
+            // unwrap: the loop condition above already proved that the side it
+            // takes from holds an element, and a `None` there is a broken
+            // invariant, handled by ending the merge rather than panicking.
             if take_existing {
-                let row = left.next().expect("peeked");
+                let Some(row) = left.next() else { break };
                 // A credit for the same delegator lands on this row.
                 let mut amount = row.amount;
-                if let Some((delegator, extra)) = right.peek() {
-                    if *delegator == row.delegator {
-                        let extra = right.next().expect("peeked").1;
+                if let Some((delegator, extra)) = right.peek().map(|pair| **pair) {
+                    if delegator == row.delegator {
+                        let _ = right.next();
                         amount = amount
                             .checked_add(extra)
                             .ok_or_else(|| "claimable reward overflow".to_string())?;
@@ -1335,7 +1339,9 @@ impl PermissionlessRegistry {
                     amount,
                 });
             } else {
-                let (delegator, amount) = *right.next().expect("peeked");
+                let Some((delegator, amount)) = right.next().copied() else {
+                    break;
+                };
                 if amount == 0 {
                     continue;
                 }
@@ -1343,11 +1349,11 @@ impl PermissionlessRegistry {
                 // a second row for the same key would break the ordering the
                 // lookups rely on.
                 let mut amount = amount;
-                while let Some((next_delegator, extra)) = right.peek() {
-                    if *next_delegator != delegator {
+                while let Some((next_delegator, extra)) = right.peek().map(|pair| **pair) {
+                    if next_delegator != delegator {
                         break;
                     }
-                    let extra = right.next().expect("peeked").1;
+                    let _ = right.next();
                     amount = amount
                         .checked_add(extra)
                         .ok_or_else(|| "claimable reward overflow".to_string())?;
