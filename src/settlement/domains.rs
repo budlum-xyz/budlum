@@ -902,7 +902,7 @@ pub fn accept_verified_commitment(
     };
     let outcome = accept_commitment(state, commitment)?;
     // An idempotent resubmission of an old commitment must not move the
-    // anchor back to its older state root , and a frozen domain
+    // anchor back to its older state root, and a frozen domain
     // anchors nothing.
     if domain_height <= height_before || outcome != CommitmentOutcome::Advanced {
         return Ok(outcome);

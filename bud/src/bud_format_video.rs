@@ -1,6 +1,6 @@
 //! B.U.D. 2.0 invention - video content class plus codec selection, 2026-08-16.
 //!
-//! Finding , from a real ffmpeg measurement: "x265 always beats x264" is
+//! Finding, from a real ffmpeg measurement: "x265 always beats x264" is
 //! WRONG - it depends on the content type, and x264 won on the testsrc2
 //! pattern. Static and temporal content reached 1300-1600x while moving content
 //! reached 70-206x. So this module:

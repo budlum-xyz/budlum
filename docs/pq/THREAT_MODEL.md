@@ -55,7 +55,7 @@ Words that are never used: "unbreakable", "quantum-proof", "100% quantum safe", 
 | Proofs | BudZero STARK, Keccak-256 Merkle commitments, FRI | hash assumption, no pairing | at least 128 bit provable |
 | Long-lived few-time signature (research) | BPQS, canonical hash SHAKE-256 | hash assumption | reserved slot, fail closed |
 
-An algebraic hash such as Poseidon is never the hash of a long-lived signature or commitment (, section 11 of the
+An algebraic hash such as Poseidon is never the hash of a long-lived signature or commitment (section 11 of the
 ). It lives inside the VM, where the proof system needs a hash that is cheap to arithmetise, and its output
 binds only within one proof.
 

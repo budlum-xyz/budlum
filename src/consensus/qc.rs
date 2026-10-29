@@ -673,7 +673,7 @@ impl QcFaultProof {
     /// The walk is `merkle_tree::merkle_root_from_proof`: the
     /// hand-rolled copy that used to live here was the same algorithm
     /// restated, and the two drifted whenever one was fixed. The shared walk
-    /// also carries the domain-tagged node combine , matching the
+    /// also carries the domain-tagged node combine, matching the
     /// tree the root was built with.
     pub fn verify_inclusion(&self, merkle_root: &str) -> Result<(), String> {
         let QcProofKind::InvalidDilithiumV1 {

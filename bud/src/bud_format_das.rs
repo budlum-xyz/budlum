@@ -5,7 +5,7 @@
 //! data availability sampling (DAS).
 //!
 //! This module verifies the chunks of a block or file one at a time with a
-//! **Merkle root** that is domain-tagged , plus **DAS sampling**: if a
+//! **Merkle root** that is domain-tagged, plus **DAS sampling**: if a
 //! small number of chunks are pulled and verified against the root, the whole
 //! of the data can be trusted to be present with high probability. That is the
 //! Celestia and Avail pattern.
@@ -46,7 +46,7 @@ fn tree_depth(count: usize) -> usize {
     depth
 }
 
-/// The Merkle root over a chunk list, domain-tagged , bound to the leaf
+/// The Merkle root over a chunk list, domain-tagged, bound to the leaf
 /// count.
 pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
     // No chunks, no tree: a domain-tagged empty root instead of `level[0]`
