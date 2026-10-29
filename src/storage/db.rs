@@ -1498,7 +1498,7 @@ impl Storage {
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             return Err(std::io::Error::other(
-                "injected storage-economics persist failure (BLG-0190)",
+                "injected storage-economics persist failure",
             ));
         }
         let val = encode(snapshot)?;

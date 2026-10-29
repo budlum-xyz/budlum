@@ -249,7 +249,7 @@ fn bridge_lock_mint_burn_unlock_conserves_supply() {
     assert_eq!(
         sum(&bc),
         start - held,
-        "burn must debit the minted units (BLG-0108)"
+        "burn must debit the minted units"
     );
 
     // Unlock on the source side: the owner is credited back what was burned.

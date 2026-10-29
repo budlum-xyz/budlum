@@ -2385,7 +2385,7 @@ mod tests {
         assert_eq!(reg.slashing_history()[0].penalty, 0);
         assert!(
             reg.is_active_relayer(&a),
-            "a liveness fault is a timed jail, not a registry Slashed (BLG-0087, decision B)"
+            "a liveness fault is a timed jail, not a registry Slashed"
         );
     }
 

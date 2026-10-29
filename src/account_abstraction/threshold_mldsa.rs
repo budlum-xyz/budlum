@@ -87,33 +87,33 @@ pub enum ThresholdError {
 impl core::fmt::Display for ThresholdError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NoOwners => write!(f, "KQ-THRESHOLD-MLDSA: owner set is empty"),
+            Self::NoOwners => write!(f, "threshold mldsa: owner set is empty"),
             Self::TooManyOwners { count } => write!(
                 f,
-                "KQ-THRESHOLD-MLDSA: {count} owners exceeds the {MAX_THRESHOLD_OWNERS} allowed"
+                "threshold mldsa: {count} owners exceeds the {MAX_THRESHOLD_OWNERS} allowed"
             ),
             Self::DuplicateOwner => {
-                write!(f, "KQ-THRESHOLD-MLDSA: the owner set repeats a key")
+                write!(f, "threshold mldsa: the owner set repeats a key")
             }
-            Self::ZeroThreshold => write!(f, "KQ-THRESHOLD-MLDSA: threshold is zero"),
+            Self::ZeroThreshold => write!(f, "threshold mldsa: threshold is zero"),
             Self::ThresholdAboveOwnerCount { threshold, owners } => write!(
                 f,
-                "KQ-THRESHOLD-MLDSA: threshold {threshold} exceeds {owners} owners and can never be met"
+                "threshold mldsa: threshold {threshold} exceeds {owners} owners and can never be met"
             ),
             Self::ThresholdNotMet { valid, threshold } => write!(
                 f,
-                "KQ-THRESHOLD-MLDSA: {valid} valid signatures below the threshold of {threshold}"
+                "threshold mldsa: {valid} valid signatures below the threshold of {threshold}"
             ),
             Self::UnknownSigner { index } => write!(
                 f,
-                "KQ-THRESHOLD-MLDSA: signature {index} is from a key outside the owner set"
+                "threshold mldsa: signature {index} is from a key outside the owner set"
             ),
             Self::RepeatedSigner { index } => write!(
                 f,
-                "KQ-THRESHOLD-MLDSA: signature {index} repeats an owner that already signed"
+                "threshold mldsa: signature {index} repeats an owner that already signed"
             ),
             Self::InvalidSignature { index } => {
-                write!(f, "KQ-THRESHOLD-MLDSA: signature {index} does not verify")
+                write!(f, "threshold mldsa: signature {index} does not verify")
             }
         }
     }

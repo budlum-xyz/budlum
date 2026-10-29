@@ -122,7 +122,7 @@ impl std::fmt::Display for SyncCommitteeError {
             SyncCommitteeError::RotationBranchRequired => write!(
                 f,
                 "sync: period rotation refused - no branch proving next_sync_committee \
-                 to the finalized state (BLG-0137 interim)"
+                 to the finalized state ( interim)"
             ),
         }
     }

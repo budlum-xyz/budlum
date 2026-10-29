@@ -119,22 +119,22 @@ impl core::fmt::Display for TeeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::BackendUnavailable => {
-                write!(f, "KQ-WALLET-TEE: backend unavailable, refusing to proceed")
+                write!(f, "wallet tee: backend unavailable, refusing to proceed")
             }
-            Self::AttestationFailed => write!(f, "KQ-WALLET-TEE: runtime attestation failed"),
-            Self::EmptyQuote => write!(f, "KQ-WALLET-TEE: quote is empty"),
+            Self::AttestationFailed => write!(f, "wallet tee: runtime attestation failed"),
+            Self::EmptyQuote => write!(f, "wallet tee: quote is empty"),
             Self::QuoteTooLarge { len } => write!(
                 f,
-                "KQ-WALLET-TEE: quote of {len} bytes exceeds the {MAX_QUOTE_LEN} byte limit"
+                "wallet tee: quote of {len} bytes exceeds the {MAX_QUOTE_LEN} byte limit"
             ),
             Self::UnexpectedKey => {
-                write!(f, "KQ-WALLET-TEE: attestation key is not the expected one")
+                write!(f, "wallet tee: attestation key is not the expected one")
             }
-            Self::InvalidSignature => write!(f, "KQ-WALLET-TEE: quote signature does not verify"),
+            Self::InvalidSignature => write!(f, "wallet tee: quote signature does not verify"),
             Self::ClosedByAlarm => {
                 write!(
                     f,
-                    "KQ-WALLET-TEE: shortcuts are closed by the quantum alarm"
+                    "wallet tee: shortcuts are closed by the quantum alarm"
                 )
             }
         }

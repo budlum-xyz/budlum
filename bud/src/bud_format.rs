@@ -329,21 +329,21 @@ impl BudFile {
     /// cannot authenticate itself, so the call belongs where the publisher's
     /// identity is known and not in the parser.
     pub fn verify_pq_signature_with(&self, trusted_key: &[u8]) -> Result<(), &'static str> {
-        let sig = self.pq_signature.as_ref().ok_or("KQ-BUD-PQ: no sig")?;
+        let sig = self.pq_signature.as_ref().ok_or("bud pq: no sig")?;
         let pk = trusted_key;
         // ML-DSA-87: decode the key and the signature
         let enc_vk = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(pk)
-            .map_err(|_| "KQ-BUD-PQ: invalid public key")?;
+            .map_err(|_| "bud pq: invalid public key")?;
         let vk87 = ml_dsa::VerifyingKey::<ml_dsa::MlDsa87>::decode(&enc_vk);
         let sig87 = ml_dsa::Signature::<ml_dsa::MlDsa87>::try_from(sig.as_slice())
-            .map_err(|_| "KQ-BUD-PQ: invalid signature")?;
+            .map_err(|_| "bud pq: invalid signature")?;
         // domain-etiketli mesaj: BDLM_PQ_SIGN_V1 || content_id
         let mut msg = Vec::with_capacity(13 + 32);
         msg.extend_from_slice(b"BDLM_PQ_SIGN_V1");
         msg.extend_from_slice(&self.header.content_id);
         use ml_dsa::signature::Verifier as _;
         vk87.verify(&msg, &sig87)
-            .map_err(|_| "KQ-BUD-PQ: the signature did not verify")
+            .map_err(|_| "bud pq: the signature did not verify")
     }
 
     /// Producing a PQ-signed .bud (test/production): sign with ML-DSA-87.
@@ -401,11 +401,11 @@ impl BudFile {
             // authorisation on the strength of the embedded key.
             self.pq_signature
                 .as_ref()
-                .ok_or("KQ-BUD-PQ: no sig")
+                .ok_or("bud pq: no sig")
                 .and_then(|sig| {
                     ml_dsa::Signature::<ml_dsa::MlDsa87>::try_from(sig.as_slice())
                         .map(|_| ())
-                        .map_err(|_| "KQ-BUD-PQ: invalid signature")
+                        .map_err(|_| "bud pq: invalid signature")
                 })?;
         }
         if self.header.flags.is_delta() && self.header.previous_version_hash == [0u8; 32] {
