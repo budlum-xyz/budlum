@@ -19,7 +19,7 @@
 //!    them gives the original.
 //!
 //! Both of them: `#![forbid(unsafe_code)]`, deterministic, panic free,
-//! lossless , None on irregular input (the caller falls back to the raw
+//! lossless, None on irregular input (the caller falls back to the raw
 //! path).
 
 #![forbid(unsafe_code)]

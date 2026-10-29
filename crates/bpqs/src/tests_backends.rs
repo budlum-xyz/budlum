@@ -90,7 +90,7 @@ fn tamper_refuses<H: BpqsHash, P: BpqsParams>() {
 /// Per-call randomizer semantics (2026-09-22, bar-1 record): the same tuple
 /// signs byte-identically (determinism; KAT stability), while a different
 /// message draws a different randomizer - the anti-adaptive property of the
-/// PRF-derived r. The tuple's count slot is the signer's own , so
+/// PRF-derived r. The tuple's count slot is the signer's own, so
 /// determinism is pinned across independent signers minting their first
 /// signature of the epoch.
 fn randomizer_bound_and_deterministic<H: BpqsHash, P: BpqsParams>() {
