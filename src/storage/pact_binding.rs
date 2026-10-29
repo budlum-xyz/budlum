@@ -46,15 +46,15 @@ impl Pact {
         mode_flag: u8,
     ) -> Result<Self, &'static str> {
         if budget > 128 {
-            return Err("KQ-STORAGE-PACT: byte_budget >128");
+            return Err("storage pact: byte_budget >128");
         }
         if mode_flag > 2 {
-            return Err("KQ-STORAGE-PACT: mode_flag >2");
+            return Err("storage pact: mode_flag >2");
         }
         // The mode and the residual must tell the same story: a pure
         // production pact carries no residual, the other two modes do.
         if (mode_flag == 0) != (residual == [0u8; 32]) {
-            return Err("KQ-STORAGE-PACT: mode_flag does not match residual_commitment");
+            return Err("storage pact: mode_flag does not match residual_commitment");
         }
         Ok(Self {
             id,
@@ -75,7 +75,7 @@ impl Pact {
         h.update(payload);
         let calc: [u8; 32] = h.finalize().into();
         if calc != self.commitment {
-            return Err("KQ-STORAGE-PACT: commitment mismatch");
+            return Err("storage pact: commitment mismatch");
         }
         Ok(())
     }
@@ -128,10 +128,10 @@ impl PactRegistry {
     /// Returns an error when the id is already registered or the registry is full.
     pub fn add_pact(&mut self, pact: Pact) -> Result<(), &'static str> {
         if self.pacts.len() >= MAX_PACTS {
-            return Err("KQ-STORAGE-PACT: registry is full");
+            return Err("storage pact: registry is full");
         }
         if self.pacts.iter().any(|existing| existing.id == pact.id) {
-            return Err("KQ-STORAGE-PACT: duplicate pact id");
+            return Err("storage pact: duplicate pact id");
         }
         self.pacts.push(pact);
         self.recompute_root();
@@ -184,7 +184,7 @@ impl PactRegistry {
     /// root.
     pub fn verify_root(&self) -> Result<(), &'static str> {
         if self.computed_root() != self.root {
-            return Err("KQ-STORAGE-PACT: root mismatch");
+            return Err("storage pact: root mismatch");
         }
         Ok(())
     }
@@ -214,7 +214,7 @@ impl PactGates {
         pact_root: &[u8; 32],
     ) -> Result<(), &'static str> {
         if storage_root == &[0u8; 32] && pact_root != &[0u8; 32] {
-            return Err("KQ-STORAGE-BOUND: storage_root zero but pact_root non-zero");
+            return Err("storage bound: storage_root zero but pact_root non-zero");
         }
         Ok(())
     }
