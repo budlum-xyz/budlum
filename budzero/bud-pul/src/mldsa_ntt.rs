@@ -12,11 +12,11 @@ pub const Q: u64 = 8_380_417;
 pub const N: usize = 256;
 
 /// A primitive 512th root of unity modulo `Q` (FIPS 204, section 7.5).
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub const ZETA: u64 = 1_753;
 
 /// `256^-1 mod Q`, the scaling of the inverse transform.
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub const N_INV: u64 = 8_347_681;
 
 fn pow_mod(mut base: u64, mut exp: u64) -> u64 {
@@ -43,7 +43,7 @@ fn bit_reverse_8(mut value: usize) -> usize {
 
 /// `zetas[k] = ZETA^BitRev8(k) mod Q`, the twiddle table of the transform.
 #[must_use]
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn zetas() -> [u64; N] {
     let mut table = [0u64; N];
     for (k, slot) in table.iter_mut().enumerate() {
@@ -54,7 +54,7 @@ pub fn zetas() -> [u64; N] {
 
 /// The forward transform (FIPS 204 algorithm 41). Inputs are reduced modulo `Q` first.
 #[must_use]
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn ntt(input: &[u64; N]) -> [u64; N] {
     let zetas = zetas();
     let mut w = input.map(|c| c % Q);
@@ -79,7 +79,7 @@ pub fn ntt(input: &[u64; N]) -> [u64; N] {
 
 /// The inverse transform (FIPS 204 algorithm 42), including the final scaling by `256^-1`.
 #[must_use]
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn inverse_ntt(input: &[u64; N]) -> [u64; N] {
     let zetas = zetas();
     let mut w = input.map(|c| c % Q);
@@ -104,7 +104,7 @@ pub fn inverse_ntt(input: &[u64; N]) -> [u64; N] {
 
 /// The product in `Z_q[X] / (X^256 + 1)` through the transform: pointwise in the NTT domain.
 #[must_use]
-/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring wave.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn multiply(a: &[u64; N], b: &[u64; N]) -> [u64; N] {
     let (na, nb) = (ntt(a), ntt(b));
     let mut product = [0u64; N];

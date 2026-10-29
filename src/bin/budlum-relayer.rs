@@ -54,7 +54,7 @@ use std::time::Duration;
 
 /// The relayer CLI configuration, permissionless.
 #[derive(Debug, Clone)]
-/// exposed for: public surface of this module - production readers land with the wiring wave.
+/// exposed for: public surface of this module - production readers land with the wiring change.
 pub struct RelayerConfig {
     pub eth_rpc_url: String,
     pub budlum_rpc_url: String,

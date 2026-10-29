@@ -770,7 +770,7 @@ impl Storage {
     /// # Errors
     ///
     /// Propagates `std::io::Error` from the read.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn is_witness_pruned(&self, height: u64) -> std::io::Result<bool> {
         Ok(self
             .db
@@ -974,7 +974,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns the underlying I/O error when encoding or the write fails.
-    /// exposed for: storage surface - the key-package door's readers land with the custody wave.
+    /// exposed for: storage surface - the key-package door's readers land with the custody path.
     pub fn save_handoff_cert(
         &self,
         cert: &crate::consensus::handoff::HandoffCertificate,
@@ -990,7 +990,7 @@ impl Storage {
     /// # Errors
     ///
     /// Returns the underlying I/O error when the scan or a decode fails.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn load_handoff_certs(
         &self,
     ) -> std::io::Result<Vec<crate::consensus::handoff::HandoffCertificate>> {
@@ -1287,7 +1287,7 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn save_storage_registry(
         &self,
         registry: &crate::domain::storage_deal::StorageRegistry,
@@ -1306,7 +1306,7 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn load_storage_registry(
         &self,
     ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {

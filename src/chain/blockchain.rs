@@ -1959,7 +1959,7 @@ impl Blockchain {
     /// from its own header archive, with the class the anchor was signed
     /// with (the current class when this node did not record it).
     #[must_use]
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub fn local_anchor_root(&self, height: u64) -> Option<[u8; 32]> {
         let class = self
             .anchor_classes
@@ -4259,7 +4259,7 @@ impl Blockchain {
     /// rejects the next block or forks. Every state-rebuild loop
     /// must call this in the same position the live path does - after the
     /// block's committed roots are checked, before the next block applies.
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub(crate) fn apply_ai_registry_maintenance(
         state: &mut AccountState,
         block_height: u64,
@@ -5033,7 +5033,7 @@ impl Blockchain {
     /// # Errors
     ///
     /// The first refused check; nothing is added past it.
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub fn import_pruned_segment(
         &mut self,
         blocks: Vec<Block>,
@@ -5133,7 +5133,7 @@ impl Blockchain {
     /// one call stays cheap; it is idempotent.
     ///
     /// Returns the heights pruned now.
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub fn prune_released_witnesses(&self, retention_blocks: u64, window: u64) -> Vec<u64> {
         use crate::storage::witness_retention::{may_prune, NodeKind};
         let (Some(store), Some(pm)) = (&self.storage, &self.pruning_manager) else {
@@ -5629,7 +5629,7 @@ impl Blockchain {
         self.try_reorg(candidate)
     }
 
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub fn try_reorg(&mut self, new_chain: Vec<Block>) -> Result<bool, String> {
         if !self.consensus.is_better_chain(&self.chain, &new_chain) {
             return Ok(false);
@@ -7081,7 +7081,7 @@ impl Blockchain {
     // ─── B.U.D.: On-chain storage operations ────────────
 
     #[allow(clippy::too_many_arguments)]
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub fn open_storage_deal_with_escrow(
         &mut self,
         domain_id: u32,
@@ -7163,7 +7163,7 @@ impl Blockchain {
     /// opened by the maintenance sweep could never be filled on-chain:
     /// the trigger ran, and the acceptance was test-only.
     #[allow(clippy::too_many_arguments)]
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn accept_storage_reallocation_with_escrow(
         &mut self,
         ticket_id: u64,
