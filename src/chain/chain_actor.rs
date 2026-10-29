@@ -2375,15 +2375,10 @@ impl ChainActor {
         if !matches!(outcome, Ok(true)) {
             return;
         }
-        if let Some(tip) = self.blockchain.chain.last().cloned() {
-            if crate::chain::finality::is_checkpoint_height_for_chain(
-                tip.index,
-                self.blockchain.chain_id,
-            ) {
-                self.blockchain
-                    .start_prevote_task(tip.index, tip.hash.clone());
-            }
-        }
+        // The round is the lowest unfinalized checkpoint, not the tip: every
+        // node has to vote for the same height or no aggregator ever sees a
+        // quorum.
+        self.blockchain.start_pending_finality_round();
     }
 
     pub fn new(blockchain: Blockchain) -> (Self, ChainHandle) {
@@ -2528,13 +2523,8 @@ impl ChainActor {
                 }
                 ChainCommand::ProduceBlock(producer, tx) => {
                     let result = self.blockchain.produce_block(producer);
-                    if let Some((ref b, ref cids)) = result {
-                        if crate::chain::finality::is_checkpoint_height_for_chain(
-                            b.index,
-                            self.blockchain.chain_id,
-                        ) {
-                            self.blockchain.start_prevote_task(b.index, b.hash.clone());
-                        }
+                    if let Some((_, ref cids)) = result {
+                        self.blockchain.start_pending_finality_round();
                         if !cids.is_empty() {
                             tracing::info!(count = cids.len(), "NftBurn detected during production - notifying node for physical pruning");
                         }
@@ -2542,22 +2532,9 @@ impl ChainActor {
                     let _ = tx.send(result);
                 }
                 ChainCommand::ValidateAndAddBlock(block, res_tx) => {
-                    let height = block.index;
                     let res = self.blockchain.validate_and_add_block(block);
                     if let Ok(ref cids) = res {
-                        if crate::chain::finality::is_checkpoint_height_for_chain(
-                            height,
-                            self.blockchain.chain_id,
-                        ) {
-                            let checkpoint_hash = self
-                                .blockchain
-                                .chain
-                                .get(height as usize)
-                                .map(|checkpoint| checkpoint.hash.clone());
-                            if let Some(checkpoint_hash) = checkpoint_hash {
-                                self.blockchain.start_prevote_task(height, checkpoint_hash);
-                            }
-                        }
+                        self.blockchain.start_pending_finality_round();
                         if !cids.is_empty() {
                             tracing::info!(
                                 count = cids.len(),
@@ -2729,16 +2706,7 @@ impl ChainActor {
                     // prevote task on the new tip when it is itself a
                     // checkpoint height, mirroring ValidateAndAddBlock.
                     if matches!(outcome, Ok(true)) {
-                        let tip = self.blockchain.chain.last().cloned();
-                        if let Some(tip) = tip {
-                            if crate::chain::finality::is_checkpoint_height_for_chain(
-                                tip.index,
-                                self.blockchain.chain_id,
-                            ) {
-                                self.blockchain
-                                    .start_prevote_task(tip.index, tip.hash.clone());
-                            }
-                        }
+                        self.blockchain.start_pending_finality_round();
                     }
                     let _ = res_tx.send(outcome);
                 }
