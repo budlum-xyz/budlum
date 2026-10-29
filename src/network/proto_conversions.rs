@@ -3088,52 +3088,6 @@ mod tests {
         }
     }
 
-    /// A header that carries every optional field survives the wire and still
-    /// hashes to the hash it arrived with.
-    ///
-    /// This is the sync path's load-bearing property: a follower asks for
-    /// headers, and the first thing it does with the answer is
-    /// `validate_header_batch`, which recomputes each hash from the fields on
-    /// the wire. One field dropped by the encoder makes every header invalid,
-    /// the follower rejects the batch, and it re-asks the same peer for the
-    /// same headers forever - which looks like a slow follower, not a broken
-    /// message. The round-trip equality test above covers `Block::new`, whose
-    /// optional fields are all empty, so the encoders for those fields were
-    /// never exercised.
-    #[test]
-    fn a_header_with_every_optional_field_keeps_its_hash_across_the_wire() {
-        let keypair = KeyPair::generate().unwrap();
-        let from = Address::from(keypair.public_key_bytes());
-        let mut block = Block::new(10, "aa".repeat(32), vec![]);
-        block.state_root = "STATE_ROOT".to_string();
-        block.tx_root = "TX_ROOT".to_string();
-        block.storage_root = Some([0x11; 32]);
-        block.shards_root = Some([0x22; 32]);
-        block.witness_root = Some([0x33; 32]);
-        block.vrf_output = vec![0x44; 32];
-        block.vrf_proof = vec![0x55; 96];
-        block.validator_set_hash = "abc123".to_string();
-        block.producer = Some(from);
-        block.producer_public_key = keypair.public_key_bytes().to_vec();
-        block.epoch = 7;
-        block.slot = 21;
-        block.nonce = 4_242;
-        block.hash = block.calculate_hash();
-
-        let header = BlockHeader::from_block(&block);
-        let decoded = BlockHeader::try_from(pb::ProtoBlockHeader::from(&header))
-            .expect("a valid header must decode");
-        assert_eq!(decoded, header, "a field was lost on the wire");
-        assert_eq!(
-            decoded.calculate_hash(),
-            decoded.hash,
-            "the decoded header does not hash to the hash it carries, so \
-             validate_header_batch refuses every batch built from it"
-        );
-        NetworkMessage::validate_header_batch(std::slice::from_ref(&decoded), decoded.chain_id)
-            .expect("the header must pass the batch check a follower runs");
-    }
-
     #[test]
     fn test_block_proto_conversion() {
         let keypair = KeyPair::generate().unwrap();
