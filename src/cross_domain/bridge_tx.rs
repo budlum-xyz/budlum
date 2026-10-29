@@ -640,16 +640,29 @@ pub fn submit_relay_proof(
             .pending_relay(&message_id)
             .ok_or_else(|| format!("no pending relay for message {}", hex::encode(message_id)))?;
         let source_height = pending.source_event.domain_height;
-        state
+        let commitment = state
             .settlement
             .commitments
             .find_by_height(source_domain, source_height)
-            .map(|commitment| commitment.event_root)
             .ok_or_else(|| {
                 format!(
                     "No committed event root for domain {source_domain} at height {source_height}"
                 )
-            })?
+            })?;
+        // The root is the root of trust only when the commitment's finality
+        // proof binds it. A PoS or BFT certificate signs the checkpoint hash
+        // and nothing else, so under one of those the event root is the
+        // submitter's claim and a relay proven against it would mint from a
+        // message the source domain never emitted.
+        if !crate::settlement::domains::CommitmentAttestation::for_kind(&commitment.consensus_kind)
+            .roots
+        {
+            return Err(format!(
+                "domain {source_domain} height {source_height}: event root is not bound by the \
+                 commitment's finality proof"
+            ));
+        }
+        commitment.event_root
     };
     // The ledger record is written inside `process_relay`; when the bridge
     // effect refuses afterwards, the relayer is put back as it was.
