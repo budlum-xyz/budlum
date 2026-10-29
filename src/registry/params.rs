@@ -305,7 +305,7 @@ impl RegistryParams {
     /// 100, an unbonding window of zero or above 100,000 epochs, a slash
     /// ratio above `FIXED_POINT_SCALE`, a fee rate at or above 100% (which
     /// credits the recipient nothing while debiting the sender everything),
-    /// or an invalid-vote threshold above 100,000, which no epoch can reach.
+    /// or an invalid-vote threshold that cannot fit in a verifiable report.
     pub fn validate(&self) -> Result<(), String> {
         if self.min_stake < 100 {
             return Err("min_stake must be at least 100".into());
@@ -380,14 +380,13 @@ impl RegistryParams {
                 return Err(format!("{name} must be below 100%"));
             }
         }
-        // Zero is a documented off-switch ("set to 0 to disable
-        // invalid-vote-spam slashing entirely"), so the floor is not 1. The
-        // ceiling is: a threshold above one epoch's worth of votes can never
-        // be reached, which disables the fault while looking like it is
-        // configured. `max_votes_per_msg` is 128 per network, so 100_000 is
-        // orders of magnitude past any honest value and still refuses u64::MAX.
-        if self.max_invalid_votes_per_epoch > 100_000 {
-            return Err("max_invalid_votes_per_epoch must be at most 100,000".into());
+        // A report must independently prove the entire threshold, and must
+        // fit the block's encoded-report limit. Zero remains the off-switch.
+        let max_samples = crate::registry::invalid_vote::MAX_SPAM_REPORT_SAMPLES as u64;
+        if self.max_invalid_votes_per_epoch > max_samples {
+            return Err(format!(
+                "max_invalid_votes_per_epoch must be at most {max_samples}"
+            ));
         }
         Ok(())
     }
@@ -620,13 +619,16 @@ mod tests {
         assert!(p.validate().is_ok(), "0 is the documented off-switch");
 
         let p = RegistryParams {
-            max_invalid_votes_per_epoch: 100_000,
+            max_invalid_votes_per_epoch: crate::registry::invalid_vote::MAX_SPAM_REPORT_SAMPLES
+                as u64,
             ..Default::default()
         };
         assert!(p.validate().is_ok(), "the ceiling itself is allowed");
 
         let p = RegistryParams {
-            max_invalid_votes_per_epoch: 100_001,
+            max_invalid_votes_per_epoch: crate::registry::invalid_vote::MAX_SPAM_REPORT_SAMPLES
+                as u64
+                + 1,
             ..Default::default()
         };
         let err = p.validate().expect_err("above the ceiling must be refused");

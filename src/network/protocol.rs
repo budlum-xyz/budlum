@@ -186,7 +186,22 @@ impl NetworkMessage {
                 "non-canonical protobuf encoding".into(),
             ));
         }
-        Self::try_from(proto_msg).map_err(MessageError::ParseError)
+        let message = Self::try_from(proto_msg).map_err(MessageError::ParseError)?;
+        // The protobuf can be canonical while its string-valued address is
+        // not. Raw gossip IDs hash the bytes; accepting hex case or a 0x
+        // prefix lets a single signed vote bypass deduplication and repeatedly
+        // trigger expensive BLS checks. Do not count replays as fresh offences:
+        // a third party can replay another validator's authenticated vote.
+        if let Self::Prevote { voter_id, .. } | Self::Precommit { voter_id, .. } = &message {
+            let address = crate::core::address::Address::from_hex(voter_id)
+                .map_err(MessageError::ParseError)?;
+            if address.to_hex() != voter_id.as_str() {
+                return Err(MessageError::ParseError(
+                    "non-canonical finality voter address".into(),
+                ));
+            }
+        }
+        Ok(message)
     }
 
     pub fn validate_block_size(block: &Block) -> Result<(), MessageError> {
@@ -290,6 +305,44 @@ mod tests {
         padded.extend_from_slice(&[0x98, 0x06, 0x01]);
         assert!(NetworkMessage::from_bytes(&padded).is_ok());
         assert!(NetworkMessage::from_bytes_validated(&padded).is_err());
+    }
+
+    #[test]
+    fn finality_votes_require_canonical_voter_ids_before_verification() {
+        let canonical = "ab".repeat(32);
+        for voter_id in [
+            canonical.clone(),
+            canonical.to_uppercase(),
+            format!("0x{canonical}"),
+        ] {
+            for is_precommit in [false, true] {
+                let message = if is_precommit {
+                    NetworkMessage::Precommit {
+                        epoch: 1,
+                        checkpoint_height: 10,
+                        checkpoint_hash: "cd".repeat(32),
+                        voter_id: voter_id.clone(),
+                        sig_bls: vec![1; 48],
+                        auth_sig: vec![2; 48],
+                    }
+                } else {
+                    NetworkMessage::Prevote {
+                        epoch: 1,
+                        checkpoint_height: 10,
+                        checkpoint_hash: "cd".repeat(32),
+                        voter_id: voter_id.clone(),
+                        sig_bls: vec![1; 48],
+                        auth_sig: vec![2; 48],
+                    }
+                };
+                let bytes = message.to_bytes();
+                assert!(NetworkMessage::from_bytes(&bytes).is_ok());
+                assert_eq!(
+                    NetworkMessage::from_bytes_validated(&bytes).is_ok(),
+                    voter_id == canonical
+                );
+            }
+        }
     }
 
     #[test]
