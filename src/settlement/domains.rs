@@ -687,9 +687,10 @@ pub fn accept_commitment(
     }
 
     if let Some(existing) = existing {
-        if existing.domain_block_hash == commitment.domain_block_hash
-            && existing.sequence == commitment.sequence
-        {
+        // The same finalized block is not an equivocation merely because a
+        // relayer changed an auxiliary sequence number. Treat it as a replay,
+        // not evidence that the domain finalized conflicting blocks.
+        if existing.domain_block_hash == commitment.domain_block_hash {
             return Ok(CommitmentOutcome::Idempotent);
         }
         return Ok(freeze_domain(
@@ -2512,6 +2513,23 @@ mod tests {
         let domain = pow(1);
         register_domain(&mut state, domain.clone()).unwrap();
         let genesis = "00".repeat(32);
+        // A pending copy of the same block with another sequence is a replay,
+        // not evidence of two finalized block hashes.
+        let future = commitment(&domain, &block(3, &genesis, 3), 3);
+        assert_eq!(
+            accept_commitment(&mut state, future.clone()).unwrap(),
+            CommitmentOutcome::Stored
+        );
+        let mut copied = future;
+        copied.sequence += 1;
+        assert_eq!(
+            accept_commitment(&mut state, copied).unwrap(),
+            CommitmentOutcome::Idempotent
+        );
+        assert_eq!(
+            state.settlement.domains.get(1).unwrap().status,
+            DomainStatus::Active
+        );
         let first = commitment(&domain, &block(1, &genesis, 1), 1);
         let rival = commitment(&domain, &block(1, &genesis, 2), 2);
         assert_eq!(
