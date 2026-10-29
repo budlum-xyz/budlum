@@ -1,4 +1,4 @@
-8056
+8108
 # ---------------------------------------------------------------------------
 # G2 pedantic/nursery ratchet baseline.
 # The FIRST bare-number line of this file is the baseline
@@ -48,3 +48,9 @@
 # 2026-10-28: 6671 -> 8056 after the consensus-of-consensuses merge (fd-phase)
 # brought its warning surface onto this branch; the ratchet holds the new
 # number from here.
+# 2026-10-29: 8056 -> 8108 (measured on the CI run for a27a913, "Budlum Core
+# quality": `clippy-extra: 8108 | baseline: 8056`). The testnet branch carries
+# the quantum canary, the graft and domain modules and the settlement doors the
+# consensus branch does not, and their doc/`must_use` surface is what the +52
+# is; the base is set to the measured count with no concurrency margin because
+# the gate refuses a baseline more than 10% above it.
