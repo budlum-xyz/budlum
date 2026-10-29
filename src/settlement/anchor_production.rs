@@ -810,7 +810,7 @@ impl AnchorEmission {
     ///
     /// [`AnchorError::Ledger`] when no ledger is loaded or the pair is no
     /// evidence.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn report_equivocation(
         &mut self,
         first: &PqAnchor,

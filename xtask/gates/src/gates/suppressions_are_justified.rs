@@ -258,7 +258,7 @@ const BUDGETS: &[Budget] = &[
         file: "src/chain/blockchain.rs",
         lint: "clippy::too_many_arguments",
         count: 4,
-        reason: "the bridge lock, verified-mint and settlement evidence entry points, whose arguments are all required and none of which groups into a meaningful struct; the storage escrow wrappers that were here left when deal opening and repair acceptance became `StorageTx` transactions, and the evidence path arrived with the slashing waves",
+        reason: "the bridge lock, verified-mint and settlement evidence entry points, whose arguments are all required and none of which groups into a meaningful struct; the storage escrow wrappers that were here left when deal opening and repair acceptance became `StorageTx` transactions, and the evidence path arrived with the slashing work",
     },
         Budget {
         file: "src/cross_domain/bridge.rs",

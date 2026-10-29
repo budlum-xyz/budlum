@@ -195,10 +195,10 @@ use crate::bud_format_pact::{SignedRecordError, SuiteSigner, SuiteVerifier};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The composite suite of a regeneration result.
-/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption.
 pub const RESULT_SUITE: u16 = 0x0002;
 /// Domain tag of the signed result payload.
-/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption.
 pub const RESULT_SIGN_DOMAIN: &[u8] = b"BDLM_BUD_REGEN_RESULT_V2";
 /// Tag of the digest a ledger remembers for a signed result it has applied, so
 /// replaying the same envelope cannot move a score twice.
@@ -213,7 +213,7 @@ const SELECT_DOMAIN: &[u8] = b"BDLM_BUD_REGEN_SELECT_V1";
 /// (sorted) order every validator holds. The result is a list of indexes into
 /// it, in selection order; the same inputs give the same list everywhere.
 #[must_use]
-/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption.
 pub fn select_challenges(
     epoch_randomness: &[u8; 32],
     epoch: u64,
@@ -264,7 +264,7 @@ pub fn select_challenges(
 /// another provider's reputation: the provider is read from the envelope, never
 /// from a caller argument.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption.
 pub struct SignedRegenerationResult {
     pub record: RegenerationRecord,
     pub validator: [u8; 32],
@@ -346,7 +346,7 @@ impl SignedRegenerationResult {
 /// names, once: an unsigned, wrongly signed or classically signed result changes
 /// nothing, and a result that was already applied moves nothing.
 #[derive(Debug, Clone, Default)]
-/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
+/// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption.
 pub struct ReputationLedger {
     scores: BTreeMap<[u8; 32], i64>,
     applied: BTreeSet<[u8; 32]>,
@@ -354,10 +354,10 @@ pub struct ReputationLedger {
 
 impl ReputationLedger {
     /// Score gained for a verified production.
-    /// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
+    /// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption.
     pub const REWARD: i64 = 1;
     /// Score lost for a mismatch or a producer that cannot produce.
-    /// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption wave.
+    /// exposed for: the bud format crate's signed-record surface - the consumers land with the format adoption.
     pub const PENALTY: i64 = 10;
 
     #[must_use]

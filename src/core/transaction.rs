@@ -943,7 +943,7 @@ impl Transaction {
         )
     }
 
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn new_delegate(
         from: Address,
         validator: Address,
@@ -964,7 +964,7 @@ impl Transaction {
         )
     }
 
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn new_undelegate(
         from: Address,
         validator: Address,
@@ -985,7 +985,7 @@ impl Transaction {
         )
     }
 
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn new_withdraw_delegation(
         from: Address,
         validator: Address,
@@ -1005,7 +1005,7 @@ impl Transaction {
         )
     }
 
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn new_validator_commission(
         from: Address,
         commission_ppm: u32,
@@ -1478,7 +1478,7 @@ impl Transaction {
     ///
     /// A message when the transaction is not a transfer, the recovery seed or
     /// the context is wrong, or signing fails.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn sign_recovery(
         &mut self,
         suite: crate::crypto::scheme::SuiteId,
@@ -1679,7 +1679,7 @@ impl Transaction {
     ///
     /// A message for an owner set or signer list out of range, a suite that
     /// cannot sign, or a signing failure.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn sign_v8(
         &mut self,
         registry: &crate::crypto::scheme::SchemeStatusRegistry,
@@ -1880,7 +1880,7 @@ impl Transaction {
     }
 
     /// Put a witness back on a body.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn attach_witness(&mut self, witness: TxWitness) {
         self.signer_public_key = witness.signer_public_key;
         self.signature = if witness.signature.is_empty() {
