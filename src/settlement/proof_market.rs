@@ -65,10 +65,10 @@ pub enum ProofTaskKind {
 /// PUL-Full is produced only when the aggregate is smaller than this fraction
 /// of the archived witness. The rule is economic, not cryptographic: below it
 /// the proof costs more than the bytes it replaces.
-/// WIRING: settlement surface - the door that reads it is the settlement-rollout wave's, wiring pending.
+/// Read by [`pul_proof_is_warranted`], which `SettlementTx::ProofMarket` consults in
+/// the block transition (`settlement::domains::execute_settlement_tx`).
 pub const PUL_FULL_COST_NUMERATOR: u64 = 1;
 /// See [`PUL_FULL_COST_NUMERATOR`].
-/// WIRING: settlement surface - the door that reads it is the settlement-rollout wave's, wiring pending.
 pub const PUL_FULL_COST_DENOMINATOR: u64 = 2;
 
 /// Whether one finality window is worth a PUL-Full proof: the aggregate must
@@ -713,7 +713,6 @@ impl ProofReceipt {
     /// The epoch-close sweep clears revoked receipts after a verifier has
     /// settled them; the receipt-submission and payment doors remain
     /// deliberately separate from funding and assignment.
-    /// WIRING: settlement surface - the door that reads it is the settlement-rollout wave's, wiring pending.
     pub fn is_revoked(&self) -> bool {
         matches!(self.status, ReceiptStatus::Revoked { .. })
     }
@@ -821,7 +820,6 @@ impl ProofMarketState {
 
     /// BLG-0064: the escrow a creator holds.
     #[must_use]
-    /// WIRING: settlement surface - the door that reads it is the settlement-rollout wave's, wiring pending.
     pub fn escrow_balance(&self, creator: &Address) -> u64 {
         self.escrowed.get(creator).copied().unwrap_or(0)
     }
