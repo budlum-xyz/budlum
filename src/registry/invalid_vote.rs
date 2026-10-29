@@ -384,7 +384,6 @@ mod tests {
         let sig = vec![9u8; MAX_VOTE_SIGNATURE_BYTES];
         let auth = crate::chain::finality::vote_auth_signing_message(&vote, &sig);
         let sample = (auth, vec![3; 48], vote, sig);
-        let mut reports = 0;
         for i in 0..5 {
             let report = t.record_invalid_vote_with_sample(7, v, sample.clone(), &p);
             // The evidence set cannot independently prove five separate
