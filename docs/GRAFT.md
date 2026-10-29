@@ -128,7 +128,11 @@ bud graft intent --key-file wallet.key --graft-id <hex> --call-hash <hex> \
 - Only an active RELAYER bids: `bud graft bid --intent-id <hex> --cost <units>
   --fee <units>`, with `fee <= solver_fee_cap` and
   `cost + fee + service_price <= max_payment`.
-- The solver makes the call through the domain's executor contract and
+- The owner freezes the cheapest offer with `bud graft award --key-file
+  wallet.key --intent-id <hex>` (ties go to the earliest bid). The award must
+  leave at least 8 blocks before expiry, and no new bid is accepted after it.
+  A solver should wait for the award to be finalized before acting.
+- The awarded solver makes the call through the domain's executor contract and
   submits its fulfilment event (`bud graft fulfill --evidence result.json`):
 
 | Message field | Value |
@@ -141,8 +145,9 @@ bud graft intent --key-file wallet.key --graft-id <hex> --call-hash <hex> \
 - On a proven fulfilment the solver receives `cost + fee`, the application
   receives `service_price`, and the rest returns to the person.
 - After the deadline anyone may `bud graft refund --intent-id <hex>`: the
-  escrow returns, and every bidder that did not deliver is slashed on its
-  RELAYER bond at the liveness rate.
+  escrow returns, and only the awarded solver that did not deliver may be
+  slashed on its RELAYER bond at the liveness rate. Unawarded bidders owe no
+  delivery and are not slashed.
 
 The solver may fill the call on the origin chain before Budlum finality and
 carries that risk itself; settlement happens only on the anchored proof.

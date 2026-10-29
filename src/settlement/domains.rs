@@ -1264,8 +1264,13 @@ pub(crate) fn execute_relayer_intent_tx(
                     "relayer settlement fee exceeds the sender's bid".into(),
                 ));
             }
-            crate::relayer::policy::verify_intent_result(&state.external_roots, intent, result)
-                .map_err(SettlementTxError::Refused)?;
+            crate::relayer::policy::verify_intent_result(
+                &state.external_roots,
+                intent,
+                result,
+                ctx.sender,
+            )
+            .map_err(SettlementTxError::Refused)?;
             let escrow = registry.escrowed_amount(intent_id);
             let owner = intent.owner;
             let refund = escrow.checked_sub(*paid_fee).ok_or_else(|| {
@@ -1313,6 +1318,12 @@ pub(crate) fn execute_relayer_intent_tx(
                 .try_add_balance(&owner, refund)
                 .map_err(SettlementTxError::Refused)
         }
+        RelayerIntentTx::Award { intent_id } => state
+            .settlement
+            .relayer_policy
+            .award_intent(*intent_id, ctx.sender, state.current_block_height)
+            .map(|_| ())
+            .map_err(SettlementTxError::Refused),
         RelayerIntentTx::Expire { intent_id } => {
             let policy = &state.settlement.relayer_policy;
             let intent = policy
@@ -2264,6 +2275,22 @@ mod tests {
             )))),
         )
         .unwrap();
+        assert!(execute_settlement_tx(
+            &mut state,
+            &ctx(relayer),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
+                intent_id: intent.intent_id
+            }))
+        )
+        .is_err());
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
+                intent_id: intent.intent_id,
+            })),
+        )
+        .unwrap();
         state.current_block_height = 20;
         execute_settlement_tx(
             &mut state,
@@ -2369,6 +2396,14 @@ mod tests {
             )))),
         )
         .expect("a bid that lapses before the deadline is still an auction bid");
+        execute_settlement_tx(
+            &mut state,
+            &ctx(owner),
+            &SettlementTx::RelayerIntent(Box::new(crate::relayer::RelayerIntentTx::Award {
+                intent_id: intent.intent_id,
+            })),
+        )
+        .unwrap();
         state.current_block_height = 20;
         execute_settlement_tx(
             &mut state,

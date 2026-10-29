@@ -18,12 +18,11 @@
 //!   mirror balance moves to it. A later claim event rotates the owner.
 //! - **Pay** moves BUD from a user to the application: to its owner, or into
 //!   the mirror while nobody has claimed it.
-//! - **OpenIntent / Bid / Fulfill / Refund** let a user ask a solver to make
-//!   a call on the origin chain, paid in BUD. The user's maximum payment is
-//!   escrowed; only an active RELAYER bids; a solver is paid when an anchored
-//!   `budlum/graft/fulfilled/v1` event from the domain's executor proves this
-//!   exact call for this exact intent; an expired intent refunds the user and
-//!   slashes every bidder that did not deliver.
+//! - **OpenIntent / Bid / Award / Fulfill / Refund** let a user ask a solver
+//!   to make a call on the origin chain. The owner awards the cheapest bid
+//!   before any solver acts; that choice is frozen in consensus state. An
+//!   anchored executor event then pays only that solver. On expiry the owner
+//!   is refunded and only the awarded solver may be slashed.
 //!
 //! External evidence uses the anchored-result model of the bridge and the
 //! relayer intents ([`crate::relayer::policy::verify_anchored_result`]): a
@@ -58,6 +57,9 @@ pub const MAX_GRAFT_BIDS_PER_INTENT: usize = 16;
 pub const MAX_GRAFT_USED_MESSAGES: usize = 100_000;
 /// The farthest deadline an intent may name, in blocks from now.
 pub const MAX_GRAFT_INTENT_HORIZON_BLOCKS: u64 = 100_000;
+/// The award must leave a bidder time to act, rather than imposing a
+/// liveness obligation on a bid just as the intent expires.
+pub const MIN_GRAFT_AWARD_WINDOW_BLOCKS: u64 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum GraftStatus {
@@ -154,6 +156,9 @@ pub struct GraftIntent {
     pub origin_beneficiary: Vec<u8>,
     pub deadline_block: u64,
     pub bids: Vec<GraftBid>,
+    /// Once awarded, late bids cannot change the solver who may be paid.
+    #[serde(default)]
+    pub awarded_solver: Option<Address>,
 }
 
 /// State-rooted Graft writes. Every variant is carried by a signed settlement
@@ -224,6 +229,9 @@ pub enum GraftTx {
         valid_until_block: u64,
         signature: Vec<u8>,
     },
+    /// Freeze the cheapest existing bid (owner only). Appended to preserve
+    /// earlier bincode enum discriminants.
+    Award { intent_id: [u8; 32] },
 }
 
 /// The 32-byte message an externally owned application signs (EIP-191
@@ -960,6 +968,7 @@ pub fn execute_graft_tx(
                     origin_beneficiary: origin_beneficiary.clone(),
                     deadline_block: deadline,
                     bids: Vec::new(),
+                    awarded_solver: None,
                 },
             );
             Ok(())
@@ -984,6 +993,9 @@ pub fn execute_graft_tx(
             if block > intent.deadline_block {
                 return Err(refused("Graft intent has expired"));
             }
+            if intent.awarded_solver.is_some() {
+                return Err(refused("Graft auction is already awarded"));
+            }
             let total = cost
                 .checked_add(*fee)
                 .and_then(|sum| sum.checked_add(intent.service_price))
@@ -1004,6 +1016,34 @@ pub fn execute_graft_tx(
             });
             Ok(())
         }
+        GraftTx::Award { intent_id } => {
+            let intent = state
+                .settlement
+                .graft
+                .intents
+                .get_mut(intent_id)
+                .ok_or_else(|| refused("Graft intent not found"))?;
+            if intent.owner != ctx.sender {
+                return Err(refused("only the intent owner may award a Graft bid"));
+            }
+            if intent.awarded_solver.is_some() {
+                return Err(refused("Graft auction is already awarded"));
+            }
+            if intent.deadline_block.saturating_sub(block) < MIN_GRAFT_AWARD_WINDOW_BLOCKS {
+                return Err(refused("Graft award leaves too little time to fulfil"));
+            }
+            // Bids were overflow-checked at admission. `min_by_key` keeps the
+            // first bid in a tie, so the ordering is deterministic and a
+            // later bid cannot displace an equal offer.
+            let winner = intent
+                .bids
+                .iter()
+                .min_by_key(|bid| bid.cost.saturating_add(bid.fee))
+                .ok_or_else(|| refused("Graft intent has no bids"))?
+                .solver;
+            intent.awarded_solver = Some(winner);
+            Ok(())
+        }
         GraftTx::Fulfill {
             intent_id,
             evidence,
@@ -1015,12 +1055,18 @@ pub fn execute_graft_tx(
                 .get(intent_id)
                 .cloned()
                 .ok_or_else(|| refused("Graft intent not found"))?;
+            if block > intent.deadline_block {
+                return Err(refused("Graft intent has expired"));
+            }
+            if intent.awarded_solver != Some(ctx.sender) {
+                return Err(refused("the sender is not the awarded Graft solver"));
+            }
             let bid = intent
                 .bids
                 .iter()
                 .find(|bid| bid.solver == ctx.sender)
                 .cloned()
-                .ok_or_else(|| refused("the sender has no bid on this Graft intent"))?;
+                .ok_or_else(|| refused("the awarded Graft bid is missing"))?;
             let app = state
                 .settlement
                 .graft
@@ -1080,18 +1126,18 @@ pub fn execute_graft_tx(
                 return Err(refused("Graft intent has not expired"));
             }
             state.settlement.graft.intents.remove(intent_id);
-            // A solver that bid and did not deliver answers for it with its
-            // RELAYER bond, at the liveness rate: it held the job open.
-            let ratio = state.registry.params().liveness_slash_ratio_fixed;
-            for bid in &intent.bids {
+            // Bidding alone is not a promise to execute: only the solver
+            // actually awarded the work held it open.
+            if let Some(solver) = intent.awarded_solver {
                 let slashable = state
                     .registry
-                    .get(&bid.solver, crate::registry::role::roles::RELAYER)
+                    .get(&solver, crate::registry::role::roles::RELAYER)
                     .is_some_and(crate::registry::permissionless::Registration::is_slashable);
                 if slashable {
+                    let ratio = state.registry.params().liveness_slash_ratio_fixed;
                     state
                         .slash_role_destroying(
-                            bid.solver,
+                            solver,
                             crate::registry::role::roles::RELAYER,
                             crate::registry::permissionless::SlashingCondition::LivenessFault,
                             ratio,
@@ -1355,6 +1401,21 @@ mod tests {
             .next()
             .unwrap()
             .clone();
+        let rival = Address::from([0x07; 32]);
+        state
+            .registry
+            .register(rival, crate::registry::role::roles::RELAYER, bond, epoch)
+            .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(rival),
+            &GraftTx::Bid {
+                intent_id: intent.intent_id,
+                cost: 600,
+                fee: 50,
+            },
+        )
+        .unwrap();
         execute_graft_tx(
             &mut state,
             &ctx(solver),
@@ -1365,6 +1426,51 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(execute_graft_tx(
+            &mut state,
+            &ctx(solver),
+            &GraftTx::Award {
+                intent_id: intent.intent_id
+            }
+        )
+        .is_err());
+        let before_award = state.settlement.graft.root();
+        execute_graft_tx(
+            &mut state,
+            &ctx(user),
+            &GraftTx::Award {
+                intent_id: intent.intent_id,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.settlement.graft.intents[&intent.intent_id].awarded_solver,
+            Some(solver)
+        );
+        assert_ne!(before_award, state.settlement.graft.root());
+        let restored: GraftRegistry =
+            serde_json::from_str(&serde_json::to_string(&state.settlement.graft).unwrap()).unwrap();
+        assert_eq!(restored.root(), state.settlement.graft.root());
+        assert_eq!(
+            restored.intents[&intent.intent_id].awarded_solver,
+            Some(solver)
+        );
+        // Once a solver acts, a late cheaper offer cannot change the award.
+        let late = Address::from([0x06; 32]);
+        state
+            .registry
+            .register(late, crate::registry::role::roles::RELAYER, bond, epoch)
+            .unwrap();
+        assert!(execute_graft_tx(
+            &mut state,
+            &ctx(late),
+            &GraftTx::Bid {
+                intent_id: intent.intent_id,
+                cost: 1,
+                fee: 1
+            }
+        )
+        .is_err());
         // An event from the right executor about another call pays nothing.
         let mut other = intent.clone();
         other.call_hash = [0x23; 32];
@@ -1390,6 +1496,9 @@ mod tests {
             intent.intent_id,
         );
         let evidence = anchored(&mut state, right);
+        // A rival cannot reuse the public proof (or offer a higher-priced
+        // proof of its own execution) after the owner chose another winner.
+        assert!(execute_graft_tx(&mut state, &ctx(rival), &fulfil(evidence.clone())).is_err());
         execute_graft_tx(&mut state, &ctx(solver), &fulfil(evidence)).unwrap();
         assert_eq!(state.get_balance(&solver), 450);
         assert_eq!(state.get_balance(&mirror_account(id)), 200);
@@ -1448,7 +1557,42 @@ mod tests {
             },
         )
         .unwrap();
+        let rival = Address::from([0x06; 32]);
+        state
+            .registry
+            .register(rival, crate::registry::role::roles::RELAYER, bond, epoch)
+            .unwrap();
+        execute_graft_tx(
+            &mut state,
+            &ctx(rival),
+            &GraftTx::Bid {
+                intent_id,
+                cost: 200,
+                fee: 10,
+            },
+        )
+        .unwrap();
         let refund = GraftTx::Refund { intent_id };
+        let mut unawarded = state.clone();
+        unawarded.current_block_height = 11;
+        execute_graft_tx(&mut unawarded, &ctx(user), &refund).unwrap();
+        assert_eq!(
+            unawarded
+                .registry
+                .get(&solver, crate::registry::role::roles::RELAYER)
+                .unwrap()
+                .stake,
+            bond
+        );
+        assert_eq!(
+            unawarded
+                .registry
+                .get(&rival, crate::registry::role::roles::RELAYER)
+                .unwrap()
+                .stake,
+            bond
+        );
+        execute_graft_tx(&mut state, &ctx(user), &GraftTx::Award { intent_id }).unwrap();
         assert!(execute_graft_tx(&mut state, &ctx(user), &refund).is_err());
         state.current_block_height = 11;
         let before = state.get_balance(&user);
@@ -1460,6 +1604,15 @@ mod tests {
             .unwrap()
             .stake;
         assert!(stake < bond, "the undelivered bid costs bond");
+        assert_eq!(
+            state
+                .registry
+                .get(&rival, crate::registry::role::roles::RELAYER)
+                .unwrap()
+                .stake,
+            bond,
+            "the unawarded bid must not be slashed"
+        );
     }
 
     #[test]
@@ -1518,6 +1671,7 @@ mod tests {
             origin_beneficiary: vec![0x44; 20],
             deadline_block: 0,
             bids: Vec::new(),
+            awarded_solver: None,
         };
         assert_eq!(
             hex::encode(fulfilled_payload_hash(
