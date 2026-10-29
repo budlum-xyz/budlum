@@ -23,14 +23,15 @@ const ACCUMULATORS: &[(&str, &str)] = &[
 ];
 
 /// Accumulators whose commitment reaches the public inputs transitively, so
-/// they have no direct `public_inputs[...]` binding block to find. The
-/// merkle fold lives on the root rows: the transition rule hands the finished
-/// product to `COL_MERKLE_RESULT` (`nxt[COL_MERKLE_ACC] == cu(COL_MERKLE_ACC)
-/// * nxt[COL_MERKLE_EQ]`, and the result column equals the fold when
-/// expansion ends), the result feeds the merkle opcode, and every accepted
-/// merkle path is checked against the initial/final state roots bound on the
-/// last row (`public_inputs[10..26]`). The hazard this gate exists for - a
-/// side-table fold still running when the CPU table halts - cannot apply
+/// they have no direct `public_inputs[...]` binding block to find.
+///
+/// The merkle fold lives on the root rows: the transition rule hands the
+/// finished product to `COL_MERKLE_RESULT` (`nxt[COL_MERKLE_ACC] ==
+/// cu(COL_MERKLE_ACC) * nxt[COL_MERKLE_EQ]`, and the result column equals the
+/// fold when expansion ends), the result feeds the merkle opcode, and every
+/// accepted merkle path is checked against the initial/final state roots bound
+/// on the last row (`public_inputs[10..26]`). The hazard this gate exists for -
+/// a side-table fold still running when the CPU table halts - cannot apply
 /// here: the column is gated on the root-row conditions (`rootg`,
 /// `when_transition`), never on `is_halt`/`cpu_active`. The direct-binding
 /// check is skipped for these columns; every other check still runs.
@@ -110,7 +111,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             continue;
         }
         let blocks = binding_blocks(&scrubbed, column);
-        if blocks.is_empty() && !BINDS_VIA_STATE_ROOT.contains(&column) {
+        if blocks.is_empty() && !BINDS_VIA_STATE_ROOT.contains(column) {
             problems.push(format!(
                 "{column} is never compared against a public input, so the \
                  accumulator is folded and then dropped. Either it binds \
