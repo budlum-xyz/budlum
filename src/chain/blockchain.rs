@@ -6577,6 +6577,16 @@ impl Blockchain {
                                     .into(),
                             );
                         }
+                        // A signature from another network cannot establish
+                        // an offence on this chain, even with the same voter
+                        // and epoch. The vote preimage itself names the chain.
+                        if crate::chain::finality::vote_message_chain_id(vote_msg)
+                            != Some(block.chain_id)
+                        {
+                            return Err(
+                                "InvalidSignatureSpam sample does not bind this chain".into()
+                            );
+                        }
                         if crate::chain::finality::vote_auth_signing_message(vote_msg, bad_sig)
                             != *auth_msg
                         {
