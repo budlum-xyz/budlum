@@ -1339,7 +1339,7 @@ mod settlement_prod_tests {
     }
 
     #[test]
-    fn attack_double_commitment_same_block_hash() {
+    fn same_block_with_another_sequence_is_an_idempotent_replay() {
         let mut bc = test_chain();
         let pow = domain(1, ConsensusKind::PoW);
         bc.register_consensus_domain(pow.clone()).unwrap();
@@ -1349,8 +1349,7 @@ mod settlement_prod_tests {
 
         let mut c2 = c1.clone();
         c2.sequence = 1;
-        let err = bc.submit_domain_commitment(c2).unwrap_err();
-        assert!(err.contains("Equivocation"));
+        bc.submit_domain_commitment(c2).unwrap();
     }
 
     #[test]

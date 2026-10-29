@@ -4018,21 +4018,7 @@ impl Node {
                                                             continue;
                                                         }
                                                         let chain_id = self.chain.get_chain_id().await;
-                                                        if let Err(error) =
-                                                            NetworkMessage::validate_header_batch(&headers, chain_id)
-                                                        {
-                                                            // Loud on purpose: this refusal ends
-                                                            // the round without the follower moving,
-                                                            // and a silent one is indistinguishable
-                                                            // from a peer that simply has nothing new.
-                                                            warn!(
-                                                                peer = %peer,
-                                                                error = ?error,
-                                                                count = headers.len(),
-                                                                first = headers.first().map(|h| h.index),
-                                                                last = headers.last().map(|h| h.index),
-                                                                "header batch refused; the sync round is closed"
-                                                            );
+                                                        if NetworkMessage::validate_header_batch(&headers, chain_id).is_err() {
                                                             {
                                                                 let mut pm = self.peer_manager_lock();
                                                                 pm.report_invalid_block(&peer);
@@ -4048,16 +4034,6 @@ impl Node {
                                                             // The peer has nothing past our locator: we
                                                             // are level with it. Nothing to fetch, so the
                                                             // round closes now rather than at the timeout.
-                                                            // Said out loud: an empty answer from a peer
-                                                            // that just announced a higher block is a
-                                                            // locator disagreement, and it is the one way
-                                                            // a follower can re-ask forever.
-                                                            let our_height = self.chain.get_height().await;
-                                                            info!(
-                                                                peer = %peer,
-                                                                our_height,
-                                                                "peer returned no headers past our locator"
-                                                            );
                                                             self.clear_sync_round();
                                                         }
                                                         if !headers.is_empty() {
