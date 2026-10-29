@@ -97,6 +97,39 @@ budlum-core --config config/testnet.toml
 Add `--validator-key-file` for a validator (see the validator guide). The
 operations runbook is `docs/OPERATIONS.md`.
 
+The public Caddy host runs the services in **proxy mode**, not direct mode:
+
+```
+budlum-faucet serve --rpc-url http://127.0.0.1:18545 \
+  --key-file ./secrets/faucet.seed --listen 127.0.0.1:18600 \
+  --trusted-proxy 127.0.0.1
+budlum-indexer --rpc-url http://127.0.0.1:18545 \
+  --db ./data/testnet/indexer --listen 127.0.0.1:18700 \
+  --trusted-proxy 127.0.0.1
+```
+
+Both listeners require an explicit identity mode. `--trusted-proxy` is
+repeatable; only those immediate peers may connect, and they must supply a
+valid `X-Forwarded-For`. The sample Caddyfile is an Internet edge and
+replaces that header with its actual peer address. If an additional proxy is
+in front, configure and verify its trust chain separately; never trust a
+header supplied by an untrusted client. Loopback is a boundary between
+machines, not between users on one machine: do not let untrusted local
+processes connect directly to these listeners. For direct local use, replace
+`--trusted-proxy` with `--allow-direct`; forwarded headers are then ignored.
+The Docker rehearsal explicitly uses direct mode and is not an Internet
+service; its NAT may make local users appear to share one IP.
+
+Both services cap concurrent connections and enforce header and connection
+lifetimes; the faucet also bounds body reads. The explorer limits each client
+and globally budgets forwarded node RPCs (120 per minute, eight concurrently).
+Its follower uses at most 300 RPCs per minute, leaving capacity under a
+600-per-minute node limit for other local users. Provision a dedicated node or
+adjust the node's quota if multiple indexers or other clients share its source
+IP. The faucet reserves a request's cooldown and daily allowance before RPC
+submission: if the node rejects a transaction or the reply is lost, the
+allowance remains spent for safety. Limits are in memory and reset on restart.
+
 Two local rehearsals use the same image:
 
 - `ops/testnet-local.yml`: the testnet profile end to end on one machine:
