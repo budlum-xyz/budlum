@@ -524,6 +524,8 @@ pub enum CanaryError {
     DuplicateCommit,
     /// The claimer already holds [`MAX_PENDING_PER_CLAIMER`] commits.
     ClaimerQuota,
+    /// Every global slot is occupied by an unexpired commitment.
+    BookFull,
     /// No pending commit matches the reveal and its claimer.
     UnknownCommit,
     /// The reveal came before [`CANARY_REVEAL_DELAY`] blocks passed.
@@ -665,7 +667,9 @@ impl CanaryBook {
     /// # Errors
     ///
     /// [`CanaryError::DuplicateCommit`] for a commitment this claimer already
-    /// has pending, [`CanaryError::ClaimerQuota`] past the per-claimer limit.
+    /// has pending, [`CanaryError::ClaimerQuota`] past the per-claimer limit,
+    /// or [`CanaryError::BookFull`] when all unexpired slots are occupied.
+    /// A full book refuses the newcomer; it never revokes an unexpired commit.
     pub fn commit(
         &mut self,
         height: u64,
@@ -685,37 +689,10 @@ impl CanaryBook {
             return Err(CanaryError::ClaimerQuota);
         }
         if self.pending.len() >= MAX_PENDING_COMMITS {
-            self.evict_from_largest_holder();
+            return Err(CanaryError::BookFull);
         }
         self.pending.insert(key, height);
         Ok(())
-    }
-
-    /// Frees one slot by dropping the oldest commit of the claimer that holds
-    /// the most (ties go to the lowest address). A claimer with one commit is
-    /// never the largest holder while another holds more, so a flood spread
-    /// over many addresses is paid for in addresses and still cannot evict a
-    /// lone honest commit before the others.
-    fn evict_from_largest_holder(&mut self) {
-        let mut counts: BTreeMap<[u8; 32], usize> = BTreeMap::new();
-        for (claimer, _) in self.pending.keys() {
-            *counts.entry(*claimer).or_default() += 1;
-        }
-        let Some((&largest, _)) = counts
-            .iter()
-            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
-        else {
-            return;
-        };
-        let oldest = self
-            .pending
-            .iter()
-            .filter(|((claimer, _), _)| *claimer == largest)
-            .min_by_key(|((_, commitment), height)| (**height, *commitment))
-            .map(|(key, _)| *key);
-        if let Some(key) = oldest {
-            self.pending.remove(&key);
-        }
     }
 
     /// Applies a `CanaryReveal` accepted at `height`. Returns the claim when
@@ -1143,37 +1120,36 @@ mod tests {
     }
 
     #[test]
-    fn full_book_evicts_from_the_largest_holder_not_a_lone_commit() {
+    fn full_book_never_evicts_an_unexpired_commit() {
         let mut book = CanaryBook::new();
-        let honest = commit_hash(CanaryId::Ecc192, b"honest", &addr(200));
-        book.commit(0, addr(200), honest).unwrap();
-        // Flooding claimers with 16 commits each fill the rest of the book.
-        let flooder = |n: u16| {
+        // The lowest address would lose the former one-per-address tie-break.
+        let honest_claimer = addr(0);
+        let proof = b"honest";
+        let honest = commit_hash(CanaryId::Ecc192, proof, &honest_claimer);
+        book.commit(0, honest_claimer, honest).unwrap();
+        for n in 1..MAX_PENDING_COMMITS {
             let mut bytes = [0u8; 32];
-            bytes[..2].copy_from_slice(&n.to_be_bytes());
-            Address(bytes)
-        };
-        let mut height = 1u64;
-        'fill: for claimer in 0..1000u16 {
-            for i in 0..MAX_PENDING_PER_CLAIMER {
-                if book.pending_len() >= MAX_PENDING_COMMITS {
-                    break 'fill;
-                }
-                let mut commitment = [0u8; 32];
-                commitment[..2].copy_from_slice(&claimer.to_be_bytes());
-                commitment[2] = i as u8;
-                book.commit(height, flooder(claimer), commitment).unwrap();
-                height += 1;
-            }
+            bytes[..2].copy_from_slice(&(n as u16).to_be_bytes());
+            book.commit(0, Address(bytes), [0xab; 32]).unwrap();
         }
         assert_eq!(book.pending_len(), MAX_PENDING_COMMITS);
-        // One more commit from a new claimer evicts from a flooder.
-        book.commit(height, addr(201), [0xab; 32]).unwrap();
-        assert_eq!(book.pending_len(), MAX_PENDING_COMMITS);
-        assert!(
-            book.pending.contains_key(&(*addr(200).as_bytes(), honest)),
-            "the honest commit survived the flood"
+        let mut newcomer = [0u8; 32];
+        newcomer[..2].copy_from_slice(&(MAX_PENDING_COMMITS as u16).to_be_bytes());
+        assert_eq!(
+            book.commit(500, Address(newcomer), [0xcd; 32]),
+            Err(CanaryError::BookFull)
         );
+        assert_eq!(book.pending_len(), MAX_PENDING_COMMITS);
+        assert_eq!(
+            book.reveal(500, honest_claimer, CanaryId::Ecc192, proof),
+            Err(CanaryError::InvalidProof),
+            "the honest commitment must still be found"
+        );
+
+        // Expiry, not a newcomer, releases slots and makes admission possible.
+        book.commit(CANARY_REVEAL_WINDOW + 1, Address(newcomer), [0xcd; 32])
+            .unwrap();
+        assert_eq!(book.pending_len(), 1);
     }
 
     #[test]
