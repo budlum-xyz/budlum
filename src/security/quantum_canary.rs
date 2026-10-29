@@ -1317,15 +1317,15 @@ mod tests {
             ),
             (
                 CanaryId::Lat65,
-                "81621870f2e3986885acdc2a1112c1fd5c78c56467a10f3f5b08f211e5cd454b",
+                "e6a9ae854deffffaf073a4a27c85a19cab0d48a3a33836d111f48abdf6313123",
             ),
             (
                 CanaryId::Lat87,
-                "9ee25d6d9893987345a94cf28a797dc1106c035ed5c1c53d8e38383835f34960",
+                "26cb55e104557e01c865b03bbb8858ec028821431eda3183c6075cf5c9faed10",
             ),
             (
                 CanaryId::Slh256s,
-                "7ffe9a70e0b8d8bba6323341a682e84910eb62a214a87dfae46409e27c0ce29d",
+                "b7deea0b5b5a771b92d515f688a2573fc3637332e9b53312be816b74fcbfbfc9",
             ),
         ];
         for (id, expected) in pins {
@@ -1336,9 +1336,14 @@ mod tests {
                 id.name()
             );
         }
+        // The label carries its length, so the three signature puzzles
+        // (`C-LAT-65`, `C-LAT-87`, `C-SLH-256S`) and the set digest were
+        // re-derived when the XOF started absorbing that length: without it
+        // `label` and the bytes after it were not injective, and two puzzle
+        // families could be made to share a key.
         assert_eq!(
             hex::encode(genesis_digest()),
-            "a71a0d113bfeff11f7fcf1210e0eb46d7053c5b14be3fd022a1fa66d9b8d6943"
+            "5f5cfb7d09594a88a89b924dd9a25827f0cba015e8a73d6708e144e40facb54b"
         );
     }
 }
