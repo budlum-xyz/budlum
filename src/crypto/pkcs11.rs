@@ -228,8 +228,7 @@ impl Pkcs11Signer {
         }
     }
 
-    /// Operator-configured expectations, cross-checked against the slot
-    ///.
+    /// Operator-configured expectations, cross-checked against the slot.
     ///
     /// With both sides present they must match byte for byte; with only the
     /// expectation present it becomes the announced key and the vendor

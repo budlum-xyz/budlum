@@ -1,5 +1,4 @@
-//! B.U.D. (Broad Universal Database) - Storage ConsensusDomain parameters
-//!.
+//! B.U.D. (Broad Universal Database) - Storage ConsensusDomain parameters.
 //!
 //! Vision reference: the B.U.D. decentralised storage vision,
 //! The vision proposes `ConsensusKind::StorageAttestation(StorageDomainParams)`
