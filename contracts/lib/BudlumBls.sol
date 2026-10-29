@@ -55,6 +55,12 @@ library BudlumBls {
         if (pubkeyG2.length != 256 || negSignatureG1.length != 128 || g2Generator.length != 256) {
             return false;
         }
+        // EIP-2537 represents the point at infinity by all-zero coordinates.
+        // Pairing with two identities succeeds for any message, so subgroup
+        // validation in the pairing precompile alone is not sufficient.
+        if (_isInfinity(pubkeyG2) || _isInfinity(negSignatureG1) || _isInfinity(g2Generator)) {
+            return false;
+        }
         bytes memory input =
             abi.encodePacked(hashToG1(message), pubkeyG2, negSignatureG1, g2Generator);
         (bool ok, bytes memory out) = PAIRING.staticcall{gas: 400_000}(input);
@@ -76,7 +82,7 @@ library BudlumBls {
         pure
         returns (bool)
     {
-        if (compressed.length != 96 || uncompressed.length != 256) {
+        if (compressed.length != 96 || uncompressed.length != 256 || _isInfinity(uncompressed)) {
             return false;
         }
         uint8 flags = uint8(compressed[0]);
@@ -114,6 +120,14 @@ library BudlumBls {
         }
         uint256 at = c1Zero ? 128 + 16 : 192 + 16;
         return _above(uncompressed, at, HALF_MODULUS) == largest;
+    }
+
+    /// EIP-2537's canonical encoding of the point at infinity.
+    function _isInfinity(bytes memory point) private pure returns (bool) {
+        for (uint256 i = 0; i < point.length; i++) {
+            if (point[i] != 0) return false;
+        }
+        return true;
     }
 
     /// Whether the 48 big-endian bytes at `data[at..]` exceed `bound`.
