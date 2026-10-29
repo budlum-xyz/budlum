@@ -2594,11 +2594,11 @@ impl ChainActor {
                     let _ = tx.send(self.blockchain.mempool.get(&hash).is_some());
                 }
                 ChainCommand::GetValidatorAddress(tx) => {
-                    let addr = self
-                        .blockchain
-                        .consensus()
-                        .signer()
-                        .map(crate::crypto::signer::ConsensusSigner::address);
+                    // `validator_address`, not `signer`: a key-file validator
+                    // has no signer backend, and reading the backend alone
+                    // made every such node answer "not a validator" - so it
+                    // never voted and the chain never finalized.
+                    let addr = self.blockchain.consensus().validator_address();
                     let _ = tx.send(addr);
                 }
                 ChainCommand::GetAggregatorState(tx) => {
