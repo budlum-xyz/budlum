@@ -245,7 +245,7 @@ pub struct GenesisConfig {
     /// written before the flag existed means: testnet funds and pays the
     /// default schedule, mainnet and devnet do not. `Some` pins the answer in
     /// genesis, so a chain can refuse a pool its profile would otherwise
-    /// provide - and, once mainnet's schedule is decided , take one it
+    /// provide - and, once mainnet's schedule is decided, take one it
     /// would not. The pool is never minted: it moves out of the ecosystem
     /// share at genesis and the epoch transition pays only its balance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
