@@ -1,5 +1,6 @@
 use crate::chain::finality::{
     FinalityAggregator, FinalityCert, Precommit, Prevote, ValidatorEntry, ValidatorSetSnapshot,
+    BLS_VOTE_SIGNATURE_BYTES, MAX_CHECKPOINT_HASH_LEN,
 };
 use crate::chain::genesis::GenesisConfig;
 use crate::chain::snapshot::PruningManager;
@@ -60,10 +61,6 @@ pub const MAX_VALIDATOR_SNAPSHOTS: usize = 100;
 /// "never trimmed" was the finding.
 const ALARM_RETENTION_BLOCKS: u64 = 100_000;
 const MAX_PENDING_SLASHING_EVIDENCE: usize = 64;
-/// Longest accepted `checkpoint_hash` on a finality vote. A checkpoint hash
-/// names a block hash (64 hex chars), preventing oversized samples from
-/// swelling local slashing reports past the P2P/block size limits.
-const MAX_CHECKPOINT_HASH_LEN: usize = 128;
 #[cfg(test)]
 pub const EPOCH_LENGTH: u64 = 10;
 
@@ -7441,7 +7438,7 @@ impl Blockchain {
                     samples,
                     ..
                 } => {
-                    const MAX_SPAM_REPORT_SAMPLES: usize = 256;
+                    use crate::registry::invalid_vote::MAX_SPAM_REPORT_SAMPLES;
                     if *epoch > state.epoch_index.saturating_add(1) {
                         return Err("InvalidSignatureSpam epoch out of bounds".into());
                     }
@@ -7451,10 +7448,13 @@ impl Blockchain {
                         );
                     }
                     let expected_threshold = state.registry.params().max_invalid_votes_per_epoch;
-                    let required_samples = expected_threshold.min(MAX_SPAM_REPORT_SAMPLES as u64);
+                    // Every configured invalid vote must be proved. Capping the
+                    // required evidence below the threshold lets a block producer
+                    // slash a validator that has not committed the offence.
                     if expected_threshold == 0
+                        || expected_threshold > MAX_SPAM_REPORT_SAMPLES as u64
                         || *threshold < expected_threshold
-                        || (samples.len() as u64) < required_samples
+                        || (samples.len() as u64) < expected_threshold
                     {
                         return Err(
                             "InvalidSignatureSpam proof does not satisfy active epoch threshold"
@@ -7576,8 +7576,9 @@ impl Blockchain {
         // auth preimage below. Refuse anything that cannot be one before the
         // preimage is built, so an oversized `sig_bls` is neither hashed nor
         // retained as a local invalid-vote sample.
-        const MAX_VOTE_SIG_LEN: usize = 128;
-        if vote.sig_bls.len() > MAX_VOTE_SIG_LEN || vote.auth_sig.len() > MAX_VOTE_SIG_LEN {
+        if vote.sig_bls.len() > BLS_VOTE_SIGNATURE_BYTES
+            || vote.auth_sig.len() > BLS_VOTE_SIGNATURE_BYTES
+        {
             return Err("Rejecting prevote: signature is not a BLS signature".into());
         }
         // Chain binding. `vote.chain_id` is the domain the sender signed
@@ -7664,8 +7665,9 @@ impl Blockchain {
         }
         // Same ceiling as `handle_prevote`: the signature must be a BLS point
         // before it enters the auth preimage or the invalid-vote sample store.
-        const MAX_VOTE_SIG_LEN: usize = 128;
-        if vote.sig_bls.len() > MAX_VOTE_SIG_LEN || vote.auth_sig.len() > MAX_VOTE_SIG_LEN {
+        if vote.sig_bls.len() > BLS_VOTE_SIGNATURE_BYTES
+            || vote.auth_sig.len() > BLS_VOTE_SIGNATURE_BYTES
+        {
             return Err("Rejecting precommit: signature is not a BLS signature".into());
         }
         // Chain binding; see `handle_prevote`.

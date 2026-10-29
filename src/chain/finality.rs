@@ -416,6 +416,15 @@ pub const BLS_SCHEME_RFC9380_V1: &str = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_
 const PREVOTE_DOMAIN: &[u8] = b"BUDLUM_PREVOTE_V2";
 /// Domain tag of the chain-bound precommit (and finality certificate) preimage.
 const PRECOMMIT_DOMAIN: &[u8] = b"BUDLUM_PRECOMMIT_V2";
+/// Maximum vote preimage accepted by the finality-vote ingress. The longer
+/// precommit domain bounds both vote types, including a 128-byte hash.
+pub(crate) const MAX_VOTE_PREIMAGE_BYTES: usize = PRECOMMIT_DOMAIN.len()
+    + BLS_SCHEME_RFC9380_V1.len()
+    + 3 * std::mem::size_of::<u64>()
+    + MAX_CHECKPOINT_HASH_LEN;
+pub(crate) const MAX_CHECKPOINT_HASH_LEN: usize = 128;
+/// BLS min-sig uses compressed G1 signatures, never variable-length PQ keys.
+pub(crate) const BLS_VOTE_SIGNATURE_BYTES: usize = 48;
 /// The pre-migration construction exposed H(m)'s discrete logarithm. Its ID is
 /// Retained only for handshake rejection and historical tooling; it must never
 /// Be used to validate a live vote or certificate.
