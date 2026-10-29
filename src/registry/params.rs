@@ -192,6 +192,22 @@ pub struct RegistryParams {
     /// Epochs an undelegated amount stays locked, and slashable, before it
     /// can be withdrawn. TESTNET-DEFAULT: 100 epochs.
     pub delegation_unbonding_epochs: u64,
+    /// Smallest amount a *new* delegation position may hold, in base units.
+    ///
+    /// The delegation fee is flat, so without a floor a funded account can
+    /// create positions one base unit at a time. Every node then pays the
+    /// enlarged per-block and per-epoch work those positions cause for the
+    /// life of the chain, while the attacker recovers its principal by
+    /// undelegating. TESTNET-DEFAULT: 100 base units.
+    pub min_delegation_amount: u64,
+    /// Largest number of active delegation positions one validator may carry.
+    ///
+    /// The global `MAX_DELEGATIONS` ceiling bounds the whole table; this one
+    /// bounds the slice a single validator's stake operations, epoch close and
+    /// slash have to walk, so one popular validator cannot turn every block
+    /// that touches it into a scan of the entire delegation table.
+    /// TESTNET-DEFAULT: 1,000 positions.
+    pub max_delegations_per_validator: u64,
 }
 
 /// Deterministic split of an eligible protocol fee between an application and
@@ -338,6 +354,23 @@ impl RegistryParams {
         if self.delegation_unbonding_epochs == 0 || self.delegation_unbonding_epochs > 100_000 {
             return Err("delegation_unbonding_epochs must be between 1 and 100,000".into());
         }
+        // A zero floor is the flood the field exists to stop, and a floor
+        // above the maximum parameter amount would price delegation out of
+        // existence rather than bound it.
+        if self.min_delegation_amount == 0 || self.min_delegation_amount > MAX_PARAM_AMOUNT {
+            return Err(format!(
+                "min_delegation_amount must be between 1 and {MAX_PARAM_AMOUNT}"
+            ));
+        }
+        let per_validator_ceiling =
+            crate::registry::permissionless::MAX_DELEGATIONS as u64;
+        if self.max_delegations_per_validator == 0
+            || self.max_delegations_per_validator > per_validator_ceiling
+        {
+            return Err(format!(
+                "max_delegations_per_validator must be between 1 and {per_validator_ceiling}"
+            ));
+        }
         if self.max_commission_change_ppm_per_epoch > self.max_validator_commission_ppm {
             return Err(
                 "max_commission_change_ppm_per_epoch cannot exceed max_validator_commission_ppm"
@@ -468,6 +501,14 @@ impl Default for RegistryParams {
             max_validator_commission_ppm: 200_000,
             max_commission_change_ppm_per_epoch: 10_000,
             delegation_unbonding_epochs: 100,
+            // TESTNET-DEFAULT: a hundred base units. Small enough that an
+            // honest delegator is unaffected, large enough that splitting a
+            // position into dust costs more in fees than it gains in
+            // amplified work.
+            min_delegation_amount: 100,
+            // TESTNET-DEFAULT. With the global ceiling at 100,000 positions,
+            // this bounds what one validator's slice can ever cost a block.
+            max_delegations_per_validator: 1_000,
         }
     }
 }
@@ -486,8 +527,15 @@ mod tests {
     fn registry_params_serialized_shape_is_pinned() {
         let encoded =
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
-        // 22 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
-        // (BLG-0102/P04-F20: the comment said 15; the pin now counts 22.)
+        // 24 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        // (BLG-0102/P04-F20: the comment said 15; the pin now counts 24.)
+        //
+        // The count moved from 22 when the two delegation bounds
+        // (`min_delegation_amount`, `max_delegations_per_validator`) were
+        // added: the entry-side half of the delegation-flood finding. Both are
+        // economic values, so they belong in `RegistryParams` rather than in
+        // constants, and the shape change is the deliberate one the note above
+        // describes.
         //
         // The count moved from 12 when the three proportional rates were
         // added: a state-format change the `# Adding a field` note describes,
@@ -508,7 +556,7 @@ mod tests {
         // would never fail, so it would not be a pin at all.
         assert_eq!(
             encoded.len(),
-            22 * 8 + 1,
+            24 * 8 + 1,
             "RegistryParams changed shape: old snapshots can no longer be \
              deserialized and the state root moves. See the type's docs."
         );

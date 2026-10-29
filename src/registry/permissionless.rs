@@ -1053,9 +1053,67 @@ impl PermissionlessRegistry {
             })
     }
 
+    /// Index of `(validator, delegator)` in the active-position table.
+    ///
+    /// The table is kept sorted by that key, so a lookup is a binary search and
+    /// every validator's positions sit in one contiguous slice. That is the
+    /// difference between an O(every position) scan on every stake operation -
+    /// which a flood of one-unit positions turns into permanent per-block work
+    /// for every node - and O(log n) plus the positions of the single validator
+    /// involved.
+    fn delegation_slot(&self, delegator: Address, validator: Address) -> Result<usize, usize> {
+        self.delegations
+            .binary_search_by(|position| {
+                (position.validator, position.delegator).cmp(&(validator, delegator))
+            })
+    }
+
+    /// The contiguous slice of the sorted table that belongs to `validator`.
+    fn delegation_span(&self, validator: &Address) -> std::ops::Range<usize> {
+        let start = self
+            .delegations
+            .partition_point(|position| position.validator < *validator);
+        let end = self
+            .delegations
+            .partition_point(|position| position.validator <= *validator);
+        start..end
+    }
+
+    /// Index of `(validator, delegator)` in the claimable-reward table, kept
+    /// sorted by the same key as the positions.
+    fn claimable_slot(&self, delegator: Address, validator: Address) -> Result<usize, usize> {
+        self.claimable_rewards
+            .binary_search_by(|reward| {
+                (reward.validator, reward.delegator).cmp(&(validator, delegator))
+            })
+    }
+
+    /// Restore the order both delegation tables are indexed by.
+    ///
+    /// Every mutation below inserts at the key's position, so the tables are
+    /// sorted for as long as they are only touched through this type. A
+    /// snapshot is the one way a table can arrive in another order, written by
+    /// a build that appended in arrival order, so a restored registry is sorted
+    /// once - before it is hashed or queried - and every node agrees on the
+    /// same table for the same rows.
+    pub fn reindex_delegations(&mut self) {
+        self.delegations
+            .sort_by_key(|position| (position.validator, position.delegator));
+        self.claimable_rewards
+            .sort_by_key(|reward| (reward.validator, reward.delegator));
+    }
+
     /// Add an active delegation position. The account layer performs the
     /// validator and liquid-balance checks; this method owns the canonical
     /// position mutation and its bounded-state checks.
+    ///
+    /// A *new* position has to clear `min_delegation_amount`: the delegation
+    /// fee is flat, so without a floor any funded account can add positions a
+    /// base unit at a time, recover the principal by undelegating, and leave
+    /// every node paying the enlarged per-block and per-epoch work for the life
+    /// of the chain. One validator also carries at most
+    /// `max_delegations_per_validator` positions, which is what bounds the
+    /// slice its own stake operations walk.
     pub fn delegate(
         &mut self,
         delegator: Address,
@@ -1068,25 +1126,52 @@ impl PermissionlessRegistry {
         if delegator == validator {
             return Err("a validator cannot delegate to itself".into());
         }
-        if let Some(position) = self
-            .delegations
-            .iter_mut()
-            .find(|position| position.delegator == delegator && position.validator == validator)
-        {
-            position.amount = position
-                .amount
-                .checked_add(amount)
-                .ok_or_else(|| "delegation amount overflow".to_string())?;
-            return Ok(());
+        match self.delegation_slot(delegator, validator) {
+            // An existing position is grown by any non-zero amount: it already
+            // cleared the floor when it was created.
+            Ok(index) => {
+                self.delegations[index].amount = self.delegations[index]
+                    .amount
+                    .checked_add(amount)
+                    .ok_or_else(|| "delegation amount overflow".to_string())?;
+                Ok(())
+            }
+            Err(index) => {
+                self.admit_new_delegation_position(validator, amount)?;
+                self.delegations.insert(
+                    index,
+                    DelegationPosition {
+                        delegator,
+                        validator,
+                        amount,
+                    },
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// The entry-side bounds on a new delegation position.
+    fn admit_new_delegation_position(
+        &self,
+        validator: Address,
+        amount: u64,
+    ) -> Result<(), String> {
+        let floor = self.params.min_delegation_amount;
+        if amount < floor {
+            return Err(format!(
+                "delegation amount must be at least {floor} base units"
+            ));
         }
         if self.delegations.len() >= MAX_DELEGATIONS {
             return Err("delegation position limit reached".into());
         }
-        self.delegations.push(DelegationPosition {
-            delegator,
-            validator,
-            amount,
-        });
+        let cap = self.params.max_delegations_per_validator;
+        if (self.delegation_span(&validator).len() as u64) >= cap {
+            return Err(format!(
+                "this validator already holds the maximum of {cap} delegation positions"
+            ));
+        }
         Ok(())
     }
 
@@ -1096,7 +1181,8 @@ impl PermissionlessRegistry {
     ///
     /// The source position must already exist and cover the amount; the
     /// destination either grows an existing position or takes a new one, under
-    /// the same [`MAX_DELEGATIONS`] ceiling as [`Self::delegate`].
+    /// the same [`MAX_DELEGATIONS`] ceiling and the same entry-side bounds as
+    /// [`Self::delegate`].
     pub fn move_delegation(
         &mut self,
         delegator: Address,
@@ -1114,36 +1200,42 @@ impl PermissionlessRegistry {
             return Err("a validator cannot delegate to itself".into());
         }
         let source = self
-            .delegations
-            .iter()
-            .position(|position| position.delegator == delegator && position.validator == from)
-            .ok_or_else(|| "no active delegation to redelegate from".to_string())?;
+            .delegation_slot(delegator, from)
+            .map_err(|_| "no active delegation to redelegate from".to_string())?;
         if self.delegations[source].amount < amount {
             return Err("redelegation exceeds the active position".into());
         }
-        let destination = self
-            .delegations
-            .iter()
-            .position(|position| position.delegator == delegator && position.validator == to);
-        if destination.is_none() && self.delegations.len() >= MAX_DELEGATIONS {
-            return Err("delegation position limit reached".into());
-        }
-        match destination {
-            Some(index) => {
+        match self.delegation_slot(delegator, to) {
+            Ok(index) => {
                 self.delegations[index].amount = self.delegations[index]
                     .amount
                     .checked_add(amount)
                     .ok_or_else(|| "delegation amount overflow".to_string())?;
             }
-            None => self.delegations.push(DelegationPosition {
-                delegator,
-                validator: to,
-                amount,
-            }),
+            Err(index) => {
+                self.admit_new_delegation_position(to, amount)?;
+                self.delegations.insert(
+                    index,
+                    DelegationPosition {
+                        delegator,
+                        validator: to,
+                        amount,
+                    },
+                );
+            }
         }
+        // The insert above may have moved the source, so the slot is read
+        // again rather than reused: a stale index would debit another
+        // delegator's position.
+        let source = self
+            .delegation_slot(delegator, from)
+            .map_err(|_| "no active delegation to redelegate from".to_string())?;
         self.delegations[source].amount -= amount;
-        self.delegations
-            .retain(|position| position.delegator != delegator || position.amount > 0);
+        if self.delegations[source].amount == 0 {
+            // The emptied position leaves the table: a zero row is never
+            // created, so it must never be left behind either.
+            self.delegations.remove(source);
+        }
         Ok(())
     }
 
@@ -1151,6 +1243,10 @@ impl PermissionlessRegistry {
     /// the reward pool. The value sits here until [`Self::claim_delegator_rewards`]
     /// moves it to the delegator's liquid balance, so a delegator who never
     /// claims cannot be paid twice and a node that restarts sees the same debt.
+    ///
+    /// The table is sorted by `(validator, delegator)` and addressed by binary
+    /// search, so the epoch close - which credits one debt per position it
+    /// walked - no longer pays a scan of the whole table for each of them.
     pub fn credit_claimable_reward(
         &mut self,
         delegator: Address,
@@ -1160,35 +1256,128 @@ impl PermissionlessRegistry {
         if amount == 0 {
             return Ok(());
         }
-        if let Some(reward) = self
-            .claimable_rewards
-            .iter_mut()
-            .find(|reward| reward.delegator == delegator && reward.validator == validator)
-        {
-            reward.amount = reward
-                .amount
-                .checked_add(amount)
-                .ok_or_else(|| "claimable reward overflow".to_string())?;
-            return Ok(());
+        match self.claimable_slot(delegator, validator) {
+            Ok(index) => {
+                self.claimable_rewards[index].amount = self.claimable_rewards[index]
+                    .amount
+                    .checked_add(amount)
+                    .ok_or_else(|| "claimable reward overflow".to_string())?;
+                Ok(())
+            }
+            Err(index) => {
+                if self.claimable_rewards.len() >= MAX_DELEGATIONS {
+                    return Err("claimable reward limit reached".into());
+                }
+                self.claimable_rewards.insert(
+                    index,
+                    ClaimableReward {
+                        delegator,
+                        validator,
+                        amount,
+                    },
+                );
+                Ok(())
+            }
         }
-        if self.claimable_rewards.len() >= MAX_DELEGATIONS {
+    }
+
+    /// Credit many delegator rewards for one validator in a single pass.
+    ///
+    /// The epoch close credits one debt per position it walked, and doing that
+    /// through [`Self::credit_claimable_reward`] pays a table insert per
+    /// position. `credits` arrives in delegator order - it is produced from
+    /// [`Self::delegations_for`], which is sorted - and the claimable table is
+    /// sorted by `(validator, delegator)`, so the whole block is one merge
+    /// instead of one insert per row.
+    ///
+    /// Rows already held for this validator keep their amounts and are added
+    /// to; a pair that appears twice in `credits` is merged as well. All or
+    /// nothing: an amount that would overflow leaves the table unchanged, which
+    /// is the same choice the single-credit door makes.
+    pub fn credit_claimable_rewards(
+        &mut self,
+        validator: Address,
+        credits: &[(Address, u64)],
+    ) -> Result<u64, String> {
+        if credits.is_empty() {
+            return Ok(0);
+        }
+        let start = self
+            .claimable_rewards
+            .partition_point(|reward| reward.validator < validator);
+        let end = self
+            .claimable_rewards
+            .partition_point(|reward| reward.validator <= validator);
+        let span = start..end;
+        let existing = &self.claimable_rewards[span.clone()];
+        let rows_outside_the_block = self.claimable_rewards.len() - existing.len();
+        let mut merged: Vec<ClaimableReward> = Vec::with_capacity(existing.len() + credits.len());
+        let mut credit_total = 0u64;
+        let mut left = existing.iter().peekable();
+        let mut right = credits.iter().peekable();
+        while left.peek().is_some() || right.peek().is_some() {
+            let take_existing = match (left.peek(), right.peek()) {
+                (Some(existing), Some((delegator, _))) => existing.delegator <= *delegator,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => false,
+            };
+            if take_existing {
+                let row = left.next().expect("peeked");
+                // A credit for the same delegator lands on this row.
+                let mut amount = row.amount;
+                if let Some((delegator, extra)) = right.peek() {
+                    if *delegator == row.delegator {
+                        let extra = *right.next().expect("peeked").1;
+                        amount = amount
+                            .checked_add(extra)
+                            .ok_or_else(|| "claimable reward overflow".to_string())?;
+                        credit_total = credit_total.saturating_add(extra);
+                    }
+                }
+                merged.push(ClaimableReward {
+                    delegator: row.delegator,
+                    validator,
+                    amount,
+                });
+            } else {
+                let (delegator, amount) = *right.next().expect("peeked");
+                if amount == 0 {
+                    continue;
+                }
+                // Two credits for one new delegator are merged, not duplicated:
+                // a second row for the same key would break the ordering the
+                // lookups rely on.
+                let mut amount = amount;
+                while let Some((next_delegator, extra)) = right.peek() {
+                    if *next_delegator != delegator {
+                        break;
+                    }
+                    let extra = *right.next().expect("peeked").1;
+                    amount = amount
+                        .checked_add(extra)
+                        .ok_or_else(|| "claimable reward overflow".to_string())?;
+                }
+                credit_total = credit_total.saturating_add(amount);
+                merged.push(ClaimableReward {
+                    delegator,
+                    validator,
+                    amount,
+                });
+            }
+        }
+        if rows_outside_the_block + merged.len() > MAX_DELEGATIONS {
             return Err("claimable reward limit reached".into());
         }
-        self.claimable_rewards.push(ClaimableReward {
-            delegator,
-            validator,
-            amount,
-        });
-        Ok(())
+        self.claimable_rewards.splice(span, merged);
+        Ok(credit_total)
     }
 
     /// What `delegator` has earned on `validator` and not claimed yet.
     #[must_use]
     pub fn claimable_reward(&self, delegator: Address, validator: Address) -> u64 {
-        self.claimable_rewards
-            .iter()
-            .find(|reward| reward.delegator == delegator && reward.validator == validator)
-            .map_or(0, |reward| reward.amount)
+        self.claimable_slot(delegator, validator)
+            .map_or(0, |index| self.claimable_rewards[index].amount)
     }
 
     /// Take the claimable reward of one `(delegator, validator)` pair. The
@@ -1200,41 +1389,37 @@ impl PermissionlessRegistry {
         validator: Address,
     ) -> Result<u64, String> {
         let index = self
-            .claimable_rewards
-            .iter()
-            .position(|reward| reward.delegator == delegator && reward.validator == validator)
-            .ok_or_else(|| "no claimable reward for this delegator and validator".to_string())?;
+            .claimable_slot(delegator, validator)
+            .map_err(|_| "no claimable reward for this delegator and validator".to_string())?;
         // Decide before the remove: a zero reward refuses with its row still
         // in place, so a failed claim cannot drop what it refused to pay.
         if self.claimable_rewards[index].amount == 0 {
             return Err("the claimable reward is zero".into());
         }
-        let amount = self.claimable_rewards.remove(index).amount;
-        Ok(amount)
+        Ok(self.claimable_rewards.remove(index).amount)
     }
 
     pub fn delegated_amount(&self, delegator: Address, validator: Address) -> u64 {
-        self.delegations
-            .iter()
-            .find(|position| position.delegator == delegator && position.validator == validator)
-            .map_or(0, |position| position.amount)
+        self.delegation_slot(delegator, validator)
+            .map_or(0, |index| self.delegations[index].amount)
     }
 
+    /// Everything one validator's delegators have bonded. The positions are one
+    /// contiguous slice of the sorted table, so the sum is over that
+    /// validator's rows only - bounded by `max_delegations_per_validator`, not
+    /// by the size of the whole table.
     pub fn delegated_stake(&self, validator: &Address) -> u64 {
-        self.delegations
-            .iter()
-            .filter(|position| position.validator == *validator)
-            .fold(0u64, |total, position| {
-                total.saturating_add(position.amount)
-            })
+        let span = self.delegation_span(validator);
+        self.delegations[span].iter().fold(0u64, |total, position| {
+            total.saturating_add(position.amount)
+        })
     }
 
+    /// One validator's positions, in delegator order, without touching any
+    /// other validator's rows.
     pub fn delegations_for(&self, validator: &Address) -> Vec<DelegationPosition> {
-        self.delegations
-            .iter()
-            .filter(|position| position.validator == *validator)
-            .cloned()
-            .collect()
+        let span = self.delegation_span(validator);
+        self.delegations[span].to_vec()
     }
 
     /// Move an active position into the canonical unbonding queue. The
@@ -1250,11 +1435,10 @@ impl PermissionlessRegistry {
         if amount == 0 {
             return Err("delegation unbond amount must be non-zero".into());
         }
-        let available = self
-            .delegations
-            .iter()
-            .find(|position| position.delegator == delegator && position.validator == validator)
-            .map_or(0, |position| position.amount);
+        let position_index = self
+            .delegation_slot(delegator, validator)
+            .map_err(|_| "delegation position not found".to_string())?;
+        let available = self.delegations[position_index].amount;
         if available < amount {
             return Err(format!(
                 "delegation unbond exceeds position: requested {amount}, available {available}"
@@ -1269,11 +1453,6 @@ impl PermissionlessRegistry {
         if !has_release_entry && self.delegation_unbonding.len() >= MAX_DELEGATIONS {
             return Err("delegation unbonding limit reached".into());
         }
-        let position_index = self
-            .delegations
-            .iter()
-            .position(|position| position.delegator == delegator && position.validator == validator)
-            .ok_or_else(|| "delegation position not found".to_string())?;
         let release_index = self.delegation_unbonding.iter().position(|entry| {
             entry.delegator == delegator
                 && entry.validator == validator
@@ -1293,7 +1472,9 @@ impl PermissionlessRegistry {
             });
         }
         self.delegations[position_index].amount -= amount;
-        self.delegations.retain(|position| position.amount > 0);
+        if self.delegations[position_index].amount == 0 {
+            self.delegations.remove(position_index);
+        }
         Ok(())
     }
 
@@ -1453,23 +1634,16 @@ impl PermissionlessRegistry {
                 .min(amount)
         };
         let target = scale(delegated);
+        let span = self.delegation_span(validator);
         let mut cut_total = 0u64;
-        for position in self
-            .delegations
-            .iter_mut()
-            .filter(|position| position.validator == *validator)
-        {
+        for position in &mut self.delegations[span.clone()] {
             let cut = scale(position.amount);
             position.amount -= cut;
             cut_total = cut_total.saturating_add(cut);
         }
         // The per-position floors can fall short of the delegated share by
         // at most one unit per position.
-        for position in self
-            .delegations
-            .iter_mut()
-            .filter(|position| position.validator == *validator)
-        {
+        for position in &mut self.delegations[span.clone()] {
             if cut_total >= target {
                 break;
             }
@@ -1478,7 +1652,13 @@ impl PermissionlessRegistry {
                 cut_total += 1;
             }
         }
-        self.delegations.retain(|position| position.amount > 0);
+        // A position slashed to nothing leaves the table, highest index first
+        // so the removals cannot shift one another.
+        for index in span.rev() {
+            if self.delegations[index].amount == 0 {
+                self.delegations.remove(index);
+            }
+        }
     }
 
     /// Pending delegation exits remain slashable until they are withdrawn.
@@ -1636,19 +1816,158 @@ mod tests {
             .unwrap();
         reg.register_validator(addr(2), MIN_REGISTRATION_STAKE, 0)
             .unwrap();
-        reg.delegate(addr(9), addr(1), 100).unwrap();
+        reg.delegate(addr(9), addr(1), 250).unwrap();
 
-        reg.move_delegation(addr(9), addr(1), addr(2), 40).unwrap();
-        assert_eq!(reg.delegated_amount(addr(9), addr(1)), 60);
-        assert_eq!(reg.delegated_amount(addr(9), addr(2)), 40);
-        assert_eq!(reg.delegated_stake(&addr(1)), 60);
-        assert_eq!(reg.delegated_stake(&addr(2)), 40);
+        // A new destination position has to clear the same floor a fresh
+        // delegation does: redelegating must not be a way to create the dust
+        // positions the floor exists to prevent.
+        let floor = reg.params().min_delegation_amount;
+        assert!(reg
+            .move_delegation(addr(9), addr(1), addr(2), floor - 1)
+            .is_err());
+        reg.move_delegation(addr(9), addr(1), addr(2), 100).unwrap();
+        assert_eq!(reg.delegated_amount(addr(9), addr(1)), 150);
+        assert_eq!(reg.delegated_amount(addr(9), addr(2)), 100);
+        assert_eq!(reg.delegated_stake(&addr(1)), 150);
+        assert_eq!(reg.delegated_stake(&addr(2)), 100);
 
         // moving the whole position retires the source row
-        reg.move_delegation(addr(9), addr(1), addr(2), 60).unwrap();
+        reg.move_delegation(addr(9), addr(1), addr(2), 150).unwrap();
         assert_eq!(reg.delegated_amount(addr(9), addr(1)), 0);
-        assert_eq!(reg.delegated_amount(addr(9), addr(2)), 100);
+        assert_eq!(reg.delegated_amount(addr(9), addr(2)), 250);
         assert_eq!(reg.delegations_for(&addr(1)).len(), 0);
+    }
+
+    /// The delegation table is addressed by binary search, so it has to stay
+    /// sorted by `(validator, delegator)` whatever order rows arrive in - and
+    /// every lookup has to answer for a row that is not first in the table.
+    ///
+    /// The order is consensus: `root()` hashes the table as it stands, so two
+    /// nodes that received the same positions in different order must still
+    /// produce the same root.
+    #[test]
+    fn the_delegation_table_is_sorted_and_answers_from_any_position() {
+        let mut forward = PermissionlessRegistry::new();
+        let mut backward = PermissionlessRegistry::new();
+        let validators = [addr(3), addr(1), addr(2)];
+        let delegators = [addr(9), addr(7), addr(8)];
+        for validator in validators {
+            for delegator in delegators {
+                forward.delegate(delegator, validator, 100).unwrap();
+            }
+        }
+        for validator in validators.iter().rev() {
+            for delegator in delegators.iter().rev() {
+                backward.delegate(*delegator, *validator, 100).unwrap();
+            }
+        }
+        assert_eq!(
+            forward.delegations, backward.delegations,
+            "arrival order must not decide the table"
+        );
+        assert_eq!(forward.root(), backward.root());
+        assert!(
+            forward
+                .delegations
+                .windows(2)
+                .all(|pair| (pair[0].validator, pair[0].delegator)
+                    < (pair[1].validator, pair[1].delegator)),
+            "the table is sorted by (validator, delegator)"
+        );
+
+        // Every row answers its own lookup, including the last one in the
+        // table and the only row of a validator at the end.
+        for validator in validators {
+            assert_eq!(forward.delegated_stake(&validator), 300);
+            assert_eq!(forward.delegations_for(&validator).len(), 3);
+            for delegator in delegators {
+                assert_eq!(forward.delegated_amount(delegator, validator), 100);
+            }
+        }
+        assert_eq!(forward.delegated_stake(&addr(4)), 0);
+        assert!(forward.delegations_for(&addr(4)).is_empty());
+        assert_eq!(forward.delegated_amount(addr(6), addr(1)), 0);
+    }
+
+    /// One validator cannot be turned into an unbounded slice of the table.
+    #[test]
+    fn a_validator_cannot_carry_more_positions_than_its_cap() {
+        let mut reg = PermissionlessRegistry::new();
+        let validator = addr(1);
+        let cap = 8u64;
+        reg.set_params(RegistryParams {
+            max_delegations_per_validator: cap,
+            min_delegation_amount: 1,
+            ..RegistryParams::default()
+        });
+        for index in 0..cap {
+            let mut byte = [0u8; 32];
+            byte[0] = u8::try_from(index).unwrap();
+            reg.delegate(Address::from(byte), validator, 1).unwrap();
+        }
+        let err = reg
+            .delegate(addr(200), validator, 1)
+            .expect_err("the per-validator cap must refuse another position");
+        assert!(err.contains("maximum of 8"), "got: {err}");
+        // A position already held is still grown: the cap bounds rows, not
+        // stake.
+        reg.delegate(Address::from([0u8; 32]), validator, 1).unwrap();
+        assert_eq!(reg.delegations_for(&validator).len(), cap as usize);
+    }
+
+    /// A new position below the floor is refused, an existing one is not
+    /// re-checked, and the floor is governance-settable rather than fixed.
+    #[test]
+    fn a_dust_position_cannot_be_created() {
+        let mut reg = PermissionlessRegistry::new();
+        let validator = addr(1);
+        reg.set_params(RegistryParams {
+            min_delegation_amount: 100,
+            ..RegistryParams::default()
+        });
+        let err = reg
+            .delegate(addr(9), validator, 99)
+            .expect_err("a position below the floor must be refused");
+        assert!(err.contains("at least 100"), "got: {err}");
+        reg.delegate(addr(9), validator, 100).unwrap();
+        reg.delegate(addr(9), validator, 1).unwrap();
+        assert_eq!(reg.delegated_amount(addr(9), validator), 101);
+    }
+
+    /// The claimable table is sorted by `(validator, delegator)` too, and the
+    /// epoch close credits a whole validator's delegators in one merge.
+    #[test]
+    fn the_epoch_close_credits_a_whole_validator_in_one_merge() {
+        let mut reg = PermissionlessRegistry::new();
+        let first = addr(1);
+        let second = addr(2);
+        // A reward already held for the second validator has to survive a
+        // merge that touches only the first.
+        reg.credit_claimable_reward(addr(5), second, 7).unwrap();
+        reg.credit_claimable_reward(addr(4), first, 3).unwrap();
+        let credited = reg
+            .credit_claimable_rewards(
+                first,
+                &[(addr(2), 10), (addr(4), 5), (addr(8), 20)],
+            )
+            .unwrap();
+        assert_eq!(credited, 35);
+        assert_eq!(reg.claimable_reward(addr(2), first), 10);
+        assert_eq!(reg.claimable_reward(addr(4), first), 8);
+        assert_eq!(reg.claimable_reward(addr(8), first), 20);
+        assert_eq!(reg.claimable_reward(addr(5), second), 7);
+        assert_eq!(reg.claimable_reward(addr(4), second), 0);
+        assert!(
+            reg.claimable_rewards
+                .windows(2)
+                .all(|pair| (pair[0].validator, pair[0].delegator)
+                    < (pair[1].validator, pair[1].delegator)),
+            "the claimable table is sorted by (validator, delegator)"
+        );
+        // Every row is still claimable exactly once.
+        assert_eq!(reg.claim_delegator_rewards(addr(4), first).unwrap(), 8);
+        assert!(reg.claim_delegator_rewards(addr(4), first).is_err());
+        assert_eq!(reg.claimable_reward(addr(5), second), 7);
     }
 
     #[test]
