@@ -191,6 +191,8 @@ services:
       - "--rpc-url=http://rpc:8545"
       - "--key-file=/home/budlum/ceremony/faucet.seed"
       - "--listen=0.0.0.0:18600"
+      # Local rehearsal only; Docker's NAT can make clients share one IP.
+      - "--allow-direct"
     depends_on:
       - rpc
 
@@ -206,6 +208,7 @@ services:
       - "--rpc-url=http://rpc:8545"
       - "--db=/home/budlum/data/indexer"
       - "--listen=0.0.0.0:18700"
+      - "--allow-direct"
     depends_on:
       - rpc
 

@@ -182,6 +182,17 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
+      - name: Public service admission tests
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          cargo test --bin budlum-faucet --bin budlum-indexer 2>&1 | tee /tmp/public-service-tests.log
+          for name in direct_and_proxy_modes_are_explicit_and_fail_closed a_partial_request_body_times_out incomplete_headers_expire_and_release_a_connection_slot; do
+            grep -Eq "${name} \.\.\. ok" /tmp/public-service-tests.log || {
+              echo "::error::public service regression $name did not pass"
+              exit 1
+            }
+          done
   budlum-bpqs:
     # P02-F04 (BLG-0040): crates/bpqs was a package no workflow tested - the
     # fuzz target and a cargo-hack check were not a test gate. The research
