@@ -112,6 +112,9 @@ pub enum NetworkMessage {
         voter_id: String,
         sig_bls: Vec<u8>,
         auth_sig: Vec<u8>,
+        /// The signer's ML-DSA attestation of the same checkpoint; see
+        /// [`crate::chain::finality::Precommit::pq_sig`].
+        pq_sig: Vec<u8>,
     },
 
     FinalityCert {
@@ -324,6 +327,7 @@ mod tests {
                         voter_id: voter_id.clone(),
                         sig_bls: vec![1; 48],
                         auth_sig: vec![2; 48],
+                        pq_sig: vec![3; 16],
                     }
                 } else {
                     NetworkMessage::Prevote {

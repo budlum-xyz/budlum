@@ -222,6 +222,32 @@ fn precommit_height_is_new(signed_height: u64, last_precommit_height: u64) -> bo
     signed_height > last_precommit_height
 }
 
+/// Whether a refused vote was refused for belonging to another round rather
+/// than for being wrong.
+///
+/// A vote only counts in an aggregator holding its own checkpoint, and an
+/// aggregator holds one round at a time: a validator one block behind signs
+/// the checkpoint it sees, and every node whose round has already moved on
+/// refuses it. That voter is honest - it is at a different tip, which the
+/// fork choice resolves - so the refusal says nothing about the sender.
+/// Charging bad behaviour for it is how a mesh bans its own validators, which
+/// is what the devnet did once the vote beat got fast enough to produce
+/// cross-round votes.
+fn refusal_is_round_scope(error: &str) -> bool {
+    [
+        "Prevote epoch mismatch",
+        "Prevote checkpoint height mismatch",
+        "Precommit epoch mismatch",
+        "Precommit checkpoint height mismatch",
+        "Duplicate prevote",
+        "Duplicate precommit",
+        "Cannot precommit before prevote quorum",
+        "No active finality aggregator",
+    ]
+    .iter()
+    .any(|refusal| error.contains(refusal))
+}
+
 /// First `max_chars` characters of a peer controlled string, for log lines.
 ///
 /// A byte slice such as `&s[..16]` panics when byte 16 is inside a multi byte
@@ -2392,7 +2418,16 @@ impl Node {
 
         let mut gc_interval = tokio::time::interval(Duration::from_secs(60));
         let mut discovery_interval = tokio::time::interval(Duration::from_secs(300));
-        let mut finality_interval = tokio::time::interval(Duration::from_secs(30));
+        // The vote beat. A checkpoint is `finality_checkpoint_interval` blocks
+        // away (two on the devnet, about 2.4 s) and an aggregator holds one
+        // round at a time, so the beat has to be well inside a round: on a
+        // 30 s beat the devnet mesh started 445 rounds and cast five votes,
+        // and every round was displaced before a quorum could form. One
+        // command round trip per beat is the cost.
+        let mut finality_interval = tokio::time::interval(Duration::from_millis(250));
+        // The health tick keeps its own, slower beat - it used to share the
+        // finality beat, and at 250 ms it would fire four times a second.
+        let mut finality_health_interval = tokio::time::interval(Duration::from_secs(30));
         let mut qc_retry_interval = tokio::time::interval(QC_RETRY_DELAY);
         let mut slashing_gossip_interval = tokio::time::interval(Duration::from_secs(5));
         let mut dht_interval = tokio::time::interval(DHT_BOOTSTRAP_INTERVAL);
@@ -2480,11 +2515,12 @@ impl Node {
                     self.pending_qc_fetches.retain(|pending| pending.height > finalized);
                     self.drain_qc_fetches();
                 }
-                _ = finality_interval.tick() => {
+                _ = finality_health_interval.tick() => {
                     // Every node checks its own view, validator or not,
-                    // so the health tick runs before the validator gate.
+                    // so the health tick runs on a beat of its own.
                     self.regen_health_tick().await;
-
+                }
+                _ = finality_interval.tick() => {
                     // Resolve validator address lazily
                     if self.validator_address.is_none() {
                         self.validator_address = self.chain.get_validator_address().await;
@@ -2528,6 +2564,7 @@ impl Node {
                                     voter_id: voter_addr.to_hex(),
                                     sig_bls: precommit.sig_bls,
                                     auth_sig: precommit.auth_sig,
+                                    pq_sig: precommit.pq_sig,
                                 };
                                 // The mark is durable before the
                                 // bytes leave on the wire.
@@ -3781,6 +3818,10 @@ impl Node {
                                             }
                                             Err(e) => {
                                                 warn!("Prevote from {peer_id} rejected: {e}");
+                                                if refusal_is_round_scope(&e) {
+                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                    continue;
+                                                }
                                                 self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                 self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
                                                 continue;
@@ -3788,7 +3829,7 @@ impl Node {
                                         }
                                     }
 
-                                    NetworkMessage::Precommit { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls, auth_sig } => {
+                                    NetworkMessage::Precommit { epoch, checkpoint_height, checkpoint_hash, voter_id, sig_bls, auth_sig, pq_sig } => {
                                         let rate_limit_ok = self.peer_manager_lock().check_vote_rate_limit(&peer_id);
                                         if !rate_limit_ok {
                                             warn!("Peer {peer_id} exceeded vote rate limit or lock error. Ignoring Precommit.");
@@ -3817,6 +3858,7 @@ impl Node {
                                             voter_id: voter_addr,
                                             sig_bls,
                                             auth_sig,
+                                            pq_sig,
                                         };
                                         match self.chain.handle_precommit(precommit).await {
                                             Ok(Some(cert)) => {
@@ -3850,6 +3892,10 @@ impl Node {
                                             }
                                             Err(e) => {
                                                 warn!("Precommit from {peer_id} rejected: {e}");
+                                                if refusal_is_round_scope(&e) {
+                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                    continue;
+                                                }
                                                 self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                 self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
                                                 continue;
