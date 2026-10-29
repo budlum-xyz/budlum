@@ -133,7 +133,13 @@ bud graft intent --key-file wallet.key --graft-id <hex> --call-hash <hex> \
   leave at least 8 blocks before expiry, and no new bid is accepted after it.
   A solver should wait for the award to be finalized before acting.
 - The awarded solver makes the call through the domain's executor contract and
-  submits its fulfilment event (`bud graft fulfill --evidence result.json`):
+  submits its fulfilment event (`bud graft fulfill --evidence result.json`).
+  The executor takes no solver argument: the origin-chain account binds its
+  Budlum solver address once with `registerSolverKey`, the binding is
+  immutable, and every fulfilment it emits names that address. An unbound
+  account cannot fulfil, and one account cannot name another solver's key -
+  which is what keeps a copied delivery from being attributed, and paid, to
+  whoever submitted it:
 
 | Message field | Value |
 |---|---|
