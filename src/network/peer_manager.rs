@@ -621,6 +621,28 @@ impl PeerManager {
             self.ban_peer(peer_id);
         }
     }
+    /// A request this node sent came back unanswered.
+    ///
+    /// Asking a peer for a header batch or a block range is this node's own
+    /// decision, and the answer can fail for reasons that say nothing about
+    /// the peer: a connection that churned mid-flight, a peer busy importing
+    /// the blocks it already has, a request the transport dropped. The score
+    /// still moves - a peer that never answers sinks in `get_best_peers` and
+    /// stops being chosen as a sync source - but it does not reach the ban
+    /// threshold, because a ban is one hour of silence and a four-validator
+    /// mesh that bans one of its own on a dropped request can no longer reach
+    /// a finality quorum. Refusals that prove malice keep their own paths:
+    /// an invalid block, a forged vote, an oversized message.
+    pub fn report_unanswered_request(&mut self, peer_id: &PeerId) {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
+        score.score = score
+            .score
+            .saturating_add(SLOW_SYNC_PENALTY)
+            .max(MIN_SCORE.saturating_add(1));
+        score.last_seen = Some(Instant::now());
+    }
     pub fn report_invalid_handshake(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
@@ -1265,6 +1287,9 @@ mod tests {
             ("report_bad_behavior", |m, p| m.report_bad_behavior(p)),
             ("report_good_behavior", |m, p| m.report_good_behavior(p)),
             ("report_timeout", |m, p| m.report_timeout(p)),
+            ("report_unanswered_request", |m, p| {
+                m.report_unanswered_request(p)
+            }),
             ("report_slow_sync", |m, p| m.report_slow_sync(p)),
             ("report_invalid_handshake", |m, p| {
                 m.report_invalid_handshake(p)
