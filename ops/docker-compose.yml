@@ -53,7 +53,19 @@ services:
         joiner=$$(bud validator init --chain-id 45262 --moniker node5 \
           --key-file "$$dir/node5.key" --record-out "$$dir/node5.json" \
           | sed -n 's/^validator address: //p')
+        # The genesis clock starts now. Without a stamp the assembled
+        # genesis keeps the template's zero, so every block this devnet
+        # produces is stamped decades behind the wall clock and the leader
+        # round ladder reads the whole chain as a stalled slot: every
+        # validator then wins its draw, every validator produces one block a
+        # second, and the resulting four-fold block rate keeps the chain
+        # permanently behind - one bookkeeping storm that no round can close,
+        # with the vote beat, the sync rounds and the RPC all starved behind
+        # it. A devnet is a rehearsal of wall-clock slots, so it starts at
+        # wall-clock time.
+        stamp_ms=$$(date +%s%3N)
         bud genesis assemble --network devnet --operators "$$dir/operators" \
+          --timestamp-ms "$$stamp_ms" \
           --fund "$$joiner:10000000" \
           --community b0d0000000000000000000000000000000000000000000000000000000000001 \
           --liquidity b0d0000000000000000000000000000000000000000000000000000000000002 \
