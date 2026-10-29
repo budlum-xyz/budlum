@@ -5353,7 +5353,7 @@ mod tests {
     /// Strip the aux (LogUp) trace from an honest proof: the commitment and
     /// both openings together.
     ///
-    /// This is the shape of P15-F01, but built from a proof that was made
+    /// This is the shape of , but built from a proof that was made
     /// with the aux trace, so the PCS opening argument still covers it and
     /// the verifier must refuse. The forged shape, a proof that the prover
     /// built with no aux generator at all, is not tested here: it needs the
@@ -5907,7 +5907,7 @@ mod tests {
         }
     }
 
-    /// P15-F02: one proof has exactly one encoding. Bytes appended after a
+    /// One proof has exactly one encoding. Bytes appended after a
     /// valid proof are refused, so the proof hash and the relay fingerprint
     /// cannot be varied without invalidating the proof.
     #[test]
@@ -6147,7 +6147,7 @@ mod tests {
         });
     }
 
-    ///: PrivacyCommit Poseidon3 binding proves + verifies.
+    /// PrivacyCommit Poseidon3 binding proves + verifies.
     #[test]
     fn d2_proves_privacy_commit() {
         let amount = 100u64;
@@ -6427,7 +6427,7 @@ mod tests {
         assert_eq!(encoded & 0xFF, 0x1E);
     }
 
-    /// P12-F01: each VerifyMerkle level hashes
+    /// Each VerifyMerkle level hashes
     /// with a single Poseidon round, which has no second preimage resistance,
     /// so the opcode must stay closed in production. This pins the closed
     /// gate where proofs are consumed: the default activation refuses the
@@ -9481,7 +9481,7 @@ mod tests {
     }
 
     /// A public scalar at or above the modulus is the same field element as
-    /// `value - p` (BLG-0218). One proof must not verify for both.
+    /// `value - p`. One proof must not verify for both.
     #[test]
     fn rejects_a_non_canonical_public_scalar() {
         let program = vec![
@@ -9627,7 +9627,7 @@ mod tests {
     /// Helper: prove a trivial Add+Halt program and return the envelope + the
     /// public inputs.
     ///
-    /// BLG-0232 (P14-F02): the old helper doc claimed the caller's
+    /// The old helper doc claimed the caller's
     /// between-prove-and-verify mutation "asserts that the AIR rejects" -
     /// it asserted nothing of the sort. The envelope pins
     /// `public_inputs_hash`, so a mutated `pi` was always refused at the
@@ -9640,7 +9640,7 @@ mod tests {
     /// reject. Fields whose AIR binding is an equality to the public inputs
     /// the prover itself copies (gas_limit, chain_id, exit_code, trace_len,
     /// event digest limbs 1..7) would PASS such a test - that gap is the
-    /// AIR-side finding P12-F04/P13-F01, tracked there, not papered over
+    /// AIR-side finding , tracked there, not papered over
     /// by a test that asserts acceptance.
     fn build_arith_proof() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
         build_arith_proof_forged(|_| {})
@@ -9648,7 +9648,7 @@ mod tests {
 
     /// Prove with a FORGED public input baked in before proving: the envelope
     /// hash matches the forged values, so a verification failure can only
-    /// come from the AIR constraints (BLG-0232/P14-F02).
+    /// come from the AIR constraints.
     fn build_arith_proof_forged(
         forge: impl FnOnce(&mut ExecutionPublicInputs),
     ) -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
@@ -9712,7 +9712,7 @@ mod tests {
     /// The AIR-level version of the test above: the forgery is baked in
     /// BEFORE proving, so the envelope agrees and only the constraint that
     /// compares the committed final memory fold against `COL_FINAL_ROOT` can
-    /// reject (BLG-0232/P14-F02).
+    /// reject.
     #[test]
     fn air_rejects_a_forged_final_state_root_baked_in_before_proving() {
         let (envelope, pi, program) =
@@ -9735,7 +9735,7 @@ mod tests {
         );
     }
 
-    /// BLG-0232 (P14-F02): the initial image is bound through the
+    /// The initial image is bound through the
     /// commitment of the read rows; baked in, the fold comparison still
     /// refuses the forgery.
     #[test]
@@ -9754,9 +9754,9 @@ mod tests {
         let (envelope, mut pi, program) = build_arith_proof();
         // Gas_limit differs from what the trace recorded.
         pi.gas_limit = pi.gas_limit.wrapping_add(1);
-        // BLG-0232 (P14-F02): the rejection here is the envelope hash gate -
+        // The rejection here is the envelope hash gate -
         // pinned by variant, not by `is_err`. An AIR-level binding for
-        // gas_limit is P12-F04's job (the column's only reader is the compare
+        // gas_limit is 's job (the column's only reader is the compare
         // to public inputs the prover copies), so baking this forgery in
         // would prove the hole, not close it.
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);

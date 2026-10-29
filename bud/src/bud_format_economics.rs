@@ -15,7 +15,7 @@ pub struct BudEconomics {
 }
 
 impl BudEconomics {
-    /// Monthly cost per TB. K38: an invalid ratio (<=0 or non-finite) -> +inf (it can NEVER
+    /// Monthly cost per TB.: an invalid ratio (<=0 or non-finite) -> +inf (it can NEVER
     /// hold the ceiling - an honest REFUSAL); IEEE division is not trusted. device_only -> 0 (free on device).
     pub fn cost_per_tb_month(&self) -> f64 {
         if self.device_only {
@@ -46,22 +46,22 @@ fn within_ceiling(cost: f64, ceiling: f64) -> bool {
     cost.is_finite() && ceiling.is_finite() && cost <= ceiling + 1e-12
 }
 
-/// The K60 zero-egress model (research: an R2-like zero-egress CDN, p.190):
+/// The zero-egress model (research: an R2-like zero-egress CDN, p.190):
 /// IN-NETWORK access (the same B.U.D. network, a CDN cache, a peer) has ZERO egress; only
 /// egress to the internet is charged. Egress is not added to the storage cost (a business model advantage).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressZone {
-    InNetwork, // the same network/CDN - zero egress (K60)
+    InNetwork, // the same network/CDN - zero egress
     Internet,  // external egress - charged at the rate
 }
 
-/// Egress cost: InNetwork is always 0 (the zero-egress guarantee, K60).
+/// Egress cost: InNetwork is always 0 (the zero-egress guarantee).
 pub fn egress_cost(zone: EgressZone, tb: f64, rate_usd_per_tb: f64) -> f64 {
     match zone {
         EgressZone::InNetwork => 0.0,
         EgressZone::Internet => {
             if !rate_usd_per_tb.is_finite() || rate_usd_per_tb < 0.0 {
-                f64::INFINITY // a broken ratio -> an honest REFUSAL (K38)
+                f64::INFINITY // a broken ratio -> an honest REFUSAL
             } else {
                 tb.max(0.0) * rate_usd_per_tb
             }
@@ -134,12 +134,12 @@ pub fn flat_price(
         || !measured_ratio.is_finite()
         || measured_ratio <= 0.0
     {
-        return f64::INFINITY; // K38: broken input -> an honest REFUSAL
+        return f64::INFINITY; // Broken input -> an honest REFUSAL
     }
     physical_usd_per_tb_month * erasure_multiplier / measured_ratio
 }
 
-/// The SINGLE PRICE gate: does it hold the ceiling? (K19 - with the measured ratio)
+/// The SINGLE PRICE gate: does it hold the ceiling? (with the measured ratio)
 pub fn flat_holds_ceiling(physical: f64, erasure: f64, ratio: f64, ceiling: f64) -> bool {
     within_ceiling(flat_price(physical, erasure, ratio), ceiling)
 }
@@ -203,7 +203,7 @@ pub fn pipeline_holds_ceiling(
 }
 /// F3/F1151 TAPE ARCHIVE CLASS - cold content on tape (0 W idle):
 /// LTO-9 is about 5 USD/TB (30 years); 1 PB over 10 years costs 30K USD versus 480K USD on disk; power/cooling about 1 percent.
-/// NOT RECONCILED (P38-F05): 0.003 USD/GB/year is 3 USD/TB/year = 0.25 USD/TB/month,
+/// NOT RECONCILED: 0.003 USD/GB/year is 3 USD/TB/year = 0.25 USD/TB/month,
 /// a factor of 1000 above the constant below, and the 5 USD/TB over 30 years above
 /// gives about 0.0139 USD/TB/month. The constant is kept as measured by F3 until the
 /// owner re-derives it; do not quote the 0.016 archive target from it.
@@ -437,7 +437,7 @@ mod tests {
     }
     #[test]
     fn k60_egress_zero_in_network() {
-        // K60: in-network access has zero egress - even 10 TB is free
+        // In-network access has zero egress - even 10 TB is free
         assert_eq!(egress_cost(EgressZone::InNetwork, 10.0, 0.005), 0.0);
         assert!(
             holds_egress(EgressZone::InNetwork, 10.0, 0.005, 0.0),
@@ -449,7 +449,7 @@ mod tests {
             !holds_egress(EgressZone::Internet, 1.0, 0.005, 0.001),
             "1 TB of internet egress does not hold a 0.001 budget"
         );
-        // bozuk oran → +inf (K38)
+        // bozuk oran → +inf
         assert_eq!(egress_cost(EgressZone::Internet, 1.0, -1.0), f64::INFINITY);
         assert_eq!(
             egress_cost(EgressZone::Internet, 1.0, f64::NAN),
@@ -520,14 +520,14 @@ mod tests {
             (p1 / pcold - 2.0).abs() < 0.05,
             "cold is 50 percent cheaper: {p1} vs {pcold}"
         );
-        // broken input -> +inf (K38)
+        // broken input -> +inf
         assert_eq!(residual_price(-1.0, 1.143, 0.0, 0.23342), f64::INFINITY);
         assert_eq!(residual_price(1.0, 0.5, 0.0, 0.23342), f64::INFINITY);
         assert_eq!(residual_price(f64::NAN, 1.143, 0.0, 0.23342), f64::INFINITY);
     }
     #[test]
     fn invalid_ratio_is_honest_inf() {
-        // K38: oran <=0 / NaN → +inf (tavan asla tutmaz, panik/NaN yok)
+        // Oran <=0 / NaN → +inf (tavan asla tutmaz, panik/NaN yok)
         let zero = BudEconomics {
             physical_usd: 0.23342,
             expansion: 1.286,

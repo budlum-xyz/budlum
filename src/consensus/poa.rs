@@ -212,7 +212,7 @@ impl PoAEngine {
     /// `block_index` and the active validator set fingerprint so the next
     /// Leader is not a trivial sequential prediction. Still fully
     /// Deterministic (all nodes agree); full VRF can replace this later.
-    /// Test-only convenience wrapper (P01-F21: production routes through
+    /// Test-only convenience wrapper (production routes through
     /// `expected_proposer_with_entropy`).
     #[cfg(test)]
     pub fn expected_proposer<'a>(
@@ -225,7 +225,7 @@ impl PoAEngine {
 
     /// Expected proposer with external entropy for unpredictability.
     ///
-    /// `round` is the leader-failure retry term (P01-F02): a slot whose
+    /// `round` is the leader-failure retry term: a slot whose
     /// round-0 leader is offline advances to round 1 on timeout, and each
     /// round hashes to a different leader. Validation recovers the round
     /// from `block.nonce`.
@@ -246,7 +246,7 @@ impl PoAEngine {
     /// Public inputs (block_index + validator set), allowing DoS/bribery
     /// Attacks. Now the leader is unpredictable until the previous block
     /// Is produced, since its hash is unknown beforehand.
-    /// Test-only convenience wrapper (P01-F21).
+    /// Test-only convenience wrapper.
     #[cfg(test)]
     pub fn leader_slot(block_index: u64, active_validators: &[&Validator]) -> Option<usize> {
         Self::leader_slot_with_entropy(block_index, active_validators, &[0u8; 32], 0)
@@ -254,9 +254,9 @@ impl PoAEngine {
 
     /// Leader selection with external entropy (e.g., previous block hash).
     ///
-    /// The round term (P01-F02) re-rolls the pick for a stalled slot. The
+    /// The round term re-rolls the pick for a stalled slot. The
     /// nonce is the round and is capped and time-priced in validation
-    /// (P01-F10), so the leader of one slot cannot farm favourable next
+    /// so the leader of one slot cannot farm favourable next
     /// leaders by varying the nonce: only `0..MAX_LEADER_ROUNDS` exist and
     /// claiming a later one costs wall time. Production timestamps come from
     /// the slot schedule (`planned_block_timestamp`), so the header fields
@@ -286,7 +286,7 @@ impl PoAEngine {
         // This makes the leader unpredictable until the previous block
         // Is durably committed - preventing pre-computation attacks.
         hasher.update(entropy);
-        // P01-F02: the retry round re-rolls the leader for a stalled slot.
+        // The retry round re-rolls the leader for a stalled slot.
         hasher.update(round.to_le_bytes());
         // Fingerprint the ordered set (callers pass address-sorted active set).
         hasher.update((n as u64).to_le_bytes());
@@ -324,7 +324,7 @@ impl PoAEngine {
             our_addrs.push(Address::from(kp.public_key_bytes()));
         }
 
-        // Leader rounds (P01-F02). The affordable rounds are priced by wall
+        // Leader rounds. The affordable rounds are priced by wall
         // time since the parent landed: round `r` needs
         // `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS` to have elapsed, the
         // same floor validation applies. A slot whose round-0 leader is
@@ -353,7 +353,7 @@ impl PoAEngine {
             if our_addrs.contains(&expected.address) {
                 block.producer = Some(expected.address);
                 // The block nonce carries the round; validation reads it back
-                // and re-prices it (P01-F10: the nonce is no longer a free
+                // and re-prices it (the nonce is no longer a free
                 // grinding field).
                 block.nonce = round;
                 if let Some(prev_ts) = parent_timestamp {
@@ -452,7 +452,7 @@ impl PoAEngine {
 
 impl ConsensusEngine for PoAEngine {
     /// The identity master registry opens writes on the PoA authority's
-    /// chain and nowhere else (identity architecture note §2). This is that declaration:
+    /// chain and nowhere else (identity architecture note). This is that declaration:
     /// the gate reads it from the engine the node itself started with.
     fn domain_kind(&self) -> crate::domain::ConsensusKind {
         crate::domain::ConsensusKind::PoA
@@ -464,7 +464,7 @@ impl ConsensusEngine for PoAEngine {
     }
 
     /// Chain-aware preview: the parent timestamp prices the leader rounds
-    /// (P01-F02), so production must go through this variant.
+    /// so production must go through this variant.
     fn preview_block_with_chain(
         &self,
         block: &mut Block,
@@ -472,7 +472,7 @@ impl ConsensusEngine for PoAEngine {
         chain: &[crate::core::block::Block],
     ) -> Result<(), ConsensusError> {
         let expected = self.prepare_common(block, state, chain.last().map(|p| p.timestamp))?;
-        // P01-F24: refuse a slot we do not lead before the caller applies any
+        // Refuse a slot we do not lead before the caller applies any
         // state. `prepare_common` names the round-0 leader for display when no
         // affordable round names us; previewing through to the end made every
         // non-leader PoA node compute the full state transition and then fail
@@ -534,7 +534,7 @@ impl ConsensusEngine for PoAEngine {
 
         let active_refs = self.active_authorities(state);
         if !active_refs.is_empty() {
-            // The block nonce carries the leader round (P01-F02, P01-F10).
+            // The block nonce carries the leader round.
             // The round is capped, and claiming a later one is time-priced,
             // so the nonce is a bounded retry term and not a free grinding
             // field for steering the next slot's leader.
@@ -1008,7 +1008,7 @@ mod tests {
         );
     }
 
-    ///: an authority whose key set holds its ML-DSA-65 key signs the
+    /// an authority whose key set holds its ML-DSA-65 key signs the
     /// composite block form, and the block verifies.
     #[test]
     fn a_poa_authority_with_a_pq_key_signs_composite_blocks() {

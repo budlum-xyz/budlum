@@ -50,7 +50,7 @@ pub const FINALITY_DEPTH: usize = 50;
 pub const MAX_VALIDATOR_SNAPSHOTS: usize = 100;
 /// Upper bound of the slashing evidence pool. The pool is copied into the next
 /// block, so it must stay small.
-/// BLG-0105 (P04-F23): how long an alarm stays in the ledger.
+/// How long an alarm stays in the ledger.
 /// Orders of magnitude past any honest audit window and still finite -
 /// "never trimmed" was the finding.
 const ALARM_RETENTION_BLOCKS: u64 = 100_000;
@@ -132,11 +132,11 @@ pub struct Blockchain {
         ),
     >,
     pub plugin_registry: DomainPluginRegistry,
-    /// Durable K3/K4 alarm & quarantine ledger (E1). Node-local and persisted
+    /// Durable alarm & quarantine ledger. Node-local and persisted
     /// through the storage layer; deliberately not folded into the state root
     /// (see `registry/quarantine_ledger.rs`).
     pub quarantine_ledger: crate::registry::QuarantineLedger,
-    /// BLG-0105 (P04-F23): the ledger is written once per block while this
+    /// The ledger is written once per block while this
     /// is set, not once per event.
     pub quarantine_dirty: bool,
     pub pending_slashing_evidence: Vec<SlashingEvidence>,
@@ -144,7 +144,7 @@ pub struct Blockchain {
     pub local_invalid_votes: crate::registry::InvalidVoteTracker,
     pub finality_aggregator: Option<FinalityAggregator>,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
-    /// BLG-0076 (P03-F19): the anchor emission trace, run on every
+    /// The anchor emission trace, run on every
     /// checkpoint header a committed block carries; the default is GatedOff
     /// (skip).
     pub anchor_emission: AnchorEmission,
@@ -156,7 +156,7 @@ pub struct Blockchain {
     /// local recomputation of its aggregate root uses the class it was signed
     /// with. Bounded, memory only.
     anchor_classes: BTreeMap<u64, crate::crypto::facts::QuantumClass>,
-    /// BLG-0076 (P03-F19): the cold-wallet committee state, when the node
+    /// The cold-wallet committee state, when the node
     /// runs with a cold committee. `None` today; the rotation entry on this
     /// chain exercises cold_wallet + cold_quorum through pq_anchor.
     pub cold_wallet: Option<ColdWalletState>,
@@ -583,7 +583,7 @@ impl Blockchain {
                     panic!("Genesis ceremony validation failed: {e}");
                 }
             } else if matches!(network, crate::core::chain_config::Network::Mainnet) {
-                // BLG-0174 (P08-F08): mainnet must never skip the ceremony.
+                // Mainnet must never skip the ceremony.
                 // The warning-only path existed for the pre-launch skeletons
                 // (the ceremony addresses arrive at launch); a MAINNET
                 // genesis that declares no ceremony addresses is a mainnet
@@ -749,7 +749,7 @@ impl Blockchain {
                             #[cfg(test)]
                             panic!("Mainnet startup refuses unsigned V1 snapshot fallback");
                         }
-                        // BLG-0175 (P08-F09): the V1 fallback restored only
+                        // The V1 fallback restored only
                         // balances and nonces - validators, registry, epoch
                         // and roots stayed at genesis - and then logged
                         // "Restored state", which is a half-truth at best.
@@ -787,7 +787,7 @@ impl Blockchain {
                 // The snapshot is ahead of the stored chain, so it cannot be
                 // trusted for this chain. Drop it and start from the genesis
                 // state, or every block would be applied on top of a state
-                // that already holds its effects (BLG-0168).
+                // that already holds its effects.
                 state = resolved_genesis_config.build_state();
                 state.execution_domain = consensus.domain_kind();
                 restored_finalized_height = 0;
@@ -1282,7 +1282,7 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Freeze an address in a PoA domain (BLG-0091 / P04-F09).
+    /// Freeze an address in a PoA domain.
     ///
     /// Freezing may only be done in permissioned (PoA) domains and only on a
     /// NAMED admin's authority - the bare `bool` that anybody could pass is
@@ -1305,7 +1305,7 @@ impl Blockchain {
         self.apply_poa_compliance_request(domain_id, admin, address, reason_hash, false)
     }
 
-    /// BLG-0091 (P04-F09): the reverse of [`Self::freeze_poa_account`],
+    /// The reverse of [`Self::freeze_poa_account`],
     /// with the same authority rules.
     ///
     /// WIRING: the direct-API half of the PoA compliance door, twin of
@@ -1379,7 +1379,7 @@ impl Blockchain {
         result.map_err(|e| format!("{e:?}"))
     }
 
-    /// Apply the governance-queued PoA compliance requests (BLG-0091),
+    /// Apply the governance-queued PoA compliance requests ,
     /// mirroring the governance domain unfreezes: the queue is drained at
     /// block close and each request runs the same verification path as the
     /// direct API.
@@ -1415,7 +1415,7 @@ impl Blockchain {
     pub fn submit_slashing_evidence(&mut self, evidence: SlashingEvidence) -> Result<(), String> {
         // Cheap checks first. Any peer can sign headers with a throwaway key,
         // so the producer must be a known validator and the headers must be
-        // for this chain, and the pool is bounded (BLG-0171).
+        // for this chain, and the pool is bounded.
         if evidence.header1.chain_id != self.chain_id || evidence.header2.chain_id != self.chain_id
         {
             return Err("Slashing evidence is for another chain".into());
@@ -1544,7 +1544,7 @@ impl Blockchain {
             .quarantine_entity(target, reason, height);
         self.quarantine_ledger
             .record_alarm(code, message, height, severity);
-        // BLG-0105 (P04-F23): no whole-ledger rewrite per event - the
+        // No whole-ledger rewrite per event - the
         // ledger is persisted once at block close (next to the pending
         // queues), tagged dirty here.
         self.quarantine_dirty = true;
@@ -2001,7 +2001,7 @@ impl Blockchain {
                 .at(height)
                 .map(|seal| seal.digest()),
         };
-        //: a seal whose post-quantum families the alarm took out of the
+        // a seal whose post-quantum families the alarm took out of the
         // scheme registry is not a source any more; the tick then descends to
         // the next stage that still has a live seal.
         let live = self
@@ -2018,7 +2018,7 @@ impl Blockchain {
     }
 
     /// The quantum alarm and the observed crypto facts of every native domain
-    ///: what `bud_getQuantumAlarm` and `bud_getDomainInfo` show.
+    /// what `bud_getQuantumAlarm` and `bud_getDomainInfo` show.
     #[must_use]
     pub fn quantum_view(&self) -> serde_json::Value {
         let domains: Vec<serde_json::Value> = self
@@ -2138,7 +2138,7 @@ impl Blockchain {
             // Anchor AI Inference Layer into global settlement.
             // When AiRegistry has any state, its root is committed here;
             // When empty, None ensures no bloat. This fulfills Paradigma
-            // §5 - AI outcomes are cryptographically provable at settlement.
+            // - AI outcomes are cryptographically provable at settlement.
             ai_root: if self.state.ai_registry.is_empty() {
                 None
             } else {
@@ -2254,7 +2254,7 @@ impl Blockchain {
     }
 
     /// Rotate the anchor signing key with the cold-wallet committee
-    /// (BLG-0076 / P03-F19 production entry): pq_anchor's cold channel drives
+    /// ( production entry): pq_anchor's cold channel drives
     /// cold_wallet's quorum signature and cold_quorum's verification. The
     /// wallet must be configured on this chain; the committee is read from
     /// its pinned trusted-device set (S2).
@@ -2315,7 +2315,7 @@ impl Blockchain {
     }
 
     /// Test harness only: the body of the `BridgeTx::Mint` door without the
-    /// carrier bond. The block hash stays mandatory (security audit §9).
+    /// carrier bond. The block hash stays mandatory (security audit).
     ///
     /// # Errors
     ///
@@ -2452,7 +2452,7 @@ impl Blockchain {
     }
 
     /// Test harness only: the body of the `BridgeTx::Unlock` door without
-    /// the carrier bond. The block hash stays mandatory (security audit §9).
+    /// the carrier bond. The block hash stays mandatory (security audit).
     ///
     /// # Errors
     ///
@@ -2636,7 +2636,7 @@ impl Blockchain {
                 let _ = self.state.slash_from_report(report);
                 if let Some(v) = self.state.validators.get_mut(&report.offender) {
                     if !v.slashed {
-                        // Timed jail, not a permanent slash (BLG-0087,
+                        // Timed jail, not a permanent slash (
                         // decision B): see `apply_epoch_close_liveness`.
                         v.active = false;
                         v.jailed = true;
@@ -3286,7 +3286,7 @@ impl Blockchain {
             let mut height = (tip / checkpoint_interval) * checkpoint_interval;
             while height >= checkpoint_interval {
                 if let Ok(Some(cert)) = store.get_finality_cert(height) {
-                    // BLG-0186 (P09-F07): a stored cert is adopted only when
+                    // A stored cert is adopted only when
                     // its checkpoint hash matches the block actually at that
                     // height on THIS chain. Adopting whatever the disk holds
                     // let a cert for another fork set the finalized marker.
@@ -3320,7 +3320,7 @@ impl Blockchain {
             }
         }
 
-        // P01-F04: the rescan may have restored finality; let the engine
+        // The rescan may have restored finality; let the engine
         // promote any parked boundary checkpoints it covers.
         self.consensus.note_finalized_height(
             self.finalized_height,
@@ -3335,14 +3335,14 @@ impl Blockchain {
         verdict: QcProofVerdict,
     ) -> Result<(), String> {
         if verdict.slash_validator || verdict.action == QcProofAction::SlashValidator {
-            // BLG-0187 (P09-F08): a stake slash applied directly to
+            // A stake slash applied directly to
             // `self.state` from the gossip/RPC import path mutates state that
             // lives in the state root OUTSIDE block execution - every node
             // that saw the proof would compute a different root from every
             // node that did not. The old path also dropped the result
             // (`let _ =`), so even the caller could not tell what moved.
             // The slash is refused here; it applies only when a block carries
-            // it as an effect. Until that carrier exists (with the P01-F22
+            // it as an effect. Until that carrier exists (with the
             // proof path), the verdict records nothing and moves nothing.
             return Err(
                 "QC fault verdict slash refused: stake moves only inside block \
@@ -3387,7 +3387,7 @@ impl Blockchain {
 
         self.require_checkpoint_epoch(blob.epoch, blob.checkpoint_height, "QcBlob")?;
         let snapshot = self.require_validator_snapshot(blob.epoch)?;
-        // (security audit §4, §2) enforce the BLS
+        // (security audit) enforce the BLS
         // Finality quorum (2/3 of `snapshot.validators`) against the
         // POST-deduplication unique-signer count, not the raw
         // `pq_signatures.len`.
@@ -3436,7 +3436,7 @@ impl Blockchain {
             }
         }
 
-        // BLG-0189 (P09-F10): the blob is imported - stored in memory and on
+        // The blob is imported - stored in memory and on
         // disk - before this point. A pending cert at this height failing is
         // a separate bookkeeping problem, not a reason to report the peer
         // that delivered a good blob as bad. The import reports success; the
@@ -3453,7 +3453,7 @@ impl Blockchain {
     /// A stored QC blob must sign the same checkpoint block as the certificate.
     /// After a reorg `get_qc_blob` can still return the blob of the old fork
     /// from disk, and a certificate of the new fork must not be finalized with
-    /// it (BLG-0181).
+    /// it.
     fn ensure_blob_matches_checkpoint(blob: &QcBlob, checkpoint_hash: &str) -> Result<(), String> {
         if blob.checkpoint_hash != checkpoint_hash {
             return Err(format!(
@@ -3928,7 +3928,7 @@ impl Blockchain {
                 if block_bytes.saturating_add(tx_bytes) > tx_byte_budget {
                     continue;
                 }
-                // BLG-0289: execute against a disposable candidate. Only a
+                // Execute against a disposable candidate. Only a
                 // successful transaction publishes its state to the selection
                 // prefix; every error discards ALL partial writes. Replaying a
                 // prefix after an error is not sufficient: replay itself can
@@ -3973,7 +3973,7 @@ impl Blockchain {
 
     fn apply_system_effects(state: &mut AccountState, block: &Block) {
         if let Some(evidences) = &block.slashing_evidence {
-            // (security audit §8) the slashing ratio
+            // (security audit) the slashing ratio
             // For on-chain `slashing_evidence` is a critical
             // Security parameter and must come from
             // `RegistryParams` rather than a hardcoded literal.
@@ -4040,7 +4040,7 @@ impl Blockchain {
     /// pays from. A chain that turned the pool off pays nothing even if
     /// someone transferred BUD to the pool account later - the flag, not the
     /// balance, is the permission - and a chain whose profile has no schedule
-    /// (mainnet until D-04, devnet) has nothing to pay from whatever the flag
+    /// (mainnet until , devnet) has nothing to pay from whatever the flag
     /// says. Genesis refuses the one combination that disagrees
     /// (`GenesisConfig::validate_reward_pool_flag`).
     fn payable_reward_pool(
@@ -4121,7 +4121,7 @@ impl Blockchain {
                 let _ = state.slash_from_report(report);
                 if let Some(validator) = state.validators.get_mut(&report.offender) {
                     if !validator.slashed {
-                        // BLG-0087 (P04-F05, decision B): absence is a TIMED
+                        // Absence is a TIMED
                         // jail. `slashed` stays false, or the release loop
                         // (`!slashed`) could never bring the validator back.
                         validator.active = false;
@@ -4175,7 +4175,7 @@ impl Blockchain {
                 accounts_to_save.push((*pubkey, account.clone()));
             }
 
-            // BLG-0186 (P09-F07): the durable batch stores the cert ONLY
+            // The durable batch stores the cert ONLY
             // when it certifies THIS block. A pending cert is just a queued
             // object - storing it beside a block it does not hash-match
             // writes a finality cert for a block that was never finalised
@@ -4256,7 +4256,7 @@ impl Blockchain {
     /// candidate rebuild and `rebuild_state` used to skip it, so a restarted
     /// node carried AI-registry rows its live peers had already pruned: two
     /// different state roots for the same height, and the restarted node
-    /// rejects the next block or forks (P10-F02). Every state-rebuild loop
+    /// rejects the next block or forks. Every state-rebuild loop
     /// must call this in the same position the live path does - after the
     /// block's committed roots are checked, before the next block applies.
     /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
@@ -4295,7 +4295,7 @@ impl Blockchain {
     /// Passing it keeps this function a pure `(state, block, history) -> state`
     /// Map, which is what every replay path depends on.
     ///
-    /// BLG-0296 (P18-F11) - the precondition this function had and never
+    ///- the precondition this function had and never
     /// stated: every transaction it applies was already admitted through
     /// `validate_transaction` (the sender's nonce equal to the account nonce
     /// is one of its checks), at ingest, at the gates pointed at from
@@ -4434,7 +4434,7 @@ impl Blockchain {
             Self::prune_storage_content_in_state(&mut next_state, &content_id)?;
         }
         Self::apply_bridge_sweep_to_state(&mut next_state, block.index)?;
-        // BLG-0114 (P05-F07) / CWE-696: prune expired cross-domain message rows
+        /// CWE-696: prune expired cross-domain message rows
         // inside `apply_block_effects` BEFORE `state_root` is computed so block
         // producers, validators, and replayers see identical message state.
         next_state.message_registry.prune_expired(
@@ -4730,7 +4730,7 @@ impl Blockchain {
             return None;
         }
 
-        // F1 (Constitution §1): pre-scan NftBurn CIDs before state mutation.
+        // F1 (Constitution): pre-scan NftBurn CIDs before state mutation.
         let nft_burn_cids = Self::collect_nft_burn_cids_from_state(&self.state, &block);
 
         let ai_outcomes_before = self.state.ai_registry.outcomes.len();
@@ -4810,7 +4810,7 @@ impl Blockchain {
         self.observe_committed_global_headers(&block);
         // PoA compliance requests are drained inside `apply_block_effects`
         // BEFORE `calculate_state_root`, so every replay path reproduces them.
-        // BLG-0105 (P04-F23): the alarm log is trimmed by age and the
+        // The alarm log is trimmed by age and the
         // ledger is written once per block, not once per event.
         self.quarantine_ledger
             .prune_expired(self.chain.len() as u64, ALARM_RETENTION_BLOCKS);
@@ -4844,7 +4844,7 @@ impl Blockchain {
         }
 
         if let Some(last_block) = self.chain.last() {
-            // (security audit §3) the trait-level `record_block`
+            // (security audit) the trait-level `record_block`
             // No longer mutates PoW difficulty (validation is pure).
             // Instead, the chain-aware `record_block_with_chain` is
             // Called here, AFTER the block has been durably committed
@@ -5278,7 +5278,7 @@ impl Blockchain {
             }
         }
 
-        // F1 (Constitution §1): pre-scan NftBurn CIDs before state mutation.
+        // F1 (Constitution): pre-scan NftBurn CIDs before state mutation.
         let nft_burn_cids = Self::collect_nft_burn_cids_from_state(&self.state, &block);
 
         let ai_outcomes_before = self.state.ai_registry.outcomes.len();
@@ -5667,7 +5667,7 @@ impl Blockchain {
         // changes. A state root mismatch here (for example the PoA stamp
         // mismatch) now refuses the reorg while memory and disk still agree,
         // instead of leaving memory on the new chain and disk on neither
-        // fork (BLG-0182). Only a real disk error can still fail later.
+        // fork. Only a real disk error can still fail later.
         let replayed_snapshots = if self.storage.is_some() {
             Some(self.replay_reorg_blocks(&new_chain, fork_point, |_, _| Ok(()))?)
         } else {
@@ -5699,7 +5699,7 @@ impl Blockchain {
         self.chain = new_chain;
         self.state = new_state;
 
-        // BLG-0186 (P09-F07): the DISK still holds FINALITY_CERT and
+        // The DISK still holds FINALITY_CERT and
         // QC_BLOB at the reorged heights. Left behind, a later
         // `invalidate_finality_from_height` rescan adopts the orphaned
         // fork's cert wholesale (before its adoption fix) or the next reorg
@@ -5733,7 +5733,7 @@ impl Blockchain {
 
         // Keep the sets of epochs the fork did not touch and add the sets the
         // new fork went through, so past-epoch certificates and fault proofs
-        // stay verifiable after a reorg (BLG-0184). Without storage there is no
+        // stay verifiable after a reorg. Without storage there is no
         // replay, so only the current epoch is known.
         let kept_snapshots: BTreeMap<u64, ValidatorSetSnapshot> = match &replayed_snapshots {
             Some(replayed) => {
@@ -5777,7 +5777,7 @@ impl Blockchain {
         }
 
         // Transactions of the orphaned blocks go back to the pool unless the
-        // new fork already holds them (BLG-0185).
+        // new fork already holds them.
         for block in &old_chain[fork_point..] {
             for tx in &block.transactions {
                 if !chain_txs.contains(&tx.hash) {
@@ -6077,7 +6077,7 @@ impl Blockchain {
                 snapshot.height
             ));
         };
-        // BLG-0188 (P09-F09): the snapshot must be AT THE TIP. The old rule
+        // The snapshot must be AT THE TIP. The old rule
         // accepted any height whose block merely exists, so a snapshot at a
         // lower height replaced a state that had already moved past it -
         // state rollback dressed up as sync.
@@ -6150,7 +6150,7 @@ impl Blockchain {
                 v2.height, self.finalized_height
             ));
         }
-        // The same BLG-0188 rule the V1 branch enforces. The V2 path is tried
+        // The same rule the V1 branch enforces. The V2 path is tried
         // first, so leaving it out made the guard the V1 fallback never
         // reached: any snapshot between the finalized height and the tip
         // replaced state that had already moved past it while `self.chain`
@@ -6378,7 +6378,7 @@ impl Blockchain {
             }
         }
 
-        // P01-F04: hand the new finality to the engine so parked
+        // Hand the new finality to the engine so parked
         // epoch-boundary checkpoints at or below it are promoted.
         self.consensus.note_finalized_height(
             self.finalized_height,
@@ -6386,7 +6386,7 @@ impl Blockchain {
             self.storage.as_ref(),
         );
 
-        //: finality may release old witnesses (Pul-Lite).
+        // finality may release old witnesses (Pul-Lite).
         let pruned = self.prune_released_witnesses(
             crate::storage::witness_retention::DEFAULT_RETENTION_BLOCKS,
             WITNESS_PRUNE_WINDOW,
@@ -6724,7 +6724,7 @@ impl Blockchain {
                 vote.chain_id, self.chain_id
             ));
         }
-        // BLG-0083 (P04-F01): authenticate BEFORE attributing. A garbage
+        // Authenticate BEFORE attributing. A garbage
         // vote naming a victim must not count against the victim: only a
         // vote whose `auth_sig` proves control of the registered key may
         // later earn an invalid-vote tick (self-incrimination). Unverified
@@ -6808,7 +6808,7 @@ impl Blockchain {
                 vote.chain_id, self.chain_id
             ));
         }
-        // BLG-0083 (P04-F01): authenticate BEFORE attributing (see
+        // Authenticate BEFORE attributing (see
         // `handle_prevote`).
         if let Some(v) = self.state.validators.get(&vote.voter_id) {
             if !v.bls_public_key.is_empty()
@@ -6914,11 +6914,11 @@ impl Blockchain {
             return Err("No BLS signing capability available".to_string());
         };
 
-        // BLG-0083 (P04-F01): the vote is also authenticated under the same
+        // The vote is also authenticated under the same
         // key, over the domain-separated auth message. The receiving side
         // refuses to attribute an invalid vote to this validator unless the
         // auth signature proves key control first.
-        // BLG-0300 (P10-F12): V2 covers the vote signature itself, so a
+        // V2 covers the vote signature itself, so a
         // captured auth cannot vouch for a swapped-in garbage sig_bls.
         let auth_msg = crate::chain::finality::vote_auth_signing_message(&msg, &sig);
         let auth_sig = if let Some(sk) = self.consensus.bls_secret_key() {
@@ -6966,8 +6966,8 @@ impl Blockchain {
             return Err("No BLS signing capability available".to_string());
         };
 
-        // BLG-0083 (P04-F01): the precommit carries the same vote
-        // authentication the prevote does; BLG-0300 (P10-F12): V2, bound to
+        // The precommit carries the same vote
+        // authentication the prevote does;: V2, bound to
         // the vote signature as well.
         let auth_msg = crate::chain::finality::vote_auth_signing_message(&msg, &sig);
         let auth_sig = if let Some(sk) = self.consensus.bls_secret_key() {
@@ -7027,7 +7027,7 @@ impl Blockchain {
     }
 
     pub fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
-        // BLG-0195 (P10-F05): the single aggregator slot used to be clobbered
+        // The single aggregator slot used to be clobbered
         // on every call. Two consequences are pinned here:
         // 1. Re-starting the SAME checkpoint (a re-delivered block, a gossip
         //    echo) must not throw away the votes already collected - if the
@@ -7240,7 +7240,7 @@ impl Blockchain {
             .collect();
         // The math runs in u128. A deal weight is bounded only by the payer
         // balance, so `boost_share * weight` can pass u64 and a u64 overflow
-        // here fails the whole block (BLG-0180). Each share is at most
+        // here fails the whole block. Each share is at most
         // `boost_share`, so it always fits back into u64.
         let total_weight: u128 = deals.iter().map(|(_, weight)| u128::from(*weight)).sum();
         if total_weight == 0 {
@@ -7280,7 +7280,7 @@ impl Blockchain {
     }
 
     /// Release the quarantine-ledger rows of the domains a block's
-    /// governance unfreeze reopened (BLG-0105, P04-F23): the freeze that
+    /// governance unfreeze reopened: the freeze that
     /// quarantined them is over. The unfreeze itself is state, applied in
     /// `apply_block_effects_with_unfreezes`; the ledger is node-local.
     fn release_unfrozen_domains(&mut self, unfrozen: &[DomainId]) {
@@ -7664,13 +7664,13 @@ mod tests {
         // Testnet: the profile has a schedule, so the flag alone decides.
         assert!(Blockchain::payable_reward_pool(testnet, true).is_some());
         assert!(Blockchain::payable_reward_pool(testnet, false).is_none());
-        // Mainnet (no schedule yet, D-04) and devnet (no distribution to fund
+        // Mainnet (no schedule yet) and devnet (no distribution to fund
         // one): a flag saying yes still pays nothing.
         assert!(Blockchain::payable_reward_pool(mainnet, true).is_none());
         assert!(Blockchain::payable_reward_pool(devnet, true).is_none());
     }
 
-    /// BLG-0181: a QC blob of another fork must not back a certificate.
+    /// A QC blob of another fork must not back a certificate.
     #[test]
     fn qc_blob_of_another_checkpoint_hash_is_refused() {
         let blob = QcBlob {
@@ -7687,7 +7687,7 @@ mod tests {
         assert!(error.contains("does not match certificate hash"));
     }
 
-    /// BLG-0172,: the domain progress a proof claim causes is consensus
+    /// The domain progress a proof claim causes is consensus
     /// state. The registries live in `AccountState::settlement`, so a move of
     /// a domain's committed height changes the state root every node checks,
     /// and a restart replays it from the blocks instead of a side store.
@@ -7766,7 +7766,7 @@ mod tests {
         assert!(err.contains("Invalid slashing evidence"), "{err}");
     }
 
-    /// BLG-0018: double-sign evidence signed for another chain id must not
+    /// Double-sign evidence signed for another chain id must not
     /// slash a validator of this chain.
     #[test]
     fn block_evidence_for_another_chain_does_not_slash() {
@@ -7792,7 +7792,7 @@ mod tests {
         assert!(state.get_validator(&producer).unwrap().slashed);
     }
 
-    /// BLG-0171: evidence from a key that is not a validator is refused, and
+    /// Evidence from a key that is not a validator is refused, and
     /// the pool has an upper bound.
     #[test]
     fn slashing_evidence_pool_needs_a_validator_and_is_bounded() {
@@ -7824,7 +7824,7 @@ mod tests {
             .is_err());
     }
 
-    /// BLG-0088: an invalid vote that names a far future epoch must not move
+    /// An invalid vote that names a far future epoch must not move
     /// the tracker epoch, or the spam guard is closed for good.
     #[test]
     fn invalid_vote_with_a_far_future_epoch_is_not_counted() {
@@ -7843,7 +7843,7 @@ mod tests {
         assert_eq!(bc.local_invalid_votes.invalid_count(&victim), 1);
     }
 
-    /// BLG-0170,: a parent hash mismatch freezes the domain, and the
+    /// A parent hash mismatch freezes the domain, and the
     /// freeze is consensus state: the state root commits it.
     #[test]
     fn parent_hash_mismatch_freeze_is_consensus_state() {
@@ -7886,7 +7886,7 @@ mod tests {
         );
     }
 
-    /// BLG-0169: resubmitting an old accepted commitment must not rewind the
+    /// Resubmitting an old accepted commitment must not rewind the
     /// external root anchor to that commitment's state root.
     #[test]
     fn resubmitted_old_commitment_does_not_rewind_the_anchor() {
@@ -7932,7 +7932,7 @@ mod tests {
         assert_eq!(bc.state.external_roots.get(&1), Some(&root2));
     }
 
-    /// BLG-0168: a snapshot that is ahead of the stored chain must not stay
+    /// A snapshot that is ahead of the stored chain must not stay
     /// as the replay base. Startup falls back to the genesis state.
     #[test]
     fn startup_drops_a_snapshot_that_is_ahead_of_the_chain() {
@@ -7967,7 +7967,7 @@ mod tests {
         assert_eq!(bc.finalized_height, 0);
     }
 
-    /// BLG-0180: a huge deal weight must not make the boost distribution fail.
+    /// A huge deal weight must not make the boost distribution fail.
     /// With u64 math `boost_share * weight` overflowed and halted block production.
     #[test]
     fn boost_distribution_survives_a_huge_deal_weight() {
@@ -8019,7 +8019,7 @@ mod tests {
         assert_eq!(state.pending_bud_boost_share, 0);
     }
 
-    /// BLG-0112: a relay whose fee or mint step fails after the ledger step
+    /// A relay whose fee or mint step fails after the ledger step
     /// must not stay consumed. The supply cap refuses the mint here.
     #[test]
     fn failed_relay_mint_restores_the_relayer_ledger() {
@@ -8102,7 +8102,7 @@ mod tests {
     }
 
     /// Block entropy is block context: set from the previous hash and the VRF
-    /// P10-F02: the live path prunes the AI registry after every committed
+    /// The live path prunes the AI registry after every committed
     /// block; the state-rebuild loops (startup replay, reorg rebuild,
     /// `rebuild_state`) must run the same per-height maintenance, or the
     /// rebuilt node carries rows its peers already pruned and its state root
@@ -9530,7 +9530,7 @@ mod tests {
             .contains("No active finality aggregator"));
     }
 
-    /// BLG-0099 (P04-F17): a vote naming an epoch far ahead of the chain
+    /// A vote naming an epoch far ahead of the chain
     /// must not count and must not move the tracker - the F06 seam, pinned
     /// at the door that refuses it.
     #[test]
@@ -9592,7 +9592,7 @@ mod tests {
     }
 }
 
-/// (security audit §8) the QC-fault verdict and the
+/// (security audit) the QC-fault verdict and the
 /// On-chain `slashing_evidence` path now read the slash ratio
 /// From `RegistryParams` instead of using hardcoded literals.
 /// This test pins the contract by exercising the two paths
@@ -9747,7 +9747,7 @@ mod bond_and_reorg_tests {
         assert!(error.contains("at or below finalized height"));
     }
 
-    /// BLG-0182: the persistence replay of a reorg runs before anything changes.
+    /// The persistence replay of a reorg runs before anything changes.
     /// A block with a wrong state root is refused and the callback never sees it.
     #[test]
     fn reorg_replay_refuses_a_wrong_state_root_without_touching_the_chain() {
@@ -9777,7 +9777,7 @@ mod bond_and_reorg_tests {
         assert_eq!(left.chain, chain_before);
     }
 
-    /// BLG-0184: a reorg must keep the validator sets of the epochs it did not
+    /// A reorg must keep the validator sets of the epochs it did not
     /// touch, or past-epoch certificates are refused until restart.
     #[test]
     fn reorg_keeps_validator_snapshots_of_untouched_epochs() {
@@ -9808,7 +9808,7 @@ mod bond_and_reorg_tests {
             .contains_key(&left.state.epoch_index));
     }
 
-    /// BLG-0185: a reorg returns the transactions of the orphaned blocks to the
+    /// A reorg returns the transactions of the orphaned blocks to the
     /// pool.
     #[test]
     fn reorg_returns_orphaned_transactions_to_the_pool() {

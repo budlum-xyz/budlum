@@ -86,7 +86,7 @@ pub enum RenderFormat {
     ///
     /// **This is not a storage format, it is a TRANSPORT representation.** A frame
     /// is produced on demand and no intermediate product is stored, so this format
-    /// ADDS NO storage under any regime (§59). The persistent form of the content is
+    /// ADDS NO storage under any regime. The persistent form of the content is
     /// still whatever the manifest says: the recipe for recipe-backed content, the
     /// bytes for organic content.
     ///
@@ -294,7 +294,7 @@ fn zlib_stored(data: &[u8]) -> Vec<u8> {
 /// [`RenderError::MissingParam`] when the format needs a parameter the
 /// recipe did not carry (a non-square buffer, or an oversized PNG request).
 pub fn render(spec: &GeneratedSpec, format: &RenderFormat) -> Result<Vec<u8>, RenderError> {
-    // BLG-0418: refuse SVG expansion before generating the source raster.
+    // Refuse SVG expansion before generating the source raster.
     if matches!(format, RenderFormat::Svg) {
         svg_capacity(spec.output_len as usize)?;
     }
@@ -392,7 +392,7 @@ fn render_png(spec: &GeneratedSpec, pixels: &[u8], size: u16) -> Result<Vec<u8>,
     // must sit under the same cap, so the square side is bounded by
     // sqrt(MAX_GENERATED_BYTES / 3) ~= 1182. Refuse anything larger rather
     // than let a hostile caller exhaust memory or CPU (CWE-400).
-    // BLG-0419: compare squared dimensions directly. u16 dimensions fit
+    // Compare squared dimensions directly. u16 dimensions fit
     // comfortably in u64 even after multiplying by the three RGB channels.
     let raster_bytes = u64::from(size) * u64::from(size) * 3;
     if raster_bytes > u64::from(MAX_GENERATED_BYTES) {
@@ -577,7 +577,7 @@ pub fn qr_stream_content_id(
     if frame_count == 0 {
         return Err(RenderError::MissingParam("qr stream frame_count"));
     }
-    // BLG-0421: V1 folded only the four-byte transport checksum. That
+    // V1 folded only the four-byte transport checksum. That
     // checksum detects optical corruption; it is not a content commitment.
     // V2 binds the full recipe digest and every frame byte at hash strength.
     // No V1 fallback: this helper has no production callers or stored ids.

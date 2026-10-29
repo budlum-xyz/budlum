@@ -68,7 +68,7 @@ mod rpc_tests {
             MethodKind, SlotDisclosure, VerificationMethod,
         };
         let poa = crate::domain::ConsensusKind::PoA;
-        // The receipt is signed by the subject's account key (BLG-0097), and
+        // The receipt is signed by the subject's account key , and
         // the V4 address IS that key, so the subject is derived from it.
         let subject_keys = crate::crypto::primitives::KeyPair::generate().expect("keypair");
         let subject = Address::from(subject_keys.public_key_bytes());
@@ -622,7 +622,7 @@ mod rpc_tests {
             "pow-header-chain-v1",
             1,
         );
-        //: a domain registers in block (`SettlementTx::RegisterDomain`);
+        // a domain registers in block (`SettlementTx::RegisterDomain`);
         // the fixture writes the registry before the actor starts.
         let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
         blockchain
@@ -796,11 +796,11 @@ mod rpc_tests {
         // The relayed submit path requires the sender to be an active relayer.
         // Bonding on this node alone would change the registry outside a
         // block, so the RPC door refuses and names the transaction that does
-        // the work (BLG-0134). The test bonds the relayer directly in the
+        // the work. The test bonds the relayer directly in the
         // chain state it owns - the same row a signed RoleBond transaction
         // would write inside block execution - and then uses it as the
         // message sender.
-        // The message envelope is signed (BLG-0113): the V4 address IS the
+        // The message envelope is signed: the V4 address IS the
         // Ed25519 public key, so the relayer is derived from the key that
         // signs.
         let relayer_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
@@ -880,7 +880,7 @@ mod rpc_tests {
         relay_bc.state.add_balance(&relayer, 100_000_000);
         let (relay_server, relay_chain) = setup_with_blockchain(relay_bc).await;
         // The relayed message is carried by a signed transaction whose
-        // signer is the message sender (BLG-0113: the V4 address IS the
+        // signer is the message sender (the V4 address IS the
         // Ed25519 public key) and an active relayer. The direct RPC door
         // stays shut; the transaction path is the one that works.
         let base_fee = relay_chain.get_base_fee().await;
@@ -926,7 +926,7 @@ mod rpc_tests {
             refused.message()
         );
 
-        // (security audit §3) the bridge-lock → mint → burn → unlock
+        // (security audit) the bridge-lock → mint → burn → unlock
         // Happy path is exercised by `src/tests/bridge_lifecycle.rs` (an
         // integration test against the internal `Blockchain` API), not via
         // RPC. The RPC `bud_lockBridgeTransfer` is removed because it
@@ -1024,7 +1024,7 @@ mod rpc_tests {
         assert_eq!(domains["domains"], serde_json::json!([]));
     }
 
-    ///: the five storage writes are `StorageTx` transactions applied in
+    /// the five storage writes are `StorageTx` transactions applied in
     /// block (covered in `src/domain/storage_tx.rs`). Their operator RPCs
     /// refuse every call, name the transaction door, and change nothing:
     /// the manifest stays unregistered and no balance moves.
@@ -1178,7 +1178,7 @@ mod rpc_tests {
     async fn storage_active_operators_lists_registered() {
         let operator = Address::from_hex(&"0a".repeat(32)).unwrap();
         let min_stake = 1_000u64; // PermissionlessRegistry default floor
-                                  //: a bond is a `RoleBond` transaction applied in block; the
+                                  // a bond is a `RoleBond` transaction applied in block; the
                                   // fixture writes the registry before the actor starts.
         let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
         blockchain.state.add_balance(&operator, min_stake * 2);

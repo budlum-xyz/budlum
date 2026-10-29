@@ -345,7 +345,7 @@ fn schedule_fork(
     };
     let mut versions = reg.versions.clone();
     // The fork lands only on a version the adapter itself accepts
-    // (BLG-0161): the registration's accepted list is policy output and
+    // The registration's accepted list is policy output and
     // cannot vouch for what the adapter takes.
     versions
         .schedule_fork(

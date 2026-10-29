@@ -40,7 +40,7 @@ pub use identity::{
     IdentityOp, IdentityRecord, IdentityRegistry, IdentityTx, MethodKind, VerificationMethod,
     DID_METHOD_NAME,
 };
-// BLG-0104 (P04-F22): the signing-digest helpers and the wallet-side fill
+// The signing-digest helpers and the wallet-side fill
 // API have no production caller in this tree - test-only until a wallet
 // binary consumes them (idle-code policy: test-only, not shipped).
 #[cfg(test)]

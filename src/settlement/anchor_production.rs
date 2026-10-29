@@ -462,7 +462,7 @@ pub struct CheckpointOutcome {
     pub sealed: Option<u64>,
 }
 
-/// Node-side anchor emission (BLG-0076 / P03-F19): where a sealed anchor is
+/// Node-side anchor emission: where a sealed anchor is
 /// written, under which mode, at which key epoch, with which keys, and the
 /// Root Seal state that follows it.
 ///
@@ -686,7 +686,7 @@ impl AnchorEmission {
         match self.mode {
             AnchorMode::GatedOff => Ok(()),
             AnchorMode::Devnet => {
-                //: development keys have public seeds and secure nothing.
+                // development keys have public seeds and secure nothing.
                 if crate::core::chain_config::Network::from_chain_id(request.chain_id)
                     == Some(crate::core::chain_config::Network::Mainnet)
                 {
@@ -712,7 +712,7 @@ impl AnchorEmission {
                         blocker: "production-grant-is-for-another-ledger",
                     });
                 }
-                //: only the stark_root path depends on VerifyMerkle.
+                // only the stark_root path depends on VerifyMerkle.
                 if request.stark_root.is_some() && !grant.stark_path_open() {
                     return Err(AnchorError::ProductionBlocked {
                         blocker: "verifymerkle-audit-pending-for-the-stark-root-path",

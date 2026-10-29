@@ -50,7 +50,7 @@ const RPC_DEFAULT_BODY_LIMIT: u32 = 16 * 1024 * 1024;
 const RPC_DEFAULT_RATE_LIMIT_PER_MINUTE: u64 = 120;
 const RPC_DEFAULT_CONNECTION_LIMIT: u32 = 500;
 
-// (security audit §5) `auth_required` defaults to `true` (secure
+// (security audit) `auth_required` defaults to `true` (secure
 // By default). Operators that explicitly want an unauthenticated RPC
 // Must call [`RpcSecurityConfig::operator_default`], which logs a
 // Prominent warning at server startup.
@@ -68,7 +68,7 @@ pub struct RpcSecurityConfig {
 
 impl Default for RpcSecurityConfig {
     fn default() -> Self {
-        // (security audit §5) secure default - auth ON, no API key
+        // (security audit) secure default - auth ON, no API key
         // (caller must configure `api_key` before serving). This is what
         // [`Self::operator_default`] used to be (auth OFF); the prior
         // Behaviour is preserved under that explicit name for trusted
@@ -78,7 +78,7 @@ impl Default for RpcSecurityConfig {
             api_key: None,
             allowed_ips: vec!["127.0.0.1".into(), "::1".into()],
             cors_origins: Vec::new(),
-            // Secure default (P21-F01): a limiter that is off by default
+            // Secure default: a limiter that is off by default
             // leaves API-key guessing unthrottled on the public listener.
             rate_limit_per_minute: Some(120),
             trusted_proxies: Vec::new(),
@@ -593,7 +593,7 @@ impl RpcServer {
     }
 
     fn block_to_json(b: Block) -> serde_json::Value {
-        //: a block whose witnesses were pruned says so, so a client
+        // a block whose witnesses were pruned says so, so a client
         // does not read an empty signature as an unsigned transaction.
         let witness_pruned = b.witness_is_stripped();
         serde_json::json!({
@@ -1836,7 +1836,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         domain: crate::domain::ConsensusDomain,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: domain registration is a signed `Settlement` transaction
+        // domain registration is a signed `Settlement` transaction
         // (`SettlementTx::RegisterDomain`) from the domain's operator.
         self.require_operator("bud_registerConsensusDomain")?;
         let _ = domain;
@@ -1866,7 +1866,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         evidence: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: evidence is a signed `ExternalDomain` transaction from the
+        // evidence is a signed `ExternalDomain` transaction from the
         // submitter it names, applied in block.
         self.require_operator("bud_submitExternalEvidence")?;
         let _ = evidence;
@@ -2667,7 +2667,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         payload: crate::domain::VerifiedDomainCommitment,
     ) -> Result<String, ErrorObjectOwned> {
-        //: a commitment is a signed `Settlement` transaction
+        // a commitment is a signed `Settlement` transaction
         // (`SettlementTx::SubmitCommitment`) from a bonded RELAYER, applied in
         // block. It used to advance the domain registry and the external
         // roots on this node, then gossip the payload so every peer applied
@@ -2686,7 +2686,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         msg: crate::cross_domain::CrossDomainMessage,
     ) -> Result<String, ErrorObjectOwned> {
-        //: this method used to insert the message into the message
+        // this method used to insert the message into the message
         // registry (folded into the state root) on the serving node alone,
         // from the public listener, and gossip it to peers that did the
         // same at whatever moment it reached them. The registration is a
@@ -3037,7 +3037,7 @@ impl BudlumApiServer for RpcServer {
         address: String,
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: this helper bonded any address into the relayer role outside
+        // this helper bonded any address into the relayer role outside
         // a block, on this node alone. The method stays so a client gets a
         // pointer instead of "method not found".
         self.require_operator("bud_registryBondRelayer")?;
@@ -3095,9 +3095,9 @@ impl BudlumApiServer for RpcServer {
         &self,
         submission: crate::prover::ZkProofSubmission,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: a ZK proof is a signed `Settlement` transaction
+        // a ZK proof is a signed `Settlement` transaction
         // (`SettlementTx::SubmitZkProof`) from the submitter the proof names,
-        // which also closes P18-F02 (the submitter is the signer now).
+        // which also closes (the submitter is the signer now).
         self.require_operator("bud_submitZkProof")?;
         let _ = submission;
         Err(Self::door_refusal(
@@ -3236,7 +3236,7 @@ impl BudlumApiServer for RpcServer {
         // Submitter cannot self-certify a report as ConsensusVerified to force a
         // Slash - the RPC path is always Unverified. Only the node's own
         // Consensus layer emits ConsensusVerified reports internally; a
-        // caller's claim is demoted first (BLG-0102/P04-F24).
+        // caller's claim is demoted first.
         report.demote_to_unverified();
         // A reporter is required so the anti-spam fee can be charged.
         if report.reporter.is_none() {
@@ -3267,7 +3267,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         proof: crate::consensus::qc::QcFaultProof,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // (security audit §4) permissionless entry-point.
+        // (security audit) permissionless entry-point.
         // The proof's correctness is enforced by
         // `handle_qc_fault_proof` (merkle inclusion +
         // Cryptographic dilithium verification), which is the
@@ -3375,7 +3375,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         manifest: crate::storage::ContentManifest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: this method registered a manifest into the storage registry
+        // this method registered a manifest into the storage registry
         // (folded into the state root) on this node alone, outside a block.
         // The method stays so a client gets a pointer instead of "method not
         // found".
@@ -4067,7 +4067,7 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: this method opened a deal and moved the payer escrow and the
+        // this method opened a deal and moved the payer escrow and the
         // operator bond on this node alone, outside a block.
         self.require_operator("bud_storageOpenDeal")?;
         let _ = (
@@ -4109,7 +4109,7 @@ impl BudlumApiServer for RpcServer {
         payer_signature: String,
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: this method filled a repair ticket and moved the payer escrow
+        // this method filled a repair ticket and moved the payer escrow
         // and the replacement operator bond on this node alone, outside a
         // block.
         self.require_operator("bud_storageAcceptReallocation")?;
@@ -4314,7 +4314,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         request: RetrievalChallengeRequest,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: this method opened a challenge and debited the opener bond on
+        // this method opened a challenge and debited the opener bond on
         // this node alone, outside a block, with a range drawn from this
         // node's tip.
         self.require_operator("bud_storageOpenChallenge")?;
@@ -4331,7 +4331,7 @@ impl BudlumApiServer for RpcServer {
         &self,
         response: RetrievalResponse,
     ) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: this method settled a challenge (and its slash) on this node
+        // this method settled a challenge (and its slash) on this node
         // alone, outside a block.
         self.require_operator("bud_storageAnswerChallenge")?;
         let _ = response;
@@ -5683,7 +5683,7 @@ impl BudlumApiServer for RpcServer {
         })
     }
 
-    // --- (§1): AI Inference & Verifier Layer ---
+    // ---: AI Inference & Verifier Layer ---
 
     async fn ai_get_model(&self, model_id: String) -> Result<serde_json::Value, ErrorObjectOwned> {
         let clean_id = model_id.strip_prefix("0x").unwrap_or(&model_id);
@@ -6681,7 +6681,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn ai_agent_ranking(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
-        // BLG-0201 (P10-F11): the score crosses the actor and the wire as a
+        // The score crosses the actor and the wire as a
         // fixed-point permyriad integer (10_000 = full trust), never as an
         // f64 - Z8. The unit is stated in the response so a client never has
         // to guess whether 9000 is 9000.0 or 0.9.
@@ -6760,7 +6760,7 @@ impl BudlumApiServer for RpcServer {
         }))
     }
 
-    ///: Read-only status.
+    /// Read-only status.
     async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned> {
         let height = self.chain.get_height().await;
         let chain_id = self.chain.get_chain_id().await;
@@ -6793,7 +6793,7 @@ impl BudlumApiServer for RpcServer {
     }
 
     async fn get_domain_info(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned> {
-        //: the facts the chain observed for the domain and the class
+        // the facts the chain observed for the domain and the class
         // derived from them, next to the registry record.
         let facts = self
             .chain

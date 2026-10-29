@@ -138,7 +138,7 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 FinalityError(format!("external adapter refused evidence: {error}"))
             })?;
 
-        // BLG-0132 (P06-F03): the policy's `require_slashable` is enforced at
+        // The policy's `require_slashable` is enforced at
         // the BRIDGE, for every adapter - not only the one adapter that
         // happened to check it. A validity proof is at least as strong as a
         // slashable set; an unslashable signature set is not.
@@ -180,7 +180,7 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 "external state root does not match local commitment state root".to_string(),
             ));
         }
-        // BLG-0133 (P06-F04): every binding-critical field is ATTESTED or
+        // Every binding-critical field is ATTESTED or
         // EMPTY. Before this, one valid evidence for (height, state_root)
         // could carry any block hash, event root and transaction root - the
         // later checks that rely on those fields rested on unattested data.
@@ -212,7 +212,7 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 }
             }
         }
-        // The remaining free fields (BLG-0133): no external evidence carries
+        // The remaining free fields: no external evidence carries
         // them, so a commitment that claims them is claiming data nobody
         // looked at. `parent_domain_block_hash` is the exception - it is
         // chain-linked to the previous ATTACHED hash at the blockchain seam
@@ -291,13 +291,13 @@ mod tests {
                 height: evidence.declared_height,
                 state_root: evidence.declared_root,
                 // The fixture attests exactly what its commitment claims
-                // (BLG-0133/P06-F04 binding).
+                // ( binding).
                 attested_block_hash: Some([5; 32]),
                 attested_event_root: Some([1; 32]),
                 attested_tx_root: Some([2; 32]),
                 finalized_at: evidence.declared_height,
                 time_unit: TimeUnit::Height,
-                // An unslashable signature set (BLG-0132 fixture): the
+                // An unslashable signature set ( fixture): the
                 // slashable-only policy must refuse it.
                 security: SecurityBacking::SignatureSet {
                     scheme: crate::crypto::facts::ObservedScheme::Scheme(
@@ -414,7 +414,7 @@ mod tests {
             .is_err());
     }
 
-    /// BLG-0133 (P06-F04): a valid evidence cannot carry a free block hash,
+    /// A valid evidence cannot carry a free block hash,
     /// event root or transaction root - the fields are attested or empty.
     #[test]
     fn unattested_commitment_fields_are_refused() {
@@ -443,7 +443,7 @@ mod tests {
         }
     }
 
-    /// BLG-0132 (P06-F03): the bridge enforces require_slashable for every
+    /// The bridge enforces require_slashable for every
     /// adapter - the fixture's backing is an unslashable signature set and
     /// must be refused under such a policy.
     #[test]

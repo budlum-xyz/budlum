@@ -5,10 +5,10 @@
 //! to end.
 //!
 //! Flow:
-//!   1. Detect the content class from raw YUV (frame difference - based on the K84 measurement).
+//!   1. Detect the content class from raw YUV (frame difference - based on the measurement).
 //!   2. Codec/GOP suggestion per class (VideoSuggestion - honest measurement range).
 //!   3. The video bitstream is embedded into the .bud container (zstd) and a BudVideoRecord is produced.
-//!   4. Production proof: original size + stored size -> measured ratio (K19).
+//!   4. Production proof: original size + stored size -> measured ratio.
 //!
 //! Code: `#![forbid(unsafe_code)]`, deterministic, panic-free.
 
@@ -48,13 +48,13 @@ pub fn run_video_pipeline(
 ) -> Option<VideoPipelineResult> {
     // 1) class detection (from the sample frames)
     let (class, _avg) = classify_content(yuv_sample, w, h, frames)?;
-    // 2) codec/GOP suggestion (honest measurement range - K84)
+    // 2) codec/GOP suggestion (honest measurement range -)
     let suggestion = VideoSuggestion::for_class(class);
     // 3) .bud container: split the video bitstream structurally (Binary) + zstd compress
     let chunks = structural_split_compact(StructuralKind::Binary, video_bytes, 64 * 1024);
     let file = BudV2File::new_zstd(FormatCodec::Mp4, chunks)?;
     let container = file.encode();
-    // 4) video record + production proof (measured ratio - K19)
+    // 4) video record + production proof (measured ratio -)
     let video_record = BudVideoRecord::new(
         suggestion.codec,
         class,

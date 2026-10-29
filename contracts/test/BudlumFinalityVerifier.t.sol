@@ -21,7 +21,7 @@ contract FraudVerifierStub is IExternalFraudProofVerifier {
     }
 }
 
-/// F01-F06 negative tests. The default profile runs on Cancun, which has
+/// negative tests. The default profile runs on Cancun, which has
 /// neither the BLS nor the ML-DSA precompile: an attestation with no
 /// verification path at all is refused. The window tests (F02 pending, F05,
 /// F06) run under the `prague` profile, where the real EIP-2537 pairing

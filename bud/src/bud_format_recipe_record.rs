@@ -2,10 +2,10 @@
 //!
 //! The question behind it (2026-08-16): "what if the content, once compressed, were
 //! sent as a QR video, a system that moves storage onto the network alone; what would the tariff be?"
-//! The spec answer (measured by K13/K14/K15): the only persistent object is THE RECIPE RECORD.
+//! The spec answer (measured by): the only persistent object is THE RECIPE RECORD.
 //! Two kinds: Generative (generator+seed, ~120 B, R1) | Bodied (compressed/raw body, R2/R3).
 //! A QR video is a derivative (not kept). held_bytes: Generative -> 0, Bodied -> len(body).
-//! Rent accrues only on Bodied.body (the K14b three meters: rent -> the storer,
+//! Rent accrues only on Bodied.body (the three meters: rent -> the storer,
 //! step -> the validator, commitment -> the consensus state).
 
 #![forbid(unsafe_code)]
@@ -27,7 +27,7 @@ pub enum ContentSource {
 #[derive(Debug, Clone)]
 pub enum RecipeRecord {
     Generative {
-        commitment: [u8; 32], // the content identity (K3)
+        commitment: [u8; 32], // the content identity
         generator: u16,       // the generator identity (deterministic)
         seed: [u8; 32],
         params: Vec<u8>, // generator parameters
@@ -40,7 +40,7 @@ pub enum RecipeRecord {
 }
 
 impl RecipeRecord {
-    /// Bytes held (the K14b rent meter): Generative -> 0; Bodied -> len(body).
+    /// Bytes held (the rent meter): Generative -> 0; Bodied -> len(body).
     pub fn held_bytes(&self) -> u64 {
         match self {
             Self::Generative { .. } => 0,
@@ -70,7 +70,7 @@ impl RecipeRecord {
         }
     }
 
-    /// The commitment (K3: SHA3-256, domain-tagged).
+    /// The commitment (SHA3-256, domain-tagged).
     pub fn commit(content: &[u8]) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(b"BDLM_TARIF_COMMIT_V1");
@@ -106,7 +106,7 @@ impl RecipeRecord {
     }
 }
 
-/// RENT per TB/month (K14b - only the bytes held; generation CPU is in the step fee).
+/// RENT per TB/month (only the bytes held; generation CPU is in the step fee).
 /// The floor: $0.23342/TB/month (one physical base across all editions: 60-month amortization).
 pub const R3_FLOOR_USD_TB_MONTH: f64 = 0.23342;
 
