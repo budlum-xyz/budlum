@@ -152,9 +152,10 @@ impl InvalidVoteTracker {
 
         let threshold = params.max_invalid_votes_per_epoch;
         let enough_samples = !require_samples
-            || self.samples.get(&validator).is_some_and(|samples| {
-                (samples.len() as u64) >= threshold
-            });
+            || self
+                .samples
+                .get(&validator)
+                .is_some_and(|samples| (samples.len() as u64) >= threshold);
         if threshold > 0
             && current >= threshold
             && enough_samples
@@ -358,12 +359,8 @@ mod tests {
         for byte in [4u8, 5] {
             let sig = vec![byte; 48];
             let auth = crate::chain::finality::vote_auth_signing_message(&vote, &sig);
-            let report = t.record_invalid_vote_with_sample(
-                7,
-                v,
-                (auth, vec![3; 48], vote.clone(), sig),
-                &p,
-            );
+            let report =
+                t.record_invalid_vote_with_sample(7, v, (auth, vec![3; 48], vote.clone(), sig), &p);
             if byte == 4 {
                 assert!(report.is_none());
             } else {
@@ -396,7 +393,6 @@ mod tests {
         let sig = vec![9u8; MAX_VOTE_SIGNATURE_BYTES];
         let auth = crate::chain::finality::vote_auth_signing_message(&vote, &sig);
         let sample = (auth, vec![3; 48], vote, sig);
-        let mut reports = 0;
         for i in 0..5 {
             let report = t.record_invalid_vote_with_sample(7, v, sample.clone(), &p);
             // The evidence set cannot independently prove five separate
@@ -422,12 +418,8 @@ mod tests {
             let vote = crate::chain::finality::checkpoint_signing_message(45261, 7, height, "hash");
             let sig = vec![2u8; 48];
             let auth = crate::chain::finality::vote_auth_signing_message(&vote, &sig);
-            let report = t.record_invalid_vote_with_sample(
-                7,
-                v,
-                (auth, vec![3; 48], vote, sig),
-                &p,
-            );
+            let report =
+                t.record_invalid_vote_with_sample(7, v, (auth, vec![3; 48], vote, sig), &p);
             assert_eq!(report.is_some(), height == 2);
         }
     }
