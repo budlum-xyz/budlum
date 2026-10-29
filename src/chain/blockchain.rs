@@ -6844,6 +6844,40 @@ impl Blockchain {
                 }
             }
         }
+        // The post-quantum half of the vote. A precommit that carries one is
+        // checked here, against the epoch's snapshot, before the aggregator
+        // can put it in a QC blob; a bad attestation is a bad vote. A
+        // precommit without one still counts for the BLS half, but its signer
+        // is missing from the checkpoint's blob, so no certificate can be
+        // applied on it - the signing path only leaves it out when the node
+        // holds no PQ key at all.
+        if !vote.pq_sig.is_empty() {
+            if let Some(snapshot) = self.validator_snapshot_for_epoch(vote.epoch) {
+                if let (Some(index), Some(entry)) = (
+                    snapshot.validator_index(&vote.voter_id),
+                    snapshot.find_validator(&vote.voter_id),
+                ) {
+                    let index: u32 = index.try_into().map_err(|_| {
+                        "Precommit attests a validator index that does not fit its wire field"
+                            .to_string()
+                    })?;
+                    let message = crate::consensus::qc::pq_signing_message(
+                        vote.epoch,
+                        vote.checkpoint_height,
+                        &vote.checkpoint_hash,
+                        index,
+                    );
+                    crate::crypto::primitives::PqKeyPair::verify_in(
+                        &self.state.scheme_registry,
+                        &entry.pq_public_key,
+                        crate::crypto::ctx::QC_V2,
+                        &message,
+                        &vote.pq_sig,
+                    )
+                    .map_err(|e| format!("Invalid PQ attestation in precommit: {e}"))?;
+                }
+            }
+        }
         let (result, quorum_reached, reports) = {
             let aggregator = self
                 .finality_aggregator
@@ -6865,23 +6899,53 @@ impl Blockchain {
         }
         result.map_err(|e| e.to_string())?;
 
-        if quorum_reached {
-            let cert = if let Some(agg) = self.finality_aggregator.as_mut() {
-                agg.try_produce_cert()
-            } else {
-                None
-            };
-            if let Some(cert) = &cert {
-                info!(
-                    "FinalityCert produced: epoch={}, height={}",
-                    cert.epoch, cert.checkpoint_height
-                );
-                self.finality_aggregator = None;
-            }
-            Ok(cert)
-        } else {
-            Ok(None)
+        if !quorum_reached {
+            return Ok(None);
         }
+        // Both halves of the round, taken while the aggregator is still the
+        // one that produced them.
+        let produced = self.finality_aggregator.as_ref().and_then(|agg| {
+            let cert = agg.try_produce_cert()?;
+            let blob = agg.try_produce_qc_blob();
+            Some((cert, blob))
+        });
+        let Some((cert, blob)) = produced else {
+            return Ok(None);
+        };
+        info!(
+            "FinalityCert produced: epoch={}, height={}",
+            cert.epoch, cert.checkpoint_height
+        );
+        self.finality_aggregator = None;
+
+        // The QC blob this round's own precommits attested, imported through
+        // the same verified door a blob from a peer takes, and then the
+        // certificate applied here: a node does not gossip to itself, so
+        // without this the only node that never finalized was the one that
+        // assembled the certificate. The failures below are logged, not
+        // returned: the certificate is still worth gossiping (a peer may hold
+        // the blob), and a round that cannot be applied locally must not take
+        // the vote-ingest path down with it.
+        if let Some(blob) = blob {
+            if let Err(e) = self.import_qc_blob(blob) {
+                warn!(
+                    height = cert.checkpoint_height,
+                    "The round's own QC blob was refused locally: {e}"
+                );
+            }
+        } else {
+            warn!(
+                height = cert.checkpoint_height,
+                "No QC blob could be assembled for this checkpoint: fewer than a quorum of its precommits carried a PQ attestation"
+            );
+        }
+        if let Err(e) = self.handle_finality_cert(cert.clone()) {
+            warn!(
+                height = cert.checkpoint_height,
+                "Produced finality certificate did not apply locally: {e}"
+            );
+        }
+        Ok(Some(cert))
     }
 
     pub fn sign_prevote(
@@ -6966,9 +7030,8 @@ impl Blockchain {
             return Err("No BLS signing capability available".to_string());
         };
 
-        // The precommit carries the same vote
-        // authentication the prevote does;: V2, bound to
-        // the vote signature as well.
+        // The precommit carries the same vote authentication the prevote
+        // does, in the V2 form bound to the vote signature as well.
         let auth_msg = crate::chain::finality::vote_auth_signing_message(&msg, &sig);
         let auth_sig = if let Some(sk) = self.consensus.bls_secret_key() {
             crate::chain::finality::sign_bls(&sk, &auth_msg)
@@ -6980,6 +7043,38 @@ impl Blockchain {
             return Err("No BLS signing capability available".to_string());
         };
 
+        // The post-quantum half of the vote. The index is this validator's
+        // own in the epoch's snapshot, because that is what the blob entry
+        // the aggregator will assemble is keyed by; a node outside the
+        // snapshot has no index to attest under and sends the BLS vote only
+        // (the aggregator refuses it anyway).
+        let pq_sig = match self
+            .validator_snapshot_for_epoch(epoch)
+            .as_ref()
+            .and_then(|snapshot| snapshot.validator_index(voter_id))
+            .and_then(|index| u32::try_from(index).ok())
+        {
+            Some(index) => {
+                let pq_msg = crate::consensus::qc::pq_signing_message(
+                    epoch,
+                    checkpoint_height,
+                    checkpoint_hash,
+                    index,
+                );
+                match self.consensus.pq_sign(crate::crypto::ctx::QC_V2, &pq_msg) {
+                    Ok(sig) => sig,
+                    Err(e) => {
+                        warn!(
+                            height = checkpoint_height,
+                            "Precommit carries no PQ attestation, so this checkpoint will have no QC blob from this signer: {e}"
+                        );
+                        Vec::new()
+                    }
+                }
+            }
+            None => Vec::new(),
+        };
+
         Ok(Precommit {
             epoch,
             checkpoint_height,
@@ -6988,6 +7083,7 @@ impl Blockchain {
             voter_id: *voter_id,
             sig_bls: sig,
             auth_sig,
+            pq_sig,
         })
     }
 
@@ -9568,6 +9664,7 @@ mod tests {
             voter_id: Address::from([1u8; 32]),
             sig_bls: vec![],
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         let result = bc.handle_precommit(vote);
         assert!(result.is_err());

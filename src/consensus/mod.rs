@@ -376,6 +376,15 @@ pub trait ConsensusEngine: Send + Sync {
     fn bls_public_key(&self) -> Option<Vec<u8>> {
         None
     }
+    /// An ML-DSA attestation from this node's validator key, or an error when
+    /// it holds none.
+    ///
+    /// A finality precommit carries one so its checkpoint has a QC blob to be
+    /// finalized against; without it a certificate has the BLS half only, and
+    /// the checkpoint is not final.
+    fn pq_sign(&self, _ctx: &[u8], _msg: &[u8]) -> Result<Vec<u8>, String> {
+        Err("no PQ signing key on this node".into())
+    }
     fn validate_timestamp(
         &self,
         block: &Block,

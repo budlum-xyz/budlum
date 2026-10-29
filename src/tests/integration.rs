@@ -855,6 +855,7 @@ mod integration_tests {
             voter_id: validator_addr,
             sig_bls: vec![],
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         vote2.sig_bls = sign_bls(&bls_sk, &vote2.signing_message());
         vote2.auth_sig = sign_bls(&bls_sk, &vote2.auth_signing_message());
@@ -1111,6 +1112,7 @@ mod integration_tests {
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
                 auth_sig: Vec::new(),
+                pq_sig: Vec::new(),
             };
             let msg = pc.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
@@ -1248,6 +1250,7 @@ mod integration_tests {
             voter_id: addr,
             sig_bls: vec![],
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         let msg = pc.signing_message();
         let sig = sign_bls(&bls_key.secret_key, &msg);
@@ -1305,6 +1308,7 @@ mod integration_tests {
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
                 auth_sig: Vec::new(),
+                pq_sig: Vec::new(),
             };
             let msg = pc.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);

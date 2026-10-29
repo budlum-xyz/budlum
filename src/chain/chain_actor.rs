@@ -2575,7 +2575,22 @@ impl ChainActor {
                     // has no signer backend, and reading the backend alone
                     // made every such node answer "not a validator" - so it
                     // never voted and the chain never finalized.
-                    let addr = self.blockchain.consensus().validator_address();
+                    //
+                    // A key file says who this node is, not who may vote. The
+                    // devnet's fifth node holds a key from the start and only
+                    // joins the set in a later step; while it was not a member
+                    // it still voted every checkpoint, and each peer answered
+                    // "Voter not in validator set" and charged it bad
+                    // behaviour for it. Membership is the state's answer, so
+                    // that is what gets reported.
+                    let active = self.blockchain.state.get_active_validators();
+                    let addr = self
+                        .blockchain
+                        .consensus()
+                        .validator_address()
+                        .filter(|address| {
+                            active.iter().any(|validator| validator.address == *address)
+                        });
                     let _ = tx.send(addr);
                 }
                 ChainCommand::GetAggregatorState(tx) => {
