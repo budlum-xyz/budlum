@@ -645,8 +645,8 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- guards-are-reachable 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       # `guards-are-reachable` covers the refusal-shaped subset. The rest of the
-      # public surface had no ratchet at all: docs/AUDIT-DEAD-PUB-API-2026-09-10.md
-      # measured what that costs and asked for this file, and a gate added here is
+      # public surface had no ratchet at all: measuring what that costs is what
+      # asked for this file, and a gate added here is
       # worthless if nothing runs it, which is the failure the comment above this
       # block was written about.
       - name: Dead public API canary
