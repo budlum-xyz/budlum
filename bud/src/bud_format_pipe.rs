@@ -76,7 +76,7 @@ pub fn detect(data: &[u8]) -> FormatCodec {
     }
     // Last signal: if it is all printable ASCII (line breaks included) it is
     // plain text. A wrong match is safe - losslessness is independent of the
-    // type , only the granularity changes.
+    // type, only the granularity changes.
     let printable = data
         .iter()
         .all(|b| (0x20..0x7F).contains(b) || *b == b'\n' || *b == b'\t' || *b == b'\r');

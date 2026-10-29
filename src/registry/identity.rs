@@ -938,7 +938,7 @@ pub struct GuardianApproval {
     pub signature: Vec<u8>,
 }
 
-/// The subject's word on an issuance aimed at them , at the
+/// The subject's word on an issuance aimed at them, at the
 /// transaction door: the full method key and its signature over
 /// [`issue_consent_digest`]. The key's wallet address must be a live
 /// verification method of the subject record - a consent from a key the
