@@ -385,7 +385,7 @@ impl BridgeState {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "BLG-0128 (P05-F21): lock's arguments ARE the transfer's parameter set (route, indices, parties, amount, expiry) - a struct would mirror them one-for-one"
+        reason = ": lock's arguments ARE the transfer's parameter set (route, indices, parties, amount, expiry) - a struct would mirror them one-for-one"
     )]
     pub fn lock(
         &mut self,

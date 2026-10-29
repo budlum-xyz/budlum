@@ -440,7 +440,7 @@ fn a_liveness_slash_is_releasable() {
 
     assert!(
         !v.slashed,
-        "a liveness fault is a TIMED jail (BLG-0087, decision B): `slashed` would make \
+        "a liveness fault is a TIMED jail: `slashed` would make \
          the release loop, which requires `!slashed`, refuse to ever reactivate it"
     );
     assert!(

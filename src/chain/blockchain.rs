@@ -767,7 +767,7 @@ impl Blockchain {
                         #[cfg(not(test))]
                         std::process::exit(1);
                         #[cfg(test)]
-                        panic!("V1 snapshot half-restore refused (BLG-0175)");
+                        panic!("V1 snapshot half-restore refused");
                     } else {
                         warn!(
                             "V1 snapshot chain_id mismatch (expected {}, got {}). Ignoring.",
@@ -3346,7 +3346,7 @@ impl Blockchain {
             // proof path), the verdict records nothing and moves nothing.
             return Err(
                 "QC fault verdict slash refused: stake moves only inside block \
-                 execution (BLG-0187) - slashing outside a block splits the state root"
+                 execution - slashing outside a block splits the state root"
                     .to_string(),
             );
         }
@@ -7048,7 +7048,7 @@ impl Blockchain {
             }
             if existing.prevote_quorum_reached && !existing.precommit_quorum_reached {
                 warn!(
-                    "checkpoint height={} displaced an active round at height={} with prevote quorum but no precommit quorum; the older round will never finalize (single-slot aggregator, BLG-0195)",
+                    "checkpoint height={} displaced an active round at height={} with prevote quorum but no precommit quorum; the older round will never finalize (single-slot aggregator)",
                     checkpoint_height, existing.checkpoint_height
                 );
             }
