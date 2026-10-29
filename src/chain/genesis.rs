@@ -139,7 +139,7 @@ pub struct GenesisConsensusKeys {
 /// recorded genesis parameter rather than a property of the binary that
 /// happened to build the chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
 pub struct GenesisRewardPool {
     /// Whether this chain pays validation rewards from a pre-funded pool.
     pub enabled: bool,
@@ -154,7 +154,7 @@ impl GenesisRewardPool {
 
     /// The flag, off.
     #[must_use]
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub const fn disabled() -> Self {
         Self { enabled: false }
     }
@@ -569,7 +569,7 @@ impl GenesisConfig {
     /// schedule yet ( is Ayaz's), and a flag with no schedule would fund
     /// nothing while telling operators the pool is live. Refusing names the
     /// owner instead of failing later as an empty epoch payout.
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub fn validate_reward_pool_flag(&self) -> Result<(), String> {
         let Some(flag) = self.reward_pool else {
             return Ok(());
@@ -593,7 +593,7 @@ impl GenesisConfig {
     /// the ledger of this chain. Absence is allowed here: the ledger
     /// arrives with the anchor key ceremony, and production anchoring refuses
     /// to start without it.
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub fn validate_anchor_ledger(&self) -> Result<(), String> {
         let Some(ledger) = &self.anchor_ledger else {
             return Ok(());
@@ -1081,7 +1081,7 @@ pub fn mainnet_genesis() -> GenesisConfig {
 
 /// The mainnet economic parameters: the 100M fixed-supply distribution, the
 /// burns, the team schedule and the reward settings on the mainnet calendar.
-/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
 pub fn mainnet_tokenomics() -> crate::tokenomics::TokenomicsParams {
     use crate::core::chain_config::FIXED_POINT_SCALE;
     use crate::tokenomics::bud;
@@ -1192,7 +1192,7 @@ pub fn testnet_genesis() -> GenesisConfig {
 /// epochs make a 150 s epoch, so 210 240 epochs are a calendar year. Testnet
 /// block emission remains disabled; the compatibility field is zero.
 /// TESTNET-DEFAULT: every economic value equals the mainnet template's.
-/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
 pub fn testnet_tokenomics() -> crate::tokenomics::TokenomicsParams {
     const EPOCHS_PER_YEAR: u64 = 210_240;
     let mut params = mainnet_tokenomics();

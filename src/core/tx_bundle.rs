@@ -17,7 +17,7 @@
 //!
 //! A bundle is executed as its members, in order. A node that accepts a bundle
 //! admits all members or none.
-//! WIRING: unwired - the transaction-bundle helpers are the submission wave's surface; the RPC and CLI paths that assemble bundles land with that wave.
+//! WIRING: unwired - the transaction-bundle helpers are the submission surface; the RPC and CLI paths that assemble bundles land with it.
 
 use crate::core::address::Address;
 use crate::core::transaction::{
@@ -194,7 +194,7 @@ impl TxBundle {
 
     /// The members, for execution in order. Call after [`Self::verify_in`].
     #[must_use]
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn into_members(self) -> Vec<Transaction> {
         self.members
     }

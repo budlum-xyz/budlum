@@ -224,7 +224,7 @@ impl ProofSystem {
     /// What the system's soundness rests on: Groth16 and PLONK on a
     /// pairing over an elliptic curve, the STARK systems on a hash function.
     #[must_use]
-    /// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring wave.
+    /// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
     pub const fn assumption_class(self) -> AssumptionClass {
         match self {
             Self::Groth16 | Self::Plonk => AssumptionClass::ClassicalPairing,

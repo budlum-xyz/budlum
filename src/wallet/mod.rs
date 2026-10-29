@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 mod bip39_wordlist;
 
 /// Words in a mnemonic: 256 bits of entropy and an 8-bit checksum.
-/// exposed for: wallet surface - the grant/reveal doors' readers land with the custody wave.
+/// exposed for: wallet surface - the grant/reveal doors' readers land with the custody path.
 pub const MNEMONIC_WORDS: usize = 24;
 /// PBKDF2 iterations for a new key file (OWASP 2023 figure for SHA-256).
 pub const DEFAULT_KDF_ITERATIONS: u32 = 600_000;
@@ -164,7 +164,7 @@ pub fn entropy_from_mnemonic(mnemonic: &str) -> Result<[u8; 32], WalletError> {
 
 /// The ML-DSA-87 key of `entropy`, as wallet-core derives it.
 #[must_use]
-/// exposed for: wallet surface - the grant/reveal doors' readers land with the custody wave.
+/// exposed for: wallet surface - the grant/reveal doors' readers land with the custody path.
 pub fn keypair_from_entropy(entropy: &[u8; 32]) -> WalletKeyPair {
     use sha3::{Digest, Sha3_256};
     let mut hasher = Sha3_256::new();
@@ -183,7 +183,7 @@ pub fn keypair_from_entropy(entropy: &[u8; 32]) -> WalletKeyPair {
 /// # Errors
 ///
 /// [`WalletError::Format`] when a key component cannot be derived.
-/// exposed for: wallet surface - the grant/reveal doors' readers land with the custody wave.
+/// exposed for: wallet surface - the grant/reveal doors' readers land with the custody path.
 pub fn user_account_from_entropy(
     entropy: &[u8; 32],
     account: u32,

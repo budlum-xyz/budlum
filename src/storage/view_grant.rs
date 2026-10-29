@@ -1042,7 +1042,7 @@ mod tests {
 
     /// A grant minted by somebody else opens nothing.
     ///
-    /// The `issuer` field is not a claim the book waves through: without this
+    /// The `issuer` field is not a claim the book changes through: without this
     /// rule any caller could hand out public view access to content it does not
     /// own, and the access model would be decoration.
     #[test]

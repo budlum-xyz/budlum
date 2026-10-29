@@ -681,7 +681,7 @@ impl SchemeStatusRegistry {
     ///
     /// [`SchemeError`] when the suite is unknown, the step is not exactly one
     /// rung forward, or the source may not take that step.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn transition_suite(
         &mut self,
         id: SuiteId,

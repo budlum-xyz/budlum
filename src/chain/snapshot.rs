@@ -684,16 +684,16 @@ pub struct StateSnapshotV2 {
     /// chain had: declared numbers, no escrow.
     #[serde(default)]
     pub external_bond_escrow: Option<BTreeMap<Address, u64>>,
-    /// The settlement registries (schema-10 wave). `None` on a snapshot
+    /// The settlement registries (schema-10 bump). `None` on a snapshot
     /// taken before they were consensus state, which is what such a chain
     /// had in its state: nothing.
     #[serde(default)]
     pub settlement: Option<crate::settlement::SettlementRegistries>,
-    /// The scheme and suite statuses (schema-11 wave). `None` reads as the
+    /// The scheme and suite statuses (schema-11 bump). `None` reads as the
     /// genesis statuses, which is what a chain that never moved one had.
     #[serde(default)]
     pub scheme_registry: Option<SchemeRegistrySnapshot>,
-    /// The reward-pool flag (schema-12 wave). `None` reads as the network
+    /// The reward-pool flag (schema-12 bump). `None` reads as the network
     /// profile's answer, which is what a chain that predates the flag did.
     #[serde(default)]
     pub reward_pool_enabled: Option<bool>,
@@ -708,7 +708,7 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub proof_market: Option<crate::settlement::ProofMarketState>,
 
-    /// The `did:bud` identity registry (schema-5 wave): DID records,
+    /// The `did:bud` identity registry (schema-5 bump): DID records,
     /// credential commitments, revocations.
     ///
     /// `#[serde(default)]` so pre-identity snapshots load; the field is
@@ -718,7 +718,7 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub identity: Option<crate::registry::IdentityRegistry>,
 
-    /// The social-fi folder registry (schema-6 wave): which minted tokens
+    /// The social-fi folder registry (schema-6 bump): which minted tokens
     /// are folders, and what each holds.
     ///
     /// `#[serde(default)]` so pre-vault snapshots load; the field is
@@ -761,7 +761,7 @@ pub enum SnapshotTrustPolicy {
 /// The scheme registry as a snapshot stores it: `(identifier, status byte)`
 /// pairs for schemes and for suites, in ascending identifier order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring wave.
+/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
 pub struct SchemeRegistrySnapshot {
     pub schemes: Vec<(u16, u8)>,
     pub suites: Vec<(u16, u8)>,
@@ -1127,7 +1127,7 @@ impl StateSnapshotV2 {
             hasher.update(&fc_bytes);
             hasher.update(self.created_at.to_le_bytes());
         }
-        // --- The identity registry (schema-5 wave). The gate is the version
+        // --- The identity registry (schema-5 bump). The gate is the version
         //     bump itself: at schema 4 the field cannot affect the digest,
         //     which is what keeps every pre-identity pinned digest exact;
         //     at 5 and above a node that dropped the revocation set produces
@@ -1135,7 +1135,7 @@ impl StateSnapshotV2 {
         if self.schema_version >= 5 {
             hash_opt_serializable(&mut hasher, &self.identity);
         }
-        // --- The vault folder registry (schema-6 wave). The bump is again
+        // --- The vault folder registry (schema-6 bump). The bump is again
         //     the whole mechanism: at 5 the field cannot affect the digest
         //     (pinned pre-vault hashes stay reproducible byte for byte), at
         //     6 and above a node that dropped folder memberships produces a
@@ -1143,7 +1143,7 @@ impl StateSnapshotV2 {
         if self.schema_version >= 6 {
             hash_opt_serializable(&mut hasher, &self.vault);
         }
-        // --- The PoA admission + compliance pair (schema-7 wave, /
+        // --- The PoA admission + compliance pair (schema-7 bump, /
         //). Same gate logic as identity and vault: at 6 and
         //     below these fields cannot affect the digest, at 7 and above a
         //     node that dropped an admission set or a freeze produces a
@@ -1988,7 +1988,7 @@ mod tests {
 
     #[test]
     fn schema6_digest_includes_vault_and_schema5_stays_exact() {
-        // The schema-5 wave's test, mirrored: the bump gates the field, so
+        // The schema-5 bump's test, mirrored: the bump gates the field, so
         // version 6 notices None-vs-Some(default) and version 5 cannot see
         // the field at all - every pinned pre-vault digest stays exact.
         let account_state = AccountState::new();
@@ -2462,7 +2462,7 @@ mod tests {
         serde_json::to_vec(&value).unwrap()
     }
 
-    /// all keys of the schema-3 and schema-4 wave (stored in the blob as `hub`
+    /// all keys of the schema-3 and schema-4 change (stored in the blob as `hub`
     /// serilestirilen `budlumxyz` dahil).
     const SCHEMA3_AND_4_KEYS: &[&str] = &[
         "tokenomics",
@@ -2489,7 +2489,7 @@ mod tests {
         "poa_onboarding",
     ];
 
-    /// Only the keys of the schema-4 wave.
+    /// Only the keys of the schema-4 change.
     const SCHEMA4_ONLY_KEYS: &[&str] = &["manifest_signer", "manifest_signature", "trust_policy"];
 
     /// PoA admission records: a field added with `#[serde(default)]`.
@@ -2509,26 +2509,26 @@ mod tests {
     /// kumesi tasiyabilirdi.
     const POA_ADMISSION_KEYS: &[&str] = &["poa_onboarding"];
 
-    /// The schema-5 wave: the identity registry. Inside the digest from
+    /// The schema-5 bump: the identity registry. Inside the digest from
     /// version 5 on, outside at 4 and below - so old blobs must also lack
     /// the KEY, not merely the value, and each legacy-blob test below drops
     /// this from its assembled blob to keep that premise true.
     const SCHEMA5_KEYS: &[&str] = &["identity"];
-    /// The schema-6 wave's key: dropped from every old-blob the trio
-    /// assembles, exactly as identity's was for the schema-5 wave.
+    /// The schema-6 bump's key: dropped from every old-blob the trio
+    /// assembles, exactly as identity's was for the schema-5 change.
     const SCHEMA6_KEYS: &[&str] = &["vault"];
-    /// The schema-9 wave's key: the lifetime burned total, digested from
+    /// The schema-9 bump's key: the lifetime burned total, digested from
     /// schema 9. Old blobs lack the key and it restores as zero - "nothing
     /// was ever recorded burned", which under-counts rather than fabricates.
     const SCHEMA9_KEYS: &[&str] = &["burned_total"];
 
-    /// Only the keys of the schema-10 wave.
+    /// Only the keys of the schema-10 change.
     const SCHEMA10_KEYS: &[&str] = &["settlement"];
 
-    /// Only the keys of the schema-11 wave.
+    /// Only the keys of the schema-11 change.
     const SCHEMA11_KEYS: &[&str] = &["scheme_registry"];
 
-    /// Only the keys of the schema-12 wave.
+    /// Only the keys of the schema-12 change.
     const SCHEMA12_KEYS: &[&str] = &["reward_pool_enabled"];
 
     /// Fields rooted in schema-2: known to the old release too, and not a single byte
@@ -2677,19 +2677,19 @@ mod tests {
             "trust_policy",
             // admission records (a serde-default field with no version bump)
             "poa_onboarding",
-            // compliance ledger (schema-7 wave: default-filled AND digested)
+            // compliance ledger (schema-7 bump: default-filled AND digested)
             "poa_compliance",
-            // lifetime burned total (schema-9 wave: default-filled AND digested)
+            // lifetime burned total (schema-9 bump: default-filled AND digested)
             "burned_total",
-            // settlement registries (schema-10 wave: default-filled AND digested)
+            // settlement registries (schema-10 bump: default-filled AND digested)
             "settlement",
-            // scheme and suite statuses (schema-11 wave: default-filled AND digested)
+            // scheme and suite statuses (schema-11 bump: default-filled AND digested)
             "scheme_registry",
-            // the reward-pool flag (schema-12 wave: default-filled AND digested)
+            // the reward-pool flag (schema-12 bump: default-filled AND digested)
             "reward_pool_enabled",
-            // identity registry (schema-5 wave: default-filled AND digested)
+            // identity registry (schema-5 bump: default-filled AND digested)
             "identity",
-            // vault folder registry (schema-6 wave: same discipline)
+            // vault folder registry (schema-6 bump: same discipline)
             "vault",
             // the digest itself: recomputed when the version changes
             "snapshot_hash",
