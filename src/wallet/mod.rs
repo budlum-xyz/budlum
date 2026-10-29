@@ -8,8 +8,7 @@
 //! rule it names is the version 1 (V5) derivation.
 //!
 //! - A 24-word BIP39 mnemonic (256 bits of entropy). A 12-word phrase is
-//!   refused here as on mainnet: the testnet is the mainnet rehearsal
-//!.
+//!   refused here as on mainnet: the testnet is the mainnet rehearsal.
 //! - The ML-DSA-87 key is derived from the entropy exactly as
 //!   `crates/wallet-core` derives it: `SHA3-256("BUDLUM_MLDSA87_SEED_V1" ‖
 //!   entropy)` is the FIPS 204 `KeyGen_internal` seed

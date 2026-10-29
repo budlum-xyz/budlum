@@ -330,8 +330,7 @@ pub trait ConsensusEngine: Send + Sync {
     ) {
     }
 
-    /// The chain reports the height finalised by quorum certificates
-    ///.
+    /// The chain reports the height finalised by quorum certificates.
     ///
     /// A checkpoint written at local commit time is not a finality claim: two
     /// nodes commit different blocks at an epoch boundary and then reject each

@@ -207,8 +207,7 @@ pub fn prove_bytecode_mainnet(
 /// execution that is `weights_digest` plus `input_commitment` on the
 /// transaction, see `docs/AI_VERIFICATION_STATUS.md`.
 ///
-/// The staged-rollout opcode gate applies here as on the ContractCall path
-///.
+/// The staged-rollout opcode gate applies here as on the ContractCall path.
 pub fn prove_bytecode_with_memory<F>(
     bytecode: &[u8],
     gas_limit: u64,

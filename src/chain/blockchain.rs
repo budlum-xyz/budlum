@@ -4295,8 +4295,8 @@ impl Blockchain {
     /// Passing it keeps this function a pure `(state, block, history) -> state`
     /// Map, which is what every replay path depends on.
     ///
-    ///- the precondition this function had and never
-    /// stated: every transaction it applies was already admitted through
+    /// The precondition this function had and never stated: every
+    /// transaction it applies was already admitted through
     /// `validate_transaction` (the sender's nonce equal to the account nonce
     /// is one of its checks), at ingest, at the gates pointed at from
     /// `blockchain.rs` and the mempool. `apply_transaction` bumps the nonce
@@ -4434,7 +4434,7 @@ impl Blockchain {
             Self::prune_storage_content_in_state(&mut next_state, &content_id)?;
         }
         Self::apply_bridge_sweep_to_state(&mut next_state, block.index)?;
-        /// CWE-696: prune expired cross-domain message rows
+        // CWE-696: prune expired cross-domain message rows
         // inside `apply_block_effects` BEFORE `state_root` is computed so block
         // producers, validators, and replayers see identical message state.
         next_state.message_registry.prune_expired(
