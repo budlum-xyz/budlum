@@ -178,6 +178,17 @@ pub struct Precommit {
     /// [`Prevote::auth_sig`].
     #[serde(default)]
     pub auth_sig: Vec<u8>,
+    /// The validator's ML-DSA attestation of this checkpoint, over
+    /// [`crate::consensus::qc::pq_signing_message`].
+    ///
+    /// It is the post-quantum half of finality: the QC blob a certificate is
+    /// finalized against is assembled from exactly these, one entry per
+    /// signer. A precommit without one still counts for the BLS half, but the
+    /// checkpoint's blob is then short this signer and no certificate for it
+    /// can be applied - which is why the signing path always attaches one
+    /// when the node holds a PQ key.
+    #[serde(default)]
+    pub pq_sig: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -945,6 +956,48 @@ impl FinalityAggregator {
         })
     }
 
+    /// The QC blob for this round, assembled from the PQ attestations its
+    /// precommits carried.
+    ///
+    /// This is the producer the certificate path was missing. Every entry is
+    /// keyed by the *snapshot's* index and address for the signer - never by
+    /// anything off the wire - so the blob is a claim this aggregator can make
+    /// about its own round. Entries are ordered by validator index, so two
+    /// aggregators that saw the same set of attestations build the same blob.
+    ///
+    /// `None` when fewer than `quorum_count()` signers attested: a blob below
+    /// quorum cannot be imported (`import_qc_blob` refuses it), so handing one
+    /// back would only move the failure one call further out with a worse
+    /// message.
+    pub fn try_produce_qc_blob(&self) -> Option<crate::consensus::qc::QcBlob> {
+        let snapshot = &self.validator_snapshot;
+        let mut entries: Vec<crate::consensus::qc::PqSignatureEntry> = self
+            .precommits
+            .iter()
+            .filter_map(|(address, precommit)| {
+                if precommit.pq_sig.is_empty() {
+                    return None;
+                }
+                let index = u32::try_from(snapshot.validator_index(address)?).ok()?;
+                Some(crate::consensus::qc::PqSignatureEntry {
+                    validator_index: index,
+                    validator_address: address.to_string(),
+                    pq_signature: precommit.pq_sig.clone(),
+                })
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.validator_index);
+        if entries.len() < snapshot.quorum_count() {
+            return None;
+        }
+        Some(crate::consensus::qc::QcBlob::new(
+            self.epoch,
+            self.checkpoint_height,
+            self.checkpoint_hash.clone(),
+            entries,
+        ))
+    }
+
     pub fn get_state(&self) -> AggregatorState {
         AggregatorState {
             active: true,
@@ -1421,6 +1474,7 @@ mod tests {
                 ),
             ),
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         assert!(agg.add_precommit(pc).is_err());
     }
@@ -1446,6 +1500,7 @@ mod tests {
                 voter_id: snap.validators[i].address,
                 sig_bls: vec![],
                 auth_sig: Vec::new(),
+                pq_sig: Vec::new(),
             };
 
             let sig_bytes = sign_msg(*sk, &pc.signing_message());
@@ -1542,6 +1597,7 @@ mod tests {
             voter_id: snap.validators[0].address,
             sig_bls: vec![],
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         let sig_bytes = sign_msg(sks[0], &pc.signing_message());
 
@@ -1659,6 +1715,7 @@ mod tests {
             voter_id: snap.validators[0].address,
             sig_bls: vec![],
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         let sig_bytes = sign_msg(sks[0], &pc.signing_message());
         let cert = FinalityCert {
@@ -1901,6 +1958,7 @@ mod tests {
             voter_id: voter,
             sig_bls: Vec::new(),
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         assert_ne!(
             precommit(45260).signing_message(),
@@ -1976,6 +2034,7 @@ mod tests {
             voter_id,
             sig_bls: pc_sig.clone(),
             auth_sig: sign_bls(&sk, &vote_auth_signing_message(&pc_msg, &pc_sig)),
+            pq_sig: Vec::new(),
         };
         for split in 1..hash.len() {
             let mut shifted_sig = hash.as_bytes()[split..].to_vec();
