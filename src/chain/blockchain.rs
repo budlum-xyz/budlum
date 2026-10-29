@@ -6991,6 +6991,41 @@ impl Blockchain {
         })
     }
 
+    /// The checkpoint finality has not finalized yet, and therefore the one
+    /// this node should be voting on.
+    ///
+    /// A vote only counts in an aggregator that holds the same height, so the
+    /// round has to be a number every node computes the same way. It used to
+    /// be taken from each node's own tip: nodes one block apart voted at
+    /// different checkpoints (one at 60, the rest at 82), every aggregator
+    /// saw a handful of votes and none reached quorum, so the mesh produced
+    /// blocks and finalized nothing. The lowest unfinalized checkpoint is
+    /// that agreed number, and it only moves when a round really finalizes.
+    pub fn next_finality_checkpoint(&self) -> u64 {
+        let interval =
+            crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id);
+        if interval == 0 {
+            return 0;
+        }
+        (self.finalized_height / interval)
+            .saturating_add(1)
+            .saturating_mul(interval)
+    }
+
+    /// Start - or keep - the prevote round for the lowest unfinalized
+    /// checkpoint, once this node holds the block at that height.
+    pub fn start_pending_finality_round(&mut self) {
+        let height = self.next_finality_checkpoint();
+        if height == 0 {
+            return;
+        }
+        let Some(block) = self.chain.get(height as usize) else {
+            return;
+        };
+        let hash = block.hash.clone();
+        self.start_prevote_task(height, hash);
+    }
+
     pub fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
         // BLG-0195 (P10-F05): the single aggregator slot used to be clobbered
         // on every call. Two consequences are pinned here:
@@ -9431,6 +9466,30 @@ mod tests {
         assert_eq!(bc.state.get_balance(&Address::from([9u8; 32])), 0);
         assert_eq!(bc.state.dirty_account_count(), 1);
         assert_eq!(bc.state.get_balance(&restored_account), 250);
+    }
+
+    /// The round is a function of the finalized height alone, so every node
+    /// computes the same number. Taking it from the tip made nodes one block
+    /// apart vote at different checkpoints (60 on one node, 82 on the rest)
+    /// and no aggregator ever saw a quorum.
+    #[test]
+    fn the_finality_round_is_the_lowest_unfinalized_checkpoint() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let interval = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+        assert!(interval > 0);
+        assert_eq!(bc.next_finality_checkpoint(), interval);
+
+        // A tip past the checkpoint does not move the round.
+        bc.finalized_height = 0;
+        assert_eq!(bc.next_finality_checkpoint(), interval);
+
+        // Finalizing the round advances it by exactly one interval, and the
+        // next round is never the one just finalized.
+        bc.finalized_height = interval;
+        assert_eq!(bc.next_finality_checkpoint(), interval * 2);
+        bc.finalized_height = interval + 1;
+        assert_eq!(bc.next_finality_checkpoint(), interval * 2);
     }
 
     #[test]
