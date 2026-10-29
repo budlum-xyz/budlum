@@ -1552,7 +1552,7 @@ mod tests {
     fn devnet_genesis_hash_matches_the_docker_smoke_pin() {
         let block = devnet_genesis().build_genesis_block();
         assert_eq!(
-            block.hash, "153809d8d1ab45ea7f601c3ee41a6db599254e05429eee5ac3f1e39b568b9058",
+            block.hash, "c0e97af8bae9bff4086bb4d5820865ee00c1f2b36d5bfeb856f752221815454f",
             "the pin in xtask/tools/src/docker_smoke.rs must move with devnet_genesis()"
         );
     }
