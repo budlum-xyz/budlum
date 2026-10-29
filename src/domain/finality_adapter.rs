@@ -2346,6 +2346,16 @@ mod tests {
                 .unwrap(),
             FinalityStatus::Rejected(_)
         ));
+        let mut altered_writes = commitment.clone();
+        altered_writes
+            .state_updates
+            .insert(crate::core::address::Address::from([0xCF; 32]), 1);
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &altered_writes, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
 
         // Same height, same block hash, different claimed roots: the very
         // signatures that proved the honest commitment must not open this one.
