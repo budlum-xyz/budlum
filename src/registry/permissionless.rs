@@ -1062,10 +1062,9 @@ impl PermissionlessRegistry {
     /// for every node - and O(log n) plus the positions of the single validator
     /// involved.
     fn delegation_slot(&self, delegator: Address, validator: Address) -> Result<usize, usize> {
-        self.delegations
-            .binary_search_by(|position| {
-                (position.validator, position.delegator).cmp(&(validator, delegator))
-            })
+        self.delegations.binary_search_by(|position| {
+            (position.validator, position.delegator).cmp(&(validator, delegator))
+        })
     }
 
     /// The contiguous slice of the sorted table that belongs to `validator`.
@@ -1082,10 +1081,9 @@ impl PermissionlessRegistry {
     /// Index of `(validator, delegator)` in the claimable-reward table, kept
     /// sorted by the same key as the positions.
     fn claimable_slot(&self, delegator: Address, validator: Address) -> Result<usize, usize> {
-        self.claimable_rewards
-            .binary_search_by(|reward| {
-                (reward.validator, reward.delegator).cmp(&(validator, delegator))
-            })
+        self.claimable_rewards.binary_search_by(|reward| {
+            (reward.validator, reward.delegator).cmp(&(validator, delegator))
+        })
     }
 
     /// Restore the order both delegation tables are indexed by.
@@ -1152,11 +1150,7 @@ impl PermissionlessRegistry {
     }
 
     /// The entry-side bounds on a new delegation position.
-    fn admit_new_delegation_position(
-        &self,
-        validator: Address,
-        amount: u64,
-    ) -> Result<(), String> {
+    fn admit_new_delegation_position(&self, validator: Address, amount: u64) -> Result<(), String> {
         let floor = self.params.min_delegation_amount;
         if amount < floor {
             return Err(format!(
@@ -1328,7 +1322,7 @@ impl PermissionlessRegistry {
                 let mut amount = row.amount;
                 if let Some((delegator, extra)) = right.peek() {
                     if *delegator == row.delegator {
-                        let extra = *right.next().expect("peeked").1;
+                        let extra = right.next().expect("peeked").1;
                         amount = amount
                             .checked_add(extra)
                             .ok_or_else(|| "claimable reward overflow".to_string())?;
@@ -1353,7 +1347,7 @@ impl PermissionlessRegistry {
                     if *next_delegator != delegator {
                         break;
                     }
-                    let extra = *right.next().expect("peeked").1;
+                    let extra = right.next().expect("peeked").1;
                     amount = amount
                         .checked_add(extra)
                         .ok_or_else(|| "claimable reward overflow".to_string())?;
@@ -1911,7 +1905,8 @@ mod tests {
         assert!(err.contains("maximum of 8"), "got: {err}");
         // A position already held is still grown: the cap bounds rows, not
         // stake.
-        reg.delegate(Address::from([0u8; 32]), validator, 1).unwrap();
+        reg.delegate(Address::from([0u8; 32]), validator, 1)
+            .unwrap();
         assert_eq!(reg.delegations_for(&validator).len(), cap as usize);
     }
 
@@ -1946,10 +1941,7 @@ mod tests {
         reg.credit_claimable_reward(addr(5), second, 7).unwrap();
         reg.credit_claimable_reward(addr(4), first, 3).unwrap();
         let credited = reg
-            .credit_claimable_rewards(
-                first,
-                &[(addr(2), 10), (addr(4), 5), (addr(8), 20)],
-            )
+            .credit_claimable_rewards(first, &[(addr(2), 10), (addr(4), 5), (addr(8), 20)])
             .unwrap();
         assert_eq!(credited, 35);
         assert_eq!(reg.claimable_reward(addr(2), first), 10);
