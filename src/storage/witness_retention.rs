@@ -38,7 +38,8 @@ pub fn may_prune(
         NodeKind::Archive => false,
         NodeKind::Normal => {
             witness_height <= finalized_height
-                && tip_height.saturating_sub(witness_height) >= retention_blocks
+                && witness_height <= tip_height
+                && tip_height - witness_height >= retention_blocks
         }
     }
 }
@@ -66,5 +67,6 @@ mod tests {
     #[test]
     fn a_tip_below_the_witness_height_does_not_underflow() {
         assert!(!may_prune(NodeKind::Normal, 100, 100, 50, 10));
+        assert!(!may_prune(NodeKind::Normal, 100, 100, 50, 0));
     }
 }
