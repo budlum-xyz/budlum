@@ -651,7 +651,7 @@ pub struct CommitmentAttestation {
 impl CommitmentAttestation {
     /// What the proof family registered for `kind` binds.
     #[must_use]
-    pub fn for_kind(kind: &ConsensusKind) -> Self {
+    pub const fn for_kind(kind: &ConsensusKind) -> Self {
         match kind {
             ConsensusKind::PoA
             | ConsensusKind::PoW
