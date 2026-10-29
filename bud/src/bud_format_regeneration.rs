@@ -187,7 +187,7 @@ impl RegenerationRecord {
 }
 
 // ---------------------------------------------------------------------------
-//: challenge selection from the Filiz epoch randomness, a
+// challenge selection from the Filiz epoch randomness, a
 // result record signed with suite 0x0002 (ML-DSA-65 + Ed25519, validator
 // suite), and reputation that moves only on a verified signed result.
 

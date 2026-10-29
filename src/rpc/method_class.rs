@@ -14,7 +14,7 @@
 //!   no other node has to agree on, or a refusal that names the door. A
 //!   method that changes consensus state outside block execution has no
 //!   class: the node that served it would hold a state, a finality view or a
-//!   registry its peers do not share (K4). The last such
+//!   registry its peers do not share. The last such
 //!   rows became transaction doors or in-block work in and, and the
 //!   class was removed with them, so a new one cannot be classified at all.
 //!
@@ -95,18 +95,18 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_graftPaymentProof", Public, Read),
     // /: refused; the door is `ExternalDomainTx::Register`.
     row("bud_registerExternalDomain", Operator, Refused),
-    //: refused; the door is `ExternalDomainTx::SubmitEvidence`.
+    // refused; the door is `ExternalDomainTx::SubmitEvidence`.
     row("bud_submitExternalEvidence", Operator, Refused),
     row("bud_getExternalDomainProfile", Public, Read),
     row("bud_getExternalDomains", Public, Read),
     row("bud_getExternalIntakeDigest", Public, Read),
-    //: refused; the doors are `ExternalDomainTx::Readmit` and
+    // refused; the doors are `ExternalDomainTx::Readmit` and
     // `ExternalDomainTx::ScheduleFork`.
     row("bud_readmitExternalDomain", Operator, Refused),
     row("bud_scheduleExternalFork", Operator, Refused),
     // Closed: no proof that an attestation was false is defined yet.
     row("bud_slashExternalProver", Operator, Refused),
-    //: refused; the doors are `ExternalDomainTx::BondProver` and
+    // refused; the doors are `ExternalDomainTx::BondProver` and
     // `ExternalDomainTx::SetQuorumPolicy`.
     row("bud_bondExternalProver", Operator, Refused),
     row("bud_setExternalQuorumPolicy", Operator, Refused),
@@ -126,7 +126,7 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_submitDomainCommitment", Public, Refused),
     // /: refused; the door is `SettlementTx::SubmitCommitment`.
     row("bud_submitVerifiedDomainCommitment", Operator, Refused),
-    //: refused; a relayed message is a `RelayCrossDomainMessage`
+    // refused; a relayed message is a `RelayCrossDomainMessage`
     // transaction now.
     row("bud_submitCrossDomainMessage", Public, Refused),
     row("bud_getCrossDomainMessage", Public, Read),
@@ -145,10 +145,10 @@ const METHOD_CLASSES: &[MethodClass] = &[
     // /: refused; headers are built in block at every checkpoint.
     row("bud_sealGlobalHeader", Operator, Refused),
     row("bud_registryRegister", Public, TxSubmit),
-    //: refused; a role bond is a `RoleBond` transaction now.
+    // refused; a role bond is a `RoleBond` transaction now.
     row("bud_registryBondRelayer", Operator, Refused),
     row("bud_registryBondProver", Operator, Refused),
-    //: refused; the exits are `RoleUnbond` and `RoleWithdraw`.
+    // refused; the exits are `RoleUnbond` and `RoleWithdraw`.
     row("bud_registryBeginRoleBondUnbonding", Operator, Refused),
     row("bud_registryWithdrawRoleBond", Operator, Refused),
     // /: refused; the door is `SettlementTx::SubmitZkProof`.
@@ -170,12 +170,12 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_adminBanPeer", Operator, LocalAdmin),
     row("bud_adminUnbanPeer", Operator, LocalAdmin),
     row("bud_adminListBannedPeers", Operator, Read),
-    //: refused; manifest registration is `StorageTx::RegisterManifest`.
+    // refused; manifest registration is `StorageTx::RegisterManifest`.
     row("bud_storageRegisterManifest", Operator, Refused),
     row("bud_storageVerifyEncoding", Public, Read),
     row("bud_storageQrFeedPreview", Public, Read),
     row("bud_storageQrFeedFrames", Public, Read),
-    // Refused on every chain until grants ride a block transaction (P30-F01).
+    // Refused on every chain until grants ride a block transaction.
     row("bud_storageIssueViewGrant", Public, Refused),
     row("bud_storageRevokeViewGrant", Public, Refused),
     row("bud_storageSocialDelete", Public, Refused),
@@ -186,7 +186,7 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_storageCloseReveal", Public, LocalAdmin),
     row("bud_storageRegisterConfidentialCommit", Operator, Refused),
     row("bud_storageGetConfidentialCommit", Public, Read),
-    //: refused; the doors are `StorageTx::OpenDeal` and
+    // refused; the doors are `StorageTx::OpenDeal` and
     // `StorageTx::AcceptReallocation`.
     row("bud_storageOpenDeal", Operator, Refused),
     row("bud_storageAcceptReallocation", Operator, Refused),
@@ -194,7 +194,7 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_storageGetDealsByManifest", Public, Read),
     row("bud_storageGetDealsByShard", Public, Read),
     row("bud_storageGetChallenges", Public, Read),
-    //: refused; the doors are `StorageTx::OpenChallenge` and
+    // refused; the doors are `StorageTx::OpenChallenge` and
     // `StorageTx::AnswerChallenge`.
     row("bud_storageOpenChallenge", Operator, Refused),
     row("bud_storageAnswerChallenge", Operator, Refused),

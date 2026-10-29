@@ -13,7 +13,7 @@
 //! R2/R3 in the cost tables are **not** a third edition. They are body-cost
 //! regimes on the Classic path. If it has a body, it is 2.0 (Classic). If it
 //! is recipe-only with zero held bytes, it is 3.0 (Three). Calling a stored
-//! JPEG "3.0 because we wrapped it in QR" is a category error (K13).
+//! JPEG "3.0 because we wrapped it in QR" is a category error.
 //!
 //! # What a grant is
 //!
@@ -846,7 +846,7 @@ mod tests {
         ContentId([b; 32])
     }
 
-    /// P28-F17: a stored registry whose three fields disagree is refused.
+    /// A stored registry whose three fields disagree is refused.
     #[test]
     fn a_registry_row_whose_fields_disagree_is_refused_on_load() {
         let mut reg = ViewGrantRegistry::new();
@@ -896,7 +896,7 @@ mod tests {
         reg.revoke(id, addr(2), 10).unwrap();
     }
 
-    /// P28-F19: the digest and the commitment share one tag table, and the
+    /// The digest and the commitment share one tag table, and the
     /// bytes stay what they were on chain.
     #[test]
     fn confidential_proof_and_cipher_tags_are_frozen() {
@@ -965,7 +965,7 @@ mod tests {
         );
     }
 
-    /// P28-F16: chain id and nonce enter every signed digest.
+    /// Chain id and nonce enter every signed digest.
     #[test]
     fn signed_digests_bind_chain_id_and_nonce() {
         let issue = |c: u64, n: u64| {

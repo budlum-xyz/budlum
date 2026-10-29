@@ -93,7 +93,7 @@ pub use poseidon2::Poseidon2GoldilocksHash;
 pub use shake256::Shake256Hash;
 
 /// The canonical hash backend for any long-lived use of this construction
-///: SHAKE-256, a FIPS 202 member whose security rests on the
+/// SHAKE-256, a FIPS 202 member whose security rests on the
 /// Keccak permutation alone. The Poseidon2 backend is research-only and is
 /// never the hash of a long-lived signature or commitment.
 pub type CanonicalHash = Shake256Hash;

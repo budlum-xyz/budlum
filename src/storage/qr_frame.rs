@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 QR-bound drop frame (plan §CH A3).
+//! B.U.D. 3.0 QR-bound drop frame.
 //!
 //! Wraps an A2 carousel drop in a **self-describing optical frame** so a
 //! mid-stream join can parse without prior handshake. This is the main
@@ -164,7 +164,7 @@ pub fn unpack_frame(stream_commitment: &[u8; 32], frame: &[u8]) -> Result<Drop, 
     if frame.len() < drop_end {
         return Err(FrameError::Truncated);
     }
-    // BLG-0431: the length-delimited object must consume the entire frame.
+    // The length-delimited object must consume the entire frame.
     if frame.len() > drop_end {
         return Err(FrameError::TrailingBytes);
     }

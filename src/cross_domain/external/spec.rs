@@ -257,7 +257,7 @@ pub struct FinalityAttestation {
     /// after the adapter upgrades, because the version travels with it.
     pub adapter_version: u32,
     pub evidence_version: u32,
-    /// The block hash the evidence actually covers (BLG-0133/P06-F04): for
+    /// The block hash the evidence actually covers: for
     /// a sync-committee update this is the signed header's root. `None`
     /// means the adapter cannot attest one and the bridge must refuse a
     /// commitment that claims one.

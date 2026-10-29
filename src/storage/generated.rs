@@ -986,7 +986,7 @@ fn draw_rings(seed: &[u8; 32], len: u32, meter: &mut Meter) -> Result<Vec<u8>, G
 mod tests {
     use super::*;
 
-    /// P28-F08: public fields of a sealed recipe are bounded like a public one.
+    /// Public fields of a sealed recipe are bounded like a public one.
     #[test]
     fn sealed_public_fields_are_bounded() {
         let mut ok = SealedGeneratedSpec {

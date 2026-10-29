@@ -470,7 +470,7 @@ impl Metrics {
         ))?;
         let rpc_requests_total =
             IntCounter::new("budlum_rpc_requests_total", "Total RPC requests received")?;
-        //: Domain metrics.
+        // Domain metrics.
         let bridge_transfers_total = IntCounter::new(
             "budlum_bridge_transfers_total",
             "Total bridge transfers processed",

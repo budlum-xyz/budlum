@@ -42,11 +42,11 @@ pub struct Pkcs11Signer {
     pq_mechanism: Option<u64>,
     strict_vendor_native: bool,
     /// HSM-held BLS public key, read from the slot's PUBLIC_KEY object
-    /// (P02-F01 decision A). `None` when the slot carries no such object.
+    /// `None` when the slot carries no such object.
     bls_public_key_bytes: Option<Vec<u8>>,
-    /// HSM-held PQ public key, read the same way (P02-F01 decision A).
+    /// HSM-held PQ public key, read the same way.
     pq_public_key_bytes: Option<Vec<u8>>,
-    /// Operator-configured expectations (P02-F01 decision B). When set, the
+    /// Operator-configured expectations. When set, the
     /// HSM-read key must equal it; a mismatch is a fail-closed startup error,
     /// and a slot with no readable key may be announced only through these.
     expected_bls_public_key: Option<Vec<u8>>,
@@ -159,7 +159,7 @@ impl Pkcs11Signer {
             .map_err(CryptoError::KeyGeneration)?;
         let bls_key = None;
         let pq_key = None;
-        // P02-F01 decision A: the consensus public halves live in the slot as
+        // decision A: the consensus public halves live in the slot as
         // PUBLIC_KEY objects. They used to be hard-coded `None` here, so a
         // mainnet HSM validator could never register its BLS or PQ key.
         let bls_public_key_bytes = Self::extract_public_key_by_label(&session, BLS_DATA_LABEL);
@@ -188,7 +188,7 @@ impl Pkcs11Signer {
         })
     }
 
-    /// Read the PUBLIC_KEY object carrying `label`, exactly one (P02-F01).
+    /// Read the PUBLIC_KEY object carrying `label`, exactly one.
     ///
     /// Zero objects is `None` - the slot may legitimately hold only the Ed25519
     /// identity. More than one is refused: announcing one consensus key while
@@ -229,7 +229,7 @@ impl Pkcs11Signer {
     }
 
     /// Operator-configured expectations, cross-checked against the slot
-    /// (P02-F01 decision B).
+    ///.
     ///
     /// With both sides present they must match byte for byte; with only the
     /// expectation present it becomes the announced key and the vendor
@@ -304,7 +304,7 @@ impl Pkcs11Signer {
         self
     }
 
-    /// The consensus public half this signer announces (P02-F01).
+    /// The consensus public half this signer announces.
     ///
     /// Operator expectation (decision B) wins as the announced identity; the
     /// HSM-read object (decision A) is the fallback. Both were cross-checked
@@ -323,7 +323,7 @@ impl Pkcs11Signer {
             .or_else(|| self.pq_public_key_bytes.clone())
     }
 
-    /// Startup binding test (P02-F01 decision B): the announced consensus
+    /// Startup binding test: the announced consensus
     /// public keys must pair with the keys the HSM actually signs with.
     ///
     /// Announcing one BLS key and signing with another is a consensus fault
@@ -523,7 +523,7 @@ impl Pkcs11Signer {
             .get_attributes(objects[0], &[cryptoki::object::AttributeType::Value])
             .map_err(|e| format!("Public key read failed: {e}"))?;
         if let Some(cryptoki::object::Attribute::Value(value)) = attr.first() {
-            // P02-F14: the exact length, not a silent cut. A 33-byte read
+            // The exact length, not a silent cut. A 33-byte read
             // truncated to 32 announced a key the HSM never held.
             if value.len() == 32 {
                 let mut key = [0u8; 32];
@@ -589,7 +589,7 @@ impl Pkcs11Signer {
         let sig = session
             .sign(&Self::ed25519_mechanism(), key_handle, msg)
             .map_err(|e| format!("HSM sign: {e}"))?;
-        // P02-F14: the exact length, not a silent cut. A vendor signature
+        // The exact length, not a silent cut. A vendor signature
         // longer than 64 bytes is a different encoding, not a longer Ed25519
         // signature; truncating it verified nothing.
         if sig.len() != 64 {

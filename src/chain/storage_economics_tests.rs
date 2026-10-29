@@ -84,7 +84,7 @@ mod tests {
         // We ensure fail-closed logic works as intended.
     }
 
-    ///: the economics ledger (reward cursor, slash and burn totals,
+    /// the economics ledger (reward cursor, slash and burn totals,
     /// events) lives in the storage registry, so the state root commits it
     /// and a restart replays it from the blocks instead of a side store.
     #[test]
@@ -186,7 +186,7 @@ mod tests {
     }
 
     /// The deal-setup half, on a caller-supplied chain (which may or may not
-    /// have storage attached) - BLG-0190 needs the same fixture on a chain
+    /// have storage attached) - needs the same fixture on a chain
     /// with a real store.
     fn blockchain_with_one_deal_in(
         deal_end_epoch: u64,

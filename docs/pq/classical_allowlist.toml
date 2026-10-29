@@ -1,6 +1,6 @@
 # allow list for the `classical-crypto-is-paired` gate.
 #
-#: no object is accepted on a classical signature alone. The only
+# no object is accepted on a classical signature alone. The only
 # classical components allowed are
 #   a  the Ed25519 half of a composite signature,
 #   b  the BLS12-381 finality peer, required together with the ML-DSA-65 QC,
@@ -27,53 +27,53 @@ unregistered_baseline = 10
 path = "src/crypto/composite.rs"
 function = "*"
 pq_companion = "ML-DSA-87 (suite 0x0001), ML-DSA-65 (suite 0x0002) or SLH-DSA-SHAKE-128s (suite 0x0004) over the same message representative"
-k02 = "a"
+category = "a"
 
 [[entry]]
 path = "src/chain/finality.rs"
 function = "*"
 pq_companion = "ML-DSA-65 QC blob of the same signers (consensus/qc.rs); finality needs both"
-k02 = "b"
+category = "b"
 
 [[entry]]
 path = "src/consensus/mod.rs"
 function = "bls_secret_key"
 pq_companion = "ML-DSA-65 key of the same validator key set"
-k02 = "b"
+category = "b"
 
 [[entry]]
 path = "src/consensus/pos.rs"
 function = "bls_secret_key"
 pq_companion = "ML-DSA-65 key of the same validator key set"
-k02 = "b"
+category = "b"
 
 [[entry]]
 path = "src/core/account.rs"
 function = "consensus_validator_set_hash"
 pq_companion = "the key-set preimage binds the ML-DSA-65 key beside the BLS key (crypto/key_set_preimage.rs)"
-k02 = "b"
+category = "b"
 
 [[entry]]
 path = "src/cross_domain/evm/sync_committee.rs"
 function = "*"
 pq_companion = "none: an Ethereum sync committee proof of an external network, shown as classical in the domain profile"
-k02 = "d"
+category = "d"
 
 [[entry]]
 path = "src/cross_domain/external/intake.rs"
 function = "*"
 pq_companion = "none: an external network quorum, shown as classical in the domain profile"
-k02 = "d"
+category = "d"
 
 [[entry]]
 path = "src/security/quantum_canary.rs"
 function = "(imports)"
 pq_companion = "ML-DSA-87 signatures over the same canary statements (the canary's own signing path)"
-k02 = "a"
+category = "a"
 
 [[entry]]
 path = "src/domain/producer.rs"
 function = "(imports)"
 pq_companion = "ML-DSA-65 QC of the same producer (consensus/qc.rs); a block needs the QC too"
-k02 = "b"
+category = "b"
 

@@ -214,7 +214,7 @@ jobs:
           echo "OK: the consensus output is BYTE-EQUAL on all three platforms."
 
   pq-vector-determinism:
-    #: the ML-DSA and SLH-DSA vectors (NIST ACVP, Wycheproof, the explicit bug
+    # the ML-DSA and SLH-DSA vectors (NIST ACVP, Wycheproof, the explicit bug
     # vectors) give every vector the same verdict on every platform. The wallet crate
     # mounts the node's own PQ source files (`crates/wallet-core/src/crypto.rs`), so
     # the very same code and vectors run on wasm32 too. Each platform prints one digest

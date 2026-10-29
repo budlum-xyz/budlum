@@ -156,7 +156,7 @@ impl QuantumAccount {
     /// unit) under the model: 0.23342 per TB, divided by the 16.68 Duz
     /// ratio; device-only storage costs nothing.
     ///
-    /// BLG-0279 (P17-F13): this returned an `f64` behind a
+    /// This returned an `f64` behind a
     /// `cast_precision_loss` allow. Z8's rule is that money-shaped values
     /// do not travel as floats - a comparison or accumulation of this number
     /// anywhere downstream inherits float error and platform-dependent
@@ -166,7 +166,7 @@ impl QuantumAccount {
     #[must_use]
     ///
     /// WIRING: exposed for the quantum-account fee reporting edge; the
-    /// f64 form it replaced (BLG-0279) had no remaining production
+    /// f64 form it replaced had no remaining production
     /// caller, so the exact value waits for that edge to land.
     pub fn storage_cost_pico(&self) -> u64 {
         if self.storage_bytes == 0 {
@@ -227,7 +227,7 @@ impl QuantumAccount {
         Ok(())
     }
 
-    /// Calls all KQ-* guards from a single entry point.
+    /// Calls all guards from a single entry point.
     ///
     /// `verify_multisig_threshold`, `verify_recovery_policy` and `verify_storage_bound`.
     /// Because `verify_storage_bound` and friends are each `pub` separately, the gate cannot see
@@ -237,7 +237,7 @@ impl QuantumAccount {
     /// # Errors
     ///
     /// Returns the first error if any of the three checks refuses.
-    /// BLG-0276 (P17-F10): a guardian list that repeats a key is not a set -
+    /// A guardian list that repeats a key is not a set -
     /// [`guardian_root`](Self::guardian_root) dedups while the list length did
     /// not, so the state-tree root and the account's own view of its
     /// guardians could disagree, and a threshold chosen against the padded
@@ -275,7 +275,7 @@ pub struct RecoveryProposal {
     pub new_address: [u8; 32],
     pub created_block: u64,
     pub executable_after: u64,
-    /// BLG-0276 (P17-F10): the chain this recovery is bound to. Before this
+    /// The chain this recovery is bound to. Before this
     /// field the digest said nothing about chains, so guardian votes collected
     /// on a testnet (or any fork that reused the keys) carried over verbatim
     /// to mainnet - same keys, same proposal, same digest, valid forever.
@@ -319,7 +319,7 @@ impl RecoveryProposal {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
-        // V3 (BLG-0276): domain, chain and current account nonce precede
+        // V3: domain, chain and current account nonce precede
         // the owner fields. V1/V2 approvals cannot authorize this format.
         h.update(RECOVERY_DOMAIN_V3);
         h.update(self.chain_id.to_be_bytes());
@@ -434,7 +434,7 @@ impl BftGuardianFinality {
         if guardians.len() > MAX_MULTISIG_OWNERS {
             return Err("K-BUD-BFT-GUARDIAN: too many guardians");
         }
-        // BLG-0276: vote deduplication does not validate the guardian SET.
+        // Vote deduplication does not validate the guardian SET.
         // Reject a padded list before computing a quorum over its length.
         for (i, guardian) in guardians.iter().enumerate() {
             if guardians.iter().take(i).any(|g| g == guardian) {
@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn guardian_list_and_recovery_digest_are_pinned() {
-        // BLG-0276 (P17-F10), half one: a duplicated guardian key is now a
+        //half one: a duplicated guardian key is now a
         // refused account, so the deduped `guardian_root` and the list the
         // threshold is chosen against can no longer disagree.
         let mut a = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
@@ -573,7 +573,7 @@ mod tests {
             "the root is order-insensitive, so order is not a second channel"
         );
 
-        // BLG-0276, half two: the recovery digest binds the chain. The same
+        // half two: the recovery digest binds the chain. The same
         // (owner, owner, block) proposal on two chains must not share a
         // digest, or one chain's guardian votes finalize the other's.
         let mut cur = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];

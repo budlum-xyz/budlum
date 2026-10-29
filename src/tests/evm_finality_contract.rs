@@ -1,4 +1,4 @@
-//! / F01-F06 regression locks for the Ethereum finality verifier.
+//! / regression locks for the Ethereum finality verifier.
 //!
 //! The Solidity workflow compiles the contract, while these tests pin the
 //! security boundaries that are otherwise easy to regress in a source-only

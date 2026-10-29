@@ -97,7 +97,7 @@ pub struct DomainRegistration {
     /// beside the attestation makes slashing addressable to the actual
     /// carrier; accepting a proof and later charging an unrelated bond would
     /// turn permissionless registration into arbitrary confiscation.
-    /// BLG-0154 (P07-F09): `serde(default)` is not a migration for bincode
+    /// `serde(default)` is not a migration for bincode
     /// (not self-describing) - a registration written before this trailing
     /// field existed fails to decode, loudly, at load. See `IntakeState`.
     #[serde(default, with = "crate::core::map_keys")]
@@ -364,7 +364,7 @@ impl ExternalDomainRegistry {
         // nothing changed and the call is refused. A Faulted domain has no
         // other way out (a dispute is not a probe set change), so for it the
         // operator's explicit re-admission is accepted with the same digest
-        // (P07-F05).
+        //.
         if digest == reg.admission_digest && reg.record.state != DomainState::Faulted {
             return Err(RegistryError::AdmissionDigestMismatch {
                 expected: hex(&reg.admission_digest),
@@ -857,7 +857,7 @@ impl ExternalDomainRegistry {
             .values()
             .any(|a| a.evidence_digest == evidence_digest);
         // The carrier map survives a slash (it is the receipt), while the
-        // attestation itself is withdrawn (BLG-0156) - so a repeat slash is
+        // attestation itself is withdrawn - so a repeat slash is
         // recognised through the carrier and the bond record below, and the
         // "never landed" refusal must wait until after the already-slashed
         // check or it shadows it.
@@ -882,7 +882,7 @@ impl ExternalDomainRegistry {
             return Err(RegistryError::UnknownProver(hex(prover.as_bytes())));
         };
         // One piece of evidence is one offence: repeating the call would
-        // drain the bond for the same attestation (P07-F11).
+        // drain the bond for the same attestation.
         if bond
             .slashings
             .iter()
@@ -907,7 +907,7 @@ impl ExternalDomainRegistry {
         // evidence could never be presented again. Clamped here, the escrow
         // step cannot be the thing that fails after the point of no return.
         let reward = reward.min(taken);
-        // BLG-0156 (P07-F11): a contradicted attestation is withdrawn from
+        // A contradicted attestation is withdrawn from
         // the served book, and both its carrier digest and its domain-separated
         // `(height, version, state_root)` claim tombstone remain recorded in
         // `attestation_provers` so no second prover can replay the contradicted
@@ -958,7 +958,7 @@ pub fn no_backing() -> SecurityBacking {
 
 #[cfg(test)]
 mod tests {
-    // BLG-0157 (P07-F12): the R3 registry had no direct tests at all - the
+    // The R3 registry had no direct tests at all - the
     // defects of F03, F05 and F11 would have been found by any of these.
     use super::*;
     use crate::cross_domain::external::selftest::{admit, FaultProbe};
@@ -1098,7 +1098,7 @@ mod tests {
             .expect("the carrier of an accepted attestation is slashable");
         assert!(taken > 0, "the slash must take something");
         assert!(reward <= taken, "the reward can never exceed the slash");
-        // BLG-0156 (P07-F11): the contradicted attestation is withdrawn -
+        // The contradicted attestation is withdrawn -
         // `latest_attestation` must not keep serving it as valid.
         let reg = registry.domain(&key).expect("domain");
         assert!(
@@ -1179,7 +1179,7 @@ mod tests {
             "an identical report on a serving domain is refused, got: {err:?}"
         );
         registry.mark_faulted(&key, "test").expect("faults");
-        // BLG-0135 no: P07-F05: the exit from Faulted WORKS even though
+        // no:: the exit from Faulted WORKS even though
         // admission is deterministic - the same digest is exactly what a
         // Faulted domain re-presents.
         registry

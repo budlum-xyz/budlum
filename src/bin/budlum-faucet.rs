@@ -11,7 +11,7 @@
 //! # Limits
 //!
 //! Each request is checked against three limits before anything is signed
-//!:
+//!
 //!
 //! * one grant per recipient address per cooldown window,
 //! * one grant per client IP per cooldown window,
@@ -37,7 +37,7 @@
 //! ```
 //!
 //! The key file holds the 32-byte ML-DSA-87 seed as hex. It is read from a
-//! path, never from the command line or the environment (K7), and `keygen`
+//! path, never from the command line or the environment , and `keygen`
 //! creates it with owner-only permissions.
 
 use budlum_core::core::address::Address;

@@ -11,7 +11,7 @@
 //! Losslessness: a PACT record does not replace the ORIGINAL; it is the integrity anchor of the container.
 //! The generatable class claim permits integrity verification even when a LOSSY transform
 //! (for example a video codec) is used inside the .bud: commitment = H(producer output), and the bytes are
-//! reproducible. In the lossless class commitment = content_id(original) (K3).
+//! reproducible. In the lossless class commitment = content_id(original).
 //!
 //! Code: `#![forbid(unsafe_code)]`, deterministic, panic free.
 
@@ -98,7 +98,7 @@ impl PactRecord {
         }
     }
 
-    /// For a lossless .bud: commitment = content_id(original) (K3) - exact integrity.
+    /// For a lossless .bud: commitment = content_id(original) - exact integrity.
     pub fn residual_only(original: &[u8], ts: u64) -> Self {
         let cid = crate::bud_format_container::content_id(original);
         PactRecord {
@@ -133,7 +133,7 @@ impl PactRecord {
     /// already exist and are CANONICAL: the same logical record -> the SAME bytes -> no effect on the state
     /// root (section 10.3). Test: `consensus_safe_serialization_roundtrip`.
     /// Production verification (I2 generate_and_verify): do the produced bytes satisfy the commitment?
-    /// In the lossless class (ResidualOnly) commitment = content_id(original) - it must match K3.
+    /// In the lossless class (ResidualOnly) commitment = content_id(original) - it must match.
     pub fn verify_production(&self, produced: &[u8]) -> bool {
         match self.mode {
             PactMode::PureProduction | PactMode::RecipePlusResidual => {
@@ -252,7 +252,7 @@ impl PactRecord {
 }
 
 // ---------------------------------------------------------------------------
-//: a PACT record that enters consensus is signed with the
+// a PACT record that enters consensus is signed with the
 // user composite suite 0x0001 (ML-DSA-87 + Ed25519). The crate does not carry
 // the composite implementation: the signing and verifying sides are traits, so
 // the node supplies the real suite and a classical-only signer cannot be
@@ -441,7 +441,7 @@ mod tests {
 
     #[test]
     fn residual_only_matches_content_id() {
-        // a lossless .bud: commitment = content_id(original) (K3)
+        // a lossless .bud: commitment = content_id(original)
         let original = b"lossless content 12345";
         let pact = PactRecord::residual_only(original, 300);
         assert!(pact.verify_production(original), "content_id matches");

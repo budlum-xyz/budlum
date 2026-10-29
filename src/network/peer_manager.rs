@@ -21,7 +21,7 @@ pub const BAN_DURATION: Duration = Duration::from_secs(3600);
 /// table forever and refuse every peer the node has never seen.
 const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
 /// After a prune that reclaimed nothing, the table is not scanned again for
-/// this long (P36-F09).
+/// this long.
 const EMPTY_PRUNE_BACKOFF: Duration = Duration::from_secs(1);
 pub const MAX_SCORE: i32 = 100;
 pub const MIN_SCORE: i32 = BAN_THRESHOLD;
@@ -141,7 +141,7 @@ pub struct PeerManager {
     outbound_peer_subnets: HashMap<PeerId, [u8; 3]>,
     /// When the last full-table prune found nothing to reclaim. While the
     /// table stays full of unprunable records, scanning it again on every
-    /// message from an unknown peer is a CPU amplifier (P36-F09).
+    /// message from an unknown peer is a CPU amplifier.
     last_empty_prune: Option<Instant>,
 }
 impl Default for PeerManager {
@@ -897,7 +897,7 @@ mod tests {
         assert!(spent.peers.contains_key(&overflow));
     }
 
-    /// P36-F09: a full table of unprunable records is scanned once, not on
+    /// A full table of unprunable records is scanned once, not on
     /// every message from an unknown peer; the back-off lifts when a scan can
     /// succeed again.
     #[test]
@@ -1162,7 +1162,7 @@ mod tests {
         );
     }
 
-    /// Reputation invariant (§3.4): score must stay within
+    /// Reputation invariant: score must stay within
     /// `[MIN_SCORE, MAX_SCORE]` under any penalty sequence. The
     /// Invalid-block / invalid-tx / oversized-message penalty paths clamp to
     /// `MIN_SCORE` (like `report_bad_behavior`) so `get_score` never

@@ -88,7 +88,7 @@ impl ModelSpec {
 
 /// The digest the output lock and the manifest use: SHA-256 over a domain tag
 /// and the bytes. The earlier skeleton mixed bytes with add and xor, so zero
-/// bytes contributed nothing and collisions were constructible (P34-F07).
+/// bytes contributed nothing and collisions were constructible.
 #[must_use]
 pub fn placeholder_digest(bytes: &[u8]) -> Hash32 {
     use sha2::{Digest, Sha256};
@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(spec.tier, crate::tier::ModelTier::Light);
     }
 
-    /// P34-F07: zero bytes must change the digest.
+    /// Zero bytes must change the digest.
     #[test]
     fn digest_distinguishes_zero_padding() {
         assert_ne!(placeholder_digest(&[]), placeholder_digest(&[0u8; 32]));
