@@ -10,8 +10,13 @@
 #
 # Caddy sets X-Forwarded-For; the node reads the client address from it only
 # because `trusted_proxies = ["127.0.0.1"]` names this proxy, and applies its
-# per-IP rate limit to that address. The operator listener (18546) and the
-# metrics listener (19090) are never proxied.
+# per-IP rate limit to that address. Start the faucet and indexer with
+# `--trusted-proxy 127.0.0.1` and bind them to loopback; do not give untrusted
+# local processes access to those listeners. This Caddy instance must be the
+# public edge: it overwrites X-Forwarded-For with the actual socket peer.
+# If another proxy fronts Caddy, configure its trust separately and use the
+# authenticated client address, not a client-supplied forwarded header.
+# The operator listener (18546) and metrics listener (19090) are never proxied.
 
 {
 	# Certificate issuance needs an address to send expiry notices to.
@@ -34,17 +39,23 @@
 # (Caddy forwards the upgrade unchanged).
 rpc.{$TESTNET_DOMAIN} {
 	import common
-	reverse_proxy 127.0.0.1:18545
+	reverse_proxy 127.0.0.1:18545 {
+		header_up X-Forwarded-For {remote_host}
+	}
 }
 
-# The faucet (budlum-faucet serve --listen 127.0.0.1:18600).
+# The faucet (budlum-faucet serve --listen 127.0.0.1:18600 --trusted-proxy 127.0.0.1).
 faucet.{$TESTNET_DOMAIN} {
 	import common
-	reverse_proxy 127.0.0.1:18600
+	reverse_proxy 127.0.0.1:18600 {
+		header_up X-Forwarded-For {remote_host}
+	}
 }
 
-# The read-only explorer API (budlum-indexer, 127.0.0.1:18700).
+# The read-only explorer API (budlum-indexer --listen 127.0.0.1:18700 --trusted-proxy 127.0.0.1).
 explorer-api.{$TESTNET_DOMAIN} {
 	import common
-	reverse_proxy 127.0.0.1:18700
+	reverse_proxy 127.0.0.1:18700 {
+		header_up X-Forwarded-For {remote_host}
+	}
 }

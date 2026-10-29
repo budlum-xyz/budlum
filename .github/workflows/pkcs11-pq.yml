@@ -54,7 +54,12 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/kryoptic"
-          cargo build --release -p kryoptic --no-default-features --features standard,pqc
+          # The workspace disables ossl's default features. With defaults off,
+          # `standard,pqc` alone selects no OpenSSL backend at all: ossl's
+          # build script receives no version metadata and aborts. Explicitly
+          # enable the static-source ossl-sys backend; `dynamic` would instead
+          # use the runner's system OpenSSL, which may not support ML-DSA.
+          cargo build --release -p kryoptic --no-default-features --features standard,pqc,ossl/ossl-sys
           test -f target/release/libkryoptic_pkcs11.so
       - name: Token configuration
         run: |

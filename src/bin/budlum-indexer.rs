@@ -17,7 +17,7 @@
 //!
 //! ```text
 //! budlum-indexer --rpc-url http://127.0.0.1:18545 \
-//!     --db ./data/testnet/indexer --listen 127.0.0.1:18700
+//!     --db ./data/testnet/indexer --listen 127.0.0.1:18700 --allow-direct
 //! curl http://127.0.0.1:18700/v1/status
 //! ```
 
@@ -25,10 +25,15 @@ use clap::Parser;
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::{Method, Request, Response, StatusCode};
-use std::net::SocketAddr;
+use std::collections::{BTreeMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
+
+#[path = "support/http.rs"]
+mod http_support;
 
 /// Blocks fetched per follow step.
 const BLOCKS_PER_STEP: u64 = 100;
@@ -36,6 +41,14 @@ const BLOCKS_PER_STEP: u64 = 100;
 const FOLLOW_INTERVAL: Duration = Duration::from_secs(2);
 /// The largest page a list endpoint returns.
 const MAX_PAGE: usize = 100;
+/// Leave capacity on a 600/minute node for the index follower and other local services.
+const PUBLIC_NODE_CALLS_PER_MINUTE: usize = 120;
+const PUBLIC_NODE_CONCURRENCY: usize = 8;
+const CLIENT_REQUESTS_PER_MINUTE: usize = 60;
+const MAX_CLIENTS: usize = 10_000;
+const RATE_WINDOW_SECS: u64 = 60;
+/// At most 300 follower RPCs/minute, independently of the public budget.
+const FOLLOW_RPC_SPACING: Duration = Duration::from_millis(200);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -52,14 +65,112 @@ struct Cli {
     /// The HTTP listener of the API.
     #[arg(long, default_value = "127.0.0.1:18700")]
     listen: String,
+    /// Serve only these reverse proxies and trust their X-Forwarded-For. Repeatable.
+    #[arg(long = "trusted-proxy")]
+    trusted_proxies: Vec<IpAddr>,
+    /// Serve direct clients, ignoring forwarded headers.
+    #[arg(long)]
+    allow_direct: bool,
+}
+
+#[derive(Default)]
+struct RateWindow {
+    requests: VecDeque<u64>,
+}
+
+impl RateWindow {
+    fn expire(&mut self, now: u64) {
+        while self
+            .requests
+            .front()
+            .is_some_and(|old| now.saturating_sub(*old) >= RATE_WINDOW_SECS)
+        {
+            self.requests.pop_front();
+        }
+    }
+
+    fn take(&mut self, now: u64, limit: usize) -> bool {
+        self.expire(now);
+        if self.requests.len() >= limit {
+            return false;
+        }
+        self.requests.push_back(now);
+        true
+    }
+}
+
+#[derive(Default)]
+struct ClientRates {
+    clients: BTreeMap<IpAddr, RateWindow>,
+}
+
+impl ClientRates {
+    fn take(&mut self, ip: IpAddr, now: u64) -> bool {
+        if !self.clients.contains_key(&ip) && self.clients.len() >= MAX_CLIENTS {
+            self.clients.retain(|_, window| {
+                window.expire(now);
+                !window.requests.is_empty()
+            });
+            if self.clients.len() >= MAX_CLIENTS {
+                return false;
+            }
+        }
+        self.clients
+            .entry(ip)
+            .or_default()
+            .take(now, CLIENT_REQUESTS_PER_MINUTE)
+    }
+}
+
+struct PublicClients {
+    identity: http_support::ClientIdentity,
+    started: Instant,
+    rates: Mutex<ClientRates>,
+}
+
+#[derive(Debug)]
+enum PublicCallError {
+    Limited,
+    Busy,
+    Node(String),
 }
 
 struct Node {
     url: String,
     http: reqwest::Client,
+    started: Instant,
+    public_rate: Mutex<RateWindow>,
+    public_slots: Semaphore,
 }
 
 impl Node {
+    async fn call_public(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, PublicCallError> {
+        let _slot = self
+            .public_slots
+            .try_acquire()
+            .map_err(|_| PublicCallError::Busy)?;
+        let allowed = self
+            .public_rate
+            .lock()
+            .map(|mut window| {
+                window.take(
+                    self.started.elapsed().as_secs(),
+                    PUBLIC_NODE_CALLS_PER_MINUTE,
+                )
+            })
+            .unwrap_or(false);
+        if !allowed {
+            return Err(PublicCallError::Limited);
+        }
+        self.call(method, params)
+            .await
+            .map_err(PublicCallError::Node)
+    }
+
     async fn call(
         &self,
         method: &str,
@@ -278,6 +389,7 @@ impl Index {
 
 /// Fetch every finalized block the index does not hold yet, in height order.
 async fn follow_step(node: &Node, index: &Index) -> Result<u64, String> {
+    tokio::time::sleep(FOLLOW_RPC_SPACING).await;
     let status = node.call("bud_getStatus", serde_json::json!([])).await?;
     let finalized = status
         .get("finalizedHeight")
@@ -286,6 +398,7 @@ async fn follow_step(node: &Node, index: &Index) -> Result<u64, String> {
     let mut next = index.next_height();
     let last = finalized.min(next.saturating_add(BLOCKS_PER_STEP - 1));
     while next <= last {
+        tokio::time::sleep(FOLLOW_RPC_SPACING).await;
         let block = node
             .call("bud_getBlockByNumber", serde_json::json!([next]))
             .await?;
@@ -349,12 +462,27 @@ fn limit(query: &str) -> usize {
         .map_or(20, |n| n.clamp(1, MAX_PAGE))
 }
 
-/// Answer a current-state read from the node.
+fn public_error(error: PublicCallError) -> Response<Full<Bytes>> {
+    let (status, message) = match error {
+        PublicCallError::Limited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "public node budget exhausted".to_string(),
+        ),
+        PublicCallError::Busy => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "public node requests are busy".to_string(),
+        ),
+        PublicCallError::Node(message) => (StatusCode::BAD_GATEWAY, message),
+    };
+    json_response(status, &serde_json::json!({"error": message}))
+}
+
+/// Answer a current-state read from the node under the public RPC budget.
 async fn from_node(node: &Node, method: &str, params: serde_json::Value) -> Response<Full<Bytes>> {
-    match node.call(method, params).await {
+    match node.call_public(method, params).await {
         Ok(serde_json::Value::Null) => found(None),
         Ok(value) => json_response(StatusCode::OK, &value),
-        Err(e) => json_response(StatusCode::BAD_GATEWAY, &serde_json::json!({"error": e})),
+        Err(e) => public_error(e),
     }
 }
 
@@ -363,7 +491,14 @@ async fn route(node: &Node, index: &Index, path: &str, query: &str) -> Response<
     match parts.as_slice() {
         ["health"] => json_response(StatusCode::OK, &serde_json::json!({"ok": true})),
         ["v1", "status"] => {
-            let node_status = node.call("bud_getStatus", serde_json::json!([])).await.ok();
+            let node_status = match node
+                .call_public("bud_getStatus", serde_json::json!([]))
+                .await
+            {
+                Ok(status) => Some(status),
+                Err(PublicCallError::Node(_)) => None,
+                Err(error) => return public_error(error),
+            };
             json_response(
                 StatusCode::OK,
                 &serde_json::json!({
@@ -419,6 +554,8 @@ async fn route(node: &Node, index: &Index, path: &str, query: &str) -> Response<
 async fn handle(
     node: Arc<Node>,
     index: Arc<Index>,
+    clients: Arc<PublicClients>,
+    peer: SocketAddr,
     request: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     if request.method() != Method::GET {
@@ -429,10 +566,38 @@ async fn handle(
     }
     let path = request.uri().path().to_string();
     let query = request.uri().query().unwrap_or("").to_string();
+    if path != "/health" {
+        let ip = match clients.identity.client_ip(peer.ip(), request.headers()) {
+            Ok(ip) => ip,
+            Err(message) => {
+                return Ok(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &serde_json::json!({"error": message}),
+                ))
+            }
+        };
+        let allowed = clients
+            .rates
+            .lock()
+            .map(|mut rates| rates.take(ip, clients.started.elapsed().as_secs()))
+            .unwrap_or(false);
+        if !allowed {
+            return Ok(json_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                &serde_json::json!({"error": "client rate limit reached"}),
+            ));
+        }
+    }
     Ok(route(&node, &index, &path, &query).await)
 }
 
 async fn serve(cli: Cli) -> Result<(), String> {
+    let identity = http_support::ClientIdentity::new(cli.allow_direct, cli.trusted_proxies)?;
+    let clients = Arc::new(PublicClients {
+        identity,
+        started: Instant::now(),
+        rates: Mutex::new(ClientRates::default()),
+    });
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -440,6 +605,9 @@ async fn serve(cli: Cli) -> Result<(), String> {
     let node = Arc::new(Node {
         url: cli.rpc_url,
         http,
+        started: Instant::now(),
+        public_rate: Mutex::new(RateWindow::default()),
+        public_slots: Semaphore::new(PUBLIC_NODE_CONCURRENCY),
     });
     let index = Arc::new(Index::open(&cli.db)?);
     tokio::spawn(follow(node.clone(), index.clone()));
@@ -451,6 +619,7 @@ async fn serve(cli: Cli) -> Result<(), String> {
         index.next_height(),
         cli.listen
     );
+    let connections = Arc::new(Semaphore::new(http_support::MAX_CONNECTIONS));
     loop {
         let (stream, peer): (_, SocketAddr) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -459,16 +628,27 @@ async fn serve(cli: Cli) -> Result<(), String> {
                 continue;
             }
         };
-        let (node, index) = (node.clone(), index.clone());
+        let Ok(permit) = connections.clone().try_acquire_owned() else {
+            continue;
+        };
+        let (node, index, clients) = (node.clone(), index.clone(), clients.clone());
         tokio::spawn(async move {
+            let _permit = permit;
             let service = hyper::service::service_fn(move |request| {
-                handle(node.clone(), index.clone(), request)
+                handle(node.clone(), index.clone(), clients.clone(), peer, request)
             });
-            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
-                .await
-            {
-                eprintln!("budlum-indexer: connection from {peer} ended: {e}");
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            builder
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(http_support::HEADER_TIMEOUT)
+                .max_buf_size(http_support::MAX_HEADER_BYTES)
+                .keep_alive(false);
+            let connection =
+                builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
+            match tokio::time::timeout(http_support::CONNECTION_LIFETIME, connection).await {
+                Ok(Err(e)) => eprintln!("budlum-indexer: connection from {peer} ended: {e}"),
+                Err(_) => eprintln!("budlum-indexer: connection from {peer} timed out"),
+                Ok(Ok(())) => {}
             }
         });
     }
@@ -534,6 +714,43 @@ mod tests {
         assert_eq!(index.latest_blocks(1)[0]["number"], "0x1");
     }
 
+    #[tokio::test]
+    async fn incomplete_headers_expire_and_release_a_connection_slot() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = slots.clone().try_acquire_owned().unwrap();
+        let server = tokio::spawn(async move {
+            let _permit = permit;
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = hyper::service::service_fn(|_: Request<Incoming>| async {
+                Ok::<_, std::convert::Infallible>(json_response(
+                    StatusCode::OK,
+                    &serde_json::json!({"ok": true}),
+                ))
+            });
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            builder
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(Duration::from_millis(30));
+            let connection =
+                builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
+            assert!(tokio::time::timeout(Duration::from_secs(2), connection)
+                .await
+                .unwrap()
+                .is_err());
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost")
+            .await
+            .unwrap();
+        assert_eq!(slots.available_permits(), 0);
+        server.await.unwrap();
+        assert_eq!(slots.available_permits(), 1);
+    }
+
     #[test]
     fn quantities_and_pages_are_read_defensively() {
         assert_eq!(quantity(&serde_json::json!("0x10")), Some(16));
@@ -542,5 +759,20 @@ mod tests {
         assert_eq!(limit("limit=5000"), MAX_PAGE);
         assert_eq!(limit(""), 20);
         assert_eq!(param("a=1&before=9", "before"), Some("9"));
+        let mut window = RateWindow::default();
+        for _ in 0..PUBLIC_NODE_CALLS_PER_MINUTE {
+            assert!(window.take(0, PUBLIC_NODE_CALLS_PER_MINUTE));
+        }
+        assert!(!window.take(59, PUBLIC_NODE_CALLS_PER_MINUTE));
+        assert!(window.take(60, PUBLIC_NODE_CALLS_PER_MINUTE));
+        let mut clients = ClientRates::default();
+        let one: IpAddr = "203.0.113.1".parse().unwrap();
+        let two: IpAddr = "203.0.113.2".parse().unwrap();
+        for _ in 0..CLIENT_REQUESTS_PER_MINUTE {
+            assert!(clients.take(one, 0));
+        }
+        assert!(!clients.take(one, 59));
+        assert!(clients.take(two, 59));
+        assert!(clients.take(one, 60));
     }
 }
