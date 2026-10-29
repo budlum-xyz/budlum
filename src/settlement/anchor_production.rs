@@ -598,6 +598,7 @@ impl AnchorEmission {
                 public_key: seal.public_key(),
             }],
             suspended: std::collections::BTreeSet::new(),
+            revoked_key_hashes: std::collections::BTreeSet::new(),
         };
         ledger.validate().map_err(AnchorError::from)?;
         Ok(Self {
