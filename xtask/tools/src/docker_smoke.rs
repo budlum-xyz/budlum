@@ -31,7 +31,7 @@ const DEVNET_CONTAINER: &str = "budlum-smoke-devnet";
 const RPC_PORT: u16 = 8545;
 pub const DEVNET_CHAIN_ID: &str = "0xb0ce";
 pub const DEVNET_GENESIS_HASH: &str =
-    "0x153809d8d1ab45ea7f601c3ee41a6db599254e05429eee5ac3f1e39b568b9058";
+    "0xc0e97af8bae9bff4086bb4d5820865ee00c1f2b36d5bfeb856f752221815454f";
 const WAIT_SECONDS: u32 = 60;
 const REFUSAL_MARKER: &str = "CRITICAL SECURITY FAILURE";
 

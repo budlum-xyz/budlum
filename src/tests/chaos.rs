@@ -685,17 +685,17 @@ mod chaos_tests {
         let consensus_settlement = Arc::new(PoWEngine::new(0));
         let mut settlement_node = Blockchain::new(consensus_settlement, None, 45262, None);
 
-        let pos_domain = default_domain(2, ConsensusKind::PoS, 1338, "pos-qc-finality", 0);
+        let source_domain = default_domain(2, ConsensusKind::PoA, 1338, "poa-authority-quorum", 0);
         let poa_domain = default_domain(3, ConsensusKind::PoA, 1339, "poa-authority-quorum", 0);
 
         settlement_node
-            .register_consensus_domain(pos_domain.clone())
+            .register_consensus_domain(source_domain.clone())
             .unwrap();
         settlement_node
             .register_consensus_domain(poa_domain.clone())
             .unwrap();
         let num_transfers = 100;
-        let mut pos_event_tree = DomainEventTree::new();
+        let mut source_event_tree = DomainEventTree::new();
         let mut transfers_data = Vec::new();
 
         for i in 1..=num_transfers {
@@ -706,7 +706,7 @@ mod chaos_tests {
             settlement_node
                 .state
                 .bridge_state
-                .register_asset(asset, pos_domain.id)
+                .register_asset(asset, source_domain.id)
                 .unwrap();
 
             let sender = Address::from([i as u8; 32]);
@@ -716,7 +716,7 @@ mod chaos_tests {
                 .state
                 .bridge_state
                 .lock(
-                    pos_domain.id,
+                    source_domain.id,
                     poa_domain.id,
                     1,
                     (i - 1) as u32,
@@ -728,23 +728,26 @@ mod chaos_tests {
                 )
                 .unwrap();
 
-            pos_event_tree.push(lock_event.clone());
+            source_event_tree.push(lock_event.clone());
             transfers_data.push((transfer, lock_event));
         }
 
-        let mut pos_block = Block::new(1, "pos_prev".repeat(32), vec![]);
-        pos_block.state_root = "pos_state_root".repeat(32)[0..64].to_string();
-        pos_block.tx_root = pos_block.calculate_tx_root();
-        pos_block.hash = pos_block.calculate_hash();
+        let mut source_block = Block::new(1, "source_prev".repeat(32), vec![]);
+        source_block.state_root = "source_state_root".repeat(32)[0..64].to_string();
+        source_block.tx_root = source_block.calculate_tx_root();
+        source_block.hash = source_block.calculate_hash();
 
-        let mut pos_com =
-            DomainCommitment::from_block(&pos_domain, &pos_block, [2u8; 32], [3u8; 32], 1).unwrap();
-        pos_com.event_root = pos_event_tree.root();
+        let mut source_com =
+            DomainCommitment::from_block(&source_domain, &source_block, [2u8; 32], [3u8; 32], 1)
+                .unwrap();
+        source_com.event_root = source_event_tree.root();
         // (security audit §9) capture the commitment block hash so the
         // Bridge-mint forgery gate has a concrete value to bind against.
-        let pos_com_block_hash = pos_com.domain_block_hash;
+        let source_com_block_hash = source_com.domain_block_hash;
 
-        settlement_node.submit_domain_commitment(pos_com).unwrap();
+        settlement_node
+            .submit_domain_commitment(source_com)
+            .unwrap();
 
         for (_transfer, event) in &transfers_data {
             let msg = event.message.clone().unwrap();
@@ -762,13 +765,13 @@ mod chaos_tests {
         );
 
         for (i, (_transfer, lock_event)) in transfers_data.iter().enumerate() {
-            let proof = pos_event_tree.proof(i).unwrap();
+            let proof = source_event_tree.proof(i).unwrap();
 
             let mint_result = settlement_node.mint_bridge_transfer_from_verified_event(
-                pos_domain.id,
+                source_domain.id,
                 1,
                 1,
-                Some(pos_com_block_hash),
+                Some(source_com_block_hash),
                 lock_event.clone(),
                 &proof,
                 Address::from([0x99; 32]), // relayer
@@ -781,10 +784,10 @@ mod chaos_tests {
             );
 
             let duplicate_mint_result = settlement_node.mint_bridge_transfer_from_verified_event(
-                pos_domain.id,
+                source_domain.id,
                 1,
                 1,
-                Some(pos_com_block_hash),
+                Some(source_com_block_hash),
                 lock_event.clone(),
                 &proof,
                 Address::from([0x99; 32]),

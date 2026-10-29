@@ -806,9 +806,14 @@ mod settlement_prod_tests {
     fn bridge_mint_is_only_called_after_settlement_event_proof_verifies() {
         let mut blockchain = test_chain();
         let pow = domain(1, ConsensusKind::PoW);
-        let pos = domain(2, ConsensusKind::PoS);
+        // The burn the bridge unlocks against comes from a PoA domain: its
+        // authority digest binds the commitment's event root, which is what a
+        // mint or an unlock consumes. A PoS certificate signs the checkpoint
+        // hash alone, so the settlement layer refuses an event root it cannot
+        // attest (`UnattestedEventRoot`).
+        let poa = domain(2, ConsensusKind::PoA);
         blockchain.register_consensus_domain(pow.clone()).unwrap();
-        blockchain.register_consensus_domain(pos.clone()).unwrap();
+        blockchain.register_consensus_domain(poa.clone()).unwrap();
 
         let asset_id = AssetId(hash_fields_bytes(&[b"canonical-asset"]));
         let owner = test_addr_from_byte(11u8);
@@ -865,12 +870,12 @@ mod settlement_prod_tests {
         );
 
         let burn_event = blockchain
-            .burn_bridge_transfer_with_event(message_id, pos.id, 56, 0, 2_000, [7u8; 20])
+            .burn_bridge_transfer_with_event(message_id, poa.id, 56, 0, 2_000, [7u8; 20])
             .unwrap();
         let mut burn_tree = DomainEventTree::new();
         burn_tree.push(burn_event.clone());
-        apply_chain_through(&mut blockchain, &pos, 56, 5);
-        let mut burn_commitment = commitment_for(&pos, 56, 0, 5);
+        apply_chain_through(&mut blockchain, &poa, 56, 5);
+        let mut burn_commitment = commitment_for(&poa, 56, 0, 5);
         burn_commitment.event_root = burn_tree.root();
         let burn_commitment_block_hash = burn_commitment.domain_block_hash;
         blockchain
@@ -878,7 +883,7 @@ mod settlement_prod_tests {
             .unwrap();
         blockchain
             .unlock_bridge_transfer_from_verified_event(
-                pos.id,
+                poa.id,
                 56,
                 0,
                 Some(burn_commitment_block_hash),
@@ -1786,9 +1791,11 @@ mod settlement_prod_tests {
     fn full_bridge_lifecycle_lock_mint_burn_unlock_with_proof_verification() {
         let mut bc = test_chain();
         let pow = domain(1, ConsensusKind::PoW);
-        let pos = domain(2, ConsensusKind::PoS);
+        // PoA, not PoS: the burn commitment's event root has to be attested by
+        // the certificate that finalizes it (see `CommitmentAttestation`).
+        let poa = domain(2, ConsensusKind::PoA);
         bc.register_consensus_domain(pow.clone()).unwrap();
-        bc.register_consensus_domain(pos.clone()).unwrap();
+        bc.register_consensus_domain(poa.clone()).unwrap();
 
         let asset = AssetId(hash_fields_bytes(&[b"lifecycle-asset"]));
         let alice = Address::from([0xAA; 32]);
@@ -1798,7 +1805,7 @@ mod settlement_prod_tests {
         let (transfer, lock_event) = bc
             .state
             .bridge_state
-            .lock(pow.id, pos.id, 100, 0, asset, alice, bob, 1000, 5000)
+            .lock(pow.id, poa.id, 100, 0, asset, alice, bob, 1000, 5000)
             .unwrap();
 
         let mut tree = DomainEventTree::new();
@@ -1822,12 +1829,12 @@ mod settlement_prod_tests {
         .unwrap();
 
         let burn_event = bc
-            .burn_bridge_transfer_with_event(transfer.message_id, pos.id, 101, 0, 5000, [7u8; 20])
+            .burn_bridge_transfer_with_event(transfer.message_id, poa.id, 101, 0, 5000, [7u8; 20])
             .unwrap();
 
         let mut burn_tree = DomainEventTree::new();
         burn_tree.push(burn_event.clone());
-        let mut burn_commitment = commitment_for(&pos, 101, 0, 81);
+        let mut burn_commitment = commitment_for(&poa, 101, 0, 81);
         burn_commitment.event_root = burn_tree.root();
         let burn_commitment_block_hash = burn_commitment.domain_block_hash;
         bc.submit_domain_commitment(burn_commitment).unwrap();
@@ -1835,7 +1842,7 @@ mod settlement_prod_tests {
         let burn_proof = burn_tree.proof(0).unwrap();
         let alice_before = bc.state.get_balance(&alice);
         bc.unlock_bridge_transfer_from_verified_event(
-            pos.id,
+            poa.id,
             101,
             0,
             Some(burn_commitment_block_hash),
@@ -1860,9 +1867,11 @@ mod settlement_prod_tests {
     fn bridge_unlock_requires_verified_burn_event_from_target_domain() {
         let mut bc = test_chain();
         let pow = domain(1, ConsensusKind::PoW);
-        let pos = domain(2, ConsensusKind::PoS);
+        // PoA, not PoS: the burn commitment's event root has to be attested by
+        // the certificate that finalizes it (see `CommitmentAttestation`).
+        let poa = domain(2, ConsensusKind::PoA);
         bc.register_consensus_domain(pow.clone()).unwrap();
-        bc.register_consensus_domain(pos.clone()).unwrap();
+        bc.register_consensus_domain(poa.clone()).unwrap();
 
         let asset = AssetId(hash_fields_bytes(&[b"return-proof-asset"]));
         let alice = Address::from([0xA1; 32]);
@@ -1872,7 +1881,7 @@ mod settlement_prod_tests {
         let (transfer, lock_event) = bc
             .state
             .bridge_state
-            .lock(pow.id, pos.id, 200, 0, asset, alice, bob, 777, 9000)
+            .lock(pow.id, poa.id, 200, 0, asset, alice, bob, 777, 9000)
             .unwrap();
         let mut lock_tree = DomainEventTree::new();
         lock_tree.push(lock_event.clone());
@@ -1894,12 +1903,12 @@ mod settlement_prod_tests {
         .unwrap();
 
         let burn_event = bc
-            .burn_bridge_transfer_with_event(transfer.message_id, pos.id, 201, 0, 9000, [7u8; 20])
+            .burn_bridge_transfer_with_event(transfer.message_id, poa.id, 201, 0, 9000, [7u8; 20])
             .unwrap();
         let mut burn_tree = DomainEventTree::new();
         burn_tree.push(burn_event.clone());
-        apply_chain_through(&mut bc, &pos, 201, 91);
-        let mut burn_commitment = commitment_for(&pos, 201, 0, 91);
+        apply_chain_through(&mut bc, &poa, 201, 91);
+        let mut burn_commitment = commitment_for(&poa, 201, 0, 91);
         burn_commitment.event_root = burn_tree.root();
         let burn_commitment_block_hash = burn_commitment.domain_block_hash;
         bc.submit_domain_commitment(burn_commitment).unwrap();
@@ -1909,7 +1918,7 @@ mod settlement_prod_tests {
         wrong_kind.kind = DomainEventKind::BridgeMinted;
         assert!(bc
             .unlock_bridge_transfer_from_verified_event(
-                pos.id,
+                poa.id,
                 201,
                 0,
                 None,
@@ -1922,7 +1931,7 @@ mod settlement_prod_tests {
         wrong_message.message.as_mut().unwrap().kind = MessageKind::BridgeUnlock;
         assert!(bc
             .unlock_bridge_transfer_from_verified_event(
-                pos.id,
+                poa.id,
                 201,
                 0,
                 None,
@@ -1932,7 +1941,7 @@ mod settlement_prod_tests {
             .is_err());
 
         bc.unlock_bridge_transfer_from_verified_event(
-            pos.id,
+            poa.id,
             201,
             0,
             Some(burn_commitment_block_hash),
