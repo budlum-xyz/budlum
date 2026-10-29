@@ -1,5 +1,5 @@
 //! WIRING: wired - `SettlementTx::RelayerIntent` carries intent, bid,
-//! fulfilment and expiry writes through the consensus settlement door.
+//! award, fulfilment and expiry writes through the consensus settlement door.
 //!
 //! Relayer Policy Layer primitives.
 //!
@@ -7,8 +7,8 @@
 //! deadlines, replay ids, fee caps, explicit owner escrow, anchored receipt
 //! proofs and slashable RELAYER bonds. The settlement door pays the winning
 //! solver from the locked maximum fee and refunds the remainder. An overdue
-//! intent cannot be pruned silently: its owner is refunded and every
-//! unhonoured bid is slashed before the rows leave consensus state.
+//! intent cannot be pruned silently: its owner is refunded and an unhonoured
+//! active award may be slashed before the rows leave consensus state.
 //!
 //! The inbound bridge direction remains separate: `split_bridge_fee` pays the
 //! relayer out of an arriving asset. This module is the outbound intent layer,
@@ -26,6 +26,10 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const MAX_RELAYER_INTENTS: usize = 10_000;
 pub const MAX_RELAYER_BIDS_PER_INTENT: usize = 64;
 pub const MAX_RELAYER_SETTLEMENTS: usize = 10_000;
+/// Minimum time a new award must leave both the selected solver and the
+/// intent to deliver an anchored proof; operators should use longer windows
+/// when the target chain's finality needs them.
+pub const MIN_RELAYER_AWARD_WINDOW_BLOCKS: u64 = 8;
 /// Consensus accepts a bounded Merkle receipt for an external intent. The
 /// bridge result path uses the same ceiling, so an intent cannot smuggle a
 /// larger proof through a different transaction door.
@@ -50,8 +54,12 @@ pub enum RelayerIntentTx {
         result: Box<RelayerExternalResult>,
     },
     /// Expire an intent after its deadline, refunding its owner and slashing
-    /// every bid that was committed but not honoured.
+    /// a still-live awarded bid that was not honoured.
     Expire { intent_id: [u8; 32] },
+    /// Freeze the cheapest eligible bid before a solver acts. Only the
+    /// owner may award, and an active award cannot be displaced. Appended to
+    /// preserve existing bincode enum discriminants.
+    Award { intent_id: [u8; 32] },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,13 +418,15 @@ pub const INTENT_EXECUTED_KIND: &[u8] = b"budlum/relayer/intent-executed/v1";
 /// The result has to prove that *this* intent was carried out, not merely
 /// that something happened on the target chain: on top of
 /// [`verify_anchored_result`], its message must name the intent
-/// (`correlation_id`), repeat the action's payload hash and carry the
-/// intent-executed kind. A solver cannot settle with a self-signed receipt,
+/// (`correlation_id`), repeat the action's payload hash, name the awarded
+/// solver as recipient, and carry the intent-executed kind. A solver cannot
+/// settle with another solver's receipt or with a self-signed receipt,
 /// with a root nobody anchored, or with a real but unrelated event.
 pub fn verify_intent_result(
     external_roots: &BTreeMap<u32, [u8; 32]>,
     intent: &UserIntent,
     result: &RelayerExternalResult,
+    relayer: Address,
 ) -> Result<(), String> {
     let RelayerActionKind::ExternalTransaction {
         chain,
@@ -431,6 +441,8 @@ pub fn verify_intent_result(
     }
     let message = verify_anchored_result(external_roots, result)?;
     if message.correlation_id != Some(intent.intent_id)
+        || message.target_domain != intent.source_domain
+        || message.recipient != relayer
         || message.payload_hash != *payload_hash
         || message.kind
             != crate::cross_domain::message::MessageKind::Custom(INTENT_EXECUTED_KIND.to_vec())
@@ -448,6 +460,14 @@ pub fn verify_intent_result(
         ));
     }
     Ok(())
+}
+
+/// A consensus-rooted choice made before external execution. Its bid remains
+/// immutable; a new award is permitted only after this bid's own window ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayerAward {
+    pub relayer: Address,
+    pub awarded_at_block: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -468,6 +488,9 @@ pub struct RelayerPolicyRegistry {
     /// itself is still known.
     #[serde(default)]
     pub settled_intents: BTreeSet<[u8; 32]>,
+    /// The locked winner of each currently awarded intent.
+    #[serde(default, with = "crate::core::map_keys")]
+    pub awards: BTreeMap<[u8; 32], RelayerAward>,
 }
 
 impl RelayerPolicyRegistry {
@@ -482,6 +505,7 @@ impl RelayerPolicyRegistry {
             && self.escrowed.is_empty()
             && self.settlements.is_empty()
             && self.settled_intents.is_empty()
+            && self.awards.is_empty()
     }
 
     pub fn submit_intent(
@@ -556,16 +580,17 @@ impl RelayerPolicyRegistry {
             .escrowed
             .remove(&intent_id)
             .ok_or_else(|| "RelayerPolicyRegistry intent has no escrow".to_string())?;
-        // A bid whose own window closed before the intent's deadline was never a
-        // commitment the deadline could test: it leaves with the intent but it
-        // is not slashable. `submit_bid` now refuses such a bid, so this filter
-        // matters for rows written before that rule existed.
+        // A bidder that was not awarded work, or whose own window closed
+        // before the intent deadline, did not hold that deadline open.
+        let awarded = self.awards.remove(&intent_id).map(|award| award.relayer);
         let bids: Vec<SolverBid> = self
             .bids
             .remove(&intent_id)
             .unwrap_or_default()
             .into_iter()
-            .filter(|bid| bid.expires_at_block >= intent.deadline_block)
+            .filter(|bid| {
+                Some(bid.relayer) == awarded && bid.expires_at_block > intent.deadline_block
+            })
             .collect();
         self.intents.remove(&intent_id);
         self.settled_intents.insert(intent_id);
@@ -606,15 +631,66 @@ impl RelayerPolicyRegistry {
         Ok(())
     }
 
-    pub fn best_bid(&self, intent_id: &[u8; 32]) -> Option<&SolverBid> {
+    /// Lowest eligible quote at this height: lapsed or imminently expiring
+    /// offers cannot block the other solvers. Ties use bond then address.
+    pub fn best_bid_at(&self, intent_id: &[u8; 32], current_block: u64) -> Option<&SolverBid> {
         self.bids.get(intent_id).and_then(|bids| {
-            bids.iter().min_by(|a, b| {
-                a.quoted_fee
-                    .cmp(&b.quoted_fee)
-                    .then_with(|| b.bond.cmp(&a.bond))
-                    .then_with(|| a.relayer.as_bytes().cmp(b.relayer.as_bytes()))
-            })
+            bids.iter()
+                .filter(|bid| {
+                    bid.expires_at_block.saturating_sub(current_block)
+                        >= MIN_RELAYER_AWARD_WINDOW_BLOCKS
+                })
+                .min_by(|a, b| {
+                    a.quoted_fee
+                        .cmp(&b.quoted_fee)
+                        .then_with(|| b.bond.cmp(&a.bond))
+                        .then_with(|| a.relayer.as_bytes().cmp(b.relayer.as_bytes()))
+                })
         })
+    }
+
+    /// Lock a winner before external execution. An owner can replace an
+    /// expired award, but never displace a still-live one with a later bid.
+    pub fn award_intent(
+        &mut self,
+        intent_id: [u8; 32],
+        owner: Address,
+        current_block: u64,
+    ) -> Result<RelayerAward, String> {
+        let intent = self
+            .intents
+            .get(&intent_id)
+            .ok_or_else(|| "RelayerPolicyRegistry intent not found".to_string())?;
+        if self.is_settled(&intent_id) {
+            return Err("RelayerPolicyRegistry intent already settled".into());
+        }
+        if intent.owner != owner {
+            return Err("only the intent owner may award a relayer bid".into());
+        }
+        if intent.deadline_block.saturating_sub(current_block) < MIN_RELAYER_AWARD_WINDOW_BLOCKS {
+            return Err("relayer award leaves too little time to fulfil".into());
+        }
+        if let Some(existing) = self.awards.get(&intent_id) {
+            if self
+                .bids
+                .get(&intent_id)
+                .into_iter()
+                .flatten()
+                .any(|bid| bid.relayer == existing.relayer && bid.expires_at_block > current_block)
+            {
+                return Err("RelayerPolicyRegistry already has an active award".into());
+            }
+        }
+        let relayer = self
+            .best_bid_at(&intent_id, current_block)
+            .ok_or_else(|| "RelayerPolicyRegistry has no eligible bid".to_string())?
+            .relayer;
+        let award = RelayerAward {
+            relayer,
+            awarded_at_block: current_block,
+        };
+        self.awards.insert(intent_id, award.clone());
+        Ok(award)
     }
 
     pub fn settle_intent(
@@ -634,23 +710,23 @@ impl RelayerPolicyRegistry {
         if intent.deadline_block <= current_block {
             return Err("RelayerPolicyRegistry intent expired".into());
         }
-        // The auction pays the winning solver, not whichever bidder presents
-        // the receipt first. An anchored receipt proof is public, so any
-        // bonded relayer could otherwise reuse the winner's proof, settle
-        // against its own (higher) quote and leave the solver that did the
-        // external work unpaid for the gas it burned. `best_bid` is the one
-        // price ordering the door documents: lowest quote, then highest bond,
-        // then address for a deterministic tie-break.
-        let bid = self
-            .best_bid(&intent_id)
-            .ok_or_else(|| "RelayerPolicyRegistry relayer bid not found".to_string())?;
-        if bid.relayer != relayer {
-            return Err(format!(
-                "RelayerPolicyRegistry settlement names {relayer}, but the winning bid is \
-                 {} at {} (lowest quote first)",
-                bid.relayer, bid.quoted_fee
-            ));
+        // The owner fixed the winner before execution. Looking up the cheapest
+        // bid only at settlement would let a late underbid steal a public
+        // receipt after the delivering solver paid the external-chain cost.
+        let award = self
+            .awards
+            .get(&intent_id)
+            .ok_or_else(|| "RelayerPolicyRegistry intent has no award".to_string())?;
+        if award.relayer != relayer {
+            return Err("RelayerPolicyRegistry settlement sender is not the awarded solver".into());
         }
+        let bid = self
+            .bids
+            .get(&intent_id)
+            .into_iter()
+            .flatten()
+            .find(|bid| bid.relayer == award.relayer)
+            .ok_or_else(|| "RelayerPolicyRegistry awarded bid not found".to_string())?;
         if bid.expires_at_block <= current_block {
             return Err("RelayerPolicyRegistry selected bid expired".into());
         }
@@ -669,6 +745,7 @@ impl RelayerPolicyRegistry {
         };
         self.settlements.insert(intent_id, settlement.clone());
         self.settled_intents.insert(intent_id);
+        self.awards.remove(&intent_id);
         Ok(settlement)
     }
 
@@ -693,6 +770,7 @@ impl RelayerPolicyRegistry {
         for id in &expired {
             self.intents.remove(id);
             self.bids.remove(id);
+            self.awards.remove(id);
             self.settled_intents.remove(id);
         }
         expired.len()
@@ -743,6 +821,12 @@ impl RelayerPolicyRegistry {
                 hasher.update(bid.bond.to_le_bytes());
                 hasher.update(bid.expires_at_block.to_le_bytes());
             }
+        }
+        for (id, award) in &self.awards {
+            hasher.update(b"award");
+            hasher.update(id);
+            hasher.update(award.relayer.as_bytes());
+            hasher.update(award.awarded_at_block.to_le_bytes());
         }
         for (id, settlement) in &self.settlements {
             hasher.update(b"settlement");
@@ -887,7 +971,7 @@ mod tests {
                     event_index: 0,
                     nonce: 0,
                     sender: addr(9),
-                    recipient: owner,
+                    recipient: addr(7),
                     payload_hash: payload,
                     kind: MessageKind::Custom(INTENT_EXECUTED_KIND.to_vec()),
                     expiry_height: 0,
@@ -917,20 +1001,22 @@ mod tests {
 
         let good = result_for(intent.intent_id, payload_hash);
         let roots = BTreeMap::from([(chain.domain_id(), good.external_state_root)]);
-        assert!(verify_intent_result(&roots, &intent, &good).is_ok());
+        assert!(verify_intent_result(&roots, &intent, &good, addr(7)).is_ok());
+        // The same anchored receipt cannot pay another, later bidder.
+        assert!(verify_intent_result(&roots, &intent, &good, addr(8)).is_err());
 
         // A real, anchored event about another intent settles nothing.
         let other = result_for([0x77; 32], payload_hash);
         let roots = BTreeMap::from([(chain.domain_id(), other.external_state_root)]);
-        assert!(verify_intent_result(&roots, &intent, &other).is_err());
+        assert!(verify_intent_result(&roots, &intent, &other, addr(7)).is_err());
 
         // Nor does one with another payload.
         let wrong = result_for(intent.intent_id, [0x5B; 32]);
         let roots = BTreeMap::from([(chain.domain_id(), wrong.external_state_root)]);
-        assert!(verify_intent_result(&roots, &intent, &wrong).is_err());
+        assert!(verify_intent_result(&roots, &intent, &wrong, addr(7)).is_err());
 
         // Nor an unanchored root.
-        assert!(verify_intent_result(&BTreeMap::new(), &intent, &good).is_err());
+        assert!(verify_intent_result(&BTreeMap::new(), &intent, &good, addr(7)).is_err());
 
         // Nor an event naming the intent, its payload and its kind but emitted
         // by somebody else: the owner fixed the emitter when it locked the fee.
@@ -970,7 +1056,7 @@ mod tests {
             result
         };
         let roots = BTreeMap::from([(chain.domain_id(), impostor.external_state_root)]);
-        assert!(verify_intent_result(&roots, &intent, &impostor).is_err());
+        assert!(verify_intent_result(&roots, &intent, &impostor, addr(7)).is_err());
     }
 
     #[test]
@@ -1121,15 +1207,61 @@ mod tests {
         registry.submit_bid(first, 10).unwrap();
         registry.submit_bid(second.clone(), 10).unwrap();
         assert_eq!(
-            registry.best_bid(&intent_id).unwrap().relayer,
+            registry.best_bid_at(&intent_id, 10).unwrap().relayer,
             second.relayer
         );
         let before = registry.root();
+        registry.award_intent(intent_id, owner, 10).unwrap();
         let settlement = registry
             .settle_intent(intent_id, second.relayer, second.quoted_fee, 20)
             .unwrap();
         assert_eq!(settlement.status, IntentSettlementStatus::Executed);
         assert_ne!(before, registry.root());
+    }
+
+    #[test]
+    fn awards_freeze_the_winner_and_expired_offers_do_not_block_reaward() {
+        let owner = addr(1);
+        let policy = make_policy(owner);
+        let mut registry = RelayerPolicyRegistry::new();
+        let id = registry
+            .submit_intent(intent(owner, &policy), &policy, 10)
+            .unwrap();
+        let bid = |relayer, quoted_fee, expires_at_block| SolverBid {
+            intent_id: id,
+            relayer,
+            quoted_fee,
+            proof_commitment: [3; 32],
+            bond: 10,
+            expires_at_block,
+        };
+        registry.submit_bid(bid(addr(9), 10, 20), 10).unwrap();
+        registry.submit_bid(bid(addr(8), 20, 45), 10).unwrap();
+        assert!(registry.award_intent(id, addr(7), 10).is_err());
+        let before_award = registry.root();
+        assert_eq!(
+            registry.award_intent(id, owner, 10).unwrap().relayer,
+            addr(9)
+        );
+        assert_ne!(before_award, registry.root());
+        let restored: RelayerPolicyRegistry =
+            serde_json::from_str(&serde_json::to_string(&registry).unwrap()).unwrap();
+        assert_eq!(restored.root(), registry.root());
+        assert_eq!(restored.awards[&id].relayer, addr(9));
+        registry.submit_bid(bid(addr(6), 1, 45), 11).unwrap();
+        assert!(
+            registry.award_intent(id, owner, 11).is_err(),
+            "a later underbid cannot change a live award"
+        );
+        let mut original_winner = registry.clone();
+        assert!(original_winner.settle_intent(id, addr(6), 1, 12).is_err());
+        original_winner.settle_intent(id, addr(9), 10, 12).unwrap();
+        assert_eq!(
+            registry.award_intent(id, owner, 20).unwrap().relayer,
+            addr(6)
+        );
+        assert!(registry.settle_intent(id, addr(9), 10, 21).is_err());
+        registry.settle_intent(id, addr(6), 1, 21).unwrap();
     }
 
     #[test]
@@ -1174,6 +1306,7 @@ mod tests {
             expires_at_block: 80,
         };
         registry.submit_bid(bid, 10).unwrap();
+        registry.award_intent(intent_id, owner, 10).unwrap();
         assert!(registry
             .settle_intent(intent_id, addr(9), 40, 50)
             .unwrap_err()
@@ -1221,6 +1354,7 @@ mod tests {
             expires_at_block: 30,
         };
         registry.submit_bid(bid, 10).unwrap();
+        registry.award_intent(intent_id, owner, 10).unwrap();
         assert!(registry
             .settle_intent(intent_id, addr(9), 41, 20)
             .unwrap_err()
@@ -1254,6 +1388,7 @@ mod tests {
             intent.intent_id = intent.calculate_id();
             let id = registry.submit_intent(intent, &policy, 10).unwrap();
             registry.submit_bid(bid_for(id, addr(9), 40), 10).unwrap();
+            registry.award_intent(id, owner, 10).unwrap();
             ids.push(id);
         }
         // Settled out of key order: the age order is ids[1], ids[2], ids[0].
@@ -1311,6 +1446,7 @@ mod tests {
                 10,
             )
             .unwrap();
+        registry.award_intent(intent_id, owner, 10).unwrap();
         assert_eq!(registry.prune_expired(50), 0);
         let (returned_owner, escrow, bids) = registry.expire_intent(intent_id, 50).unwrap();
         assert_eq!(returned_owner, owner);

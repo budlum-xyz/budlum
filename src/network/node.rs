@@ -3314,18 +3314,10 @@ impl Node {
                                                     for block in blocks {
                                                         let h = self.chain.get_height().await;
                                                         if block.index == h + 1 {
-                                                            match self.chain.validate_and_add_block(block.clone()).await {
-                                                                Ok(pruned_cids) => {
-                                                                    for cid in pruned_cids {
-                                                                        let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
-                                                                    }
+                                                            if let Ok(pruned_cids) = self.chain.validate_and_add_block(block.clone()).await {
+                                                                for cid in pruned_cids {
+                                                                    let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
                                                                 }
-                                                                Err(e) => warn!(
-                                                                    peer = %peer_id,
-                                                                    index = block.index,
-                                                                    error = %e,
-                                                                    "gossip block refused"
-                                                                ),
                                                             }
                                                         }
                                                     }
@@ -3334,20 +3326,12 @@ impl Node {
                                                 for block in blocks {
                                                     let h = self.chain.get_height().await;
                                                     if block.index == h + 1 {
-                                                        match self.chain.validate_and_add_block(block.clone()).await {
-                                                            Ok(pruned_cids) => {
-                                                                for cid in pruned_cids {
-                                                                    let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
-                                                                }
+                                                        if let Ok(pruned_cids) = self.chain.validate_and_add_block(block.clone()).await {
+                                                            for cid in pruned_cids {
+                                                                let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
                                                             }
-                                                            Err(e) => warn!(
-                                                                peer = %peer_id,
-                                                                index = block.index,
-                                                                error = %e,
-                                                                "gossip block refused"
-                                                            ),
                                                         }
-                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -4135,22 +4119,11 @@ impl Node {
                                                                         let h = self.chain.get_height().await;
                                                                         if block.index == h + 1 {
                                                                             let index = block.index;
-                                                                            match self.chain.validate_and_add_block(block).await {
-                                                                                Ok(pruned_cids) => {
-                                                                                    info!("Added block #{index} to local chain");
-                                                                                    for cid in pruned_cids {
-                                                                                        let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
-                                                                                    }
+                                                                            if let Ok(pruned_cids) = self.chain.validate_and_add_block(block).await {
+                                                                                info!("Added block #{index} to local chain");
+                                                                                for cid in pruned_cids {
+                                                                                    let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
                                                                                 }
-                                                                                // Silent refusal is how a follower can fetch the
-                                                                                // same range every second and never move: the
-                                                                                // round closes as a success, the height does not.
-                                                                                Err(e) => warn!(
-                                                                                    peer = %peer,
-                                                                                    index,
-                                                                                    error = %e,
-                                                                                    "sync block refused"
-                                                                                ),
                                                                             }
                                                                         }
                                                                     }
@@ -4160,19 +4133,11 @@ impl Node {
                                                                     let h = self.chain.get_height().await;
                                                                     if block.index == h + 1 {
                                                                         let index = block.index;
-                                                                        match self.chain.validate_and_add_block(block).await {
-                                                                            Ok(pruned_cids) => {
-                                                                                info!("Added block #{index} to local chain");
-                                                                                for cid in pruned_cids {
-                                                                                    let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
-                                                                                }
+                                                                        if let Ok(pruned_cids) = self.chain.validate_and_add_block(block).await {
+                                                                            info!("Added block #{index} to local chain");
+                                                                            for cid in pruned_cids {
+                                                                                let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
                                                                             }
-                                                                            Err(e) => warn!(
-                                                                                peer = %peer,
-                                                                                index,
-                                                                                error = %e,
-                                                                                "sync block refused"
-                                                                            ),
                                                                         }
                                                                     }
                                                                 }
