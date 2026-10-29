@@ -17,9 +17,9 @@
 //! * one grant per client IP per cooldown window,
 //! * a daily cap on the total sent.
 //!
-//! The limits live in memory. A restart forgets them, which costs at most
-//! one extra grant per address; the daily cap still bounds what an attacker
-//! can drain, and the faucet balance bounds it absolutely.
+//! The limits live in memory. A restart forgets cooldowns and the daily cap,
+//! so operators must protect restarts as well as the funding key; only the
+//! faucet balance is an absolute bound across restarts.
 //!
 //! # Chains
 //!
@@ -32,7 +32,7 @@
 //! ```text
 //! budlum-faucet keygen --out ./secrets/faucet.seed
 //! budlum-faucet serve --rpc-url http://127.0.0.1:18545 \
-//!     --key-file ./secrets/faucet.seed --listen 127.0.0.1:18600
+//!     --key-file ./secrets/faucet.seed --listen 127.0.0.1:18600 --allow-direct
 //! curl -X POST http://127.0.0.1:18600/request -d '{"address":"0x..."}'
 //! ```
 //!
@@ -53,7 +53,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
+
+#[path = "support/http.rs"]
+mod http_support;
 
 /// TESTNET-DEFAULT: 100 BUD per request.
 const DEFAULT_AMOUNT_BUD: u64 = 100;
@@ -63,6 +66,8 @@ const DEFAULT_COOLDOWN_SECS: u64 = 24 * 60 * 60;
 const DEFAULT_DAILY_CAP_BUD: u64 = 100_000;
 /// Largest request body read. A request carries one address.
 const MAX_REQUEST_BYTES: usize = 1024;
+/// A body that stops arriving cannot occupy a connection indefinitely.
+const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Most rows each cooldown table keeps. Rows older than the cooldown are
 /// dropped first; at the ceiling new requests are refused rather than
 /// letting the table grow without bound.
@@ -104,9 +109,12 @@ enum Command {
         /// Total BUD sent per UTC day.
         #[arg(long, default_value_t = DEFAULT_DAILY_CAP_BUD)]
         daily_cap_bud: u64,
-        /// A reverse proxy whose `X-Forwarded-For` is believed. Repeatable.
+        /// Serve only these reverse proxies and trust their X-Forwarded-For. Repeatable.
         #[arg(long = "trusted-proxy")]
         trusted_proxies: Vec<IpAddr>,
+        /// Serve direct clients; ignore every X-Forwarded-For header.
+        #[arg(long)]
+        allow_direct: bool,
     },
 }
 
@@ -209,7 +217,7 @@ impl Ledger {
         Ok(())
     }
 
-    /// Record a grant the node accepted.
+    /// Reserve an allowance before submission, even if the RPC response is lost.
     fn record(&mut self, policy: &Policy, to: Address, ip: IpAddr, now: u64) {
         self.roll_day(now);
         self.by_address.insert(to, now);
@@ -236,28 +244,6 @@ impl Ledger {
 fn faucet_allowed_on(chain_id: u64) -> bool {
     chain_id == Network::Testnet.chain_id().value()
         || chain_id == Network::Devnet.chain_id().value()
-}
-
-/// The client address: the socket peer, or the nearest untrusted hop in
-/// `X-Forwarded-For` when the peer is a trusted proxy. Walking from the
-/// right means a client cannot claim an address by prepending it.
-fn client_ip(peer: IpAddr, forwarded_for: Option<&str>, trusted: &[IpAddr]) -> IpAddr {
-    if !trusted.contains(&peer) {
-        return peer;
-    }
-    let Some(header) = forwarded_for else {
-        return peer;
-    };
-    for hop in header.rsplit(',') {
-        let Ok(ip) = hop.trim().parse::<IpAddr>() else {
-            // A hop that does not parse ends the chain of trust.
-            return peer;
-        };
-        if !trusted.contains(&ip) {
-            return ip;
-        }
-    }
-    peer
 }
 
 /// The `address` field of a request body.
@@ -330,7 +316,9 @@ struct Faucet {
     address: Address,
     chain_id: u64,
     policy: Policy,
-    trusted_proxies: Vec<IpAddr>,
+    identity: http_support::ClientIdentity,
+    /// Do not queue an unbounded number of grants behind the nonce lock.
+    grant_slots: Arc<Semaphore>,
     /// The ledger and the next nonce to use, under one lock so two requests
     /// cannot pass the same cooldown or sign with the same nonce.
     state: Mutex<(Ledger, u64)>,
@@ -377,14 +365,23 @@ impl Faucet {
         tx.fee = fee;
         tx.max_fee = fee;
         tx.sign_v5(&self.key);
+        // The node can accept a transfer and then lose the reply. Charge the
+        // cooldown and daily allowance before sending, so an ambiguous RPC
+        // timeout cannot yield unaccounted grants. Definite RPC refusals also
+        // consume the allowance; this is safer than assuming no transfer ran.
+        ledger.record(&self.policy, to, ip, now);
         let hash = self
             .node
             .call("bud_sendRawTransaction", serde_json::json!([tx]))
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("submission failed or reply was lost; allowance reserved: {e}"),
+                )
+            })?;
 
         *next_nonce = nonce.saturating_add(1);
-        ledger.record(&self.policy, to, ip, now);
         Ok(serde_json::json!({
             "to": format!("0x{}", to.to_hex()),
             "amount_atoms": self.policy.amount,
@@ -422,6 +419,14 @@ fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     json_response(status, &serde_json::json!({ "error": message }))
 }
 
+async fn read_request_body(body: Incoming, deadline: Duration) -> Result<Bytes, StatusCode> {
+    match tokio::time::timeout(deadline, Limited::new(body, MAX_REQUEST_BYTES).collect()).await {
+        Ok(Ok(collected)) => Ok(collected.to_bytes()),
+        Ok(Err(_)) => Err(StatusCode::PAYLOAD_TOO_LARGE),
+        Err(_) => Err(StatusCode::REQUEST_TIMEOUT),
+    }
+}
+
 async fn handle(
     faucet: Arc<Faucet>,
     peer: SocketAddr,
@@ -438,21 +443,16 @@ async fn handle(
             "POST /request or GET /health",
         ));
     }
-    let forwarded = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let ip = client_ip(peer.ip(), forwarded.as_deref(), &faucet.trusted_proxies);
-    let body = match Limited::new(request.into_body(), MAX_REQUEST_BYTES)
-        .collect()
-        .await
-    {
-        Ok(collected) => collected.to_bytes(),
-        Err(_) => {
+    let ip = match faucet.identity.client_ip(peer.ip(), request.headers()) {
+        Ok(ip) => ip,
+        Err(message) => return Ok(error_response(StatusCode::BAD_REQUEST, message)),
+    };
+    let body = match read_request_body(request.into_body(), BODY_TIMEOUT).await {
+        Ok(body) => body,
+        Err(status) => {
             return Ok(error_response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "request body is too large or unreadable",
+                status,
+                "request body is too large or timed out",
             ))
         }
     };
@@ -460,9 +460,23 @@ async fn handle(
         Ok(to) => to,
         Err(e) => return Ok(error_response(StatusCode::BAD_REQUEST, &e)),
     };
-    Ok(match faucet.grant(to, ip).await {
-        Ok(receipt) => json_response(StatusCode::OK, &receipt),
-        Err((status, message)) => error_response(status, &message),
+    let Ok(permit) = faucet.grant_slots.clone().try_acquire_owned() else {
+        return Ok(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "faucet busy; retry later",
+        ));
+    };
+    // A client can disappear after the node accepted its transfer. Detach the
+    // bounded grant from the HTTP connection so cancellation or timeout cannot
+    // discard the nonce/cooldown update after an accepted transaction.
+    let grant = tokio::spawn(async move {
+        let _permit = permit;
+        faucet.grant(to, ip).await
+    });
+    Ok(match grant.await {
+        Ok(Ok(receipt)) => json_response(StatusCode::OK, &receipt),
+        Ok(Err((status, message))) => error_response(status, &message),
+        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "faucet worker failed"),
     })
 }
 
@@ -502,7 +516,9 @@ async fn serve(
     listen: &str,
     policy: Policy,
     trusted_proxies: Vec<IpAddr>,
+    allow_direct: bool,
 ) -> Result<(), String> {
+    let identity = http_support::ClientIdentity::new(allow_direct, trusted_proxies)?;
     let key = WalletKeyPair::from_seed(&read_seed(key_file)?);
     let address = key.address();
     let http = reqwest::Client::builder()
@@ -527,7 +543,8 @@ async fn serve(
         address,
         chain_id,
         policy,
-        trusted_proxies,
+        identity,
+        grant_slots: Arc::new(Semaphore::new(1)),
         state: Mutex::new((Ledger::default(), 0)),
     });
     let listener = tokio::net::TcpListener::bind(listen)
@@ -538,6 +555,7 @@ async fn serve(
         address.to_hex(),
         policy.amount
     );
+    let connections = Arc::new(Semaphore::new(http_support::MAX_CONNECTIONS));
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -546,15 +564,27 @@ async fn serve(
                 continue;
             }
         };
+        let Ok(permit) = connections.clone().try_acquire_owned() else {
+            // Drop excess sockets without spawning another task.
+            continue;
+        };
         let faucet = faucet.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             let service =
                 hyper::service::service_fn(move |request| handle(faucet.clone(), peer, request));
-            if let Err(e) = hyper::server::conn::http1::Builder::new()
-                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
-                .await
-            {
-                eprintln!("budlum-faucet: connection from {peer} ended: {e}");
+            let mut builder = hyper::server::conn::http1::Builder::new();
+            builder
+                .timer(hyper_util::rt::TokioTimer::new())
+                .header_read_timeout(http_support::HEADER_TIMEOUT)
+                .max_buf_size(http_support::MAX_HEADER_BYTES)
+                .keep_alive(false);
+            let connection =
+                builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
+            match tokio::time::timeout(http_support::CONNECTION_LIFETIME, connection).await {
+                Ok(Err(e)) => eprintln!("budlum-faucet: connection from {peer} ended: {e}"),
+                Err(_) => eprintln!("budlum-faucet: connection from {peer} timed out"),
+                Ok(Ok(())) => {}
             }
         });
     }
@@ -573,11 +603,19 @@ fn main() -> ExitCode {
             cooldown_secs,
             daily_cap_bud,
             trusted_proxies,
+            allow_direct,
         } => Policy::from_bud(amount_bud, cooldown_secs, daily_cap_bud).and_then(|policy| {
             tokio::runtime::Runtime::new()
                 .map_err(|e| format!("tokio runtime: {e}"))
                 .and_then(|runtime| {
-                    runtime.block_on(serve(rpc_url, &key_file, &listen, policy, trusted_proxies))
+                    runtime.block_on(serve(
+                        rpc_url,
+                        &key_file,
+                        &listen,
+                        policy,
+                        trusted_proxies,
+                        allow_direct,
+                    ))
                 })
         }),
     };
@@ -593,8 +631,8 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        client_ip, faucet_allowed_on, parse_request, rpc_u64, Ledger, Policy, Refusal,
-        DEFAULT_AMOUNT_BUD, DEFAULT_COOLDOWN_SECS, DEFAULT_DAILY_CAP_BUD,
+        faucet_allowed_on, parse_request, rpc_u64, Ledger, Policy, Refusal, DEFAULT_AMOUNT_BUD,
+        DEFAULT_COOLDOWN_SECS, DEFAULT_DAILY_CAP_BUD,
     };
     use budlum_core::core::address::Address;
     use budlum_core::core::chain_config::Network;
@@ -702,20 +740,44 @@ mod tests {
         assert!(!ledger.by_ip.contains_key(&ip(4)));
     }
 
-    #[test]
-    fn forwarded_for_is_believed_only_from_a_trusted_proxy() {
-        let proxy: IpAddr = "127.0.0.1".parse().unwrap();
-        let client = ip(50);
-        // Direct peer: the header is ignored.
-        assert_eq!(client_ip(client, Some("198.51.100.1"), &[proxy]), client);
-        // Through the proxy: the nearest untrusted hop.
-        assert_eq!(
-            client_ip(proxy, Some("198.51.100.1, 203.0.113.50"), &[proxy]),
-            client
-        );
-        // No header, or garbage: the proxy itself.
-        assert_eq!(client_ip(proxy, None, &[proxy]), proxy);
-        assert_eq!(client_ip(proxy, Some("not-an-ip"), &[proxy]), proxy);
+    #[tokio::test]
+    async fn a_partial_request_body_times_out() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = hyper::service::service_fn(
+                |request: hyper::Request<hyper::body::Incoming>| async move {
+                    let status = super::read_request_body(
+                        request.into_body(),
+                        std::time::Duration::from_millis(30),
+                    )
+                    .await
+                    .unwrap_err();
+                    Ok::<_, std::convert::Infallible>(super::error_response(
+                        status,
+                        "body timed out",
+                    ))
+                },
+            );
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                .await
+                .unwrap();
+        });
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client.write_all(b"POST /request HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{").await.unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.read_to_string(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+        server.await.unwrap();
     }
 
     #[test]
