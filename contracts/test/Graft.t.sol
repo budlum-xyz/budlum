@@ -54,11 +54,15 @@ contract Receiver is BudlumPaymentReceiver {
     }
 }
 
-/// A second account that fulfils through the executor: the per-caller guard
+/// A second account that fulfils through the executor: the per-solver guard
 /// must let it through even after the test contract has used its own slot.
 contract Filler {
+    function bind(GraftExecutor executor, bytes32 solver) external {
+        executor.registerSolverKey(solver);
+    }
+
     function run(GraftExecutor executor, bytes32 intent, address target) external {
-        executor.execute(intent, bytes32(uint256(2)), target, abi.encodeCall(Counter.bump, ()), hex"01");
+        executor.execute(intent, target, abi.encodeCall(Counter.bump, ()), hex"01");
     }
 }
 
@@ -66,9 +70,12 @@ contract GraftTest is Harness {
     GraftExecutor internal executor;
     Counter internal counter;
 
+    bytes32 internal constant SOLVER = bytes32(uint256(1));
+
     function setUp() public {
         executor = new GraftExecutor();
         counter = new Counter();
+        executor.registerSolverKey(SOLVER);
     }
 
     /// Same values as `event_payload_hashes_match_the_solidity_known_answers`
@@ -104,41 +111,83 @@ contract GraftTest is Harness {
 
     function test_an_intent_is_fulfilled_once() public {
         bytes32 intent = keccak256("intent");
-        executor.execute(intent, bytes32(uint256(1)), address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
+        executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
         assertEq(counter.count(), 1, "the call was made");
         vm.expectPartialRevert(GraftExecutor.AlreadyFulfilled.selector);
-        executor.execute(intent, bytes32(uint256(1)), address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
+        executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
     }
 
-    /// The once-per-intent guard is per caller: a second account cannot burn
-    /// the id, and cannot be blocked by the first caller either.
-    function test_the_once_per_intent_guard_is_per_caller() public {
+    /// The once-per-intent guard is per solver: a second account cannot burn
+    /// the id, and cannot be blocked by the first solver either.
+    function test_the_once_per_intent_guard_is_per_solver() public {
         bytes32 intent = keccak256("contested-intent");
-        executor.execute(intent, bytes32(uint256(1)), address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
-        assertTrue(executor.fulfilled(intent, address(this)), "the caller's slot is used");
+        executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
+        assertTrue(executor.fulfilled(intent, SOLVER), "the caller's slot is used");
         assertEq(counter.count(), 1, "the call was made");
 
-        // Another account still gets to fulfil the same intent: the first
-        // caller cannot burn the id for everyone.
+        // Another solver still gets to fulfil the same intent: the first
+        // one cannot burn the id for everyone.
         Filler filler = new Filler();
+        filler.bind(executor, bytes32(uint256(2)));
         filler.run(executor, intent, address(counter));
-        assertTrue(executor.fulfilled(intent, address(filler)), "the other caller's slot was free");
+        assertTrue(executor.fulfilled(intent, bytes32(uint256(2))), "the other solver's slot was free");
         assertEq(counter.count(), 2, "the second call was made too");
+    }
+
+    /// A fulfilment names the solver the executing account bound, never one the
+    /// caller chose for this call. The executor cannot authenticate a Budlum
+    /// address, so it must not accept one it was merely told about.
+    function test_an_unbound_account_cannot_fulfil() public {
+        Filler stranger = new Filler();
+        vm.expectPartialRevert(GraftExecutor.SolverKeyNotBound.selector);
+        stranger.run(executor, keccak256("unbound"), address(counter));
+        assertEq(counter.count(), 0, "no call was made");
+    }
+
+    /// The binding is immutable, so one account cannot re-point its
+    /// fulfilments at another solver's address after the fact.
+    function test_a_solver_key_cannot_be_repointed() public {
+        assertEq(executor.solverKey(address(this)), SOLVER, "the binding is in place");
+        vm.expectPartialRevert(GraftExecutor.SolverKeyAlreadyBound.selector);
+        executor.registerSolverKey(bytes32(uint256(3)));
+        assertEq(executor.solverKey(address(this)), SOLVER, "the binding did not move");
+    }
+
+    /// A zero binding would name no solver at all, so it is refused rather than
+    /// treated as an unbound account that later cannot be bound.
+    function test_a_zero_solver_key_is_refused() public {
+        Filler filler = new Filler();
+        vm.expectPartialRevert(GraftExecutor.SolverKeyIsZero.selector);
+        filler.bind(executor, bytes32(0));
+    }
+
+    /// The payload hash the settlement door checks commits to the bound
+    /// solver, and the slot `execute` spends is that solver's.
+    function test_the_payload_hash_commits_to_the_bound_solver() public {
+        bytes32 intent = keccak256("bound-solver-intent");
+        bytes32 callHash = keccak256(abi.encodeCall(Counter.bump, ()));
+        assertTrue(
+            executor.fulfilledPayloadHash(intent, address(counter), callHash, 0, hex"01", SOLVER)
+                != executor.fulfilledPayloadHash(
+                    intent, address(counter), callHash, 0, hex"01", bytes32(uint256(2))
+                ),
+            "the payload hash commits to the solver"
+        );
+        executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
+        assertTrue(executor.fulfilled(intent, SOLVER), "the bound solver's slot is the one used");
     }
 
     function test_a_call_to_an_address_with_no_code_is_refused() public {
         vm.expectPartialRevert(GraftExecutor.CallFailed.selector);
-        executor.execute(
-            keccak256("no-code"), bytes32(uint256(1)), address(0xdead), hex"", hex"01"
-        );
+        executor.execute(keccak256("no-code"), address(0xdead), hex"", hex"01");
     }
 
     function test_a_failed_call_emits_nothing_and_reverts() public {
         vm.expectPartialRevert(GraftExecutor.CallFailed.selector);
         executor.execute(
-            keccak256("intent"), bytes32(uint256(1)), address(counter), abi.encodeCall(Counter.fail, ()), hex"01"
+            keccak256("intent"), address(counter), abi.encodeCall(Counter.fail, ()), hex"01"
         );
-        assertTrue(!executor.fulfilled(keccak256("intent"), address(this)), "not marked fulfilled");
+        assertTrue(!executor.fulfilled(keccak256("intent"), SOLVER), "not marked fulfilled");
     }
 
     function _proof(Receiver receiver, FinalityStub finality, bytes32 graftId)
