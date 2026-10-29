@@ -1081,6 +1081,22 @@ impl ConsensusEngine for PoSEngine {
     fn signer(&self) -> Option<&dyn ConsensusSigner> {
         self.signer.as_ref().map(std::convert::AsRef::as_ref)
     }
+    /// The consensus key, not the signer backend.
+    ///
+    /// `signer()` is only populated for an HSM-backed node: a node started
+    /// with a validator key file keeps that key in `validator_keys` and leaves
+    /// `signer` empty. Finality used to ask `signer()` alone, so such a node
+    /// reported no validator address and never cast a vote - the devnet mesh
+    /// produced blocks and never finalized one.
+    fn validator_address(&self) -> Option<crate::core::address::Address> {
+        self.validator_keys
+            .as_ref()
+            .map(crate::crypto::primitives::ValidatorKeys::address)
+            .or_else(|| {
+                self.signer()
+                    .map(crate::crypto::signer::ConsensusSigner::address)
+            })
+    }
     fn bls_secret_key(&self) -> Option<bls12_381::Scalar> {
         self.validator_keys
             .as_ref()
@@ -1555,6 +1571,23 @@ mod tests {
         let mut tx = Transaction::new_stake(from, amount, nonce);
         tx.sign(keypair);
         tx
+    }
+
+    /// A node started with a validator key file is a validator even though it
+    /// has no signer backend: the finality loop reads `validator_address`, and
+    /// while it read `signer()` alone every key-file node reported "not a
+    /// validator", cast no vote, and the devnet mesh never finalized a
+    /// checkpoint it kept producing.
+    #[test]
+    fn a_key_file_validator_reports_its_address_without_a_signer_backend() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let expected = keys.address();
+        let engine = PoSEngine::new(PoSConfig::default(), Some(keys));
+        assert!(
+            engine.signer().is_none(),
+            "a key-file node holds no signer backend"
+        );
+        assert_eq!(engine.validator_address(), Some(expected));
     }
 
     #[test]

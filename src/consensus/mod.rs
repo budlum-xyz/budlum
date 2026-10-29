@@ -361,6 +361,15 @@ pub trait ConsensusEngine: Send + Sync {
     fn signer(&self) -> Option<&dyn crate::crypto::signer::ConsensusSigner> {
         None
     }
+    /// The address this node signs consensus with, if it is a validator.
+    ///
+    /// Finality votes and the producer candidate are both keyed by it. The
+    /// default reads the signer backend, which an HSM-backed node sets; an
+    /// engine that keeps its keys in memory overrides this.
+    fn validator_address(&self) -> Option<crate::core::address::Address> {
+        self.signer()
+            .map(crate::crypto::signer::ConsensusSigner::address)
+    }
     fn bls_secret_key(&self) -> Option<bls12_381::Scalar> {
         None
     }
