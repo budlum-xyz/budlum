@@ -225,10 +225,7 @@ pub fn pay_epoch(
             // account, so a delegator cannot be paid twice and the payout is an
             // explicit, signed transaction. One merge for the whole validator,
             // not one table insert per position.
-            if let Ok(credited) = state
-                .registry
-                .credit_claimable_rewards(address, &shares)
-            {
+            if let Ok(credited) = state.registry.credit_claimable_rewards(address, &shares) {
                 paid = paid.saturating_add(credited);
             }
         }
