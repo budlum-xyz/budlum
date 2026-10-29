@@ -15,6 +15,9 @@ info:
 
     Amounts are base units (1 BUD = 1,000,000 units). Hashes and addresses
     are hex; a `0x` prefix is accepted and ignored on input.
+    Except for `/health`, requests are limited per client and may return
+    429. Current-state reads also use a shared node-call budget and may
+    return 429 or 503 under load. Clients should back off and retry.
   license:
     name: PolyForm Shield 1.0.0
 servers:
