@@ -148,4 +148,22 @@ contract MikorizaTest is Harness {
     function test_a_compressed_key_without_the_compression_flag_does_not_match() public pure {
         assertTrue(!BudlumBls.g2Matches(new bytes(96), new bytes(256)), "flags required");
     }
+
+    function test_bls_rejects_identity_keys_signatures_and_generator_before_pairing() public view {
+        bytes memory compressed = new bytes(96);
+        compressed[0] = 0x80; // Pretend the all-zero affine point is compressed.
+        bytes memory identityG2 = new bytes(256);
+        bytes memory identityG1 = new bytes(128);
+        assertTrue(!BudlumBls.g2Matches(compressed, identityG2), "identity key cannot match");
+
+        // These need not be valid points: all three calls must return false
+        // before the EIP-2537 precompiles, including on the Cancun CI profile.
+        bytes memory nonzeroG2 = new bytes(256);
+        bytes memory nonzeroG1 = new bytes(128);
+        nonzeroG2[255] = 0x01;
+        nonzeroG1[127] = 0x01;
+        assertTrue(!BudlumBls.verify(identityG2, "message", identityG1, nonzeroG2), "identity key");
+        assertTrue(!BudlumBls.verify(nonzeroG2, "message", identityG1, nonzeroG2), "identity signature");
+        assertTrue(!BudlumBls.verify(nonzeroG2, "message", nonzeroG1, identityG2), "identity generator");
+    }
 }
