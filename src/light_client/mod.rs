@@ -809,6 +809,7 @@ mod tests {
                 voter_id: snapshot.validators[i].address,
                 sig_bls: vec![],
                 auth_sig: Vec::new(),
+                pq_sig: Vec::new(),
             };
             let sig = sign_bls(sk, &pc.signing_message());
             let mut signed = pc;

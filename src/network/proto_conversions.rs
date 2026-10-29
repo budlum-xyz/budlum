@@ -2317,6 +2317,7 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 voter_id,
                 sig_bls,
                 auth_sig,
+                pq_sig,
             } => pb::proto_network_message::Payload::Precommit(pb::ProtoPrecommit {
                 epoch: *epoch,
                 checkpoint_height: *checkpoint_height,
@@ -2324,6 +2325,7 @@ impl From<&NetworkMessage> for pb::ProtoNetworkMessage {
                 voter_id: voter_id.clone(),
                 sig_bls: sig_bls.clone(),
                 auth_sig: auth_sig.clone(),
+                pq_sig: pq_sig.clone(),
             }),
             NetworkMessage::FinalityCert {
                 epoch,
@@ -2532,6 +2534,7 @@ impl TryFrom<pb::ProtoNetworkMessage> for NetworkMessage {
                 voter_id: v.voter_id,
                 sig_bls: v.sig_bls,
                 auth_sig: v.auth_sig,
+                pq_sig: v.pq_sig,
             }),
             pb::proto_network_message::Payload::FinalityCert(f) => {
                 Ok(NetworkMessage::FinalityCert {
