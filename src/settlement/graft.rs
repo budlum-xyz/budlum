@@ -509,7 +509,7 @@ impl GraftRegistry {
     /// A payment still in the window, with its Merkle path to
     /// [`Self::payments_root`].
     #[must_use]
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn payment_proof(
         &self,
         payment_id: &[u8; 32],
