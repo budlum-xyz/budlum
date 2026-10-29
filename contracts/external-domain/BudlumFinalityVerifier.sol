@@ -5,12 +5,12 @@ pragma solidity ^0.8.24;
 /// @notice Verifies Budlum's hybrid finality proof (BLS12-381 aggregate +
 ///         post-quantum ML-DSA) on an EVM chain.
 ///
-/// @dev BLG-1074 (P60-F07): this source is deployment-ready code, but no
+/// @dev: this source is deployment-ready code, but no
 ///      Sepolia deployment is claimed by this repository. The verifier has no
 ///      upgrade or owner path: its chain id, key hashes, fraud verifier and
 ///      challenge policy are immutable constructor commitments. The Rust
 ///      `EvmFinalityAttestation` encoder and the negative contract locks cover
-///      the cross-language signing root and the six F01-F06 refusal boundaries.
+///      the cross-language signing root and the six refusal boundaries.
 ///      An operator still needs an independent deployment ceremony and must
 ///      publish the constructor key-hash manifest before relying on an address.
 ///

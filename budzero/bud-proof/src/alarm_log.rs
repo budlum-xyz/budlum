@@ -1,4 +1,4 @@
-//! Chained alarm log (K3 of the BudZero regeneration design).
+//! Chained alarm log ( of the BudZero regeneration design).
 //!
 //! A relay report is single and signed; the chained log turns the warnings
 //! into an un-erasable sequence. Every entry commits to the previous entry's

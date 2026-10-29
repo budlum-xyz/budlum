@@ -201,7 +201,7 @@ impl PrivateTransferAuth {
     }
 }
 
-/// The KQ-* gate surface: the single entry point a production path should call.
+/// The gate surface: the single entry point a production path should call.
 pub struct PrivateTransferGates;
 
 impl PrivateTransferGates {

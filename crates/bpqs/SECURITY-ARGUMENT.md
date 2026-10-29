@@ -526,7 +526,7 @@ SIGNED-PATH secret flow inventory (each item points at code):
    Scope, unchanged: this is a wall-clock test on one host, not a formal
    constant-time proof, and it covers the field arithmetic through the
    permutation - which is what the caveat named.
-5. shake256.rs (K12-class keccak): fixed 24-round permutation,
+5. shake256.rs (class keccak): fixed 24-round permutation,
    table-free by construction; absorb boundaries depend on input LENGTH
    (public), never on input bytes.
 6. Absent from the whole signing path: secret-indexed table access,

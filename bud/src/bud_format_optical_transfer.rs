@@ -147,7 +147,7 @@ pub fn optx_digest(segs: &[OptSegment]) -> [u8; 32] {
 mod tests {
     use super::*;
 
-    /// BLG-0648: split had no ceiling while join refused more than a million
+    /// Split had no ceiling while join refused more than a million
     /// segments, so a large transfer failed at the receiving end.
     #[test]
     fn split_refuses_more_segments_than_join_accepts() {

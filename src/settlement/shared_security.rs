@@ -57,7 +57,7 @@ pub const BLS_PUBLIC_KEY_BYTES: usize = 96;
 /// Parts per million.
 const PPM: u128 = 1_000_000;
 
-/// The Mikoriza parameters of a profile (genesis parameters, K9).
+/// The Mikoriza parameters of a profile (genesis parameters).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedSecurityParams {
     /// The genesis flag (10.7).

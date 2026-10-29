@@ -2186,7 +2186,7 @@ this transformation add to storage?**
 The answer: nothing. `RenderFormat::QrStream` is not a storage format, it is a
 **transport representation**. Frames are produced on demand and no intermediate
 product is stored. The persistent form of the content is still what the manifest
-says - the recipe for recipe-bearing content (§59), the bytes for organic content.
+says - the recipe for recipe-bearing content , the bytes for organic content.
 A derived representation ADDS storage in no regime; the test measures that
 property directly.
 
@@ -2243,7 +2243,7 @@ wrong guess stays on the screen.
   deterministic; the channel is not. Round-trip under a lossy re-encode cannot be
   assumed without measuring it on the target channel.
 - **It does not zero storage for organic content.** Changing representation does
-  not change information theory (§59).
+  not change information theory.
 
 ## 61. Identity limits who, transport limits what it costs: two questions before listening
 
@@ -2604,7 +2604,7 @@ flowchart TD
 The principle: **a check living inside one caller is not a rule, it is a habit.**
 Callers get added; a rule with only one home is open to the next caller forgetting it.
 
-This is the same shape seen in the DAO grant ceiling (§53) and in the two roots: a
+This is the same shape seen in the DAO grant ceiling and in the two roots: a
 check present on one path, absent on the other. When the same shape appears three
 times, the shape is not a coincidence.
 
@@ -2625,7 +2625,7 @@ right; it was simply **at the wrong layer**. As shared checks move under
 
 ## 66. Derived content: a dependent recipe gets no discount
 
-The source regime (§59) could say three things: the bytes are stored (`Stored`),
+The source regime could say three things: the bytes are stored (`Stored`),
 they are born from a recipe (`Generated`), or a prefix is stored and the rest is
 generated (`Hybrid`). A fourth class existed and could not be expressed:
 **content that is a region of an object the chain already holds.**
@@ -3643,7 +3643,7 @@ the case this exists to make visible. The compiler found the three call sites th
 compile `e.kind()`; a bare `io::Error` would have let all three keep compiling while quietly reclassifying an oversized
 file as a clean first boot.
 
-This is the same shape as the mempool ceiling (§81) and the score table (§82): a quantity that is small in every real
+This is the same shape as the mempool ceiling and the score table: a quantity that is small in every real
 run is still unbounded until something states the bound.
 
 ## 84. Where a guarantee lives

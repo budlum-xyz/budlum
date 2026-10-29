@@ -298,7 +298,7 @@ fn verifying_key_bytes(sk: &SigningKey<MlDsa87>) -> PublicKeyBytes {
 /// the result is an all-zero array, which no verifier accepts, never a
 /// context-free signature.
 fn sign_message(sk: &SigningKey<MlDsa87>, ctx: &[u8], message: &[u8]) -> SignatureBytes {
-    // BLG-0278 (P17-F12): the deterministic variant is the FIPS 204 approved
+    // The deterministic variant is the FIPS 204 approved
     // default; the hedge is defense-in-depth against side channels. A platform
     // whose CSPRNG fails keeps producing VALID, FIPS-conformant signatures,
     // just without the extra masking; non-production builds always take this
@@ -637,7 +637,7 @@ pub struct WalletPrivacyConfig {
 }
 
 impl std::fmt::Debug for WalletPrivacyConfig {
-    /// BLG-0280 (P17-F14): the derived Debug printed `view_key` in the
+    /// The derived Debug printed `view_key` in the
     /// clear. The whole point of the key is that it stays off chain and off
     /// logs - one `{config:?}` in an error path or a test panic message put
     /// the selective-disclosure secret into whatever captured it. The redacted
@@ -911,7 +911,7 @@ pub mod wasm_bindings {
     #[wasm_bindgen]
     impl BrowserWallet {
         /// Open a wallet from a 24-word mnemonic. 12-word phrases are refused
-        /// (decision A-07).
+        ///.
         ///
         /// # Errors
         ///
@@ -1468,7 +1468,7 @@ impl Wallet {
     /// [`TeeRuntime`] and refuses to return plaintext witnesses without it.
     /// Build a private-transfer intent.
     ///
-    /// BLG-0275 (P17-F09): `chain_id` and `sender_nonce` come from the caller
+    /// `chain_id` and `sender_nonce` come from the caller
     /// (the network the relayer will submit to, the account nonce at signing
     /// time) and are bound into the authorization signature; they are not
     /// wallet state, and silently assuming either was how V1 became
@@ -1547,7 +1547,7 @@ impl Wallet {
             )));
         }
         let digest = privacy_transfer::public_digest(&nullifiers, &output_commitments);
-        // BLG-0275 (P17-F09): the signature covers the binding message, not
+        // The signature covers the binding message, not
         // the bare digest; construct the intent first and sign the exact helper
         // relayers and verifiers call so producer and verifier cannot diverge.
         let mut intent = PrivateTransferIntent {
@@ -1571,7 +1571,7 @@ impl Wallet {
 
     /// The smallest blinding counter this wallet will still hand out.
     ///
-    /// P17-F06: the counter lives in memory only, and `from_mnemonic` and
+    /// The counter lives in memory only, and `from_mnemonic` and
     /// `from_entropy` start it at 0. A caller that restores a wallet must
     /// persist this value and give it back through
     /// [`Self::resume_blinding_counter`], or the first restored note reuses a
@@ -1663,7 +1663,7 @@ impl Wallet {
 mod tests {
     use super::*;
 
-    /// BLG-0281 (P17-F15): rotation is counter-indexed, so the property the
+    /// Rotation is counter-indexed, so the property the
     /// design depends on must be pinned: same (seed, counter) -> same key no
     /// matter what key the wallet currently holds, distinct counters ->
     /// distinct keys. The derivation is deliberately NOT chained through the
@@ -1698,7 +1698,7 @@ mod tests {
         let _ = &mut other_wallet;
     }
 
-    /// BLG-0278 (P17-F12): the deterministic fallback must be a working
+    /// The deterministic fallback must be a working
     /// signer, not a half-path. In non-production builds every signature
     /// takes this exact route, so this test pins what the fallback produces:
     /// verify-able under the wallet's key, and deterministic (same message,
@@ -1739,7 +1739,7 @@ mod tests {
         assert_eq!(words.len(), 24, "must have 24 words");
     }
 
-    /// P17-F06: a restored wallet resumes the saved counter and never goes back.
+    /// A restored wallet resumes the saved counter and never goes back.
     #[test]
     fn a_resumed_blinding_counter_blocks_reuse_and_only_moves_forward() {
         let mut wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
@@ -2523,7 +2523,7 @@ mod tests {
         assert!(matches!(err, WalletError::NotePrivacyDisabled));
     }
 
-    /// BLG-0280 (P17-F14): the derived Debug printed the note opening, and a
+    /// The derived Debug printed the note opening, and a
     /// wallet formats witnesses into error and test output. Redacting only
     /// `spend_secret` left `amount`, `blinding` and `recipient_tag` - the three
     /// field elements `privacy_commit` exists to hide - readable, and both the
@@ -2637,7 +2637,7 @@ mod tests {
             &privacy_transfer::intent_authorization_message(&intent),
             &intent.authorization_sig
         ));
-        // BLG-0275: the same signature on another chain (or another nonce)
+        // The same signature on another chain (or another nonce)
         // must not verify - the replay V1 allowed.
         let mut foreign = intent.clone();
         foreign.chain_id = 1;

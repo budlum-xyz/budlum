@@ -192,7 +192,7 @@ impl DeviceSigner {
 /// The seed of development fixture device `device_id`.
 ///
 /// Deliberately simple and visible: anything subtler would only pretend these
-/// keys have entropy. Kept in production code (BLG-0074) so `verify_quorum`
+/// keys have entropy. Kept in production code so `verify_quorum`
 /// can *reject* these public keys wherever they appear.
 ///
 /// Renewed for the SLH-DSA committee: 96 bytes, a different base
@@ -237,7 +237,7 @@ fn fixture_public_key(device_id: u32) -> Vec<u8> {
 /// Deterministic on purpose: a test that cannot reproduce its signers cannot
 /// reproduce its quorum. Seeds are fixed bytes in this file, which is exactly
 /// why these keys must never custody anything (see the module header).
-/// BLG-0074 (P03-F17): test-only. Production code cannot even construct
+/// Test-only. Production code cannot even construct
 /// these signers, and `verify_quorum` refuses their identities outright.
 #[cfg(test)]
 #[must_use]
@@ -277,14 +277,14 @@ pub enum QuorumError {
     SignerOutOfRange { device_id: u32, device_count: u32 },
     /// One device counted twice. Distinctness is the whole quorum property.
     DuplicateSigner { device_id: u32 },
-    /// BLG-0073: the identity set is not the full committee.
+    /// The identity set is not the full committee.
     IdentitySetSizeMismatch { device_count: u32, presented: usize },
-    /// BLG-0073: two device ids present the same verifying key.
+    /// Two device ids present the same verifying key.
     DuplicateVerifyingKey { device_id: u32 },
-    ///: a device key that is not 64 bytes of SLH-DSA-SHAKE-256s, an
+    /// a device key that is not 64 bytes of SLH-DSA-SHAKE-256s, an
     /// Ed25519 key for one.
     BadKeyLength { device_id: u32, got: usize },
-    /// BLG-0074: a public development fixture identity tried to sign.
+    /// A public development fixture identity tried to sign.
     FixtureIdentity { device_id: u32 },
     /// A signature pinned to a different key epoch than the one the gate is
     /// asked to accept (rotation boundary enforcement).
@@ -425,7 +425,7 @@ pub fn verify_quorum(
             presented: signatures.len(),
         });
     }
-    // BLG-0073 (P03-F16): the presented identity set must be the whole
+    // The presented identity set must be the whole
     // committee - no more, no less. Without this rule a caller could present
     // one real identity twice under two device ids.
     if identities.len() != policy.device_count as usize {
@@ -434,7 +434,7 @@ pub fn verify_quorum(
             presented: identities.len(),
         });
     }
-    //: a device key is 64 bytes. An Ed25519 key never gets as far as a
+    // a device key is 64 bytes. An Ed25519 key never gets as far as a
     // verification attempt.
     for identity in identities {
         if identity.verifying_key.len() != COLD_DEVICE_KEY_LEN {
@@ -444,7 +444,7 @@ pub fn verify_quorum(
             });
         }
     }
-    // BLG-0073: two device ids sharing one verifying key are one device.
+    // Two device ids sharing one verifying key are one device.
     for (i, a) in identities.iter().enumerate() {
         for b in identities.iter().skip(i + 1) {
             if a.verifying_key == b.verifying_key {
@@ -454,7 +454,7 @@ pub fn verify_quorum(
             }
         }
     }
-    // BLG-0074: the dev fixture keys are public knowledge and must never
+    // The dev fixture keys are public knowledge and must never
     // pass a quorum in a production build, whatever identity they arrive
     // under. Compiled out of `cfg(test)` on purpose: the test suite models
     // committees with these very fixtures, and the rule that matters is the
@@ -733,7 +733,7 @@ mod tests {
             .expect_err("invalid policy must fail closed");
         assert_eq!(err.kind(), "quorum-invalid-policy");
     }
-    // ---- BLG-0073 (P03-F16) ----
+    // --------
 
     #[test]
     fn a_partial_identity_set_is_refused() {

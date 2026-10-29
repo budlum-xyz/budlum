@@ -265,7 +265,7 @@ mod chaos_tests {
         );
     }
 
-    /// K4: the settlement registries are account state. A domain registered
+    /// The settlement registries are account state. A domain registered
     /// by a `SettlementTx` in a block is rebuilt by the block replay after a
     /// restart, and the settlement root comes back byte for byte.
     #[test]
@@ -741,7 +741,7 @@ mod chaos_tests {
             DomainCommitment::from_block(&source_domain, &source_block, [2u8; 32], [3u8; 32], 1)
                 .unwrap();
         source_com.event_root = source_event_tree.root();
-        // (security audit §9) capture the commitment block hash so the
+        // (security audit) capture the commitment block hash so the
         // Bridge-mint forgery gate has a concrete value to bind against.
         let source_com_block_hash = source_com.domain_block_hash;
 
@@ -1090,7 +1090,7 @@ mod chaos_tests {
         let mut tx = Transaction::new_with_fee(alice, bob, 100, 1, 0, vec![]);
         tx.sign(&alice_kp);
 
-        // The executor deliberately does not compare nonces (BLG-0296): the
+        // The executor deliberately does not compare nonces: the
         // ingest gate owns that invariant and `validate_and_add_block` runs
         // it before every application. A caller bypassing the gate owns the
         // nonce, so the honest replay check goes through the same door block

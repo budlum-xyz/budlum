@@ -5,7 +5,7 @@
 //! data availability sampling (DAS).
 //!
 //! This module verifies the chunks of a block or file one at a time with a
-//! **Merkle root** that is domain-tagged (K38), plus **DAS sampling**: if a
+//! **Merkle root** that is domain-tagged , plus **DAS sampling**: if a
 //! small number of chunks are pulled and verified against the root, the whole
 //! of the data can be trusted to be present with high probability. That is the
 //! Celestia and Avail pattern.
@@ -23,7 +23,7 @@ use sha3::{Digest, Sha3_256};
 pub const DAS_MAGIC: [u8; 8] = *b"\xB5DASS\0\0\0";
 pub const DAS_VERSION: u8 = 1;
 
-/// Wrap a Merkle tree root with the leaf count (P37-F22). The odd-node rule
+/// Wrap a Merkle tree root with the leaf count. The odd-node rule
 /// duplicates the last node, so `[a, b, c]` and `[a, b, c, c]` share one tree
 /// root; folding the count in keeps the two roots apart and lets a verifier
 /// that holds the root know the object length.
@@ -46,7 +46,7 @@ fn tree_depth(count: usize) -> usize {
     depth
 }
 
-/// The Merkle root over a chunk list, domain-tagged (K38), bound to the leaf
+/// The Merkle root over a chunk list, domain-tagged , bound to the leaf
 /// count.
 pub fn das_root(chunks: &[Vec<u8>]) -> [u8; 32] {
     // No chunks, no tree: a domain-tagged empty root instead of `level[0]`
@@ -162,7 +162,7 @@ impl DasProof {
     /// Verify a proof: the leaf plus the path must reach the root. Panic-free.
     pub fn verify(&self, leaf: &[u8], root: &[u8; 32]) -> bool {
         // The position must lie inside the tree and the path must have exactly
-        // the depth of that tree: high index bits are not ignored (P37-F23).
+        // the depth of that tree: high index bits are not ignored.
         if self.leaf_count == 0
             || self.leaf_index >= self.leaf_count
             || self.path.len() != tree_depth(self.leaf_count)
@@ -321,8 +321,8 @@ mod tests {
         }
     }
 
-    /// P37-F22: a duplicated last chunk is a different object and must have a
-    /// different root; P37-F23: a proof does not verify at another position.
+    /// A duplicated last chunk is a different object and must have a
+    /// different root;: a proof does not verify at another position.
     #[test]
     fn root_binds_the_leaf_count_and_proofs_bind_the_position() {
         let abc = gen_chunks(3);

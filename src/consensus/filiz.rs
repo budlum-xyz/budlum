@@ -489,7 +489,7 @@ impl FilizRegistration {
 }
 
 /// Environment variable naming the file that holds a validator's Filiz seed
-/// (64 hex characters). The seed never enters the tree or a log (K7).
+/// (64 hex characters). The seed never enters the tree or a log.
 pub const FILIZ_SEED_FILE_ENV: &str = "BUDLUM_FILIZ_SEED_FILE";
 
 /// Read a Filiz seed file: 64 hex characters, surrounding whitespace allowed.

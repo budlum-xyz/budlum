@@ -301,7 +301,7 @@ impl AiModelSpec {
             }
             None => hasher.update([0u8]),
         }
-        // P31-F02: execution_dims select the guest program a proof is checked
+        // Execution_dims select the guest program a proof is checked
         // against and modalities gate request admission. Both are behavior
         // controlling spec fields, so the registry root must commit to them.
         match &self.execution_dims {

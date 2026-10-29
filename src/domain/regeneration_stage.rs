@@ -514,7 +514,7 @@ impl RegenerationLedger {
         //    through this call.
         //    A same-stage target is not a reversion either: it would record
         //    an event with `from == to`, which `validate` rejects, so one
-        //    accepted call would brick the ledger (P24-F01).
+        //    accepted call would brick the ledger.
         let wanted = match self.stage.reversions_to(target.stage) {
             Some(steps) if steps > 0 => steps,
             _ => {
@@ -665,7 +665,7 @@ impl RegenerationLedger {
         }
         // The only legal target here is Polyp, so this is always a full
         // reversion. The policy switch applies to this door like any other
-        // (P24-F02). The lifetime budget is not checked: the counters of a
+        // The lifetime budget is not checked: the counters of a
         // forged trail carry no meaning.
         if !policy.allow_full_reversion {
             return Err(ReversionError::FullReversionForbidden);
@@ -718,7 +718,7 @@ impl RegenerationLedger {
             return Err(ReversionError::InvalidLedger { rule });
         }
         // At the last stage there is nothing to grow into. `unwrap_or(self)`
-        // used to make Medusa to Medusa the "next" stage (P24-F07).
+        // used to make Medusa to Medusa the "next" stage.
         if self.stage.later() != Some(snapshot.stage) {
             return Err(ReversionError::GrowthNotNext {
                 from: self.stage,
@@ -763,7 +763,7 @@ impl RegenerationLedger {
         stage_height: &dyn Fn(Stage) -> Option<u64>,
     ) -> Option<Stage> {
         // A reversion goes strictly earlier: the current stage holds the
-        // damaged view, and `revert` refuses a same-stage target (P24-F01).
+        // damaged view, and `revert` refuses a same-stage target.
         let mut candidate = self.stage.earlier();
         while let Some(stage) = candidate {
             if stage_height(stage).is_some_and(|height| height <= damaged_below) {
@@ -851,7 +851,7 @@ mod tests {
         }
     }
 
-    /// P24-F01: a same-stage target used to be accepted, recorded an event
+    /// A same-stage target used to be accepted, recorded an event
     /// with `from == to`, and the next `validate` rejected the whole ledger.
     #[test]
     fn a_same_stage_target_is_refused_and_leaves_the_ledger_valid() {
@@ -1356,7 +1356,7 @@ mod tests {
     fn the_cheapest_target_is_the_shallowest_one_that_clears_the_damage() {
         let ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         // The current stage is never a target: a reversion goes strictly
-        // earlier, and `revert` refuses a same-stage target (P24-F01).
+        // earlier, and `revert` refuses a same-stage target.
         let stage_height = |stage| match stage {
             Stage::Medusa => Some(100),
             Stage::Ephyra => Some(60),

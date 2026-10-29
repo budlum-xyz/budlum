@@ -578,7 +578,7 @@ fn team_vesting_holds_on_every_value_path_not_only_transfer() {
     );
 }
 
-/// F4 (Constitution §3): NftBoost 4% B.U.D. share accumulates in
+/// F4 (Constitution): NftBoost 4% B.U.D. share accumulates in
 /// `pending_bud_boost_share` for later distribution to storage operators.
 /// REGRESSION LOCK - verifies the executor-side wiring.
 #[test]

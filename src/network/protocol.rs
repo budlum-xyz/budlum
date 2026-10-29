@@ -171,7 +171,7 @@ impl NetworkMessage {
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge(bytes.len()));
         }
-        // Only the canonical encoding is accepted (P36-F07). Dedup keys and
+        // Only the canonical encoding is accepted. Dedup keys and
         // gossipsub ids hash the raw bytes, but prost skips unknown fields and
         // accepts any field order and overlong varints, so one signed object
         // could be re-wrapped into unlimited byte strings that each look new.
@@ -288,7 +288,7 @@ pub fn is_canonical_hash(hash: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// P36-F07: an appended unknown field decodes to the same message but is
+    /// An appended unknown field decodes to the same message but is
     /// not the canonical encoding, so the validated entry point refuses it.
     #[test]
     fn a_non_canonical_encoding_of_a_valid_message_is_refused() {

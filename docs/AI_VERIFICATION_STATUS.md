@@ -319,7 +319,7 @@ verifies proof-required executions against the registered program". The gap argu
 the circuit that re-derives the output from the weights (step 3b) is not
 written, and mainnet keeps the opcode undecodable until it is.
 
-## RPC / economics audit (2026-08-14, skill §10.5 pass)
+## RPC / economics audit (2026-08-14, skill pass)
 
 Every AI inference layer surface was checked against live code with call-site evidence:
 

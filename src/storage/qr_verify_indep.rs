@@ -232,7 +232,7 @@ fn reconstruct(stream_commitment: &[u8; 32], frames: &[Vec<u8>]) -> Result<Found
         let b = basis.as_mut().ok_or(IndepError::NoFrames)?;
         seen.insert(drop.seq, drop.body.clone());
         b.add(&cols, drop.body)?;
-        // BLG-0431: full rank permits reconstruction, not acceptance of an
+        // Full rank permits reconstruction, not acceptance of an
         // unchecked suffix. Authenticate and validate every supplied frame.
     }
     let p = params.ok_or(IndepError::NoFrames)?;

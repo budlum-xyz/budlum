@@ -228,7 +228,7 @@ mod distributed_settlement_tests {
             .await
             .unwrap();
 
-        // K4: the buffer is consensus state and was written outside any
+        // The buffer is consensus state and was written outside any
         // block, so the restart (a replay of the stored blocks) dropped it.
         // Height 1 alone advances the domain; height 2 has to arrive again.
         sleep(Duration::from_millis(500)).await;
@@ -297,7 +297,7 @@ mod distributed_settlement_tests {
         )
         .unwrap();
 
-        // K4: the freeze was written outside any block, so the restart (a
+        // The freeze was written outside any block, so the restart (a
         // replay of the stored blocks) does not bring it back. The domain is
         // active again and height 2 is buffered behind the missing height 1.
         let res2 = n2.chain_handle.submit_domain_commitment(com2).await;
@@ -369,7 +369,7 @@ mod distributed_settlement_tests {
         n1.stop().await;
 
         let n2 = NodeHarness::new(port, vec![], Some(path.clone())).await;
-        // K4: the commitments were accepted outside any block, so the restart
+        // The commitments were accepted outside any block, so the restart
         // (a replay of the stored blocks) rebuilds the registry without them.
         let header = n2.chain_handle.build_global_header(None).await.unwrap();
         assert_ne!(root_before, root_empty);
@@ -381,7 +381,7 @@ mod distributed_settlement_tests {
         n2.stop().await;
     }
 
-    ///: the finality verdict the `SettlementTx::SubmitCommitment` door
+    /// the finality verdict the `SettlementTx::SubmitCommitment` door
     /// reaches refuses adversarial proofs before anything is applied.
     #[test]
     fn test_adversarial_finality_proofs() {

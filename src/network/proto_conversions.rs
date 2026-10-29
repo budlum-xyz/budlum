@@ -3306,7 +3306,7 @@ mod tests {
         }
     }
 
-    ///: the class survives the wire, and a byte that names no class is
+    /// the class survives the wire, and a byte that names no class is
     /// refused rather than read as "no class".
     #[test]
     fn a_cross_domain_message_keeps_its_source_quantum_class_on_the_wire() {

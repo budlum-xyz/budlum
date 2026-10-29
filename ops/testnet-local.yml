@@ -12,7 +12,7 @@
 # the faucet as the community destination. The other
 # destinations are local stand-ins. Keys stay in the `ceremony` volume.
 #
-# Published on loopback only: RPC 28545 (no API key, A-06), faucet 28600,
+# Published on loopback only: RPC 28545 (no API key), faucet 28600,
 # explorer API 28700, Prometheus 29091, Grafana 23000.
 
 x-node: &node
@@ -159,7 +159,7 @@ services:
       - ceremony:/home/budlum/ceremony:ro
     environment:
       - RUST_LOG=info
-      # A-06: the public listener serves reads and signed transactions
+      # The public listener serves reads and signed transactions
       # without an API key; the method class table bounds what it can do.
       - BUDLUM_RPC_AUTH_REQUIRED=0
       - BUDLUM_RPC_ALLOWED_IPS=

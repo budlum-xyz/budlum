@@ -764,7 +764,7 @@ mod tests {
         entries
     }
 
-    /// P26-F03: the indexed root equals the reference recursive hash.
+    /// The indexed root equals the reference recursive hash.
     #[test]
     fn the_indexed_root_matches_the_reference_hash() {
         let entries = spread_entries();
@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(trie.root_ref(), finalize_root(&hash_leaves(&sorted, 0)));
     }
 
-    /// P26-F03: proofs drawn from the index verify for present and absent
+    /// Proofs drawn from the index verify for present and absent
     /// addresses, including ones that diverge below a lone leaf.
     #[test]
     fn indexed_proofs_verify_for_present_and_absent_addresses() {
@@ -793,7 +793,7 @@ mod tests {
         assert!(trie.proof(&absent).verify(&root));
     }
 
-    /// P26-F03: a change drops the index, so the next root is the new one.
+    /// A change drops the index, so the next root is the new one.
     #[test]
     fn a_change_after_a_proof_moves_the_indexed_root() {
         let mut trie = MerkleTrie::new();

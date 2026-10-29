@@ -32,13 +32,13 @@ __bench_domain_throughput_disabled = []
 
 [dependencies]
 sha2 = "0.11"
-# zlib for Three payload pack (K-QR-SIKISTIR: only when it shrinks).
+# zlib for Three payload pack (only when it shrinks).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # G1 payload AEAD (T11): content bytes encrypted before A1 pack.
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
-#: HPKE RFC 9180 with KEM 0x647a (X-Wing), HKDF-SHA256, ChaCha20-Poly1305.
+# HPKE RFC 9180 with KEM 0x647a (X-Wing), HKDF-SHA256, ChaCha20-Poly1305.
 hpke = { version = "=0.15.0", default-features = false, features = ["alloc", "getrandom", "chacha", "mlkem", "x25519", "hkdfsha2"] }
-# ISO QR encode for Three optical frames (K-QR: EC=L, mask pin). MIT/Apache.
+# ISO QR encode for Three optical frames (EC=L, mask pin). MIT/Apache.
 qrcode = { version = "0.14", default-features = false, features = [] }
 # Decode QR modules from our deterministic PNGs (MIT/Apache).
 rqrr = "0.11"
@@ -84,7 +84,7 @@ libp2p = { git = "https://github.com/libp2p/rust-libp2p", rev = "38b8a2c0e91bf69
     # configures a hostname peer instead of a raw IP.
     "dns",
     "noise",
-    #: TLS 1.3 next to Noise on TCP, and QUIC (TLS 1.3 by design).
+    # TLS 1.3 next to Noise on TCP, and QUIC (TLS 1.3 by design).
     # The mainnet profile offers TLS only.
     "tls",
     "quic",
@@ -151,10 +151,10 @@ slh-dsa = { version = "=0.2.0-rc.5", features = ["zeroize"] }
 # Secret seeds are wiped on drop. 1.9 is the floor libcrux-ml-dsa asks for
 # (through tls_codec), so one pin serves the PQ core and the HPKE module.
 zeroize = { version = "=1.9.1", features = ["alloc"] }
-#: the wallet password is NFKD normalized before it enters the
+# the wallet password is NFKD normalized before it enters the
 # root derivation. No default features: the crate needs no std or table extras.
 unicode-normalization = { version = "=0.1.24", default-features = false }
-#: quantum canary puzzles. Classical curves appear only as puzzles whose
+# quantum canary puzzles. Classical curves appear only as puzzles whose
 # solution proves a break; none of them is on an acceptance path.
 shake = "=0.1.0"
 p192 = { version = "=0.14.0-rc.15", default-features = false, features = ["arithmetic"] }

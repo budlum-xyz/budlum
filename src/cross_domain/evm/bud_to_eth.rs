@@ -120,7 +120,7 @@ pub fn build_bud_to_eth_claim(
     let len = bytes.len().min(32);
     asset_id[..len].copy_from_slice(&bytes[..len]);
 
-    // BLG-0116 (P05-F09): the recipient is the one the burn committed,
+    // The recipient is the one the burn committed,
     // not a free parameter the caller picks here.
     let recipient_eth = transfer
         .recipient_eth
@@ -187,7 +187,7 @@ mod tests {
         );
     }
 
-    /// BLG-0126 (P05-F19): every named refusal is EXERCISED, not just
+    /// Every named refusal is EXERCISED, not just
     /// declared.
     #[test]
     fn claim_refusals_are_exercised() {

@@ -1,5 +1,4 @@
-//! P01 consensus-round behaviour (BLG-0006/0007/0009/0017/0029) and the P01
-//! negative-validation batch (BLG-0028).
+//! Consensus-round behaviour and the negative-validation batch.
 //!
 //! The round rule is shared by PoS and PoA: the block nonce carries the
 //! leader round, the round is capped at [`MAX_LEADER_ROUNDS`], and a round
@@ -7,7 +6,7 @@
 //! after its parent. These tests pin the pieces the older suite never
 //! exercised: the round binding in the seed and threshold, the cap and floor
 //! refusals, checkpoint parking until quorum finality, and the missing
-//! negative cases named by P01-F19.
+//! negative cases named by.
 
 /// Whether the engine refused because the leader round the producer claims has
 /// not elapsed at wall clock. PoS and PoA enforce the same rule and word the
@@ -17,7 +16,7 @@ fn round_not_elapsed(error: &str) -> bool {
 }
 
 #[cfg(test)]
-mod p01_consensus_rounds_tests {
+mod consensus_round_tests {
     use super::round_not_elapsed;
     use crate::consensus::poa::{PoAConfig, PoAEngine};
     use crate::consensus::pos::{PoSConfig, PoSEngine};
@@ -121,7 +120,7 @@ mod p01_consensus_rounds_tests {
         parent.hash = parent.calculate_hash();
 
         // Round 2 prices at parent + 1s + 2x3s. One second after the parent is
-        // far too early (P01-F20).
+        // far too early.
         let mut block = Block::new(1, parent.hash.clone(), vec![]);
         block.slot = block.index;
         block.timestamp = parent.timestamp + MIN_BLOCK_INTERVAL_MS;
@@ -285,7 +284,7 @@ mod p01_consensus_rounds_tests {
 
         // Over a run of slots the round must actually re-roll someone: if the
         // round term did nothing, every (slot, round) pair would name the same
-        // leader (P01-F02).
+        // leader.
         let mut changed = false;
         for slot in 0..32u64 {
             let round0 = engine
@@ -455,7 +454,7 @@ mod p01_consensus_rounds_tests {
         }
     }
 
-    ///: once a Filiz Chain is active, the block's election proof is
+    /// once a Filiz Chain is active, the block's election proof is
     /// the reveal opening it and the output is that reveal's eligibility
     /// value; a reveal that opens nothing is refused before the threshold.
     #[test]
@@ -533,7 +532,7 @@ mod p01_consensus_rounds_tests {
 /// fix. An authority that leads round 0 must not be able to publish a valid
 /// block for round 2 just because it dated the parent an hour ahead.
 #[cfg(test)]
-mod p01_poa_round_pricing_tests {
+mod poa_round_pricing_tests {
     use super::round_not_elapsed;
     use crate::consensus::poa::{PoAConfig, PoAEngine};
     use crate::consensus::ConsensusEngine;

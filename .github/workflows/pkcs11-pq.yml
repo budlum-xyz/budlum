@@ -1,6 +1,6 @@
 name: PKCS#11 3.2 post-quantum token
 
-#: the anchor and Root Seal keys sign through the PKCS#11 3.2
+# the anchor and Root Seal keys sign through the PKCS#11 3.2
 # standard mechanisms (CKM_ML_DSA, CKM_SLH_DSA). CI has no HSM, so it runs a
 # software token with 3.2 support (kryoptic, built against OpenSSL 3.5 with
 # the `pqc` feature). The token is a test fixture only: mainnet refuses a

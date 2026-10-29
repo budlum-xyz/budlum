@@ -1,7 +1,7 @@
 //! A funded chain that applies signed door transactions in produced blocks
 //! and restarts from its own storage.
 //!
-//! Consensus state changes only inside a block (K4). A
+//! Consensus state changes only inside a block. A
 //! restart rebuilds the state by replaying the stored blocks over the genesis
 //! state, so a write made outside a block - a test shim, an operator call -
 //! does not survive it, and a restart test that wants to see something

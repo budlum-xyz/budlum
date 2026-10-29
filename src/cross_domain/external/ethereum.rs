@@ -246,7 +246,7 @@ pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError>
     })
 }
 
-/// The sync committee the adapter is pinned to (BLG-0130/P06-F01).
+/// The sync committee the adapter is pinned to.
 ///
 /// The aggregate public key used to be a field of the submitted payload:
 /// whoever could submit evidence generated their own BLS key and signed with
@@ -262,7 +262,7 @@ pub struct PinnedCommittee {
     pub next_committee_root: [u8; 32],
 }
 
-/// The commitment a rotation must open (BLG-0130/P06-F01): the root of a
+/// The commitment a rotation must open: the root of a
 /// committee is the domain-separated hash of its aggregate key. Both the
 /// pinned `next_committee_root` and [`EthereumSyncAdapter::rotate_committee`]
 /// speak this one function, so a rotation cannot name a key the pin did not
@@ -272,7 +272,7 @@ pub fn committee_root(aggregate_pubkey: &[u8]) -> [u8; 32] {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_ETHSYNC_COMMITTEE_ROOT_V1", aggregate_pubkey])
 }
 
-/// The signing root, derived (BLG-0131/P06-F02, evidence format v2).
+/// The signing root, derived (evidence format v2).
 ///
 /// The v1 adapter signed a constant held in `AdapterSpec` - the signature
 /// bound nothing about the update, so one signature replayed under any
@@ -301,7 +301,7 @@ pub struct EthereumSyncAdapter {
     /// attestations, because the signing root it holds belongs to the first.
     network: String,
     verifier: Option<Box<dyn BlsVerifier>>,
-    /// The pinned sync committee (BLG-0130/P06-F01). `None` is the closed
+    /// The pinned sync committee. `None` is the closed
     /// admission state (decision C, interim): the adapter refuses every
     /// update until a committee is pinned.
     committee: Option<PinnedCommittee>,
@@ -326,7 +326,7 @@ impl EthereumSyncAdapter {
             descriptor: AdapterDescriptor {
                 id,
                 name: format!("ethereum-sync-{network}"),
-                // BLG-0131 (P06-F02): evidence format v2 - the signature
+                // Evidence format v2 - the signature
                 // covers the update itself, not a stored constant.
                 adapter_version: 2,
                 accepted_evidence_versions: vec![2],
@@ -347,7 +347,7 @@ impl EthereumSyncAdapter {
         }
     }
 
-    /// Rotates the pinned committee (BLG-0130/P06-F01, decision B).
+    /// Rotates the pinned committee.
     ///
     /// The new key must open the pin's `next_committee_root` under
     /// [`committee_root`], and the new period must move forward. Anything
@@ -496,7 +496,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             });
         }
 
-        // BLG-0130 (P06-F01): the key the signature is checked against is
+        // The key the signature is checked against is
         // the PINNED committee's, never the payload's own claim. No pin is
         // the closed admission state (decision C, interim).
         let Some(committee) = self.committee.as_ref() else {
@@ -526,7 +526,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
                     .to_string(),
             });
         };
-        // BLG-0131 (P06-F02): the signed root is DERIVED from the update -
+        // The signed root is DERIVED from the update -
         // the signature binds the claimed state root and cannot be replayed
         // under another one.
         verifier
@@ -569,7 +569,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             ),
             height: update.finalized_slot,
             state_root: update.state_root,
-            // BLG-0133 (P06-F04): the signed header root IS the block hash
+            // The signed header root IS the block hash
             // this attestation covers.
             attested_block_hash: Some(update.finalized_root),
             attested_event_root: None,
@@ -789,7 +789,7 @@ mod slashable_policy_tests {
         );
     }
 
-    /// BLG-0130 (P06-F01): the pin decides which key is trusted - a payload
+    /// The pin decides which key is trusted - a payload
     /// naming its own key is refused.
     #[test]
     fn a_payload_key_that_is_not_the_pinned_committee_is_refused() {
@@ -810,7 +810,7 @@ mod slashable_policy_tests {
         );
     }
 
-    /// BLG-0130 (P06-F01, decision B): rotation opens the committed root,
+    /// Rotation opens the committed root,
     /// and nothing else.
     #[test]
     fn rotation_must_open_the_committed_root() {
@@ -853,7 +853,7 @@ mod slashable_policy_tests {
         adapter.rotate_committee(good).expect("committed rotation");
     }
 
-    /// BLG-0131 (P06-F02): the signature binds the claimed state root -
+    /// The signature binds the claimed state root -
     /// the same signature cannot be replayed under another root.
     #[test]
     fn the_v2_signing_root_binds_the_claimed_state_root() {
@@ -874,7 +874,7 @@ mod slashable_policy_tests {
         );
     }
 
-    /// BLG-0130 (P06-F01, decision C interim): with no pinned committee the
+    /// With no pinned committee the
     /// adapter is closed - every update is refused.
     #[test]
     fn committee_less_admission_is_closed() {

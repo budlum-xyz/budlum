@@ -69,7 +69,7 @@ pub fn decode_receipt(envelope: &[u8]) -> Result<EthReceipt, ReceiptError> {
     }
     let first = envelope[0];
     // Legacy receipt: first byte >= 0xc0 (RLP list prefix). Typed: 0x01/0x02/0x03.
-    // BLG-0125 (P05-F18): the typed envelope type byte is CHECKED - any other
+    // The typed envelope type byte is CHECKED - any other
     // nonzero prefix used to be accepted and its payload decoded as a receipt.
     let payload = if first >= 0xc0 {
         envelope
@@ -102,7 +102,7 @@ fn decode_status(b: &[u8]) -> Result<bool, ReceiptError> {
     match b.len() {
         0 => Ok(false), // status 0 (fail)
         32 => Ok(true), // pre-Byzantium postState root
-        // BLG-0125 (P05-F18): the status byte is EXACTLY 0 or 1. Any other
+        // The status byte is EXACTLY 0 or 1. Any other
         // nonzero value (0x02, 0xff) used to read as "success".
         1 => match b[0] {
             0 => Ok(false),
@@ -168,7 +168,7 @@ impl EthReceipt {
     }
 
     /// Like [`Self::find_log`], but returns the log WITH its position in the
-    /// receipt (BLG-0125/P05-F18): `(log_index, log)`. The pair
+    /// receipt: `(log_index, log)`. The pair
     /// `(tx, log_index)` is the deposit id a bridge can bind; the bare log
     /// cannot be told apart from a same-shaped sibling later in the list.
     pub fn find_log_indexed<'a>(
@@ -353,7 +353,7 @@ mod tests {
         );
     }
 
-    /// BLG-0126 (P05-F19): trailing bytes after the receipt are refused -
+    /// Trailing bytes after the receipt are refused -
     /// an injection surface.
     #[test]
     fn neg_trailing_bytes_rejected() {
@@ -367,7 +367,7 @@ mod tests {
         );
     }
 
-    /// BLG-0126 (P05-F19): the status byte is exactly 0 or 1.
+    /// The status byte is exactly 0 or 1.
     #[test]
     fn neg_bad_status_byte_rejected() {
         let bloom = Item::String(vec![0u8; 256]);
@@ -383,7 +383,7 @@ mod tests {
         );
     }
 
-    /// BLG-0126 (P05-F19): an unknown typed-envelope type byte is refused.
+    /// An unknown typed-envelope type byte is refused.
     #[test]
     fn neg_bad_type_byte_rejected() {
         let mut env = build_typed_receipt(0x04, true, Vec::new());
@@ -395,7 +395,7 @@ mod tests {
         assert!(decode_receipt(&build_typed_receipt(0x02, true, Vec::new())).is_ok());
     }
 
-    /// BLG-0125 (P05-F18): find_log_indexed binds (tx, log index) - two
+    /// Find_log_indexed binds (tx, log index) - two
     /// same-shaped logs are told apart by position.
     #[test]
     fn find_log_indexed_binds_the_position() {

@@ -75,7 +75,7 @@ pub fn address_to_recipient_tag(addr: &[u8; 32]) -> u64 {
     // the crate is built: there is no branch left to reason about.
     let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *addr;
     let raw = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
-    // BLG-0282 (P17-F16, accepted with documentation): `%` is not a
+    // (accepted with documentation): `%` is not a
     // constant-time modular reduction and this fold consumes secret note
     // material. Accepted because wallet-core is unwired to any network or
     // consensus path (the node's own fold lives in bud-state, matching this

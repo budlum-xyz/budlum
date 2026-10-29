@@ -9,7 +9,7 @@
 //! `CrossDomainMessageRegistry` into a coherent pipeline.
 //!
 //! WIRING: partially wired - the relay-enqueue stage runs in production
-//! through `Blockchain::enqueue_bridge_relay` (BLG-0117), which builds the
+//! through `Blockchain::enqueue_bridge_relay` , which builds the
 //! pipeline around the chain's own bridge, relayer and registry state. The
 //! remaining stages (lock, relay, mint, burn, unlock) still have no
 //! production loop sequencing them end to end: the components are reached
@@ -81,7 +81,7 @@ impl From<RelayerError> for PipelineError {
 /// Machine through each stage of a cross-domain transfer.
 pub struct BridgeRelayerPipeline<'a> {
     /// The bridge state machine (lock/mint/burn/unlock lifecycle). Borrowed:
-    /// production lends the pipeline ITS OWN state (BLG-0117/P05-F10), so
+    /// production lends the pipeline ITS OWN state , so
     /// there is no second copy of the bridge to keep in sync.
     pub bridge: &'a mut BridgeState,
     /// The universal relayer (pending relays, proof verification).
@@ -94,7 +94,7 @@ pub struct BridgeRelayerPipeline<'a> {
 
 impl<'a> BridgeRelayerPipeline<'a> {
     /// Construct the pipeline around existing state - the production
-    /// wiring (BLG-0117/P05-F10): `Blockchain` builds one of these around
+    /// wiring: `Blockchain` builds one of these around
     /// its own bridge/relayer/registry and runs the stage work through it.
     pub fn from_parts(
         bridge: &'a mut BridgeState,
@@ -111,7 +111,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
 
     /// Stage 2 alone: enqueue the relay for an already-registered message.
     /// This is the step `Blockchain::enqueue_bridge_relay` runs, and it runs
-    /// it THROUGH the pipeline (BLG-0117/P05-F10 wiring) rather than around
+    /// it THROUGH the pipeline ( wiring) rather than around
     /// it.
     pub fn enqueue_stage(
         &mut self,
@@ -119,7 +119,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
         message: &CrossDomainMessage,
         source_height: u64,
     ) {
-        // BLG-0129 (P05-F22): the stage refuses an event that does not
+        // The stage refuses an event that does not
         // carry the enqueued message.
         if let Err(e) = self
             .relayer
@@ -170,7 +170,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
         // The bridge is mutated before the registry is consulted, because
         // the message id is derived inside `lock` (it consumes the replay
         // nonce). If the registry then refuses the message, the row is
-        // UNWOUND (BLG-0117/P05-F10): `unwind_lock` removes exactly what the
+        // UNWOUND: `unwind_lock` removes exactly what the
         // lock added - no whole-`BridgeState` clone per call, which cost a
         // full state copy on every stage and was itself a DoS surface.
         let (transfer, event) = self.bridge.lock(
@@ -277,7 +277,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
 
         // Same shape as `lock`: the burn moves the transfer to `Burned`
         // before the message can be registered, so a registry refusal
-        // UNWINDS the burn (`unwind_burn`, BLG-0117/P05-F10) instead of
+        // UNWINDS the burn (`unwind_burn`) instead of
         // restoring a whole-`BridgeState` clone, and instead of leaving a
         // burned transfer whose unlock message nobody holds.
         let previous_expiry = self
@@ -551,7 +551,7 @@ mod tests {
     }
 
     /// Owned state + a borrow-based pipeline over it: the production shape
-    /// (BLG-0117/P05-F10) - one state, the pipeline borrowing it.
+    /// - one state, the pipeline borrowing it.
     struct Rig {
         bridge: BridgeState,
         relayer: UniversalRelayer,

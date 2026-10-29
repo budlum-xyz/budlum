@@ -312,7 +312,7 @@ impl VerifierRegistry {
         }
     }
 
-    /// P16-F12: like [`Self::with_params`], but refuses parameters that fail
+    /// Like [`Self::with_params`], but refuses parameters that fail
     /// [`RegistryParams::validate`] (zero `min_stake` or `unbonding_epochs`,
     /// ratios above the scale).
     pub fn try_with_params(params: RegistryParams) -> Result<Self, String> {
@@ -444,7 +444,7 @@ impl VerifierRegistry {
         match self.registrations.get_mut(&key) {
             Some(reg) => {
                 if total_stake == 0 {
-                    // P16-F11: a zero stake is an exit, not a deletion. The
+                    // A zero stake is an exit, not a deletion. The
                     // bond stays slashable and locked for the unbonding
                     // window; removing it let evidence find `NotRegistered`.
                     //
@@ -464,7 +464,7 @@ impl VerifierRegistry {
                     reg.stake = total_stake;
                     return;
                 }
-                // BLG-0253 (P16-F10): a slashed entry may only shrink.
+                // A slashed entry may only shrink.
                 // Writing the caller's uncut total back undid the slash on the
                 // next mirrored Stake/Unstake, which made the "terminal" status
                 // below even less coherent.
@@ -503,7 +503,7 @@ impl VerifierRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        // P16-F13: only an Active bond can grow; an unbonding or slashed
+        // Only an Active bond can grow; an unbonding or slashed
         // bond is on its way out. An overflow is an error, not a clip.
         if !matches!(reg.status, MemberStatus::Active) {
             return Err(RegistryError::NotActive { account, role });
@@ -527,7 +527,7 @@ impl VerifierRegistry {
             .registrations
             .get_mut(&(role, account))
             .ok_or(RegistryError::NotRegistered { account, role })?;
-        // BLG-0253, decision 5A: exclusion is not confiscation. The
+        // decision 5A: exclusion is not confiscation. The
         // penalty already reduced stake; the remainder exits with the same
         // delay as an active bond, matching the node registry.
         if !matches!(reg.status, MemberStatus::Active | MemberStatus::Slashed) {
@@ -591,8 +591,8 @@ impl VerifierRegistry {
 
         let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
         reg.stake = reg.stake.saturating_sub(penalty);
-        // BLG-0253 (P16-F10, mirroring the node's twin at
-        // src/registry/permissionless.rs, BLG-0087 decision B): Slashed had
+        // (mirroring the node's twin at
+        // src/registry/permissionless.rs, decision B): Slashed had
         // no exit at all - a 1% liveness cut froze the remaining stake
         // forever, because begin_unbonding required Active and withdraw
         // required Unbonding. A liveness fault is a timed event: cut the
@@ -639,7 +639,7 @@ impl VerifierRegistry {
                 }
                 let penalty = slash_penalty(reg.stake, slash_ratio_fixed);
                 reg.stake = reg.stake.saturating_sub(penalty);
-                // BLG-0253: the liveness exemption applies to the sweep
+                // The liveness exemption applies to the sweep
                 // too - a cross-role jail over an unrelated role would lock
                 // that role's bond with no exit, the exact defect just fixed.
                 if condition != SlashingCondition::LivenessFault {
@@ -1207,7 +1207,7 @@ mod tests {
         assert!(!reg.is_active_attester(&account));
     }
 
-    /// BLG-0253 (P16-F10): a liveness fault is a timed cut with an exit;
+    /// A liveness fault is a timed cut with an exit;
     /// the remaining stake must be withdrawable after the unbonding window.
     #[test]
     fn liveness_fault_leaves_an_exit_for_the_remainder() {
@@ -1267,7 +1267,7 @@ mod tests {
         assert!(reg.get(&account, roles::VALIDATOR).is_none());
     }
 
-    /// BLG-0253: the mirror may only shrink a slashed entry.
+    /// The mirror may only shrink a slashed entry.
     #[test]
     fn upsert_cannot_undraw_a_slash() {
         let account = addr(53);
@@ -1291,7 +1291,7 @@ mod tests {
         );
     }
 
-    /// BLG-0253 (P16-F10) was enforced only while the entry still carried
+    ///was enforced only while the entry still carried
     /// `Slashed`. `begin_unbonding` moves a slashed entry to `Unbonding`, and
     /// from that point the shrink-only test no longer saw it: one mirrored
     /// stake event carrying the pre-slash total raised the bond back, and the
@@ -1393,7 +1393,7 @@ mod tests {
 
         let result = reg.slash_from_report(&report).unwrap();
         assert!(result.is_some());
-        // BLG-0253 (P16-F10, decision mirrored from the node's BLG-0087):
+        // (decision mirrored from the node's):
         // a liveness report is a timed cut, not a terminal status. The
         // penalty stands and the entry stays Active so the remainder can
         // leave through the unbonding path; the record is the slash.
@@ -1473,7 +1473,7 @@ mod tests {
         assert_eq!(last, Some(Address::from(expected_last)));
     }
 
-    /// P16-F11: a zero stake unbonds, it does not delete the registration.
+    /// A zero stake unbonds, it does not delete the registration.
     #[test]
     fn upsert_zero_stake_keeps_the_bond_slashable() {
         let mut reg = VerifierRegistry::new();
@@ -1499,7 +1499,7 @@ mod tests {
             .is_ok());
     }
 
-    /// P16-F13: stake only grows on an Active bond and never clips.
+    /// Stake only grows on an Active bond and never clips.
     #[test]
     fn add_stake_refuses_non_active_and_overflow() {
         let mut reg = VerifierRegistry::new();
@@ -1521,7 +1521,7 @@ mod tests {
         ));
     }
 
-    /// P16-F12: parameters that fail validation are refused.
+    /// Parameters that fail validation are refused.
     #[test]
     fn invalid_params_are_refused() {
         let bad = RegistryParams {
@@ -1545,7 +1545,7 @@ mod tests {
         assert!(reg.is_active_content_validator(&addr(21)));
     }
 
-    /// BLG-0257 (P16-F14): the root commits to EVERYTHING the struct holds.
+    /// The root commits to EVERYTHING the struct holds.
     /// V1 hashed the registration table only - parameters and the slashing
     /// history were invisible, so a snapshot could not tell apart registries
     /// whose unbonding window, min stake, slash ratios, or truncation of the

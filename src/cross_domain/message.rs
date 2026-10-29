@@ -57,7 +57,7 @@ pub struct CrossDomainMessage {
     pub payload_hash: Hash32,
     pub kind: MessageKind,
     pub expiry_height: u64,
-    /// BLG-0113 (P05-F06): the sender's authentication over
+    /// The sender's authentication over
     /// [`CrossDomainMessage::message_id`]. Envelope, not payload - the id
     /// binds the fields above and nothing here, exactly like a
     /// transaction's signature over its signing hash. An empty envelope is
@@ -77,7 +77,7 @@ pub struct CrossDomainMessage {
     #[serde(default)]
     pub sender_signature: Vec<u8>,
     /// The quantum class of the source domain when the message was relayed
-    ///: the weakest class among the schemes its adapter has observed,
+    /// the weakest class among the schemes its adapter has observed,
     /// `None` while nothing is observed. A receiver reads it from the message
     /// and does not have to look the source domain up.
     ///
@@ -161,7 +161,7 @@ impl CrossDomainMessage {
     }
 
     /// Signs [`CrossDomainMessage::message_id`] with the sender's Ed25519
-    /// account key (BLG-0113/P05-F06). The V4 derivation makes the key
+    /// account key. The V4 derivation makes the key
     /// bytes the address itself, so the envelope is self-identifying.
     ///
     /// WIRING: exposed for the sender side of the relayed-message door:
@@ -173,7 +173,7 @@ impl CrossDomainMessage {
         self.sender_signature = keypair.sign(&self.message_id).to_vec();
     }
 
-    /// Verifies the sender envelope (BLG-0113/P05-F06): the signature must
+    /// Verifies the sender envelope: the signature must
     /// open over [`CrossDomainMessage::message_id`] under a key that IS the
     /// declared sender - Ed25519 (the key bytes are the address) or
     /// ML-DSA-87 (the wallet address derives from the key). An empty
@@ -224,7 +224,7 @@ impl CrossDomainMessage {
 
     pub fn calculate_message_id(&self) -> MessageId {
         let kind = self.kind.as_bytes();
-        // BLG-0121 (P05-F14): presence is folded in through the shared
+        // Presence is folded in through the shared
         // `presence_tagged` helper - `None` and `Some([0; 32])` used to
         // hash identically (the zero-id collision class the header fix
         // closed in core/hash.rs:22).
@@ -329,7 +329,7 @@ pub fn register_relayed_on_state(
         .registry
         .ensure_active_relayer(&relayer)
         .map_err(|e| e.to_string())?;
-    // BLG-0113 (P05-F06): the sender must SIGN the message id. The
+    // The sender must SIGN the message id. The
     // self-declared field alone let anybody name an active relayer and
     // register arbitrary messages - or pre-register a predictable lock id out
     // from under the real one.
@@ -370,7 +370,7 @@ mod tests {
         assert!(!tampered.verify_id());
     }
 
-    ///: the class is part of the identity. Changing it, or removing
+    /// the class is part of the identity. Changing it, or removing
     /// it, produces another id, so a relay cannot rewrite what the receiver
     /// reads without the id check failing.
     #[test]
@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(MESSAGE_ENVELOPE_VERSION, 3);
     }
 
-    /// BLG-0121 (P05-F14): a `None` correlation and a present one are
+    /// A `None` correlation and a present one are
     /// DIFFERENT identities - the id folds presence, not just bytes. A
     /// correlated id of all zeros must not collapse into "no correlation".
     #[test]

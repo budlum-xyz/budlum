@@ -299,7 +299,7 @@ pub struct NodeConfig {
     #[arg(long)]
     pub pkcs11_pq_mechanism: Option<String>,
     /// Operator-configured BLS public key (hex), cross-checked against the
-    /// HSM-held PUBLIC_KEY object at startup (P02-F01 decision B).
+    /// HSM-held PUBLIC_KEY object at startup.
     #[arg(long)]
     pub pkcs11_bls_public_key: Option<String>,
     /// Operator-configured PQ public key (hex), cross-checked the same way.
@@ -346,7 +346,7 @@ pub struct NodeConfig {
     //
     // `RelayerWorker::with_adapters` existed and nothing called it, because
     // the node carried no way to say what an adapter should point at.
-    // BLG-0135 (P06-F06, decision B): the `--evm-bridge-address` registration
+    // The `--evm-bridge-address` registration
     // is REMOVED. The EVM bridge leg has no live end-to-end route (the
     // off-chain half is a stub that refuses at broadcast), and a registration
     // surface that reads as "production" while the leg cannot operate was the
@@ -379,7 +379,7 @@ impl Default for NodeConfig {
             config: None,
             metrics_port: 9090,
             rpc_enabled: true,
-            // (security audit §5 wiring) secure-by-default for
+            // (security audit wiring) secure-by-default for
             // NodeConfig::default. The previous `false` here meant
             // `main.rs:557`'s `RpcSecurityConfig::from_env(config.rpc_auth_required, ...)`
             // Silently opened a public, unauthenticated RPC at startup
@@ -612,7 +612,7 @@ pub struct Pkcs11Section {
     /// If absent, BLS signing falls back to software (data object).
     pub bls_mechanism: Option<String>,
     /// Operator-configured BLS/PQ public keys (hex) for the startup
-    /// cross-check (P02-F01 decision B).
+    /// cross-check.
     pub bls_public_key: Option<String>,
     pub pq_public_key: Option<String>,
     /// Label of the ML-DSA-65 key pair signed with through PKCS#11 3.2.
@@ -1251,7 +1251,7 @@ impl NodeConfig {
                 std::process::exit(1);
             }
 
-            //: a node that regenerates asks archive peers for the
+            // a node that regenerates asks archive peers for the
             // witnesses it pruned. Fewer than five distinct archive bootnodes
             // leave one failure away from no witness source.
             if let Some(reason) = self.mainnet_archive_bootnode_violation() {
@@ -1280,7 +1280,7 @@ impl NodeConfig {
                 std::process::exit(1);
             }
 
-            // F-01: a non-empty bootnode list that still names the ceremony
+            // A non-empty bootnode list that still names the ceremony
             // template (RFC 5737 / "placeholder") is not a launch config.
             if let Some(bad) = crate::core::chain_config::first_placeholder_peer(&self.bootnodes) {
                 eprintln!(
@@ -1295,7 +1295,7 @@ impl NodeConfig {
                 std::process::exit(1);
             }
 
-            // F-13: the checked-in mainnet profile must not advertise an open
+            // The checked-in mainnet profile must not advertise an open
             // VerifyMerkle gate. The VM ignores this flag today; refusing it
             // here keeps a future wiring from silently enabling an unfinished
             // verifier.
@@ -1802,7 +1802,7 @@ mod tests {
         assert!(cfg.mainnet_rpc_violation().is_none());
     }
 
-    ///: on mainnet an RPC listener off loopback needs TLS.
+    /// on mainnet an RPC listener off loopback needs TLS.
     #[test]
     fn mainnet_rpc_off_loopback_needs_tls() {
         let mut cfg = NodeConfig {

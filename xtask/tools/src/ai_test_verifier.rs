@@ -12,7 +12,7 @@
 //! ```
 //!
 //! The wallet password comes from the file or `BUD_WALLET_PASSWORD`; the
-//! tool never prints or stores it (K7).
+//! tool never prints or stores it.
 
 use crate::json::{self, Value};
 use crate::rpc;

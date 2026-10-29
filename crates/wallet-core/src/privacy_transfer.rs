@@ -19,7 +19,7 @@ pub struct PrivateNoteInput {
 }
 
 impl std::fmt::Debug for PrivateNoteInput {
-    /// BLG-0280 (P17-F14): `spend_secret` is the nullifier secret - the
+    /// `spend_secret` is the nullifier secret - the
     /// derived Debug printed it, and wallets format witnesses into error and
     /// test output. Redacted like the rest of the secret material.
     ///
@@ -112,7 +112,7 @@ pub struct PrivateTransferIntent {
     pub outputs: Vec<PrivateNoteOutput>,
     /// Domain-separated digest over public halves for wallet signature.
     pub public_digest: [u8; 32],
-    /// BLG-0275 (P17-F09): the network and account the authorization is
+    /// The network and account the authorization is
     /// bound to. The signature no longer covers `public_digest` alone;
     /// see [`authorization_message`].
     pub chain_id: u64,
@@ -148,7 +148,7 @@ impl std::fmt::Debug for PrivateTransferIntent {
 }
 
 /// The message the wallet's authorization signature covers
-/// (BLG-0275/P17-F09). V1 signed the bare `public_digest`: a captured
+/// V1 signed the bare `public_digest`: a captured
 /// authorization was valid on every Budlum network and for every future
 /// intent from that wallet - the only stop was the relayer's nullifier
 /// set, a state check, not a cryptographic binding. V2 binds chain id,

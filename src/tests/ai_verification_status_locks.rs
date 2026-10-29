@@ -213,7 +213,7 @@ fn guest_relu_uses_the_signed_field_threshold() {
     );
 }
 
-/// The Program CTL argument (BudL_SPEC §9) models a straight-line fetch, so
+/// The Program CTL argument models a straight-line fetch, so
 /// the guest builder must not emit control flow.
 #[test]
 fn guest_builder_emits_no_branches() {

@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 /// A domain event with the inclusion proof that places it under a committed
 /// domain block. `expected_block_hash` is mandatory: without it a carrier
 /// could pick any commitment at the `(domain, height, sequence)` tuple,
-/// stale or equivocated ones included (security audit §9).
+/// stale or equivocated ones included (security audit).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvenBridgeEvent {
     pub domain: DomainId,
@@ -68,7 +68,7 @@ pub struct LockRequest {
 }
 
 /// A burn of the units held for transfer `message_id`: the burner is the
-/// transfer's recipient. BLG-0116 (P05-F09): the burner declares the
+/// transfer's recipient.: the burner declares the
 /// Ethereum destination here, at burn time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BurnRequest {
@@ -213,7 +213,7 @@ pub fn register_bridge_message(
 }
 
 /// Enqueue a bridge event for the universal relayer, through the same
-/// pipeline the four-stage tests exercise (BLG-0117).
+/// pipeline the four-stage tests exercise.
 pub fn enqueue_bridge_relay(
     state: &mut AccountState,
     source_event: &DomainEvent,
@@ -296,7 +296,7 @@ pub fn lock(
             "Insufficient balance for bridge lock: owner has {owner_balance}, needed {needed}"
         ));
     }
-    // BLG-0118 (P05-F11): the message registry refusal rolls the row back,
+    // The message registry refusal rolls the row back,
     // so the order row -> registry -> debit leaves nothing behind.
     let bridge_before = state.bridge_state.clone();
     let result = state
@@ -461,7 +461,7 @@ pub fn burn_with_event(
     height: u64,
 ) -> Result<DomainEvent, String> {
     let message_id = request.message_id;
-    // BLG-0108 (P05-F01): burn is the debit half of mint. The recipient
+    // Burn is the debit half of mint. The recipient
     // holds what the mint credited to it - the amount less the relayer fee -
     // so that is what the burn takes back before the row flips.
     let transfer = state
@@ -579,7 +579,7 @@ pub fn unlock_from_verified_event(
     if transfer.owner != message.recipient {
         return Err("Verified bridge burn recipient mismatch".into());
     }
-    // BLG-0116 (P05-F09): the burn payload commits the Ethereum destination.
+    // The burn payload commits the Ethereum destination.
     let expected_payload_hash = match transfer.recipient_eth {
         Some(recipient_eth) => crate::cross_domain::bridge::bridge_burn_payload_hash(
             transfer.asset_id,

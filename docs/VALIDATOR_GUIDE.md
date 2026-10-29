@@ -148,7 +148,7 @@ measurement has been taken yet, so no figure is given. The method:
 
 Mainnet validators sign from an HSM, and no PKCS#11 backend computes the
 chain's VRF (schnorrkel over Ristretto). A mainnet PoS validator therefore
-exits at startup today. Options, for Ayaz to choose (D-07): an HSM with a
+exits at startup today. Options, for Ayaz to choose: an HSM with a
 native VRF over the chain's curve; the VRF in a separate signing process
 with its own key isolation; or a VRF construction an HSM supports, which
 changes consensus.

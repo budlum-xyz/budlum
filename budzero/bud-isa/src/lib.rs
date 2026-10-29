@@ -140,7 +140,7 @@ impl Default for MainnetActivation {
     /// the examples showing what an internal review can miss. Do not turn this
     /// flag on merely on the strength of this comment.
     ///
-    /// A second open weakness (P16-F02): the node hash of the walk is ONE
+    /// A second open weakness: the node hash of the walk is ONE
     /// round, `7 * (a + c0)^7 + (b + c1)^7`, with no capacity. `x -> x^7` is a
     /// bijection on Goldilocks (`gcd(7, P - 1) = 1`), so the last sibling can
     /// be solved with a seventh root and any root can be reached from any
@@ -321,7 +321,7 @@ impl Instruction {
 mod tests {
     use super::*;
 
-    /// P12-F01: the one-round Poseidon path hash behind VerifyMerkle is
+    /// The one-round Poseidon path hash behind VerifyMerkle is
     /// invertible, so the opcode must stay closed until a full permutation
     /// replaces it. This pins the gate: opening it must be a deliberate edit
     /// that also changes this test.

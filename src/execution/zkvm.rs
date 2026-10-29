@@ -208,7 +208,7 @@ pub fn prove_bytecode_mainnet(
 /// transaction, see `docs/AI_VERIFICATION_STATUS.md`.
 ///
 /// The staged-rollout opcode gate applies here as on the ContractCall path
-/// (P16-F03).
+///.
 pub fn prove_bytecode_with_memory<F>(
     bytecode: &[u8],
     gas_limit: u64,
@@ -474,7 +474,7 @@ mod tests {
         }
     }
 
-    /// P16-F03: the memory-image prover must apply the same staged-rollout
+    /// The memory-image prover must apply the same staged-rollout
     /// gate as the ContractCall path. It used to hard code `mainnet = false`,
     /// so the closed opcodes decoded there.
     #[test]

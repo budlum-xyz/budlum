@@ -1,6 +1,6 @@
 //! B.U.D. Active Sharding - determines shard responsibility.
 //!
-//! Implements the sharding logic from Vision §7: nodes are responsible
+//! Implements the sharding logic from Vision: nodes are responsible
 //! For a subset of the global storage state based on the distance between
 //! Their `PeerId` and the `ContentId` (CID) of the shard.
 //!
@@ -81,7 +81,7 @@ impl ShardManager {
 
     /// Check if this node should proactively fetch and store a CID.
     ///
-    /// This is used for "Active Sharding" (Vision §7.2): nodes don't
+    /// This is used for "Active Sharding" (Vision): nodes don't
     /// Just wait for deals; they help maintain the network's health by
     /// Caching CIDs that are "close" to them in the XOR keyspace.
     pub fn should_cache(&self, cid: &ContentId) -> bool {

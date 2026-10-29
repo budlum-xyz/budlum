@@ -1,5 +1,5 @@
 //! Consensus state is written only by block execution (
-//! K4, item 7).
+//! item 7).
 //!
 //! The account state is what the state root commits. A write to it that runs
 //! outside the block transition (an operator RPC, a chain-actor command, a

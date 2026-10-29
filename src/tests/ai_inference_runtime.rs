@@ -864,7 +864,7 @@ fn a_request_whose_own_clock_lies_is_refused_at_submission() {
 
 #[test]
 fn prune_refunds_escrow_of_never_reclaimed_request() {
-    // BLG-0467 / P32-F01: an unfinalized request whose requester never sent
+    // An unfinalized request whose requester never sent
     // AiFeeReclaim used to be deleted by prune_expired with its escrowed
     // max_fee: the fee was neither returned, burned, nor paid. Prune now
     // hands the refund to the caller (the chain actor credits it).

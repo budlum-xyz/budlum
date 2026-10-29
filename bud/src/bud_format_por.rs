@@ -77,7 +77,7 @@ impl PorKey {
 
     /// Produce a response (the prover side): a tag for every block in the
     /// challenge. Bounds-safe: if any index exceeds the block count it returns
-    /// None (NO PANIC, the K38 mini-fuzz philosophy), so a malicious or
+    /// None (NO PANIC, the mini-fuzz philosophy), so a malicious or
     /// corrupt challenge cannot crash the prover.
     pub fn respond(&self, blocks: &[Vec<u8>], challenge: &PorChallenge) -> Option<PorResponse> {
         let mut tags = Vec::with_capacity(challenge.indices.len());
@@ -210,7 +210,7 @@ mod tests {
         bad.clear();
         assert!(!key.verify(&bad, &ch, &key.respond(&blk, &ch).expect("response")));
         // a challenge with an out-of-bounds index -> respond returns None, NO
-        // PANIC (K38)
+        // PANIC
         let ch_bad = PorChallenge {
             indices: vec![999_999],
             nonce: [0u8; 32],

@@ -147,7 +147,7 @@ impl VersionPolicy {
                 version: new_version,
             });
         }
-        // BLG-0161 (P07-F16): a fork may only land on a version the adapter
+        // A fork may only land on a version the adapter
         // actually accepts. Without this, an operator could schedule a
         // version the adapter refuses and sunset the one it does, leaving
         // the domain with no usable version.

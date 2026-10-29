@@ -321,7 +321,7 @@ pub fn window_proof(
 }
 
 /// Everything an application needs to check a Graft payment itself
-///: the payment, its path to the payment window root, the
+/// the payment, its path to the payment window root, the
 /// other half of the registry root, and the checkpoint header that commits
 /// that root with the material that ties the header to a finalized block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

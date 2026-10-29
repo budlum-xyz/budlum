@@ -1,7 +1,6 @@
 //! chain privacy-layer state (note/UTXO parallel subtree).
 //!
-//! Isolated from NFT, B.U.D. and Pollen (the confidentiality directive,
-//! section 7). Receives
+//! Isolated from NFT, B.U.D. and Pollen state. Receives
 //! Public halves of wallet `PrivateTransferIntent` via
 //! `TransactionType::PrivateTransferSubmit`.
 

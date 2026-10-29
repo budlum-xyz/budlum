@@ -1,7 +1,7 @@
 //! B.U.D. 2.0 Invention - Direction 4: the Social Bridge Record (2026-08-16).
 //!
 //! An AT Proto / ActivityPub post turns into a B.U.D. archive (S.94/S.96,
-//! K27/K33):
+//!):
 //! A record holds the source platform URL, the content hash (ContentId), the
 //! owner DID and a timestamp. Even if the source is deleted, the B.U.D. copy
 //! stays authoritative (content provenance). Lossless: if the source has not
@@ -20,7 +20,7 @@ pub enum SocialPlatform {
     Other(&'static str),
 }
 
-/// The AB 2426 (California 2025) ownership split (K74): if "buy" means REAL
+/// The AB 2426 (California 2025) ownership split: if "buy" means REAL
 /// ownership it cannot be revoked and is portable; if it is a "licence" it can
 /// be revoked and an explicit disclosure is mandatory. A B.U.D. record is
 /// Owned, which is REAL ownership, unlike platform licences.
@@ -38,7 +38,7 @@ pub struct SocialBridgeRecord {
     pub content: Vec<u8>,
     pub content_id: [u8; 32],
     pub ts_unix: u64,
-    /// K74: the ownership kind - Owned (real B.U.D. ownership) or Licensed.
+    /// The ownership kind - Owned (real B.U.D. ownership) or Licensed.
     pub ownership: OwnershipKind,
 }
 
@@ -62,7 +62,7 @@ impl SocialBridgeRecord {
         )
     }
 
-    /// K74: B.U.D. records carry REAL ownership by default (Owned); a licence
+    /// B.U.D. records carry REAL ownership by default (Owned); a licence
     /// bridge is marked explicitly with Licensed (the AB 2426 disclosure
     /// obligation).
     pub fn new_with_ownership(
@@ -85,20 +85,20 @@ impl SocialBridgeRecord {
         }
     }
 
-    /// The K74 evidence: Owned records are non-revocable and portable (Data
-    /// Act/K27).
+    /// The evidence: Owned records are non-revocable and portable (Data
+    /// Act/).
     pub fn is_revocable(&self) -> bool {
         matches!(self.ownership, OwnershipKind::Licensed)
     }
     pub fn is_transferable(&self) -> bool {
-        true // a B.U.D. record is machine-readable and an open format (K72), so it is portable
+        true // a B.U.D. record is machine-readable and an open format , so it is portable
     }
 
     /// The record identity: source URI + owner + content hash + OWNERSHIP +
     /// time (domain-tagged).
     /// ownership (Owned/Licensed) is part of the identity. If the
     /// label changes the identity changes, so ownership manipulation is caught
-    /// on the chain (the K74 guarantee).
+    /// on the chain (the guarantee).
     pub fn record_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -185,7 +185,7 @@ mod tests {
             licensed.is_revocable(),
             "a licence can be revoked (the AB 2426 disclosure)"
         );
-        // Does record_hash cover the ownership kind? K74: yes - a malicious
+        // Does record_hash cover the ownership kind?: yes - a malicious
         // Owned-to-Licensed conversion changes the record identity, so the
         // corruption is caught.
         assert_ne!(owned.record_hash(), licensed.record_hash());

@@ -39,12 +39,12 @@ This file summarises the layers.
 
 | Decision | Status |
 |---|---|
-| K1 skeleton and repository | produced; awaiting review |
-| K2 base model | abstract; the light tier is the default, with approval before the first run |
-| K3 type binding | deferred; the skeleton suits either option |
-| K5 method | LoRA SFT with a BF16 adapter |
-| K6 data source | **HYBRID**: open sets enter the network with a B.U.D. record |
-| K7 tier naming | **light** (the smaller base) and **normal** (the larger base); there are no multiplier labels |
+| skeleton and repository | produced; awaiting review |
+| base model | abstract; the light tier is the default, with approval before the first run |
+| type binding | deferred; the skeleton suits either option |
+| method | LoRA SFT with a BF16 adapter |
+| data source | **HYBRID**: open sets enter the network with a B.U.D. record |
+| tier naming | **light** (the smaller base) and **normal** (the larger base); there are no multiplier labels |
 
 ## Deepening
 

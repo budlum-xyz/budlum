@@ -62,7 +62,7 @@ jobs:
           (cd budzero && cargo bench --bench canonical_programs --features "" 2>&1) | tee /tmp/bench-budzero-canonical.txt
           (cd budzero && cargo bench --bench proof_baseline 2>&1) | tee /tmp/bench-budzero-baseline.txt
           echo "BudZero bench runs completed."
-      # BLG-1049 (P58-F03, decision B interim): the job is named "Benchmark
+      # The job is named "Benchmark
       # Regression" but had no baseline and no threshold - it could not fail
       # on a regression. The interim gate makes a vacuous run fail: every
       # micro bench must emit its throughput line and every BudZero bench its

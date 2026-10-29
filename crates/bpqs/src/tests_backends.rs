@@ -90,7 +90,7 @@ fn tamper_refuses<H: BpqsHash, P: BpqsParams>() {
 /// Per-call randomizer semantics (2026-09-22, bar-1 record): the same tuple
 /// signs byte-identically (determinism; KAT stability), while a different
 /// message draws a different randomizer - the anti-adaptive property of the
-/// PRF-derived r. The tuple's count slot is the signer's own (BLG-0041), so
+/// PRF-derived r. The tuple's count slot is the signer's own , so
 /// determinism is pinned across independent signers minting their first
 /// signature of the epoch.
 fn randomizer_bound_and_deterministic<H: BpqsHash, P: BpqsParams>() {
@@ -217,7 +217,7 @@ backend_battery!(poseidon_battery, Poseidon2GoldilocksHash);
 
 #[test]
 fn the_canonical_backend_is_shake256_and_not_poseidon2() {
-    //: the canonical label names the FIPS 202 member. The alias must
+    // the canonical label names the FIPS 202 member. The alias must
     // compute exactly SHAKE-256, and it must not be the algebraic backend.
     let framed: [&[u8]; 2] = [&[0u8; 16], b"x"];
     let canonical = crate::CanonicalHash::digest32(crate::domains::MESSAGE_BIND_V1, &framed);

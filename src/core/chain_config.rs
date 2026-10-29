@@ -163,7 +163,7 @@ impl Network {
     /// The validation reward pool this profile pays from, if any.
     ///
     /// Testnet: the default schedule, 10M BUD over 100 000 epochs
-    ///. Mainnet waits for Ayaz (D-04). Devnet has
+    ///. Mainnet waits for Ayaz. Devnet has
     /// no distribution to fund a pool from.
     #[must_use]
     pub fn reward_pool(&self) -> Option<crate::tokenomics::reward_pool::RewardPoolSchedule> {
@@ -465,7 +465,7 @@ pub struct ConsensusParams {
     pub finality_quorum_numerator: u64,
     pub finality_quorum_denominator: u64,
     pub max_votes_per_msg: usize,
-    /// (§1.3 / P0 Transport v2) activation block height for fail-closed v2 wire transport.
+    /// (P0 Transport v2) activation block height for fail-closed v2 wire transport.
     pub transport_v2_activation_height: u64,
 }
 

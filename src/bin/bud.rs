@@ -2282,7 +2282,7 @@ mod tests {
         );
     }
 
-    /// BLG-1093: the CLI help names the product by its approved name, not
+    /// The CLI help names the product by its approved name, not
     /// by the banned layer-one term.
     #[test]
     fn cli_help_does_not_use_the_layer_one_term() {
@@ -2295,7 +2295,7 @@ mod tests {
                 .any(|w| w == banned),
             "help text uses the banned term: {help}"
         );
-        // BLG-0099 (P04-F17): the ban covers every surface the CLI PRINTS -
+        // The ban covers every surface the CLI PRINTS -
         // long help, short help and the subcommand helps - instead of
         // scanning the source file as text.
         let short = Cli::command().render_help().to_string();

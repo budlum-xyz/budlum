@@ -1,4 +1,4 @@
-//! Canonical-pin reconciliation (K2 of the BudZero regeneration design).
+//! Canonical-pin reconciliation ( of the BudZero regeneration design).
 //!
 //! "Repair" never patches torn bytes - it re-derives the stream from the
 //! schema. The schema is pinned in independent places (the VM builder, the

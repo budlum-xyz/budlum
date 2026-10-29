@@ -139,7 +139,7 @@ impl StateSnapshot {
         }
         serde_json::from_slice(data).map_err(|e| format!("Failed to parse snapshot: {e}"))
     }
-    // BLG-0213 (P11-F12): `size` and `chunk` were deleted. No caller in the
+    // `size` and `chunk` were deleted. No caller in the
     // tree and no entry in any baseline; a paged-transfer API that exists only
     // as a public name is an unowned attack surface (the chunking a snapshot
     // actually ships is the wire protocol's, not this method's).
@@ -223,7 +223,7 @@ impl PruningManager {
     /// 0 when there is none. Pruning must never delete blocks above this
     /// height: a restart without them resumes from a snapshot it cannot
     /// reach, because `load_chain` stops at the first deleted parent and the
-    /// node exits without genesis (P10-F03).
+    /// node exits without genesis.
     pub fn latest_snapshot_height(&self) -> u64 {
         let dir = std::path::Path::new(&self.snapshot_dir);
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -529,7 +529,7 @@ pub const MIN_SUPPORTED_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 /// digest under a `>= 6` gate and pre-vault pinned digests stay byte-exact.
 ///
 /// Schema 7 digests the PoA admission records and the compliance ledger
-/// (BLG-0090 / BLG-0091). Both decide writes: a node that dropped an
+/// Both decide writes: a node that dropped an
 /// admission set or a freeze would serve a chain that is not the chain's,
 /// and the field shipped outside the digest was exactly the forgery surface
 /// the note-registry lesson closed. Pre-schema-7 pinned digests stay
@@ -666,7 +666,7 @@ pub struct StateSnapshotV2 {
     /// was derived from.
     #[serde(default)]
     pub poa_onboarding: Option<crate::registry::poa_onboarding::PoAOnboarding>,
-    /// BLG-0091 (P04-F09): the PoA compliance ledger (screening, freeze,
+    /// The PoA compliance ledger (screening, freeze,
     /// travel-rule) alongside the admission records, both digested from
     /// schema 7.
     #[serde(default)]
@@ -679,7 +679,7 @@ pub struct StateSnapshotV2 {
     #[serde(default)]
     pub external_roots:
         Option<BTreeMap<crate::domain::types::DomainId, crate::domain::types::Hash32>>,
-    /// Escrowed external-domain prover bonds (BLG-0155/P07-F10). `None` on a
+    /// Escrowed external-domain prover bonds. `None` on a
     /// snapshot taken before the bond money existed, which is what such a
     /// chain had: declared numbers, no escrow.
     #[serde(default)]
@@ -971,7 +971,7 @@ impl StateSnapshotV2 {
     pub fn calculate_digest(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
-        // Schema-4 domain-separation prefix (RFC_ACCESSGRANT_V2 §4; the
+        // Schema-4 domain-separation prefix (RFC_ACCESSGRANT_V2; the
         // lesson of f40f5f6: a one-sided root change is FORBIDDEN - bump it
         // together with the prefix).
         if self.schema_version >= 4 {
@@ -1143,8 +1143,8 @@ impl StateSnapshotV2 {
         if self.schema_version >= 6 {
             hash_opt_serializable(&mut hasher, &self.vault);
         }
-        // --- The PoA admission + compliance pair (schema-7 wave, BLG-0090 /
-        //     BLG-0091). Same gate logic as identity and vault: at 6 and
+        // --- The PoA admission + compliance pair (schema-7 wave, /
+        //). Same gate logic as identity and vault: at 6 and
         //     below these fields cannot affect the digest, at 7 and above a
         //     node that dropped an admission set or a freeze produces a
         //     different hash instead of a quietly-valid snapshot. ---
@@ -1493,7 +1493,7 @@ mod tests {
         assert!(dir.path().join("snapshot_30.json.reorg").exists());
     }
 
-    /// BLG-0208: the V2 startup loader leaves V1 and foreign-version files alone.
+    /// The V2 startup loader leaves V1 and foreign-version files alone.
     #[test]
     fn v2_loader_does_not_quarantine_v1_or_out_of_window_files() {
         use std::fs;
@@ -1515,7 +1515,7 @@ mod tests {
         assert!(future.exists(), "a newer-release file must not be renamed");
     }
 
-    /// BLG-0208: a corrupt file is still quarantined.
+    /// A corrupt file is still quarantined.
     #[test]
     fn v2_loader_still_quarantines_a_file_that_does_not_parse() {
         use std::fs;
@@ -1647,7 +1647,7 @@ mod tests {
     fn latest_snapshot_height_bounds_rpc_pruning() {
         use std::fs;
         use tempfile::tempdir;
-        // P10-F03: the RPC-driven prune passed the tip height as the "latest
+        // The RPC-driven prune passed the tip height as the "latest
         // snapshot", so the snapshot bound never applied and bud_requestPrune
         // deleted blocks (with their finality certs) that the next restart
         // needs: load_chain stops at the first deleted parent and the node
@@ -2352,7 +2352,7 @@ mod tests {
     }
 
     /// The PoA admission records and the compliance ledger cross the wire
-    /// INSIDE the digest (BLG-0090 / BLG-0091): a peer that empties an
+    /// INSIDE the digest: a peer that empties an
     /// admission set or drops a freeze invalidates the snapshot instead of
     /// quietly unpermissioning a domain or clearing a gate.
     #[test]
@@ -2496,7 +2496,7 @@ mod tests {
     ///
     /// It shipped WITHOUT a version bump, on the argument that absence
     /// defaults to an empty record ("not permissioned"), which is the truth
-    /// of old snapshots. BLG-0090 (P04-F08) overrode that: the records are
+    /// of old snapshots.overrode that: the records are
     /// consensus gate state, and a field crossing the wire outside the
     /// digest is a field a peer can empty without invalidating the
     /// snapshot - the same forgery surface the note-registry lesson closed.

@@ -1,13 +1,13 @@
-//! Fuzzing harness for the .bud format - V14 (extended for K25/K38).
+//! Fuzzing harness for the .bud format - V14 (extended for).
 //!
 //! Kapsam:
-//!   1) v1 BudFile from_bytes/decode/decode_streaming (the K25 stream limits)
+//!   1) v1 BudFile from_bytes/decode/decode_streaming (the stream limits)
 //!   2) BudV2File decode + restore_original + a Huffman roundtrip (the
 //!      losslessness property)
 //!   3) HuffmanCoder::decompress - no panic on untrusted bytes
-//!   4) pipe store/restore - the K38 property: restore(store(d)) == d (the
+//!   4) pipe store/restore - the property: restore(store(d)) == d (the
 //!      assert is a fuzz crash)
-//!   5) PoR respond/verify - no panic on out-of-bounds indices (K38)
+//!   5) PoR respond/verify - no panic on out-of-bounds indices
 //!   6) structural chunking is lossless for every kind (split+join == d)
 #![no_main]
 use bud_core::bud_format::{BudFile, BudFlags, BudFormatClass};
@@ -21,7 +21,7 @@ use bud_core::bud_format_por::{PorChallenge, PorKey};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    // 1) The v1 format (bud_format.rs) - K25 stream plus limits.
+    // 1) The v1 format (bud_format.rs) - stream plus limits.
     if let Ok(file) = BudFile::from_bytes(data) {
         let _ = file.decode();
         let _ = file.decode_streaming(|_| Ok(()));
@@ -49,7 +49,7 @@ fuzz_target!(|data: &[u8]| {
     // 3) Huffman decompress - no panic on untrusted bytes.
     let _ = HuffmanCoder::decompress(data);
 
-    // 4) The pipe K38 property: restore(store(d)) == d. On small inputs store
+    // 4) The pipe property: restore(store(d)) == d. On small inputs store
     //    always succeeds (the size limits only bite on large inputs); if the
     //    equality breaks the ASSERT crashes, so the fuzzer catches the
     //    property violation (the COMPLETENESS of losslessness).
@@ -58,7 +58,7 @@ fuzz_target!(|data: &[u8]| {
             let back = restore(&bud).expect("a valid container can be restored");
             assert_eq!(&back[..], data, "K38: restore(store(d)) == d ihlali");
         }
-        // The zstd property: store_zstd -> restore == d (V21, K38).
+        // The zstd property: store_zstd -> restore == d (V21).
         if let Some(bud) = store_zstd(data) {
             let back = restore(&bud).expect("a zstd container can be restored");
             assert_eq!(&back[..], data, "K38: zstd restore(store(d)) == d ihlali");

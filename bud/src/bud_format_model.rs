@@ -1,7 +1,7 @@
 //! B.U.D. 2.0 - the model and neural network file transform, in the BF16 weight
 //! splitting pattern, 2026-08-16.
 //!
-//! F1068 and K96: special-purpose compression for neural network weights. In
+//! F1068 and: special-purpose compression for neural network weights. In
 //! BF16 models, splitting out the exponent bytes and compressing them with
 //! Huffman shrinks the model, because the narrow exponent distribution makes
 //! visible a repetition that general-purpose compression cannot catch.
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn bf16_roundtrip_lossless() {
-        // K38: encode then decode gives back the original, losslessly.
+        // Encode then decode gives back the original, losslessly.
         for n in [10, 1000, 5000] {
             let model = gen_bf16_model(n);
             let split = ModelFloatSplit::encode(&model, FloatKind::Bf16).expect("encode");

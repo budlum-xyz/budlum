@@ -630,7 +630,7 @@ impl KeyPair {
         let mut seed = [0u8; SECRET_KEY_LENGTH];
         rand::rng().fill_bytes(&mut seed);
         let signing_key = SigningKey::from_bytes(&seed);
-        // (security audit §7) never `println!` keypair
+        // (security audit) never `println!` keypair
         // Material. The public key being written to stdout is a
         // Soft info leak (operator's terminal scrollback, CI logs,
         // Process accounting) - under default settings, every
@@ -672,7 +672,7 @@ impl KeyPair {
     }
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
         write_key_file(path.as_ref(), self.signing_key.as_bytes())?;
-        // (security audit §7) the file path of a
+        // (security audit) the file path of a
         // Freshly-saved keypair is a sensitive secret, an
         // Attacker reading process stdout learns exactly where
         // To look on disk. The same `tracing::debug!` rationale as
@@ -830,7 +830,7 @@ impl WalletKeyPair {
     /// (fault-injection and side-channel defence). A dead OS rng must not
     /// strand a transaction mid-flight, so the deterministic variant (also
     /// FIPS 204 approved) takes over, and losing the hedge is an incident, not
-    /// a quiet detail: it is logged at error level (P02-F20).
+    /// a quiet detail: it is logged at error level.
     ///
     /// The one other failure is an unusable context (empty or longer than 255
     /// bytes), a programming error at the call site since every context is a
@@ -996,7 +996,7 @@ pub fn verify_ml_dsa_87_signature(
 mod tests {
     use super::*;
 
-    // ---- BLG-0046 (F10): key-file parsing is exact. ----
+    // ---- (F10): key-file parsing is exact. ----
 
     #[test]
     fn bls_from_bytes_refuses_a_zero_scalar() {
@@ -1108,7 +1108,7 @@ mod tests {
     }
     #[test]
     fn test_save_and_load() {
-        // BLG-0053 (F17): a fixed /tmp path is shared between parallel test
+        // (F17): a fixed /tmp path is shared between parallel test
         // processes; every run gets its own tempdir now.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_budlum_key");
@@ -1141,10 +1141,10 @@ fn stdout_has_64_hex_run(stdout: &[u8]) -> bool {
     false
 }
 
-/// (security audit §7) the public-key hex must NOT be printed to stdout by
+/// (security audit) the public-key hex must NOT be printed to stdout by
 /// `KeyPair::generate`.
 ///
-/// BLG-0053 (F17): the old test claimed to capture stdout but never did. The
+/// (F17): the old test claimed to capture stdout but never did. The
 /// check now runs `generate` inside a child process whose raw stdout is
 /// fully captured, so any printed 64-hex public key is observable. A canary
 /// test proves the detector itself works (red-green).

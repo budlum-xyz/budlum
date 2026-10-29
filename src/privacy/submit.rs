@@ -23,7 +23,7 @@ pub struct PrivateTransferSubmit {
     pub spent_commitments: Vec<NoteHash>,
     pub nullifiers: Vec<NoteHash>,
     pub output_commitments: Vec<NoteHash>,
-    /// BLG-0058 (P03-F01): one derivation proof per input, checked as
+    /// One derivation proof per input, checked as
     /// `nullifier[i] == derive_nullifier(commitment[i], proof[i])`. The
     /// registry refuses a transfer without them.
     #[serde(default)]
@@ -42,7 +42,7 @@ impl PrivateTransferSubmit {
         if self.spent_commitments.len() != self.nullifiers.len() {
             return Err("private transfer: input arity mismatch".into());
         }
-        // BLG-0058: proofs are part of the transaction, one per input.
+        // Proofs are part of the transaction, one per input.
         if self.nullifier_proofs.len() != self.nullifiers.len() {
             return Err("private transfer: nullifier proof arity mismatch".into());
         }
@@ -112,7 +112,7 @@ impl PrivateTransferSubmit {
     }
 
     /// Domain-separated authorization preimage binding `public_digest` to the
-    /// chain id, sending account, and sender nonce (BLG-0275 / P17-F09).
+    /// chain id, sending account, and sender nonce.
     #[must_use]
     pub fn authorization_message(
         chain_id: u64,

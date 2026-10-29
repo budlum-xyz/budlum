@@ -1,7 +1,7 @@
 //! Ethereum signature recovery for Graft claims by an externally owned
-//! account (8.2 (b), D-14 option (b)): secp256k1 ECDSA
+//! account (8.2 (b), option (b)): secp256k1 ECDSA
 //! public key recovery written on the `k256` curve arithmetic already in the
-//! tree, so no new dependency enters (K8).
+//! tree, so no new dependency enters.
 //!
 //! This is a combinator over audited curve arithmetic, not a new signature
 //! scheme: `Q = r^-1 (s R - e G)`, with `R` decompressed from `r` and the

@@ -1,4 +1,4 @@
-//! Social/DM delete → key rotation (plan §CH G5; CK.5 dam item).
+//! Social/DM delete → key rotation (CK.5 dam item).
 //!
 //! Deleting content from a social surface or a DM must do two things for the
 //! product to stay honest to the threat model (T3):
