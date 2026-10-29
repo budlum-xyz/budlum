@@ -176,3 +176,8 @@ Use a fresh testnet genesis; do not mix V1/V2 nodes or replay a V1 history as
 V2 without an explicitly scheduled, consensus-wide activation/migration.
 Canary commit books refuse new entries at capacity until an existing entry
 expires or is revealed; accepted commits are never evicted to admit newcomers.
+A valid proof raises the alarm even without a commitment. Such an alarm is
+uncredited; a previously mature commitment can still claim it. Publishing a
+proof before its own commitment matures sacrifices claim eligibility. Canary
+alarm and claim rules are consensus changes and require coordinated activation
+or a fresh genesis, not an uncoordinated rolling upgrade.
