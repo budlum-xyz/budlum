@@ -23,21 +23,42 @@ import {BudlumOutboundEmitter} from "../lib/BudlumOutbound.sol";
 ///         A call that fails reverts: no event, no settlement, and the
 ///         solver keeps the risk it took by filling early.
 ///
+///         The `solver` field is not a caller argument. The executing key on
+///         this chain and the receiving Budlum key are different keys, so the
+///         executor cannot verify a Budlum signature here and must not let a
+///         caller name a solver freely: an unclaimed field let a bonded
+///         relayer replay another solver's delivery under its own name, or
+///         emit an event naming a solver that never authorised it. Each
+///         origin-chain account binds one Budlum solver key once
+///         (`registerSolverKey`), the binding is immutable, and `execute`
+///         reads it - so a fulfilment is always attributable to the account
+///         that authorised the payout.
+///
 ///         There is no owner, no pause and no upgrade path.
 contract GraftExecutor is BudlumOutboundEmitter {
     bytes internal constant FULFILLED_KIND = "budlum/graft/fulfilled/v1";
 
     /// One fulfilment per intent *per solver*: a second call for the same
-    /// intent by the same account would be a second event it could try to
+    /// intent by the same solver would be a second event it could try to
     /// collect on.
     ///
-    /// Scoped by `msg.sender` because this contract is permissionless. A
-    /// global flag made the id first-come-first-served, so any account could
-    /// burn an intent id with an empty call to a benign target and leave the
-    /// real solver unable to fulfil - a griefing attack that costs the
-    /// attacker one transaction. A slot per (intent, caller) means one account
-    /// can only ever use up its own.
-    mapping(bytes32 => mapping(address => bool)) public fulfilled;
+    /// Scoped by the bound solver key rather than by `msg.sender` because this
+    /// contract is permissionless. A global flag made the id first-come-first-
+    /// served, so any account could burn an intent id with an empty call to a
+    /// benign target and leave the real solver unable to fulfil - a griefing
+    /// attack that costs the attacker one transaction. A slot per (intent,
+    /// solver) means one solver can only ever use up its own, and operational
+    /// key rotation inside one solver cannot mint a second collectable event
+    /// for an intent that solver already fulfilled.
+    mapping(bytes32 => mapping(bytes32 => bool)) public fulfilled;
+
+    /// The Budlum address an origin-chain account authors fulfilments for.
+    ///
+    /// Set once by [`registerSolverKey`] and never re-pointed: a bound account
+    /// that could move its binding could emit a fulfilment naming somebody
+    /// else's solver key, and the settlement door would have no way to tell
+    /// that apart from the solver itself.
+    mapping(address => bytes32) public solverKey;
 
     event BudlumGraftFulfilled(
         bytes32 indexed intentId,
@@ -48,24 +69,51 @@ contract GraftExecutor is BudlumOutboundEmitter {
         bool success
     );
 
+    event SolverKeyRegistered(address indexed account, bytes32 solverKey);
+
     error AlreadyFulfilled(bytes32 intentId);
     error ValueTooLarge(uint256 value);
     error CallFailed(bytes32 intentId, bytes reason);
+    error SolverKeyNotBound(address account);
+    error SolverKeyAlreadyBound(address account, bytes32 current);
+    error SolverKeyIsZero();
+
+    /// @notice Bind this account to the Budlum solver address its fulfilments
+    ///         name. One-time, permissionless and free: binding costs a
+    ///         transaction, not a deposit, and a wrong binding costs the
+    ///         account every settlement it would have earned.
+    /// @param budlumSolver The solver's Budlum address.
+    function registerSolverKey(bytes32 budlumSolver) external {
+        if (budlumSolver == bytes32(0)) {
+            revert SolverKeyIsZero();
+        }
+        bytes32 current = solverKey[msg.sender];
+        if (current != bytes32(0)) {
+            revert SolverKeyAlreadyBound(msg.sender, current);
+        }
+        solverKey[msg.sender] = budlumSolver;
+        emit SolverKeyRegistered(msg.sender, budlumSolver);
+    }
 
     /// @notice Make the call for `intentId` and emit the fulfilment.
     /// @param intentId The Budlum intent id.
-    /// @param budlumSolver The solver's Budlum address, paid on settlement.
     /// @param target The origin application (the Graft row's `origin_app`).
     /// @param data The call data; its keccak256 is the intent's `call_hash`.
     /// @param beneficiary The intent's `origin_beneficiary` bytes.
     function execute(
         bytes32 intentId,
-        bytes32 budlumSolver,
         address target,
         bytes calldata data,
         bytes calldata beneficiary
     ) external payable returns (bytes memory result) {
-        if (fulfilled[intentId][msg.sender]) {
+        // The solver this fulfilment pays is the caller's binding, never a
+        // caller-supplied argument: the executor cannot authenticate a Budlum
+        // address, so it must not accept one it was merely told about.
+        bytes32 budlumSolver = solverKey[msg.sender];
+        if (budlumSolver == bytes32(0)) {
+            revert SolverKeyNotBound(msg.sender);
+        }
+        if (fulfilled[intentId][budlumSolver]) {
             revert AlreadyFulfilled(intentId);
         }
         if (msg.value > type(uint64).max) {
@@ -76,7 +124,7 @@ contract GraftExecutor is BudlumOutboundEmitter {
         if (target.code.length == 0) {
             revert CallFailed(intentId, "target has no code");
         }
-        fulfilled[intentId][msg.sender] = true;
+        fulfilled[intentId][budlumSolver] = true;
         bool ok;
         (ok, result) = target.call{value: msg.value}(data);
         if (!ok) {
