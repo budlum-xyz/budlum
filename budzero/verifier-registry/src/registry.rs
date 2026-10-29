@@ -1560,7 +1560,7 @@ mod tests {
         assert_ne!(
             empty.state_root(),
             other_params.state_root(),
-            "parameters are part of the state root (BLG-0257)"
+            "parameters are part of the state root"
         );
 
         let mut with_history = VerifierRegistry::default();
@@ -1582,7 +1582,7 @@ mod tests {
         assert_ne!(
             empty.state_root(),
             with_history.state_root(),
-            "slashing history is part of the state root (BLG-0257)"
+            "slashing history is part of the state root"
         );
         let mut other_history = VerifierRegistry::default();
         other_history.slashing_history.push(SlashingRecord {

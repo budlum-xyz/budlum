@@ -1874,7 +1874,7 @@ async fn main() {
         // configuration to register and nothing safe to default. Outbound
         // EVM relay stays off until the real receipt flow lands.
         tracing::info!(
-            "Relayer: outbound EVM relay is disabled (BLG-0135): the EVM bridge leg has no \
+            "Relayer: outbound EVM relay is disabled: the EVM bridge leg has no \
              live end-to-end route. The worker will observe relay requests and refuse to \
              submit results."
         );

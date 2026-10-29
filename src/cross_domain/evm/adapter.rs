@@ -319,7 +319,7 @@ impl ChainAdapter for EvmChainAdapter {
         // refuses to ACCEPT the result until the package can carry the
         // evidence.
         Err(AdapterError::ProofVerificationFailed(
-            "the deposit package carries no sync attestation; BLG-0136 interim: this \
+            "the deposit package carries no sync attestation interim: this \
              observation seam refuses until the package can carry the attestation and \
              finality branch"
                 .into(),
@@ -1010,7 +1010,7 @@ mod tests {
         let observation = observation_for(&adapter, 3);
         let err = adapter
             .verify_observation(&observation)
-            .expect_err("no sync attestation, no accepted observation (BLG-0136 interim)");
+            .expect_err("no sync attestation, no accepted observation ( interim)");
         // Either refusal is the contract: the 0111 finality rule (no
         // attestation and no checkpoint) or this seam's own attestation
         // gate. What is pinned is that attestation-less is not accepted.

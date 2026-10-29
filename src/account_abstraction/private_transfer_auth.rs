@@ -87,17 +87,17 @@ impl core::fmt::Display for PrivateTransferError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NullifierAlreadySpent => {
-                write!(f, "KQ-WALLET-PRIVATE: nullifier was already spent")
+                write!(f, "wallet private: nullifier was already spent")
             }
             Self::CommitmentMismatch => write!(
                 f,
-                "KQ-WALLET-PRIVATE: commitment does not match the declared transfer"
+                "wallet private: commitment does not match the declared transfer"
             ),
-            Self::ZeroAmount => write!(f, "KQ-WALLET-PRIVATE: amount is zero"),
+            Self::ZeroAmount => write!(f, "wallet private: amount is zero"),
             Self::InvalidAuthorization => {
                 write!(
                     f,
-                    "KQ-WALLET-PRIVATE: authorization signature does not verify"
+                    "wallet private: authorization signature does not verify"
                 )
             }
         }

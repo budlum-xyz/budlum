@@ -48,7 +48,7 @@ impl std::fmt::Display for SeedError {
         match self {
             Self::InsufficientEntropy { given, required } => write!(
                 f,
-                "KQ-SEED-ENTROPY: the seed input is {given} bytes, at least {required} are required. \
+                "seed entropy: the seed input is {given} bytes, at least {required} are required. \
                  The derived seed claims to carry 256 bits; if it is derived from a shorter input \
                  that claim is false and the addresses can be precomputed. \
                  The input must come from the operating system randomness source - \
@@ -189,13 +189,13 @@ impl QuantumAccount {
     /// Errors if the threshold is outside 1..=16 or the guardian list is empty or larger than 16.
     pub const fn verify_multisig_threshold(&self) -> Result<(), &'static str> {
         if self.guardians.is_empty() {
-            return Err("KQ-WALLET-MULTISIG-16: guardians empty");
+            return Err("wallet multisig: guardians empty");
         }
         if self.guardians.len() > MAX_MULTISIG_OWNERS {
-            return Err("KQ-WALLET-MULTISIG-16: exceeds 16");
+            return Err("wallet multisig: exceeds 16");
         }
         if self.multisig_threshold == 0 || self.multisig_threshold > self.guardians.len() {
-            return Err("KQ-WALLET-MULTISIG-16: threshold outside");
+            return Err("wallet multisig: threshold outside");
         }
         Ok(())
     }
@@ -205,13 +205,13 @@ impl QuantumAccount {
     /// Errors if the recovery threshold is outside 1..=16 or the guardian list is empty or larger than 16.
     pub const fn verify_recovery_policy(&self) -> Result<(), &'static str> {
         if self.guardians.is_empty() {
-            return Err("KQ-WALLET-RECOVERY-16: empty");
+            return Err("wallet recovery: empty");
         }
         if self.guardians.len() > MAX_MULTISIG_OWNERS {
-            return Err("KQ-WALLET-RECOVERY-16: exceeds 16");
+            return Err("wallet recovery: exceeds 16");
         }
         if self.recovery_threshold == 0 || self.recovery_threshold > self.guardians.len() {
-            return Err("KQ-WALLET-RECOVERY-16: threshold outside");
+            return Err("wallet recovery: threshold outside");
         }
         Ok(())
     }
@@ -222,7 +222,7 @@ impl QuantumAccount {
     pub fn verify_storage_bound(&self) -> Result<(), &'static str> {
         // storage_root zero but pact_root non-zero -> inconsistent
         if self.storage_root == [0u8; 32] && self.pact_root != [0u8; 32] {
-            return Err("KQ-STORAGE-BOUND: storage_root zero but pact_root non-zero");
+            return Err("storage bound: storage_root zero but pact_root non-zero");
         }
         Ok(())
     }
@@ -249,7 +249,7 @@ impl QuantumAccount {
         // needs no allocation - a HashSet would be the slower "optimization".
         for (i, a) in self.guardians.iter().enumerate() {
             if self.guardians.iter().skip(i + 1).any(|b| b == a) {
-                return Err("KQ-WALLET-GUARDIAN-SET: duplicate guardian key");
+                return Err("wallet guardian set: duplicate guardian key");
             }
         }
         Ok(())
@@ -261,7 +261,7 @@ impl QuantumAccount {
         self.verify_recovery_policy()?;
         self.verify_storage_bound()?;
         if self.guardian_root != Self::guardian_root(&self.guardians) {
-            return Err("KQ-WALLET-GUARDIAN-SET: root does not match guardians");
+            return Err("wallet guardian set: root does not match guardians");
         }
         Ok(())
     }
@@ -297,11 +297,11 @@ impl RecoveryProposal {
         account_nonce: u64,
     ) -> Result<Self, &'static str> {
         if current_owner == new_owner {
-            return Err("KQ-WALLET-RECOVERY-16: new==current");
+            return Err("wallet recovery: new==current");
         }
         let executable_after = created
             .checked_add(timelock)
-            .ok_or("KQ-WALLET-RECOVERY-16: timelock overflow")?;
+            .ok_or("wallet recovery: timelock overflow")?;
         let current_address = QuantumAccount::address_from_public_key(&current_owner);
         let new_address = QuantumAccount::address_from_public_key(&new_owner);
         Ok(Self {
@@ -549,7 +549,7 @@ mod tests {
         let dup = account(vec![a, a, b]);
         assert_eq!(
             dup.verify_no_duplicate_guardians(),
-            Err("KQ-WALLET-GUARDIAN-SET: duplicate guardian key")
+            Err("wallet guardian set: duplicate guardian key")
         );
         assert!(
             dup.validate_all().is_err(),
@@ -561,7 +561,7 @@ mod tests {
         corrupt_root.guardian_root[0] ^= 1;
         assert_eq!(
             corrupt_root.validate_all(),
-            Err("KQ-WALLET-GUARDIAN-SET: root does not match guardians")
+            Err("wallet guardian set: root does not match guardians")
         );
         let padded = [a, a, b];
         let error = BftGuardianFinality::finalize(Vec::new(), &padded, 2, &[0; 32])

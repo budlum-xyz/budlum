@@ -403,7 +403,7 @@ fn trace_layout_no_overlap_and_within_bounds() {
         panic!(
             "trace layout gap: columns {gap}..={} are owned by no range in \
              `all_ranges` - a column the AIR can read but the lock does not name \
-             is an unowned witness slot (BLG-0229; overlaps are caught by the
+             is an unowned witness slot (; overlaps are caught by the
              pairwise check above, gaps are this assertion's job)",
             end + 1
         );
