@@ -152,7 +152,7 @@ impl<'a> BridgeRelayerPipeline<'a> {
     /// Returns the event (for the caller's audit log).
     #[expect(
         clippy::too_many_arguments,
-        reason = "BLG-0128 (P05-F21): the pipeline's lock mirrors BridgeState::lock's parameter set one-for-one"
+        reason = ": the pipeline's lock mirrors BridgeState::lock's parameter set one-for-one"
     )]
     pub fn lock(
         &mut self,

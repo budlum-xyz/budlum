@@ -106,7 +106,7 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          and already counted against the ceiling is returned - not new supply \
          but supply changing category); one is the body of `try_mint_balance` itself, \
          the line that performs the actual addition after checking the ceiling. \
-         Two are the external-domain bond escrow (BLG-0155): \
+         Two are the external-domain bond escrow: \
          `release_external_bond` returns what `lock_external_bond` took out \
          of the same poster's balance, capped at what the escrow actually \
          holds, and `slash_external_bond` pays the challenger a reward no \
