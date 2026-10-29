@@ -2494,15 +2494,13 @@ impl Node {
                         continue;
                     };
 
-                    let height = self.chain.get_height().await;
-                    let chain_id = self.chain.get_chain_id().await;
-                    let checkpoint_interval =
-                        crate::core::chain_config::finality_checkpoint_interval_for_chain_id(
-                            chain_id,
-                        );
-                    let checkpoint_height = (height / checkpoint_interval) * checkpoint_interval;
-
                     // --- Check aggregator state for auto-precommit ---
+                    //
+                    // The aggregator also names the round this node votes in.
+                    // Deriving the checkpoint from the local tip instead made
+                    // nodes one block apart vote at different heights, and a
+                    // vote only counts in an aggregator that holds its own
+                    // height: no round ever saw a quorum.
                     let agg_state = self.chain.get_aggregator_state().await;
                     if agg_state.active
                         && agg_state.prevote_quorum_reached
@@ -2555,62 +2553,65 @@ impl Node {
                     }
 
                     // --- Periodic prevote ---
-                    if checkpoint_height > 0 && checkpoint_height > self.last_prevote_height {
-                        if let Some(block) = self.chain.get_block(checkpoint_height).await {
-                            // The receiving side derives the epoch as
-                            // checkpoint_height / epoch_len
-                            // (`Blockchain::start_prevote_task`).
-                            // Signing with the checkpoint-interval
-                            // divisor made every honest prevote fail
-                            // `add_prevote` with "Prevote epoch
-                            // mismatch" on every network where the two
-                            // divisors differ, so the prevote quorum
-                            // was never reached and native BLS
-                            // finality never advanced (P10-F01).
-                            let epoch = checkpoint_height
-                                / crate::core::chain_config::epoch_len_for_chain_id(
-                                    chain_id,
-                                );
-                            match self.chain.sign_prevote(
+                    //
+                    // The round named by the aggregator, not this node's own
+                    // tip. A vote counts only in an aggregator holding the
+                    // same height, so a node voting at its own checkpoint
+                    // (one or two blocks ahead of its peers) contributed to
+                    // no round at all.
+                    if agg_state.active
+                        && agg_state.checkpoint_height > 0
+                        && agg_state.checkpoint_height > self.last_prevote_height
+                    {
+                        // The epoch the aggregator was started with, and the
+                        // round's own hash. Signing with the checkpoint-
+                        // interval divisor instead of the epoch length made
+                        // every honest prevote fail `add_prevote` with
+                        // "Prevote epoch mismatch" wherever the two divisors
+                        // differ (P10-F01).
+                        let epoch = agg_state.epoch;
+                        let checkpoint_height = agg_state.checkpoint_height;
+                        match self
+                            .chain
+                            .sign_prevote(
                                 epoch,
                                 checkpoint_height,
-                                block.hash.clone(),
+                                agg_state.checkpoint_hash.clone(),
                                 voter_addr,
-                            ).await {
-                                Ok(prevote) => {
-                                    info!("Finality: voting for checkpoint height {checkpoint_height} (epoch {epoch})");
-                                    let vote_msg = NetworkMessage::Prevote {
-                                        epoch: prevote.epoch,
-                                        checkpoint_height: prevote.checkpoint_height,
-                                        checkpoint_hash: prevote.checkpoint_hash,
-                                        voter_id: voter_addr.to_hex(),
-                                        sig_bls: prevote.sig_bls,
-                                        auth_sig: prevote.auth_sig,
-                                    };
-                                    // BLG-0210: persist-before-publish, as
-                                    // for the precommit above.
-                                    self.last_prevote_height = checkpoint_height;
-                                    self.save_vote_history();
-                                    let topic = gossipsub::IdentTopic::new("blocks");
-                                    if let Err(e) = self
-                                    .swarm
-                                    .behaviour_mut()
-                                    .gossipsub
-                                    .publish(topic, vote_msg.to_bytes())
+                            )
+                            .await
+                        {
+                            Ok(prevote) => {
+                                info!("Finality: voting for checkpoint height {checkpoint_height} (epoch {epoch})");
+                                let vote_msg = NetworkMessage::Prevote {
+                                    epoch: prevote.epoch,
+                                    checkpoint_height: prevote.checkpoint_height,
+                                    checkpoint_hash: prevote.checkpoint_hash,
+                                    voter_id: voter_addr.to_hex(),
+                                    sig_bls: prevote.sig_bls,
+                                    auth_sig: prevote.auth_sig,
+                                };
+                                // BLG-0210: persist-before-publish, as for the
+                                // precommit above.
+                                self.last_prevote_height = checkpoint_height;
+                                self.save_vote_history();
+                                let topic = gossipsub::IdentTopic::new("blocks");
+                                if let Err(e) =
+                                    self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes())
                                 {
                                     // A vote that never reaches the mesh is
                                     // indistinguishable from a vote that was
                                     // never cast, and finality simply stops.
                                     warn!("Failed to gossip a finality vote: {e}");
                                 }
-                                }
-                                Err(e) => {
-                                    warn!("Failed to sign prevote: {e}");
-                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to sign prevote: {e}");
                             }
                         }
                     }
                 }
+
                 _ = slashing_gossip_interval.tick() => {
                     for evidence in self.chain.drain_slashing_evidence().await {
                         let topic = gossipsub::IdentTopic::new("blocks");
