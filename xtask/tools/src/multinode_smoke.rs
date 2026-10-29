@@ -500,6 +500,19 @@ fn finality_log_witness(root: &Path) {
         "qc",
     ];
     for node in ["node1", "node2", "node3", "node4", "node5"] {
+        // The two heights first: a mesh whose nodes disagree on the tip cannot
+        // finalize whatever its vote logs say, and the difference between a
+        // node that never voted and a node that is nine hundred blocks behind
+        // is one number.
+        match container_metrics(root, node) {
+            Some(page) => println!(
+                "[{node}] heights: chain={:?} finalized={:?} active_validators={:?}",
+                metric_value(&page, "budlum_chain_height"),
+                metric_value(&page, "budlum_finalized_height"),
+                metric_value(&page, "budlum_active_validators")
+            ),
+            None => println!("[{node}] heights: metrics page unavailable"),
+        }
         let Some(logs) = compose(root, &["logs", "--no-color", "--no-log-prefix", node]) else {
             println!("[{node}] logs unavailable");
             continue;
