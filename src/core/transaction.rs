@@ -2551,6 +2551,33 @@ impl Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settlement_signing_tags_separate_awards_from_shared_security() {
+        use crate::settlement::domains::SettlementTx;
+        let award =
+            SettlementTx::RelayerIntent(Box::new(crate::relayer::policy::RelayerIntentTx::Award {
+                intent_id: [1; 32],
+            }));
+        let other_award =
+            SettlementTx::RelayerIntent(Box::new(crate::relayer::policy::RelayerIntentTx::Award {
+                intent_id: [2; 32],
+            }));
+        let shared = SettlementTx::SharedSecurity(Box::new(
+            crate::settlement::shared_security::SharedSecurityTx::SetRegistrar {
+                domain_key: 1,
+                registrar: vec![1; 20],
+            },
+        ));
+        let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
+        encode_settlement_tx(&award, &mut a);
+        encode_settlement_tx(&other_award, &mut b);
+        encode_settlement_tx(&shared, &mut c);
+        assert_eq!(a[0], 9);
+        assert_eq!(c[0], 7);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+    }
     #[test]
     fn redelegation_and_claim_carry_their_addresses_and_pass_validation() {
         let delegator = test_addr_from_byte(7u8);
@@ -3998,7 +4025,9 @@ fn encode_settlement_tx(tx: &crate::settlement::domains::SettlementTx, out: &mut
             encode_proof_market_tx(market_tx, out);
         }
         SettlementTx::RelayerIntent(intent_tx) => {
-            put_u8(out, 7);
+            // 7 belongs to SharedSecurity. A distinct tag prevents signatures
+            // crossing settlement transaction variants.
+            put_u8(out, 9);
             encode_relayer_intent_tx(intent_tx, out);
         }
         SettlementTx::Graft(graft_tx) => {
@@ -4075,6 +4104,10 @@ fn encode_relayer_intent_tx(tx: &crate::relayer::policy::RelayerIntentTx, out: &
         }
         RelayerIntentTx::Expire { intent_id } => {
             put_u8(out, 3);
+            put_fixed(out, intent_id);
+        }
+        RelayerIntentTx::Award { intent_id } => {
+            put_u8(out, 4);
             put_fixed(out, intent_id);
         }
     }
