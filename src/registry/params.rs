@@ -362,8 +362,7 @@ impl RegistryParams {
                 "min_delegation_amount must be between 1 and {MAX_PARAM_AMOUNT}"
             ));
         }
-        let per_validator_ceiling =
-            crate::registry::permissionless::MAX_DELEGATIONS as u64;
+        let per_validator_ceiling = crate::registry::permissionless::MAX_DELEGATIONS as u64;
         if self.max_delegations_per_validator == 0
             || self.max_delegations_per_validator > per_validator_ceiling
         {

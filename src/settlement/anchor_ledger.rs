@@ -318,7 +318,11 @@ impl AnchorKeyLedger {
         let mut revoked_key_hashes = self.revoked_key_hashes.clone();
         // Also migrate suspensions in older serialized ledgers that predate the
         // fingerprint set, while their current slot-to-key mapping is known.
-        for suspension in self.suspended.iter().filter(|s| s.key_epoch == self.key_epoch) {
+        for suspension in self
+            .suspended
+            .iter()
+            .filter(|s| s.key_epoch == self.key_epoch)
+        {
             let keys = match suspension.family {
                 KeyFamily::Anchor => &self.anchor_keys,
                 KeyFamily::Seal => &self.seal_keys,
@@ -326,12 +330,13 @@ impl AnchorKeyLedger {
             let key = keys
                 .get(usize::from(suspension.index))
                 .ok_or(LedgerError::Invalid("suspension-of-unknown-slot"))?;
-            revoked_key_hashes.insert((
-                suspension.family,
-                Sha3_256::digest(&key.public_key).into(),
-            ));
+            revoked_key_hashes
+                .insert((suspension.family, Sha3_256::digest(&key.public_key).into()));
         }
-        for (family, keys) in [(KeyFamily::Anchor, &anchor_keys), (KeyFamily::Seal, &seal_keys)] {
+        for (family, keys) in [
+            (KeyFamily::Anchor, &anchor_keys),
+            (KeyFamily::Seal, &seal_keys),
+        ] {
             for key in keys {
                 let fingerprint: [u8; 32] = Sha3_256::digest(&key.public_key).into();
                 if revoked_key_hashes.contains(&(family, fingerprint)) {
@@ -409,7 +414,8 @@ impl AnchorKeyLedger {
         for index in &slots {
             if let Some(key) = self.anchor_key(*index) {
                 let fingerprint: [u8; 32] = Sha3_256::digest(key).into();
-                self.revoked_key_hashes.insert((KeyFamily::Anchor, fingerprint));
+                self.revoked_key_hashes
+                    .insert((KeyFamily::Anchor, fingerprint));
             }
             self.suspended.insert(Suspension {
                 family: KeyFamily::Anchor,
@@ -461,10 +467,8 @@ impl AnchorKeyLedger {
         {
             return Err(LedgerError::NoCommonSigner);
         }
-        self.revoked_key_hashes.insert((
-            KeyFamily::Seal,
-            Sha3_256::digest(&public_key).into(),
-        ));
+        self.revoked_key_hashes
+            .insert((KeyFamily::Seal, Sha3_256::digest(&public_key).into()));
         self.suspended.insert(Suspension {
             family: KeyFamily::Seal,
             index: first.key_index,
@@ -644,10 +648,15 @@ pub(crate) mod test_support {
         seals[0].public_key = SoftwareSealSigner::from_seed(&[0x5F; 96])
             .expect("valid replacement seed")
             .public_key();
-        ledger.install_rotated_keys(2, anchors, seals).expect("new keys rotate");
+        ledger
+            .install_rotated_keys(2, anchors, seals)
+            .expect("new keys rotate");
         let restored: AnchorKeyLedger =
             serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
-        assert_eq!(restored, ledger, "revoked fingerprints survive serialization");
+        assert_eq!(
+            restored, ledger,
+            "revoked fingerprints survive serialization"
+        );
 
         let mut reordered = ledger.anchor_keys.clone();
         reordered[2].public_key = old_anchor;
