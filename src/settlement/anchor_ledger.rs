@@ -18,8 +18,9 @@
 //! epoch, are evidence that the key signs conflicting history. The evidence
 //! suspends that key for that epoch ([`AnchorKeyLedger::apply_equivocation`]):
 //! its signatures stop counting toward the threshold, while the other keys
-//! keep the chain anchored. A cold committee rotation (new key epoch with new
-//! keys) is what ends a suspension.
+//! keep the chain anchored. A cold committee rotation ends an epoch, but a
+//! key suspended for equivocation can never be reintroduced under another slot
+//! or a later epoch.
 //!
 //! The same rule covers the SLH-DSA key of the Root Seal
 //! ([`AnchorKeyLedger::apply_seal_equivocation`]).
@@ -96,6 +97,10 @@ pub struct AnchorKeyLedger {
     /// The suspensions evidence has caused.
     #[serde(default)]
     pub suspended: BTreeSet<Suspension>,
+    /// Family and SHA3-256 fingerprint of each key suspended for equivocation.
+    /// Unlike a slot number, a fingerprint survives rotation and reordering.
+    #[serde(default)]
+    pub revoked_key_hashes: BTreeSet<(KeyFamily, [u8; 32])>,
 }
 
 /// Why the ledger or its evidence was refused.
@@ -215,12 +220,30 @@ impl AnchorKeyLedger {
             },
         )?;
         for s in &self.suspended {
+            // Historical slot numbers describe the old ledger, not the
+            // current key count. Their fingerprints remain in the deny set.
+            if s.key_epoch != self.key_epoch {
+                continue;
+            }
             let known = match s.family {
                 KeyFamily::Anchor => self.anchor_keys.len(),
                 KeyFamily::Seal => self.seal_keys.len(),
             };
             if usize::from(s.index) >= known {
                 return Err(LedgerError::Invalid("suspension-of-unknown-slot"));
+            }
+        }
+        for (family, keys) in [
+            (KeyFamily::Anchor, &self.anchor_keys),
+            (KeyFamily::Seal, &self.seal_keys),
+        ] {
+            for key in keys {
+                let fingerprint: [u8; 32] = Sha3_256::digest(&key.public_key).into();
+                if self.revoked_key_hashes.contains(&(family, fingerprint))
+                    && !self.is_suspended(family, key.index, self.key_epoch)
+                {
+                    return Err(LedgerError::Invalid("revoked-key-active"));
+                }
             }
         }
         Ok(())
@@ -274,7 +297,7 @@ impl AnchorKeyLedger {
     }
 
     /// Install the keys of the next key epoch, after a cold committee rotation.
-    /// Suspensions of the old epoch stay on record and cover only that epoch.
+    /// Suspensions stay on record, and a suspended public key cannot return.
     ///
     /// # Errors
     ///
@@ -292,12 +315,37 @@ impl AnchorKeyLedger {
                 requested: key_epoch,
             });
         }
+        let mut revoked_key_hashes = self.revoked_key_hashes.clone();
+        // Also migrate suspensions in older serialized ledgers that predate the
+        // fingerprint set, while their current slot-to-key mapping is known.
+        for suspension in self.suspended.iter().filter(|s| s.key_epoch == self.key_epoch) {
+            let keys = match suspension.family {
+                KeyFamily::Anchor => &self.anchor_keys,
+                KeyFamily::Seal => &self.seal_keys,
+            };
+            let key = keys
+                .get(usize::from(suspension.index))
+                .ok_or(LedgerError::Invalid("suspension-of-unknown-slot"))?;
+            revoked_key_hashes.insert((
+                suspension.family,
+                Sha3_256::digest(&key.public_key).into(),
+            ));
+        }
+        for (family, keys) in [(KeyFamily::Anchor, &anchor_keys), (KeyFamily::Seal, &seal_keys)] {
+            for key in keys {
+                let fingerprint: [u8; 32] = Sha3_256::digest(&key.public_key).into();
+                if revoked_key_hashes.contains(&(family, fingerprint)) {
+                    return Err(LedgerError::Invalid("suspended-key-reuse"));
+                }
+            }
+        }
         let next = Self {
             chain_id: self.chain_id,
             key_epoch,
             anchor_keys,
             seal_keys,
             suspended: self.suspended.clone(),
+            revoked_key_hashes,
         };
         next.validate()?;
         *self = next;
@@ -359,6 +407,10 @@ impl AnchorKeyLedger {
             return Err(LedgerError::NoCommonSigner);
         }
         for index in &slots {
+            if let Some(key) = self.anchor_key(*index) {
+                let fingerprint: [u8; 32] = Sha3_256::digest(key).into();
+                self.revoked_key_hashes.insert((KeyFamily::Anchor, fingerprint));
+            }
             self.suspended.insert(Suspension {
                 family: KeyFamily::Anchor,
                 index: *index,
@@ -409,6 +461,10 @@ impl AnchorKeyLedger {
         {
             return Err(LedgerError::NoCommonSigner);
         }
+        self.revoked_key_hashes.insert((
+            KeyFamily::Seal,
+            Sha3_256::digest(&public_key).into(),
+        ));
         self.suspended.insert(Suspension {
             family: KeyFamily::Seal,
             index: first.key_index,
@@ -494,6 +550,7 @@ pub(crate) mod test_support {
                 public_key: seal_key,
             }],
             suspended: BTreeSet::new(),
+            revoked_key_hashes: BTreeSet::new(),
         }
     }
 
@@ -554,6 +611,59 @@ pub(crate) mod test_support {
         assert_eq!(
             zero_epoch.validate().unwrap_err(),
             LedgerError::Invalid("key-epoch-zero")
+        );
+    }
+
+    #[test]
+    fn suspended_keys_cannot_return_after_rotation_or_slot_reordering() {
+        let mut ledger = software_ledger(1, 1);
+        ledger.suspended.insert(Suspension {
+            family: KeyFamily::Anchor,
+            index: 0,
+            key_epoch: 1,
+        });
+        ledger.suspended.insert(Suspension {
+            family: KeyFamily::Seal,
+            index: 0,
+            key_epoch: 1,
+        });
+        let original = ledger.clone();
+        let old_anchor = ledger.anchor_keys[0].public_key.clone();
+        let old_seal = ledger.seal_keys[0].public_key.clone();
+        assert_eq!(
+            ledger
+                .install_rotated_keys(2, ledger.anchor_keys.clone(), ledger.seal_keys.clone())
+                .unwrap_err(),
+            LedgerError::Invalid("suspended-key-reuse")
+        );
+        assert_eq!(ledger, original, "a refused rotation is atomic");
+
+        let mut anchors = ledger.anchor_keys.clone();
+        anchors[0].public_key = signer(3).public_key();
+        let mut seals = ledger.seal_keys.clone();
+        seals[0].public_key = SoftwareSealSigner::from_seed(&[0x5F; 96])
+            .expect("valid replacement seed")
+            .public_key();
+        ledger.install_rotated_keys(2, anchors, seals).expect("new keys rotate");
+        let restored: AnchorKeyLedger =
+            serde_json::from_slice(&serde_json::to_vec(&ledger).unwrap()).unwrap();
+        assert_eq!(restored, ledger, "revoked fingerprints survive serialization");
+
+        let mut reordered = ledger.anchor_keys.clone();
+        reordered[2].public_key = old_anchor;
+        assert_eq!(
+            ledger
+                .install_rotated_keys(3, reordered, ledger.seal_keys.clone())
+                .unwrap_err(),
+            LedgerError::Invalid("suspended-key-reuse")
+        );
+        let mut old_seals = ledger.seal_keys.clone();
+        old_seals[0].public_key = old_seal;
+        assert_eq!(
+            ledger
+                .install_rotated_keys(3, ledger.anchor_keys.clone(), old_seals)
+                .unwrap_err(),
+            LedgerError::Invalid("suspended-key-reuse")
         );
     }
 
