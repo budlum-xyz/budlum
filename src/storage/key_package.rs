@@ -17,7 +17,7 @@
 //! Packages are for [`ViewPolicy::NamedGrantee`](crate::storage::view_grant::ViewPolicy): the key
 //! is sealed to one recipient. A public-link grant has no recipient, so its
 //! key travels in the link and this module does not apply.
-//! WIRING: unwired - the key-package surface is the custody wave's; the grant and ceremony doors that read it land with that wave.
+//! WIRING: unwired - the key-package surface belongs to the custody path; the grant and ceremony doors that read it land with it.
 
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
@@ -26,7 +26,7 @@ use crate::storage::content_id::ContentId;
 use crate::storage::view_grant::{ViewGrant, ViewPolicy};
 
 /// Length of a content key: 256 bits.
-/// exposed for: storage surface - the key-package door's readers land with the custody wave.
+/// exposed for: storage surface - the key-package door's readers land with the custody path.
 pub const CONTENT_KEY_LEN: usize = 32;
 
 const PACKAGE_HASH_TAG: &[u8] = b"BDLM_KEY_PACKAGE_V1";
@@ -34,7 +34,7 @@ const PACKAGE_INFO_TAG: &[u8] = b"BDLM_KEY_PACKAGE_INFO_V1";
 
 /// Why a key package was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// exposed for: storage surface - the key-package door's readers land with the custody wave.
+/// exposed for: storage surface - the key-package door's readers land with the custody path.
 pub enum KeyPackageError {
     /// The grant is revoked: no new opens.
     GrantRevoked,
@@ -75,7 +75,7 @@ impl std::error::Error for KeyPackageError {}
 
 /// A content key sealed to one grantee.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// exposed for: storage surface - the key-package door's readers land with the custody wave.
+/// exposed for: storage surface - the key-package door's readers land with the custody path.
 pub struct KeyPackage {
     content_id: ContentId,
     grantee: Address,
@@ -116,7 +116,7 @@ impl KeyPackage {
 
     /// The hash the chain keeps. Use it as the grant's `key_id`.
     #[must_use]
-    /// exposed for: storage surface - the key-package door's readers land with the custody wave.
+    /// exposed for: storage surface - the key-package door's readers land with the custody path.
     pub fn package_hash(&self) -> [u8; 32] {
         hash_fields_bytes(&[
             PACKAGE_HASH_TAG,

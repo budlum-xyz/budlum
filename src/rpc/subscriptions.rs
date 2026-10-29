@@ -24,7 +24,7 @@ use std::time::Duration;
 /// How often a feed looks for new blocks.
 const POLL: Duration = Duration::from_secs(1);
 /// The most blocks a feed sends per poll.
-/// exposed for: the RPC surface - method handlers land with the subscription wiring wave.
+/// exposed for: the RPC surface - method handlers land with the subscription wiring.
 pub const MAX_BLOCKS_PER_TICK: u64 = 64;
 
 /// What a subscription follows.

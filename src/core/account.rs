@@ -3626,7 +3626,7 @@ impl AccountState {
     ///
     /// [`crate::crypto::scheme::SchemeError`] when the step is not one rung
     /// forward.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn scheme_transition_from_alarm(
         &mut self,
         id: crate::crypto::scheme::SchemeId,
@@ -3646,7 +3646,7 @@ impl AccountState {
     ///
     /// [`crate::crypto::scheme::SchemeError`] when the step is not one rung
     /// forward.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn scheme_transition_from_cold_committee(
         &mut self,
         id: crate::crypto::scheme::SchemeId,
@@ -3665,7 +3665,7 @@ impl AccountState {
     /// # Errors
     ///
     /// [`crate::crypto::scheme::SchemeError`] when the scheme is not `Reserved`.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn scheme_activate_by_governance(
         &mut self,
         id: crate::crypto::scheme::SchemeId,

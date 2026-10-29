@@ -20,22 +20,22 @@ pub const POLLEN_AI_INPUT_REF_PREFIX: &[u8] = b"BDLM_POLLEN_AI_INPUT_REF_V1";
 
 /// HPKE KEM 0x647a, MLKEM768-X25519. The only
 /// suite a mainnet policy may name.
-/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout wave.
+/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
 pub const HPKE_SUITE_MLKEM768_X25519: u16 = 0x647a;
 
 /// HPKE KEM 0x0020, X25519 alone. A recorded ciphertext opens once a quantum
 /// attacker exists, so it is a devnet and testnet suite only.
-/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout wave.
+/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
 pub const HPKE_SUITE_X25519_ONLY: u16 = 0x0020;
 
 /// Public key size of KEM 0x647a: ML-KEM-768 encapsulation key (1,184 bytes)
 /// plus X25519 (32 bytes).
-/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout wave.
+/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
 pub const HPKE_MLKEM768_X25519_PUBLIC_KEY_BYTES: u16 = 1216;
 
 /// First policy version a mainnet chain accepts. Version 1 carried the
 /// X25519-only default; the post-quantum default starts at 2.
-/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout wave.
+/// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
 pub const MAINNET_MIN_ENCRYPTION_POLICY_VERSION: u32 = 2;
 
 /// DAO-managed encryption policy. DAO can tune protocol parameters, but it
@@ -80,7 +80,7 @@ impl EncryptionPolicy {
     }
 
     /// The post-quantum default: KEM 0x647a with the full public key size.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn post_quantum(
         version: u32,
         max_grant_duration_blocks: u64,

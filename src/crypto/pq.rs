@@ -432,7 +432,7 @@ pub fn ml_dsa_sign(
 /// # Errors
 ///
 /// [`PqError`] for an empty or too long context, or an unsupported scheme.
-/// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+/// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
 pub fn ml_dsa_sign_libcrux(
     scheme: SchemeId,
     seed: &[u8; ML_DSA_SEED_LEN],

@@ -369,7 +369,7 @@ impl BridgeState {
             .push(message_id);
     }
 
-    /// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring wave.
+    /// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
     pub fn register_asset(
         &mut self,
         asset_id: AssetId,

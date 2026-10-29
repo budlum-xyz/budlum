@@ -295,7 +295,7 @@ impl RegenHealthTick {
 
 /// Decodes a 32-byte hex hash. Anything else holds no commitment.
 #[must_use]
-/// WIRING: unwired - production has no caller in this tree; tests pin the behaviour and the caller lands with the wave that ships the path.
+/// WIRING: unwired - production has no caller in this tree; tests pin the behaviour and the caller lands with the code that ships the path.
 pub fn hash32(hex_str: &str) -> Option<[u8; 32]> {
     hex::decode(hex_str).ok()?.try_into().ok()
 }

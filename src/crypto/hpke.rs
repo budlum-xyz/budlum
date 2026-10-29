@@ -225,7 +225,7 @@ impl HpkeEnvelope {
     }
 
     /// The encapsulated key.
-    /// WIRING: unwired - no caller in this tree yet; kept as the surface its wave wires up, and nothing depends on it until then.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn encapsulated_key(&self) -> &[u8] {
         &self.enc
     }

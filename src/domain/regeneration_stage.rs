@@ -188,7 +188,7 @@ impl ProofFamily {
     /// the table does not list is classical: an unknown scheme earns no
     /// trust.
     #[must_use]
-    /// WIRING: the scheme-aware repair assessment consumes this - the production caller lands with the regen-health wiring wave.
+    /// WIRING: the scheme-aware repair assessment consumes this - the production caller lands with the regen-health wiring.
     pub fn of_scheme(scheme: SchemeId) -> Self {
         match scheme.info().map(|info| info.family) {
             Some(
@@ -240,7 +240,7 @@ impl Transdifferentiated {
 /// `ledger_height`: only a post-quantum proof about a height the ledger still
 /// holds. A classical proof is never used directly.
 #[must_use]
-/// WIRING: the repair verdict consumes this after a reversion - the production caller lands with the regen-health wiring wave.
+/// WIRING: the repair verdict consumes this after a reversion - the production caller lands with the regen-health wiring.
 pub fn proof_usable_after_reversion(
     family: ProofFamily,
     proof_height: u64,
