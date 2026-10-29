@@ -746,6 +746,10 @@ message ProtoPrecommit {
     string voter_id = 4;
     bytes sig_bls = 5;
     bytes auth_sig = 6;
+    // The signer's ML-DSA attestation of the same checkpoint. A precommit
+    // without it still counts for the BLS half of finality, but the
+    // checkpoint's QC blob is then short its signer.
+    bytes pq_sig = 7;
 }
 
 message ProtoFinalityCert {
