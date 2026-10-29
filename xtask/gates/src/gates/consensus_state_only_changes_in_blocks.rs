@@ -12,7 +12,7 @@
 //!      would hide the divergence instead of fixing it.
 //!   2. `apply_pending_commitments` no longer writes account nonces out of
 //!      block; the executor's `StateUpdate` arm is retired and refuses
-//!      every StateUpdate outright (431d7fb).
+//!      every `StateUpdate` outright (431d7fb).
 //!   3. `validate_commitment_state_updates` still rejects non-monotonic,
 //!      near-`u64::MAX` and over-ceiling updates for whatever door ends up
 //!      carrying the writes.
@@ -63,7 +63,7 @@ fn slice_of<'a>(src: &'a str, start: &str, end: &str) -> Result<&'a str, String>
 /// Returns the first violated claim.
 /// Checks 1 and 2: the state root still covers the consensus fields, and
 /// the nonce writes are block-scoped (no out-of-block write; the executor
-/// refuses StateUpdate entirely).
+/// refuses `StateUpdate` entirely).
 fn check_root_covers_and_nonces_are_block_scoped(
     bc: &str,
     acc: &str,
