@@ -110,8 +110,7 @@ pub enum TeeError {
     UnexpectedKey,
     /// The ML-DSA-87 signature did not verify.
     InvalidSignature,
-    /// The quantum alarm is at Watch or above: TEE shortcuts are closed
-    ///.
+    /// The quantum alarm is at Watch or above: TEE shortcuts are closed.
     ClosedByAlarm,
 }
 

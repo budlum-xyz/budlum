@@ -1155,8 +1155,7 @@ impl AccountState {
         self.bond_independent_role(address, crate::registry::role::roles::RELAYER, amount)
     }
 
-    /// Register a relayed cross-domain message inside block execution
-    ///.
+    /// Register a relayed cross-domain message inside block execution.
     ///
     /// The rules are the ones the retired out-of-block door applied, with
     /// the transaction signature in place of the message's own envelope:

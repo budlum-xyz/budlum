@@ -1,5 +1,4 @@
-//! Quantum canary: puzzles whose solution proves a cryptographic break
-//!.
+//! Quantum canary: puzzles whose solution proves a cryptographic break.
 //!
 //! Genesis fixes a set of puzzles. Each one is built from a label so that
 //! nobody holds its solution: a curve point with no known discrete logarithm,

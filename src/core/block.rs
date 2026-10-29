@@ -370,8 +370,7 @@ impl Block {
 
     /// Whether every transaction's witness was pruned: the body is
     /// complete, the signatures are gone. Such a block is admitted only
-    /// inside a segment that a finality certificate and its QC end
-    ///.
+    /// inside a segment that a finality certificate and its QC end.
     #[must_use]
     pub fn witness_is_stripped(&self) -> bool {
         !self.transactions.is_empty()

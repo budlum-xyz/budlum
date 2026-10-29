@@ -61,8 +61,7 @@ pub const DEFAULT_DEPOSIT_TOPIC0: [u8; 32] = [0u8; 32];
 /// `verify_receipt_proof` is deterministic in Budlum consensus. The off-chain
 /// methods (`generate_receipt_proof`/`submit_transaction`/
 /// `wait_for_confirmation`) are an offline-test stub (the StubAdapter
-/// pattern) that REFUSES at broadcast - there is no live Ethereum RPC route
-///.
+/// pattern) that REFUSES at broadcast - there is no live Ethereum RPC route.
 ///
 /// `Debug` so a caller can `expect` on a `Result` carrying one. All three
 /// fields are public configuration already: a contract address, an event

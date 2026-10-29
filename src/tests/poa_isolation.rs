@@ -318,8 +318,7 @@ mod poa_compliance_gate {
     }
 
     /// A PoA domain whose registered operator is `addr(id)` - the operator
-    /// holds compliance authority while the domain has no admins yet
-    ///.
+    /// holds compliance authority while the domain has no admins yet.
     fn poa_domain(id: u32) -> ConsensusDomain {
         let mut d = default_domain(
             id,
