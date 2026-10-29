@@ -9,7 +9,7 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, tls, yamux, Multiaddr, PeerId, StreamProtocol, Swarm,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,19 +30,14 @@ const MAX_SYNC_CONCURRENT_STREAMS: usize = 16;
 const MAX_PENDING_BITSWAP_FETCH_WAITERS: usize = 128;
 /// QC blobs assembled at once, across all peers.
 const MAX_QC_ASSEMBLIES: usize = 8;
-/// The most QC fetches one peer may have in flight. The shared fetch table is
-/// eight slots; without a per-peer share, one identity that relays
-/// certificates and then goes quiet holds all of them for the request timeout.
+/// A slow or malicious peer cannot occupy every outbound fetch slot.
 const MAX_QC_FETCHES_PER_PEER: usize = 1;
-/// QC fetches that met a full table wait here instead of being dropped. The
-/// certificate that asked for the fetch is already queued in the chain and the
-/// gossip message that carried it is deduplicated by content hash, so a fetch
-/// dropped here is never retried: the checkpoint simply stays unfinalized.
-const MAX_QC_FETCH_BACKLOG: usize = 64;
-/// QC blobs one peer may keep open in the serve table at once. The global table
-/// is eight slots; a per-peer share keeps one peer from taking them all and
-/// leaving every other requester refused.
+/// A single peer cannot occupy the entire global serve table.
 const MAX_QC_SERVES_PER_PEER: usize = 2;
+/// Pending validated certificates retained for fetching when all slots are
+/// busy. The chain retains 100 pending certificates by default.
+const MAX_PENDING_QC_REQUESTS: usize = 128;
+const QC_RETRY_DELAY: Duration = Duration::from_secs(5);
 /// How long a partly received QC blob is kept.
 const QC_ASSEMBLY_TTL: Duration = Duration::from_secs(120);
 /// Most validators a QC blob may name on the wire. The snapshot check at
@@ -51,6 +46,7 @@ const MAX_QC_WIRE_VALIDATORS: usize = 2048;
 
 /// A QC response is accepted only for a request we made to this peer. Each
 /// request asks for exactly one chunk; the next is requested after validation.
+#[derive(Clone)]
 struct QcFetch {
     peer: PeerId,
     epoch: u64,
@@ -58,6 +54,116 @@ struct QcFetch {
     checkpoint_hash: String,
     chunk_index: u32,
     chunk_count: Option<u32>,
+}
+
+#[derive(Clone)]
+struct PendingQcFetch {
+    epoch: u64,
+    height: u64,
+    checkpoint_hash: String,
+    preferred: Option<PeerId>,
+    last_peer: Option<PeerId>,
+    ready_at: std::time::Instant,
+}
+
+fn enqueue_qc_fetch(queue: &mut VecDeque<PendingQcFetch>, pending: PendingQcFetch) {
+    if let Some(existing) = queue.iter_mut().find(|existing| {
+        existing.epoch == pending.epoch
+            && existing.height == pending.height
+            && existing.checkpoint_hash == pending.checkpoint_hash
+    }) {
+        // A new announcing peer is an opportunity to retry, not a second job.
+        if pending.preferred.is_some() && pending.preferred != existing.last_peer {
+            existing.preferred = pending.preferred;
+            existing.ready_at = pending.ready_at;
+        }
+        return;
+    }
+    if queue.len() >= MAX_PENDING_QC_REQUESTS {
+        // The chain's own pending-cert book also evicts oldest entries.
+        queue.pop_front();
+        warn!("QC retry queue full; dropped its oldest request");
+    }
+    queue.push_back(pending);
+}
+
+fn select_qc_peer(
+    peers: &[PeerId],
+    occupied: &HashMap<PeerId, usize>,
+    preferred: Option<PeerId>,
+    last_peer: Option<PeerId>,
+) -> Option<PeerId> {
+    let mut ordered: Vec<_> = peers
+        .iter()
+        .copied()
+        .filter(|peer| occupied.get(peer).copied().unwrap_or(0) < MAX_QC_FETCHES_PER_PEER)
+        .collect();
+    if let Some(peer) = preferred.filter(|p| Some(*p) != last_peer && ordered.contains(p)) {
+        return Some(peer);
+    }
+    // Visit every eligible peer before cycling, not merely the first peer
+    // different from the previous one (which can starve a third peer).
+    ordered.sort_by_key(|peer| peer.to_bytes());
+    if ordered.is_empty() {
+        return None;
+    }
+    let next = last_peer
+        .and_then(|last| ordered.iter().position(|peer| *peer == last))
+        .map_or(0, |index| (index + 1) % ordered.len());
+    Some(ordered[next])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QcServeAdmission {
+    Start,
+    Continue,
+    Busy,
+    Invalid,
+}
+
+type QcServeTable = HashMap<(PeerId, u64, u64), (std::time::Instant, u32)>;
+
+fn qc_serve_admission(
+    serves: &QcServeTable,
+    peer: PeerId,
+    epoch: u64,
+    height: u64,
+    chunk_index: u32,
+    max_chunks: usize,
+) -> QcServeAdmission {
+    if height == 0 || chunk_index as usize >= max_chunks {
+        return QcServeAdmission::Invalid;
+    }
+    let key = (peer, epoch, height);
+    if chunk_index == 0 {
+        if serves.contains_key(&key)
+            || serves.len() >= MAX_QC_ASSEMBLIES
+            || serves
+                .keys()
+                .filter(|(holder, _, _)| *holder == peer)
+                .count()
+                >= MAX_QC_SERVES_PER_PEER
+        {
+            QcServeAdmission::Busy
+        } else {
+            QcServeAdmission::Start
+        }
+    } else {
+        match serves.get(&key) {
+            Some((_, next)) if *next == chunk_index => QcServeAdmission::Continue,
+            Some(_) => QcServeAdmission::Invalid,
+            // A server may have released an old/expired transfer while the
+            // client was in flight. Ask it to restart; do not blame the peer.
+            None => QcServeAdmission::Busy,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QcResponseAction {
+    InProgress,
+    Imported,
+    Missing,
 }
 
 /// Build a single bounded peer-bound response, never a gossip broadcast.
@@ -516,12 +622,11 @@ pub struct Node {
     qc_assemblies:
         HashMap<(PeerId, u64, u64), (std::time::Instant, crate::consensus::qc::QcBlobAssembler)>,
     qc_fetches: HashMap<request_response::OutboundRequestId, QcFetch>,
-    /// Fetches that met a full table, in arrival order, dispatched as slots
-    /// free so a dropped fetch never strands a certificate.
-    qc_fetch_backlog: std::collections::VecDeque<(PeerId, u64, u64, String)>,
+    /// Bounded work deferred by capacity, missing responses, or disconnects.
+    pending_qc_fetches: VecDeque<PendingQcFetch>,
     /// Bounded in-progress deliveries: subsequent chunks spend the first
     /// chunk's blob rate token, never a new token per 256 KiB frame.
-    qc_serves: HashMap<(PeerId, u64, u64), (std::time::Instant, u32)>,
+    qc_serves: QcServeTable,
     pub bootstrap_peers: Vec<String>,
     pub dns_seeds: Vec<String>,
     pub dns_seed_port: u16,
@@ -762,88 +867,102 @@ impl Node {
         }
     }
 
-    /// Fetch QC data over /sync, never from the public gossip topic. The
-    /// request ID pins every answer to the requested peer, epoch, height and
-    /// checkpoint hash, and only one chunk per blob is in flight.
+    /// Queue a validated missing QC, even when all fetch slots are busy.
     fn request_qc_blob(&mut self, peer: PeerId, epoch: u64, height: u64, hash: String) {
-        if height == 0 || self.qc_fetch_is_pending(&peer, epoch, height) {
-            return;
-        }
-        if self.qc_fetches.len() >= MAX_QC_ASSEMBLIES
-            || self.qc_fetches.values().filter(|f| f.peer == peer).count()
-                >= MAX_QC_FETCHES_PER_PEER
-        {
-            self.queue_qc_fetch(peer, epoch, height, hash);
-            return;
-        }
-        self.dispatch_qc_blob_fetch(peer, epoch, height, hash);
-    }
-
-    /// Whether a fetch for this peer, epoch and height is in flight or queued.
-    fn qc_fetch_is_pending(&self, peer: &PeerId, epoch: u64, height: u64) -> bool {
-        self.qc_fetches
-            .values()
-            .any(|f| f.peer == *peer && f.epoch == epoch && f.height == height)
+        if height == 0
+            || hash.len() > 128
             || self
-                .qc_fetch_backlog
-                .iter()
-                .any(|(p, e, h, _)| p == peer && *e == epoch && *h == height)
-    }
-
-    /// Hold a fetch that met a full table, oldest first and bounded. Items are
-    /// dropped from the front when the backlog itself is full: the certificate
-    /// behind them stays queued in the chain, and the next relay of that
-    /// checkpoint asks again.
-    fn queue_qc_fetch(&mut self, peer: PeerId, epoch: u64, height: u64, hash: String) {
-        if self.qc_fetch_backlog.len() >= MAX_QC_FETCH_BACKLOG {
-            self.qc_fetch_backlog.pop_front();
+                .qc_fetches
+                .values()
+                .any(|f| f.epoch == epoch && f.height == height && f.checkpoint_hash == hash)
+        {
+            return;
         }
-        self.qc_fetch_backlog.push_back((peer, epoch, height, hash));
-    }
-
-    /// Send the first chunk request for a QC blob.
-    fn dispatch_qc_blob_fetch(&mut self, peer: PeerId, epoch: u64, height: u64, hash: String) {
-        let request = NetworkMessage::GetQcBlob {
-            epoch,
-            checkpoint_height: height,
-            chunk_index: 0,
-        };
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .sync
-            .send_request(&peer, request.to_bytes());
-        self.qc_fetches.insert(
-            id,
-            QcFetch {
-                peer,
+        enqueue_qc_fetch(
+            &mut self.pending_qc_fetches,
+            PendingQcFetch {
                 epoch,
                 height,
                 checkpoint_hash: hash,
-                chunk_index: 0,
-                chunk_count: None,
+                preferred: Some(peer),
+                last_peer: None,
+                ready_at: std::time::Instant::now(),
+            },
+        );
+        self.drain_qc_fetches();
+    }
+
+    fn retry_qc_fetch(&mut self, fetch: &QcFetch) {
+        enqueue_qc_fetch(
+            &mut self.pending_qc_fetches,
+            PendingQcFetch {
+                epoch: fetch.epoch,
+                height: fetch.height,
+                checkpoint_hash: fetch.checkpoint_hash.clone(),
+                preferred: None,
+                last_peer: Some(fetch.peer),
+                ready_at: std::time::Instant::now() + QC_RETRY_DELAY,
             },
         );
     }
 
-    /// Dispatch queued fetches while the table has room. Called wherever a
-    /// fetch slot frees, so a fetch that met a full table is not lost.
-    fn drain_qc_fetch_backlog(&mut self) {
-        while let Some((peer, epoch, height, hash)) = self.qc_fetch_backlog.pop_front() {
-            if self.qc_fetch_is_pending(&peer, epoch, height) {
+    /// Drain at most the queue's initial size: disconnected peers and retry
+    /// delays cannot make the node loop spin. Each retry chooses a different
+    /// eligible peer when available and starts again at chunk zero.
+    fn drain_qc_fetches(&mut self) {
+        let count = self.pending_qc_fetches.len();
+        for _ in 0..count {
+            if self.qc_fetches.len() >= MAX_QC_ASSEMBLIES {
+                break;
+            }
+            let Some(pending) = self.pending_qc_fetches.pop_front() else {
+                break;
+            };
+            if pending.ready_at > std::time::Instant::now() {
+                self.pending_qc_fetches.push_back(pending);
                 continue;
             }
-            if self.qc_fetches.len() >= MAX_QC_ASSEMBLIES
-                || self.qc_fetches.values().filter(|f| f.peer == peer).count()
-                    >= MAX_QC_FETCHES_PER_PEER
-            {
-                // Still no room for this one. Put it back and stop: the queue
-                // is in arrival order, so nothing behind it may overtake it.
-                self.qc_fetch_backlog
-                    .push_front((peer, epoch, height, hash));
-                return;
-            }
-            self.dispatch_qc_blob_fetch(peer, epoch, height, hash);
+            let occupied: HashMap<PeerId, usize> =
+                self.qc_fetches
+                    .values()
+                    .fold(HashMap::new(), |mut counts, fetch| {
+                        *counts.entry(fetch.peer).or_default() += 1;
+                        counts
+                    });
+            let peers = {
+                let pm = self.peer_manager_lock();
+                pm.connected_peers()
+                    .into_iter()
+                    .filter(|peer| pm.is_handshaked(peer) && !pm.is_banned(peer))
+                    .collect::<Vec<_>>()
+            };
+            let Some(peer) =
+                select_qc_peer(&peers, &occupied, pending.preferred, pending.last_peer)
+            else {
+                self.pending_qc_fetches.push_back(pending);
+                continue;
+            };
+            let request = NetworkMessage::GetQcBlob {
+                epoch: pending.epoch,
+                checkpoint_height: pending.height,
+                chunk_index: 0,
+            };
+            let id = self
+                .swarm
+                .behaviour_mut()
+                .sync
+                .send_request(&peer, request.to_bytes());
+            self.qc_fetches.insert(
+                id,
+                QcFetch {
+                    peer,
+                    epoch: pending.epoch,
+                    height: pending.height,
+                    checkpoint_hash: pending.checkpoint_hash,
+                    chunk_index: 0,
+                    chunk_count: None,
+                },
+            );
         }
     }
 
@@ -858,7 +977,7 @@ impl Node {
         fetch: QcFetch,
         peer: PeerId,
         response: NetworkMessage,
-    ) -> Result<(), String> {
+    ) -> Result<QcResponseAction, String> {
         let NetworkMessage::QcBlobResponse {
             epoch,
             checkpoint_height,
@@ -883,7 +1002,7 @@ impl Node {
                 return Err("malformed missing QC response".into());
             }
             self.qc_assemblies.remove(&(peer, epoch, checkpoint_height));
-            return Ok(());
+            return Ok(QcResponseAction::Missing);
         }
         let max_chunks = crate::consensus::qc::qc_blob_max_bytes(MAX_QC_WIRE_VALIDATORS)
             .div_ceil(crate::consensus::qc::QC_CHUNK_BYTES);
@@ -916,6 +1035,7 @@ impl Node {
             }
             self.chain.import_qc_blob(blob).await?;
             self.peer_manager_lock().report_good_behavior(&peer);
+            return Ok(QcResponseAction::Imported);
         } else {
             let next = chunk_index + 1;
             if next >= chunk_count {
@@ -940,7 +1060,7 @@ impl Node {
                 },
             );
         }
-        Ok(())
+        Ok(QcResponseAction::InProgress)
     }
 
     /// Take the `PeerManager` lock, recovering if it was poisoned.
@@ -1819,7 +1939,7 @@ impl Node {
             gossip_dedup,
             qc_assemblies: HashMap::new(),
             qc_fetches: HashMap::new(),
-            qc_fetch_backlog: std::collections::VecDeque::new(),
+            pending_qc_fetches: VecDeque::new(),
             qc_serves: HashMap::new(),
             bootstrap_peers: Vec::new(),
             dns_seeds: Vec::new(),
@@ -2273,6 +2393,7 @@ impl Node {
         let mut gc_interval = tokio::time::interval(Duration::from_secs(60));
         let mut discovery_interval = tokio::time::interval(Duration::from_secs(300));
         let mut finality_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut qc_retry_interval = tokio::time::interval(QC_RETRY_DELAY);
         let mut slashing_gossip_interval = tokio::time::interval(Duration::from_secs(5));
         let mut dht_interval = tokio::time::interval(DHT_BOOTSTRAP_INTERVAL);
         let mut banning_interval = tokio::time::interval(Duration::from_secs(60));
@@ -2352,6 +2473,12 @@ impl Node {
                             warn!("Periodic bootstrap failed for {addr}: {e}");
                         }
                     }
+                }
+                _ = qc_retry_interval.tick() => {
+                    // Later finality makes older pending requests unnecessary.
+                    let finalized = self.chain.get_finalized_height().await;
+                    self.pending_qc_fetches.retain(|pending| pending.height > finalized);
+                    self.drain_qc_fetches();
                 }
                 _ = finality_interval.tick() => {
                     // Every node checks its own view, validator or not,
@@ -4046,46 +4173,23 @@ impl Node {
                                                         let now = std::time::Instant::now();
                                                         self.qc_serves.retain(|_, (started, _)| now.duration_since(*started) < QC_ASSEMBLY_TTL);
                                                         let key = (peer, epoch, checkpoint_height);
-                                                        let own_slots = self
-                                                            .qc_serves
-                                                            .keys()
-                                                            .filter(|entry| entry.0 == peer)
-                                                            .count();
-                                                        let allowed = if chunk_index == 0 {
-                                                            own_slots < MAX_QC_SERVES_PER_PEER
-                                                                && self.qc_serves.len() < MAX_QC_ASSEMBLIES
-                                                                && self.peer_manager_lock().check_blob_rate_limit(&peer)
-                                                        } else {
-                                                            self.qc_serves.get(&key).is_some_and(|(_, next)| *next == chunk_index)
-                                                        };
-                                                        // A request outside the protocol shape is misbehaviour; a
-                                                        // request that met a full table is not. The requester did
-                                                        // nothing wrong, and penalising it would ban an honest peer
-                                                        // for asking while one identity held every slot.
-                                                        if checkpoint_height == 0
-                                                            || chunk_index as usize >= max_chunks
-                                                            || (chunk_index > 0 && !allowed)
-                                                        {
+                                                        let admission = qc_serve_admission(
+                                                            &self.qc_serves, peer, epoch, checkpoint_height, chunk_index, max_chunks,
+                                                        );
+                                                        if admission == QcServeAdmission::Invalid {
                                                             self.peer_manager_lock().report_bad_behavior(&peer);
                                                             continue;
                                                         }
-                                                        if !allowed {
-                                                            // Answer an empty "no blob here" so the fetch fails
-                                                            // cleanly and the requester can ask elsewhere, instead
-                                                            // of timing out and blaming this node in return.
-                                                            let answer = match qc_chunk_response(
-                                                                epoch,
-                                                                checkpoint_height,
-                                                                chunk_index,
-                                                                None,
-                                                            ) {
-                                                                Ok(answer) => answer,
-                                                                Err(e) => {
-                                                                    warn!("cannot build the capacity refusal for height {checkpoint_height}: {e}");
-                                                                    continue;
-                                                                }
-                                                            };
-                                                            let _ = self.swarm.behaviour_mut().sync.send_response(channel, answer.to_bytes());
+                                                        // A saturated table, duplicate start or exhausted rate
+                                                        // budget is not an invalid request and must not ban an
+                                                        // honest peer. Reply missing so the fetcher can retry.
+                                                        let busy = admission == QcServeAdmission::Busy
+                                                            || (admission == QcServeAdmission::Start
+                                                                && !self.peer_manager_lock().check_blob_rate_limit(&peer));
+                                                        if busy {
+                                                            if let Ok(answer) = qc_chunk_response(epoch, checkpoint_height, chunk_index, None) {
+                                                                let _ = self.swarm.behaviour_mut().sync.send_response(channel, answer.to_bytes());
+                                                            }
                                                             continue;
                                                         }
                                                         let blob = self.chain.get_qc_blob(checkpoint_height).await;
@@ -4114,18 +4218,22 @@ impl Node {
                                                 let key = (fetch.peer, fetch.epoch, fetch.height);
                                                 let result = NetworkMessage::from_bytes_validated(&response)
                                                     .map_err(|e| format!("{e:?}"));
+                                                let retry = fetch.clone();
                                                 let result = match result {
                                                     Ok(msg) => self.accept_qc_response(fetch, peer, msg).await,
                                                     Err(e) => Err(e),
                                                 };
-                                                if let Err(e) = result {
-                                                    self.qc_assemblies.remove(&key);
-                                                    warn!("QC response from {peer} rejected: {e}");
-                                                    self.peer_manager_lock().report_bad_behavior(&peer);
+                                                match result {
+                                                    Ok(QcResponseAction::Missing) => self.retry_qc_fetch(&retry),
+                                                    Ok(QcResponseAction::Imported | QcResponseAction::InProgress) => {},
+                                                    Err(e) => {
+                                                        self.qc_assemblies.remove(&key);
+                                                        warn!("QC response from {peer} rejected: {e}");
+                                                        self.peer_manager_lock().report_bad_behavior(&peer);
+                                                        self.retry_qc_fetch(&retry);
+                                                    }
                                                 }
-                                                // The fetch slot is free either way: hand it to a
-                                                // certificate whose fetch met a full table.
-                                                self.drain_qc_fetch_backlog();
+                                                self.drain_qc_fetches();
                                                 continue;
                                             }
                                             if let Ok(msg) = NetworkMessage::from_bytes_validated(&response) {
@@ -4294,11 +4402,10 @@ impl Node {
                                 request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
                                     if let Some(fetch) = self.qc_fetches.remove(&request_id) {
                                         self.qc_assemblies.remove(&(fetch.peer, fetch.epoch, fetch.height));
+                                        self.retry_qc_fetch(&fetch);
+                                        self.drain_qc_fetches();
                                     }
                                     warn!("Outbound sync failure to {}: {:?}", peer, error);
-                                    // A timed-out fetch frees its slot: dispatch what was queued
-                                    // instead of letting the whole table drain to nothing.
-                                    self.drain_qc_fetch_backlog();
                                     {
                                         let mut pm = self.peer_manager_lock();
                                         pm.report_timeout(&peer);
@@ -4769,6 +4876,111 @@ mod mobile_profile_wiring_tests {
 
 #[cfg(test)]
 mod sync_handler_order_tests {
+    #[test]
+    fn qc_serve_capacity_is_per_peer_and_full_is_not_invalid() {
+        use super::{qc_serve_admission, QcServeAdmission, QcServeTable, MAX_QC_ASSEMBLIES};
+        use libp2p::PeerId;
+        let now = std::time::Instant::now();
+        let attacker = PeerId::random();
+        let honest = PeerId::random();
+        let mut table = QcServeTable::new();
+        table.insert((attacker, 1, 10), (now, 1));
+        table.insert((attacker, 1, 20), (now, 1));
+        assert_eq!(
+            qc_serve_admission(&table, attacker, 1, 30, 0, 100),
+            QcServeAdmission::Busy
+        );
+        assert_eq!(
+            qc_serve_admission(&table, honest, 1, 30, 0, 100),
+            QcServeAdmission::Start
+        );
+        assert_eq!(
+            qc_serve_admission(&table, attacker, 1, 10, 1, 100),
+            QcServeAdmission::Continue
+        );
+        assert_eq!(
+            qc_serve_admission(&table, attacker, 1, 10, 2, 100),
+            QcServeAdmission::Invalid
+        );
+        assert_eq!(
+            qc_serve_admission(&table, honest, 1, 99, 1, 100),
+            QcServeAdmission::Busy
+        );
+        while table.len() < MAX_QC_ASSEMBLIES {
+            table.insert((PeerId::random(), 1, 30), (now, 1));
+        }
+        assert_eq!(
+            qc_serve_admission(&table, honest, 1, 30, 0, 100),
+            QcServeAdmission::Busy
+        );
+    }
+
+    #[test]
+    fn qc_fetch_queue_defers_capacity_and_retries_other_peers() {
+        use super::{enqueue_qc_fetch, select_qc_peer, PendingQcFetch, MAX_PENDING_QC_REQUESTS};
+        use libp2p::PeerId;
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
+        let now = std::time::Instant::now();
+        let request = |height, preferred, last_peer| PendingQcFetch {
+            epoch: 1,
+            height,
+            checkpoint_hash: format!("{height:064x}"),
+            preferred,
+            last_peer,
+            ready_at: now,
+        };
+        let mut queue = std::collections::VecDeque::new();
+        for h in 1..=MAX_PENDING_QC_REQUESTS as u64 {
+            enqueue_qc_fetch(&mut queue, request(h, Some(peer_a), None));
+        }
+        assert_eq!(queue.len(), MAX_PENDING_QC_REQUESTS);
+        enqueue_qc_fetch(&mut queue, request(1, Some(peer_b), Some(peer_a)));
+        assert_eq!(
+            queue.len(),
+            MAX_PENDING_QC_REQUESTS,
+            "duplicate announcements do not consume slots"
+        );
+        let mut occupied = std::collections::HashMap::new();
+        assert_eq!(
+            select_qc_peer(&[peer_a, peer_b], &occupied, None, Some(peer_a)),
+            Some(peer_b)
+        );
+        assert_eq!(
+            select_qc_peer(&[peer_a], &occupied, None, Some(peer_a)),
+            Some(peer_a)
+        );
+        assert_eq!(select_qc_peer(&[], &occupied, Some(peer_a), None), None);
+        occupied.insert(peer_a, 1);
+        assert_eq!(
+            select_qc_peer(&[peer_a, peer_b], &occupied, Some(peer_a), None),
+            Some(peer_b),
+            "one slow peer cannot consume every fetch slot"
+        );
+        occupied.insert(peer_b, 1);
+        assert_eq!(
+            select_qc_peer(&[peer_a, peer_b], &occupied, None, None),
+            None
+        );
+        occupied.clear();
+        let peer_c = PeerId::random();
+        let peers = [peer_a, peer_b, peer_c];
+        let mut visited = std::collections::HashSet::new();
+        let mut last = None;
+        for _ in 0..3 {
+            let next = select_qc_peer(&peers, &occupied, None, last).unwrap();
+            visited.insert(next);
+            last = Some(next);
+        }
+        assert_eq!(visited.len(), 3, "every connected peer gets a retry");
+        enqueue_qc_fetch(
+            &mut queue,
+            request(MAX_PENDING_QC_REQUESTS as u64 + 1, None, None),
+        );
+        assert_eq!(queue.len(), MAX_PENDING_QC_REQUESTS);
+        assert_eq!(queue.front().unwrap().height, 2);
+    }
+
     #[test]
     fn thousand_validator_qc_is_served_in_binary_chunks_and_reassembled() {
         use crate::consensus::qc::{PqSignatureEntry, QcBlob, QcBlobAssembler, QC_CHUNK_BYTES};
