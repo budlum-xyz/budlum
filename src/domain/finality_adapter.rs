@@ -140,26 +140,66 @@ pub struct PoAAuthoritySignature {
 }
 
 /// Canonical message a PoA authority signs to attest a commitment. Binds the
-/// signature to the specific (domain, height, block hash) **and to the roots
-/// the commitment claims**: a quorum captured over one commitment must not be
-/// replayable under a different `state_root`/`tx_root`/`event_root`, or a
-/// fabricated external root can be anchored with a genuine set of signatures.
+/// signature to the network (`chain_id`), the domain, the height, the block
+/// hash, parent, sequence, timestamp, producer, roots and nonce writes: a quorum
+/// captured over one commitment must not be replayable under a different
+/// `state_root`/`tx_root`/`event_root` or an extended `state_updates` map, or
+/// a fabricated external root can be anchored with a genuine set of signatures
+/// - and a quorum collected on one network cannot be presented to another.
+///
+/// The chain id is not decoration: domain ids are small integers assigned by
+/// permissionless registration, so two networks can both have a domain 7, and
+/// without the chain id the same `(domain, height, hash)` triple would produce
+/// the same message on both. The `_V5` tag is part of the domain separation: a
+/// signature made under `_V1`-`_V4` (each of which lacked some of these
+/// fields) does not verify here, so no pre-fix attestation can be replayed
+/// against the chain- and commitment-metadata-bound verifier.
+#[allow(clippy::too_many_arguments)]
 pub fn poa_commit_signing_message(
+    chain_id: u64,
     domain_id: DomainId,
     domain_height: u64,
     domain_block_hash: &Hash32,
+    parent_domain_block_hash: &Hash32,
+    sequence: u64,
+    timestamp_ms: u128,
+    producer: Option<crate::core::address::Address>,
     state_root: &Hash32,
     tx_root: &Hash32,
     event_root: &Hash32,
+    state_updates: &std::collections::BTreeMap<crate::core::address::Address, u64>,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(8 + 8 + 32 + 32 + 32 + 32 + 32);
-    msg.extend_from_slice(b"BUDLUM_POA_COMMIT_V2");
+    let mut msg = Vec::with_capacity(
+        24 + 8 + 8 + 8 + 32 + 32 + 8 + 16 + 1 + 32 + 32 + 32 + 32 + 8 + state_updates.len() * 40,
+    );
+    msg.extend_from_slice(b"BUDLUM_POA_COMMIT_V5");
+    msg.extend_from_slice(&chain_id.to_le_bytes());
     msg.extend_from_slice(&domain_id.to_le_bytes());
     msg.extend_from_slice(&domain_height.to_le_bytes());
     msg.extend_from_slice(domain_block_hash);
+    msg.extend_from_slice(parent_domain_block_hash);
+    msg.extend_from_slice(&sequence.to_le_bytes());
+    msg.extend_from_slice(&timestamp_ms.to_le_bytes());
+    match producer {
+        Some(address) => {
+            msg.push(1);
+            msg.extend_from_slice(address.as_bytes());
+        }
+        None => msg.push(0),
+    }
     msg.extend_from_slice(state_root);
     msg.extend_from_slice(tx_root);
     msg.extend_from_slice(event_root);
+    // The nonce writes the commitment carries are consensus state: the
+    // settlement door applies them to accounts on this chain. A digest that
+    // did not cover them attested only the block hash, so a relayer could
+    // append writes to an honestly signed commitment and they would land. The
+    // map is a `BTreeMap`, so this order is canonical.
+    msg.extend_from_slice(&(state_updates.len() as u64).to_le_bytes());
+    for (address, nonce) in state_updates {
+        msg.extend_from_slice(address.as_bytes());
+        msg.extend_from_slice(&nonce.to_le_bytes());
+    }
     msg
 }
 
@@ -619,12 +659,18 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
 
         // The message every authority must have signed, bound to THIS commitment.
         let msg = poa_commit_signing_message(
+            domain.domain_chain_id,
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
+            &commitment.state_updates,
         );
 
         // Count DISTINCT authorities with a valid signature over `msg`.
@@ -939,12 +985,18 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                     return Ok(rejected);
                 }
                 let msg = poa_commit_signing_message(
+                    domain.domain_chain_id,
                     domain.id,
                     commitment.domain_height,
                     &commitment.domain_block_hash,
+                    &commitment.parent_domain_block_hash,
+                    commitment.sequence,
+                    commitment.timestamp_ms,
+                    commitment.producer,
                     &commitment.state_root,
                     &commitment.tx_root,
                     &commitment.event_root,
+                    &commitment.state_updates,
                 );
                 let mut valid_signers = std::collections::BTreeSet::new();
                 for sig in signatures {
@@ -1498,12 +1550,18 @@ mod tests {
         // finalizes nothing by design; register the set this test signs with.
         domain.validator_set_hash = poa_authority_set_hash(&domain, &authorities).unwrap();
         let msg = poa_commit_signing_message(
+            domain.domain_chain_id,
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
+            &commitment.state_updates,
         );
         let sig = |i: usize| PoAAuthoritySignature {
             authority: authorities[i],
@@ -1586,12 +1644,18 @@ mod tests {
 
         // The quorum signed THIS commitment, roots included.
         let msg = poa_commit_signing_message(
+            domain.domain_chain_id,
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
+            &commitment.state_updates,
         );
         let signatures: Vec<_> = kps
             .iter()
@@ -1616,6 +1680,53 @@ mod tests {
             FinalityStatus::Finalized,
             "the commitment the quorum signed finalizes"
         );
+
+        let proof = FinalityProof::PoA {
+            authorities: authorities.clone(),
+            signatures: signatures.clone(),
+        };
+        let mut altered_parent = commitment.clone();
+        altered_parent.parent_domain_block_hash = [0xAB; 32];
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &altered_parent, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+        let mut altered_sequence = commitment.clone();
+        altered_sequence.sequence = commitment.sequence.saturating_add(1);
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &altered_sequence, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+        let mut altered_timestamp = commitment.clone();
+        altered_timestamp.timestamp_ms = commitment.timestamp_ms.saturating_add(1);
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &altered_timestamp, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+        let mut altered_producer = commitment.clone();
+        altered_producer.producer = Some(crate::core::address::Address::from([0xCD; 32]));
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &altered_producer, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+        let mut altered_writes = commitment.clone();
+        altered_writes
+            .state_updates
+            .insert(crate::core::address::Address::from([0xCF; 32]), 1);
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &altered_writes, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
 
         // Same height, same block hash, different claimed roots: the very
         // signatures that proved the honest commitment must not open this one.
@@ -1931,12 +2042,18 @@ mod tests {
         ));
 
         let msg = poa_commit_signing_message(
+            domain.domain_chain_id,
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
+            &commitment.state_updates,
         );
         let real_sig = kp.sign(&msg);
         let real_proof = FinalityProof::PoA {
