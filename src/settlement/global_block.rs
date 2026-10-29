@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Global settlement block header - anchors all domain roots, bridge state,
 /// And (as / B.U.D.) the aggregated storage proof root.
 ///
-/// **B.U.D. (vision §8.4):** `storage_root` is `Some(hash)` when the
+/// **B.U.D. (vision):** `storage_root` is `Some(hash)` when the
 /// Block contains at least one verified `StorageProofResponse` from the
 /// B.U.D. storage domain operators; `None` when no storage proofs were
 /// Submitted in this block. This field is committed to the same hash chain
@@ -57,7 +57,7 @@ pub struct GlobalBlockHeader {
     /// Via `poseidon4_hash` (or `hash_fields_bytes` with domain tag
     /// `BDLM_STORAGE_PROOF_V1`) over the proof set.
     ///
-    /// See vision §8.4 and `src/domain/finality_adapter.rs` for the
+    /// See vision and `src/domain/finality_adapter.rs` for the
     /// `StorageAttestationFinalityAdapter` that feeds into this field.
     #[serde(default)]
     pub storage_root: Option<Hash32>,

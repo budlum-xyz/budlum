@@ -45,7 +45,7 @@ and the matching Rust tests) pin the same values.
 ## Deployment
 
 Addresses and constructor parameters live in `config/testnet-ethereum.toml`.
-The deployment rule: no deployment while any F01-F06 negative
+The deployment rule: no deployment while any negative
 test (`test/BudlumFinalityVerifier.t.sol`) is red in CI. The deployer key never
 enters the tree: `contracts deploy` reads the keystore path from
 `BUDLUM_ETH_KEYSTORE`, the endpoint from `BUDLUM_ETH_RPC_URL`, and forge reads

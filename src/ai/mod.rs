@@ -1,4 +1,4 @@
-//! (§1) AI Inference & Compute Layer.
+//! AI Inference & Compute Layer.
 //!
 //! Provides deterministic model registration, request/result attestation tracking,
 //! And threshold consensus finalization (`AiVerifier`).
@@ -18,12 +18,12 @@ pub use registry::AiRegistry;
 
 /// Plonky3 STARK verification is not a production acceptance condition.
 ///
-/// F-03 / F-04 / F-08 / F-09: full Plonky3 STARK verification of AI
+/// Full Plonky3 STARK verification of AI
 /// inference is compiled and tested, but it is not the production
 /// acceptance condition. Flip this only together with an AIR that binds
-/// the initial memory image (F-08) from a Fiat-Shamir transcript (F-09).
+/// the initial memory image from a Fiat-Shamir transcript.
 ///
-/// Additional flip conditions found by the second-pass audit (P32-F02):
+/// Additional flip conditions found by the second-pass audit:
 /// - `initial_state_root` is a prover claim: rebuilding it node-side
 ///   (`expected_initial_state_root`) needs the weights, which are not on
 ///   chain (the model registers only a digest and dims). Until weights are
@@ -840,7 +840,7 @@ mod tests {
         .unwrap();
 
         // Deadline has passed (current_block=200 > deadline_block=110, result_deadline=60)
-        // The read-only check changes nothing (P10-F08): it can run twice.
+        // The read-only check changes nothing: it can run twice.
         assert_eq!(
             registry.check_reclaimable(&req_id, 200),
             Ok((requester, 500))
@@ -4378,7 +4378,7 @@ mod tests {
         assert_ne!(root_before, registry.state_root());
     }
 
-    /// P32-F02: the STARK public inputs are prover claims (initial state root,
+    /// The STARK public inputs are prover claims (initial state root,
     /// event digest, sender, nonce, block height are not bound to the request).
     /// Until they are, the flag stays off and proof-required models cannot
     /// register. Whoever flips the flag must first replace this lock with
@@ -4395,7 +4395,7 @@ mod tests {
 
     #[test]
     fn require_proof_release_needs_fully_verified_proof() {
-        // BLG-0469 / P32-F03: a structural-only attach against a model that
+        // A structural-only attach against a model that
         // does not require proofs used to satisfy `has_execution_proof`, and
         // that was the gate for releasing a `require_proof` escrow: the payer
         // asked for a verified proof and an operator could settle with

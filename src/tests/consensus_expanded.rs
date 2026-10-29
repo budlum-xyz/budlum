@@ -117,7 +117,7 @@ fn chain_genesis_balance_check() {
     assert!(bc.state.get_balance(&Address::from([0x01; 32])) >= 1_000_000_000);
 }
 
-// P01-F25: the forty copies of one block-production test are one loop over
+// The forty copies of one block-production test are one loop over
 // the producer addresses. Same assertions per address, no macro stamp-out.
 #[test]
 fn block_production_works_across_producer_addresses() {

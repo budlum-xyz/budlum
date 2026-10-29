@@ -217,7 +217,7 @@ mod byzantine_settlement_tests {
             DomainCommitment::from_block(&pos, &b_pos, [0u8; 32], [0u8; 32], 1).unwrap();
         com_pos.state_updates.insert(alice, 1); // Also claims consuming nonce 0 -> 1
 
-        //: the settlement door applies a commitment's nonce writes when
+        // the settlement door applies a commitment's nonce writes when
         // it advances the domain, inside the block. The first claim moves the
         // nonce; the second domain's claim on the same nonce breaks the nonce
         // invariant and is refused, so the nonce is spent once.
@@ -295,7 +295,7 @@ mod byzantine_settlement_tests {
 
     #[tokio::test]
     async fn state_update_from_a_non_committer_is_refused() {
-        // BLG-0286 (P18-F01): the freeze-the-victim path. A funded attacker
+        // The freeze-the-victim path. A funded attacker
         // with no validator seat tries the exact move the finding names -
         // push the victim's nonce just under the ceiling, which the old
         // ceiling/monotonicity guards happily waved through.
@@ -327,7 +327,7 @@ mod byzantine_settlement_tests {
                 .expect_err(
                     "an attacker without a validator seat must not move another account's nonce",
                 );
-        //: the StateUpdate door is retired for every sender. A
+        // the StateUpdate door is retired for every sender. A
         // commitment's nonce writes are applied by the settlement door
         // (`SettlementTx::SubmitCommitment`), so the attacker's move is
         // refused before any seat check is reached.
@@ -530,7 +530,7 @@ mod byzantine_settlement_tests {
         );
     }
 
-    /// K4: a restart rebuilds the state from the stored blocks. A domain
+    /// A restart rebuilds the state from the stored blocks. A domain
     /// registered in a block comes back; a commitment accepted outside any
     /// block (the test shim) does not, and neither does the nonce it moved.
     #[tokio::test]

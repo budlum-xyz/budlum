@@ -1054,7 +1054,7 @@ pub struct MerkleWalk {
 /// the Poseidon opcode, `PrivacyCommit` and the nullifier hash all run the
 /// same permutation with zero capacity and no tag, so `Poseidon(a, b)` equals
 /// `PrivacyCommit(a, b, 0)` and `nullifier(s)` equals `Poseidon(s, D)`
-/// (P16-F04). A real separation needs a capacity tag, which changes the AIR.
+/// A real separation needs a capacity tag, which changes the AIR.
 pub const DOMAIN_NULLIFIER: u64 = 0x4e55_4c4c_4946_4552; // "NULLIFER"
 
 // The in-VM hash is the Poseidon parameter set: Goldilocks, width 12,
@@ -1381,7 +1381,7 @@ mod tests {
         assert!(vm.stack.is_empty());
     }
 
-    /// P16-F19: the stack limit, an empty pop and a jump below zero all end
+    /// The stack limit, an empty pop and a jump below zero all end
     /// the run with a typed error. None of them is a panic.
     #[test]
     fn stack_limit_empty_pop_and_negative_jump_are_typed_errors() {
@@ -1996,7 +1996,7 @@ mod poseidon_parameter_tests {
         );
     }
 
-    /// P16-F04: the three hash uses share one function with zero capacity.
+    /// The three hash uses share one function with zero capacity.
     /// This test records the overlap so nobody reads the nullifier constant
     /// as domain separation.
     #[test]

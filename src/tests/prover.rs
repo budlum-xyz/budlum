@@ -327,7 +327,7 @@ fn conflicting_claim_same_domain_height_rejected() {
     assert_eq!(bc.state.settlement.proof_claims.len(), 1);
 }
 
-///: the proof claim book is a settlement registry in the account state.
+/// the proof claim book is a settlement registry in the account state.
 /// An accepted claim changes the state root every node checks; a restart
 /// rebuilds it by replaying the block that carried the proof.
 #[test]

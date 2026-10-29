@@ -59,8 +59,8 @@ const GENESIS_LABEL: &[u8] = b"BDLM_QUANTUM_CANARY_V1";
 const COMMIT_TAG: &[u8] = b"BDLM_CANARY_COMMIT_V1";
 const SET_TAG: &[u8] = b"BDLM_CANARY_SET_V1";
 const BLS_G1_DST: &[u8] = b"BDLM_QUANTUM_CANARY_V1_BLS12381G1_XMD:SHA-256_SSWU_RO_";
-const K1_DST: &[u8] = b"BDLM_QUANTUM_CANARY_V1_SECP256K1_XMD:SHA-256_SSWU_RO_";
-const R1_DST: &[u8] = b"BDLM_QUANTUM_CANARY_V1_P256_XMD:SHA-256_SSWU_RO_";
+const SECP256K1_DST: &[u8] = b"BDLM_QUANTUM_CANARY_V1_SECP256K1_XMD:SHA-256_SSWU_RO_";
+const P256_DST: &[u8] = b"BDLM_QUANTUM_CANARY_V1_P256_XMD:SHA-256_SSWU_RO_";
 
 /// The puzzles of the canary set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -320,7 +320,7 @@ fn collision_check(proof: &[u8], digest: impl Fn(&[u8]) -> Vec<u8>) -> bool {
 }
 
 mod weierstrass {
-    use super::{label, CanaryId, K1_DST, R1_DST};
+    use super::{label, CanaryId, SECP256K1_DST, P256_DST};
     use hash2curve::ExpandMsgXmd;
     use k256::elliptic_curve::array::typenum::Unsigned;
     use k256::elliptic_curve::group::Group;
@@ -371,7 +371,7 @@ mod weierstrass {
     pub(super) fn hash_to_curve_k1() -> Vec<u8> {
         let point = hash2curve::hash_from_bytes::<k256::Secp256k1, ExpandMsgXmd<sha2::Sha256>>(
             &[&label(CanaryId::EccK1)],
-            &[K1_DST],
+            &[SECP256K1_DST],
         )
         .unwrap_or_else(|_| unreachable!("expand_message_xmd accepts these lengths"));
         k256::AffinePoint::from(point)
@@ -384,7 +384,7 @@ mod weierstrass {
     pub(super) fn hash_to_curve_r1() -> Vec<u8> {
         let point = hash2curve::hash_from_bytes::<p256::NistP256, ExpandMsgXmd<sha2::Sha256>>(
             &[&label(CanaryId::EccR1)],
-            &[R1_DST],
+            &[P256_DST],
         )
         .unwrap_or_else(|_| unreachable!("expand_message_xmd accepts these lengths"));
         p256::AffinePoint::from(point)

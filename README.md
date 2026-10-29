@@ -1,5 +1,7 @@
 ![Budlum](assets/budlum-consensus-of-consensuses.png)
 
+Budlum is the next layer of the internet, focused on data sovereignty and social flourishing.
+
 Budlum is the consensus of consensuses.
 
 Every network keeps its own rules. Budlum unifies their finality into a single proof.
@@ -334,7 +336,7 @@ The API covers chain and account state, blocks, transactions and receipts, the v
 and slashing history, domain commitments and settlement info, the bridge lifecycle, BNS
 resolution, the Pollen marketplace, the AI inference lifecycle, and node health. The full
 method list with auth requirements per listener is in
-[SPECIFICATION.md § 3.3](docs/SPECIFICATION.md).
+[SPECIFICATION.md](docs/SPECIFICATION.md).
 
 A minimal CLI client ships in the same tree:
 

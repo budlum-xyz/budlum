@@ -429,7 +429,7 @@ impl RelayerExternalResult {
         hasher.update([u8::from(self.success)]);
         if let Some(ref msg) = self.message {
             hasher.update(msg.message_id);
-            // P18-F03: the executor acts on these message fields (bridge
+            // The executor acts on these message fields (bridge
             // state, unlock domain, correlation). Left out of the leaf, a
             // valid anchored result could be reused with a different kind or
             // correlation id and settle a transfer it never proved.
@@ -562,15 +562,15 @@ pub enum TransactionType {
     BudlumxyzAttestApp {
         app_id: u64,
     },
-    /// (§1) Register AI model specification (`AiVerifier` attestation target).
+    /// Register AI model specification (`AiVerifier` attestation target).
     AiModelRegister(crate::ai::types::AiModelSpec),
-    /// (§1) Submit AI inference attestation request.
+    /// Submit AI inference attestation request.
     AiInferenceRequest(crate::ai::types::AiInferenceRequest),
     /// Submit an AI inference layer inference result by an active bonded RoleId(8) operator.
     AiInferenceResult(crate::ai::types::AiInferenceResult),
-    /// (§1 P5) Reclaim escrowed max_fee for expired unfinalized AI request.
+    /// Reclaim escrowed max_fee for expired unfinalized AI request.
     AiFeeReclaim(crate::ai::types::AiRequestId),
-    /// (§1 P5) Deactivate an AI model (owner-only, prevents new requests).
+    /// Deactivate an AI model (owner-only, prevents new requests).
     AiModelDeactivate(crate::ai::types::AiModelId),
     /// Reactivate a previously deactivated AI model.
     AiModelReactivate(crate::ai::types::AiModelId),
@@ -664,7 +664,7 @@ pub enum TransactionType {
     /// execution body. (Written without naming types: the signing gate reads
     /// the enum body's identifiers to resolve carried payload types.)
     PoaOnboarding(crate::registry::poa_onboarding::PoAOnboardingTx),
-    /// Bond into a permissionless role (BLG-0092 / P04-F10, testnet
+    /// Bond into a permissionless role (testnet
     ///): the role id and the bond amount in the signed
     /// header, nothing else. The verifier family registers at the floor;
     /// the relayer, prover and storage operator roles also take a top-up of
@@ -1560,7 +1560,7 @@ impl Transaction {
             debug!("the suite does not name SLH-DSA-SHAKE-256s as its recovery scheme");
             return false;
         }
-        //: the path opens only while the ML-DSA family is Disabled.
+        // the path opens only while the ML-DSA family is Disabled.
         if registry.scheme_status(info.pq) != Some(SchemeStatus::Disabled) {
             debug!("recovery is closed: the post-quantum family of the suite is not disabled");
             return false;
@@ -1926,7 +1926,7 @@ impl Transaction {
         if canonical_genesis {
             return true;
         }
-        //: a mainnet genesis accepts the composite formats alone. V4
+        // a mainnet genesis accepts the composite formats alone. V4
         // (Ed25519 only), V5 (ML-DSA-87 only) and V6 (ML-DSA-87 multisig) have
         // no Ed25519 half or no PQ half, so none of them may stand on mainnet
         //. They stay valid on devnet and testnet.
@@ -2916,7 +2916,7 @@ fn encode_message(message: &crate::cross_domain::message::CrossDomainMessage, ou
         crate::cross_domain::message::quantum_class_code(message.source_quantum_class),
     );
 }
-/// Canonical preimage of a PoA admission transaction (BLG-0089).
+/// Canonical preimage of a PoA admission transaction.
 ///
 /// Operation tag, domain id, and the addresses/commitments/reasons each arm
 /// carries - every field the execution body reads is under the signature, so
@@ -3277,7 +3277,7 @@ fn encode_identity_tx(tx: &crate::registry::IdentityTx, out: &mut Vec<u8>) {
         } => {
             put_u8(out, 1);
             encode_credential_commitment(credential, out);
-            // BLG-0095: the consent is committed whole, key and signature
+            // The consent is committed whole, key and signature
             // included, so a relay cannot strip it or swap another valid one.
             match consent {
                 Some(consent) => {
@@ -4618,7 +4618,7 @@ mod v29_signing_tests {
         );
     }
 
-    ///: the source quantum class of a relayed message is under the
+    /// the source quantum class of a relayed message is under the
     /// relay transaction's signature, so a relaying node cannot rewrite what
     /// the receiver reads.
     #[test]
@@ -4663,7 +4663,7 @@ mod v29_signing_tests {
         assert_ne!(tx.signing_hash(), hashes[0]);
     }
 
-    ///: every field a bridge transaction carries reaches the signing
+    /// every field a bridge transaction carries reaches the signing
     /// preimage: a relaying node that rewrites one breaks the signature.
     #[test]
     fn bridge_preimage_covers_every_field_it_claims() {
@@ -5643,7 +5643,7 @@ mod relayer_result_leaf_tests {
         }
     }
 
-    /// P18-F03: a valid anchored result cannot be reused under another
+    /// A valid anchored result cannot be reused under another
     /// message kind, correlation id, or domain pair.
     #[test]
     fn leaf_binds_message_kind_correlation_and_domains() {

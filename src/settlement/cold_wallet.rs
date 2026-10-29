@@ -307,7 +307,7 @@ pub struct ColdWalletState {
     /// device that has signed nothing since it was installed is a cold device
     /// nobody is using, and that is an operational fact worth seeing.
     pub signed_count: u64,
-    /// S2 (P03-F05 follow-up): the committee this wallet trusts, stored in
+    /// S2 ( follow-up): the committee this wallet trusts, stored in
     /// state. Verification used to take the identity set from the caller,
     /// so any caller could present its own identities and pass the quorum.
     #[serde(default)]
@@ -505,7 +505,7 @@ impl ColdWalletState {
     ///
     /// The first [`ColdRefusal`] that applies.
     ///
-    /// BLG-0071 (P03-F14): module-private on purpose. The unauthenticated
+    /// Module-private on purpose. The unauthenticated
     /// path may only be reached through [`Self::sign_with_quorum`], which has
     /// verified the device quorum before any budget or counter moves.
     fn sign(
@@ -744,7 +744,7 @@ impl ColdWalletState {
         // quorum gate however must refuse signatures pinned to any other
         // epoch right here, before the policy layer even looks at the request.
         if presented_key_epoch != self.key_epoch {
-            // BLG-0072 (P03-F15): no signature has been checked yet, so this
+            // No signature has been checked yet, so this
             // refusal must NOT enter the bounded refusal history - an
             // unsigned caller could otherwise push real refusals out of it.
             // `check` decides without recording; only the authenticated path
@@ -780,7 +780,7 @@ impl ColdWalletState {
     /// WIRING: unwired - key rotation is an operator action on the same
     /// dormant cold-wallet path; refusal rules are pinned by this file's tests.
     ///
-    /// BLG-0071 (P03-F14): crate-visible only, like [`Self::sign`] is
+    /// Crate-visible only, like [`Self::sign`] is
     /// module-visible. The sole caller is the committee-gated rotation in
     /// `pq_anchor`; an unauthenticated caller must not bump the key epoch.
     pub(crate) fn rotate_key(
@@ -839,7 +839,7 @@ mod tests {
     use super::*;
 
     /// The six fixture devices as the trusted set a wallet is pinned to
-    /// (BLG-0062-S2).
+    /// (S2).
     fn quorum_identities() -> Vec<crate::settlement::cold_quorum::SignerIdentity> {
         crate::settlement::cold_quorum::dev_fixture_device_signers()
             .iter()

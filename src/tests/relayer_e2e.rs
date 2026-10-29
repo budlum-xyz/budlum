@@ -120,7 +120,7 @@ fn enqueue_bridge_relay_increments_pending() {
     assert_eq!(bc.pending_relay_count(), 1);
 }
 
-/// K4: a lock applied in a block enqueues its relay in the account state,
+/// A lock applied in a block enqueues its relay in the account state,
 /// and the restart (a replay of the stored blocks) brings the pending relay
 /// back with the same relayer state.
 #[test]
@@ -210,7 +210,7 @@ fn burn_bridge_transfer_with_event_auto_enqueues_pending_relay() {
     let lock_message = lock_event.message.unwrap();
     bc.state.bridge_state.mint(&lock_message, 0).unwrap();
     // The state-level mint is the row flip only; the credit half is the
-    // caller's (BLG-0108), and the burn debits what was credited.
+    // caller's , and the burn debits what was credited.
     bc.state.add_balance(&recipient(), 100);
 
     let burn_event = bc
@@ -492,7 +492,7 @@ fn full_internal_relay_cycle_burn_unlock() {
         .unwrap();
     let lock_msg = lock_event.message.unwrap();
     bc.state.bridge_state.mint(&lock_msg, 0).unwrap();
-    // Credit half of the mint (BLG-0108): the burn below debits it again.
+    // Credit half of the mint: the burn below debits it again.
     bc.state.add_balance(&recipient(), 100);
 
     // 3. Burn on Domain 2 via the blockchain wrapper so production relay

@@ -896,7 +896,7 @@ mod tests {
         assert!(parser.parse_contract().is_ok());
     }
 
-    /// P35-F08: operator and field chains are parsed in loops, so the
+    /// Operator and field chains are parsed in loops, so the
     /// nesting guard never sees them. Before, a flat chain built a tree as
     /// tall as the chain, and sema or codegen recursed once per level.
     #[test]

@@ -154,7 +154,7 @@ impl ZkProofSubmission {
         // Infeasible to fail from untrusted input (no fallible custom Serialize,
         // Writing to a Vec), so a failure is a deterministic programming error we
         // Fail-fast on rather than hide.
-        // P18-F10: if the envelope cannot be serialized (a programming error),
+        // If the envelope cannot be serialized (a programming error),
         // the fallback still carries the raw proof bytes and the envelope
         // identity, so two different proofs never share one binding hash.
         let proof_bytes = bincode::serialize(proof).unwrap_or_else(|_| {
@@ -266,7 +266,7 @@ pub enum ProofError {
     },
     /// Insufficient balance to pay the submission fee.
     InsufficientFee { have: u64, need: u64 },
-    /// The claim registry is at its capacity (BLG-0294).
+    /// The claim registry is at its capacity.
     RegistryFull { cap: usize },
 }
 
@@ -300,7 +300,7 @@ impl std::fmt::Display for ProofError {
 
 impl std::error::Error for ProofError {}
 
-/// Hard capacity of [`ProofClaimRegistry`] (BLG-0294, P18-F09).
+/// Hard capacity of [`ProofClaimRegistry`].
 ///
 /// The registry had no bound and no pruning, and it is consensus-critical,
 /// which rules the two options apart from how they look elsewhere: pruning
@@ -308,7 +308,7 @@ impl std::error::Error for ProofError {}
 /// statement - a claim dropped for domain height H lets a *new* proof assert a
 /// different root for H today. So no horizon is safe here while proofs are
 /// accepted for any past height, and the bound is enforced by refusal
-/// instead: entries cost a burned fee (post BLG-0287 operator gate), reaching
+/// instead: entries cost a burned fee (post operator gate), reaching
 /// 100k means paying it 100k times, and past the cap every node refuses the
 /// same way, so the boundary is deterministic. Write-per-save stays too - the
 /// submission path runs outside block execution, and a crash that lost a
@@ -385,7 +385,7 @@ impl ProofClaimRegistry {
 
     /// Persist a newly accepted claim.
     ///
-    /// BLG-0294: refuses at [`MAX_PROOF_CLAIMS`] rather than growing without
+    /// Refuses at [`MAX_PROOF_CLAIMS`] rather than growing without
     /// bound; the caller maps the refusal onto the submission path.
     pub fn record(&mut self, claim: AcceptedProofClaim) -> Result<(), ProofError> {
         if self.claims.len() >= MAX_PROOF_CLAIMS {
@@ -418,7 +418,7 @@ mod tests {
         }
     }
 
-    /// BLG-0294: the cap refuses at the boundary and the refusal is total -
+    /// The cap refuses at the boundary and the refusal is total -
     /// the registry state is untouched, so a full registry still answers
     /// its recorded claims and still classifies duplicates correctly.
     /// Filling 100k keys is a loop of BTreeMap inserts; keep it cheap by

@@ -74,14 +74,14 @@ pub struct VerifiedCheckpoint {
     /// The external chain's state root at `height` (64-hex), as recorded in the
     /// finalized header. A consensus step anchors this via
     /// `AccountState::anchor_external_root` so the relayer gate can validate
-    /// against it (AR-GE-6 / F-12). Carried here so the verified finality fact
+    /// against it (AR-GE-6 /). Carried here so the verified finality fact
     /// survives past the verification call.
     pub state_root: String,
 }
 
 impl VerifiedCheckpoint {
     /// The external chain's state root at [`Self::height`], as a 32-byte digest
-    /// ready to anchor via `AccountState::anchor_external_root` (AR-GE-6 / F-12).
+    /// ready to anchor via `AccountState::anchor_external_root` (AR-GE-6 /).
     ///
     /// Returns `None` when the recorded root is not a canonical 32-byte digest:
     /// such a value would be refused by the anchor (zero / malformed), so
@@ -971,7 +971,7 @@ mod tests {
         ));
     }
 
-    /// AR-GE-6 / F-12: a verified checkpoint exposes the external state root
+    /// AR-GE-6 /: a verified checkpoint exposes the external state root
     /// as an anchorable Hash32; non-32-byte / non-hex roots are refused.
     #[test]
     fn verified_checkpoint_exposes_anchorable_external_root() {
@@ -1128,7 +1128,7 @@ mod tests {
     }
 
     /// A finalized header that `verify_header_chain` never linked to the
-    /// anchor is refused, even with a valid certificate (audit P18-F07).
+    /// anchor is refused, even with a valid certificate (audit).
     #[test]
     fn checkpoint_requires_a_header_linked_to_the_anchor() {
         let (snapshot, sks) = make_bls_snapshot(4, 1000);
@@ -1169,7 +1169,7 @@ mod tests {
         ));
     }
 
-    /// The next checkpoint height is computed in closed form (audit P18-F08):
+    /// The next checkpoint height is computed in closed form (audit):
     /// a huge target must not loop height by height.
     #[test]
     fn next_checkpoint_height_is_closed_form() {
@@ -1274,7 +1274,7 @@ mod tests {
         QcBlob::new(snapshot.epoch, header.index, header.hash.clone(), entries)
     }
 
-    ///: a global header binds to a verified checkpoint through the state
+    /// a global header binds to a verified checkpoint through the state
     /// root opening; a header from another checkpoint, a tampered header or
     /// a wrong opening is refused.
     #[test]

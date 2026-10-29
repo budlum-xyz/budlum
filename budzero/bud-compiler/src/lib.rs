@@ -78,7 +78,7 @@ pub fn compile(source: &str, profile: IsaProfile) -> Result<Vec<u64>, CompileErr
 mod tests {
     use super::*;
 
-    /// P35-F21: a CRLF source compiles like its LF twin.
+    /// A CRLF source compiles like its LF twin.
     #[test]
     fn crlf_line_ends_are_whitespace() {
         let lf = "contract C {\n    pub fn main() {\n        let x = 1;\n    }\n}\n";
@@ -89,7 +89,7 @@ mod tests {
         );
     }
 
-    /// P35-F22: duplicate names are errors, not "the last one wins".
+    /// Duplicate names are errors, not "the last one wins".
     #[test]
     fn duplicate_functions_structs_storage_and_params_are_refused() {
         let cases = [
@@ -813,7 +813,7 @@ mod tests {
         vm.events.clone()
     }
 
-    /// P35-F01: a non-identifier scrutinee lives in a temporary register;
+    /// A non-identifier scrutinee lives in a temporary register;
     /// the pattern Load must not reuse it.
     #[test]
     fn match_on_expression_scrutinee_picks_the_right_arm() {
@@ -834,7 +834,7 @@ mod tests {
         assert_eq!(run_events(source), vec![300]);
     }
 
-    /// P35-F02: `let b = a;` must copy, not alias.
+    /// `let b = a;` must copy, not alias.
     #[test]
     fn let_binding_does_not_alias_its_source() {
         let source = r#"
@@ -851,7 +851,7 @@ mod tests {
         assert_eq!(run_events(source), vec![5, 6]);
     }
 
-    /// P35-F03: a struct literal nested inside another literal must get its
+    /// A struct literal nested inside another literal must get its
     /// own heap block.
     #[test]
     fn nested_struct_literal_does_not_overlap_outer_block() {
@@ -900,7 +900,7 @@ mod tests {
         assert_eq!(vm.events, vec![30]);
     }
 
-    /// P35-F23: storage reads and writes are checked against the declared
+    /// Storage reads and writes are checked against the declared
     /// field type, and a mapping needs an index.
     #[test]
     fn storage_access_is_checked_against_the_field() {
@@ -943,7 +943,7 @@ mod tests {
         .expect("matching storage access compiles");
     }
 
-    /// P35-F24: with two fields missing, the error names the same one on
+    /// With two fields missing, the error names the same one on
     /// every run (the first in name order).
     #[test]
     fn missing_field_error_is_deterministic() {
@@ -966,7 +966,7 @@ mod tests {
         }
     }
 
-    /// P35-F16: a function with a result must return on every path, and
+    /// A function with a result must return on every path, and
     /// `main` cannot take parameters.
     #[test]
     fn missing_return_and_main_parameters_are_refused() {
@@ -1023,7 +1023,7 @@ mod tests {
         }
     }
 
-    /// P35-F17: a name bound inside an `if` or `while` body is not visible
+    /// A name bound inside an `if` or `while` body is not visible
     /// after it, and a `let` there does not replace an outer variable.
     #[test]
     fn branch_bindings_stay_in_the_branch() {
@@ -1072,7 +1072,7 @@ mod tests {
         assert_eq!(vm.events, vec![2, 1]);
     }
 
-    /// P35-F01: a scrutinee that is not a plain identifier lives in a
+    /// A scrutinee that is not a plain identifier lives in a
     /// temporary register. The pattern Load must not overwrite it.
     #[test]
     fn test_match_on_expression_scrutinee_keeps_its_register() {
@@ -1099,7 +1099,7 @@ mod tests {
         assert_eq!(vm.events, vec![200, 999]);
     }
 
-    /// P35-F02: `let b = a;` copies the value. A later write to `a` must not
+    /// `let b = a;` copies the value. A later write to `a` must not
     /// change `b`, and a write to the loop bound must not move the bound.
     #[test]
     fn test_let_copies_value_and_loop_bound_is_snapshotted() {
@@ -1130,7 +1130,7 @@ mod tests {
         assert_eq!(vm.events, vec![5, 3]);
     }
 
-    /// P35-F03: a struct literal nested in another literal must get its own
+    /// A struct literal nested in another literal must get its own
     /// heap block. Before, both objects started at the same address.
     #[test]
     fn test_nested_struct_literal_gets_its_own_heap_block() {
@@ -1152,7 +1152,7 @@ mod tests {
         assert_eq!(vm.events, vec![1, 42, 7]);
     }
 
-    /// P35-F05: a wide integer pattern must compare as the full value. Before,
+    /// A wide integer pattern must compare as the full value. Before,
     /// the Load immediate was cut with `as i32`, so 4294967296 matched 0.
     #[test]
     fn test_match_wide_integer_pattern_is_not_truncated() {
@@ -1180,7 +1180,7 @@ mod tests {
         assert_eq!(vm.events, vec![0, 1, 2, 0]);
     }
 
-    /// P35-F05: a pattern at or above the field modulus is refused, like an
+    /// A pattern at or above the field modulus is refused, like an
     /// expression literal.
     #[test]
     fn test_match_pattern_above_field_modulus_is_refused() {
@@ -1199,7 +1199,7 @@ mod tests {
         assert!(matches!(res, Err(CompileError::CodegenError(_))), "{res:?}");
     }
 
-    /// P35-F06: a `let` inside a match arm is scoped to the arm. It must not
+    /// A `let` inside a match arm is scoped to the arm. It must not
     /// replace an outer variable of the same name.
     #[test]
     fn test_match_arm_let_does_not_shadow_outer_variable() {
@@ -1222,7 +1222,7 @@ mod tests {
         assert_eq!(vm.events, vec![5, 1]);
     }
 
-    /// P35-F07: sema enforces what codegen assumes: the last arm is the
+    /// Sema enforces what codegen assumes: the last arm is the
     /// wildcard, a wildcard is never in the middle, patterns are unique.
     #[test]
     fn test_match_shape_is_checked_by_sema() {

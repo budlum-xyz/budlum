@@ -1,6 +1,6 @@
 //! Budlum blockchain quantum security - chain-wide (not storage).
 //!
-//! Fix in 8 steps, KQ-* gates, no unsafe.
+//! Fix in 8 steps, gates, no unsafe.
 //!
 //! FINAL decisions: V4 SHA3 hard fork, a 128KB block holding 27 tx, lower
 //! threshold, same_set, ci_gate, only ml-dsa-87 final, sha3_sponge,
@@ -125,7 +125,7 @@ impl Sha3Sponge {
     }
 }
 
-/// Gates KQ-*
+/// Gates
 pub struct QuantumChainGates;
 impl QuantumChainGates {
     pub fn kq_hash(data: &[u8], digest: &[u8; 32]) -> bool {

@@ -93,7 +93,7 @@ record.
 
 ## 4. Route options (costed; decision routed, not taken here)
 
-E1 - Poseidon16 chip inside the existing audit scope. Add a width-16
+- Poseidon16 chip inside the existing audit scope. Add a width-16
 Poseidon2 lane to the same plonky3 AIR package the VerifyMerkle audit
 will already read (same 30-round schedule, initial/terminal round
 splits, same Grain-LFSR constants set - byte-identical constants to
@@ -108,22 +108,22 @@ queue manifest (section 5). This is the route that keeps bar 4's
 sentence true with one honest amendment: the needed class is a chip,
 not an opcode; the audit scope widens by one chip inside one package.
 
-E2 - Generalize VerifyMerkle to parameterized width/depth. Fold the
+- Generalize VerifyMerkle to parameterized width/depth. Fold the
 64-deep u64 path verifier and a 16-deep 32-byte path verifier into one
 parameterized AIR. Cost: higher chip complexity, longer review;
-benefit over E1: one chip instead of two (path walk + sponge). Carried
+benefit over: one chip instead of two (path walk + sponge). Carried
 as an option, not recommended for the first audit round: it multiplies
 the reviewer-facing surface exactly where history says bindings get
 forgotten (the `merkle_current` lesson).
 
-E3 - Defer: keep BPQS verification off-VM entirely (native settlement
+- Defer: keep BPQS verification off-VM entirely (native settlement
 code), with the production slot fail-closed forever unless bar 2/3 say
 otherwise. Cost: bar 4 never closes, BPQS never promotes beyond
 research; the anchor flow keeps its current PQ family. Honest and
-available; recorded so the cost of E1 is visible against it.
+available; recorded so the cost of is visible against it.
 
 Registered recommendation (this document's own weighing, pending the
-user's decision on item 7 and the review-call issue): E1, queued as
+user's decision on item 7 and the review-call issue): , queued as
 manifest items / below so the review assesses the widened chip
 set in the same engagement as the VerifyMerkle binding re-review.
 
@@ -141,10 +141,10 @@ pq_anchor.rs` both wait on; each item names its evidence owner:
   privacy lane (the 30-round constraint set; the privacy opcodes'
   reopening rationale in bud-isa is part of the record the reviewer
   reads).
-- (queued by this document): Poseidon16 chip (E1) with the
+- (queued by this document): Poseidon16 chip with the
   cross-KAT obligation against `crates/bpqs/src/poseidon2.rs`
   constants and the pinned upstream vector; opens once decision item 7
-  lands E1-side.
+  lands -side.
 - (queued by this document): BPQS verify-chain trace projection
   (the ~2 x 10^3-permutation schedule of section 2) expressed over
  's chip, so the anchor verification's row count is part of the
@@ -158,7 +158,7 @@ pq_anchor.rs` both wait on; each item names its evidence owner:
   few-time term; SECURITY-ARGUMENT.md section 6).
 - Bar 3 (review call) can issue in parallel with KARAR-7; the call's
   question 2 already subsumes it (`docs/BPQS_INDEPENDENT_REVIEW_CALL.md`).
-- Bar 4 (this document) -> E1/E2/E3 posture (user decision; E1
+- Bar 4 (this document) -> posture (user decision;
   recommended) -> / implementation (a later milestone; chip work
   belongs to the BudZero tree, not crates/bpqs) -> VerifyMerkle
   external review (shared blocker with anchor production mode).

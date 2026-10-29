@@ -317,7 +317,7 @@ fn decode_png_grey(png: &[u8]) -> Result<(usize, usize, Vec<u8>), String> {
             return Err("png crc".into());
         }
         off = crc_end;
-        // BLG-0431: CRC-valid chunks still need a valid PNG grammar.
+        // CRC-valid chunks still need a valid PNG grammar.
         if !saw_ihdr && chunk_kind != b"IHDR" {
             return Err("ihdr must be first".into());
         }
@@ -643,7 +643,7 @@ mod tests {
         assert_eq!(got0, frames[0]);
     }
 
-    /// The lossy half of the K10 claim, measured here rather than asserted.
+    /// The lossy half of the claim, measured here rather than asserted.
     ///
     /// Two things are checked, because the claim has two halves and they run
     /// through different code. A drop's body is 4000 bytes at the low level, so

@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 progressive receiver (plan §CH A7, K-QR-AKIS / K-QR-KARUSEL).
+//! B.U.D. 3.0 progressive receiver.
 //!
 //! Ingests A3 optical frames (or raw A2 drops), peels the carousel, and
 //! exposes **prefix availability**: how many leading source blocks are solid
@@ -180,7 +180,7 @@ impl ProgressiveReceiver {
     /// Leading contiguous solved blocks: how far a viewer can play without
     /// waiting for the carousel to close.
     ///
-    /// K-QR-KARUSEL: the systematic pass makes this climb early under low loss,
+    /// The systematic pass makes this climb early under low loss,
     /// which is the whole reason for that ordering. The count comes from the
     /// decoder's own solved slots, not from a completion flag.
     #[must_use]
@@ -345,9 +345,9 @@ mod tests {
         assert_eq!(rx.finish_packed().unwrap(), packed);
     }
 
-    /// P29-F01: a self-consistent forged stream framed under the pinned
+    /// A self-consistent forged stream framed under the pinned
     /// commitment is refused at finish, and after a reset the honest stream
-    /// recovers (P29-F02 recovery).
+    /// recovers ( recovery).
     #[test]
     fn a_forged_stream_is_refused_at_finish_and_reset_recovers() {
         let honest = pack_payload(PayloadKind::ContentBytes, b"honest-body-bytes-honest").unwrap();
