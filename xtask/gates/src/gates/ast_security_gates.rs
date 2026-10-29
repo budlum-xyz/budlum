@@ -287,11 +287,6 @@ impl<'ast> Visit<'ast> for ZeroAddressFinder {
             if cond.contains("Address::zero") {
                 let mut check = ZeroBlockCheck::default();
                 check.visit_block(&node.then_branch);
-                for st in &node.then_branch.stmts {
-                    if let Stmt::Expr(Expr::If(ifn), _) = st {
-                    } else {
-                    }
-                }
                 self.result = Some(check);
                 return;
             }
