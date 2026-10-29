@@ -233,6 +233,13 @@ fn precommit_height_is_new(signed_height: u64, last_precommit_height: u64) -> bo
 /// Charging bad behaviour for it is how a mesh bans its own validators, which
 /// is what the devnet did once the vote beat got fast enough to produce
 /// cross-round votes.
+///
+/// Membership belongs on the same list. An aggregator checks a vote against
+/// the validator snapshot it built for its own epoch, and that snapshot is
+/// taken from the state this node holds: across an epoch boundary a node one
+/// block behind still has the previous set, so a vote from a validator that
+/// joined - or one whose keys landed in the current block - reads as a
+/// stranger. The voter is a member; the reader is late.
 fn refusal_is_round_scope(error: &str) -> bool {
     [
         "Prevote epoch mismatch",
@@ -243,6 +250,7 @@ fn refusal_is_round_scope(error: &str) -> bool {
         "Duplicate precommit",
         "Cannot precommit before prevote quorum",
         "No active finality aggregator",
+        "Voter not in validator set",
     ]
     .iter()
     .any(|refusal| error.contains(refusal))
@@ -4474,8 +4482,14 @@ impl Node {
                                     }
                                     warn!("Outbound sync failure to {}: {:?}", peer, error);
                                     {
+                                        // A request this node chose to send
+                                        // that came back unanswered costs the
+                                        // peer its place in the sync order,
+                                        // not an hour of silence: the devnet
+                                        // lost its own validators to that ban
+                                        // and then could not finalize.
                                         let mut pm = self.peer_manager_lock();
-                                        pm.report_timeout(&peer);
+                                        pm.report_unanswered_request(&peer);
                                     }
                                     // Handshake requests share `/sync` with chain sync.
                                     // Only the request that owns the active round may
