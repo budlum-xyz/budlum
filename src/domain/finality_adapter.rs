@@ -183,6 +183,10 @@ pub fn poa_commit_digest(
     domain_id: DomainId,
     domain_height: u64,
     domain_block_hash: &Hash32,
+    parent_domain_block_hash: &Hash32,
+    sequence: u64,
+    timestamp_ms: u128,
+    producer: Option<crate::core::address::Address>,
     state_root: &Hash32,
     tx_root: &Hash32,
     event_root: &Hash32,
@@ -193,6 +197,10 @@ pub fn poa_commit_digest(
         domain_id,
         domain_height,
         domain_block_hash,
+        parent_domain_block_hash,
+        sequence,
+        timestamp_ms,
+        producer,
         state_root,
         tx_root,
         event_root,
@@ -280,7 +288,7 @@ pub struct PoAAuthoritySignature {
 
 /// Canonical message a PoA authority signs to attest a commitment. Binds the
 /// signature to the network (`chain_id`), the domain, the height, the block
-/// hash **and to the roots and nonce writes the commitment claims**: a quorum
+/// hash, parent, sequence, timestamp, producer, roots and nonce writes: a quorum
 /// captured over one commitment must not be replayable under a different
 /// `state_root`/`tx_root`/`event_root` or an extended `state_updates` map, or
 /// a fabricated external root can be anchored with a genuine set of signatures
@@ -289,28 +297,43 @@ pub struct PoAAuthoritySignature {
 /// The chain id is not decoration: domain ids are small integers assigned by
 /// permissionless registration, so two networks can both have a domain 7, and
 /// without the chain id the same `(domain, height, hash)` triple would produce
-/// the same message on both. The `_V4` tag is part of the domain separation: a
-/// signature made under `_V1`-`_V3` (each of which lacked some of these
+/// the same message on both. The `_V5` tag is part of the domain separation: a
+/// signature made under `_V1`-`_V4` (each of which lacked some of these
 /// fields) does not verify here, so no pre-fix attestation can be replayed
-/// against the chain-bound, root-bound, writes-bound verifier.
+/// against the chain- and commitment-metadata-bound verifier.
 #[allow(clippy::too_many_arguments)]
 pub fn poa_commit_signing_message(
     chain_id: u64,
     domain_id: DomainId,
     domain_height: u64,
     domain_block_hash: &Hash32,
+    parent_domain_block_hash: &Hash32,
+    sequence: u64,
+    timestamp_ms: u128,
+    producer: Option<crate::core::address::Address>,
     state_root: &Hash32,
     tx_root: &Hash32,
     event_root: &Hash32,
     state_updates: &std::collections::BTreeMap<crate::core::address::Address, u64>,
 ) -> Vec<u8> {
-    let mut msg =
-        Vec::with_capacity(24 + 8 + 8 + 8 + 32 + 32 + 32 + 32 + 8 + state_updates.len() * 40);
-    msg.extend_from_slice(b"BUDLUM_POA_COMMIT_V4");
+    let mut msg = Vec::with_capacity(
+        24 + 8 + 8 + 8 + 32 + 32 + 8 + 16 + 1 + 32 + 32 + 32 + 32 + 8 + state_updates.len() * 40,
+    );
+    msg.extend_from_slice(b"BUDLUM_POA_COMMIT_V5");
     msg.extend_from_slice(&chain_id.to_le_bytes());
     msg.extend_from_slice(&domain_id.to_le_bytes());
     msg.extend_from_slice(&domain_height.to_le_bytes());
     msg.extend_from_slice(domain_block_hash);
+    msg.extend_from_slice(parent_domain_block_hash);
+    msg.extend_from_slice(&sequence.to_le_bytes());
+    msg.extend_from_slice(&timestamp_ms.to_le_bytes());
+    match producer {
+        Some(address) => {
+            msg.push(1);
+            msg.extend_from_slice(address.as_bytes());
+        }
+        None => msg.push(0),
+    }
     msg.extend_from_slice(state_root);
     msg.extend_from_slice(tx_root);
     msg.extend_from_slice(event_root);
@@ -810,6 +833,10 @@ impl PoAFinalityAdapter {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
@@ -1062,6 +1089,10 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
@@ -1450,6 +1481,10 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                     domain.id,
                     commitment.domain_height,
                     &commitment.domain_block_hash,
+                    &commitment.parent_domain_block_hash,
+                    commitment.sequence,
+                    commitment.timestamp_ms,
+                    commitment.producer,
                     &commitment.state_root,
                     &commitment.tx_root,
                     &commitment.event_root,
@@ -2011,6 +2046,10 @@ mod tests {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
@@ -2098,6 +2137,10 @@ mod tests {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
@@ -2163,6 +2206,10 @@ mod tests {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
@@ -2230,6 +2277,10 @@ mod tests {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
@@ -2258,6 +2309,43 @@ mod tests {
             FinalityStatus::Finalized,
             "the commitment the quorum signed finalizes"
         );
+
+        let proof = FinalityProof::PoA {
+            authorities: authorities.clone(),
+            signatures: signatures.clone(),
+        };
+        let mut altered_parent = commitment.clone();
+        altered_parent.parent_domain_block_hash = [0xAB; 32];
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &altered_parent, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+        let mut altered_sequence = commitment.clone();
+        altered_sequence.sequence = commitment.sequence.saturating_add(1);
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &altered_sequence, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+        let mut altered_timestamp = commitment.clone();
+        altered_timestamp.timestamp_ms = commitment.timestamp_ms.saturating_add(1);
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &altered_timestamp, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
+        let mut altered_producer = commitment.clone();
+        altered_producer.producer = Some(crate::core::address::Address::from([0xCD; 32]));
+        assert!(matches!(
+            adapter
+                .verify_finality(&domain, &altered_producer, &proof)
+                .unwrap(),
+            FinalityStatus::Rejected(_)
+        ));
 
         // Same height, same block hash, different claimed roots: the very
         // signatures that proved the honest commitment must not open this one.
@@ -2739,6 +2827,10 @@ mod tests {
             domain.id,
             commitment.domain_height,
             &commitment.domain_block_hash,
+            &commitment.parent_domain_block_hash,
+            commitment.sequence,
+            commitment.timestamp_ms,
+            commitment.producer,
             &commitment.state_root,
             &commitment.tx_root,
             &commitment.event_root,
