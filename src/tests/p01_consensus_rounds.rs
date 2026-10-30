@@ -190,7 +190,6 @@ mod p01_consensus_rounds_tests {
         // has genuinely elapsed, so the pricing gate lets it through and any
         // later refusal is about something else.
         let (parent, block) = fixture(now_ms.saturating_sub(60_000));
-        engine.note_block_seen(&parent.hash, parent.timestamp);
         if let Err(error) = engine.validate_block(&block, &[parent], &state) {
             assert!(
                 !error.0.contains("claimed before it elapsed")
@@ -474,70 +473,55 @@ mod p01_poa_round_pricing_tests {
         (state, address)
     }
 
-    /// The round rule prices a PoA claim identically on every node, and only a
-    /// stamp dated ahead of the sighting can lower the anchor.
+    /// The round rule prices a PoA claim identically on every node.
     ///
-    /// The price used to be read from "when this node saw the parent land".
-    /// That is a value only one node has - its boot time for genesis, its
-    /// restart for a tip loaded from disk - so the same claim cleared the gate
-    /// on the node that committed the parent and was refused on the node that
-    /// joined a second later. A refused claim is a block refused for good: the
-    /// devnet mesh answered it by keeping two chains at height 1. The parent's
-    /// stamp is the value every node holding the block reads the same way.
+    /// The price used to be read off "when this node saw the parent land".
+    /// That is a value only one node has - its boot time for genesis, its load
+    /// instant for a tip restored from disk - so the same claim cleared the
+    /// gate on the node that committed the parent and was refused on the node
+    /// that joined a second later. A refused claim is a block refused for
+    /// good: the devnet mesh answered it by keeping two chains at height 1.
+    /// The parent's stamp is the value every node holding the block reads the
+    /// same way, so it is the only anchor the price may use.
     #[test]
     fn poa_prices_a_round_by_the_shared_stamp_whatever_this_node_saw() {
         let (state, address) = single_authority_state();
         let now_ms = crate::consensus::now_millis();
         let round = 6u64;
 
-        let mut parent = Block::genesis();
-        parent.timestamp = now_ms.saturating_sub(600_000);
-        parent.hash = parent.calculate_hash();
-        let mut block = Block::new(1, parent.hash.clone(), vec![]);
-        block.timestamp = parent
-            .timestamp
-            .saturating_add(MIN_BLOCK_INTERVAL_MS)
-            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
-        block.producer = Some(address);
-        block.nonce = round;
+        let fixture = |parent_ts: u128| {
+            let mut parent = Block::genesis();
+            parent.timestamp = parent_ts;
+            parent.hash = parent.calculate_hash();
+            let mut block = Block::new(1, parent.hash.clone(), vec![]);
+            block.timestamp = parent
+                .timestamp
+                .saturating_add(MIN_BLOCK_INTERVAL_MS)
+                .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+            block.producer = Some(address);
+            block.nonce = round;
+            (parent, block)
+        };
 
-        // The same claim under three sightings - the parent adopted the moment
-        // it was stamped, adopted ten minutes late, and never adopted at all -
-        // prices the same way. Ten minutes is past round 6 on every node, so
-        // the pricing gate lets the claim through and any later refusal is
-        // about something else.
-        for seen in [Some(parent.timestamp), Some(now_ms), None] {
-            let engine = PoAEngine::new(PoAConfig::default(), None);
-            if let Some(at) = seen {
-                engine.note_block_seen(&parent.hash, at);
-            }
-            if let Err(error) = engine.validate_block(&block, std::slice::from_ref(&parent), &state)
-            {
-                assert!(
-                    !error.0.contains("claimed before it elapsed"),
-                    "the stamp is the shared anchor; sighting {seen:?} must not \
-                     change the price, got: {error:?}"
-                );
-            }
+        // Ten minutes behind the schedule is past round 6 on the shared clock,
+        // so the pricing gate lets the claim through - and it prices the same
+        // on the node that committed the parent and on one that synced it a
+        // minute later, which is the whole point of anchoring at the stamp.
+        let (parent, block) = fixture(now_ms.saturating_sub(600_000));
+        let engine = PoAEngine::new(PoAConfig::default(), None);
+        if let Err(error) = engine.validate_block(&block, std::slice::from_ref(&parent), &state) {
+            assert!(
+                !error.0.contains("claimed before it elapsed"),
+                "a genuinely stalled slot must walk the ladder, got: {error:?}"
+            );
         }
 
-        // A parent dated an hour ahead of this node is priced from the moment
-        // it was seen: the stamp can lower the anchor, never raise it, so the
-        // same round claim buys nothing.
-        let mut future_parent = Block::genesis();
-        future_parent.timestamp = now_ms.saturating_add(3_600_000);
-        future_parent.hash = future_parent.calculate_hash();
-        let mut child = Block::new(1, future_parent.hash.clone(), vec![]);
-        child.timestamp = future_parent
-            .timestamp
-            .saturating_add(MIN_BLOCK_INTERVAL_MS)
-            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
-        child.producer = Some(address);
-        child.nonce = round;
-        let engine = PoAEngine::new(PoAConfig::default(), None);
-        engine.note_block_seen(&future_parent.hash, now_ms);
+        // A parent stamped an hour ahead prices at round 0 here and at every
+        // other node: the stamp anchors the price on every node alike, so the
+        // claim buys nothing until the moment it names has passed.
+        let (parent, block) = fixture(now_ms.saturating_add(3_600_000));
         let error = engine
-            .validate_block(&child, std::slice::from_ref(&future_parent), &state)
+            .validate_block(&block, std::slice::from_ref(&parent), &state)
             .expect_err("a future-dated parent must not buy a PoA round");
         assert!(
             error.0.contains("claimed before it elapsed"),
