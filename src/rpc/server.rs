@@ -1616,8 +1616,8 @@ impl BudlumApiServer for RpcServer {
     /// Admit a bundle, all or none.
     ///
     /// The witness is checked against the bundle root first, then every member
-    /// against the transport bound: a bundle that fails either door touches
-    /// nothing. Only then are the members handed to the chain, one at a time -
+    /// for its own signature and the transport bound: a bundle that fails any
+    /// of those doors touches nothing. Only then are the members handed to the chain, one at a time -
     /// the pool has no batch door - and a member the pool refuses takes the
     /// ones already admitted back out, so a client never ends up with half a
     /// bundle in the mempool and no witness to explain it.
