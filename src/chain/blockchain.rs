@@ -7899,14 +7899,14 @@ impl Blockchain {
         slashed_bond: u64,
         reason: &'static str,
     ) -> Result<u64, String> {
-        Ok(crate::chain::storage_maintenance::apply_bond_slash(
+        crate::chain::storage_maintenance::apply_bond_slash(
             &mut self.state,
             epoch,
             deal_id,
             operator,
             slashed_bond,
             reason,
-        ))
+        )
     }
 
     /// Test harness only: the missed-challenge step of the block-end
@@ -7914,17 +7914,15 @@ impl Blockchain {
     ///
     /// # Errors
     ///
-    /// Never: the step cannot fail; the signature keeps the harness callers.
+    /// A bond refund that would overflow a balance.
     #[cfg(test)]
     pub fn finalize_missed_storage_challenges(
         &mut self,
         current_epoch: u64,
     ) -> Result<(u32, u64), String> {
-        Ok(
-            crate::chain::storage_maintenance::finalize_missed_challenges(
-                &mut self.state,
-                current_epoch,
-            ),
+        crate::chain::storage_maintenance::finalize_missed_challenges(
+            &mut self.state,
+            current_epoch,
         )
     }
 
