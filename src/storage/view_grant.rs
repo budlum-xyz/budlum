@@ -202,7 +202,13 @@ impl GrantAuthorization {
             .map_err(|_| GrantAuthError::VerifierUnavailable)
     }
 
-    /// Whether `digest` is signed by `owner`'s key.
+    /// Whether `digest` is signed by `owner`'s key, under the genesis scheme
+    /// statuses.
+    ///
+    /// This is the off-chain and self-check entry point. Anything that runs
+    /// inside block execution must call [`Self::verify_in`] with
+    /// `state.scheme_registry`: a scheme the chain has disabled would
+    /// otherwise keep binding operators and owners on the genesis default.
     ///
     /// # Errors
     ///

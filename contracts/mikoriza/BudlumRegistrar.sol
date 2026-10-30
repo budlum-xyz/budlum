@@ -60,6 +60,14 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
     }
 
     mapping(bytes32 => Binding) internal bindings;
+    /// Every key the operator ever bound for a validator, keyed
+    /// `bindingKey(validator, operator) → keccak256(uncompressedKey) → true`.
+    ///
+    /// A rebind replaces the current claim but not the accountability: the
+    /// slasher accepts evidence signed by any key the operator bound, so a
+    /// key rotation cannot make an offence unverifiable. Entries are never
+    /// removed, which is what "ever bound" has to mean.
+    mapping(bytes32 => mapping(bytes32 => bool)) internal boundKeys;
     mapping(address => bytes32) public validatorOf;
     mapping(address => uint64) public lastReportedBlock;
 
@@ -148,7 +156,12 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         // operator's to make, and a claim that turns out false is refused on
         // Budlum by the Observe door, not made permanent here.
         _retireMovedRow(msg.sender, budlumValidator, compressedKey);
-        bindings[bindingKey(budlumValidator, msg.sender)] = Binding({
+        bytes32 row = bindingKey(budlumValidator, msg.sender);
+        // History, not just the live claim: `wasBound` is what the slasher
+        // checks, so rotating the key does not retire the old key's
+        // liability.
+        boundKeys[row][keccak256(uncompressedKey)] = true;
+        bindings[row] = Binding({
             operator: msg.sender,
             compressedKey: compressedKey,
             uncompressedKey: uncompressedKey
@@ -262,6 +275,20 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         returns (bytes memory)
     {
         return bindings[bindingKey(budlumValidator, operator)].uncompressedKey;
+    }
+
+    /// @notice Whether `operator` ever bound this exact key for
+    ///         `budlumValidator`: the set `BudlumSlasher` accepts evidence
+    ///         from.
+    ///
+    /// A rebind replaces the row, never the history, so the key that signed an
+    /// offence stays answerable after a rotation.
+    function wasBound(bytes32 budlumValidator, address operator, bytes calldata uncompressedKey)
+        external
+        view
+        returns (bool)
+    {
+        return boundKeys[bindingKey(budlumValidator, operator)][keccak256(uncompressedKey)];
     }
 
     /// @notice The compressed key `operator` bound for `budlumValidator`.
