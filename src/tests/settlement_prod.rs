@@ -210,20 +210,7 @@ mod settlement_prod_tests {
         use crate::domain::finality_adapter::{poa_commit_signing_message, PoAAuthoritySignature};
 
         let (keypairs, authorities) = poa_test_keys(total);
-        let msg = poa_commit_signing_message(
-            domain.domain_chain_id,
-            domain.id,
-            commitment.domain_height,
-            &commitment.domain_block_hash,
-            &commitment.parent_domain_block_hash,
-            commitment.sequence,
-            commitment.timestamp_ms,
-            commitment.producer,
-            &commitment.state_root,
-            &commitment.tx_root,
-            &commitment.event_root,
-            &commitment.state_updates,
-        );
+        let msg = poa_commit_signing_message(domain.domain_chain_id, domain.id, commitment);
         let mut signatures = Vec::new();
         for i in 0..signers {
             signatures.push(PoAAuthoritySignature {

@@ -1,8 +1,9 @@
 # .gitleaks.toml: the Budlum secret scan configuration
 #
 # CI scans the FULL git history with `gitleaks detect` (fetch-depth: 0).
-# The default rule set is preserved; there is NO global pattern/path/commit
-# exemption, and any leak FAILs the job.
+# The default rule set is preserved; there is no blanket pattern, path or
+# commit exemption - every entry at the bottom is scoped to one file *and* one
+# known-benign line text - and any other leak FAILs the job.
 #
 # History verification (evidence that NO baseline is needed):
 #   Tool: gitleaks v8.30.1, a full history scan, 2026-07-16
@@ -18,12 +19,58 @@ title = "Budlum gitleaks config"
 [extend]
 useDefault = true
 
-# One narrow exception, recorded 2026-10-12. The full-history scan flags a
-# documentation example in a skill bundle that a later change removed from the
-# tree: api-design SKILL.md showed a header example with the placeholder key
-# sk_live_abc123. The value is a doc placeholder, not a credential, and the
-# file no longer exists at the branch head; the commit stays in history, so
-# the fingerprint alone is allow-listed. gitleaks v8.30.1 rejects a
+# The allow-list itself lives in .gitleaksignore at the repo root, which
+# `gitleaks detect` reads on its own; gitleaks v8.30.1 rejects a
 # `fingerprints` key in this file ("[[allowlists]] must contain at least one
 # check"), so the fingerprint lives in .gitleaksignore at the repo root, which
 # `gitleaks detect` reads on its own. Nothing else is exempt.
+
+# ---------------------------------------------------------------------------
+# False positives that the `generic-api-key` entropy rule flags by NAME, not by
+# value. Each entry is path-AND-line scoped (`condition = "AND"`), so a real
+# credential in one of these files still fails the scan: the exemption only
+# applies when the finding sits in that file *and* the line matches the known
+# benign text. They are recorded here rather than as `.gitleaksignore`
+# fingerprints because a fingerprint pins a commit SHA, and any history rewrite
+# gives the same content a new SHA and revives the finding.
+# ---------------------------------------------------------------------------
+
+# ML-DSA type names handed to the `ml_dsa_set!` macro.
+[[allowlists]]
+description = "ML-DSA verification key and signature type names in the scheme macro"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^src/crypto/pq\.rs$''']
+regexes = ['''MLDSA(65|87)(VerificationKey|Signature)''']
+
+# Deterministic Merkle test keys: fixed u64 constants, not material.
+[[allowlists]]
+description = "Merkle fixture keys in budzero tests (`let key = 0x...u64`)"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^budzero/bud-proof/src/plonky3_prover\.rs$''', '''^budzero/bud-vm/src/lib\.rs$''']
+regexes = ['''let key = 0x[0-9a-f_]+u64;''']
+
+# A PKCS#11 field copy: the right-hand side is another field, not a literal.
+[[allowlists]]
+description = "PKCS#11 label field assignment"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^src/cli/commands\.rs$''']
+regexes = ['''self\.pkcs11_pq_key_label = pkcs11\.pq_key_label;''']
+
+# Key-derivation prose in the wallet module documentation.
+[[allowlists]]
+description = "Wallet docs describing the PBKDF2/XChaCha20 key derivation"
+condition = "AND"
+regexTarget = "line"
+paths = ['''^src/wallet/mod\.rs$''']
+regexes = ['''derives the key, XChaCha20-Poly1305 seals''']
+
+# Crate names that end in `secrets`. Lockfiles contain no credentials.
+[[allowlists]]
+description = "Dependency names in Cargo.lock files (libcrux-secrets)"
+condition = "AND"
+regexTarget = "line"
+paths = ['''(^|/)Cargo\.lock$''']
+regexes = ['''libcrux-secrets''']
