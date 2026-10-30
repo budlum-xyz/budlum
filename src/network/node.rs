@@ -2607,10 +2607,6 @@ impl Node {
                                     auth_sig: precommit.auth_sig,
                                     pq_sig: precommit.pq_sig,
                                 };
-                                // The mark is durable before the
-                                // bytes leave on the wire.
-                                self.last_precommit_height = agg_state.checkpoint_height;
-                                self.save_vote_history();
                                 let topic = gossipsub::IdentTopic::new("blocks");
                                 if let Err(e) = self
                                     .swarm
@@ -2621,7 +2617,22 @@ impl Node {
                                     // A vote that never reaches the mesh is
                                     // indistinguishable from a vote that was
                                     // never cast, and finality simply stops.
-                                    warn!("Failed to gossip a finality vote: {e}");
+                                    // The height stays unmarked below, so the
+                                    // next beat signs the same bytes again.
+                                    warn!(
+                                        "Failed to gossip a finality vote: {e}; height {} stays unvoted and is retried on the next beat",
+                                        agg_state.checkpoint_height
+                                    );
+                                } else {
+                                    // The mark is durable once the bytes left,
+                                    // and only then: the mark is the
+                                    // once-per-height guard, and marking a
+                                    // publish that failed (an empty mesh at
+                                    // startup answers NoPeersSubscribedToTopic)
+                                    // stopped this node from ever voting that
+                                    // height while the chain kept producing.
+                                    self.last_precommit_height = agg_state.checkpoint_height;
+                                    self.save_vote_history();
                                 }
                             }
                             Err(e) => {
@@ -2675,18 +2686,23 @@ impl Node {
                                     sig_bls: prevote.sig_bls,
                                     auth_sig: prevote.auth_sig,
                                 };
-                                // Persist-before-publish, as for the
-                                // precommit above.
-                                self.last_prevote_height = checkpoint_height;
-                                self.save_vote_history();
                                 let topic = gossipsub::IdentTopic::new("blocks");
-                                if let Err(e) =
-                                    self.swarm.behaviour_mut().gossipsub.publish(topic, vote_msg.to_bytes())
+                                if let Err(e) = self
+                                    .swarm
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .publish(topic, vote_msg.to_bytes())
                                 {
-                                    // A vote that never reaches the mesh is
-                                    // indistinguishable from a vote that was
-                                    // never cast, and finality simply stops.
-                                    warn!("Failed to gossip a finality vote: {e}");
+                                    // Same rule as the precommit above: a vote
+                                    // that did not leave the node is not
+                                    // recorded as cast, so the next beat
+                                    // retries the same bytes.
+                                    warn!(
+                                        "Failed to gossip a finality vote: {e}; height {checkpoint_height} stays unvoted and is retried on the next beat"
+                                    );
+                                } else {
+                                    self.last_prevote_height = checkpoint_height;
+                                    self.save_vote_history();
                                 }
                             }
                             Err(e) => {
