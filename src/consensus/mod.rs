@@ -156,9 +156,10 @@ impl RoundPriceBook {
     /// The highest round this node may *claim*, from the producer's side.
     ///
     /// The same rule the verifier applies, which is the point: propose and
-    /// verify cannot drift apart. A producer whose parent is on its own chain
-    /// has a sighting by construction, so a claim is always priced by time
-    /// this node watched pass.
+    /// verify cannot drift apart. Both sides anchor at the parent's stamp, so
+    /// a claim this node finds affordable is affordable to every node that
+    /// holds the parent; this node's sighting only matters for a parent
+    /// stamped ahead of the moment it was seen.
     #[must_use]
     pub fn claimable_round_for(
         &self,
@@ -194,39 +195,41 @@ impl RoundPriceBook {
 ///
 /// # The anchor
 ///
-/// `parent_seen_ms` is when this node first committed the parent, and it is
-/// required: a parent with no sighting prices at round 0, because nothing a
-/// peer says about a header can buy a round. The stamp can only *delay* the
-/// ladder, never advance it - the anchor is the later of the sighting and the
-/// stamp - so a schedule-lagged chain grants nothing for its lag, while a
-/// genuinely stalled slot still walks the whole ladder up to
-/// [`MAX_LEADER_ROUNDS`], because real time passes and the sighting stays
-/// where it was. A parent stamped ahead of this node's clock is priced from
-/// the stamp it names, which postpones the retry rounds until that moment
-/// passes rather than disabling them: returning 0 for good there would let one
-/// future-stamped block kill the ladder that refills a slot whose leader is
-/// absent.
+/// Both sides price a claim with this function, so the anchor has to be a
+/// value every node holding the parent can read: the parent's own stamp. A
+/// sighting is node-local - it is this node's boot time for a tip restored
+/// from disk, and its start time for genesis - so pricing from it makes two
+/// honest nodes price the same claim by different numbers. A claim the
+/// producer finds affordable and the verifier does not is not a warning: the
+/// block is refused there for good, the slot runs again on the other side of
+/// the boundary, and the mesh keeps two chains that both look valid at home.
+///
+/// `parent_seen_ms` therefore only ever *lowers* the anchor. A parent stamped
+/// ahead of the moment this node saw it is priced from the sighting, so a
+/// future-dated header cannot buy the rounds between the two, and the ladder
+/// recovers on its own once the moment the header names has passed - returning
+/// 0 outright would let one future-stamped block kill the retry term for that
+/// height. A parent stamped behind the sighting is priced from its stamp: the
+/// stamp is the shared clock, and a stalled slot walks the whole ladder up to
+/// [`MAX_LEADER_ROUNDS`] at the same round on every node.
 ///
 /// The book keeps every block this node committed inside
-/// [`ROUND_PRICE_WINDOW`], so a reorg candidate that forks within
-/// [`MAX_REORG_DEPTH`] of the tip prices from a real observation instead of
-/// the header of a block it did not watch land.
+/// [`ROUND_PRICE_WINDOW`]. Two commits of the same block are therefore
+/// interchangeable for pricing: the window bounds what a reorg candidate can
+/// re-price, and the stamp makes the value agree across the mesh.
 #[must_use]
 pub fn affordable_leader_round(
     parent_timestamp_ms: u128,
     parent_seen_ms: Option<u128>,
     now_ms: u128,
 ) -> u64 {
-    let Some(seen_ms) = parent_seen_ms else {
-        return 0;
-    };
-    // A parent stamped ahead of this node's clock must only *delay* the
-    // ladder, never disable it: anchoring at the later of the two keeps a
-    // future stamp from advancing the price while leaving it able to recover
-    // once the moment the header names has passed. Both operands are
-    // immutable, so returning 0 outright would pin every child of that parent
-    // at round 0 for good.
-    let anchor_ms = seen_ms.max(parent_timestamp_ms);
+    // The earlier of the two: a future stamp cannot buy the rounds between the
+    // stamp and the sighting, and a sighting later than the stamp does not
+    // cost the producer the rounds the shared clock says have passed. With no
+    // sighting at all - genesis, a restarted tip, a parent only synced - the
+    // stamp is the only value on offer, and every node reads the same one.
+    let anchor_ms =
+        parent_seen_ms.map_or(parent_timestamp_ms, |seen| seen.min(parent_timestamp_ms));
     let spaced = now_ms
         .saturating_sub(anchor_ms)
         .saturating_sub(MIN_BLOCK_INTERVAL_MS);
@@ -546,65 +549,58 @@ pub trait ConsensusEngine: Send + Sync {
 mod tests {
     use super::*;
 
-    /// The two cases a header stamp cannot tell apart, priced apart.
+    /// A claim is priced from the parent's stamp, which every node reads the
+    /// same way, and the ladder still walks in real time.
     ///
-    /// Production stamps blocks from the slot schedule, so a chain that has
-    /// fallen behind carries parent stamps much older than the moment the
-    /// parent landed. Pricing off the stamp alone let the gate saturate - at
-    /// 49 s of lag every round up to `MAX_LEADER_ROUNDS` was affordable at
-    /// once - and capping the stamp instead froze the ladder for genuinely
-    /// stalled slots, so a slot whose leaders were offline could never be
-    /// refilled. The sighting separates them: lag buys nothing, a stall pays
-    /// in real time.
+    /// Pricing from when this node happened to commit the parent put the same
+    /// claim on different sides of the boundary at different nodes - a boot
+    /// time, a restart or a sync of a few seconds is already more than a
+    /// round - and a refused claim is a fork the refusing node keeps, because
+    /// the block is refused for good and the slot runs again on the other
+    /// side. The devnet mesh split into two chains at height 1 exactly so, on
+    /// the first block, where the parent is genesis and every node had booted
+    /// a few seconds apart. The stamp is the shared value, so both sides of
+    /// the rule price the same claim identically, and a future-dated header
+    /// still cannot buy the rounds between its stamp and the sighting.
     #[test]
-    fn a_stale_parent_cannot_buy_rounds_while_a_stall_still_walks_the_ladder() {
+    fn a_claim_is_priced_by_the_shared_stamp_and_the_ladder_walks_in_real_time() {
         let now = 1_700_000_000_000u128;
         let stale_stamp = now - 600_000; // ten minutes behind the schedule
 
-        // The verifier saw this parent a moment ago: the lag is not elapsed
-        // time anyone observed, so no round above 0 is affordable.
-        assert_eq!(
-            affordable_leader_round(stale_stamp, Some(now - 200), now),
-            0
-        );
-
-        // The same parent, ten minutes after this node saw it land: a real
-        // stall, and the whole ladder is walkable - the retry term still
-        // refills a slot whose leaders are offline.
+        // One parent, three sightings: the node that committed it at once,
+        // the node that restarted and loaded it, and the node that has no
+        // sighting at all. Same price, because the anchor is the stamp.
         assert_eq!(
             affordable_leader_round(stale_stamp, Some(stale_stamp), now),
             MAX_LEADER_ROUNDS
         );
+        assert_eq!(
+            affordable_leader_round(stale_stamp, Some(now - 10_000), now),
+            MAX_LEADER_ROUNDS
+        );
+        assert_eq!(
+            affordable_leader_round(stale_stamp, None, now),
+            MAX_LEADER_ROUNDS
+        );
+
         // One round per `ROUND_TIMEOUT_MS`, as the constant says.
         assert_eq!(
             affordable_leader_round(stale_stamp, Some(stale_stamp), stale_stamp + 7_500),
             2
         );
 
-        // A first sighting later than the stamp wins: a producer cannot
-        // backdate the anchor with its header.
-        assert_eq!(
-            affordable_leader_round(now - 5_000, Some(now - 1_000), now),
-            0
-        );
-
-        // A future-dated parent prices at zero now, but only until the moment
-        // it names has passed: the ladder has to recover afterwards, or one
-        // future-stamped block would kill the retry term for that height.
-        assert_eq!(affordable_leader_round(now + 60_000, None, now), 0);
+        // A future-dated parent is priced from the moment this node saw it,
+        // and recovers by itself once the moment it names has passed: a stamp
+        // can lower the anchor, never raise it.
         assert_eq!(
             affordable_leader_round(now + 60_000, Some(now - 1_000), now),
             0
         );
+        assert_eq!(affordable_leader_round(now + 60_000, None, now), 0);
         assert_eq!(
             affordable_leader_round(now + 60_000, Some(now - 1_000), now + 109_000),
             MAX_LEADER_ROUNDS
         );
-
-        // A parent this node never watched land prices at round 0. Falling
-        // back to the header here is what let a schedule-lagged stamp saturate
-        // the ladder: the producer writes the stamp, so it cannot buy a round.
-        assert_eq!(affordable_leader_round(stale_stamp, None, now), 0);
     }
 
     /// The book holds the blocks this node committed, inside the reorg
