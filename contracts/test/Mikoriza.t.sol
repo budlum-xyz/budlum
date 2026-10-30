@@ -55,6 +55,12 @@ contract RegistrarHarness is BudlumRegistrar {
             Binding({operator: operator, compressedKey: compressedKey, uncompressedKey: hex"01"});
         validatorOf[operator] = validator;
     }
+
+    /// The retire-on-move branch `bind` takes, without the BLS check it sits
+    /// behind: it is the same internal helpers `bind` runs.
+    function forceMove(address operator, bytes32 validator, bytes memory compressedKey) external {
+        _retireMovedRow(operator, validator, compressedKey);
+    }
 }
 
 contract MikorizaTest is Harness {
@@ -190,6 +196,25 @@ contract MikorizaTest is Harness {
         registrar.forceBind(OPERATOR, validator, hex"aa");
         registrar.forceBind(OPERATOR, validator, hex"cc");
         assertEq(keccak256(registrar.compressedKeyOf(validator, OPERATOR)), keccak256(hex"cc"), "rebound");
+    }
+
+    /// A move to another validator with the same key retires the row it
+    /// leaves behind: one key never stands behind two validators at once.
+    function test_a_move_with_the_same_key_retires_the_old_row() public {
+        bytes32 from = bytes32(uint256(2));
+        bytes32 to = bytes32(uint256(3));
+        registrar.forceBind(OPERATOR, from, hex"aa");
+        registrar.forceMove(OPERATOR, to, hex"aa");
+        assertEq(registrar.compressedKeyOf(from, OPERATOR).length, 0, "old row retired");
+    }
+
+    /// A rotated key is a different key, so the earlier claim stays its own.
+    function test_a_move_with_a_rotated_key_keeps_the_earlier_claim() public {
+        bytes32 from = bytes32(uint256(2));
+        bytes32 to = bytes32(uint256(3));
+        registrar.forceBind(OPERATOR, from, hex"aa");
+        registrar.forceMove(OPERATOR, to, hex"bb");
+        assertEq(keccak256(registrar.compressedKeyOf(from, OPERATOR)), keccak256(hex"aa"), "kept");
     }
 
     /// A report is the reporting operator's own claim: another operator's key
