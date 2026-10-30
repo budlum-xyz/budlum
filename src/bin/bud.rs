@@ -1158,6 +1158,14 @@ fn run_validator_join(
     let registration = keys
         .consensus_key_registration(chain_id)
         .map_err(|e| format!("consensus keys: {e}"))?;
+    let from = keys.address().to_hex();
+    // The nonce the stake will take. Read before it is sent, so the wait below
+    // can tell "included" from "still pending" without trusting a receipt
+    // shape.
+    let staking_nonce = parse_rpc_u64(
+        &rpc_call(rpc_url, "bud_getNonce", serde_json::json!([from.clone()]))?,
+        "bud_getNonce",
+    )?;
     let staked = send_signed(
         rpc_url,
         &keys,
@@ -1167,6 +1175,14 @@ fn run_validator_join(
         ValidatorSigning::Enrol,
     )?;
     println!("stake sent: {staked}");
+    // The registration is a second transaction from the same account and the
+    // node refuses it outright - "Validator must bond stake before
+    // registering" - until the stake is *in a block*. Sending both back to back
+    // therefore failed on state that had not moved yet, and the retry could not
+    // help: the second send reuses the stake's nonce and the mempool answers
+    // RbfFeeTooLow. The stake is awaited here, so what follows is built on the
+    // state it leaves.
+    wait_for_inclusion(rpc_url, &from, &staked, staking_nonce)?;
     let registered = send_signed(
         rpc_url,
         &keys,
@@ -1181,6 +1197,40 @@ fn run_validator_join(
         keys.address().to_hex()
     );
     Ok(())
+}
+
+/// Wait until the transaction has moved the account's nonce past `nonce`, or
+/// a receipt for it exists.
+///
+/// Bounded: a chain that never includes it is a failure to report, not a wait
+/// to extend. Sixty seconds is many slots even on a chain that produces one
+/// block every ten.
+fn wait_for_inclusion(
+    rpc_url: &str,
+    address: &str,
+    tx_hash: &str,
+    nonce: u64,
+) -> Result<(), String> {
+    for _ in 0..120 {
+        if let Ok(receipt) = rpc_call(
+            rpc_url,
+            "bud_getTransactionReceipt",
+            serde_json::json!([tx_hash]),
+        ) {
+            if !receipt.is_null() {
+                return Ok(());
+            }
+        }
+        if let Ok(value) = rpc_call(rpc_url, "bud_getNonce", serde_json::json!([address])) {
+            if parse_rpc_u64(&value, "bud_getNonce").is_ok_and(|current| current > nonce) {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    Err(format!(
+        "transaction {tx_hash} was not included within 60 s"
+    ))
 }
 
 /// `bud validator filiz`: build the chain the node will open and register
