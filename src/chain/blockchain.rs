@@ -72,6 +72,11 @@ pub enum StorageEconomicsEventKind {
     /// Bond was returned. The counterpart to `OperatorBondSlashed`: without it
     /// The only recorded end-of-life for a bond was losing it.
     OperatorBondReturned,
+    /// A slashed deal's unserved prepaid fee went back to the account that
+    /// escrowed it. The deal leaves the supply denominator with the slash, so
+    /// the refund is what keeps the committed total level instead of opening
+    /// minting headroom.
+    PayerRefund,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -8644,8 +8649,70 @@ impl Blockchain {
             balance_effect: 0,
             kind: StorageEconomicsEventKind::OperatorBondSlashed,
         });
+
+        // The client's unserved prepaid fee left the supply denominator the
+        // moment this deal stopped being `Active`: `total_storage_escrowed_supply`
+        // counts the unearned part of a *live* deal's fee, and nothing put the
+        // amount back. The denominator then dropped by the unserved epochs,
+        // which is minting headroom under a fixed cap - the fee was neither
+        // refunded nor burned, it simply stopped being counted. The service
+        // will not be delivered, so the fee goes back to the payer, which
+        // keeps the committed total level: escrow becomes a balance again.
+        let refunded = self.refund_unserved_storage_fee(epoch, deal_id)?;
+        if refunded > 0 {
+            self.storage_economics_events.push(StorageEconomicsEvent {
+                epoch,
+                deal_id,
+                // The credit lands on the payer, so the event names it.
+                operator: self
+                    .state
+                    .storage_registry
+                    .get_deal(deal_id)
+                    .and_then(|deal| deal.payer)
+                    .unwrap_or(operator),
+                amount: refunded,
+                balance_effect: 1,
+                kind: StorageEconomicsEventKind::PayerRefund,
+            });
+        }
+
         self.persist_storage_economics_state()?;
         Ok(burned)
+    }
+
+    /// Refund the unserved part of a slashed deal's prepaid fee to its payer.
+    ///
+    /// The deal is no longer `Active`, so the supply denominator no longer
+    /// counts the fee for the epochs it will not serve. Returning that amount
+    /// to the account that escrowed it keeps the total committed supply level;
+    /// leaving it out is the accounting hole this closes. A deal with no
+    /// recorded payer (one written before the field existed) refunds nothing -
+    /// there is no account the fee is known to belong to, and inventing one
+    /// would be worse than the loss it papers over.
+    fn refund_unserved_storage_fee(&mut self, epoch: u64, deal_id: u64) -> Result<u64, String> {
+        let Some(deal) = self.state.storage_registry.get_deal(deal_id) else {
+            return Ok(0);
+        };
+        let Some(payer) = deal.payer else {
+            return Ok(0);
+        };
+        let duration = deal.duration_epochs();
+        let paid_through = epoch.saturating_sub(deal.deal_start_epoch).min(duration);
+        let unearned = deal
+            .total_fee(duration)
+            .saturating_sub(deal.total_fee(paid_through));
+        if unearned == 0 {
+            return Ok(0);
+        }
+        self.state.try_add_balance(&payer, unearned)?;
+        self.state.mark_dirty(&payer);
+        tracing::warn!(
+            %payer,
+            unearned,
+            deal_id,
+            "Returned the unserved prepaid fee of a slashed storage deal to its payer"
+        );
+        Ok(unearned)
     }
 
     /// Finalize all challenges whose deadline has passed without a valid
