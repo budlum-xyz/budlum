@@ -3246,6 +3246,45 @@ impl AccountState {
             .saturating_add(self.proof_market.total_locked_supply())
             .saturating_add(self.settlement.relayer_policy.total_escrowed_supply())
             .saturating_add(self.settlement.graft.total_escrowed_supply())
+            .saturating_add(self.total_storage_escrowed_supply())
+    }
+
+    /// Total $BUD held in storage-deal escrow: the operator bond and the part
+    /// of the client fee the operator has not been paid for yet.
+    ///
+    /// A bond and a prepaid fee are not burns. Opening a deal takes both out
+    /// of account balances (`debit_escrow`), and the only record of that money
+    /// is the deal itself, so leaving it out of [`Self::total_bud_committed`]
+    /// makes every open deal look like supply destruction and opens the same
+    /// amount of minting headroom under the fixed cap - which, on a chain whose
+    /// genesis allocates the whole supply, is the only way to mint above it.
+    ///
+    /// The total is drawn down the way the escrow actually empties.
+    /// `accrue_storage_operator_rewards` pays the operator the fee of the
+    /// epochs that have elapsed at every epoch boundary, so the unearned part
+    /// is the fee of the epochs still to come; it is priced as the difference
+    /// of two cumulative totals because [`crate::domain::storage_deal::StorageDeal::total_fee`]
+    /// rounds up per call. `prune_content` refunds the same remaining horizon,
+    /// and the expiry, prune and slash paths all settle the deal out of
+    /// `Active`, which is what takes the bond out of this total. Precision:
+    /// the bond is counted in full while the deal is live, so the close paths
+    /// remove exactly what was counted.
+    pub fn total_storage_escrowed_supply(&self) -> u128 {
+        let epoch = self.epoch_index;
+        self.storage_registry
+            .all_deals()
+            .iter()
+            .filter(|deal| deal.is_active())
+            .fold(0u128, |total, deal| {
+                let duration = deal.duration_epochs();
+                let paid_through = epoch.saturating_sub(deal.deal_start_epoch).min(duration);
+                let unearned = deal
+                    .total_fee(duration)
+                    .saturating_sub(deal.total_fee(paid_through));
+                total
+                    .saturating_add(u128::from(deal.economics.operator_bond))
+                    .saturating_add(u128::from(unearned))
+            })
     }
 
     /// Total $BUD escrowed as external-domain prover bonds. A
