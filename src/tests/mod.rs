@@ -183,7 +183,7 @@ pub mod advisory_reachability;
 pub mod ai_verification_status_locks;
 pub mod audit_findings_locks;
 #[cfg(test)]
-pub mod priority_findings;
+pub mod consensus_rounds;
 #[cfg(test)]
 pub mod hardening_h2_locks;
 #[cfg(test)]
@@ -195,7 +195,7 @@ pub mod hardening_locks;
 pub mod mempool_dos_locks;
 pub mod network_hardening_locks;
 #[cfg(test)]
-pub mod consensus_rounds;
+pub mod priority_findings;
 #[cfg(test)]
 pub mod regression_lock;
 pub mod slashing_matrix;

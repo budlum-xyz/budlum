@@ -1165,7 +1165,6 @@ src/chain/fee_market.rs	fn	next_base_fee
 src/chain/fee_market.rs	struct	EffectiveFee
 src/chain/fee_market.rs	struct	FeeMarketParams
 src/chain/finality.rs	const	BLS_RFC9380_ACTIVATION_EPOCH
-src/chain/finality.rs	fn	find_validator
 src/chain/finality.rs	fn	hash_pop_to_g1
 src/chain/finality.rs	fn	is_checkpoint_height
 src/chain/finality.rs	fn	signer_count
@@ -1593,7 +1592,6 @@ src/network/peer_manager.rs	const	MSG_REFILL_RATE
 src/network/peer_manager.rs	const	OVERSIZED_MESSAGE_PENALTY
 src/network/peer_manager.rs	const	RATE_LIMIT_PENALTY
 src/network/peer_manager.rs	const	SLOW_SYNC_PENALTY
-src/network/peer_manager.rs	const	TIMEOUT_PENALTY
 src/network/peer_manager.rs	fn	ban_remaining
 src/network/peer_manager.rs	fn	consume_token
 src/network/peer_manager.rs	fn	consume_token_with_rate
@@ -1665,7 +1663,6 @@ src/relayer/policy.rs	const	MAX_RELAYER_BIDS_PER_INTENT
 src/relayer/policy.rs	const	MAX_RELAYER_INTENTS
 src/relayer/policy.rs	const	MAX_RELAYER_SETTLEMENTS
 src/relayer/policy.rs	enum	IntentSettlementStatus
-src/relayer/policy.rs	fn	best_bid
 src/relayer/policy.rs	fn	prune_settlements
 src/relayer/policy.rs	fn	validate_for_intent
 src/relayer/policy.rs	fn	validate_for_owner

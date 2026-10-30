@@ -6,7 +6,10 @@ pub const INVALID_BLOCK_PENALTY: i32 = -10;
 pub const INVALID_TX_PENALTY: i32 = -5;
 pub const OVERSIZED_MESSAGE_PENALTY: i32 = -3;
 pub const RATE_LIMIT_PENALTY: i32 = -3;
-pub const TIMEOUT_PENALTY: i32 = -15;
+/// A request this node sent came back unanswered. Below the ban threshold by
+/// design: the ask was this node's own choice, so an unanswerable one costs
+/// the peer its place in the sync order, not an hour of silence.
+const UNANSWERED_REQUEST_PENALTY: i32 = -5;
 pub const SLOW_SYNC_PENALTY: i32 = -5;
 pub const INVALID_HANDSHAKE_PENALTY: i32 = -20;
 pub const GOOD_BEHAVIOR_REWARD: i32 = 1;
@@ -601,16 +604,6 @@ impl PeerManager {
             .map(|(id, _)| *id)
             .collect()
     }
-    pub fn report_timeout(&mut self, peer_id: &PeerId) {
-        let Some(score) = self.get_or_create(peer_id) else {
-            return;
-        };
-        score.score = (score.score + TIMEOUT_PENALTY).max(MIN_SCORE);
-        score.last_seen = Some(Instant::now());
-        if score.score <= BAN_THRESHOLD {
-            self.ban_peer(peer_id);
-        }
-    }
     pub fn report_slow_sync(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
@@ -639,7 +632,7 @@ impl PeerManager {
         };
         score.score = score
             .score
-            .saturating_add(SLOW_SYNC_PENALTY)
+            .saturating_add(UNANSWERED_REQUEST_PENALTY)
             .max(MIN_SCORE.saturating_add(1));
         score.last_seen = Some(Instant::now());
     }
@@ -1286,7 +1279,6 @@ mod tests {
             }),
             ("report_bad_behavior", |m, p| m.report_bad_behavior(p)),
             ("report_good_behavior", |m, p| m.report_good_behavior(p)),
-            ("report_timeout", |m, p| m.report_timeout(p)),
             ("report_unanswered_request", |m, p| {
                 m.report_unanswered_request(p)
             }),

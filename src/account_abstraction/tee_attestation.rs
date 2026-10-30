@@ -131,10 +131,7 @@ impl core::fmt::Display for TeeError {
             }
             Self::InvalidSignature => write!(f, "wallet tee: quote signature does not verify"),
             Self::ClosedByAlarm => {
-                write!(
-                    f,
-                    "wallet tee: shortcuts are closed by the quantum alarm"
-                )
+                write!(f, "wallet tee: shortcuts are closed by the quantum alarm")
             }
         }
     }

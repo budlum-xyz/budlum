@@ -95,10 +95,7 @@ impl core::fmt::Display for PrivateTransferError {
             ),
             Self::ZeroAmount => write!(f, "wallet private: amount is zero"),
             Self::InvalidAuthorization => {
-                write!(
-                    f,
-                    "wallet private: authorization signature does not verify"
-                )
+                write!(f, "wallet private: authorization signature does not verify")
             }
         }
     }
