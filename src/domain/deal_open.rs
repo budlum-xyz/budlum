@@ -580,6 +580,30 @@ mod tests {
         assert_eq!(state.get_balance(&operator()), 5_000_000 - BOND);
     }
 
+    /// The finding: the escrow left balances with no supply-denominator
+    /// counterpart, so every open deal looked like supply destruction and
+    /// opened that much minting headroom under the fixed cap.
+    #[test]
+    fn an_open_deal_moves_supply_into_escrow_without_changing_what_is_committed() {
+        let manifest = manifest();
+        let t = terms(&manifest, operator());
+        let mut state = funded(5_000_000, 5_000_000);
+        let committed = state.total_bud_committed();
+        let capacity = state.supply_capacity_remaining();
+        assert_eq!(state.total_storage_escrowed_supply(), 0);
+        let deal_id = open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0).expect("opens");
+        let deal = state.storage_registry.get_deal(deal_id).expect("deal");
+        // The escrow holds the client fee and the operator bond, both of which
+        // left balances; committed supply and the remaining capacity do not
+        // move.
+        assert_eq!(
+            state.total_storage_escrowed_supply(),
+            u128::from(deal.total_fee(deal.duration_epochs()) + BOND)
+        );
+        assert_eq!(state.total_bud_committed(), committed);
+        assert_eq!(state.supply_capacity_remaining(), capacity);
+    }
+
     #[test]
     fn the_escrow_equals_the_fee_the_deal_records() {
         let manifest = manifest();

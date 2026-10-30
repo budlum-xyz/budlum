@@ -30,6 +30,28 @@ fn leader_entropy(hash: &str) -> Vec<u8> {
         _ => vec![0xFFu8; 32],
     }
 }
+
+/// The block whose hash seeds a slot's leader: the parent's parent.
+///
+/// The immediate parent's hash is written by the producer of the previous
+/// slot, whose block commits to fields it chooses (the transaction set and
+/// order, the stamp), so seeding from it let that producer re-hash candidate
+/// versions of its own block until the next leader it wanted came out - a few
+/// SHA-256 evaluations per authority, at no execution or fee cost (CWE-330).
+/// The grandparent's hash is fixed before the previous slot is produced, so
+/// nothing a producer writes into its own block can name the next slot's
+/// leader. Only the first block after genesis has no grandparent, and its
+/// parent is the genesis block, which no producer writes.
+///
+/// A caller that hands over no chain cannot see the grandparent and seeds from
+/// the parent hash; production and validation both pass the chain, so the two
+/// sides of a real slot cannot disagree.
+fn leader_seed_hash<'a>(chain: &'a [crate::core::block::Block], previous_hash: &'a str) -> &'a str {
+    match chain.len() {
+        0 | 1 => previous_hash,
+        n => &chain[n - 2].hash,
+    }
+}
 #[derive(Debug, Clone)]
 pub struct PoAConfig {
     pub epoch_length: u64,
@@ -258,10 +280,13 @@ impl PoAEngine {
     /// nonce is the round and is capped and time-priced in validation
     /// so the leader of one slot cannot farm favourable next
     /// leaders by varying the nonce: only `0..MAX_LEADER_ROUNDS` exist and
-    /// claiming a later one costs wall time. Production timestamps come from
-    /// the slot schedule (`planned_block_timestamp`), so the header fields
-    /// that remain free are the transaction choice and order, which is the
-    /// proposer's job and is priced by the block-size and gas limits.
+    /// claiming a later one costs wall time. The seed is the grandparent's
+    /// hash, which is fixed before the previous slot is produced, so the
+    /// header fields a producer still chooses - the transaction set and its
+    /// order, the stamp inside its schedule window - cannot steer the next
+    /// slot's leader. (Reordering an existing transaction set changes the hash
+    /// at identical size and gas cost, so size and gas do not price it; the
+    /// grandparent seed is what takes the choice away.)
     pub fn leader_slot_with_entropy(
         block_index: u64,
         active_validators: &[&Validator],
@@ -310,11 +335,13 @@ impl PoAEngine {
         block: &mut Block,
         state: &AccountState,
         parent_timestamp: Option<u128>,
+        chain: &[Block],
     ) -> Result<Option<Address>, ConsensusError> {
         let active_refs = self.active_authorities(state);
-        // V5-SECURITY-12: Use previous block hash as entropy for leader selection.
-        // This makes the leader unpredictable until the previous block is committed.
-        let prev_hash_bytes = leader_entropy(&block.previous_hash);
+        // V5-SECURITY-12: the leader is unpredictable until the seed block is
+        // committed. The seed is the grandparent, not the parent: the parent's
+        // hash is the previous producer's to grind (see [`leader_seed_hash`]).
+        let prev_hash_bytes = leader_entropy(leader_seed_hash(chain, &block.previous_hash));
 
         let mut our_addrs: Vec<Address> = Vec::new();
         if let Some(signer) = &self.signer {
@@ -459,7 +486,7 @@ impl ConsensusEngine for PoAEngine {
     }
 
     fn preview_block(&self, block: &mut Block, state: &AccountState) -> Result<(), ConsensusError> {
-        let _ = self.prepare_common(block, state, None)?;
+        let _ = self.prepare_common(block, state, None, &[])?;
         Ok(())
     }
 
@@ -471,8 +498,9 @@ impl ConsensusEngine for PoAEngine {
         state: &AccountState,
         chain: &[crate::core::block::Block],
     ) -> Result<(), ConsensusError> {
-        let expected = self.prepare_common(block, state, chain.last().map(|p| p.timestamp))?;
-        // Refuse a slot we do not lead before the caller applies any
+        let expected =
+            self.prepare_common(block, state, chain.last().map(|p| p.timestamp), chain)?;
+        // P01-F24: refuse a slot we do not lead before the caller applies any
         // state. `prepare_common` names the round-0 leader for display when no
         // affordable round names us; previewing through to the end made every
         // non-leader PoA node compute the full state transition and then fail
@@ -502,12 +530,12 @@ impl ConsensusEngine for PoAEngine {
         chain: &[crate::core::block::Block],
     ) -> Result<(), ConsensusError> {
         let expected_signer_addr =
-            self.prepare_common(block, state, chain.last().map(|p| p.timestamp))?;
+            self.prepare_common(block, state, chain.last().map(|p| p.timestamp), chain)?;
         self.sign_prepared(block, expected_signer_addr)
     }
 
     fn prepare_block(&self, block: &mut Block, state: &AccountState) -> Result<(), ConsensusError> {
-        let expected_signer_addr = self.prepare_common(block, state, None)?;
+        let expected_signer_addr = self.prepare_common(block, state, None, &[])?;
         self.sign_prepared(block, expected_signer_addr)
     }
 
@@ -538,6 +566,14 @@ impl ConsensusEngine for PoAEngine {
             // The round is capped, and claiming a later one is time-priced,
             // so the nonce is a bounded retry term and not a free grinding
             // field for steering the next slot's leader.
+            // PoA has no VRF to verify, so these bytes are unvalidated input
+            // to the block hash preimage: a producer could vary them until
+            // its own hash named the next leader it wanted.
+            if !block.vrf_output.is_empty() || !block.vrf_proof.is_empty() {
+                return Err(ConsensusError(
+                    "PoA blocks must not carry unverified VRF fields".into(),
+                ));
+            }
             let round = block.nonce;
             if round > MAX_LEADER_ROUNDS {
                 return Err(ConsensusError(format!(
@@ -569,7 +605,7 @@ impl ConsensusEngine for PoAEngine {
                     // stall still walks the ladder in real time.
                     let affordable = affordable_leader_round(
                         prev.timestamp,
-                        self.round_prices.live_tip_seen(&prev.hash),
+                        self.round_prices.seen_at(&prev.hash),
                         now_millis(),
                     );
                     if round > affordable {
@@ -580,13 +616,10 @@ impl ConsensusEngine for PoAEngine {
                     }
                 }
             }
-            // V5-SECURITY-12: Use previous block hash as entropy for leader verification.
-            // Must match the entropy used in prepare_block/prepare_common.
-            let prev_hash_bytes = if let Some(prev) = chain.last() {
-                leader_entropy(&prev.hash)
-            } else {
-                leader_entropy(&block.previous_hash)
-            };
+            // V5-SECURITY-12: the seed must match the one `prepare_common`
+            // used - the grandparent, because the parent's hash is the
+            // previous producer's to grind.
+            let prev_hash_bytes = leader_entropy(leader_seed_hash(chain, &block.previous_hash));
             let expected = self
                 .expected_proposer_with_entropy(block.index, &active_refs, &prev_hash_bytes, round)
                 .ok_or_else(|| ConsensusError("No proposer for this slot".into()))?;
