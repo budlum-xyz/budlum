@@ -575,6 +575,14 @@ contract BudlumFinalityVerifier {
         if (g1NegSignature.length != 128) {
             revert BadSignatureLength("negated signature must be an uncompressed G1 point (128 bytes)");
         }
+        // The point at infinity pairs to 1 against anything, so an all-zero
+        // key would "verify" every root with an all-zero signature. The
+        // sibling `BudlumBls` refuses these values and the Rust planner never
+        // produces them; a pinned zero key is a ceremony mistake that must
+        // fail loudly instead of accepting everything.
+        if (_isInfinity(g2Pubkey) || _isInfinity(g2Generator) || _isInfinity(g1NegSignature)) {
+            revert SignatureInvalid("BLS points at infinity cannot verify an attestation");
+        }
         // Pair layout: G1 (128) then G2 (256), twice.
         bytes memory input = abi.encodePacked(
             _hashToG1(root), g2Pubkey,
@@ -589,6 +597,21 @@ contract BudlumFinalityVerifier {
             result := mload(add(out, 32))
         }
         return result == 1;
+    }
+
+    /// Whether every byte of `point` is zero, which is how an uncompressed
+    /// EIP-2537 point encodes the point at infinity.
+    ///
+    /// Internal rather than inline so the three infeasible-value checks above
+    /// share one definition with each other; `BudlumBls._isInfinity` is the
+    /// same rule on the same encoding.
+    function _isInfinity(bytes calldata point) internal pure returns (bool) {
+        for (uint256 i = 0; i < point.length; i++) {
+            if (point[i] != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /// @dev RFC 9380 hash_to_curve for BLS12381G1_XMD:SHA-256_SSWU_RO_ with

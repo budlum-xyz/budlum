@@ -506,9 +506,16 @@ fn accept_reallocation(
         return Err(StorageTxError::AcceptReallocationOnMainnet);
     }
     let digest = accept_reallocation_consent_digest(ctx.chain_id, &ctx.sender, ctx.nonce, accept);
+    // The chain's live scheme statuses, not the genesis defaults: a scheme
+    // the chain has disabled (the Frost alarm drives ML-DSA-87 there) must stop
+    // binding unwilling operators into deals from the block that disables it.
     accept
         .operator_consent
-        .verify(&digest, &accept.replacement_operator)
+        .verify_in(
+            &state.scheme_registry,
+            &digest,
+            &accept.replacement_operator,
+        )
         .map_err(|e| StorageTxError::OperatorConsentRefused(e.to_string()))?;
     let terms = ReallocationTerms {
         ticket_id: accept.ticket_id,
@@ -790,8 +797,10 @@ fn open_deal(
         return Err(StorageTxError::DealManifestNotOwned { sender: ctx.sender });
     }
     let digest = open_deal_consent_digest(ctx.chain_id, &ctx.sender, ctx.nonce, open);
+    // The chain's live scheme statuses, not the genesis defaults (see
+    // `accept_reallocation`).
     open.operator_consent
-        .verify(&digest, &open.operator)
+        .verify_in(&state.scheme_registry, &digest, &open.operator)
         .map_err(|e| StorageTxError::OperatorConsentRefused(e.to_string()))?;
 
     let terms = DealOpenTerms {
