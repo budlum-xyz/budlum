@@ -113,7 +113,13 @@ fn preflight(root: &Path) -> Result<Vec<String>, String> {
 
     let profile = required_file(root, "config/testnet.toml", &mut checks)?;
     require_text(&profile, "chain_id = 45261", "testnet profile")?;
-    require_text(&profile, "auth_required = false", "testnet profile")?;
+    // The profile is the file an operator copies, so it keeps the reviewed
+    // posture: the RPC key is required whatever the bind address. The
+    // rehearsal's own compose opts out through the environment (asserted two
+    // checks below) rather than by weakening the file everyone else copies.
+    // This canary asserted the opposite and stayed green only because an
+    // earlier formatting failure in this same job ended the run before it.
+    require_text(&profile, "auth_required = true", "testnet profile")?;
 
     let compose = required_file(root, COMPOSE_FILE, &mut checks)?;
     for service in [
