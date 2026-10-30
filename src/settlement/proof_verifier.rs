@@ -89,7 +89,7 @@ impl SettlementProofVerifier {
         // fabricated event tree and have a message the domain never emitted
         // delivered into the registry its target domain reads.
         if !crate::settlement::domains::CommitmentAttestation::for_kind(&commitment.consensus_kind)
-            .roots
+            .event_root
         {
             return Err(ProofVerificationError::UnattestedEventRoot);
         }
