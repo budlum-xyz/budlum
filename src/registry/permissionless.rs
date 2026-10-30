@@ -1660,6 +1660,18 @@ impl PermissionlessRegistry {
                 existing.rates.remove(0);
             }
         } else {
+            // The first rate is a change too, from the zero a validator that
+            // had not set one was charging. It is free while nothing is
+            // delegated - the rate prices the validator's own bond, which
+            // chose it - but a validator already holding delegated stake can
+            // otherwise jump from 0 ppm to the protocol ceiling in one epoch
+            // and take that jump out of its delegators' next payout. The cap
+            // applies to that jump exactly as it applies to every later one.
+            if self.delegated_stake(&validator) > 0 && u64::from(commission_ppm) > max_change {
+                return Err(format!(
+                    "commission change exceeds {max_change} ppm per epoch"
+                ));
+            }
             self.validator_commissions.push(ValidatorCommission {
                 validator,
                 commission_ppm,
