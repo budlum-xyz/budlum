@@ -76,6 +76,10 @@ const METHOD_CLASSES: &[MethodClass] = &[
     row("bud_getNonce", Public, Read),
     row("bud_getAccountProof", Public, Read),
     row("bud_sendRawTransaction", Public, TxSubmit),
+    // A bundle is one composite witness over several V7 bodies: it is the
+    // same door as `bud_sendRawTransaction`, admitting members instead of one
+    // transaction, and it changes state only when a block carries them.
+    row("bud_sendTxBundle", Public, TxSubmit),
     row("bud_getTransactionByHash", Public, Read),
     row("bud_getTransactionReceipt", Public, Read),
     row("bud_gasPrice", Public, Read),
