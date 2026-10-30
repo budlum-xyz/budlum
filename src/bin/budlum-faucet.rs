@@ -561,8 +561,13 @@ async fn serve(
     /// would forge a second log entry - and any other control character - are
     /// removed before it reaches a log sink.
     fn loggable_peer(peer: SocketAddr) -> String {
-        let text = peer.to_string().replace('\n', "").replace('\r', "");
-        text.chars().filter(|c| !c.is_control()).collect()
+        // `is_control` covers the line break and the carriage return as well
+        // as every other character that could move the cursor or start a new
+        // entry, in one pass.
+        peer.to_string()
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect()
     }
     loop {
         let (stream, peer) = match listener.accept().await {
