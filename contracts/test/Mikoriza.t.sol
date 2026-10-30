@@ -51,8 +51,10 @@ contract RegistrarHarness is BudlumRegistrar {
     {}
 
     function forceBind(address operator, bytes32 validator, bytes memory compressedKey) external {
-        bindings[bindingKey(validator, operator)] =
-            Binding({operator: operator, compressedKey: compressedKey, uncompressedKey: hex"01"});
+        bytes32 row = bindingKey(validator, operator);
+        bindings[row] = Binding({operator: operator, compressedKey: compressedKey, uncompressedKey: hex"01"});
+        // The history the slasher checks, written the way `bind` writes it.
+        boundKeys[row][keccak256(hex"01")] = true;
         validatorOf[operator] = validator;
     }
 
@@ -60,6 +62,21 @@ contract RegistrarHarness is BudlumRegistrar {
     /// behind: it is the same internal helpers `bind` runs.
     function forceMove(address operator, bytes32 validator, bytes memory compressedKey) external {
         _retireMovedRow(operator, validator, compressedKey);
+    }
+
+    /// A rebind that replaces the live row and records the new key in the
+    /// history, the way `bind` does once the BLS check has passed.
+    function forceRebind(
+        address operator,
+        bytes32 validator,
+        bytes memory compressedKey,
+        bytes memory uncompressedKey
+    ) external {
+        bytes32 row = bindingKey(validator, operator);
+        bindings[row] =
+            Binding({operator: operator, compressedKey: compressedKey, uncompressedKey: uncompressedKey});
+        boundKeys[row][keccak256(uncompressedKey)] = true;
+        validatorOf[operator] = validator;
     }
 }
 
@@ -135,6 +152,7 @@ contract MikorizaTest is Harness {
                 hashB: hex"aa",
                 negSigB: hex""
             }),
+            hex"",
             hex""
         );
     }
@@ -250,6 +268,7 @@ contract MikorizaTest is Harness {
                 hashB: hex"bb",
                 negSigB: new bytes(128)
             }),
+            hex"01",
             bytes("generator")
         );
     }
@@ -273,7 +292,23 @@ contract MikorizaTest is Harness {
                 hashB: hex"bb",
                 negSigB: new bytes(128)
             }),
+            hex"01",
             bytes("generator")
         );
+    }
+
+    /// The high finding: an operator that double votes and then rebinds to a
+    /// fresh key must stay slashable on the key that signed. The slasher now
+    /// takes the evidenced key and asks the registrar whether the operator
+    /// ever bound it, never what it holds now.
+    function test_a_rebound_key_stays_accountable() public {
+        bytes32 validator = bytes32(uint256(2));
+        registrar.forceBind(OPERATOR, validator, hex"aa");
+        // A rotation: the live row now holds another key.
+        registrar.forceRebind(OPERATOR, validator, hex"bb", hex"02");
+        assertEq(keccak256(registrar.compressedKeyOf(validator, OPERATOR)), keccak256(hex"bb"), "live row moved");
+        assertTrue(registrar.wasBound(validator, OPERATOR, hex"01"), "the key that signed is still answerable");
+        assertTrue(registrar.wasBound(validator, OPERATOR, hex"02"), "the key it rotated to is too");
+        assertTrue(!registrar.wasBound(validator, OPERATOR, hex"ff"), "a key never bound is not");
     }
 }
