@@ -70,6 +70,16 @@ pub fn open_deal_escrowed(
 
     refuse_cooling_operator(state, &operator, now_unix_secs)?;
     let (epochs, listed_bytes) = epochs_and_listed_bytes(terms)?;
+    // A deal must not start in an epoch that has already elapsed. The supply
+    // denominator prices the unearned part of the fee from the epoch index
+    // (`total_storage_escrowed_supply`), which agrees with what the operator is
+    // owed only when every elapsed epoch of the window was served after the
+    // open. A backdated start would make the whole fee read as earned before
+    // `accrue_storage_operator_rewards` paid a single unit of it, so the
+    // escrow would leave the denominator while the money is in nobody's
+    // balance - and a bridge mint in the same block would clear the cap check
+    // with it.
+    refuse_elapsed_start(state, terms.start_epoch)?;
 
     // Replay guard: a signed deal-open must not debit escrow and lock bond
     // twice for the same placement. An ACTIVE deal of the same operator on
@@ -186,6 +196,7 @@ pub fn accept_reallocation_escrowed(
         storage_root: terms.storage_root,
     };
     let (epochs, listed_bytes) = epochs_and_listed_bytes(&open_terms)?;
+    refuse_elapsed_start(state, open_terms.start_epoch)?;
     let escrow = check_funds(
         state,
         &open_terms,
@@ -214,6 +225,26 @@ pub fn accept_reallocation_escrowed(
         .set_deal_payer(replacement_deal_id, payer);
     debit_escrow(state, &payer, &operator, &escrow)?;
     Ok(replacement_deal_id)
+}
+
+/// A deal may not start in an epoch that has already elapsed.
+///
+/// The supply denominator prices the unearned part of the fee from the epoch
+/// index ([`crate::core::account::AccountState::total_storage_escrowed_supply`]),
+/// which agrees with what the operator is owed only when every elapsed epoch
+/// of the window was served after the open. A backdated start would make the
+/// whole fee read as earned before `accrue_storage_operator_rewards` paid a
+/// single unit of it, so the escrow would leave the denominator while the
+/// money sits in nobody's balance - and a bridge mint in the same block would
+/// clear the cap check with it.
+fn refuse_elapsed_start(state: &AccountState, start_epoch: u64) -> Result<(), String> {
+    if start_epoch < state.epoch_index {
+        return Err(format!(
+            "deal start epoch {start_epoch} has already elapsed (current epoch {})",
+            state.epoch_index
+        ));
+    }
+    Ok(())
 }
 
 /// An operator that missed a challenge sits out six hours. Checked here
@@ -578,6 +609,26 @@ mod tests {
         open_deal_escrowed(&mut state, &t, payer(), 0, BOND, reserve).unwrap();
         assert_eq!(state.get_balance(&payer()), reserve);
         assert_eq!(state.get_balance(&operator()), 5_000_000 - BOND);
+    }
+
+    /// The finding: the escrow left balances with no supply-denominator
+    /// counterpart, so every open deal looked like supply destruction and
+    /// opened that much minting headroom under the fixed cap.
+    #[test]
+    fn an_open_deal_moves_supply_into_escrow_without_changing_what_is_committed() {
+        let manifest = manifest();
+        let t = terms(&manifest, operator());
+        let mut state = funded(5_000_000, 5_000_000);
+        let committed = state.total_bud_committed();
+        let capacity = state.supply_capacity_remaining();
+        let deal_id = open_deal_escrowed(&mut state, &t, payer(), 0, BOND, 0).expect("opens");
+        let deal = state.storage_registry.get_deal(deal_id).expect("deal");
+        // The escrow holds the client fee and the operator bond, both of which
+        // left balances; committed supply and the remaining capacity do not
+        // move, which is the invariant the escrow term exists for.
+        assert!(deal.total_fee(deal.duration_epochs()) > 0 && BOND > 0);
+        assert_eq!(state.total_bud_committed(), committed);
+        assert_eq!(state.supply_capacity_remaining(), capacity);
     }
 
     #[test]
