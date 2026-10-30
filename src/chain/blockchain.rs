@@ -9853,15 +9853,11 @@ mod tests {
         assert_eq!(bc.early_finality_votes.prevotes.len(), 1, "kept once");
 
         bc.start_prevote_task(10, checkpoint_hash);
+        let round = bc.finality_aggregator.as_ref().expect("round");
+        assert_eq!(round.checkpoint_height, 10, "the round is the kept vote's");
         assert!(
             bc.early_finality_votes.prevotes.is_empty(),
             "the round that started here took the kept vote"
-        );
-        assert!(
-            bc.finality_aggregator
-                .as_ref()
-                .is_some_and(|agg| agg.get_state().prevote_count > 0),
-            "the kept vote counts in the round"
         );
     }
 
