@@ -57,6 +57,9 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::storage::merkle_trie::AccountProofBundle>>,
     ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
+    /// Take a transaction back out of the pool; the bundle door rolls a
+    /// partially admitted bundle back through this.
+    RemoveTransaction(String, oneshot::Sender<Option<Transaction>>),
     ProduceBlock(Address, oneshot::Sender<Option<(Block, Vec<[u8; 32]>)>>),
     ValidateAndAddBlock(Block, oneshot::Sender<Result<Vec<[u8; 32]>, String>>),
     GetTransactionByHash(String, oneshot::Sender<Option<Transaction>>),
@@ -615,6 +618,16 @@ impl ChainHandle {
         res_rx
             .await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Take a transaction back out of the pool. `None` means it was not there.
+    pub async fn remove_transaction(&self, tx_hash: &str) -> Option<Transaction> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::RemoveTransaction(tx_hash.to_string(), res_tx))
+            .await;
+        res_rx.await.unwrap_or(None)
     }
 
     pub async fn produce_block(&self, producer: Address) -> Option<(Block, Vec<[u8; 32]>)> {
@@ -2520,6 +2533,9 @@ impl ChainActor {
                             .add_transaction(tx_obj)
                             .map_err(|e| e.to_string()),
                     );
+                }
+                ChainCommand::RemoveTransaction(tx_hash, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.remove_transaction(&tx_hash));
                 }
                 ChainCommand::ProduceBlock(producer, tx) => {
                     let result = self.blockchain.produce_block(producer);

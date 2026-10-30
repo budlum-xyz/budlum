@@ -1613,6 +1613,55 @@ impl BudlumApiServer for RpcServer {
         Ok(Self::to_0x_hash(tx_hash))
     }
 
+    /// Admit a bundle, all or none.
+    ///
+    /// The witness is checked against the bundle root first, then every member
+    /// against the transport bound: a bundle that fails either door touches
+    /// nothing. Only then are the members handed to the chain, one at a time -
+    /// the pool has no batch door - and a member the pool refuses takes the
+    /// ones already admitted back out, so a client never ends up with half a
+    /// bundle in the mempool and no witness to explain it.
+    async fn send_tx_bundle(
+        &self,
+        bundle: crate::core::tx_bundle::TxBundle,
+    ) -> Result<Vec<String>, ErrorObjectOwned> {
+        let registry = crate::crypto::scheme::SchemeStatusRegistry::genesis();
+        bundle.verify_in(&registry).map_err(|e| {
+            ErrorObjectOwned::owned(-32602, format!("Bundle refused: {e}"), None::<()>)
+        })?;
+        for member in &bundle.members {
+            if let Err(e) = crate::network::protocol::NetworkMessage::validate_tx_size(member) {
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Transaction too large: {e:?}"),
+                    None::<()>,
+                ));
+            }
+        }
+
+        let mut admitted: Vec<Transaction> = Vec::new();
+        let mut hashes: Vec<String> = Vec::new();
+        for member in bundle.into_members() {
+            let hash = member.hash.clone();
+            if let Err(e) = self.chain.add_transaction(member.clone()).await {
+                for taken in &admitted {
+                    let _ = self.chain.remove_transaction(&taken.hash).await;
+                }
+                return Err(ErrorObjectOwned::owned(
+                    -32602,
+                    format!("Bundle refused at member {}: {e}", admitted.len()),
+                    None::<()>,
+                ));
+            }
+            admitted.push(member);
+            hashes.push(Self::to_0x_hash(hash));
+        }
+        for member in admitted {
+            self.node.broadcast_tx_sync(member);
+        }
+        Ok(hashes)
+    }
+
     async fn get_transaction_by_hash(
         &self,
         hash: String,
