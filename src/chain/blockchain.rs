@@ -7381,8 +7381,14 @@ impl Blockchain {
 
     // ─── B.U.D.: On-chain storage operations ────────────
 
+    /// Test harness only. Production opens go through the signed
+    /// `StorageTx::OpenDeal` door, which verifies the operator's
+    /// `operator_consent` before it reaches `deal_open::open_deal_escrowed`.
+    /// This helper places content with an operator the caller names and debits
+    /// that operator's bond, and it takes no consent, so it must not be
+    /// reachable from a production path.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
     pub fn open_storage_deal_with_escrow(
         &mut self,
         domain_id: u32,
@@ -7463,8 +7469,13 @@ impl Blockchain {
     /// shard it cannot prove. Until this path existed, a repair ticket
     /// opened by the maintenance sweep could never be filled on-chain:
     /// the trigger ran, and the acceptance was test-only.
+    /// Test harness only, and for the same reason as
+    /// [`Self::open_storage_deal_with_escrow`]: the replacement operator is
+    /// named by the ticket, but the helper debits that operator's bond with no
+    /// consent of its own. Production reallocations ride the signed storage
+    /// door, which checks the consent before any debit.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn accept_storage_reallocation_with_escrow(
         &mut self,
         ticket_id: u64,
