@@ -366,7 +366,8 @@ fn observe(
         )));
     }
     // The validator binds the same BLS key on both sides: the slasher on
-    // Ethereum verifies double votes against the key Budlum finality uses.
+    // Ethereum verifies double votes against the key Budlum finality uses, and
+    // the key is what says which operator may speak for the validator.
     if let Some(validator) = state.validators.get(&allocation.budlum_validator) {
         if !validator.bls_public_key.is_empty()
             && validator.bls_public_key != allocation.bls_public_key
@@ -398,11 +399,10 @@ fn observe(
         return Err(refused("Mikoriza replay set is full"));
     }
     if let Some(previous) = registry.validators.get(&allocation.budlum_validator) {
-        if previous.eth_operator != allocation.eth_operator {
-            return Err(refused(
-                "the validator is already bound to another Ethereum operator",
-            ));
-        }
+        // The newest report wins, whoever it names: a rebinding is the
+        // operator's to make and the registrar only emits one after the key
+        // signed for the new operator, so the row follows the validator's key
+        // instead of belonging to the first operator ever recorded for it.
         if allocation.observed_epoch <= previous.observed_epoch {
             return Err(refused(
                 "Mikoriza allocation is not newer than the recorded one",
@@ -656,6 +656,35 @@ mod tests {
         let older = claim(validator, 9_000, 4);
         let tx = observe_tx(&mut state, &older, 1);
         assert!(execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &tx).is_err());
+    }
+
+    /// The companion of the registrar fix: the first Ethereum operator
+    /// recorded for a validator used to own it for good, so a report from the
+    /// operator the validator moved to was refused forever. The row now
+    /// follows the newest attested claim.
+    #[test]
+    fn a_newer_allocation_may_name_another_ethereum_operator() {
+        let operator = Address::from([1u8; 32]);
+        let mut state = state_with_registrar(operator);
+        let validator = Address::from([2u8; 32]);
+        let carrier = Address::from([3u8; 32]);
+        let first = claim(validator, 1_000, 5);
+        let tx = observe_tx(&mut state, &first, 0);
+        execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &tx).expect("records");
+
+        let mut moved = claim(validator, 1_000, 6);
+        moved.eth_operator = [0x0B; 20];
+        let tx = observe_tx(&mut state, &moved, 1);
+        execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &tx)
+            .expect("the newest claim is the validator's");
+
+        let row = state
+            .settlement
+            .shared_security
+            .active(&validator)
+            .expect("active");
+        assert_eq!(row.eth_operator, [0x0B; 20]);
+        assert_eq!(row.observed_epoch, 6);
     }
 
     #[test]
