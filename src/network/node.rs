@@ -4585,6 +4585,14 @@ impl Node {
                                                             self.clear_sync_round();
                                                             continue;
                                                         }
+                                                        // A batch that does not continue this chain still
+                                                        // costs the round: the same range is asked for again
+                                                        // next second and refused again, and the height does
+                                                        // not move. Raise a flag and walk the locator once the
+                                                        // round is closed, so the next request starts at the
+                                                        // common ancestor where a suffix can actually be
+                                                        // joined.
+                                                        let mut fork_retry = false;
                                                         if !blocks.is_empty() {
                                                             let start_idx = blocks[0].index;
                                                             let our_block = self.chain.get_block(start_idx).await;
@@ -4615,12 +4623,15 @@ impl Node {
                                                                                 // Silent refusal is how a follower can fetch the
                                                                                 // same range every second and never move: the
                                                                                 // round closes as a success, the height does not.
-                                                                                Err(e) => warn!(
-                                                                                    peer = %peer,
-                                                                                    index,
-                                                                                    error = %e,
-                                                                                    "sync block refused"
-                                                                                ),
+                                                                                Err(e) => {
+                                                                                    fork_retry |= e.contains("Previous hash mismatch");
+                                                                                    warn!(
+                                                                                        peer = %peer,
+                                                                                        index,
+                                                                                        error = %e,
+                                                                                        "sync block refused"
+                                                                                    );
+                                                                                }
                                                                             }
                                                                         }
                                                                     }
@@ -4637,18 +4648,27 @@ impl Node {
                                                                                     let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
                                                                                 }
                                                                             }
-                                                                            Err(e) => warn!(
-                                                                                peer = %peer,
-                                                                                index,
-                                                                                error = %e,
-                                                                                "sync block refused"
-                                                                            ),
+                                                                            Err(e) => {
+                                                                                fork_retry |= e.contains("Previous hash mismatch");
+                                                                                warn!(
+                                                                                    peer = %peer,
+                                                                                    index,
+                                                                                    error = %e,
+                                                                                    "sync block refused"
+                                                                                );
+                                                                            }
                                                                         }
                                                                     }
                                                                 }
                                                             }
                                                         }
                                                         self.clear_sync_round();
+                                                        if fork_retry {
+                                                            let locator = self.chain.get_locator().await;
+                                                            if !self.request_headers_from_peer(None, locator, 500) {
+                                                                info!(peer = %peer, "fork re-sync deferred: a sync round is already open");
+                                                            }
+                                                        }
                                                         {
                                                             let mut pm = self.peer_manager_lock();
                                                             pm.report_good_behavior(&peer);
