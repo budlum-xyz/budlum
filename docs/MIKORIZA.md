@@ -78,7 +78,9 @@ f(units)         = units * units_to_weight_ppm / 1_000_000
 The restaked part of the total is capped: `R / (B + R) <= max_restaked_share_ppm`.
 Above the cap every restaked weight is scaled down by the same ratio. The
 weights are recomputed at the epoch boundary only, and only for eligible,
-unslashed validators. Leader election and the finality snapshot read
+unslashed validators. A newer attested allocation that names another validator
+retires the operator's earlier row, so one allocation never backs two
+validators. Leader election and the finality snapshot read
 `Validator::voting_weight()`. Governance quorums still count BUD stake only.
 
 | Parameter | Testnet default | Note |
@@ -100,6 +102,10 @@ the cipher suite is `BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_`.
   precompiles (pairing, map-to-G1) and SHA-256 against the key the evidence's
   operator bound for the validator, then slashes that operator through the
   EigenLayer operator set. An operator's key cannot slash another operator.
+  The replay guard is keyed on the signing key plus the checkpoint, not on the
+  binding row, so one key bound for several validators is one offence rather
+  than one per row; a move that keeps the key retires the row it leaves
+  (`BudlumRegistrar._retireMovedRow`, `Unbound`).
 - A liveness fault does not slash ETH on testnet. It only jails on Budlum.
 
 ## Rewards
