@@ -2112,7 +2112,7 @@ fn main() {
                 *fee,
                 *nonce,
             ),
-            TxAction::Bundle { file } => run_tx_bundle(&cli.rpc_url, &file),
+            TxAction::Bundle { file } => run_tx_bundle(&cli.rpc_url, file),
         },
         Command::Query { action } => match action {
             QueryAction::Balance { address } => run_query_balance(&cli.rpc_url, address),
