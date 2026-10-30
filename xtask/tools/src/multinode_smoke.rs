@@ -101,7 +101,9 @@ fn compose_result(root: &Path, extra: &[&str]) -> Result<String, String> {
     Err(format!(
         "`docker compose {}` exited {}: {tail}",
         extra.join(" "),
-        out.status.code().map_or_else(|| "abnormally".into(), |c| c.to_string())
+        out.status
+            .code()
+            .map_or_else(|| "abnormally".into(), |c| c.to_string())
     ))
 }
 
@@ -622,8 +624,8 @@ fn step9_join(root: &Path) -> Result<(), String> {
         }
         pause(PAUSE);
     }
-    let output = joined
-        .ok_or_else(|| format!("bud validator join failed inside node1: {last_error}"))?;
+    let output =
+        joined.ok_or_else(|| format!("bud validator join failed inside node1: {last_error}"))?;
     let address = joined_address(&output)
         .ok_or_else(|| format!("bud validator join printed no address: {output}"))?;
     let mut scanned = node1("bud_blockNumber")
@@ -645,6 +647,34 @@ fn step9_join(root: &Path) -> Result<(), String> {
         }
         pause(PAUSE);
     }
+    // A joiner that never produces has three very different causes - the
+    // node never became a validator, it became one below the leadership
+    // floor, or it simply never won a slot - and the wait loop above cannot
+    // tell them apart. Ask the chain what it thinks of this address before
+    // failing, so the message names the cause instead of only the symptom.
+    let profile = rpc::call(
+        RPC_PORT,
+        "bud_validatorProfile",
+        &format!("[\"{address}\"]"),
+        Duration::from_secs(5),
+    )
+    .unwrap_or_else(|e| format!("unreadable: {e}"));
+    println!(
+        "joined validator {address}: chain profile {}",
+        crate::support::head_lines(&profile, 3)
+    );
+    let tip = node1("bud_blockNumber")
+        .ok()
+        .and_then(|b| block_number(&b))
+        .unwrap_or(0);
+    let producers: Vec<String> = (joined_at..=tip)
+        .map(|number| {
+            producer_of(number)
+                .map(|producer| producer.chars().take(10).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect();
+    println!("blocks {joined_at}..={tip} producers: {producers:?}");
     Err(format!(
         "joined validator {address} produced no block in {joined_at}..={scanned}"
     ))

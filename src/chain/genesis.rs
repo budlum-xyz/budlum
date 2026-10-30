@@ -1026,8 +1026,19 @@ impl GenesisConfig {
         Some(crate::tokenomics::TokenomicsAddresses::reserved())
     }
 
+    /// The stake every genesis validator is bonded with.
+    ///
+    /// At least one whole BUD, the smallest bond `bud validator join` can
+    /// express (`--stake-bud 1`). A seat bonded at the bare floor and a
+    /// joiner bonded at one BUD are not peers: on the devnet the four seats
+    /// held 1 000 atoms each against a joiner's 1 000 000, so once the joiner
+    /// was eligible it owned 99.6% of the slot lottery and the four founders
+    /// - threshold 0.1% each - stopped producing. A seat is sized in the same
+    /// unit the join path uses.
     fn validator_stake(&self) -> u64 {
-        Network::from_chain_id(self.chain_id).map_or(1, |network| network.min_stake())
+        Network::from_chain_id(self.chain_id).map_or(1, |network| {
+            network.min_stake().max(crate::tokenomics::bud(1))
+        })
     }
 
     /// The validation reward pool the profile funds at genesis; 0 without one
@@ -1552,7 +1563,7 @@ mod tests {
     fn devnet_genesis_hash_matches_the_docker_smoke_pin() {
         let block = devnet_genesis().build_genesis_block();
         assert_eq!(
-            block.hash, "c0e97af8bae9bff4086bb4d5820865ee00c1f2b36d5bfeb856f752221815454f",
+            block.hash, "ba194aa08eb23a094c04cc1f005266e43f961aa2d8fd127f91cfec1c9f262484",
             "the pin in xtask/tools/src/docker_smoke.rs must move with devnet_genesis()"
         );
     }
@@ -1637,9 +1648,11 @@ mod tests {
         assert_eq!(state.get_balance(&allocation.0), allocation.1);
         assert_eq!(state.base_fee, config.base_fee);
         assert_eq!(state.tokenomics.block_reward, config.block_reward);
+        // A seat is one whole BUD even where the floor is lower: see
+        // `validator_stake`. The devnet floor is 1 000 atoms.
         assert_eq!(
             state.get_validator(&validator).map(|v| v.stake),
-            Some(Network::Devnet.min_stake())
+            Some(crate::tokenomics::bud(1))
         );
     }
 
