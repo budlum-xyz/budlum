@@ -655,7 +655,7 @@ pub fn submit_relay_proof(
         // submitter's claim and a relay proven against it would mint from a
         // message the source domain never emitted.
         if !crate::settlement::domains::CommitmentAttestation::for_kind(&commitment.consensus_kind)
-            .roots
+            .event_root
         {
             return Err(format!(
                 "domain {source_domain} height {source_height}: event root is not bound by the \

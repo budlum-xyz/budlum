@@ -641,8 +641,12 @@ fn validate_commitment_state_updates(
 /// has not checked): fail-closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommitmentAttestation {
-    /// The proof binds `state_root`, `tx_root` and `event_root`.
-    pub roots: bool,
+    /// The proof binds `state_root`.
+    pub state_root: bool,
+    /// The proof binds `tx_root`.
+    pub tx_root: bool,
+    /// The proof binds `event_root`.
+    pub event_root: bool,
     /// The proof binds `parent_domain_block_hash`.
     pub parent: bool,
 }
@@ -656,15 +660,28 @@ impl CommitmentAttestation {
             | ConsensusKind::PoW
             | ConsensusKind::StorageAttestation(_)
             | ConsensusKind::AiInference => Self {
-                roots: true,
+                state_root: true,
+                tx_root: true,
+                event_root: true,
                 parent: true,
             },
+            // A ZK claim binds the state root alone: the accepted claim's
+            // `final_state_root`, which the circuit ties to the state writes.
+            // No tx root and no event root are covered by the proof, and an
+            // earlier version of this table said they were - which is how a
+            // relayer could have carried a ZK domain's event tree into the
+            // bridge and the relayer verifier, both of which read this table
+            // as the licence to trust the root.
             ConsensusKind::Zk => Self {
-                roots: true,
+                state_root: true,
+                tx_root: false,
+                event_root: false,
                 parent: false,
             },
             ConsensusKind::PoS | ConsensusKind::Bft | ConsensusKind::Custom(_) => Self {
-                roots: false,
+                state_root: false,
+                tx_root: false,
+                event_root: false,
                 parent: false,
             },
         }
@@ -867,7 +884,7 @@ pub fn accept_verified_commitment(
     let domain_id = commitment.domain_id;
     let domain_height = commitment.domain_height;
     let state_root = commitment.state_root;
-    if !CommitmentAttestation::for_kind(&commitment.consensus_kind).roots {
+    if !CommitmentAttestation::for_kind(&commitment.consensus_kind).state_root {
         let outcome = accept_commitment(state, commitment)?;
         return Ok(outcome);
     }
@@ -1024,6 +1041,35 @@ pub fn submit_zk_proof(
             "zk proof final_state_root is not the proven state_writes_digest; the committed root must be the value the circuit binds"
                 .to_string(),
         );
+    }
+    // The proof has to start where the domain is. Both checks above are
+    // self-consistency: they say the proof agrees with itself, not that it
+    // says anything about this domain. Without the tie below a proof over any
+    // state at all advances the domain, and the tip it parks is a state the
+    // domain never held.
+    if claim_height > domain.last_committed_height
+        && domain.last_committed_hash != [0u8; 32]
+        && pi.initial_state_root != domain.last_committed_hash
+    {
+        return Err(format!(
+            "zk proof starts from state {} but domain {claimed_domain} is committed at {}",
+            hex::encode(pi.initial_state_root),
+            hex::encode(domain.last_committed_hash)
+        ));
+    }
+    // Bounded advance. An accepted claim parks the tip and nothing lowers it,
+    // so a submitter free to name any height could park it out of reach of
+    // every honest claim - settlement frozen for the price of one proof fee.
+    if claim_height
+        > domain
+            .last_committed_height
+            .saturating_add(crate::prover::MAX_ZK_CLAIM_ADVANCE)
+    {
+        return Err(format!(
+            "zk claim targets height {claim_height} but domain {claimed_domain} is at {} (a claim may advance at most {} heights)",
+            domain.last_committed_height,
+            crate::prover::MAX_ZK_CLAIM_ADVANCE
+        ));
     }
     let key = ProofClaimKey {
         domain_id: claimed_domain,

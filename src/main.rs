@@ -669,6 +669,16 @@ async fn main() {
         .and_then(|s| load_signing_key(s))
         .map(|key| Address::from(key.public_key_bytes()));
 
+    // A mainnet node signs consensus when it holds a validator key, whatever
+    // its role string says. `--role` is self-declared and the custody rules
+    // below used to be keyed on it, so a mainnet node started with another
+    // role and a validator key file signed through the software fallback with
+    // no HSM custody and no post-quantum key at all. The key is the fact; the
+    // role is a label a config file can make up.
+    let mainnet_signs_consensus = config.network
+        == budlum_core::core::chain_config::Network::Mainnet
+        && (config.role == "validator" || local_signer_address.is_some());
+
     // `[features] verify_merkle` does not reach the VM: `bud-vm` decodes
     // with `MainnetActivation::default()` and reads no environment variable
     // (the old `BUDLUM_VERIFY_MERKLE` hook was removed as a configuration
@@ -710,9 +720,7 @@ async fn main() {
             );
             std::process::exit(1);
         }
-        let strict_vendor_native = config.network
-            == budlum_core::core::chain_config::Network::Mainnet
-            && config.role == "validator";
+        let strict_vendor_native = mainnet_signs_consensus;
         if strict_vendor_native {
             let Some(bls_raw) = config.pkcs11_bls_mechanism.as_deref() else {
                 eprintln!(
@@ -894,8 +902,7 @@ async fn main() {
             println!("PoS mode - min stake: {}", config.min_stake);
             // mainnet elects leaders with the Filiz Chain, which needs
             // no VRF key in the HSM. A mainnet validator must hold its chain.
-            if config.network == budlum_core::core::chain_config::Network::Mainnet
-                && config.role == "validator"
+            if mainnet_signs_consensus
                 && !std::env::var(budlum_core::consensus::filiz::FILIZ_SEED_FILE_ENV)
                     .is_ok_and(|path| !path.is_empty())
             {
