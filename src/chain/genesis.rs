@@ -1032,8 +1032,8 @@ impl GenesisConfig {
     /// express (`--stake-bud 1`). A seat bonded at the bare floor and a
     /// joiner bonded at one BUD are not peers: on the devnet the four seats
     /// held 1 000 atoms each against a joiner's 1 000 000, so once the joiner
-    /// was eligible it owned 99.6% of the slot lottery and the four founders
-    /// - threshold 0.1% each - stopped producing. A seat is sized in the same
+    /// was eligible it owned 99.6% of the slot lottery, and the four founders
+    /// (threshold 0.1% each) stopped producing. A seat is sized in the same
     /// unit the join path uses.
     fn validator_stake(&self) -> u64 {
         Network::from_chain_id(self.chain_id).map_or(1, |network| {
