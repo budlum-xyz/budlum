@@ -101,7 +101,7 @@ pub struct RoundPriceBook {
 /// One more than [`MAX_REORG_DEPTH`]: the deepest block a reorg candidate may
 /// fork at is `MAX_REORG_DEPTH` below the tip, and the window has to hold the
 /// tip itself as well.
-pub const ROUND_PRICE_WINDOW: usize = MAX_REORG_DEPTH + 1;
+const ROUND_PRICE_WINDOW: usize = MAX_REORG_DEPTH + 1;
 
 impl Default for RoundPriceBook {
     fn default() -> Self {
@@ -195,14 +195,17 @@ impl RoundPriceBook {
 /// # The anchor
 ///
 /// `parent_seen_ms` is when this node first committed the parent, and it is
-/// the only thing that prices a round. The parent's own stamp is a producer's
-/// claim, so it cannot buy time: a parent with no sighting prices at round 0,
-/// and a parent stamped later than the moment this node saw it means the
-/// producer's clock leads ours, so the time it names is not time anyone
-/// watched pass. A schedule-lagged chain therefore grants nothing for its lag,
-/// while a genuinely stalled slot still walks the whole ladder up to
+/// required: a parent with no sighting prices at round 0, because nothing a
+/// peer says about a header can buy a round. The stamp can only *delay* the
+/// ladder, never advance it - the anchor is the later of the sighting and the
+/// stamp - so a schedule-lagged chain grants nothing for its lag, while a
+/// genuinely stalled slot still walks the whole ladder up to
 /// [`MAX_LEADER_ROUNDS`], because real time passes and the sighting stays
-/// where it was - the two cases the stamp alone cannot tell apart.
+/// where it was. A parent stamped ahead of this node's clock is priced from
+/// the stamp it names, which postpones the retry rounds until that moment
+/// passes rather than disabling them: returning 0 for good there would let one
+/// future-stamped block kill the ladder that refills a slot whose leader is
+/// absent.
 ///
 /// The book keeps every block this node committed inside
 /// [`ROUND_PRICE_WINDOW`], so a reorg candidate that forks within
@@ -217,11 +220,15 @@ pub fn affordable_leader_round(
     let Some(seen_ms) = parent_seen_ms else {
         return 0;
     };
-    if parent_timestamp_ms > seen_ms {
-        return 0;
-    }
+    // A parent stamped ahead of this node's clock must only *delay* the
+    // ladder, never disable it: anchoring at the later of the two keeps a
+    // future stamp from advancing the price while leaving it able to recover
+    // once the moment the header names has passed. Both operands are
+    // immutable, so returning 0 outright would pin every child of that parent
+    // at round 0 for good.
+    let anchor_ms = seen_ms.max(parent_timestamp_ms);
     let spaced = now_ms
-        .saturating_sub(seen_ms)
+        .saturating_sub(anchor_ms)
         .saturating_sub(MIN_BLOCK_INTERVAL_MS);
     u64::try_from(spaced / ROUND_TIMEOUT_MS)
         .unwrap_or(u64::MAX)
@@ -581,11 +588,17 @@ mod tests {
             0
         );
 
-        // A future-dated parent still prices at zero, however it was seen.
+        // A future-dated parent prices at zero now, but only until the moment
+        // it names has passed: the ladder has to recover afterwards, or one
+        // future-stamped block would kill the retry term for that height.
         assert_eq!(affordable_leader_round(now + 60_000, None, now), 0);
         assert_eq!(
             affordable_leader_round(now + 60_000, Some(now - 1_000), now),
             0
+        );
+        assert_eq!(
+            affordable_leader_round(now + 60_000, Some(now - 1_000), now + 109_000),
+            MAX_LEADER_ROUNDS
         );
 
         // A parent this node never watched land prices at round 0. Falling
