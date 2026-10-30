@@ -568,9 +568,13 @@ impl ConsensusEngine for PoAEngine {
                     // node's clock with the same function the producer clamps
                     // itself with, so an authority cannot publish a valid block
                     // for a round another authority leads.
-                    // Priced from when this node saw the parent land: a
-                    // schedule-lagged stamp cannot buy a round, and a genuine
-                    // stall still walks the ladder in real time.
+                    // Priced from the parent's stamp, which every node
+                    // holding the parent reads the same way. Pricing from
+                    // this node's own sighting instead put the same claim on
+                    // different sides of the boundary wherever nodes booted
+                    // or synced seconds apart, and a claim refused here is a
+                    // block refused for good: the mesh kept two chains. A
+                    // future stamp still buys no round.
                     let affordable = affordable_leader_round(
                         prev.timestamp,
                         self.round_prices.seen_at(&prev.hash),
