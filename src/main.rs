@@ -1923,6 +1923,20 @@ async fn main() {
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tick.tick().await;
+                    // A node that is catching up produces nothing. Two nodes on
+                    // a mesh that is still forming otherwise build the same
+                    // height at once - each has only genesis, each is the
+                    // leader of the round it happens to reach first - and the
+                    // pair of blocks is a fork below every suffix either node
+                    // can join. In the devnet smoke this is one node booting a
+                    // few seconds late: it produced its own #1 while its first
+                    // sync round was still open, and neither side could reorg
+                    // onto the other. The round is opened on the first
+                    // handshake that reports a taller chain, which is exactly
+                    // the window the guard has to cover.
+                    if client_p.is_syncing() {
+                        continue;
+                    }
                     if let Some((block, _pruned_cids)) = chain_p.produce_block(producer).await {
                         tracing::info!("Produced block #{}", block.index);
                         client_p
