@@ -9,6 +9,10 @@ import {BudlumHash} from "../lib/BudlumHash.sol";
 ///         EigenLayer.
 interface IBudlumSlashTarget {
     function uncompressedKeyOf(bytes32 budlumValidator, address operator) external view returns (bytes memory);
+    function wasBound(bytes32 budlumValidator, address operator, bytes calldata uncompressedKey)
+        external
+        view
+        returns (bool);
     function slashForDoubleVote(address operator, string calldata description) external;
 }
 
@@ -96,21 +100,28 @@ contract BudlumSlasher {
     }
 
     /// @notice Slash `vote.operator` for signing two different hashes at one
-    ///         checkpoint with the key it bound for `vote.budlumValidator`.
+    ///         checkpoint with a key it bound for `vote.budlumValidator`.
     /// @param vote The two signatures (negated, uncompressed G1) and hashes.
+    /// @param pubkey The uncompressed key the evidence was signed with: a key
+    ///        the operator bound, now or before a rebind.
     /// @param g2Generator The G2 generator, uncompressed; must match the
     ///        pinned hash.
-    function slashDoubleVote(DoubleVote calldata vote, bytes calldata g2Generator) external {
+    function slashDoubleVote(
+        DoubleVote calldata vote,
+        bytes calldata pubkey,
+        bytes calldata g2Generator
+    ) external {
         if (keccak256(vote.hashA) == keccak256(vote.hashB)) {
             revert SameHash();
         }
         if (keccak256(g2Generator) != g2GeneratorHash) {
             revert UntrustedGenerator();
         }
+        _checkSignatures(vote, pubkey, g2Generator);
         // The offence belongs to the key that signed it, not to the binding
-        // row it was resolved from: one key bound for several validators is
-        // one offence at one checkpoint, not one per row.
-        bytes memory pubkey = _checkSignatures(vote, g2Generator);
+        // row the evidence names: one key bound for several validators is one
+        // offence at one checkpoint, not one per row, and the key outlives a
+        // rebind.
         bytes32 key = keccak256(abi.encode(keccak256(pubkey), vote.operator, vote.epoch, vote.height));
         if (slashed[key]) {
             revert AlreadySlashed(key);
@@ -120,15 +131,14 @@ contract BudlumSlasher {
         emit DoubleVoteSlashed(vote.budlumValidator, vote.operator, vote.epoch, vote.height);
     }
 
-    /// Verify both signatures against the key `vote.operator` bound and hand
-    /// that key back: it, not the binding row, is the identity of the offence.
-    function _checkSignatures(DoubleVote calldata vote, bytes calldata g2Generator)
+    /// Verify both signatures against the evidenced key, which the operator
+    /// must have bound for the validator at some point: a rotation leaves the
+    /// old key answerable, so a rebind cannot outrun its own evidence.
+    function _checkSignatures(DoubleVote calldata vote, bytes calldata pubkey, bytes calldata g2Generator)
         private
         view
-        returns (bytes memory pubkey)
     {
-        pubkey = registrar.uncompressedKeyOf(vote.budlumValidator, vote.operator);
-        if (pubkey.length == 0) {
+        if (!registrar.wasBound(vote.budlumValidator, vote.operator, pubkey)) {
             revert NotBound(vote.budlumValidator);
         }
         if (!BudlumBls.verify(
