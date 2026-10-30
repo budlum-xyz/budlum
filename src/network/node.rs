@@ -4664,12 +4664,22 @@ impl Node {
                                                         }
                                                         self.clear_sync_round();
                                                         if fork_retry {
+                                                            // A batch that does not continue this
+                                                            // chain is not a good contribution, so
+                                                            // the sender is charged rather than
+                                                            // rewarded: `report_invalid_block`
+                                                            // demotes it in the sync order, and the
+                                                            // re-walk below therefore asks someone
+                                                            // else. A peer that answers every round
+                                                            // with a mismatched batch cannot keep
+                                                            // the flag by being the only one asked.
+                                                            self.peer_manager_lock()
+                                                                .report_invalid_block(&peer);
                                                             let locator = self.chain.get_locator().await;
                                                             if !self.request_headers_from_peer(None, locator, 500) {
                                                                 info!(peer = %peer, "fork re-sync deferred: a sync round is already open");
                                                             }
-                                                        }
-                                                        {
+                                                        } else {
                                                             let mut pm = self.peer_manager_lock();
                                                             pm.report_good_behavior(&peer);
                                                         }

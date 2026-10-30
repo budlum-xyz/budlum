@@ -71,6 +71,17 @@ fn claim_new_key_file_or_exit(path: &str) {
     }
 }
 
+/// Longest a sync round may hold the daemon producer off.
+///
+/// The round is opened from an unverified claim - a handshake `best_height`, a
+/// `NewTip`, a gossiped block above the tip - so it must never be able to stop
+/// a validator from producing. Thirty seconds is ten slot intervals of the
+/// default ladder: long enough for an honest catch-up of the whole devnet, and
+/// short enough that a peer which claims a taller chain and then withholds it
+/// costs this node a handful of slots rather than the block times it would
+/// have led.
+const PRODUCER_SYNC_HOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The daemon block-production loop runs for every engine that produces from this process.
 /// PoA is included: the engine signs only when this node is the elected leader, and
 /// `produce_block` returns `None` for the other slots.
@@ -1921,6 +1932,11 @@ async fn main() {
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // First instant at which a sync round has been holding this
+                // producer, or `None` when no round was holding it. Cleared on
+                // every tick that produces, so a fresh round starts a fresh
+                // window and a stale one cannot accumulate.
+                let mut hold_deadline: Option<tokio::time::Instant> = None;
                 loop {
                     tick.tick().await;
                     // A node that is catching up produces nothing. Two nodes on
@@ -1934,9 +1950,26 @@ async fn main() {
                     // onto the other. The round is opened on the first
                     // handshake that reports a taller chain, which is exactly
                     // the window the guard has to cover.
+                    //
+                    // The hold is bounded. That claim is unverified - any
+                    // handshaked peer can make it, and a peer that never
+                    // answers leaves the round open until the timeout sweep -
+                    // so it may delay this validator but never stop it: a
+                    // window of `PRODUCER_SYNC_HOLD` covers every honest
+                    // catch-up, and producing on a stale tip afterwards costs
+                    // this slot a losing race, not the mesh its liveness.
                     if client_p.is_syncing() {
-                        continue;
+                        let now = tokio::time::Instant::now();
+                        let deadline =
+                            *hold_deadline.get_or_insert_with(|| now + PRODUCER_SYNC_HOLD);
+                        if now < deadline {
+                            continue;
+                        }
+                        tracing::warn!(
+                            "Sync round open past the production hold window; producing anyway"
+                        );
                     }
+                    hold_deadline = None;
                     if let Some((block, _pruned_cids)) = chain_p.produce_block(producer).await {
                         tracing::info!("Produced block #{}", block.index);
                         client_p
