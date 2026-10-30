@@ -246,11 +246,7 @@ fn bridge_lock_mint_burn_unlock_conserves_supply() {
     let burn_event = bc
         .burn_bridge_transfer_with_event(message_id, 2, 40, 0, 0, [7u8; 20])
         .expect("burn the minted transfer");
-    assert_eq!(
-        sum(&bc),
-        start - held,
-        "burn must debit the minted units"
-    );
+    assert_eq!(sum(&bc), start - held, "burn must debit the minted units");
 
     // Unlock on the source side: the owner is credited back what was burned.
     let burn_message = burn_event.message.clone().expect("burn carries a message");

@@ -319,7 +319,7 @@ fn collision_check(proof: &[u8], digest: impl Fn(&[u8]) -> Vec<u8>) -> bool {
 }
 
 mod weierstrass {
-    use super::{label, CanaryId, SECP256K1_DST, P256_DST};
+    use super::{label, CanaryId, P256_DST, SECP256K1_DST};
     use hash2curve::ExpandMsgXmd;
     use k256::elliptic_curve::array::typenum::Unsigned;
     use k256::elliptic_curve::group::Group;
