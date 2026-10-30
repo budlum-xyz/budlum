@@ -864,7 +864,7 @@ impl ConsensusEngine for PoSEngine {
                         // genuine stall still walks the ladder in real time.
                         let affordable = affordable_leader_round(
                             prev.timestamp,
-                            self.round_prices.live_tip_seen(&prev.hash),
+                            self.round_prices.seen_at(&prev.hash),
                             now_millis(),
                         );
                         if round > affordable {

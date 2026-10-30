@@ -524,18 +524,19 @@ mod p01_poa_round_pricing_tests {
             );
         }
 
-        // A parent this node never adopted - it is inside a peer's candidate
-        // chain being walked in one pass, or a replay - has no sighting and is
-        // priced from its header. Pricing it at zero would refuse every
-        // legitimate retry block in that chain, which is how a node stuck on a
-        // minority fork would fail to adopt the better one.
+        // A parent this node never adopted - deeper history, or a block a peer
+        // only described - has no sighting either, and prices at round 0. The
+        // header is the producer's claim, so it cannot price a round: the
+        // strict direction is the only safe one here, and it is why the book
+        // keeps every block this node committed inside the reorg window.
         let engine = PoAEngine::new(PoAConfig::default(), None);
-        if let Err(error) = engine.validate_block(&block, &[parent], &state) {
-            assert!(
-                !error.0.contains("claimed before it elapsed"),
-                "a candidate-chain parent must price from its header, got: {error:?}"
-            );
-        }
+        let error = engine
+            .validate_block(&block, &[parent], &state)
+            .expect_err("a parent with no sighting cannot buy a leader round");
+        assert!(
+            error.0.contains("claimed before it elapsed"),
+            "an unsighted parent must price at round 0, got: {error:?}"
+        );
     }
 
     #[test]
