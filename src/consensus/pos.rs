@@ -1,6 +1,6 @@
 use super::{
-    now_millis, ConsensusEngine, ConsensusError, RoundPriceBook, MAX_LEADER_ROUNDS,
-    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, RoundPriceBook,
+    MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
 };
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -925,37 +925,55 @@ impl ConsensusEngine for PoSEngine {
                 }
             }
 
-            // The block nonce carries the leader round. The round
-            // is capped and time-priced: a block claiming round `r` must sit
-            // at least `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS` after
-            // its parent, so a later, wider round cannot be claimed on the
-            // cheap.
+            // The block nonce carries the leader round. Read it before the
+            // VRF key is parsed: a round the verifier refuses must not depend
+            // on a later check passing.
             let round = block.nonce;
-            if round > MAX_LEADER_ROUNDS {
-                return Err(ConsensusError(format!(
-                    "PoS leader round {round} exceeds the cap {MAX_LEADER_ROUNDS}"
-                )));
-            }
-            if round > 0 {
-                if let Some(prev) = chain.last() {
-                    let floor = prev
-                        .timestamp
-                        .saturating_add(MIN_BLOCK_INTERVAL_MS)
-                        .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
-                    if block.timestamp < floor {
-                        return Err(ConsensusError(format!(
-                            "PoS leader round {round} claimed too early: block timestamp {} < floor {}",
-                            block.timestamp, floor
-                        )));
-                    }
-                    let now_ms = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis();
-                    if now_ms < floor {
-                        return Err(ConsensusError(format!(
-                            "PoS leader round {round} claimed ahead of wall clock: now {now_ms} < floor {floor}"
-                        )));
+            if schnorrkel::PublicKey::from_bytes(&validator.vrf_public_key).is_ok() {
+                // The round is capped and time-priced: a block claiming round
+                // `r` must sit at least `MIN_BLOCK_INTERVAL_MS + r *
+                // ROUND_TIMEOUT_MS` after its parent, so a later, wider round
+                // cannot be claimed on the cheap.
+                if round > MAX_LEADER_ROUNDS {
+                    return Err(ConsensusError(format!(
+                        "PoS leader round {round} exceeds the cap {MAX_LEADER_ROUNDS}"
+                    )));
+                }
+                if round > 0 {
+                    if let Some(prev) = chain.last() {
+                        let floor = prev
+                            .timestamp
+                            .saturating_add(MIN_BLOCK_INTERVAL_MS)
+                            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+                        if block.timestamp < floor {
+                            return Err(ConsensusError(format!(
+                                "PoS leader round {round} claimed too early: block timestamp {} < floor {}",
+                                block.timestamp, floor
+                            )));
+                        }
+                        // The floor compares two values the producer writes
+                        // (`block.timestamp` against `parent.timestamp`), so it
+                        // does not price the round: a timestamp up to
+                        // `MAX_FUTURE_BLOCK_TIME_MS` ahead makes rounds 0..=5
+                        // affordable at once, and every validator elected in
+                        // one of those rounds could publish a valid competing
+                        // block for the slot (CWE-807). Price the claim against
+                        // this node's clock, with the function the producer
+                        // clamps itself with.
+                        // Priced from when this node saw the parent land: a
+                        // schedule-lagged stamp cannot buy a round, and a
+                        // genuine stall still walks the ladder in real time.
+                        let affordable = affordable_leader_round(
+                            prev.timestamp,
+                            self.round_prices.seen_at(&prev.hash),
+                            now_millis(),
+                        );
+                        if round > affordable {
+                            return Err(ConsensusError(format!(
+                                "PoS leader round {round} claimed before it elapsed: only \
+                                 round {affordable} has been reached since the parent"
+                            )));
+                        }
                     }
                 }
             }
