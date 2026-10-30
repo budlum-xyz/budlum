@@ -6791,11 +6791,17 @@ impl Blockchain {
         }
         // Enqueue equivocation evidence for deterministic in-block execution
         // rather than mutating committed `AccountState` directly on gossip.
-        if self.finality_aggregator.is_none() {
-            // Nothing to put the vote in yet: keep it for the round that will
-            // start at this height instead of dropping it. The round is
-            // started from the committed block, which can land after the
-            // peers have already voted.
+        // A vote belongs to the round at its own height. When this node has no
+        // round yet, or is at another height (the peers are a round ahead, or
+        // this node has not started the round the block behind it names), the
+        // vote is kept for the round that names it instead of being dropped:
+        // it is gossiped once, and the round it belongs to may start a moment
+        // later.
+        let off_round = match self.finality_aggregator.as_ref() {
+            None => true,
+            Some(agg) => agg.checkpoint_height != vote.checkpoint_height,
+        };
+        if off_round {
             self.keep_early_prevote(vote);
             return Err("No active finality aggregator".into());
         }
@@ -6918,8 +6924,12 @@ impl Blockchain {
                 }
             }
         }
+        let off_round = match self.finality_aggregator.as_ref() {
+            None => true,
+            Some(agg) => agg.checkpoint_height != vote.checkpoint_height,
+        };
         let no_round_yet = self.finality_aggregator.is_none();
-        if no_round_yet
+        if off_round
             || self
                 .finality_aggregator
                 .as_ref()
@@ -7166,8 +7176,22 @@ impl Blockchain {
             .saturating_mul(interval)
     }
 
+    /// How many blocks must sit on top of a checkpoint before this node votes
+    /// on it.
+    ///
+    /// A block fork choice can still replace is not a checkpoint yet. This
+    /// node signs one hash per height - a second signature for another hash at
+    /// the same height is exactly the double vote the slasher exists for - so
+    /// a vote for a block a reorg then replaces leaves the round holding a
+    /// hash nobody else has, and the guard correctly refuses to sign the new
+    /// one: the round starves while the chain runs. Four blocks is two devnet
+    /// checkpoint intervals: long enough that a fork has been resolved, short
+    /// enough that the vote still lands in the first seconds of the round.
+    pub const FINALITY_VOTE_DEPTH: u64 = 4;
+
     /// Start - or keep - the prevote round for the lowest unfinalized
-    /// checkpoint, once this node holds the block at that height.
+    /// checkpoint, once this node holds the block at that height and the
+    /// block has [`Self::FINALITY_VOTE_DEPTH`] blocks on top of it.
     pub fn start_pending_finality_round(&mut self) {
         let height = self.next_finality_checkpoint();
         if height == 0 {
@@ -7176,6 +7200,11 @@ impl Blockchain {
         let Some(block) = self.chain.get(height as usize) else {
             return;
         };
+        // See `FINALITY_VOTE_DEPTH`: the checkpoint has to be behind the tip.
+        let tip = self.chain.len().saturating_sub(1) as u64;
+        if tip < height.saturating_add(Self::FINALITY_VOTE_DEPTH) {
+            return;
+        }
         let hash = block.hash.clone();
         self.start_prevote_task(height, hash);
     }
@@ -9836,10 +9865,17 @@ mod tests {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
         let checkpoint_hash = "a".repeat(64);
+        let checkpoint_height = 10;
+        // The round's epoch is derived from the height, and a vote for another
+        // epoch is not the round's vote.
+        let epoch = checkpoint_height
+            / crate::core::chain_config::epoch_len_for_chain_id(
+                crate::core::transaction::DEFAULT_CHAIN_ID,
+            );
         let vote = Prevote {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
-            epoch: 0,
-            checkpoint_height: 10,
+            epoch,
+            checkpoint_height,
             checkpoint_hash: checkpoint_hash.clone(),
             voter_id: Address::from([1u8; 32]),
             sig_bls: vec![],
@@ -9855,7 +9891,7 @@ mod tests {
         assert!(bc.handle_prevote(vote).is_err());
         assert_eq!(bc.early_finality_votes.prevotes.len(), 1, "kept once");
 
-        bc.start_prevote_task(10, checkpoint_hash);
+        bc.start_prevote_task(checkpoint_height, checkpoint_hash);
         let round = bc.finality_aggregator.as_ref().expect("round");
         assert_eq!(round.checkpoint_height, 10, "the round is the kept vote's");
         assert!(
@@ -9897,11 +9933,13 @@ mod tests {
         let consensus = Arc::new(PoWEngine::new(0));
         let mut bc = Blockchain::new(consensus, None, 45262, None);
         let checkpoint_hash = "a".repeat(64);
-        bc.start_prevote_task(10, checkpoint_hash.clone());
+        let checkpoint_height = 10;
+        bc.start_prevote_task(checkpoint_height, checkpoint_hash.clone());
+        let epoch = bc.finality_aggregator.as_ref().expect("round").epoch;
         let vote = Precommit {
             chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
-            epoch: 0,
-            checkpoint_height: 10,
+            epoch,
+            checkpoint_height,
             checkpoint_hash: checkpoint_hash.clone(),
             voter_id: Address::from([3u8; 32]),
             sig_bls: vec![],

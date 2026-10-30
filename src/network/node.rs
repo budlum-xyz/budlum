@@ -795,15 +795,21 @@ impl Drop for ReorgFlightGuard {
     }
 }
 
-/// Shortest interval between two peer-triggered chain reconstructions.
+/// Shortest interval between two chain reconstructions.
 ///
-/// Five minutes: long enough that a peer broadcasting a fork batch every block
-/// cannot make the node re-walk its chain continuously, short enough that a
-/// genuine fork seen from a new peer is still adopted long before a human
-/// notices. A node that is actually behind does not depend on this path - it
-/// asks for the blocks it is missing over `/sync`, which is self-initiated and
-/// not throttled here.
-const REORG_MIN_INTERVAL_SECS: u64 = 300;
+/// Two seconds, and the reason is the devnet's own slot time: a fork has to
+/// be resolved within a slot or two or the mesh splits into two chains that
+/// each keep producing - every node then votes a different hash at the same
+/// checkpoint, no round ever reaches quorum, and the chain grows while
+/// finality stays at zero. The window started at five minutes, which the
+/// multi-node smoke cannot outrun.
+///
+/// What still bounds the work is not this number but the way it is reached:
+/// single-flight means one reconstruction at a time, the fork depth is capped
+/// by `MAX_REORG_DEPTH`, the candidate has to beat this chain in fork choice,
+/// and the batch only exists as the answer to a sync request this node made
+/// itself. The interval only decides how often those attempts may repeat.
+const REORG_MIN_INTERVAL_SECS: u64 = 2;
 
 /// Has the minimum interval passed since the last reconstruction finished?
 ///
@@ -1435,7 +1441,7 @@ impl Node {
             .as_secs();
         if !reorg_interval_elapsed(&last_completed, now) {
             warn!(
-                "Reorg from {peer} ignored: a peer-triggered reconstruction finished less than {REORG_MIN_INTERVAL_SECS}s ago"
+                "Reorg from {peer} ignored: the previous reconstruction finished less than {REORG_MIN_INTERVAL_SECS}s ago"
             );
             return;
         }
@@ -1496,8 +1502,8 @@ impl Node {
         };
         // The join happens on the chain actor's side of the boundary
         // (CWE-400). Reading the prefix here meant a genesis-wide copy whose
-        // size the peer chose with `start`, every five minutes, whether or not
-        // the candidate could win fork choice; the actor already holds the
+        // size the peer chose with `start`, on every allowed attempt, whether
+        // or not the candidate could win fork choice; the actor already holds the
         // chain and joins the suffix before copying anything, refusing a batch
         // that cannot make the chain longer for two integer comparisons.
         match chain.try_reorg_suffix(suffix).await {
