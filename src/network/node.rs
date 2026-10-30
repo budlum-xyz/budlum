@@ -2565,6 +2565,39 @@ impl Node {
                                     "Finality: auto-precommit for checkpoint height {} (epoch {})",
                                     agg_state.checkpoint_height, agg_state.epoch
                                 );
+                                // Gossip does not echo a message back to the
+                                // node that published it, so the signature
+                                // this node just made is the one its own
+                                // aggregator never sees. A four-validator
+                                // round needs three precommits of four
+                                // thousand stake; counting only the peers'
+                                // leaves every node one short, and the round
+                                // sits at height two for the life of the
+                                // process. Added before it is gossiped, so the
+                                // local view is ahead of, never behind, the
+                                // mesh.
+                                match self.chain.handle_precommit(precommit.clone()).await {
+                                    Ok(Some(cert)) => {
+                                        let topic = gossipsub::IdentTopic::new("blocks");
+                                        let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                                            topic,
+                                            NetworkMessage::FinalityCert {
+                                                epoch: cert.epoch,
+                                                checkpoint_height: cert.checkpoint_height,
+                                                checkpoint_hash: cert.checkpoint_hash,
+                                                agg_sig_bls: cert.agg_sig_bls,
+                                                bitmap: cert.bitmap,
+                                                set_hash: cert.set_hash,
+                                                scheme_id:
+                                                    crate::chain::finality::BLS_SCHEME_RFC9380_V1
+                                                        .to_string(),
+                                            }
+                                            .to_bytes(),
+                                        );
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => warn!("Own precommit not admitted: {e}"),
+                                }
                                 let vote_msg = NetworkMessage::Precommit {
                                     epoch: precommit.epoch,
                                     checkpoint_height: precommit.checkpoint_height,
@@ -2628,6 +2661,12 @@ impl Node {
                         {
                             Ok(prevote) => {
                                 info!("Finality: voting for checkpoint height {checkpoint_height} (epoch {epoch})");
+                                // The same one-signature gap as the
+                                // precommit below: a published vote is not
+                                // delivered back to its publisher.
+                                if let Err(e) = self.chain.handle_prevote(prevote.clone()).await {
+                                    warn!("Own prevote not admitted: {e}");
+                                }
                                 let vote_msg = NetworkMessage::Prevote {
                                     epoch: prevote.epoch,
                                     checkpoint_height: prevote.checkpoint_height,
