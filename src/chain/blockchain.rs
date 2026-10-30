@@ -86,6 +86,19 @@ pub struct PqStageObservation {
     pub seal: Option<crate::domain::SealId>,
 }
 
+/// Votes kept for a round that has not started (or not reached prevote
+/// quorum) yet. See `Blockchain::early_finality_votes`.
+#[derive(Default)]
+struct EarlyFinalityVotes {
+    prevotes: Vec<Prevote>,
+    precommits: Vec<Precommit>,
+}
+
+/// The most votes kept per kind. A round is four votes on the devnet mesh and
+/// a few hundred on the testnet one; the remainder is an attacker's, so the
+/// buffer drops the oldest instead of growing.
+const MAX_EARLY_FINALITY_VOTES: usize = 64;
+
 pub struct Blockchain {
     pub chain: Vec<Block>,
     pub consensus: Arc<dyn ConsensusEngine>,
@@ -143,6 +156,14 @@ pub struct Blockchain {
     pub pending_registry_slashing_reports: Vec<crate::registry::evidence::SlashingReport>,
     pub local_invalid_votes: crate::registry::InvalidVoteTracker,
     pub finality_aggregator: Option<FinalityAggregator>,
+    /// Votes that reached this node before it had a round - or a prevote
+    /// quorum - to put them in. A peer votes the moment it holds the
+    /// checkpoint, which can be earlier than this node's own aggregator
+    /// exists, and the vote is published once: dropping it here is the
+    /// difference between a round that finalizes and one that starves while
+    /// blocks keep coming. Bounded, because these votes are kept before the
+    /// round that would validate them exists.
+    early_finality_votes: EarlyFinalityVotes,
     pub metrics: Option<Arc<crate::core::metrics::Metrics>>,
     /// The anchor emission trace, run on every
     /// checkpoint header a committed block carries; the default is GatedOff
@@ -1007,6 +1028,7 @@ impl Blockchain {
             pending_registry_slashing_reports: Vec::new(),
             local_invalid_votes: crate::registry::InvalidVoteTracker::new(),
             finality_aggregator: None,
+            early_finality_votes: EarlyFinalityVotes::default(),
             metrics: None,
             anchor_emission: AnchorEmission::default(),
             pq_source: crate::domain::PqCanonicalSource::new(chain_id),
@@ -6769,6 +6791,14 @@ impl Blockchain {
         }
         // Enqueue equivocation evidence for deterministic in-block execution
         // rather than mutating committed `AccountState` directly on gossip.
+        if self.finality_aggregator.is_none() {
+            // Nothing to put the vote in yet: keep it for the round that will
+            // start at this height instead of dropping it. The round is
+            // started from the committed block, which can land after the
+            // peers have already voted.
+            self.keep_early_prevote(vote);
+            return Err("No active finality aggregator".into());
+        }
         let (result, reports) = {
             let aggregator = self
                 .finality_aggregator
@@ -6786,6 +6816,16 @@ impl Blockchain {
         }
         for report in reports {
             self.enqueue_pending_slashing_report(report);
+        }
+        if self
+            .finality_aggregator
+            .as_ref()
+            .is_some_and(|agg| agg.prevote_quorum_reached && !agg.precommit_quorum_reached)
+        {
+            // The precommits that arrived before this quorum were kept for
+            // exactly this moment: a precommit is refused until the prevote
+            // quorum is in, and it is published once.
+            self.replay_early_precommits();
         }
         result.map_err(|e| e.to_string())
     }
@@ -6877,6 +6917,24 @@ impl Blockchain {
                     .map_err(|e| format!("Invalid PQ attestation in precommit: {e}"))?;
                 }
             }
+        }
+        let no_round_yet = self.finality_aggregator.is_none();
+        if no_round_yet
+            || self
+                .finality_aggregator
+                .as_ref()
+                .is_some_and(|agg| !agg.prevote_quorum_reached)
+        {
+            // Kept, not dropped: the sender voted at the same checkpoint as
+            // this node, it simply reached the quorum first, and the vote is
+            // published once. `handle_prevote` replays these the moment the
+            // prevote quorum is in.
+            self.keep_early_precommit(vote);
+            return Err(if no_round_yet {
+                "No active finality aggregator".into()
+            } else {
+                "Cannot precommit before prevote quorum".into()
+            });
         }
         let (result, quorum_reached, reports) = {
             let aggregator = self
@@ -7122,7 +7180,92 @@ impl Blockchain {
         self.start_prevote_task(height, hash);
     }
 
-    fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
+    /// Keep a vote whose round has not started (or has no prevote quorum)
+    /// yet, bounded and de-duplicated by (voter, epoch, height): a re-delivered
+    /// or repeated gossip of the same vote must not fill the buffer.
+    fn keep_early_prevote(&mut self, vote: Prevote) {
+        let votes = &mut self.early_finality_votes.prevotes;
+        if votes.iter().any(|kept| {
+            kept.voter_id == vote.voter_id
+                && kept.epoch == vote.epoch
+                && kept.checkpoint_height == vote.checkpoint_height
+        }) {
+            return;
+        }
+        if votes.len() >= MAX_EARLY_FINALITY_VOTES {
+            votes.remove(0);
+        }
+        votes.push(vote);
+    }
+
+    fn keep_early_precommit(&mut self, vote: Precommit) {
+        let votes = &mut self.early_finality_votes.precommits;
+        if votes.iter().any(|kept| {
+            kept.voter_id == vote.voter_id
+                && kept.epoch == vote.epoch
+                && kept.checkpoint_height == vote.checkpoint_height
+        }) {
+            return;
+        }
+        if votes.len() >= MAX_EARLY_FINALITY_VOTES {
+            votes.remove(0);
+        }
+        votes.push(vote);
+    }
+
+    /// Offer the kept prevotes to the round that just started. Votes for
+    /// another (epoch, height, hash) stay kept - a node that is one round
+    /// behind votes at a height this node has already moved past, and the
+    /// next round may still be the one they belong to.
+    fn replay_early_prevotes(&mut self, epoch: u64, checkpoint_height: u64, checkpoint_hash: &str) {
+        let kept = std::mem::take(&mut self.early_finality_votes.prevotes);
+        for vote in kept {
+            if vote.epoch != epoch
+                || vote.checkpoint_height != checkpoint_height
+                || vote.checkpoint_hash != checkpoint_hash
+            {
+                self.keep_early_prevote(vote);
+                continue;
+            }
+            if let Err(e) = self.handle_prevote(vote) {
+                tracing::debug!("kept prevote not admitted when its round started: {e}");
+            }
+        }
+    }
+
+    /// Offer the kept precommits to the round whose prevote quorum just came
+    /// in, for the same reason.
+    fn replay_early_precommits(&mut self) {
+        let Some((epoch, checkpoint_height, checkpoint_hash)) =
+            self.finality_aggregator.as_ref().map(|agg| {
+                (
+                    agg.epoch,
+                    agg.checkpoint_height,
+                    agg.checkpoint_hash.clone(),
+                )
+            })
+        else {
+            return;
+        };
+        let kept = std::mem::take(&mut self.early_finality_votes.precommits);
+        for vote in kept {
+            if vote.epoch != epoch
+                || vote.checkpoint_height != checkpoint_height
+                || vote.checkpoint_hash != checkpoint_hash
+            {
+                self.keep_early_precommit(vote);
+                continue;
+            }
+            if let Err(e) = self.handle_precommit(vote) {
+                tracing::debug!("kept precommit not admitted when the quorum came in: {e}");
+            }
+        }
+    }
+
+    /// Crate-visible because the live-path tests drive one round directly,
+    /// with the height and hash they built; the node itself reaches it
+    /// through `start_pending_finality_round`.
+    pub(crate) fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
         // The single aggregator slot used to be clobbered
         // on every call. Two consequences are pinned here:
         // 1. Re-starting the SAME checkpoint (a re-delivered block, a gossip
@@ -7133,15 +7276,22 @@ impl Blockchain {
         //    without ever finalizing. V14 does not multiplex pending rounds,
         //    so abandonment is the design - but it must be LOUD, because a
         //    silently-dropped round is indistinguishable from a stall.
-        if let Some(existing) = self.finality_aggregator.as_ref() {
-            if existing.checkpoint_height == checkpoint_height
+        let epoch =
+            checkpoint_height / crate::core::chain_config::epoch_len_for_chain_id(self.chain_id);
+        let same_round = self.finality_aggregator.as_ref().is_some_and(|existing| {
+            existing.checkpoint_height == checkpoint_height
                 && existing.checkpoint_hash == checkpoint_hash
-            {
-                tracing::debug!(
-                    "prevote task for checkpoint height={checkpoint_height} already active - keeping collected votes"
-                );
-                return;
-            }
+        });
+        if same_round {
+            tracing::debug!(
+                "prevote task for checkpoint height={checkpoint_height} already active - keeping collected votes"
+            );
+            // Kept votes can still predate this round (they arrived with the
+            // block that started it), so they get their chance either way.
+            self.replay_early_prevotes(epoch, checkpoint_height, &checkpoint_hash);
+            return;
+        }
+        if let Some(existing) = self.finality_aggregator.as_ref() {
             if existing.prevote_quorum_reached && !existing.precommit_quorum_reached {
                 warn!(
                     "checkpoint height={} displaced an active round at height={} with prevote quorum but no precommit quorum; the older round will never finalize (single-slot aggregator)",
@@ -7149,8 +7299,6 @@ impl Blockchain {
                 );
             }
         }
-        let epoch =
-            checkpoint_height / crate::core::chain_config::epoch_len_for_chain_id(self.chain_id);
         // The aggregator is always started for the current epoch, so the set
         // is known by construction; `build_validator_snapshot` is the same
         // value the lookup would return.
@@ -7161,6 +7309,7 @@ impl Blockchain {
             FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash, snapshot);
         self.finality_aggregator = Some(aggregator);
         info!("Started prevote task for checkpoint height={checkpoint_height} (epoch={epoch})");
+        self.replay_early_prevotes(epoch, checkpoint_height, &checkpoint_hash);
     }
 
     pub fn get_aggregator_state(&self) -> crate::chain::finality::AggregatorState {
@@ -7696,6 +7845,7 @@ impl Clone for Blockchain {
             pending_registry_slashing_reports: self.pending_registry_slashing_reports.clone(),
             local_invalid_votes: self.local_invalid_votes.clone(),
             finality_aggregator: None,
+            early_finality_votes: EarlyFinalityVotes::default(),
             metrics: self.metrics.clone(),
             anchor_emission: self.anchor_emission.clone(),
             pq_source: self.pq_source.clone(),
@@ -9671,6 +9821,116 @@ mod tests {
         assert!(result
             .unwrap_err()
             .contains("No active finality aggregator"));
+    }
+
+    /// A prevote that reaches a node before its own round exists is kept,
+    /// and the round that starts later counts it. This is the devnet stall:
+    /// a peer votes the moment it holds the checkpoint, the round here starts
+    /// from the committed block a moment after, and the dropped vote left
+    /// every node one short of the quorum forever.
+    #[test]
+    fn a_prevote_that_arrives_before_its_round_is_counted_when_the_round_starts() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let checkpoint_hash = "a".repeat(64);
+        let vote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: checkpoint_hash.clone(),
+            voter_id: Address::from([1u8; 32]),
+            sig_bls: vec![],
+            auth_sig: Vec::new(),
+        };
+        assert!(bc.handle_prevote(vote.clone()).is_err());
+        assert_eq!(
+            bc.early_finality_votes.prevotes.len(),
+            1,
+            "the vote must be kept, not dropped"
+        );
+        // The same vote again must not grow the buffer.
+        assert!(bc.handle_prevote(vote).is_err());
+        assert_eq!(bc.early_finality_votes.prevotes.len(), 1, "kept once");
+
+        bc.start_prevote_task(10, checkpoint_hash);
+        assert!(
+            bc.early_finality_votes.prevotes.is_empty(),
+            "the round that started here took the kept vote"
+        );
+        assert!(
+            bc.finality_aggregator
+                .as_ref()
+                .is_some_and(|agg| agg.get_state().prevote_count > 0),
+            "the kept vote counts in the round"
+        );
+    }
+
+    /// A vote for another round stays kept: a node one round behind must not
+    /// lose its vote because this node moved on.
+    #[test]
+    fn a_kept_vote_for_another_round_survives_the_round_that_starts() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let vote = Prevote {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: "a".repeat(64),
+            voter_id: Address::from([2u8; 32]),
+            sig_bls: vec![],
+            auth_sig: Vec::new(),
+        };
+        assert!(bc.handle_prevote(vote).is_err());
+        bc.start_prevote_task(12, "c".repeat(64));
+        assert_eq!(
+            bc.early_finality_votes.prevotes.len(),
+            1,
+            "a vote for height 10 does not belong to the round at 12"
+        );
+    }
+
+    /// A precommit that arrives before the prevote quorum is kept and is
+    /// offered to the round once the quorum is in - the second devnet loss:
+    /// the vote is published once, and "Cannot precommit before prevote
+    /// quorum" used to be the end of it.
+    #[test]
+    fn a_precommit_that_arrives_before_the_quorum_is_replayed_after_it() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let mut bc = Blockchain::new(consensus, None, 45262, None);
+        let checkpoint_hash = "a".repeat(64);
+        bc.start_prevote_task(10, checkpoint_hash.clone());
+        let vote = Precommit {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 0,
+            checkpoint_height: 10,
+            checkpoint_hash: checkpoint_hash.clone(),
+            voter_id: Address::from([3u8; 32]),
+            sig_bls: vec![],
+            auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
+        };
+        let err = bc
+            .handle_precommit(vote)
+            .expect_err("no prevote quorum yet");
+        assert!(
+            err.contains("Cannot precommit before prevote quorum"),
+            "{err}"
+        );
+        assert_eq!(
+            bc.early_finality_votes.precommits.len(),
+            1,
+            "the precommit must be kept"
+        );
+
+        // The quorum comes in: the kept precommit is offered to the round and
+        // the buffer is empty, whatever the round then decides about it.
+        let aggregator = bc.finality_aggregator.as_mut().expect("round");
+        aggregator.prevote_quorum_reached = true;
+        bc.replay_early_precommits();
+        assert!(
+            bc.early_finality_votes.precommits.is_empty(),
+            "the kept precommit was replayed into its own round"
+        );
     }
 
     #[test]
