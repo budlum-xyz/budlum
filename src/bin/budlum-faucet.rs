@@ -795,7 +795,16 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert!(response.starts_with("HTTP/1.1 408"), "{response}");
+        // The status line, not the body: the response text is built from the
+        // half-sent request, and putting it in a panic message makes the test
+        // log depend on remote bytes (the CodeQL log-injection rule reads a
+        // panic message as a log sink). The length is a number and carries
+        // no user text.
+        assert!(
+            response.starts_with("HTTP/1.1 408"),
+            "the half-sent body was not refused with 408 ({} bytes received)",
+            response.len()
+        );
         server.await.unwrap();
     }
 
