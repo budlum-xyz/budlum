@@ -7305,11 +7305,14 @@ impl Blockchain {
         let snapshot = self
             .validator_snapshot_for_epoch(epoch)
             .unwrap_or_else(|| self.build_validator_snapshot(epoch));
+        // The round's own hash, kept for the replay below: the aggregator
+        // takes ownership of the one it is built with.
+        let round_hash = checkpoint_hash.clone();
         let aggregator =
             FinalityAggregator::new(epoch, checkpoint_height, checkpoint_hash, snapshot);
         self.finality_aggregator = Some(aggregator);
         info!("Started prevote task for checkpoint height={checkpoint_height} (epoch={epoch})");
-        self.replay_early_prevotes(epoch, checkpoint_height, &checkpoint_hash);
+        self.replay_early_prevotes(epoch, checkpoint_height, &round_hash);
     }
 
     pub fn get_aggregator_state(&self) -> crate::chain::finality::AggregatorState {
