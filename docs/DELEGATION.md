@@ -51,7 +51,11 @@ leaving matters most exactly then.
 | Smallest new position | 100 base units, TESTNET-DEFAULT | `min_delegation_amount` |
 | Positions one validator may carry | 1,000, TESTNET-DEFAULT | `max_delegations_per_validator` |
 
-A commission may change once per epoch, by at most the per-epoch limit.
+A commission may change once per epoch, by at most the per-epoch limit, and a
+change is prospective: it prices the next epoch. The epoch close pays the epoch
+it closes at the rate that was in force for that epoch, so a rate set in the
+closing block of an epoch cannot tax rewards that already accrued, and the
+validator profile reports the first epoch the live rate prices.
 
 Both delegation tables are kept sorted by `(validator, delegator)` and
 addressed by binary search, so a stake operation, a slash and the epoch close
@@ -69,8 +73,9 @@ At every epoch boundary the reward pool pays each active, unjailed,
 unslashed validator its stake-weighted share. For one validator:
 
 1. The delegated part of its share is `share * delegated / stake`.
-2. The commission is taken from the delegated part first:
-   `delegated_part * commission_ppm / 1,000,000`.
+2. The commission is taken from the delegated part first, at the rate that was
+   in force for the epoch being closed: `delegated_part * commission_ppm /
+   1,000,000`.
 3. The validator receives its self part plus the commission.
 4. The rest of the delegated part is split across positions by amount, in
    delegator address order; the last position takes the rounding remainder.
@@ -107,7 +112,7 @@ The wallet password comes from `--password-file` or `BUD_WALLET_PASSWORD`.
 
 | RPC | Returns |
 |---|---|
-| `bud_validatorProfile(address)` | Stake, self stake, delegated stake, delegator count, pending exits, commission and its last change epoch, jail and slash record, missed checkpoints |
+| `bud_validatorProfile(address)` | Stake, self stake, delegated stake, delegator count, pending exits, commission, the epoch its current rate starts pricing and when it last changed, jail and slash record, missed checkpoints |
 | `bud_validatorList()` | Every validator's profile, in address order |
 | `bud_getValidatorDelegations(address)` | The positions and pending exits of one validator |
 
