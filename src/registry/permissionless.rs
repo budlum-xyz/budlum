@@ -55,6 +55,14 @@ pub const UNBONDING_EPOCHS: u64 = 7;
 /// registry roots.
 pub const MAX_SLASHING_HISTORY: usize = 4096;
 
+/// How many past commission rates one validator's row keeps.
+///
+/// The epoch close pays the epoch that just ended, so only the rates near the
+/// present are ever read; older epochs read as no commission, which pays the
+/// delegator rather than the validator. Changing this value is a consensus
+/// change: the retained window is part of the registry root.
+pub const MAX_COMMISSION_RATE_HISTORY: usize = 64;
+
 /// Reasons a registered member can be slashed. Explicitly enumerated so the
 /// Economic-security surface is auditable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,11 +287,30 @@ pub struct ClaimableReward {
     pub amount: u64,
 }
 
+/// One rate a validator set, and the first epoch it prices.
+///
+/// A change is prospective: the epoch that sets it keeps the rate it accrued
+/// under, so a reprice in the block that closes an epoch cannot tax that
+/// epoch's delegated rewards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommissionRate {
+    /// The first epoch whose rewards are taxed at `commission_ppm`.
+    pub effective_epoch: u64,
+    pub commission_ppm: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatorCommission {
     pub validator: Address,
     pub commission_ppm: u32,
     pub last_change_epoch: u64,
+    /// The rates this validator set, oldest first, each with the first epoch it
+    /// prices, so the epoch close can pay an epoch at the rate that was in
+    /// force for it rather than at the live one. Bounded by
+    /// [`MAX_COMMISSION_RATE_HISTORY`]: an epoch older than the retained window
+    /// reads as no commission, the direction that pays the delegator.
+    #[serde(default)]
+    pub rates: Vec<CommissionRate>,
 }
 
 /// The permissionless registry itself.
@@ -1568,6 +1595,34 @@ impl PermissionlessRegistry {
             .map_or(0, |commission| commission.commission_ppm)
     }
 
+    /// The commission that prices `epoch`'s rewards.
+    ///
+    /// A rate is not in force until its `effective_epoch`, so the epoch close
+    /// pays a mid-epoch reprice only from the next epoch on. An epoch that
+    /// precedes every rate reads as no commission, which is what a validator
+    /// that had not set one yet owed.
+    pub fn validator_commission_ppm_at(&self, validator: &Address, epoch: u64) -> u32 {
+        self.validator_commissions
+            .iter()
+            .find(|commission| commission.validator == *validator)
+            .map_or(0, |commission| {
+                commission
+                    .rates
+                    .iter()
+                    .rev()
+                    .find(|rate| rate.effective_epoch <= epoch)
+                    .map_or(0, |rate| rate.commission_ppm)
+            })
+    }
+
+    /// The first epoch the validator's live rate prices, when it has one.
+    #[must_use]
+    pub fn validator_commission_effective_epoch(&self, validator: &Address) -> Option<u64> {
+        self.validator_commission(validator)
+            .and_then(|commission| commission.rates.last())
+            .map(|rate| rate.effective_epoch)
+    }
+
     pub fn set_validator_commission(
         &mut self,
         validator: Address,
@@ -1597,11 +1652,22 @@ impl PermissionlessRegistry {
             }
             existing.commission_ppm = commission_ppm;
             existing.last_change_epoch = current_epoch;
+            existing.rates.push(CommissionRate {
+                effective_epoch: current_epoch.saturating_add(1),
+                commission_ppm,
+            });
+            if existing.rates.len() > MAX_COMMISSION_RATE_HISTORY {
+                existing.rates.remove(0);
+            }
         } else {
             self.validator_commissions.push(ValidatorCommission {
                 validator,
                 commission_ppm,
                 last_change_epoch: current_epoch,
+                rates: vec![CommissionRate {
+                    effective_epoch: current_epoch.saturating_add(1),
+                    commission_ppm,
+                }],
             });
         }
         Ok(())
