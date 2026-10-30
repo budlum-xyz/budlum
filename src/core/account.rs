@@ -3269,7 +3269,7 @@ impl AccountState {
     /// `Active`, which is what takes the bond out of this total. Precision:
     /// the bond is counted in full while the deal is live, so the close paths
     /// remove exactly what was counted.
-    pub fn total_storage_escrowed_supply(&self) -> u128 {
+    fn total_storage_escrowed_supply(&self) -> u128 {
         let epoch = self.epoch_index;
         self.storage_registry
             .all_deals()
