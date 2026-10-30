@@ -36,7 +36,7 @@ type InvalidVoteSample = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 /// Maximum independently verifiable samples in one spam report.
 ///
 /// The bound is the *encoded* one, not the raw retention budget: the report is
-/// measured by [`MAX_SPAM_REPORT_JSON_BYTES`] before it may enter a block, and
+/// measured by `MAX_SPAM_REPORT_JSON_BYTES` before it may enter a block, and
 /// `serde_json` spends up to four characters on each byte of a `Vec<u8>`. The
 /// ingress caps a vote preimage at `MAX_VOTE_PREIMAGE_BYTES` and each
 /// signature at `MAX_VOTE_SIGNATURE_BYTES`, so 24 worst-case samples encode
@@ -57,7 +57,7 @@ pub const MAX_SPAM_REPORT_SAMPLES: usize = 24;
 /// the same number before it will carry it in a block, so a report the
 /// producer builds here is one a block will accept. Kept next to the sample
 /// cap so the two cannot drift apart.
-pub const MAX_SPAM_REPORT_JSON_BYTES: usize = 65_536;
+const MAX_SPAM_REPORT_JSON_BYTES: usize = 65_536;
 
 /// Samples come only from BLS finality votes, not the PQ signature table. The
 /// ingress refuses larger signatures before authentication or pairing.
