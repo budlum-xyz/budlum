@@ -197,7 +197,6 @@ mod consensus_round_tests {
         // has genuinely elapsed, so the pricing gate lets it through and any
         // later refusal is about something else.
         let (parent, block) = fixture(now_ms.saturating_sub(60_000));
-        engine.note_block_seen(&parent.hash, parent.timestamp);
         if let Err(error) = engine.validate_block(&block, &[parent], &state) {
             assert!(
                 !round_not_elapsed(&error.0) && !error.0.contains("claimed too early"),
@@ -552,49 +551,42 @@ mod poa_round_pricing_tests {
         (state, address)
     }
 
-    /// A schedule-lagged parent must not buy rounds, and a genuine stall must
-    /// still refill the slot.
+    /// The round rule prices a PoA claim identically on every node.
     ///
-    /// Both blocks are stamped identically - the parent is ten minutes behind
-    /// its schedule and the child claims round 6 - so the header cannot tell
-    /// the two situations apart. What differs is when the verifying node saw
-    /// the parent land: a moment ago (lag, nothing has elapsed) or ten minutes
-    /// ago (a real stall, the ladder has walked past round 6).
+    /// The price used to be read off "when this node saw the parent land".
+    /// That is a value only one node has - its boot time for genesis, its load
+    /// instant for a tip restored from disk - so the same claim cleared the
+    /// gate on the node that committed the parent and was refused on the node
+    /// that joined a second later. A refused claim is a block refused for
+    /// good: the devnet mesh answered it by keeping two chains at height 1.
+    /// The parent's stamp is the value every node holding the block reads the
+    /// same way, so it is the only anchor the price may use.
     #[test]
-    fn poa_prices_a_round_by_when_the_parent_was_seen_not_by_its_stamp() {
+    fn poa_prices_a_round_by_the_shared_stamp_whatever_this_node_saw() {
         let (state, address) = single_authority_state();
-        let engine = PoAEngine::new(PoAConfig::default(), None);
         let now_ms = crate::consensus::now_millis();
         let round = 6u64;
 
-        let mut parent = Block::genesis();
-        parent.timestamp = now_ms.saturating_sub(600_000);
-        parent.hash = parent.calculate_hash();
-        let mut block = Block::new(1, parent.hash.clone(), vec![]);
-        block.timestamp = parent
-            .timestamp
-            .saturating_add(MIN_BLOCK_INTERVAL_MS)
-            .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
-        block.producer = Some(address);
-        block.nonce = round;
+        let fixture = |parent_ts: u128| {
+            let mut parent = Block::genesis();
+            parent.timestamp = parent_ts;
+            parent.hash = parent.calculate_hash();
+            let mut block = Block::new(1, parent.hash.clone(), vec![]);
+            block.timestamp = parent
+                .timestamp
+                .saturating_add(MIN_BLOCK_INTERVAL_MS)
+                .saturating_add(ROUND_TIMEOUT_MS.saturating_mul(u128::from(round)));
+            block.producer = Some(address);
+            block.nonce = round;
+            (parent, block)
+        };
 
-        // The verifier has just seen this parent: the ten minutes of schedule
-        // lag in its stamp are not time anyone observed, so round 6 is refused.
-        engine.note_block_seen(&parent.hash, now_ms);
-        let error = engine
-            .validate_block(&block, std::slice::from_ref(&parent), &state)
-            .expect_err("schedule lag must not buy a leader round");
-        assert!(
-            round_not_elapsed(&error.0),
-            "the refusal must be the wall-clock price of the round, got: {error:?}"
-        );
-
-        // Same parent, same child, but the node adopted the parent ten minutes
-        // ago: a real stall, and the ladder has reached round 6, so the
-        // pricing gate lets the claim through and any later refusal is about
-        // something else.
+        // Ten minutes behind the schedule is past round 6 on the shared clock,
+        // so the pricing gate lets the claim through - and it prices the same
+        // on the node that committed the parent and on one that synced it a
+        // minute later, which is the whole point of anchoring at the stamp.
+        let (parent, block) = fixture(now_ms.saturating_sub(600_000));
         let engine = PoAEngine::new(PoAConfig::default(), None);
-        engine.note_block_seen(&parent.hash, parent.timestamp);
         if let Err(error) = engine.validate_block(&block, std::slice::from_ref(&parent), &state) {
             assert!(
                 !round_not_elapsed(&error.0),
@@ -602,18 +594,16 @@ mod poa_round_pricing_tests {
             );
         }
 
-        // A parent this node never adopted - deeper history, or a block a peer
-        // only described - has no sighting either, and prices at round 0. The
-        // header is the producer's claim, so it cannot price a round: the
-        // strict direction is the only safe one here, and it is why the book
-        // keeps every block this node committed inside the reorg window.
-        let engine = PoAEngine::new(PoAConfig::default(), None);
+        // A parent stamped an hour ahead prices at round 0 here and at every
+        // other node: a stamp can only ever be behind the shared clock, so the
+        // claim buys nothing until the moment it names has passed.
+        let (parent, block) = fixture(now_ms.saturating_add(3_600_000));
         let error = engine
-            .validate_block(&block, &[parent], &state)
-            .expect_err("a parent with no sighting cannot buy a leader round");
+            .validate_block(&block, std::slice::from_ref(&parent), &state)
+            .expect_err("a future-dated parent must not buy a PoA round");
         assert!(
             round_not_elapsed(&error.0),
-            "an unsighted parent must price at round 0, got: {error:?}"
+            "the refusal must be the wall-clock price of the round, got: {error:?}"
         );
     }
 
