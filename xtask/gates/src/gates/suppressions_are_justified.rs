@@ -466,12 +466,6 @@ const BUDGETS: &[Budget] = &[
         reason: "the scheme registry row (id, lengths, family) mirrors the table format; an alias would add a second name for the same wire shape",
     },
     Budget {
-        file: "src/domain/finality_adapter.rs",
-        lint: "clippy::too_many_arguments",
-        count: 2,
-        reason: "the attestation entry points carry every field the cross-language encoding verifies; a struct would mirror the wire format one for one and hide which field a caller must supply",
-    },
-    Budget {
         file: "src/domain/pq_canonical.rs",
         lint: "clippy::expect_used",
         count: 2,
