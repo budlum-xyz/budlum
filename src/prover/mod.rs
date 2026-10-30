@@ -119,6 +119,17 @@ pub fn zk_program_hash(program: &[u64]) -> Hash32 {
 /// height, the window applies in full.
 pub const MAX_ZK_PROOF_HEIGHT_LAG: u64 = 128;
 
+/// How far one accepted zk claim may carry a domain's tip.
+///
+/// An accepted claim parks the domain's `last_committed_height`, and nothing
+/// lowers it: a claim behind the tip is stale. A submitter free to name any
+/// height could therefore park the tip at `u64::MAX` with one verified proof
+/// over a trivial program and freeze the domain's settlement for good, which
+/// costs only the proof fee. The cap turns that into a bounded jump - the tip
+/// may move at most this many heights per accepted claim, so an honest claim
+/// always becomes admissible again once the domain's real height catches up.
+pub const MAX_ZK_CLAIM_ADVANCE: u64 = 8 * MAX_ZK_PROOF_HEIGHT_LAG;
+
 impl ZkProofSubmission {
     /// Canonical hash binding the transport message to the proof payload. The
     /// `message.payload_hash` MUST equal this, so a message cannot be replayed
