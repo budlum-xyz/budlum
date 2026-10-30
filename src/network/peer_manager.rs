@@ -457,6 +457,15 @@ impl PeerManager {
         } else {
             score.score = (score.score - 1).max(MIN_SCORE);
             score.last_seen = Some(Instant::now());
+            // A penalty that only walks the score down to the threshold never
+            // removes the peer: `MIN_SCORE` is the floor, so a vote flood
+            // costs it tokens and nothing else. The ban is the whole point of
+            // the penalty, so it fires here as it does for every other
+            // bad-behaviour report.
+            let spent = score.score <= BAN_THRESHOLD;
+            if spent {
+                self.ban_peer(peer_id);
+            }
             false
         }
     }
@@ -472,6 +481,10 @@ impl PeerManager {
         } else {
             score.score = (score.score - 5).max(MIN_SCORE);
             score.last_seen = Some(Instant::now());
+            let spent = score.score <= BAN_THRESHOLD;
+            if spent {
+                self.ban_peer(peer_id);
+            }
             false
         }
     }

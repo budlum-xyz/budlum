@@ -2641,6 +2641,35 @@ impl Node {
                                     "Finality: auto-precommit for checkpoint height {} (epoch {})",
                                     agg_state.checkpoint_height, agg_state.epoch
                                 );
+                                // The vote is cast when the signature exists,
+                                // not when the mesh acknowledges it. Marking
+                                // only after a successful publish left the
+                                // height unmarked whenever the publish failed
+                                // (an empty mesh at startup answers
+                                // NoPeersSubscribedToTopic), and the next beat
+                                // then signed whatever hash the aggregator held
+                                // at that height: a second, *different* vote at
+                                // one height, the one thing a validator must
+                                // never cast. The mark advances here and the
+                                // signed round is remembered here; the retry
+                                // beat re-publishes exactly this round, because
+                                // `vote_retry_due` matches on epoch, height and
+                                // hash, and a round that has moved to another
+                                // hash at the same height is never signed again.
+                                let advanced = precommit_height_is_new(
+                                    agg_state.checkpoint_height,
+                                    self.last_precommit_height,
+                                );
+                                if advanced {
+                                    self.last_precommit_height = agg_state.checkpoint_height;
+                                    self.save_vote_history();
+                                }
+                                self.precommit_published = Some(PublishedVote {
+                                    epoch: agg_state.epoch,
+                                    checkpoint_height: agg_state.checkpoint_height,
+                                    checkpoint_hash: agg_state.checkpoint_hash.clone(),
+                                    at: std::time::Instant::now(),
+                                });
                                 // Gossip does not echo a message back to the
                                 // node that published it, so the signature
                                 // this node just made is the one its own
@@ -2700,37 +2729,14 @@ impl Node {
                                     // A vote that never reaches the mesh is
                                     // indistinguishable from a vote that was
                                     // never cast, and finality simply stops.
-                                    // The height stays unmarked below, so the
-                                    // next beat signs the same bytes again.
+                                    // The signed round stays remembered, so the
+                                    // retry beat re-publishes these bytes; the
+                                    // height is already marked, so no second
+                                    // vote can be signed at it.
                                     warn!(
-                                        "Failed to gossip a finality vote: {e}; height {} stays unvoted and is retried on the next beat",
+                                        "Failed to gossip a finality vote: {e}; the vote for height {} stands and its bytes are re-published on the next beat",
                                         agg_state.checkpoint_height
                                     );
-                                } else {
-                                    // The mark is durable once the bytes left,
-                                    // and only then: the mark is the
-                                    // once-per-height guard, and marking a
-                                    // publish that failed (an empty mesh at
-                                    // startup answers NoPeersSubscribedToTopic)
-                                    // stopped this node from ever voting that
-                                    // height while the chain kept producing.
-                                    let advanced = precommit_height_is_new(
-                                        agg_state.checkpoint_height,
-                                        self.last_precommit_height,
-                                    );
-                                    if advanced {
-                                        self.last_precommit_height =
-                                            agg_state.checkpoint_height;
-                                    }
-                                    self.precommit_published = Some(PublishedVote {
-                                        epoch: agg_state.epoch,
-                                        checkpoint_height: agg_state.checkpoint_height,
-                                        checkpoint_hash: agg_state.checkpoint_hash.clone(),
-                                        at: std::time::Instant::now(),
-                                    });
-                                    if advanced {
-                                        self.save_vote_history();
-                                    }
                                 }
                             }
                             Err(e) => {
