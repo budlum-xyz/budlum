@@ -60,7 +60,7 @@ pub fn now_millis() -> u128 {
         .as_millis()
 }
 
-/// When this node adopted its current tip, and which block that is.
+/// When this node first adopted a block it committed, keyed by hash.
 ///
 /// The round price is "how long ago did the parent land", and a header cannot
 /// answer that: production stamps blocks from the slot schedule
@@ -76,22 +76,32 @@ pub fn now_millis() -> u128 {
 /// self-heals, because `now` keeps moving while the adoption time does not),
 /// but it can never backdate it.
 ///
-/// The book holds exactly one entry - the tip - and only chain commit writes
-/// it, never validation. Both properties are deliberate:
+/// The book holds the blocks this node committed, up to
+/// [`ROUND_PRICE_WINDOW`], and only chain commit writes it, never validation:
 ///
 /// - Writing from validation would price a parent and its child milliseconds
 ///   apart whenever a single pass walks several blocks (fork recovery through
 ///   a peer's candidate chain, replay), so a legitimately produced retry block
 ///   inside that chain would be refused and a node stuck on a minority fork
 ///   could never adopt the better one.
-/// - A multi-entry cache is evictable. A peer that keeps a candidate chain
-///   replaying through the engine would flush the live tip's sighting and hand
-///   the price back to a schedule-derived stamp, which is the round-claim
-///   window this mechanism exists to close. One slot, written only by this
-///   node's own commit, cannot be evicted by anyone else.
+/// - The window covers every parent a reorg candidate can legally name: a
+///   candidate forks at most [`MAX_REORG_DEPTH`] below the tip, so the fork
+///   block is always one this node committed. Beyond the window a parent has
+///   no sighting, and a claim on it prices at round 0 - the strict direction,
+///   never a producer's header.
+/// - The first sighting wins, so re-committing a block (a reorg back onto it,
+///   a restore of the same tip) cannot backdate its price, and a reorg inside
+///   the window cannot evict the sighting of a block still on the live chain.
 pub struct RoundPriceBook {
-    live: std::sync::Mutex<Option<(String, u128)>>,
+    seen: std::sync::Mutex<std::collections::VecDeque<(String, u128)>>,
 }
+
+/// How many committed blocks the round price book remembers.
+///
+/// One more than [`MAX_REORG_DEPTH`]: the deepest block a reorg candidate may
+/// fork at is `MAX_REORG_DEPTH` below the tip, and the window has to hold the
+/// tip itself as well.
+pub const ROUND_PRICE_WINDOW: usize = MAX_REORG_DEPTH + 1;
 
 impl Default for RoundPriceBook {
     fn default() -> Self {
@@ -103,43 +113,52 @@ impl RoundPriceBook {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            live: std::sync::Mutex::new(None),
+            seen: std::sync::Mutex::new(std::collections::VecDeque::new()),
         }
     }
 
-    /// Record that `block_hash` is now this node's tip, adopted at `now_ms`.
+    /// Record that `block_hash` was committed at `now_ms`.
     ///
     /// Called from the chain commit path, and from a restore for the tip a
     /// node loads from disk. A poisoned lock is treated as "no adoption
     /// recorded" rather than as a panicking consensus path.
     pub fn note_tip_block(&self, block_hash: &str, now_ms: u128) {
-        if let Ok(mut live) = self.live.lock() {
-            *live = Some((block_hash.to_string(), now_ms));
+        let Ok(mut seen) = self.seen.lock() else {
+            return;
+        };
+        if seen.iter().any(|(hash, _)| hash == block_hash) {
+            // First sighting wins: a re-commit cannot backdate the price.
+            return;
+        }
+        seen.push_back((block_hash.to_string(), now_ms));
+        while seen.len() > ROUND_PRICE_WINDOW {
+            seen.pop_front();
         }
     }
 
-    /// When this node adopted `block_hash`, if it is still the tip.
+    /// When this node first committed `block_hash`, while it is still inside
+    /// the window.
     ///
-    /// A parent that is not our tip - any block in a peer's candidate chain,
-    /// any historical block - has no sighting here, and its round price falls
-    /// back to its own header. That is the permissive direction a replay and a
-    /// fork recovery need.
+    /// A parent outside the window - deeper history, a block a peer only
+    /// described - has no sighting, and its round price is 0 by
+    /// [`affordable_leader_round`]. That is the strict direction: nothing a
+    /// peer says about a header can price a round.
     #[must_use]
-    pub fn live_tip_seen(&self, block_hash: &str) -> Option<u128> {
-        let Ok(live) = self.live.lock() else {
+    pub fn seen_at(&self, block_hash: &str) -> Option<u128> {
+        let Ok(seen) = self.seen.lock() else {
             return None;
         };
-        live.as_ref()
-            .filter(|(hash, _)| hash == block_hash)
+        seen.iter()
+            .find(|(hash, _)| hash == block_hash)
             .map(|(_, at)| *at)
     }
 
     /// The highest round this node may *claim*, from the producer's side.
     ///
     /// The same rule the verifier applies, which is the point: propose and
-    /// verify cannot drift apart. A producer whose parent is its own tip has a
-    /// sighting by construction, so a claim is always priced by time this node
-    /// watched pass.
+    /// verify cannot drift apart. A producer whose parent is on its own chain
+    /// has a sighting by construction, so a claim is always priced by time
+    /// this node watched pass.
     #[must_use]
     pub fn claimable_round_for(
         &self,
@@ -147,7 +166,7 @@ impl RoundPriceBook {
         parent_timestamp_ms: u128,
         now_ms: u128,
     ) -> u64 {
-        affordable_leader_round(parent_timestamp_ms, self.live_tip_seen(parent_hash), now_ms)
+        affordable_leader_round(parent_timestamp_ms, self.seen_at(parent_hash), now_ms)
     }
 }
 
@@ -175,32 +194,34 @@ impl RoundPriceBook {
 ///
 /// # The anchor
 ///
-/// `parent_seen_ms` is when this node first saw the parent, and it is what
-/// keeps the price honest. The anchor is the later of the two facts available:
-/// the parent's own stamp (a producer's claim, bounded by
-/// [`MAX_FUTURE_BLOCK_TIME_MS`]) and the sighting (this node's observation,
-/// which no peer can backdate). A schedule-lagged chain therefore prices from
-/// the sighting and grants nothing for its lag, while a genuinely stalled slot
-/// still walks the whole ladder up to [`MAX_LEADER_ROUNDS`], because real time
-/// passes and the sighting stays where it was - the two cases the stamp alone
-/// cannot tell apart.
+/// `parent_seen_ms` is when this node first committed the parent, and it is
+/// the only thing that prices a round. The parent's own stamp is a producer's
+/// claim, so it cannot buy time: a parent with no sighting prices at round 0,
+/// and a parent stamped later than the moment this node saw it means the
+/// producer's clock leads ours, so the time it names is not time anyone
+/// watched pass. A schedule-lagged chain therefore grants nothing for its lag,
+/// while a genuinely stalled slot still walks the whole ladder up to
+/// [`MAX_LEADER_ROUNDS`], because real time passes and the sighting stays
+/// where it was - the two cases the stamp alone cannot tell apart.
 ///
-/// A parent with no sighting is priced from its own header. Only a block this
-/// node adopted as its tip has one (see [`RoundPriceBook`]), so a peer's
-/// candidate chain and a replay - anything that walks blocks without adopting
-/// them - price from headers, which is what lets a legitimate retry block
-/// inside such a chain be accepted. A sighting cannot be manufactured or
-/// evicted by a peer: it is written by this node's own commit, for its own
-/// tip, and a tip's parent is always the block that came before it.
+/// The book keeps every block this node committed inside
+/// [`ROUND_PRICE_WINDOW`], so a reorg candidate that forks within
+/// [`MAX_REORG_DEPTH`] of the tip prices from a real observation instead of
+/// the header of a block it did not watch land.
 #[must_use]
 pub fn affordable_leader_round(
     parent_timestamp_ms: u128,
     parent_seen_ms: Option<u128>,
     now_ms: u128,
 ) -> u64 {
-    let anchor = parent_seen_ms.map_or(parent_timestamp_ms, |seen| parent_timestamp_ms.max(seen));
+    let Some(seen_ms) = parent_seen_ms else {
+        return 0;
+    };
+    if parent_timestamp_ms > seen_ms {
+        return 0;
+    }
     let spaced = now_ms
-        .saturating_sub(anchor)
+        .saturating_sub(seen_ms)
         .saturating_sub(MIN_BLOCK_INTERVAL_MS);
     u64::try_from(spaced / ROUND_TIMEOUT_MS)
         .unwrap_or(u64::MAX)
@@ -562,41 +583,54 @@ mod tests {
 
         // A future-dated parent still prices at zero, however it was seen.
         assert_eq!(affordable_leader_round(now + 60_000, None, now), 0);
-
-        // A parent that is not this node's tip has no sighting, and prices
-        // from its own header: this is the path a peer's candidate chain and a
-        // replay take, and pricing it at zero would refuse every legitimate
-        // retry block in them.
         assert_eq!(
-            affordable_leader_round(stale_stamp, None, now),
-            MAX_LEADER_ROUNDS
+            affordable_leader_round(now + 60_000, Some(now - 1_000), now),
+            0
         );
+
+        // A parent this node never watched land prices at round 0. Falling
+        // back to the header here is what let a schedule-lagged stamp saturate
+        // the ladder: the producer writes the stamp, so it cannot buy a round.
+        assert_eq!(affordable_leader_round(stale_stamp, None, now), 0);
     }
 
-    /// The book holds the tip it adopted, and nothing a peer can move.
+    /// The book holds the blocks this node committed, inside the reorg
+    /// window, and nothing a peer can move.
     ///
-    /// One slot, written only by commit: a candidate chain replayed through
-    /// validation cannot overwrite it, and the sighting it holds is the one
-    /// that prices the next slot's rounds.
+    /// Written only by commit: a candidate chain replayed through validation
+    /// cannot write an entry, the first sighting of a block wins so a re-commit
+    /// cannot backdate it, and every block a reorg candidate may fork at keeps
+    /// its sighting because the window is as deep as `MAX_REORG_DEPTH`.
     #[test]
-    fn the_round_price_book_holds_only_the_adopted_tip() {
+    fn the_round_price_book_holds_the_committed_reorg_window() {
         let book = RoundPriceBook::new();
-        assert_eq!(book.live_tip_seen("aa"), None);
+        assert_eq!(book.seen_at("aa"), None);
 
         book.note_tip_block("aa", 1_000);
-        assert_eq!(book.live_tip_seen("aa"), Some(1_000));
-        assert_eq!(
-            book.live_tip_seen("bb"),
-            None,
-            "a block that is not the tip has no sighting"
-        );
+        assert_eq!(book.seen_at("aa"), Some(1_000));
+        assert_eq!(book.seen_at("bb"), None, "an unseen block has no sighting");
 
-        // Adopting a new tip replaces the entry: the book cannot grow, so it
-        // cannot be flooded, and it holds no sighting a fork could evict while
-        // its block is still the tip.
+        // A committed ancestor keeps its sighting when the tip moves past it:
+        // that is the fork block of every reorg candidate.
         book.note_tip_block("bb", 5_000);
-        assert_eq!(book.live_tip_seen("aa"), None);
-        assert_eq!(book.live_tip_seen("bb"), Some(5_000));
+        assert_eq!(book.seen_at("aa"), Some(1_000));
+        assert_eq!(book.seen_at("bb"), Some(5_000));
+
+        // Re-committing a block does not backdate its first sighting.
+        book.note_tip_block("aa", 9_000);
+        assert_eq!(book.seen_at("aa"), Some(1_000));
+
+        // The window is bounded: only the last `ROUND_PRICE_WINDOW` blocks are
+        // remembered, so the book cannot be grown without limit.
+        for height in 0..(ROUND_PRICE_WINDOW as u64 + 5) {
+            book.note_tip_block(&format!("h{height}"), 10_000 + u128::from(height));
+        }
+        assert_eq!(book.seen_at("aa"), None, "evicted from the window");
+        assert_eq!(
+            book.seen_at(&format!("h{}", ROUND_PRICE_WINDOW as u64 + 4)),
+            Some(10_000 + u128::from(ROUND_PRICE_WINDOW as u64) + 4)
+        );
+        assert_eq!(ROUND_PRICE_WINDOW, MAX_REORG_DEPTH + 1);
     }
 
     #[test]
