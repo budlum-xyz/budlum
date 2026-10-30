@@ -709,6 +709,18 @@ fn verify_pos_cert(
         return Ok(rejected);
     }
 
+    // The certificate signs its own chain id (`FinalityCert::signing_message`)
+    // and nothing compared it with the domain being advanced. Two domains that
+    // register the same validator set would share one certificate, and a
+    // relayer could move this domain's committed tip to a height and hash its
+    // own validators never finalized.
+    if cert.chain_id != domain.domain_chain_id {
+        return Ok(FinalityStatus::Rejected(format!(
+            "PoS cert chain id {} does not match domain {} chain id {}",
+            cert.chain_id, domain.id, domain.domain_chain_id
+        )));
+    }
+
     if cert.checkpoint_height != commitment.domain_height {
         return Ok(FinalityStatus::Rejected(
             "PoS cert height does not match commitment".into(),
@@ -1260,6 +1272,16 @@ fn verify_bft_cert(
         return Ok(FinalityStatus::Rejected(
             "BFT commit hash does not match commitment block hash".into(),
         ));
+    }
+
+    // Same binding as the PoS arm: the certificate commits to its chain id
+    // and that value was never compared with the domain's, so a certificate
+    // from another chain with the same validator set verified here.
+    if cert.chain_id != domain.domain_chain_id {
+        return Ok(FinalityStatus::Rejected(format!(
+            "BFT cert chain id {} does not match domain {} chain id {}",
+            cert.chain_id, domain.id, domain.domain_chain_id
+        )));
     }
 
     // Bind the certificate to THIS commitment (height + hash).
@@ -2481,6 +2503,123 @@ mod tests {
                 err.0
             );
         }
+    }
+
+    /// The certificate signs its own chain id (`FinalityCert::signing_message`)
+    /// and nothing compared it with the domain being advanced, so two domains
+    /// that register one validator set shared a certificate: a relayer could
+    /// move this domain's committed tip to a height and hash its own
+    /// validators never finalized.
+    #[test]
+    fn pos_finality_refuses_a_certificate_for_another_chain_id() {
+        let mut domain = default_domain(3, ConsensusKind::PoS, 45262, "pos-qc-finality", 0);
+        domain.bridge_enabled = false;
+        let mut other_chain = domain.clone();
+        other_chain.domain_chain_id = 77;
+        let mut commitment = commitment(ConsensusKind::PoS);
+        commitment.domain_id = other_chain.id;
+        let snapshot = ValidatorSetSnapshot::new(0, vec![]);
+        let cert = FinalityCert {
+            // The id the other chain signs under, with this chain's set.
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 0,
+            checkpoint_height: commitment.domain_height,
+            checkpoint_hash: hex::encode(commitment.domain_block_hash),
+            agg_sig_bls: vec![],
+            bitmap: vec![],
+            set_hash: snapshot.set_hash.clone(),
+        };
+        let status = PoSFinalityAdapter
+            .verify_finality(
+                &other_chain,
+                &commitment,
+                &FinalityProof::PoS {
+                    cert: cert.clone(),
+                    validator_snapshot: snapshot.clone(),
+                },
+            )
+            .expect("a foreign chain id is a refusal, not an error");
+        match status {
+            FinalityStatus::Rejected(reason) => {
+                assert!(reason.contains("chain id"), "{reason}")
+            }
+            _ => panic!("a certificate signed under another chain id was not refused"),
+        }
+
+        // The same certificate under the domain's own id is not refused for
+        // its id: the gate compares the values instead of rejecting either.
+        let status = PoSFinalityAdapter.verify_finality(
+            &domain,
+            &commitment,
+            &FinalityProof::PoS {
+                cert,
+                validator_snapshot: snapshot,
+            },
+        );
+        assert!(
+            !matches!(&status, Ok(FinalityStatus::Rejected(reason)) if reason.contains("chain id")),
+            "the chain id gate must accept the domain's own id: {status:?}"
+        );
+    }
+
+    /// The BFT twin: same gate, after the empty-set and commit-hash bindings.
+    #[test]
+    fn bft_finality_refuses_a_certificate_for_another_chain_id() {
+        let mut domain = default_domain(3, ConsensusKind::Bft, 45262, "bft-finality", 0);
+        domain.bridge_enabled = false;
+        let mut other_chain = domain.clone();
+        other_chain.domain_chain_id = 77;
+        let mut commitment = commitment(ConsensusKind::Bft);
+        commitment.domain_id = other_chain.id;
+        let mut snapshot = ValidatorSetSnapshot::new(0, vec![]);
+        snapshot.validators = vec![crate::chain::finality::ValidatorEntry {
+            address: crate::core::address::Address::from([9u8; 32]),
+            stake: 1,
+            bls_public_key: Vec::new(),
+            pop_signature: Vec::new(),
+            pq_public_key: Vec::new(),
+        }];
+        let cert = FinalityCert {
+            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            epoch: 0,
+            checkpoint_height: commitment.domain_height,
+            checkpoint_hash: hex::encode(commitment.domain_block_hash),
+            agg_sig_bls: vec![],
+            bitmap: vec![],
+            set_hash: snapshot.set_hash.clone(),
+        };
+        let status = BftFinalityAdapter::default()
+            .verify_finality(
+                &other_chain,
+                &commitment,
+                &FinalityProof::Bft {
+                    round: 0,
+                    commit_hash: commitment.domain_block_hash,
+                    cert: cert.clone(),
+                    validator_snapshot: snapshot.clone(),
+                },
+            )
+            .expect("a foreign chain id is a refusal, not an error");
+        match status {
+            FinalityStatus::Rejected(reason) => {
+                assert!(reason.contains("chain id"), "{reason}")
+            }
+            _ => panic!("a certificate signed under another chain id was not refused"),
+        }
+        let status = BftFinalityAdapter::default().verify_finality(
+            &domain,
+            &commitment,
+            &FinalityProof::Bft {
+                round: 0,
+                commit_hash: commitment.domain_block_hash,
+                cert,
+                validator_snapshot: snapshot,
+            },
+        );
+        assert!(
+            !matches!(&status, Ok(FinalityStatus::Rejected(reason)) if reason.contains("chain id")),
+            "the chain id gate must accept the domain's own id: {status:?}"
+        );
     }
 
     #[test]

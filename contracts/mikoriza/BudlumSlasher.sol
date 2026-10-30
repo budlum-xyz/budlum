@@ -8,8 +8,7 @@ import {BudlumHash} from "../lib/BudlumHash.sol";
 ///         slashing entry point the registrar (the AVS) forwards to
 ///         EigenLayer.
 interface IBudlumSlashTarget {
-    function uncompressedKeyOf(bytes32 budlumValidator) external view returns (bytes memory);
-    function operatorOf(bytes32 budlumValidator) external view returns (address);
+    function uncompressedKeyOf(bytes32 budlumValidator, address operator) external view returns (bytes memory);
     function slashForDoubleVote(address operator, string calldata description) external;
 }
 
@@ -30,9 +29,17 @@ interface IBudlumSlashTarget {
 ///
 ///         Anyone may submit the evidence. A liveness fault is not slashable
 ///         here. There is no owner.
+///
+///         The evidence names the operator whose bound key signed, because a
+///         binding is one operator's claim about a validator and no claim is
+///         the validator's: the signatures are checked against the key that
+///         operator bound, and an operator's key cannot be used to slash
+///         another operator's stake.
 /// @notice Two signatures of one validator at one checkpoint.
 struct DoubleVote {
     bytes32 budlumValidator;
+    /// The operator whose bound key produced both signatures.
+    address operator;
     uint64 epoch;
     uint64 height;
     /// The first checkpoint hash, as Budlum writes it (64 hex characters).
@@ -48,7 +55,7 @@ contract BudlumSlasher {
     uint64 public immutable budlumChainId;
     bytes32 public immutable g2GeneratorHash;
 
-    /// One slash per (validator, epoch, height).
+    /// One slash per (validator, operator, epoch, height).
     mapping(bytes32 => bool) public slashed;
 
     event DoubleVoteSlashed(
@@ -83,8 +90,8 @@ contract BudlumSlasher {
         );
     }
 
-    /// @notice Slash the operator bound to `vote.budlumValidator` for signing
-    ///         two different hashes at one checkpoint.
+    /// @notice Slash `vote.operator` for signing two different hashes at one
+    ///         checkpoint with the key it bound for `vote.budlumValidator`.
     /// @param vote The two signatures (negated, uncompressed G1) and hashes.
     /// @param g2Generator The G2 generator, uncompressed; must match the
     ///        pinned hash.
@@ -95,22 +102,21 @@ contract BudlumSlasher {
         if (keccak256(g2Generator) != g2GeneratorHash) {
             revert UntrustedGenerator();
         }
-        bytes32 key = keccak256(abi.encode(vote.budlumValidator, vote.epoch, vote.height));
+        bytes32 key = keccak256(abi.encode(vote.budlumValidator, vote.operator, vote.epoch, vote.height));
         if (slashed[key]) {
             revert AlreadySlashed(key);
         }
-        address operator = registrar.operatorOf(vote.budlumValidator);
-        if (operator == address(0)) {
-            revert NotBound(vote.budlumValidator);
-        }
         _checkSignatures(vote, g2Generator);
         slashed[key] = true;
-        registrar.slashForDoubleVote(operator, "budlum finality double vote");
-        emit DoubleVoteSlashed(vote.budlumValidator, operator, vote.epoch, vote.height);
+        registrar.slashForDoubleVote(vote.operator, "budlum finality double vote");
+        emit DoubleVoteSlashed(vote.budlumValidator, vote.operator, vote.epoch, vote.height);
     }
 
     function _checkSignatures(DoubleVote calldata vote, bytes calldata g2Generator) private view {
-        bytes memory pubkey = registrar.uncompressedKeyOf(vote.budlumValidator);
+        bytes memory pubkey = registrar.uncompressedKeyOf(vote.budlumValidator, vote.operator);
+        if (pubkey.length == 0) {
+            revert NotBound(vote.budlumValidator);
+        }
         if (!BudlumBls.verify(
             pubkey, checkpointSigningMessage(vote.epoch, vote.height, vote.hashA), vote.negSigA, g2Generator
         )) {

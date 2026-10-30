@@ -25,6 +25,14 @@ import {IAllocationManager, OperatorSet, SlashingParams} from "./IAllocationMana
 ///         key by a signature over the binding message. An Ethereum validator
 ///         key is never a Budlum key.
 ///
+///         A binding is the operator's own claim, keyed by
+///         (budlumValidator, operator), so it is neither a single slot one
+///         member of the operator set can occupy for a validator it does not
+///         run nor a permanent one: the operator may rebind, and a second
+///         operator may bind the same validator. Which claim is true is decided
+///         on Budlum, where the `SharedSecurityTx::Observe` door compares the
+///         key with the validator's registered BLS key.
+///
 ///         The registrar deploys its slasher and is the AVS EigenLayer
 ///         slashes for; the slasher is the only caller of
 ///         `slashForDoubleVote`. There is no owner, no pause and no upgrade.
@@ -61,7 +69,6 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
     );
 
     error NotInOperatorSet(address operator);
-    error AlreadyBound();
     error KeyMismatch();
     error UntrustedGenerator();
     error BindingSignatureInvalid();
@@ -123,9 +130,6 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         if (!allocationManager.isMemberOfOperatorSet(msg.sender, set)) {
             revert NotInOperatorSet(msg.sender);
         }
-        if (validatorOf[msg.sender] != bytes32(0) || bindings[budlumValidator].operator != address(0)) {
-            revert AlreadyBound();
-        }
         if (keccak256(g2Generator) != g2GeneratorHash) {
             revert UntrustedGenerator();
         }
@@ -137,7 +141,12 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         )) {
             revert BindingSignatureInvalid();
         }
-        bindings[budlumValidator] = Binding({
+        // The row is this operator's own claim about this validator, so
+        // re-binding replaces it instead of locking the validator address for
+        // good: a key rotation or a move to another validator is the
+        // operator's to make, and a claim that turns out false is refused on
+        // Budlum by the Observe door, not made permanent here.
+        bindings[bindingKey(budlumValidator, msg.sender)] = Binding({
             operator: msg.sender,
             compressedKey: compressedKey,
             uncompressedKey: uncompressedKey
@@ -151,7 +160,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
     ///         report of zero units tells Budlum the operator exited.
     function reportAllocation(address operator) external returns (uint64 units) {
         bytes32 validator = validatorOf[operator];
-        if (validator == bytes32(0)) {
+        if (validator == bytes32(0) || bindings[bindingKey(validator, operator)].operator == address(0)) {
             revert NotBound(operator);
         }
         uint64 observedEpoch = uint64(block.number);
@@ -160,7 +169,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         }
         lastReportedBlock[operator] = observedEpoch;
         units = allocatedUnits(operator);
-        bytes memory key = bindings[validator].compressedKey;
+        bytes memory key = bindings[bindingKey(validator, operator)].compressedKey;
         emit AllocationReported(operator, validator, units, observedEpoch);
         _emitOutbound(
             ALLOCATION_KIND,
@@ -217,12 +226,28 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         return BudlumHash.hashFields(fields);
     }
 
-    function uncompressedKeyOf(bytes32 budlumValidator) external view returns (bytes memory) {
-        return bindings[budlumValidator].uncompressedKey;
+    /// @notice The key `operator` bound for `budlumValidator`, as its own
+    ///         claim. Empty when that operator has not bound the validator.
+    function uncompressedKeyOf(bytes32 budlumValidator, address operator)
+        external
+        view
+        returns (bytes memory)
+    {
+        return bindings[bindingKey(budlumValidator, operator)].uncompressedKey;
     }
 
-    function operatorOf(bytes32 budlumValidator) external view returns (address) {
-        return bindings[budlumValidator].operator;
+    /// @notice The compressed key `operator` bound for `budlumValidator`.
+    function compressedKeyOf(bytes32 budlumValidator, address operator)
+        external
+        view
+        returns (bytes memory)
+    {
+        return bindings[bindingKey(budlumValidator, operator)].compressedKey;
+    }
+
+    /// @notice The storage key of one operator's claim about one validator.
+    function bindingKey(bytes32 budlumValidator, address operator) public pure returns (bytes32) {
+        return keccak256(abi.encode(budlumValidator, operator));
     }
 
     /// @notice Called by the slasher once it verified a double vote.
