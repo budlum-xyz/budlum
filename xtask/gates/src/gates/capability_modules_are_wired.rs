@@ -718,7 +718,9 @@ fn declares_unwired(src: &str, fns: &std::collections::BTreeSet<String>) -> bool
         // A header line that names one of this module's own functions is a
         // function-scoped claim ("X is unwired"), not a claim that the whole
         // module is unreached; a module-wide claim must stand on its own.
-        t.starts_with("//!") && t.contains("WIRING:") && t.contains("unwired")
+        t.starts_with("//!")
+            && t.contains("WIRING:")
+            && t.contains("unwired")
             && !fns.iter().any(|f| t.contains(f.as_str()))
     })
 }
@@ -1039,10 +1041,16 @@ fn self_test_extraction(problems: &mut Vec<String>) {
     }
 
     // The marker.
-    if !declares_unwired("//! WIRING: unwired - measured: nothing calls this\n", &std::collections::BTreeSet::new()) {
+    if !declares_unwired(
+        "//! WIRING: unwired - measured: nothing calls this\n",
+        &std::collections::BTreeSet::new(),
+    ) {
         problems.push(String::from("BROKEN: an unwired marker was not recognised"));
     }
-    if declares_unwired("//! this module is wired\n", &std::collections::BTreeSet::new()) {
+    if declares_unwired(
+        "//! this module is wired\n",
+        &std::collections::BTreeSet::new(),
+    ) {
         problems.push(String::from(
             "VACUOUS: a module without a marker declared one",
         ));

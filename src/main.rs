@@ -912,8 +912,20 @@ async fn main() {
                 match budlum_core::crypto::primitives::ValidatorKeys::load(path) {
                     Ok(k) => Some(k),
                     Err(e) => {
-                        println!("Failed to load validator keys from {path}: {e}");
-                        None
+                        // A node told to use a validator key and unable to
+                        // read it used to carry on as a spectator: it joined
+                        // the mesh, voted nothing, produced nothing, and said
+                        // so in one line that scrolled away. Worse than the
+                        // silence, its stake still counted towards the voting
+                        // weight the other validators divide their leader
+                        // threshold by, so a run with this node in the set
+                        // could stall with no node able to win a slot. An
+                        // operator's declared intent is not a hint to fall
+                        // back from: refuse to start.
+                        eprintln!(
+                            "CRITICAL: --validator-key-file {path} was set but the keys could not be loaded: {e}; refusing to start as a non-validating node"
+                        );
+                        std::process::exit(1);
                     }
                 }
             } else {

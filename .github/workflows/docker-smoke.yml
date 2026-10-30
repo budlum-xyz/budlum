@@ -134,7 +134,11 @@ jobs:
             if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke ps; then
               echo "::error::\`docker compose ps\` also failed - the failure diagnosis has no container state."
             fi
-            if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke logs --tail=150; then
+            # No tail: the failure this dump exists for (a node that never
+            # produced) is decided by lines from the first seconds of the run,
+            # and `--tail=150` cut exactly those. The stack lives four
+            # minutes, so the whole log is a few thousand lines.
+            if ! docker compose -f ops/docker-compose.yml -f ops/docker-compose.ci.yml -p budlum-multinode-smoke logs; then
               echo "::error::\`docker compose logs\` also failed - the failure diagnosis has no node logs."
             fi
             exit 1

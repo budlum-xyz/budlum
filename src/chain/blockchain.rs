@@ -7193,7 +7193,7 @@ impl Blockchain {
 
     /// Start - or keep - the prevote round for the lowest unfinalized
     /// checkpoint, once this node holds the block at that height and the
-    /// block has [`Self::FINALITY_VOTE_DEPTH`] blocks on top of it.
+    /// block has `FINALITY_VOTE_DEPTH` blocks on top of it.
     pub fn start_pending_finality_round(&mut self) {
         let height = self.next_finality_checkpoint();
         if height == 0 {
