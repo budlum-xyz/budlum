@@ -419,7 +419,7 @@ pub struct CodingAudit {
 /// it ever sees - so a pass is a spot check, not a proof of storage. Nothing in
 /// consensus reads `Passed`: deals stay `Active`, bonds do not move and repair
 /// is not suppressed by it, so an audit that passes buys the operator nothing
-/// it did not already have ([ S2]).
+/// it did not already have.
 ///
 /// The commitment is what makes the first half true. Before it, a memorised
 /// consistent column of some other object passed every audit, because the

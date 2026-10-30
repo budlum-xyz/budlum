@@ -86,7 +86,7 @@ const CALLS: &[(&str, Class)] = &[
     ("produce_block", BlockPath),
     ("sign_precommit", NodeLocal),
     ("sign_prevote", NodeLocal),
-    ("start_prevote_task", NodeLocal),
+    ("start_pending_finality_round", NodeLocal),
     ("submit_slashing_evidence", NodeLocal),
     ("try_reorg", BlockPath),
     ("tx_precheck", Read),

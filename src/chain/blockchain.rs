@@ -7097,7 +7097,7 @@ impl Blockchain {
     /// saw a handful of votes and none reached quorum, so the mesh produced
     /// blocks and finalized nothing. The lowest unfinalized checkpoint is
     /// that agreed number, and it only moves when a round really finalizes.
-    pub fn next_finality_checkpoint(&self) -> u64 {
+    fn next_finality_checkpoint(&self) -> u64 {
         let interval =
             crate::core::chain_config::finality_checkpoint_interval_for_chain_id(self.chain_id);
         if interval == 0 {
@@ -7122,7 +7122,7 @@ impl Blockchain {
         self.start_prevote_task(height, hash);
     }
 
-    pub fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
+    fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
         // The single aggregator slot used to be clobbered
         // on every call. Two consequences are pinned here:
         // 1. Re-starting the SAME checkpoint (a re-delivered block, a gossip
