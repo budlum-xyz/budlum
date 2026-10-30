@@ -423,6 +423,17 @@ impl DomainFinalityAdapter for PoSFinalityAdapter {
             ));
         }
 
+        // The certificate signs `(chain_id, epoch, height, hash)` and nothing
+        // else. Anything beside the hash - the three roots, the nonce writes -
+        // is the submitter's, so a commitment that carries nonce writes under
+        // this proof is refused: accepting them would write account state a
+        // certificate never covered.
+        if !commitment.state_updates.is_empty() {
+            return Ok(FinalityStatus::Rejected(
+                "PoS cert does not attest the commitment's state updates".into(),
+            ));
+        }
+
         if validator_snapshot.set_hash != cert.set_hash {
             return Ok(FinalityStatus::Rejected(
                 "PoS cert set hash does not match validator snapshot".into(),
@@ -780,6 +791,14 @@ impl DomainFinalityAdapter for BftFinalityAdapter {
         if cert.checkpoint_hash != commitment_hash {
             return Ok(FinalityStatus::Rejected(
                 "BFT cert hash does not match commitment".into(),
+            ));
+        }
+
+        // The certificate signs `(chain_id, epoch, height, hash)`; the nonce
+        // writes are not in it. Same seam as the PoS path above.
+        if !commitment.state_updates.is_empty() {
+            return Ok(FinalityStatus::Rejected(
+                "BFT cert does not attest the commitment's state updates".into(),
             ));
         }
 
