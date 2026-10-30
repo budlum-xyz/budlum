@@ -51,12 +51,14 @@ type InvalidVoteSample = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 /// reported for the epoch.
 pub const MAX_SPAM_REPORT_SAMPLES: usize = 24;
 
-/// The encoded size the block door allows one slashing report to occupy.
+/// The encoded size the spam-report test holds the producer to.
 ///
-/// `chain::blockchain` measures the JSON encoding of a queued report against
-/// the same number before it will carry it in a block, so a report the
-/// producer builds here is one a block will accept. Kept next to the sample
-/// cap so the two cannot drift apart.
+/// The block door measures the JSON encoding of a queued report against the
+/// space the block has left (`chain::blockchain`), so this is the test's own
+/// ceiling: the largest report the sample cap can build must fit a block
+/// whatever else that block carries. It lives here, next to the cap, so the
+/// two cannot drift apart.
+#[cfg(test)]
 const MAX_SPAM_REPORT_JSON_BYTES: usize = 65_536;
 
 /// Samples come only from BLS finality votes, not the PQ signature table. The
