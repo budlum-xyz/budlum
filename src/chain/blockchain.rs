@@ -5733,8 +5733,18 @@ impl Blockchain {
                 block.slashing_evidence = Some(fitting);
             }
         }
-        // Same self-healing sweep for the report queue.
+        // Same self-healing sweep for the report queue, and the same reason
+        // one step further: the block door prices an `InvalidSignatureSpam`
+        // report against the *live* `max_invalid_votes_per_epoch`, so a
+        // governance change to that number re-prices every report already
+        // queued. A report that no longer satisfies the live rule would be
+        // refused by this node's own validation on every slot - the queue is
+        // drained only by a block, so the producer would build the same
+        // refused block forever. The queue is the producer's own, so it drops
+        // what the live rule would refuse instead of carrying it into a block.
+        let live_spam_threshold = self.state.registry.params().max_invalid_votes_per_epoch;
         let mut unembeddable_reports = 0usize;
+        let mut repriced_reports = 0usize;
         self.pending_registry_slashing_reports.retain(|report| {
             let fits = serde_json::to_vec(report)
                 .map(|bytes| bytes.len())
@@ -5743,8 +5753,19 @@ impl Blockchain {
             if !fits {
                 unembeddable_reports = unembeddable_reports.saturating_add(1);
             }
-            fits
+            let current = Self::report_satisfies_live_threshold(report, live_spam_threshold);
+            if !current {
+                repriced_reports = repriced_reports.saturating_add(1);
+            }
+            fits && current
         });
+        if repriced_reports > 0 {
+            tracing::warn!(
+                repriced_reports,
+                live_spam_threshold,
+                "Dropped slashing reports the live spam threshold no longer admits"
+            );
+        }
         if unembeddable_reports > 0 {
             tracing::warn!(
                 unembeddable_reports,
@@ -6470,6 +6491,21 @@ impl Blockchain {
         let candidate_len = start_index.saturating_add(suffix.len());
         if self.consensus.shorter_chain_can_never_win() && candidate_len < self.chain.len() {
             return Ok(false);
+        }
+        // A fork suffix may replace the chain, not extend it without bound.
+        // The reorg depth above bounds how much of this chain the peer may
+        // throw away, but nothing bounded how much it may add: a batch of a
+        // few thousand blocks against a chain of a few bounds the copy and
+        // then sends the whole candidate through a replay from genesis inside
+        // the single-threaded chain actor. Beyond the reorg depth, catching up
+        // is the append path's job - it lands the same blocks without replaying
+        // a chain that already validates.
+        if suffix.len() > MAX_REORG_DEPTH {
+            return Err(format!(
+                "Reorg suffix of {} blocks exceeds the {MAX_REORG_DEPTH}-block reorg depth; \
+                 catching up is the block-sync path's job",
+                suffix.len()
+            ));
         }
         let mut candidate = Vec::with_capacity(candidate_len);
         candidate.extend_from_slice(&self.chain[..start_index]);
@@ -7282,6 +7318,32 @@ impl Blockchain {
         );
 
         Ok(())
+    }
+
+    /// Whether a queued report still satisfies the live registry parameters.
+    ///
+    /// Mirrors the block door's `InvalidSignatureSpam` check exactly: the
+    /// report is admitted into a block only when the live per-epoch threshold
+    /// is non-zero, fits the sample ceiling, and is met by both the report's
+    /// declared threshold and its sample count. Every other proof kind is
+    /// priced by what it carries, not by governance, so it always qualifies.
+    fn report_satisfies_live_threshold(
+        report: &crate::registry::evidence::SlashingReport,
+        live_threshold: u64,
+    ) -> bool {
+        if let crate::registry::evidence::SlashingProof::InvalidSignatureSpam {
+            threshold,
+            samples,
+            ..
+        } = &report.proof
+        {
+            let ceiling = crate::registry::invalid_vote::MAX_SPAM_REPORT_SAMPLES as u64;
+            return live_threshold != 0
+                && live_threshold <= ceiling
+                && *threshold >= live_threshold
+                && samples.len() as u64 >= live_threshold;
+        }
+        true
     }
 
     fn enqueue_pending_slashing_report(
