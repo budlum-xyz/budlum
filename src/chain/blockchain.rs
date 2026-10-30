@@ -7187,7 +7187,7 @@ impl Blockchain {
     /// one: the round starves while the chain runs. Four blocks is two devnet
     /// checkpoint intervals: long enough that a fork has been resolved, short
     /// enough that the vote still lands in the first seconds of the round.
-    pub const FINALITY_VOTE_DEPTH: u64 = 4;
+    const FINALITY_VOTE_DEPTH: u64 = 4;
 
     /// Start - or keep - the prevote round for the lowest unfinalized
     /// checkpoint, once this node holds the block at that height and the
@@ -7291,9 +7291,9 @@ impl Blockchain {
         }
     }
 
-    /// Crate-visible because the live-path tests drive one round directly,
-    /// with the height and hash they built; the node itself reaches it
-    /// through `start_pending_finality_round`.
+    /// WIRING: called from `start_pending_finality_round`, which the live
+    /// finality loop drives at every checkpoint; the tests that pin one round
+    /// call it directly with the height and hash they built.
     pub(crate) fn start_prevote_task(&mut self, checkpoint_height: u64, checkpoint_hash: String) {
         // The single aggregator slot used to be clobbered
         // on every call. Two consequences are pinned here:
