@@ -913,6 +913,22 @@ fn register_manifest(
     manifest
         .validate_untrusted()
         .map_err(StorageTxError::InvalidManifest)?;
+    // A codeword manifest has to carry its column commitments. The coding
+    // audit proves possession against those roots; without them an answer is
+    // checked for internal consistency alone, which a column of *some*
+    // codeword satisfies - so an operator storing nothing passes every audit
+    // of it. Manifests written before the field exist and keep their older
+    // meaning, but none of them can be registered now: the audit's guarantee
+    // is only as strong as what the manifest committed to.
+    if manifest.erasure.n > manifest.erasure.k {
+        let parity = manifest.erasure.parity_count() as usize;
+        if manifest.column_roots.len() != parity {
+            return Err(StorageTxError::InvalidManifest(format!(
+                "a codeword manifest must commit {parity} column roots, got {}",
+                manifest.column_roots.len()
+            )));
+        }
+    }
     if manifest.owner != *sender {
         return Err(StorageTxError::OwnerIsNotSender {
             owner: manifest.owner,
