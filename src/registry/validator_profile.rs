@@ -49,6 +49,9 @@ pub fn validator_profile(state: &AccountState, address: &Address) -> Option<serd
         "pendingDelegationExit": pending_exit,
         "commissionPpm": commission.map_or(0, |c| c.commission_ppm),
         "commissionLastChangeEpoch": commission.map(|c| c.last_change_epoch),
+        // The first epoch the live rate prices, so a delegator can see a
+        // change before it taxes their rewards.
+        "commissionEffectiveEpoch": registry.validator_commission_effective_epoch(address),
         "active": validator.active,
         "eligible": validator.is_eligible(state.epoch_index),
         "registeredValidatorRole": registry.is_active(address, roles::VALIDATOR),

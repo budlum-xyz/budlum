@@ -55,7 +55,12 @@ contract BudlumSlasher {
     uint64 public immutable budlumChainId;
     bytes32 public immutable g2GeneratorHash;
 
-    /// One slash per (validator, operator, epoch, height).
+    /// One slash per offence: (signing key, operator, epoch, height).
+    ///
+    /// Keyed on the key that produced the signatures rather than on the
+    /// binding row they were resolved from, because the signed preimage names
+    /// no validator: one key bound for several validator addresses is one
+    /// offence at one checkpoint, not one per row.
     mapping(bytes32 => bool) public slashed;
 
     event DoubleVoteSlashed(
@@ -102,18 +107,27 @@ contract BudlumSlasher {
         if (keccak256(g2Generator) != g2GeneratorHash) {
             revert UntrustedGenerator();
         }
-        bytes32 key = keccak256(abi.encode(vote.budlumValidator, vote.operator, vote.epoch, vote.height));
+        // The offence belongs to the key that signed it, not to the binding
+        // row it was resolved from: one key bound for several validators is
+        // one offence at one checkpoint, not one per row.
+        bytes memory pubkey = _checkSignatures(vote, g2Generator);
+        bytes32 key = keccak256(abi.encode(keccak256(pubkey), vote.operator, vote.epoch, vote.height));
         if (slashed[key]) {
             revert AlreadySlashed(key);
         }
-        _checkSignatures(vote, g2Generator);
         slashed[key] = true;
         registrar.slashForDoubleVote(vote.operator, "budlum finality double vote");
         emit DoubleVoteSlashed(vote.budlumValidator, vote.operator, vote.epoch, vote.height);
     }
 
-    function _checkSignatures(DoubleVote calldata vote, bytes calldata g2Generator) private view {
-        bytes memory pubkey = registrar.uncompressedKeyOf(vote.budlumValidator, vote.operator);
+    /// Verify both signatures against the key `vote.operator` bound and hand
+    /// that key back: it, not the binding row, is the identity of the offence.
+    function _checkSignatures(DoubleVote calldata vote, bytes calldata g2Generator)
+        private
+        view
+        returns (bytes memory pubkey)
+    {
+        pubkey = registrar.uncompressedKeyOf(vote.budlumValidator, vote.operator);
         if (pubkey.length == 0) {
             revert NotBound(vote.budlumValidator);
         }

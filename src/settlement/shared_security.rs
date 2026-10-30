@@ -412,6 +412,22 @@ fn observe(
         return Err(refused("Mikoriza validator table is full"));
     }
     registry.used_messages.insert(message_id);
+    // The registrar keeps one `validator` slot per operator, so an operator's
+    // live allocation names one validator at a time: a newer report from that
+    // operator for another validator means it moved and the validator it was
+    // bound to before is no longer backed. Retire the old row, or the same
+    // allocation counts twice in `apply_restaked_weights`.
+    if allocation.allocated_units > 0 {
+        for row in registry.validators.values_mut() {
+            if row.budlum_validator != allocation.budlum_validator
+                && row.source == source
+                && row.eth_operator == allocation.eth_operator
+                && row.status == RestakeStatus::Active
+            {
+                row.status = RestakeStatus::Exited;
+            }
+        }
+    }
     registry.validators.insert(
         allocation.budlum_validator,
         RestakedValidator {
@@ -685,6 +701,41 @@ mod tests {
             .expect("active");
         assert_eq!(row.eth_operator, [0x0B; 20]);
         assert_eq!(row.observed_epoch, 6);
+    }
+
+    /// A move is the operator's own: when its next attested report names
+    /// another validator, the row it left behind stops backing the validator,
+    /// so one allocation never carries restaked weight twice.
+    #[test]
+    fn a_move_retires_the_validator_the_operator_left() {
+        let operator = Address::from([1u8; 32]);
+        let mut state = state_with_registrar(operator);
+        let carrier = Address::from([3u8; 32]);
+        let left = Address::from([2u8; 32]);
+        let moved_to = Address::from([4u8; 32]);
+        let tx = observe_tx(&mut state, &claim(left, 1_000, 5), 0);
+        execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &tx).expect("records");
+        let tx = observe_tx(&mut state, &claim(moved_to, 1_000, 6), 1);
+        execute_shared_security_tx(&mut state, &ctx(carrier, devnet()), &tx).expect("moves");
+
+        assert!(state.settlement.shared_security.active(&left).is_none());
+        assert!(state.settlement.shared_security.active(&moved_to).is_some());
+
+        // Only the validator the operator still backs carries restaked weight.
+        let params = SharedSecurityParams {
+            enabled: true,
+            max_restaked_share_ppm: 1_000_000,
+            units_to_weight_ppm: 1_000_000,
+        };
+        for tag in [2u8, 4u8] {
+            let address = Address::from([tag; 32]);
+            let mut validator = Validator::new(address, 1_000);
+            validator.active = true;
+            state.validators.insert(address, validator);
+        }
+        apply_restaked_weights(&mut state, &params);
+        assert_eq!(state.validators[&left].restaked_weight, 0);
+        assert!(state.validators[&moved_to].restaked_weight > 0);
     }
 
     #[test]

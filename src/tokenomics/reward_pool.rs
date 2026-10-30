@@ -171,7 +171,11 @@ pub fn pay_epoch(
             continue;
         }
         let delegated = state.registry.delegated_stake(&address);
-        let commission_ppm = state.registry.validator_commission_ppm(&address);
+        // The rate in force for the epoch being paid: a reprice during that
+        // epoch prices the next one, not the rewards that already accrued.
+        let commission_ppm = state
+            .registry
+            .validator_commission_ppm_at(&address, closed_epoch);
         let delegated_reward = if delegated == 0 {
             0
         } else {
@@ -382,7 +386,9 @@ mod tests {
         state
             .delegate_to_validator(&delegator, &validator, 100)
             .unwrap();
+        // Set during epoch 0, so it prices epoch 1: the rate is prospective.
         state.set_validator_commission(&validator, 100_000).unwrap();
+        state.epoch_index = 1;
         state.add_balance(&pool, 1_100);
         let schedule = RewardPoolSchedule {
             validation_reward_pool: 1_100,
@@ -390,7 +396,7 @@ mod tests {
             treasury_pool: 0,
             reward_pool_start_epoch: 0,
         };
-        assert_eq!(pay_epoch(&mut state, &schedule, 0), 1_100);
+        assert_eq!(pay_epoch(&mut state, &schedule, 1), 1_100);
         // The delegated share is 100; 10% is commission, so the validator
         // receives its 1,000 self share plus 10. The delegator's 90 is a
         // claimable debt until the delegator signs a claim.
@@ -405,6 +411,40 @@ mod tests {
         );
         assert_eq!(state.get_balance(&delegator), 90);
         assert_eq!(state.get_balance(&pool), 0);
+    }
+
+    /// A reprice is prospective: a commission set in the block that closes an
+    /// epoch does not tax the delegated share of rewards that already accrued.
+    #[test]
+    fn a_commission_set_in_the_closing_epoch_does_not_price_that_epoch() {
+        let validator = addr(1);
+        let delegator = addr(2);
+        let pool = reward_pool_account();
+        let mut state = crate::core::account::AccountState::new();
+        state.add_validator(validator, 1_000);
+        state.add_balance(&delegator, 100);
+        state
+            .delegate_to_validator(&delegator, &validator, 100)
+            .unwrap();
+        // The epoch being closed is 0; the new rate starts at epoch 1.
+        state.set_validator_commission(&validator, 100_000).unwrap();
+        assert_eq!(state.registry.validator_commission_ppm_at(&validator, 0), 0);
+        assert_eq!(
+            state.registry.validator_commission_ppm_at(&validator, 1),
+            100_000
+        );
+        state.add_balance(&pool, 1_100);
+        let schedule = RewardPoolSchedule {
+            validation_reward_pool: 1_100,
+            validation_pool_epochs: 1,
+            treasury_pool: 0,
+            reward_pool_start_epoch: 0,
+        };
+        assert_eq!(pay_epoch(&mut state, &schedule, 0), 1_100);
+        // No commission was in force for epoch 0, so the whole delegated
+        // share of 100 is the delegator's claim and the validator keeps 1,000.
+        assert_eq!(state.get_balance(&validator), 1_000);
+        assert_eq!(state.registry.claimable_reward(delegator, validator), 100);
     }
 
     #[test]
