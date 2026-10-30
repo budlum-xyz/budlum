@@ -16,8 +16,10 @@
 //! * both halves of the composite signature verify over the root.
 //!
 //! A bundle is executed as its members, in order. A node that accepts a bundle
-//! admits all members or none.
-//! WIRING: unwired - the transaction-bundle helpers are the submission surface; the RPC and CLI paths that assemble bundles land with it.
+//! admits all members or none: `bud_sendTxBundle` verifies the witness and every
+//! member first, then hands them to the chain one at a time and takes the ones
+//! already admitted back out if the pool refuses a later member. `bud tx bundle
+//! --file <path>` is the client end of the same door.
 
 use crate::core::address::Address;
 use crate::core::transaction::{
@@ -31,16 +33,21 @@ use crate::crypto::scheme::SchemeStatusRegistry;
 use sha3::{Digest, Sha3_256};
 
 /// The domain tag of the bundle root.
-/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the bundle door - `bud_sendTxBundle` and `bud tx bundle` both
+/// speak a root under this tag, so it stays a named constant instead of a
+/// literal copied into three files.
 pub const BUNDLE_TAG: &[u8] = b"BDLM_TX_BUNDLE_V1";
 
 /// The most members one bundle carries.
-/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the bundle door - the verifier enforces the cap and the RPC
+/// reports it, so a client learns the bound from the same number the check
+/// uses.
 pub const MAX_BUNDLE_TXS: usize = 16;
 
 /// Why a bundle is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+/// exposed for: the bundle door - `bud_sendTxBundle` hands this to the client
+/// as the JSON-RPC error, so the variants are the client's error list.
 pub enum BundleError {
     /// No members, or more than [`MAX_BUNDLE_TXS`].
     Size(usize),
@@ -72,8 +79,13 @@ impl core::fmt::Display for BundleError {
 impl std::error::Error for BundleError {}
 
 /// Several V7 bodies and the one witness that authorizes them.
-#[derive(Debug, Clone, PartialEq)]
-/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+///
+/// `Serialize`/`Deserialize` are the wire shape `bud_sendTxBundle` takes: a
+/// client signs a bundle and the node verifies it before it admits a member.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// exposed for: the bundle door - `bud_sendTxBundle` takes a bundle in this
+/// shape and `bud tx bundle --file` posts one, so the wire form is fixed here
+/// for both ends.
 pub struct TxBundle {
     /// The member bodies, in execution order.
     pub members: Vec<Transaction>,
@@ -192,9 +204,9 @@ impl TxBundle {
         .map_err(|e| BundleError::Signature(e.to_string()))
     }
 
-    /// The members, for execution in order. Call after [`Self::verify_in`].
+    /// The members, for execution in order. Call after [`Self::verify_in`],
+    /// which is what `bud_sendTxBundle` does before it touches the pool.
     #[must_use]
-    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
     pub fn into_members(self) -> Vec<Transaction> {
         self.members
     }

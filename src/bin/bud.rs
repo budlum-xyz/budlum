@@ -635,6 +635,17 @@ enum TxAction {
         #[arg(long, requires = "key_file")]
         password_file: Option<std::path::PathBuf>,
     },
+    /// Submit a signed transaction bundle (`bud_sendTxBundle`).
+    ///
+    /// The file holds the bundle as JSON: the member bodies in execution order
+    /// and the one witness over them. Nothing is signed here - the signature
+    /// is the sender's, and the node verifies the witness and every member
+    /// before it admits a single one.
+    Bundle {
+        /// Path to the bundle file.
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -935,6 +946,26 @@ fn run_query_block(rpc_url: &str, number: &str) -> Result<(), String> {
 
 fn run_query_status(rpc_url: &str) -> Result<(), String> {
     let r = rpc_call(rpc_url, "bud_getStatus", serde_json::json!([]))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&r).unwrap_or_else(|_| r.to_string())
+    );
+    Ok(())
+}
+
+/// Submit a signed transaction bundle (`bud_sendTxBundle`).
+///
+/// The file is read as JSON and forwarded as it stands: a bundle's signature
+/// covers every member field, so a client that rewrote a body here would only
+/// produce a witness that no longer verifies. The node answers with the hash
+/// of each member in execution order, and with nothing at all if it refused
+/// the bundle - admission is all or none on both sides of the door.
+fn run_tx_bundle(rpc_url: &str, file: &std::path::Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|e| format!("cannot read bundle file {}: {e}", file.display()))?;
+    let bundle: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("bundle file {} is not JSON: {e}", file.display()))?;
+    let r = rpc_call(rpc_url, "bud_sendTxBundle", serde_json::json!([bundle]))?;
     println!(
         "{}",
         serde_json::to_string_pretty(&r).unwrap_or_else(|_| r.to_string())
@@ -2081,6 +2112,7 @@ fn main() {
                 *fee,
                 *nonce,
             ),
+            TxAction::Bundle { file } => run_tx_bundle(&cli.rpc_url, &file),
         },
         Command::Query { action } => match action {
             QueryAction::Balance { address } => run_query_balance(&cli.rpc_url, address),
