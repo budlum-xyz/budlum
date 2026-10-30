@@ -887,6 +887,11 @@ pub enum StorageEconomicsEventKind {
     /// bond was returned. The counterpart to `OperatorBondSlashed`: without it
     /// the only recorded end-of-life for a bond was losing it.
     OperatorBondReturned,
+    /// A slashed deal's unserved prepaid fee went back to the account that
+    /// escrowed it. The deal leaves the supply denominator with the slash, so
+    /// the refund is what keeps the committed total level instead of opening
+    /// minting headroom the fee never burned.
+    PayerRefund,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

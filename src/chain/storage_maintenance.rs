@@ -58,7 +58,7 @@ pub(crate) fn apply(state: &mut AccountState, block: &Block) -> Result<(), Strin
     let epoch = epoch_for(block.chain_id, block.index);
     accrue_operator_rewards(state, epoch);
     issue_challenges(state, block.chain_id, epoch, &block.vrf_output);
-    finalize_missed_challenges(state, epoch);
+    finalize_missed_challenges(state, epoch)?;
     finalize_expired_deals(state, epoch)?;
     open_repair_band_tickets(state, epoch);
     annotate_placements(state, block.chain_id, epoch, &block.previous_hash);
@@ -237,6 +237,10 @@ pub(crate) fn issue_challenges(
 /// Both slashing outcomes (a mismatched answer and a missed deadline) route
 /// through here, so answering wrongly is no cheaper than not answering.
 /// Returns the amount burned.
+/// # Errors
+///
+/// A refund that would overflow the payer's balance. The block is refused,
+/// as it is for any other failed state transition.
 pub(crate) fn apply_bond_slash(
     state: &mut AccountState,
     epoch: u64,
@@ -244,7 +248,7 @@ pub(crate) fn apply_bond_slash(
     operator: Address,
     slashed_bond: u64,
     reason: &'static str,
-) -> u64 {
+) -> Result<u64, String> {
     let now_unix = state.current_block_unix_secs;
     let cooldown_until = state
         .storage_registry
@@ -275,12 +279,64 @@ pub(crate) fn apply_bond_slash(
         balance_effect: 0,
         kind: StorageEconomicsEventKind::OperatorBondSlashed,
     });
-    burned
+
+    // The deal just left `Active`, and `total_storage_escrowed_supply`
+    // counts the unserved part of a *live* deal's prepaid fee. The epochs
+    // this deal will never serve leave the denominator with the slash, and
+    // nothing else puts them back: the fee would be neither refunded nor
+    // burned, it would simply stop being counted, and the supply cap would
+    // gain that much minting headroom. The service is not going to be
+    // delivered, so the unserved fee returns to the account that escrowed
+    // it, which turns the escrow back into a balance and keeps the
+    // committed total level.
+    let refund = match state.storage_registry.get_deal(deal_id) {
+        Some(deal) => {
+            let duration = deal.duration_epochs();
+            let served = epoch.saturating_sub(deal.deal_start_epoch).min(duration);
+            let unearned = deal
+                .total_fee(duration)
+                .saturating_sub(deal.total_fee(served));
+            match deal.payer {
+                Some(payer) if unearned > 0 => Some((payer, unearned)),
+                _ => None,
+            }
+        }
+        None => None,
+    };
+    if let Some((payer, unearned)) = refund {
+        state
+            .try_add_balance(&payer, unearned)
+            .map_err(|error| format!("storage fee refund overflow for {payer}: {error}"))?;
+        state
+            .storage_registry
+            .economics
+            .record(StorageEconomicsEvent {
+                epoch,
+                deal_id,
+                operator: payer,
+                amount: unearned,
+                balance_effect: 1,
+                kind: StorageEconomicsEventKind::PayerRefund,
+            });
+        tracing::warn!(
+            %payer,
+            unearned,
+            deal_id,
+            "Returned the unserved prepaid fee of a slashed storage deal to its payer"
+        );
+    }
+    Ok(burned)
 }
 
 /// Finalize every challenge whose deadline passed without an answer, and
 /// slash the operator. Returns the number finalized and the total slashed.
-pub(crate) fn finalize_missed_challenges(state: &mut AccountState, epoch: u64) -> (u32, u64) {
+/// # Errors
+///
+/// A bond refund that would overflow a balance.
+pub(crate) fn finalize_missed_challenges(
+    state: &mut AccountState,
+    epoch: u64,
+) -> Result<(u32, u64), String> {
     let pending: Vec<(u64, u64)> = state
         .storage_registry
         .all_challenges()
@@ -312,11 +368,11 @@ pub(crate) fn finalize_missed_challenges(state: &mut AccountState, epoch: u64) -
                 operator,
                 result.slashed_bond,
                 "missed challenge",
-            );
+            )?;
         }
         finalized += 1;
     }
-    (finalized, total_slashed)
+    Ok((finalized, total_slashed))
 }
 
 /// Return the operator bond of every deal that reached its end epoch
