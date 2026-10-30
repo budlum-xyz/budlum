@@ -40,6 +40,19 @@ pub trait BudlumApi {
     #[method(name = "bud_sendRawTransaction")]
     async fn send_raw_transaction(&self, tx: Transaction) -> Result<String, ErrorObjectOwned>;
 
+    /// Admit several transactions under one composite signature, all or none.
+    ///
+    /// A bundle carries up to [`crate::core::tx_bundle::MAX_BUNDLE_TXS`] bare
+    /// V7 bodies of one sender, nonces rising by one, and one witness over the
+    /// root of the set. The node verifies the witness and every member before
+    /// it admits anything, so a bundle the pool refuses leaves no member
+    /// behind. Returns the hash of each member in execution order.
+    #[method(name = "bud_sendTxBundle")]
+    async fn send_tx_bundle(
+        &self,
+        bundle: crate::core::tx_bundle::TxBundle,
+    ) -> Result<Vec<String>, ErrorObjectOwned>;
+
     #[method(name = "bud_getTransactionByHash")]
     async fn get_transaction_by_hash(
         &self,
