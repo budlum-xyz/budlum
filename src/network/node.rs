@@ -222,6 +222,52 @@ fn precommit_height_is_new(signed_height: u64, last_precommit_height: u64) -> bo
     signed_height > last_precommit_height
 }
 
+/// How long a cast vote waits for its round to reach quorum before the node
+/// publishes the same vote again.
+///
+/// Gossip delivers a vote to the mesh, not to every validator. On the devnet a
+/// single prevote reached one of four peers, and since every node signs once
+/// per checkpoint height nothing ever re-sent it: each round then sat one vote
+/// short with no way back, the chain kept producing, and finality stopped for
+/// the life of the process. Re-publishing the bytes already signed is
+/// idempotent at the receiver - the aggregator counts each voter once and the
+/// early-vote buffer de-duplicates by (voter, epoch, height) - and it is not a
+/// double sign: same epoch, same height, same hash.
+const FINALITY_VOTE_RETRY: Duration = Duration::from_secs(2);
+
+/// The vote this node last published, so a message lost in the mesh can be
+/// published again instead of being signed a second time.
+#[derive(Debug, Clone)]
+struct PublishedVote {
+    epoch: u64,
+    checkpoint_height: u64,
+    checkpoint_hash: String,
+    at: std::time::Instant,
+}
+
+/// Whether the beat re-publishes the vote it already cast for this round.
+///
+/// Only the identical round qualifies, and only while the round is short of
+/// quorum: a different hash at the same height is the one thing a validator
+/// must never sign twice.
+fn vote_retry_due(
+    published: Option<&PublishedVote>,
+    epoch: u64,
+    checkpoint_height: u64,
+    checkpoint_hash: &str,
+    now: std::time::Instant,
+) -> bool {
+    match published {
+        Some(vote) => {
+            vote.epoch == epoch
+                && vote.checkpoint_height == checkpoint_height
+                && vote.checkpoint_hash == checkpoint_hash
+                && now.saturating_duration_since(vote.at) >= FINALITY_VOTE_RETRY
+        }
+        None => false,
+    }
+}
+
 /// Whether a refused vote was refused for belonging to another round rather
 /// than for being wrong.
 ///
@@ -694,6 +740,12 @@ pub struct Node {
     /// signing twice at one height. It used to be a local variable inside the
     /// event loop, which meant it started at zero on every restart.
     pub last_prevote_height: u64,
+    /// The prevote this node last published, for the retry in
+    /// [`FINALITY_VOTE_RETRY`]: the once-per-height marks above say a vote was
+    /// signed, not that it arrived.
+    prevote_published: Option<PublishedVote>,
+    /// The precommit this node last published, for the same retry.
+    precommit_published: Option<PublishedVote>,
     /// Where the vote high-water marks are persisted between runs.
     ///
     /// `None` disables persistence, which is what tests and ephemeral devnet
@@ -2000,6 +2052,8 @@ impl Node {
             validator_address: None,
             last_precommit_height: 0,
             last_prevote_height: 0,
+            prevote_published: None,
+            precommit_published: None,
             vote_history_db: None,
             identity_path: None,
             banned_peer_db: None,
@@ -2552,14 +2606,30 @@ impl Node {
                     // vote only counts in an aggregator that holds its own
                     // height: no round ever saw a quorum.
                     let agg_state = self.chain.get_aggregator_state().await;
+                    let precommit_retry = agg_state.active
+                        && agg_state.prevote_quorum_reached
+                        && !agg_state.precommit_quorum_reached
+                        && vote_retry_due(
+                            self.precommit_published.as_ref(),
+                            agg_state.epoch,
+                            agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
+                            std::time::Instant::now(),
+                        );
                     if agg_state.active
                         && agg_state.prevote_quorum_reached
                         && !agg_state.precommit_quorum_reached
-                        && precommit_height_is_new(
+                        && (precommit_height_is_new(
                             agg_state.checkpoint_height,
                             self.last_precommit_height,
-                        )
+                        ) || precommit_retry)
                     {
+                        if precommit_retry {
+                            info!(
+                                "Finality: re-publishing the precommit for checkpoint height {} (epoch {}): the round has no precommit quorum yet",
+                                agg_state.checkpoint_height, agg_state.epoch
+                            );
+                        }
                         match self.chain.sign_precommit(
                             agg_state.epoch,
                             agg_state.checkpoint_height,
@@ -2583,6 +2653,13 @@ impl Node {
                                 // local view is ahead of, never behind, the
                                 // mesh.
                                 match self.chain.handle_precommit(precommit.clone()).await {
+                                    // A retry re-publishes bytes this node
+                                    // already admitted; the round counted the
+                                    // vote the first time and says so. Not
+                                    // worth a warning every beat.
+                                    Err(e) if e.contains("Duplicate") => {
+                                        tracing::debug!("own precommit re-published: {e}");
+                                    }
                                     Ok(Some(cert)) => {
                                         let topic = gossipsub::IdentTopic::new("blocks");
                                         let _ = self.swarm.behaviour_mut().gossipsub.publish(
@@ -2637,8 +2714,23 @@ impl Node {
                                     // startup answers NoPeersSubscribedToTopic)
                                     // stopped this node from ever voting that
                                     // height while the chain kept producing.
-                                    self.last_precommit_height = agg_state.checkpoint_height;
-                                    self.save_vote_history();
+                                    let advanced = precommit_height_is_new(
+                                        agg_state.checkpoint_height,
+                                        self.last_precommit_height,
+                                    );
+                                    if advanced {
+                                        self.last_precommit_height =
+                                            agg_state.checkpoint_height;
+                                    }
+                                    self.precommit_published = Some(PublishedVote {
+                                        epoch: agg_state.epoch,
+                                        checkpoint_height: agg_state.checkpoint_height,
+                                        checkpoint_hash: agg_state.checkpoint_hash.clone(),
+                                        at: std::time::Instant::now(),
+                                    });
+                                    if advanced {
+                                        self.save_vote_history();
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -2654,10 +2746,26 @@ impl Node {
                     // same height, so a node voting at its own checkpoint
                     // (one or two blocks ahead of its peers) contributed to
                     // no round at all.
+                    let prevote_retry = agg_state.active
+                        && !agg_state.prevote_quorum_reached
+                        && vote_retry_due(
+                            self.prevote_published.as_ref(),
+                            agg_state.epoch,
+                            agg_state.checkpoint_height,
+                            &agg_state.checkpoint_hash,
+                            std::time::Instant::now(),
+                        );
                     if agg_state.active
                         && agg_state.checkpoint_height > 0
-                        && agg_state.checkpoint_height > self.last_prevote_height
+                        && (agg_state.checkpoint_height > self.last_prevote_height
+                            || prevote_retry)
                     {
+                        if prevote_retry {
+                            info!(
+                                "Finality: re-publishing the prevote for checkpoint height {} (epoch {}): the round has no prevote quorum yet",
+                                agg_state.checkpoint_height, agg_state.epoch
+                            );
+                        }
                         // The epoch the aggregator was started with, and the
                         // round's own hash. Signing with the checkpoint-
                         // interval divisor instead of the epoch length made
@@ -2681,8 +2789,14 @@ impl Node {
                                 // The same one-signature gap as the
                                 // precommit below: a published vote is not
                                 // delivered back to its publisher.
-                                if let Err(e) = self.chain.handle_prevote(prevote.clone()).await {
-                                    warn!("Own prevote not admitted: {e}");
+                                match self.chain.handle_prevote(prevote.clone()).await {
+                                    // A retry re-publishes bytes this node
+                                    // already admitted; see the precommit above.
+                                    Err(e) if e.contains("Duplicate") => {
+                                        tracing::debug!("own prevote re-published: {e}");
+                                    }
+                                    Err(e) => warn!("Own prevote not admitted: {e}"),
+                                    Ok(()) => {}
                                 }
                                 let vote_msg = NetworkMessage::Prevote {
                                     epoch: prevote.epoch,
@@ -2707,8 +2821,19 @@ impl Node {
                                         "Failed to gossip a finality vote: {e}; height {checkpoint_height} stays unvoted and is retried on the next beat"
                                     );
                                 } else {
-                                    self.last_prevote_height = checkpoint_height;
-                                    self.save_vote_history();
+                                    let advanced = checkpoint_height > self.last_prevote_height;
+                                    if advanced {
+                                        self.last_prevote_height = checkpoint_height;
+                                    }
+                                    self.prevote_published = Some(PublishedVote {
+                                        epoch,
+                                        checkpoint_height,
+                                        checkpoint_hash: agg_state.checkpoint_hash.clone(),
+                                        at: std::time::Instant::now(),
+                                    });
+                                    if advanced {
+                                        self.save_vote_history();
+                                    }
                                 }
                             }
                             Err(e) => {
