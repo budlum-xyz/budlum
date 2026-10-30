@@ -1628,6 +1628,15 @@ impl AccountState {
         validator.active = false;
         validator.jailed = true;
 
+        // Stake destroyed here left the supply denominator, and a burn only
+        // counts against the fixed cap if it is recorded. Left out of
+        // `burned_total`, every slashed bond reopened its own amount as
+        // minting headroom - the same hole the external-bond and storage-bond
+        // slashes had, fixed the same way.
+        if penalty > 0 {
+            self.burned_total = self.burned_total.saturating_add(penalty);
+        }
+
         let jail_epochs = 7;
         validator.jail_until = self.epoch_index.saturating_add(jail_epochs);
 

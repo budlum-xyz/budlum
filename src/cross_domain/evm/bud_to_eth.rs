@@ -28,7 +28,8 @@ pub struct BudToEthClaim {
     pub message_id: MessageId,
     /// The burned asset, to be unlocked on Ethereum.
     pub asset_id: [u8; 32],
-    /// The unlock amount, minted or released on Ethereum.
+    /// The unlock amount: the net units the burn destroyed (`burned_amount`),
+    /// never the transfer's gross size.
     pub amount: u64,
     /// The recipient Ethereum address, 20 bytes.
     pub recipient_eth: [u8; 20],
@@ -58,6 +59,8 @@ pub enum BudToEthError {
     /// The amount is above the bridge cap. An ERC-20 `uint256` would hold it, but
     /// the bridge sets its own limit.
     AmountExceedsCap,
+    /// The burn recorded no net debit, so there is no amount to unlock.
+    BurnDebitNotRecorded,
 }
 
 impl std::fmt::Display for BudToEthError {
@@ -70,6 +73,9 @@ impl std::fmt::Display for BudToEthError {
             }
             BudToEthError::FinalityProofMissing => write!(f, "bud-to-eth: finality proof missing"),
             BudToEthError::AmountExceedsCap => write!(f, "bud-to-eth: amount exceeds bridge cap"),
+            BudToEthError::BurnDebitNotRecorded => {
+                write!(f, "bud-to-eth: the burn recorded no net debit")
+            }
         }
     }
 }
@@ -108,8 +114,16 @@ pub fn build_bud_to_eth_claim(
         return Err(BudToEthError::FinalityProofMissing);
     }
 
-    // 3. Check the amount against the cap, in a single lookup.
-    let amount = transfer.amount.get();
+    // 3. The amount is the net the burn destroyed, and the cap is applied to
+    // it. The gross `amount` is the transfer's full size; the burn debited
+    // `burned_amount`, which is what left Budlum and what Ethereum may
+    // release. Asserting the gross unlocked the relayer fee a second time out
+    // of destination escrow - the fee was never burned, so it was never owed
+    // on the other side.
+    let amount = transfer.burned_amount;
+    if amount == 0 {
+        return Err(BudToEthError::BurnDebitNotRecorded);
+    }
     if u128::from(amount) > bridge_cap {
         return Err(BudToEthError::AmountExceedsCap);
     }
