@@ -66,6 +66,16 @@ fn node1(method: &str) -> Result<String, String> {
 }
 
 fn compose(root: &Path, extra: &[&str]) -> Option<String> {
+    compose_result(root, extra).ok()
+}
+
+/// `compose`, keeping the reason a call failed.
+///
+/// A command that exits non-zero used to come back as `None` with its stderr
+/// dropped, so a step that runs a CLI inside a container (`bud validator
+/// join`) could fail for a reason the job log never showed. The stderr tail is
+/// part of the failure here, not a separate diagnosis someone has to guess at.
+fn compose_result(root: &Path, extra: &[&str]) -> Result<String, String> {
     let out = Command::new("docker")
         .arg("compose")
         .args(COMPOSE_FILES)
@@ -73,10 +83,26 @@ fn compose(root: &Path, extra: &[&str]) -> Option<String> {
         .args(extra)
         .current_dir(root)
         .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        .map_err(|e| format!("docker could not be run: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if out.status.success() {
+        return Ok(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let tail: String = stderr
+        .lines()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!(
+        "`docker compose {}` exited {}: {tail}",
+        extra.join(" "),
+        out.status.code().map_or_else(|| "abnormally".into(), |c| c.to_string())
+    ))
 }
 
 /// The metrics page of one container, read from inside it.
@@ -560,24 +586,44 @@ fn step9_join(root: &Path) -> Result<(), String> {
     );
     // The join runs inside node1's container against its own public RPC;
     // the key file sits on the read-only ceremony volume every node mounts.
-    let output = compose(
-        root,
-        &[
-            "exec",
-            "-T",
-            "node1",
-            "bud",
-            "--rpc-url",
-            "http://127.0.0.1:8545",
-            "validator",
-            "join",
-            "--key-file",
-            "/home/budlum/ceremony/node5.key",
-            "--stake-bud",
-            "1",
-        ],
-    )
-    .ok_or("bud validator join failed inside node1")?;
+    // The join is retried, not assumed: it is the one step that drives a CLI
+    // from outside the node, and a transaction the mempool has not admitted
+    // yet (an RPC that is one block behind, a node rotating its provider)
+    // reads exactly like a refusal. The last error is what the job shows when
+    // every attempt fails.
+    let mut joined = None;
+    let mut last_error = String::new();
+    for attempt in 0..5 {
+        match compose_result(
+            root,
+            &[
+                "exec",
+                "-T",
+                "node1",
+                "bud",
+                "--rpc-url",
+                "http://127.0.0.1:8545",
+                "validator",
+                "join",
+                "--key-file",
+                "/home/budlum/ceremony/node5.key",
+                "--stake-bud",
+                "1",
+            ],
+        ) {
+            Ok(output) => {
+                joined = Some(output);
+                break;
+            }
+            Err(e) => {
+                println!("attempt {}/5: {e}", attempt + 1);
+                last_error = e;
+            }
+        }
+        pause(PAUSE);
+    }
+    let output = joined
+        .ok_or_else(|| format!("bud validator join failed inside node1: {last_error}"))?;
     let address = joined_address(&output)
         .ok_or_else(|| format!("bud validator join printed no address: {output}"))?;
     let mut scanned = node1("bud_blockNumber")
