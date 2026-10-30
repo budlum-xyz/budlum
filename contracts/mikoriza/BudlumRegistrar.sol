@@ -64,6 +64,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
     mapping(address => uint64) public lastReportedBlock;
 
     event Bound(address indexed operator, bytes32 indexed budlumValidator, bytes compressedKey);
+    event Unbound(address indexed operator, bytes32 indexed budlumValidator);
     event AllocationReported(
         address indexed operator, bytes32 indexed budlumValidator, uint64 units, uint64 observedEpoch
     );
@@ -146,6 +147,7 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         // good: a key rotation or a move to another validator is the
         // operator's to make, and a claim that turns out false is refused on
         // Budlum by the Observe door, not made permanent here.
+        _retireMovedRow(msg.sender, budlumValidator, compressedKey);
         bindings[bindingKey(budlumValidator, msg.sender)] = Binding({
             operator: msg.sender,
             compressedKey: compressedKey,
@@ -153,6 +155,32 @@ contract BudlumRegistrar is BudlumOutboundEmitter {
         });
         validatorOf[msg.sender] = budlumValidator;
         emit Bound(msg.sender, budlumValidator, compressedKey);
+    }
+
+    /// Retire the row a move to another validator leaves behind, when the
+    /// key is the same one.
+    ///
+    /// `validatorOf` models one live validator per operator, so an unchanged
+    /// key cannot legitimately stand behind two validator addresses at once:
+    /// the earlier row is retired here instead of staying live for good. The
+    /// slasher charges an offence on the signing key, so the retire keeps the
+    /// claim set honest rather than closing a slashing gap. A rotated key is a
+    /// different key and leaves the earlier claim as its own.
+    function _retireMovedRow(address operator, bytes32 budlumValidator, bytes memory compressedKey)
+        internal
+    {
+        bytes32 previous = validatorOf[operator];
+        if (previous == bytes32(0) || previous == budlumValidator) {
+            return;
+        }
+        bytes32 previousRow = bindingKey(previous, operator);
+        if (
+            bindings[previousRow].operator != address(0)
+                && keccak256(bindings[previousRow].compressedKey) == keccak256(compressedKey)
+        ) {
+            delete bindings[previousRow];
+            emit Unbound(operator, previous);
+        }
     }
 
     /// @notice Report `operator`'s current allocation to Budlum. Anyone may
