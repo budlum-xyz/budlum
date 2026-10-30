@@ -637,9 +637,9 @@ enum TxAction {
     },
     /// Submit a signed transaction bundle (`bud_sendTxBundle`).
     ///
-    /// The file holds the bundle as JSON: the member bodies in execution order
-    /// and the one witness over them. Nothing is signed here - the signature
-    /// is the sender's, and the node verifies the witness and every member
+    /// The file holds the bundle as JSON: the signed members in execution
+    /// order and the one witness over them. Nothing is signed here - both are
+    /// the sender's - and the node verifies the witness and every member
     /// before it admits a single one.
     Bundle {
         /// Path to the bundle file.

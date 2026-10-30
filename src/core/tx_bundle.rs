@@ -1,15 +1,19 @@
 //! Bundle transaction: one composite signature for several
 //! operations of one sender.
 //!
-//! A bundle carries up to [`MAX_BUNDLE_TXS`] V7 transaction bodies and one
-//! witness. The witness signs the bundle root, which commits to the signing
-//! hash of every member in order, so the signature covers the set, the order
-//! and every field of every member. The members are bare bodies: they carry no
-//! signature of their own, and a member alone verifies nothing.
+//! A bundle carries up to [`MAX_BUNDLE_TXS`] V7 transactions of one sender and
+//! one witness. Every member carries its own V7 signature - that is what makes
+//! it admissible to the pool and to a block, since every admission gate
+//! verifies a body's own authority - and the witness signs the bundle root,
+//! which commits to the signing hash of every member in order. The witness is
+//! what makes the set indivisible: it says "these members, in this order", so
+//! a relay that drops or re-orders one produces a set the sender never
+//! authorized, and the door admits all of them or none.
 //!
 //! The rules a verifier enforces, each with a test:
 //!
-//! * every member is a V7 body of the same sender and chain,
+//! * every member is a V7 transaction of the same sender and chain, signed by
+//!   the witness's own key and verifiable on its own,
 //! * nonces rise by exactly one from the first member, so the order cannot be
 //!   permuted and no member can be dropped from the middle,
 //! * the witness key derives the sender address (Address V3),
@@ -51,7 +55,8 @@ pub const MAX_BUNDLE_TXS: usize = 16;
 pub enum BundleError {
     /// No members, or more than [`MAX_BUNDLE_TXS`].
     Size(usize),
-    /// A member is not a bare V7 body (or its hash is stale).
+    /// A member is not a V7 transaction this bundle's key signed (or its hash
+    /// is stale).
     Member(usize),
     /// Members differ in sender or chain.
     Mixed(usize),
@@ -67,7 +72,7 @@ impl core::fmt::Display for BundleError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Size(n) => write!(f, "bundle size {n} is out of range"),
-            Self::Member(i) => write!(f, "member {i} is not a bare V7 body"),
+            Self::Member(i) => write!(f, "member {i} is not a V7 body signed by this bundle"),
             Self::Mixed(i) => write!(f, "member {i} differs in sender or chain"),
             Self::Nonce(i) => write!(f, "member {i} breaks the nonce sequence"),
             Self::Sender => write!(f, "the witness key does not derive the sender"),
@@ -130,12 +135,30 @@ impl TxBundle {
         let auth = account_auth_v3(public.suite, &public.pq, &public.ed, recovery_public_key)
             .map_err(|_| BundleError::Sender)?;
         let from = Address::from(address_from_auth(&auth));
-        for member in &mut members {
+        let signer_key = encode_v7_signer_key(&public, &key_digest(recovery_public_key));
+        for (index, member) in members.iter_mut().enumerate() {
             member.from = from;
             member.signature_version = SIGNATURE_VERSION_V7;
-            member.signature = None;
-            member.signer_public_key = Vec::new();
+            member.signer_public_key = signer_key.clone();
             member.authorization = None;
+            // Each member is signed on its own, because every admission gate
+            // verifies a transaction's own authority: a bare body is refused
+            // by the pool and by block validation alike, so a bundle of bare
+            // bodies would be a door that admits nothing. The per-member
+            // randomness is derived from the caller's, one value per member,
+            // so two members are never signed under the same salt.
+            let mut member_randomness = *rnd;
+            member_randomness[0] ^= index as u8;
+            member_randomness[1] ^= (index >> 8) as u8;
+            let signature = keypair
+                .sign_in(
+                    registry,
+                    crate::crypto::ctx::TX_V7,
+                    &member.signing_hash(),
+                    &member_randomness,
+                )
+                .map_err(|e| BundleError::Signature(e.to_string()))?;
+            member.signature = Some(signature.encode());
             member.hash = member.calculate_hash();
         }
         let root = bundle_root(&members);
@@ -163,11 +186,15 @@ impl TxBundle {
         }
         let first = &self.members[0];
         for (i, member) in self.members.iter().enumerate() {
+            // The member's own authority, checked here so a bundle that could
+            // never be admitted is refused before the pool is touched: the
+            // chain will re-verify it, and agreeing with it now is the point
+            // of a door that promises all-or-none.
             if member.signature_version != SIGNATURE_VERSION_V7
-                || member.signature.is_some()
-                || !member.signer_public_key.is_empty()
+                || member.signer_public_key != self.witness.signer_public_key
                 || member.authorization.is_some()
                 || member.hash != member.calculate_hash()
+                || !member.verify_in(registry)
             {
                 return Err(BundleError::Member(i));
             }
@@ -251,15 +278,32 @@ mod tests {
         .unwrap()
     }
 
+    /// Every member is admitted on its own authority, and the witness is what
+    /// makes the set indivisible.
+    ///
+    /// A bare body would be refused by the pool and by block validation, so a
+    /// bundle of bare bodies would be a door that admits nothing - the shape
+    /// this test used to pin. Each member is signed by the bundle's own key,
+    /// and the witness covers the set and its order.
     #[test]
-    fn a_bundle_verifies_and_its_members_alone_do_not() {
+    fn every_member_verifies_on_its_own_and_the_witness_binds_the_set() {
         let acct = account();
+        let reg = SchemeStatusRegistry::genesis();
         let b = bundle(&acct, 3);
-        assert_eq!(b.verify_in(&SchemeStatusRegistry::genesis()), Ok(()));
+        assert_eq!(b.verify_in(&reg), Ok(()));
         for m in &b.members {
-            assert!(!m.verify(), "a bare member carries no authority");
+            assert!(m.verify_in(&reg), "a member must carry its own authority");
             assert_eq!(m.from, Address::from(acct.address));
+            assert_eq!(m.signer_public_key, b.witness.signer_public_key);
         }
+        // The same member outside the bundle says nothing about the bundle:
+        // dropping one leaves the others valid and the set unauthorized.
+        let mut without = b.clone();
+        without.members.remove(1);
+        assert!(
+            without.verify_in(&reg).is_err(),
+            "a set the sender never signed must not verify"
+        );
     }
 
     #[test]
@@ -315,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn size_limits_and_a_signed_member_are_refused() {
+    fn size_limits_and_a_forged_member_are_refused() {
         let acct = account();
         let reg = SchemeStatusRegistry::genesis();
         assert_eq!(
@@ -328,8 +372,22 @@ mod tests {
             ),
             Err(BundleError::Size(0))
         );
+        // A member whose signature does not verify is refused, and the
+        // refusal names the member rather than the set.
         let mut b = bundle(&acct, 2);
         b.members[0].signature = Some(vec![1]);
         assert_eq!(b.verify_in(&reg), Err(BundleError::Member(0)));
+
+        // A member signed by another key is the same refusal: the witness key
+        // is the bundle's signer, and every member has to carry that key.
+        let foreign = RootSecret::derive(&[7u8; 32], "")
+            .unwrap()
+            .user_account(0, 0)
+            .unwrap();
+        let theirs = bundle(&foreign, 2);
+        let mut spliced = bundle(&acct, 2);
+        spliced.members[0].signature = theirs.members[0].signature.clone();
+        spliced.members[0].signer_public_key = theirs.members[0].signer_public_key.clone();
+        assert_eq!(spliced.verify_in(&reg), Err(BundleError::Member(0)));
     }
 }

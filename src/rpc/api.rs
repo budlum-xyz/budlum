@@ -42,11 +42,12 @@ pub trait BudlumApi {
 
     /// Admit several transactions under one composite signature, all or none.
     ///
-    /// A bundle carries up to [`crate::core::tx_bundle::MAX_BUNDLE_TXS`] bare
-    /// V7 bodies of one sender, nonces rising by one, and one witness over the
-    /// root of the set. The node verifies the witness and every member before
-    /// it admits anything, so a bundle the pool refuses leaves no member
-    /// behind. Returns the hash of each member in execution order.
+    /// A bundle carries up to [`crate::core::tx_bundle::MAX_BUNDLE_TXS`] V7
+    /// transactions of one sender, nonces rising by one, each signed by the
+    /// same key, and one witness over the root of the set. The node verifies
+    /// the witness and every member before it admits anything, so a bundle the
+    /// pool refuses leaves no member behind. Returns the hash of each member in
+    /// execution order.
     #[method(name = "bud_sendTxBundle")]
     async fn send_tx_bundle(
         &self,
