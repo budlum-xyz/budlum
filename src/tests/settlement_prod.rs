@@ -137,15 +137,17 @@ mod settlement_prod_tests {
 
     // Build a valid BFT proof (real BLS cert + snapshot) bound to a
     // Commitment, mirroring the PoS pattern. Returns a fully-verifiable proof.
-    fn bft_proof_for(commitment: &DomainCommitment) -> FinalityProof {
+    fn bft_proof_for(commitment: &DomainCommitment, domain_chain_id: u64) -> FinalityProof {
         use crate::chain::finality::{sign_bls, FinalityCert};
         use bls12_381::{G1Affine, G1Projective};
 
         let (snapshot, sks) = bft_test_snapshot();
 
         let checkpoint_hash = hex::encode(commitment.domain_block_hash);
+        // The certificate signs the chain it is about: the adapter compares
+        // this id with the domain's, so the fixture signs the domain's own.
         let mut cert = FinalityCert {
-            chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
+            chain_id: domain_chain_id,
             epoch: 1,
             checkpoint_height: commitment.domain_height,
             checkpoint_hash: checkpoint_hash.clone(),
@@ -1116,7 +1118,7 @@ mod settlement_prod_tests {
 
         let mut c = commitment_for(&dom, 5, 0, 10);
         c.consensus_kind = ConsensusKind::Bft;
-        let proof = bft_proof_for(&c);
+        let proof = bft_proof_for(&c, dom.domain_chain_id);
         c.finality_proof_hash = hash_finality_proof(&proof).expect("finality proof hashes");
         bc.submit_verified_domain_commitment(c, proof).unwrap();
         assert_eq!(bc.state.settlement.commitments.len(), 1);
@@ -1134,7 +1136,7 @@ mod settlement_prod_tests {
         let mut c = commitment_for(&dom, 5, 0, 13);
         c.consensus_kind = ConsensusKind::Bft;
         // Start from a valid proof, then corrupt the aggregate signature.
-        let mut proof = bft_proof_for(&c);
+        let mut proof = bft_proof_for(&c, dom.domain_chain_id);
         if let FinalityProof::Bft { cert, .. } = &mut proof {
             cert.agg_sig_bls = vec![0u8; 48]; // invalid signature
         }
@@ -1152,7 +1154,7 @@ mod settlement_prod_tests {
 
         let mut c = commitment_for(&dom, 5, 0, 14);
         c.consensus_kind = ConsensusKind::Bft;
-        let mut proof = bft_proof_for(&c);
+        let mut proof = bft_proof_for(&c, dom.domain_chain_id);
         // Drop signers: keep only 1 of 3 in the bitmap (and re-sign with just 1).
         if let FinalityProof::Bft {
             cert,
@@ -1214,7 +1216,7 @@ mod settlement_prod_tests {
         let mut c = commitment_for(&dom, 1, 0, 12);
         c.consensus_kind = ConsensusKind::Bft;
         // Valid cert, but commit_hash deliberately wrong.
-        let mut proof = bft_proof_for(&c);
+        let mut proof = bft_proof_for(&c, dom.domain_chain_id);
         if let FinalityProof::Bft { commit_hash, .. } = &mut proof {
             *commit_hash = [0xFFu8; 32];
         }
