@@ -19,12 +19,8 @@ title = "Budlum gitleaks config"
 [extend]
 useDefault = true
 
-# One narrow exception, recorded 2026-10-12. The full-history scan flags a
-# documentation example in a skill bundle that a later change removed from the
-# tree: api-design SKILL.md showed a header example with the placeholder key
-# sk_live_abc123. The value is a doc placeholder, not a credential, and the
-# file no longer exists at the branch head; the commit stays in history, so
-# the fingerprint alone is allow-listed. gitleaks v8.30.1 rejects a
+# The allow-list itself lives in .gitleaksignore at the repo root, which
+# `gitleaks detect` reads on its own; gitleaks v8.30.1 rejects a
 # `fingerprints` key in this file ("[[allowlists]] must contain at least one
 # check"), so the fingerprint lives in .gitleaksignore at the repo root, which
 # `gitleaks detect` reads on its own. Nothing else is exempt.

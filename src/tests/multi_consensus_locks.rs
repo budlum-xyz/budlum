@@ -165,16 +165,7 @@ mod poa_authority_binding {
         let msg = crate::domain::finality_adapter::poa_commit_signing_message(
             domain.domain_chain_id,
             domain.id,
-            commitment.domain_height,
-            &commitment.domain_block_hash,
-            &commitment.parent_domain_block_hash,
-            commitment.sequence,
-            commitment.timestamp_ms,
-            commitment.producer,
-            &commitment.state_root,
-            &commitment.tx_root,
-            &commitment.event_root,
-            &commitment.state_updates,
+            commitment,
         );
         let signatures = signers
             .iter()

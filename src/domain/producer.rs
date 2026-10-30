@@ -312,19 +312,26 @@ pub fn build_poa_commitment(
     // The producer signs the same state-updates map the verifier will fold in.
     // A commitment built here carries none: the writes it would attest are the
     // relayer's claim and belong to the settlement door, not to this builder.
+    let unsigned_commitment = crate::domain::types::DomainCommitment {
+        domain_id: spec.domain.id,
+        domain_height: spec.height,
+        domain_block_hash: spec.block_hash,
+        parent_domain_block_hash: spec.parent_hash,
+        state_root: spec.state_root,
+        tx_root: spec.tx_root,
+        event_root: spec.event_root,
+        finality_proof_hash: [0u8; 32],
+        consensus_kind: crate::domain::ConsensusKind::PoA,
+        validator_set_hash: [0u8; 32],
+        timestamp_ms: spec.timestamp_ms,
+        sequence: spec.sequence,
+        producer: spec.producer,
+        state_updates: std::collections::BTreeMap::new(),
+    };
     let digest = crate::domain::finality_adapter::poa_commit_digest(
         spec.domain.domain_chain_id,
         spec.domain.id,
-        spec.height,
-        &spec.block_hash,
-        &spec.parent_hash,
-        spec.sequence,
-        spec.timestamp_ms,
-        spec.producer,
-        &spec.state_root,
-        &spec.tx_root,
-        &spec.event_root,
-        &std::collections::BTreeMap::new(),
+        &unsigned_commitment,
     );
     let mut signatures = Vec::with_capacity(signers.len());
     for keypair in signers {
