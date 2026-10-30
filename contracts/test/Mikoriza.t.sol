@@ -51,7 +51,8 @@ contract RegistrarHarness is BudlumRegistrar {
     {}
 
     function forceBind(address operator, bytes32 validator, bytes memory compressedKey) external {
-        bindings[validator] = Binding({operator: operator, compressedKey: compressedKey, uncompressedKey: hex"01"});
+        bindings[bindingKey(validator, operator)] =
+            Binding({operator: operator, compressedKey: compressedKey, uncompressedKey: hex"01"});
         validatorOf[operator] = validator;
     }
 }
@@ -60,6 +61,7 @@ contract MikorizaTest is Harness {
     AllocationManagerStub internal manager;
     RegistrarHarness internal registrar;
     address internal constant OPERATOR = address(0x0A0A0a0a0a0a0a0A0a0a0A0a0A0A0A0a0a0a0a0a);
+    address internal constant OTHER_OPERATOR = address(0x0B0b0b0b0B0B0B0B0b0b0b0b0B0B0B0B0B0b0B0b);
 
     function setUp() public {
         manager = new AllocationManagerStub();
@@ -119,6 +121,7 @@ contract MikorizaTest is Harness {
         slasher.slashDoubleVote(
             DoubleVote({
                 budlumValidator: bytes32(uint256(2)),
+                operator: OPERATOR,
                 epoch: 1,
                 height: 10,
                 hashA: hex"aa",
@@ -165,5 +168,87 @@ contract MikorizaTest is Harness {
         assertTrue(!BudlumBls.verify(identityG2, "message", identityG1, nonzeroG2), "identity key");
         assertTrue(!BudlumBls.verify(nonzeroG2, "message", identityG1, nonzeroG2), "identity signature");
         assertTrue(!BudlumBls.verify(nonzeroG2, "message", nonzeroG1, identityG2), "identity generator");
+    }
+
+    /// The finding: one operator-set member used to occupy a validator's only
+    /// slot for good. A binding is now the operator's own claim, so a claim by
+    /// someone else cannot take it away and cannot be blocked by it either.
+    function test_two_operators_claim_one_validator_without_a_lock() public {
+        bytes32 validator = bytes32(uint256(2));
+        registrar.forceBind(OPERATOR, validator, hex"aa");
+        registrar.forceBind(OTHER_OPERATOR, validator, hex"bb");
+        assertEq(keccak256(registrar.compressedKeyOf(validator, OPERATOR)), keccak256(hex"aa"), "first claim kept");
+        assertEq(
+            keccak256(registrar.compressedKeyOf(validator, OTHER_OPERATOR)), keccak256(hex"bb"), "second claim is its own"
+        );
+    }
+
+    /// A rebinding replaces the operator's own claim (the key rotated, or the
+    /// operator moved) and the validator slot is not burned by the first one.
+    function test_an_operator_rebinds_itself() public {
+        bytes32 validator = bytes32(uint256(2));
+        registrar.forceBind(OPERATOR, validator, hex"aa");
+        registrar.forceBind(OPERATOR, validator, hex"cc");
+        assertEq(keccak256(registrar.compressedKeyOf(validator, OPERATOR)), keccak256(hex"cc"), "rebound");
+    }
+
+    /// A report is the reporting operator's own claim: another operator's key
+    /// for the same validator is neither used nor enough to report.
+    function test_an_allocation_is_reported_from_the_reporting_operators_own_claim() public {
+        bytes32 validator = bytes32(uint256(2));
+        manager.setMember(OPERATOR, 32 ether);
+        manager.setMember(OTHER_OPERATOR, 64 ether);
+        registrar.forceBind(OPERATOR, validator, hex"aa");
+        vm.expectPartialRevert(BudlumRegistrar.NotBound.selector);
+        registrar.reportAllocation(OTHER_OPERATOR);
+        registrar.forceBind(OTHER_OPERATOR, validator, hex"bb");
+        assertEq(registrar.reportAllocation(OPERATOR), 32e9, "the first operator's own stake");
+        assertEq(registrar.reportAllocation(OTHER_OPERATOR), 64e9, "the second operator's own stake");
+    }
+
+    /// The slasher checks the evidence against the key the named operator
+    /// bound, so an operator that has not bound the validator cannot be
+    /// slashed on someone else's key.
+    function test_the_slasher_slashes_only_the_named_operators_own_key() public {
+        BudlumSlasher slasher = registrar.slasher();
+        bytes32 validator = bytes32(uint256(2));
+        registrar.forceBind(OPERATOR, validator, hex"aa");
+        vm.expectPartialRevert(BudlumSlasher.NotBound.selector);
+        slasher.slashDoubleVote(
+            DoubleVote({
+                budlumValidator: validator,
+                operator: OTHER_OPERATOR,
+                epoch: 1,
+                height: 10,
+                hashA: hex"aa",
+                negSigA: new bytes(128),
+                hashB: hex"bb",
+                negSigB: new bytes(128)
+            }),
+            bytes("generator")
+        );
+    }
+
+    /// The same evidence naming the operator that did bind reaches the
+    /// signature check instead: the bound key is the one verified, and a
+    /// one-byte harness key is refused before the pairing precompile.
+    function test_the_slasher_verifies_the_named_operators_bound_key() public {
+        BudlumSlasher slasher = registrar.slasher();
+        bytes32 validator = bytes32(uint256(2));
+        registrar.forceBind(OPERATOR, validator, hex"aa");
+        vm.expectPartialRevert(BudlumSlasher.SignatureInvalid.selector);
+        slasher.slashDoubleVote(
+            DoubleVote({
+                budlumValidator: validator,
+                operator: OPERATOR,
+                epoch: 1,
+                height: 10,
+                hashA: hex"aa",
+                negSigA: new bytes(128),
+                hashB: hex"bb",
+                negSigB: new bytes(128)
+            }),
+            bytes("generator")
+        );
     }
 }

@@ -556,6 +556,14 @@ async fn serve(
         policy.amount
     );
     let connections = Arc::new(Semaphore::new(http_support::MAX_CONNECTIONS));
+    /// The peer address as one log token. The address is the one part of a
+    /// connection a remote host chooses the shape of, so the line breaks that
+    /// would forge a second log entry - and any other control character - are
+    /// removed before it reaches a log sink.
+    fn loggable_peer(peer: SocketAddr) -> String {
+        let text = peer.to_string().replace('\n', "").replace('\r', "");
+        text.chars().filter(|c| !c.is_control()).collect()
+    }
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -582,8 +590,14 @@ async fn serve(
             let connection =
                 builder.serve_connection(hyper_util::rt::TokioIo::new(stream), service);
             match tokio::time::timeout(http_support::CONNECTION_LIFETIME, connection).await {
-                Ok(Err(e)) => eprintln!("budlum-faucet: connection from {peer} ended: {e}"),
-                Err(_) => eprintln!("budlum-faucet: connection from {peer} timed out"),
+                Ok(Err(e)) => eprintln!(
+                    "budlum-faucet: connection from {} ended: {e}",
+                    loggable_peer(peer)
+                ),
+                Err(_) => eprintln!(
+                    "budlum-faucet: connection from {} timed out",
+                    loggable_peer(peer)
+                ),
                 Ok(Ok(())) => {}
             }
         });

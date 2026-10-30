@@ -28,6 +28,11 @@ payload the event commits to.
    the restaked collateral (one or two transactions).
 2. On Ethereum: bind. The operator records its Budlum validator address and
    its Budlum BLS public key in `BudlumRegistrar`. Both keys sign the binding.
+   The record is the operator's own claim, keyed by `(validator, operator)`: an
+   operator may rebind (a key rotation, a move to another validator) and two
+   operators may claim the same validator. No claim is the validator's, and no
+   claim is permanent on Ethereum; which one is true is decided on Budlum, by
+   the key the validator registered (`RegisterConsensusKeys`).
 3. On Budlum: `bud validator join` (stake, then `RegisterConsensusKeys`).
 4. Run `budlum-core`.
 
@@ -54,9 +59,10 @@ The event binds:
 
 The transaction `SettlementTx::SharedSecurity(Observe { .. })` carries the
 fields in clear; the door recomputes the payload hash, refuses a replayed
-event, refuses an allocation older than the recorded one, refuses a second
-Ethereum operator for the same validator, and refuses a BLS key that differs
-from the validator's registered key.
+event, refuses an allocation older than the recorded one, refuses a BLS key
+that differs from the validator's registered key, and lets the newest report
+name another Ethereum operator: the validator's key is the authority, so the
+row follows it instead of belonging to the first operator ever recorded.
 
 Each record is a `RestakedValidator { budlum_validator, eth_operator,
 allocated_units, source, observed_epoch, status, bls_public_key }`. An
@@ -91,8 +97,9 @@ the cipher suite is `BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_`.
 - On Budlum the existing evidence path jails and slashes. A slashed
   validator's restaked weight drops to zero at the next epoch boundary.
 - On Ethereum `BudlumSlasher` verifies the two signatures with the EIP-2537
-  precompiles (pairing, map-to-G1) and SHA-256 against the bound BLS key, then
-  slashes through the EigenLayer operator set.
+  precompiles (pairing, map-to-G1) and SHA-256 against the key the evidence's
+  operator bound for the validator, then slashes that operator through the
+  EigenLayer operator set. An operator's key cannot slash another operator.
 - A liveness fault does not slash ETH on testnet. It only jails on Budlum.
 
 ## Rewards
