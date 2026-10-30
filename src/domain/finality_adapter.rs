@@ -154,21 +154,27 @@ pub struct PoAAuthoritySignature {
 /// signature made under `_V1`-`_V4` (each of which lacked some of these
 /// fields) does not verify here, so no pre-fix attestation can be replayed
 /// against the chain- and commitment-metadata-bound verifier.
-#[allow(clippy::too_many_arguments)]
 pub fn poa_commit_signing_message(
     chain_id: u64,
     domain_id: DomainId,
-    domain_height: u64,
-    domain_block_hash: &Hash32,
-    parent_domain_block_hash: &Hash32,
-    sequence: u64,
-    timestamp_ms: u128,
-    producer: Option<crate::core::address::Address>,
-    state_root: &Hash32,
-    tx_root: &Hash32,
-    event_root: &Hash32,
-    state_updates: &std::collections::BTreeMap<crate::core::address::Address, u64>,
+    commitment: &DomainCommitment,
 ) -> Vec<u8> {
+    // One argument per signed concept rather than twelve positional ones: the
+    // commitment is exactly the record the message must cover, so passing the
+    // record itself makes it impossible to sign one field and attest another.
+    let DomainCommitment {
+        domain_height,
+        domain_block_hash,
+        parent_domain_block_hash,
+        sequence,
+        timestamp_ms,
+        producer,
+        state_root,
+        tx_root,
+        event_root,
+        state_updates,
+        ..
+    } = commitment;
     let mut msg = Vec::with_capacity(
         24 + 8 + 8 + 8 + 32 + 32 + 8 + 16 + 1 + 32 + 32 + 32 + 32 + 8 + state_updates.len() * 40,
     );
@@ -658,20 +664,7 @@ impl DomainFinalityAdapter for PoAFinalityAdapter {
         }
 
         // The message every authority must have signed, bound to THIS commitment.
-        let msg = poa_commit_signing_message(
-            domain.domain_chain_id,
-            domain.id,
-            commitment.domain_height,
-            &commitment.domain_block_hash,
-            &commitment.parent_domain_block_hash,
-            commitment.sequence,
-            commitment.timestamp_ms,
-            commitment.producer,
-            &commitment.state_root,
-            &commitment.tx_root,
-            &commitment.event_root,
-            &commitment.state_updates,
-        );
+        let msg = poa_commit_signing_message(domain.domain_chain_id, domain.id, commitment);
 
         // Count DISTINCT authorities with a valid signature over `msg`.
         let mut valid_signers: std::collections::BTreeSet<crate::core::address::Address> =
@@ -984,20 +977,7 @@ impl DomainFinalityAdapter for StorageAttestationFinalityAdapter {
                 )? {
                     return Ok(rejected);
                 }
-                let msg = poa_commit_signing_message(
-                    domain.domain_chain_id,
-                    domain.id,
-                    commitment.domain_height,
-                    &commitment.domain_block_hash,
-                    &commitment.parent_domain_block_hash,
-                    commitment.sequence,
-                    commitment.timestamp_ms,
-                    commitment.producer,
-                    &commitment.state_root,
-                    &commitment.tx_root,
-                    &commitment.event_root,
-                    &commitment.state_updates,
-                );
+                let msg = poa_commit_signing_message(domain.domain_chain_id, domain.id, commitment);
                 let mut valid_signers = std::collections::BTreeSet::new();
                 for sig in signatures {
                     if !authority_set.contains(&sig.authority) {
@@ -1549,20 +1529,7 @@ mod tests {
         // `default_domain` is bridge-enabled with no registered set, which
         // finalizes nothing by design; register the set this test signs with.
         domain.validator_set_hash = poa_authority_set_hash(&domain, &authorities).unwrap();
-        let msg = poa_commit_signing_message(
-            domain.domain_chain_id,
-            domain.id,
-            commitment.domain_height,
-            &commitment.domain_block_hash,
-            &commitment.parent_domain_block_hash,
-            commitment.sequence,
-            commitment.timestamp_ms,
-            commitment.producer,
-            &commitment.state_root,
-            &commitment.tx_root,
-            &commitment.event_root,
-            &commitment.state_updates,
-        );
+        let msg = poa_commit_signing_message(domain.domain_chain_id, domain.id, &commitment);
         let sig = |i: usize| PoAAuthoritySignature {
             authority: authorities[i],
             signature: kps[i].sign(&msg).to_vec(),
@@ -1643,20 +1610,7 @@ mod tests {
         let adapter = PoAFinalityAdapter::default();
 
         // The quorum signed THIS commitment, roots included.
-        let msg = poa_commit_signing_message(
-            domain.domain_chain_id,
-            domain.id,
-            commitment.domain_height,
-            &commitment.domain_block_hash,
-            &commitment.parent_domain_block_hash,
-            commitment.sequence,
-            commitment.timestamp_ms,
-            commitment.producer,
-            &commitment.state_root,
-            &commitment.tx_root,
-            &commitment.event_root,
-            &commitment.state_updates,
-        );
+        let msg = poa_commit_signing_message(domain.domain_chain_id, domain.id, &commitment);
         let signatures: Vec<_> = kps
             .iter()
             .zip(authorities.iter())
@@ -2041,20 +1995,7 @@ mod tests {
             FinalityStatus::Rejected(_)
         ));
 
-        let msg = poa_commit_signing_message(
-            domain.domain_chain_id,
-            domain.id,
-            commitment.domain_height,
-            &commitment.domain_block_hash,
-            &commitment.parent_domain_block_hash,
-            commitment.sequence,
-            commitment.timestamp_ms,
-            commitment.producer,
-            &commitment.state_root,
-            &commitment.tx_root,
-            &commitment.event_root,
-            &commitment.state_updates,
-        );
+        let msg = poa_commit_signing_message(domain.domain_chain_id, domain.id, &commitment);
         let real_sig = kp.sign(&msg);
         let real_proof = FinalityProof::PoA {
             authorities: vec![auth_addr],

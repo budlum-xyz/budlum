@@ -36,7 +36,8 @@ type InvalidVoteSample = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 /// Maximum independently verifiable samples in one spam report.
 ///
 /// The bound is the *encoded* one, not the raw retention budget: the report is
-/// measured by [`MAX_SPAM_REPORT_JSON_BYTES`] before it may enter a block, and
+/// measured against the 65,536-byte encoded ceiling below before it may enter
+/// a block, and
 /// `serde_json` spends up to four characters on each byte of a `Vec<u8>`. The
 /// ingress caps a vote preimage at `MAX_VOTE_PREIMAGE_BYTES` and each
 /// signature at `MAX_VOTE_SIGNATURE_BYTES`, so 24 worst-case samples encode
@@ -53,11 +54,12 @@ pub const MAX_SPAM_REPORT_SAMPLES: usize = 24;
 
 /// The encoded size the block door allows one slashing report to occupy.
 ///
-/// `chain::blockchain` measures the JSON encoding of a queued report against
-/// the same number before it will carry it in a block, so a report the
-/// producer builds here is one a block will accept. Kept next to the sample
-/// cap so the two cannot drift apart.
-pub const MAX_SPAM_REPORT_JSON_BYTES: usize = 65_536;
+/// `chain::blockchain` reads this constant for both of its block-door checks
+/// (the evidence sweep and the report queue), so a report the producer builds
+/// here is one a block will accept - the number cannot drift into a second
+/// copy. It stays crate-private: an outside caller has no business sizing a
+/// consensus encoding.
+pub(crate) const MAX_SPAM_REPORT_JSON_BYTES: usize = 65_536;
 
 /// Samples come only from BLS finality votes, not the PQ signature table. The
 /// ingress refuses larger signatures before authentication or pairing.

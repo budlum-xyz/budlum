@@ -5671,7 +5671,8 @@ impl Blockchain {
         // on each entry), so retention cannot stall production: the builder
         // only inlines what fits and the rest waits.
         const BLOCK_HEADER_JSON_ALLOWANCE: usize = 4096;
-        const MAX_SINGLE_REPORT_BYTES: usize = 65_536;
+        const MAX_SINGLE_REPORT_BYTES: usize =
+            crate::registry::invalid_vote::MAX_SPAM_REPORT_JSON_BYTES;
         let mut remaining_json_bytes = crate::consensus::MAX_BLOCK_SIZE
             .saturating_sub(BLOCK_HEADER_JSON_ALLOWANCE)
             .saturating_sub(
@@ -7288,7 +7289,8 @@ impl Blockchain {
         report: crate::registry::evidence::SlashingReport,
     ) {
         const MAX_PENDING_SLASHING_REPORTS: usize = 64;
-        const MAX_SINGLE_REPORT_BYTES: usize = 65_536;
+        const MAX_SINGLE_REPORT_BYTES: usize =
+            crate::registry::invalid_vote::MAX_SPAM_REPORT_JSON_BYTES;
         // The block door only applies reports that accuse the validator role
         // (`apply_block_slashing_reports_in_state`), so a report about any
         // other role would ride in the queue and be refused by our own
