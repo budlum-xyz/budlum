@@ -226,9 +226,49 @@ distinct defects, and the three on #97 to two.
   so a lying peer still loses reputation and still gets rejected.
 - **Regression test:** `a_fork_or_a_missing_block_is_not_peer_misbehaviour`
   (`src/network/node.rs`), which pins both directions of the classification.
-- **Status:** fix pushed; **the devnet smoke run has to confirm it**, so the finding
-  stays open until `Devnet Multi-Node Smoke` is green. This is a testnet-readiness
-  blocker (Testnet Readiness Gate, "network layer" and "consensus and tokenomics").
+- **Second sink, found in the next run (the ban came from somewhere else):** the
+  devnet that failed on `64d0a85`'s predecessor banned `12D3KooWL3sp...` for 3600 s from
+  the *sync* path, not the certificate path: `sync block refused ... index=7 ...
+  Previous hash mismatch` followed immediately by `Peer ... banned`. The `Blocks` arm
+  classified the `fork_retry` flag - raised when `validate_and_add_block` answers
+  `Previous hash mismatch` - as `report_invalid_block`. That answer has two honest
+  causes and no dishonest one that is distinguishable at that point: this node's tip
+  moved between request and answer, or the peer is serving the branch that won the
+  slot. On a four-validator mesh a slot has more than one elected leader often enough
+  that this is ordinary traffic, and at `INVALID_BLOCK_PENALTY` ten such answers
+  (`BAN_THRESHOLD` is -100) silence a validator for an hour - which is the same
+  failure one level down: the node bans the peer that could carry it across the fork.
+- **Fix (this round):** `PeerManager::report_stale_sync_batch` - the fork signal keeps
+  moving the score (the peer sinks in `get_best_peers`, so the re-walk that follows
+  asks someone else) but is floored at `MIN_SCORE + 1`, one point above
+  `BAN_THRESHOLD`, so it can demote a peer and never silence it. The sync `Blocks` arm
+  now calls it instead of `report_invalid_block`. A genuine invalid block keeps the
+  banning path: the gossip `Block` arm still charges `report_invalid_block` for a block
+  whose own hash does not match its contents, and the oversized-batch refusal still
+  charges it as well.
+- **Regression test:** `stale_sync_batches_demote_but_never_ban` plus its canary
+  `stale_batch_floor_is_load_bearing` (`src/network/peer_manager.rs`): 64 stale batches
+  demote to exactly `MIN_SCORE + 1`, are never banned, and are asked last, while 64
+  invalid-block reports still ban. The H5 score-ceiling walk over every entry point
+  gains the new method, so the ceiling keeps its coverage.
+- **Still open - "only 3 of 4 validators produced":** the remaining symptom is
+  structural, not a penalty. With four equal validators the threshold admits each one
+  with probability 1/4 per round, so a slot has two or more winners with probability
+  `1 - (3/4)^4 - 4·(1/4)·(3/4)^3 about 26 %` and no winner at round 0 with probability
+  `(3/4)^4 ≈ 32 %`. Equal-height candidates are resolved deterministically
+  (`resolve_split_tie` on the tip when `fork_choice_score` - chain length - ties), so
+  the mesh converges, but on the run that failed a producer's blocks were never in the
+  winning branch that the harness reads, and there was no second chance inside its
+  240 s window. This needs the fork to heal *before* the next slot on every node, not
+  a wider penalty; the next step is to instrument the losing branch's reorg (whether
+  `reorg_to_peer_suffix` runs at all when both tips are at the same height) and treat
+  that as the remaining AF-09 work.
+- **Status:** **open.** The certificate classification and the ban-from-fork path are
+  fixed and tested; `Devnet Multi-Node Smoke` is green on `829b3ee` and that run is the
+  evidence that the two bans were the mechanism, but the step-7 producer count has
+  failed before and passed after on unchanged logic, so it stays open until a run
+  passes on a tree that carries this fix. This is a testnet-readiness blocker (Testnet
+  Readiness Gate, "network layer" and "consensus and tokenomics").
 
 ### AF-10 - 558 lines of consensus-round tests that no `mod` declared (`ci`, `medium`)
 
