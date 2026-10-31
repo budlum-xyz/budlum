@@ -1882,7 +1882,13 @@ jobs:
     # Tools are version+sha256 pinned (nextest verified byte for byte against the official .sha256 asset).
     name: Coverage (nextest + llvm-cov, ratchet)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45 minutes used to be enough and stopped being enough without the suite
+    # getting slower: it got longer. The run on `7535554` was still walking the
+    # suite at 44 minutes (2383 of 4355 tests at 17 minutes, plus the instrumented
+    # build, plus a single cold-quorum test that took over a minute), and the
+    # runner cancelled it at 45:00 - a green suite reported as a red gate. The
+    # budget is raised, the ratchet is untouched.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
