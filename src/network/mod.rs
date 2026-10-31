@@ -1,3 +1,4 @@
+pub mod fork_rewalk;
 pub mod gossip_dedup;
 pub mod mobile;
 pub mod node;

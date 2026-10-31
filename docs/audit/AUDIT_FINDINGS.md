@@ -530,6 +530,60 @@ item is `pass` only when a named job is green on that branch.
 6. **`ROUND_PRICE_WINDOW` (AF-06).** The constant stays private and the doc adjusts;
    making it public to satisfy rustdoc would widen the public surface to fix a typo.
 
+### AF-17 - The locator never named genesis, so a fork at block 1 could not heal (`devnet`, `blocker`)
+
+- **Where:** `src/chain/chain_actor.rs` (`ChainCommand::GetLocator`, now
+  `Blockchain::get_locator`), and the sync `Blocks` arm of `src/network/node.rs` (the
+  fork re-walk). Job `124556422112`, `Devnet Multi-Node Smoke` on `5a21b91` (the AF-16
+  fix): `FAIL: node2 did not catch up with node1 (node1=44, node2 tip=16)`.
+- **Observed:** node2 produced its own block #1 at `14:36:04.29` while node1 adopted a
+  sibling #1; from `14:36:05.43` node2 logged `Block #3 is ahead of our chain
+  (height=1), requesting sync` and then, for thirty milliseconds, a refusal every
+  0.2-1 ms: `sync block refused peer=... index=2 error=Consensus validation failed:
+  Consensus error: Previous hash mismatch. Expected: 9415301f..., Got: f269267b...`.
+  Each refusal was answered by an immediate header request of its own
+  (`Requesting headers from ... (limit 500)`), roughly two hundred of them, until
+  node1's own limiter cut node2 off: `Rejected sync request from banned/rate-limited
+  peer 12D3KooWPbV...` plus `Inbound sync failure ... ResponseOmission`. node2's sync
+  round then stayed open, the stuck-round sweep cleared it 119 s later
+  (`Sync state stuck for 119s (timeout=60s), resetting to 0`), and by then node1 was
+  forty blocks ahead. node2 crawled 1 -> 4 -> 16 while node1 reached 44.
+- **Root cause:** two defects, one cause and one amplifier. **Cause:** `GetLocator`
+  built its list with `while current > 0`, so it pushed the tip and then every
+  power-of-two ancestor down to index 1 - it never pushed index 0, genesis. A follower
+  whose only shared block is genesis therefore named no ancestor at all: node1's
+  `find_common_height` found nothing, `start_idx` fell back to 0, and the answer began
+  at the follower's own height 0. The follower skipped every block it already held
+  (the apply loop only takes `index == height + 1`), refused the first block above its
+  tip for a parent it does not have, and could never reach the branch that recognises
+  a fork by hash and reorgs - so the same range was asked for and refused forever.
+  **Amplifier:** the fork re-walk was issued inside the same event-loop iteration as
+  the refusal, so "asked again" meant "asked two hundred times a second" until the
+  peer's rate limiter - correctly, as a DoS surface - stopped answering at all.
+- **Fix:** `get_locator` walks down to and including genesis (and stays inside the
+  protocol's locator ceiling), so the peer names the real common ancestor and the
+  follower receives the fork block itself, recognises it by hash at its own height and
+  reorgs. The re-walk is now spaced by `ForkRewalkGate`
+  (`src/network/fork_rewalk.rs`): the first walk after a fork signal is immediate, the
+  following ones wait 1, 2, 4 and then 8 seconds, and a joined batch clears the count.
+  A batch that starts *above* our next block is treated as a gap and walks the locator
+  instead of being silently skipped. `find_common_height` moved next to the locator so
+  both sides of the protocol read the same definition.
+- **Also in this commit (not a code defect):** `Repo Lint` job `124559879332` failed at
+  `build.rs:37: Failed to compile Protobuf schemas: Could not find protoc`. That step
+  (`pq-measure --timings`) builds `examples/pq_measure.rs`, which links the node
+  library; every other job that builds the library installs `protobuf-compiler` and
+  this job had no run reach the step before, so it had never needed it. The workflow
+  installs it, exactly as the other jobs do. No gate was relaxed.
+- **Regression tests:** `a_fork_at_the_first_block_still_names_genesis_in_the_locator`
+  (two chains that both produce block 1 from genesis: the locator's last entry is the
+  shared genesis and `find_common_height` returns `Some(0)`, so the served range starts
+  at the fork block), `the_locator_is_newest_first_within_the_protocol_ceiling`, and
+  four `ForkRewalkGate` tests - including the one that pins the observed defect: a
+  second fork signal in the same second must not walk again.
+- **Status:** fix pushed; the devnet has to confirm it, so the record stays open until
+  a run passes on a tree that carries it.
+
 ## Panic bar: what was read, not just what the lints say
 
 `todo!` and `unimplemented!` appear nowhere in `src/`, `crates/`, `budzero/` or `bud/`
