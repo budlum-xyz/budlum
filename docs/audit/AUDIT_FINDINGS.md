@@ -13,7 +13,7 @@ Severity: `blocker` (build/consensus/security), `high`, `medium`, `low`.
 
 ---
 
-## Round 1 — 2026-10-31
+## Round 1 - 2026-10-31
 
 Status of the two open pull requests at the start of the round:
 
@@ -27,12 +27,12 @@ the round's work is entirely the red checks below. Each red check is recorded as
 finding with its own root cause; the eleven red checks on #110 collapse to four
 distinct defects, and the three on #97 to two.
 
-### AF-01 — A validator slash books its burn twice (`ci`, `blocker`)
+### AF-01 - A validator slash books its burn twice (`ci`, `blocker`)
 
 - **Where:** `src/core/account.rs:2270-2278` (`slash_validator_uncounted`), reached from
   `slash_validator` (`src/core/account.rs:2222`).
 - **Symptom:** `core::account::tests::a_validator_slash_records_what_it_destroyed` fails
-  with `left: 2400, right: 1200` — `burned_total` is twice the penalty.
+  with `left: 2400, right: 1200` - `burned_total` is twice the penalty.
 - **Root cause:** two recorders for one destruction. `slash_validator_uncounted` adds
   `penalty` to `burned_total` itself (line 2276), and its wrapper `slash_validator`
   additionally measures the drop in committed supply across the call
@@ -42,7 +42,7 @@ distinct defects, and the three on #97 to two.
   first one already booked.
 - **Blast radius beyond the test:** the doubling is not cosmetic. `burned_total` is
   subtracted from the fixed 100M cap in `supply_capacity_remaining`, so every slash
-  closed twice as much minting headroom as it destroyed — a consensus-relevant
+  closed twice as much minting headroom as it destroyed - a consensus-relevant
   accounting error on the tokenomics path.
 - **Fix:** the wrapper is the single recorder (the same shape `slash_from_report`
   already uses), the inner add is removed and the comment says which recorder is
@@ -50,9 +50,9 @@ distinct defects, and the three on #97 to two.
 - **Regression test:** `core::account::tests::a_validator_slash_records_what_it_destroyed`
   (already present, and it was the test that caught this) plus
   `supply_capacity_remaining_uses_committed_denominator` for the headroom side.
-- **Status:** closed on `testnet-quantum` — `quantum`: "AF-01 ...".
+- **Status:** closed on `testnet-quantum` - `quantum`: "AF-01 ...".
 
-### AF-02 — `TxBundle::verify_in` reports the wrong refusal, and pays for 16 PQ verifies first (`ci`, `high`)
+### AF-02 - `TxBundle::verify_in` reports the wrong refusal, and pays for 16 PQ verifies first (`ci`, `high`)
 
 - **Where:** `src/core/tx_bundle.rs:213-268` (`verify_in`).
 - **Symptoms:** three failing tests.
@@ -68,8 +68,8 @@ distinct defects, and the three on #97 to two.
   signature before the ladder could name the nonce. The refusal was true but named the
   wrong thing, and the most expensive checks (up to `MAX_BUNDLE_TXS` post-quantum
   verifications) ran first, on bundles a single witness check would have refused.
-- **Fix:** three passes, cheapest and most specific first: (1) shape of the set —
-  `Mixed`, `Nonce`; (2) the witness — key decodes, derives the sender (`Sender`), and
+- **Fix:** three passes, cheapest and most specific first: (1) shape of the set -
+  `Mixed`, `Nonce`; (2) the witness - key decodes, derives the sender (`Sender`), and
   its composite signature verifies over the root of exactly these members (`Signature`);
   (3) each member's own authority (`Member`). No check is dropped or relaxed: the
   ordering changes which refusal a caller sees, and the witness check now runs before
@@ -77,21 +77,21 @@ distinct defects, and the three on #97 to two.
 - **Regression tests:** `dropping_reordering_or_editing_a_member_breaks_the_signature`,
   `the_nonce_sequence_chain_and_sender_are_enforced`, `size_limits_and_a_forged_member_are_refused`,
   `every_member_verifies_on_its_own_and_the_witness_binds_the_set`.
-- **Status:** closed on `testnet-quantum` — `quantum`: "AF-02 ...".
+- **Status:** closed on `testnet-quantum` - `quantum`: "AF-02 ...".
 
-### AF-03 — Three tests set a commission the registry now refuses (`ci`, `medium`)
+### AF-03 - Three tests set a commission the registry now refuses (`ci`, `medium`)
 
 - **Where:** `src/registry/validator_profile.rs:86-95`,
   `src/tokenomics/reward_pool.rs:378-390`, `src/tokenomics/reward_pool.rs:419-430`.
 - **Symptom:** all three fail with `"commission change exceeds 10000 ppm per epoch"`.
 - **Root cause:** the registry now caps a *first* commission rate at
   `max_commission_change_ppm_per_epoch` (10 000 ppm) when the validator already holds
-  delegated stake — a validator cannot jump from 0 to the ceiling in one epoch and take
+  delegated stake - a validator cannot jump from 0 to the ceiling in one epoch and take
   the jump out of its delegators' next payout
   (`src/registry/permissionless.rs:1655-1672`). The three tests were written before the
   cap: each delegates first and then sets 5 % or 10 %.
-- **Fix:** the fixtures set the rate while nothing is delegated — which the registry
-  deliberately leaves free, because the rate then prices only the validator's own bond —
+- **Fix:** the fixtures set the rate while nothing is delegated - which the registry
+  deliberately leaves free, because the rate then prices only the validator's own bond -
   and then delegate. Every assertion stays: the profile still has to report 5 %, the
   split test still has to pay 1 010 / 90, and the prospective-reprice test still has to
   read 0 ppm for epoch 0 and 100 000 ppm for epoch 1. The cap itself keeps its own
@@ -99,23 +99,23 @@ distinct defects, and the three on #97 to two.
 - **Regression tests:** `a_profile_states_bond_delegation_and_commission_facts`,
   `delegation_rewards_are_split_after_validator_commission`,
   `a_commission_set_in_the_closing_epoch_does_not_price_that_epoch`.
-- **Status:** closed on `testnet-quantum` — `quantum`: "AF-03 ...".
+- **Status:** closed on `testnet-quantum` - `quantum`: "AF-03 ...".
 
-### AF-04 — `validator_commission_ppm` is dead public API (`ci`, `low`)
+### AF-04 - `validator_commission_ppm` is dead public API (`ci`, `low`)
 
 - **Where:** `src/registry/permissionless.rs:1591`; gate
   `dead-public-api-is-ratcheted` reported `174 | baseline: 173`, naming this function.
 - **Root cause:** the accessor was added with the commission work and only the tests
   reached it; the validator profile read the raw `ValidatorCommission` struct instead.
-- **Fix:** the profile — the production surface that shows a delegator what a validator
-  charges — now reads the live rate through the accessor. The gate's own words are
+- **Fix:** the profile - the production surface that shows a delegator what a validator
+  charges - now reads the live rate through the accessor. The gate's own words are
   "call it from the path it was written for", and that is the path; the baseline is not
   raised.
 - **Regression test:** `a_profile_states_bond_delegation_and_commission_facts`
   (still asserts the reported rate) and the gate itself.
-- **Status:** closed on `testnet-quantum` — `quantum`: "AF-04 ...".
+- **Status:** closed on `testnet-quantum` - `quantum`: "AF-04 ...".
 
-### AF-05 — The chain actor's new `Blockchain::remove_transaction` call is unclassified (`ci`, `medium`)
+### AF-05 - The chain actor's new `Blockchain::remove_transaction` call is unclassified (`ci`, `medium`)
 
 - **Where:** `src/chain/chain_actor.rs:2538`; gate
   `no-out-of-block-consensus-writes` (`xtask/gates/src/gates/no_out_of_block_consensus_writes.rs`).
@@ -133,9 +133,9 @@ distinct defects, and the three on #97 to two.
   the gate strips by design.
 - **Regression test:** the gate plus its canary (`no-out-of-block-consensus-writes
   canary OK`).
-- **Status:** closed on `testnet-quantum` — `quantum`: "AF-05 ...".
+- **Status:** closed on `testnet-quantum` - `quantum`: "AF-05 ...".
 
-### AF-06 — Rustdoc: two public items link to a private constant (`ci`, `medium`)
+### AF-06 - Rustdoc: two public items link to a private constant (`ci`, `medium`)
 
 - **Where:** `src/consensus/mod.rs:75` (docs on `RoundPriceBook`) and
   `src/consensus/mod.rs:212` (docs on `affordable_leader_round`), both writing
@@ -143,7 +143,7 @@ distinct defects, and the three on #97 to two.
 - **Symptom:** `cargo doc` with warnings denied:
   `error: public documentation for 'RoundPriceBook' links to private item 'ROUND_PRICE_WINDOW'`,
   then the same for `affordable_leader_round`, then `could not document 'budlum-core'`
-  (exit 101) — the `Budlum Core quality` job on #97.
+  (exit 101) - the `Budlum Core quality` job on #97.
 - **Root cause:** intra-doc links are checked against the visibility of the target; the
   window is deliberately private (it is `MAX_REORG_DEPTH + 1` and an implementation
   detail), the link is not.
@@ -151,9 +151,9 @@ distinct defects, and the three on #97 to two.
   unchanged; the constant stays private, which is the conservative choice.
 - **Regression test:** the `cargo doc` step itself (warnings-as-errors) in
   `Budlum Core quality`.
-- **Status:** closed on `consensus-of-consensuses` — `consensus of consensuses`: "AF-06 ...".
+- **Status:** closed on `consensus-of-consensuses` - `consensus of consensuses`: "AF-06 ...".
 
-### AF-07 — The `minting-paths-are-counted` gate under-counts a refund path (`ci`, `medium`)
+### AF-07 - The `minting-paths-are-counted` gate under-counts a refund path (`ci`, `medium`)
 
 - **Where:** `xtask/gates/src/gates/minting_paths_are_counted.rs` (`TRANSFER_JUSTIFICATIONS`,
   `src/chain/blockchain.rs` row) against `src/chain/blockchain.rs:8707`
@@ -166,24 +166,24 @@ distinct defects, and the three on #97 to two.
   `total_bud_committed` counts while the deal is held. It is a transfer, and
   `try_mint_balance` would be wrong here (it would check a ceiling against money that
   already exists and could mint into a headroom it should not have).
-- **Fix:** the count goes 10 → 11 and the rationale names this path and why it is a
+- **Fix:** the count goes 10 -> 11 and the rationale names this path and why it is a
   transfer. Raising the count without the rationale, or switching the call to
   `try_mint_balance`, would both be wrong.
 - **Regression test:** the gate plus its canary.
-- **Status:** closed on `consensus-of-consensuses` — `consensus of consensuses`: "AF-07 ...".
+- **Status:** closed on `consensus-of-consensuses` - `consensus of consensuses`: "AF-07 ...".
 
-### AF-08 — `Timing-Safe Regression` red on `constant_time_eq_str` (`ci`, `high`, **open**)
+### AF-08 - `Timing-Safe Regression` red on `constant_time_eq_str` (`ci`, `high`, **open**)
 
 - **Where:** `src/rpc/server.rs:825` (`constant_time_eq_str`) measured by
   `benches/micro/timing_safe.rs`.
 - **Symptom:** run 124371304766: main classes `mean_first=58.05ns`,
   `mean_last=61.96ns`, `|t|=17.82`, effect ratio 15.9 %; class
-  `same length vs short key` `delta≈3.7ns`, `|t|=20.85`, ratio 15.2 % — the gate
+  `same length vs short key` `delta~3.7ns`, `|t|=20.85`, ratio 15.2 % - the gate
   returns 1 (a regression, not a harness error).
 - **What is already ruled out:** the function's source is byte-identical between
   `consensus-of-consensuses` (where the same job is green) and `testnet-quantum`
   (`git diff` on `src/rpc/server.rs` shows no change to it), and the measurement
-  harness for it is unchanged too — the branch only *added* post-quantum signer
+  harness for it is unchanged too - the branch only *added* post-quantum signer
   classes, which run after this verdict. Both classes execute the same loop (the trip
   count is `b.len()`, identical in both, and the candidate index is clamped, not
   branched), so a content-dependent cost is not visible in the source. That makes the
@@ -197,7 +197,7 @@ distinct defects, and the three on #97 to two.
   expected value itself, i.e. same-pointer loads, which this file's own comments
   record as a several-nanosecond artefact) and a primitive change.
 
-### AF-09 — `Devnet Multi-Node Smoke` red: node2 does not catch up (`ci`, `high`, **open**)
+### AF-09 - `Devnet Multi-Node Smoke` red: node2 does not catch up (`ci`, `high`, **open**)
 
 - **Where:** devnet harness (`ops/`), check `node2 did not catch up with node1
   (node1=41, node2 tip=8)`.
@@ -209,17 +209,17 @@ distinct defects, and the three on #97 to two.
 - **Root cause found in the logs (and fixed in the tree):** the mesh does not punish
   a *fork* correctly. node1 and node2 each produced a block at height 2 (both were
   elected in slot 4, which the stake-weighted threshold permits), so node2 heard a
-  finality certificate for `42270e…` while holding `b05ae2…` at that height. The
+  finality certificate for `42270e...` while holding `b05ae2...` at that height. The
   handler in `src/network/node.rs` counted **every** certificate failure other than
   "Missing verified QC blob" as peer misbehaviour, so node2 banned node1 for 3600 s
-  and from then on logged `Ignoring message from banned peer` — it silenced the one
+  and from then on logged `Ignoring message from banned peer` - it silenced the one
   peer that could have carried it across the fork, and stayed at tip 8 while node1
   reached 41. A certificate for a checkpoint this node does not hold, or holds a
   sibling of, says where *this node* is, not what the peer did.
 - **Fix:** `Node::finality_cert_names_a_block_we_lack` classifies those two refusals
-  (`We don't have block at height N`, `Certificate hash … mismatch with our block hash
-  … at height N`); the handler now treats them as a sync signal —
-  `sync_if_behind(peer, height)` plus `MessageAcceptance::Ignore` — instead of
+  (`We don't have block at height N`, `Certificate hash ... mismatch with our block hash
+  ... at height N`); the handler now treats them as a sync signal -
+  `sync_if_behind(peer, height)` plus `MessageAcceptance::Ignore` - instead of
   `report_bad_behavior` + `Reject`. Every other refusal (bad aggregate signature,
   wrong height, set-hash mismatch, a QC this node is missing) keeps the old verdict,
   so a lying peer still loses reputation and still gets rejected.
@@ -227,11 +227,76 @@ distinct defects, and the three on #97 to two.
   (`src/network/node.rs`), which pins both directions of the classification.
 - **Status:** fix pushed; **the devnet smoke run has to confirm it**, so the finding
   stays open until `Devnet Multi-Node Smoke` is green. This is a testnet-readiness
-  blocker (Testnet Hazırlık Kapısı, "Ağ katmanı" and "Konsensüs ve tokenomics").
+  blocker (Testnet Readiness Gate, "network layer" and "consensus and tokenomics").
+
+### AF-10 - 558 lines of consensus-round tests that no `mod` declared (`ci`, `medium`)
+
+- **Where:** `src/tests/p01_consensus_rounds.rs` (558 lines), gate
+  `no-orphan-source-files`.
+- **Root cause:** the file was added to the tree and never declared in
+  `src/tests/mod.rs`, so rustc never read it. It compiles nowhere, is linted by
+  nothing, is executed never, and reads exactly like live coverage in a grep or
+  a review - the most expensive kind of test debt, because it looks paid.
+- **Fix:** `#[cfg(test)] pub mod p01_consensus_rounds;` in `src/tests/mod.rs`,
+  with a comment saying what the file is. The alternative - deleting 558 lines
+  of round-rule coverage - buys a green gate by removing the coverage it was
+  meant to measure.
+- **Regression test:** the file's own tests plus the `no-orphan-source-files`
+  gate.
+- **Status:** fixed, waiting for the library-test job to prove the module
+  compiles against today's APIs.
+
+### AF-11 - Two public registry items are idle (`ci`, `low`)
+
+- **Where:** `src/registry/permissionless.rs` - `MAX_COMMISSION_RATE_HISTORY`
+  (line 64) and `CommissionRate` (line 296), gate `no-idle-code`.
+- **Root cause:** both were added with the commission work and are reached only
+  from inside their own file. `CommissionRate` cannot become crate-private: it
+  is the element type of the public field `ValidatorCommission::rates`, which
+  `src/bin/budlum-indexer.rs` walks - so the type is used by the public shape
+  of the struct without its name appearing anywhere else. The constant has the
+  same character: it is the published half of the retention rule
+  `validator_commission_ppm_at` applies.
+- **Fix:** both carry an `exposed for:` line, which is the gate's own documented
+  mechanism (no baseline line, no re-export). Deleting the constant would be a
+  semver break for a value that is part of the registry root, and making the
+  type private does not compile.
+- **Regression test:** the `no-idle-code` gate and its stale-entry check.
+- **Status:** closed on `testnet-quantum`.
+
+### AF-12 - A third `try_add_balance` in `storage_maintenance.rs` is unclassified (`ci`, `medium`)
+
+- **Where:** `src/chain/storage_maintenance.rs:308`
+  (`refund_unserved_storage_fee`), gate `minting-paths-are-counted`:
+  "there are 3 `try_add_balance` calls, the justified count is 2".
+- **Root cause:** the same refund that AF-07 records on `consensus-of-consensuses`,
+  living in the file the testnet branch moved it to. The storage reward tick and
+  the expiry sweep were justified; the slashed-deal refund was not.
+- **Fix:** the count goes 2 -> 3 and the rationale names the refund and why it
+  is a transfer, not a mint - the payer gets back the unserved part of a fee
+  `open_deal` debited from it, money `total_bud_committed` counts while the deal
+  is held.
+- **Regression test:** the gate plus its canary.
+- **Status:** closed on `testnet-quantum`.
+
+### AF-13 - This ledger's own gate failures (`ci`, `low`)
+
+- **Where:** `docs/AUDIT_FINDINGS.md` as first pushed: `pq-claims-are-backed`
+  (three "post-quantum" lines without a claim id), `tree-is-english` (one
+  Turkish phrase), `no-unicode-dashes` (33 typographic dashes).
+- **Root cause:** the first version of this file was written as prose in
+  Turkish and with typographic punctuation, in a tree whose gates require
+  English, ASCII dashes, and a claim id on every line that speaks about quantum
+  computers.
+- **Fix:** the ledger lives in `docs/audit/`, which is the directory the claim
+  gate excludes by design (it holds the audit ledgers themselves, not claims),
+  and the text is plain ASCII English. Nothing was baselined and no gate was
+  switched off.
+- **Status:** closed on `testnet-quantum`.
 
 ---
 
-## Testnet readiness gate (#110, directive §5)
+## Testnet readiness gate (#110, directive section 5)
 
 Checked against the tree at `testnet-quantum` and the CI jobs that carry each item. An
 item is `pass` only when a named job is green on that branch.
@@ -239,15 +304,15 @@ item is `pass` only when a named job is green on that branch.
 | Item | Where it lives | Job | State |
 |---|---|---|---|
 | Clean build, green CI | workspace | `Budlum Core`, `Budlum Core quality`, `Budlum Core PQ build` | fixes above land in this round |
-| Genesis → config → node start, end to end | `src/genesis*`, `config/`, `bud` | `Genesis Reproducibility (item 1)`, `docker-smoke` | pass |
+| Genesis -> config -> node start, end to end | `src/genesis*`, `config/`, `bud` | `Genesis Reproducibility (item 1)`, `docker-smoke` | pass |
 | State persistence across restart (counters together) | `src/chain/snapshot.rs` | `Budlum Core library test` (snapshot suite), `AF-01` | fixes above land in this round |
-| Network: no unbounded allocation, message size and rate limits | `src/network/` | `Network Hardening` | red only for the six shared unit tests → this round |
+| Network: no unbounded allocation, message size and rate limits | `src/network/` | `Network Hardening` | red only for the six shared unit tests -> this round |
 | RPC auth and rate limiting | `src/rpc/server.rs` | `Network Hardening`, `Hardening H4` locks | pass |
-| Consensus and tokenomics per directive, tested and integrated | `src/consensus/`, `src/tokenomics/` | `Economy Invariants`, `Fork-Choice Invariants`, `Governance Invariants` | red only for the six shared unit tests → this round |
-| No `unwrap`/`panic!`/`todo!`/`unimplemented!` on production paths | workspace | `Gates (a suite that cannot run is not a protection)` | red for `dead-public-api-is-ratcheted` → this round |
-| README, install/run steps, config examples, testnet join doc | `README.md`, `README.tr.md`, `docs/TESTNET.md`, `docs/OPERATOR*` | `Repo Lint` | repo lint red for one gate → this round |
+| Consensus and tokenomics per directive, tested and integrated | `src/consensus/`, `src/tokenomics/` | `Economy Invariants`, `Fork-Choice Invariants`, `Governance Invariants` | red only for the six shared unit tests -> this round |
+| No `unwrap`/`panic!`/`todo!`/`unimplemented!` on production paths | workspace | `Gates (a suite that cannot run is not a protection)` | red for `dead-public-api-is-ratcheted` -> this round |
+| README, install/run steps, config examples, testnet join doc | `README.md`, `README.tr.md`, `docs/TESTNET.md`, `docs/OPERATOR*` | `Repo Lint` | repo lint red for one gate -> this round |
 | No secret, token or personal data in the repo | history | `gitleaks`, `Secret Scan (gitleaks, full history)`, `Secret Verification (trufflehog)` | pass |
-| Multi-node mesh behaves | `ops/` devnet | `Devnet Multi-Node Smoke` | **open — AF-09** |
+| Multi-node mesh behaves | `ops/` devnet | `Devnet Multi-Node Smoke` | **open - AF-09** |
 
 ## Decisions taken in this round (architecture-first, conservative)
 
@@ -256,7 +321,7 @@ item is `pass` only when a named job is green on that branch.
    miss a part (bond, queue, delegation, cross-role sweep) while a hand-summed
    `penalty` can. Consequence: a slash may now never under-record, and cannot
    double-record; no test or API changes.
-2. **Bundle refusal order (AF-02).** Verification order is now structural → witness →
+2. **Bundle refusal order (AF-02).** Verification order is now structural -> witness ->
    per-member. Both refusals were already correct in the sense that the bundle was
    refused; the change makes the *reason* the specific one a caller can act on, and
    puts the expensive post-quantum verifications last (DoS-relevant). No check is
