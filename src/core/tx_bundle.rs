@@ -177,27 +177,48 @@ impl TxBundle {
 
     /// Verify the bundle under the scheme statuses of a chain.
     ///
+    /// The checks run in three passes, cheapest and most specific first:
+    ///
+    /// 1. the shape of the set - one sender, one chain, a nonce ladder rising
+    ///    by one from the first member, so a relay cannot drop, reorder or
+    ///    splice a member out of the middle ([`BundleError::Mixed`],
+    ///    [`BundleError::Nonce`]);
+    /// 2. the witness - the key blob decodes, it derives the sender
+    ///    ([`BundleError::Sender`]), and its composite signature verifies over
+    ///    the root of exactly these members in this order
+    ///    ([`BundleError::Signature`]). That root commits to every member's
+    ///    signing hash, so an edited, dropped or reordered member lands here
+    ///    as a signature refusal - the set that was signed is not the set on
+    ///    the wire;
+    /// 3. each member's own authority, so a bundle that could never be
+    ///    admitted is refused before the pool is touched
+    ///    ([`BundleError::Member`]).
+    ///
+    /// The order is also the cheap one under load: the structural scan is a
+    /// few comparisons per member and the witness check is one signature
+    /// verification, both of which run before the per-member post-quantum
+    /// verifications (up to [`MAX_BUNDLE_TXS`] of them). A bundle with a bad
+    /// witness is therefore refused without paying for 16 member checks, and a
+    /// bundle whose members disagree about the sender or the nonce ladder is
+    /// refused before the composite signature is even decoded.
+    ///
+    /// Every pass is required: the witness signature does not replace a
+    /// member's own authority (the pool and block validation re-verify it),
+    /// and a member's own authority does not replace the witness (a member
+    /// carries no knowledge of the set it is in).
+    ///
     /// # Errors
     ///
-    /// The first [`BundleError`] found.
+    /// The first [`BundleError`] in that order.
     pub fn verify_in(&self, registry: &SchemeStatusRegistry) -> Result<(), BundleError> {
         if self.members.is_empty() || self.members.len() > MAX_BUNDLE_TXS {
             return Err(BundleError::Size(self.members.len()));
         }
         let first = &self.members[0];
+        // Pass 1: the shape of the set. These are properties of the members
+        // the witness commits to, and they are what a relay can break without
+        // touching a signature.
         for (i, member) in self.members.iter().enumerate() {
-            // The member's own authority, checked here so a bundle that could
-            // never be admitted is refused before the pool is touched: the
-            // chain will re-verify it, and agreeing with it now is the point
-            // of a door that promises all-or-none.
-            if member.signature_version != SIGNATURE_VERSION_V7
-                || member.signer_public_key != self.witness.signer_public_key
-                || member.authorization.is_some()
-                || member.hash != member.calculate_hash()
-                || !member.verify_in(registry)
-            {
-                return Err(BundleError::Member(i));
-            }
             if member.from != first.from || member.chain_id != first.chain_id {
                 return Err(BundleError::Mixed(i));
             }
@@ -207,6 +228,8 @@ impl TxBundle {
                 return Err(BundleError::Nonce(i));
             }
         }
+        // Pass 2: the witness is this sender's key, and this exact set is what
+        // it signed.
         let (public, recovery_digest) = decode_v7_signer_key(&self.witness.signer_public_key)
             .map_err(|_| BundleError::Sender)?;
         let auth = account_auth_v3_from_digests(
@@ -228,7 +251,21 @@ impl TxBundle {
             &bundle_root(&self.members),
             &signature,
         )
-        .map_err(|e| BundleError::Signature(e.to_string()))
+        .map_err(|e| BundleError::Signature(e.to_string()))?;
+        // Pass 3: the members' own authority, which is what admission gates
+        // downstream verify. Deferred to last because it is the expensive pass
+        // and because a set the witness disowns is refused before it.
+        for (i, member) in self.members.iter().enumerate() {
+            if member.signature_version != SIGNATURE_VERSION_V7
+                || member.signer_public_key != self.witness.signer_public_key
+                || member.authorization.is_some()
+                || member.hash != member.calculate_hash()
+                || !member.verify_in(registry)
+            {
+                return Err(BundleError::Member(i));
+            }
+        }
+        Ok(())
     }
 
     /// The members, for execution in order. Call after [`Self::verify_in`],
