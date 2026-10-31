@@ -73,6 +73,11 @@ const CALLS: &[(&str, Class)] = &[
     ("pq_sealed_heights", Read),
     ("pq_stage_observation", NodeLocal),
     ("quantum_view", Read),
+    // Taking a transaction back out of the pool: the mempool and its node-local
+    // persistence only. Nothing under `self.state` is touched, so a node that
+    // forgets an admitted transaction still holds the same state root as its
+    // peers - it either re-admits the transaction or never produces it.
+    ("remove_transaction", NodeLocal),
     ("storage_economics_events", Read),
     ("try_reorg_suffix", BlockPath),
     ("get_transaction_receipt", Read),
