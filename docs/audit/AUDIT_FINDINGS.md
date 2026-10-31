@@ -581,8 +581,15 @@ item is `pass` only when a named job is green on that branch.
   at the fork block), `the_locator_is_newest_first_within_the_protocol_ceiling`, and
   four `ForkRewalkGate` tests - including the one that pins the observed defect: a
   second fork signal in the same second must not walk again.
-- **Status:** fix pushed; the devnet has to confirm it, so the record stays open until
-  a run passes on a tree that carries it.
+- **Gate bookkeeping:** moving the locator and the common-ancestor lookup onto
+  `Blockchain` turned two calls into `Blockchain::` calls that the chain actor makes,
+  and `no-out-of-block-consensus-writes` refuses an unclassified one by design. Both
+  are `Read` (neither touches `self.state`); they are classified in the gate's `CALLS`
+  table, not exempted from it.
+- **Status:** confirmed by `Devnet Multi-Node Smoke` on `477e26b` - the 4x PoS mesh
+  passes all ten steps on the tree that carries the locator fix, where `5a21b91` failed
+  step 6. The ledger entry stays open only until the gate bookkeeping above is green in
+  the same job that carries it.
 
 ## Panic bar: what was read, not just what the lints say
 
