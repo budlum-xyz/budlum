@@ -716,6 +716,11 @@ pub struct Node {
     pub sync_started_at: Arc<AtomicU64>,
     /// Outbound request currently responsible for the one active sync round.
     active_sync_request: Option<request_response::OutboundRequestId>,
+    /// Spacing between the locator re-walks a fork signal triggers. Without it
+    /// a follower that cannot name an ancestor re-asks inside the same
+    /// iteration, the peer's rate limiter stops serving it, and the round
+    /// hangs (`ForkRewalkGate`, AF-17).
+    fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate,
     pub pending_bitswap_fetches: PendingBitswapFetches,
     /// The content id each outbound Bitswap request asked for. A response is
     /// checked against this, not against the cid the response claims.
@@ -2055,6 +2060,7 @@ impl Node {
             sync_state,
             sync_started_at,
             active_sync_request: None,
+            fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate::new(),
             pending_bitswap_fetches: HashMap::new(),
             bitswap_pending_attempts: HashMap::new(),
             bitswap_requests: HashMap::new(),
@@ -4664,11 +4670,27 @@ impl Node {
                                                         // common ancestor where a suffix can actually be
                                                         // joined.
                                                         let mut fork_retry = false;
+                                                        let mut joined = 0u32;
                                                         if !blocks.is_empty() {
                                                             let start_idx = blocks[0].index;
-                                                            let our_block = self.chain.get_block(start_idx).await;
-                                                            if let Some(our_b) = our_block {
-                                                            if our_b.hash != blocks[0].hash {
+                                                            let our_height = self.chain.get_height().await;
+                                                            // A batch that starts above the next
+                                                            // block cannot be joined, and asking
+                                                            // for the same range again returns the
+                                                            // same batch: only a locator walk from
+                                                            // a lower ancestor can close the gap.
+                                                            let ours = self.chain.get_block(start_idx).await;
+                                                            let shares_the_index =
+                                                                ours.is_some_and(|held| held.hash != blocks[0].hash);
+                                                            if start_idx > our_height.saturating_add(1) {
+                                                                warn!(
+                                                                    peer = %peer,
+                                                                    first = start_idx,
+                                                                    our_height,
+                                                                    "sync batch starts above the next block: walking the locator"
+                                                                );
+                                                                fork_retry = true;
+                                                            } else if shares_the_index {
                                                                 if let Some(flight_guard) = ReorgFlightGuard::try_acquire(&self.reorg_in_flight) {
                                                                     let reorg_chain = self.chain.clone();
                                                                     let reorg_peer = peer;
@@ -4679,34 +4701,6 @@ impl Node {
                                                                 } else {
                                                                     warn!("Sync reorg from {peer} ignored: another reorg attempt is already in flight");
                                                                 }
-                                                                } else {
-                                                                    for block in blocks {
-                                                                        let h = self.chain.get_height().await;
-                                                                        if block.index == h + 1 {
-                                                                            let index = block.index;
-                                                                            match self.chain.validate_and_add_block(block).await {
-                                                                                Ok(pruned_cids) => {
-                                                                                    info!("Added block #{index} to local chain");
-                                                                                    for cid in pruned_cids {
-                                                                                        let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
-                                                                                    }
-                                                                                }
-                                                                                // Silent refusal is how a follower can fetch the
-                                                                                // same range every second and never move: the
-                                                                                // round closes as a success, the height does not.
-                                                                                Err(e) => {
-                                                                                    fork_retry |= e.contains("Previous hash mismatch");
-                                                                                    warn!(
-                                                                                        peer = %peer,
-                                                                                        index,
-                                                                                        error = %e,
-                                                                                        "sync block refused"
-                                                                                    );
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
                                                             } else {
                                                                 for block in blocks {
                                                                     let h = self.chain.get_height().await;
@@ -4715,10 +4709,14 @@ impl Node {
                                                                         match self.chain.validate_and_add_block(block).await {
                                                                             Ok(pruned_cids) => {
                                                                                 info!("Added block #{index} to local chain");
+                                                                                joined = joined.saturating_add(1);
                                                                                 for cid in pruned_cids {
                                                                                     let _ = self.command_tx.send(NodeCommand::StoragePrune { cid }).await;
                                                                                 }
                                                                             }
+                                                                            // Silent refusal is how a follower can fetch the
+                                                                            // same range every second and never move: the
+                                                                            // round closes as a success, the height does not.
                                                                             Err(e) => {
                                                                                 fork_retry |= e.contains("Previous hash mismatch");
                                                                                 warn!(
@@ -4749,11 +4747,34 @@ impl Node {
                                                             // own validators out of the mesh.
                                                             self.peer_manager_lock()
                                                                 .report_unjoined_block(&peer);
-                                                            let locator = self.chain.get_locator().await;
-                                                            if !self.request_headers_from_peer(None, locator, 500) {
-                                                                info!(peer = %peer, "fork re-sync deferred: a sync round is already open");
+                                                            // The walk is spaced: issued
+                                                            // inside this iteration it re-asks as
+                                                            // fast as the answers arrive, and the
+                                                            // peer's rate limiter answers a flood
+                                                            // by serving nothing at all. A refused
+                                                            // walk costs nothing - the next block
+                                                            // announcement asks again.
+                                                            let now = SystemTime::now()
+                                                                .duration_since(UNIX_EPOCH)
+                                                                .unwrap_or_default()
+                                                                .as_secs();
+                                                            if !self.fork_rewalk.may_walk(now) {
+                                                                info!(
+                                                                    peer = %peer,
+                                                                    backoff_secs = self.fork_rewalk.backoff_secs(),
+                                                                    "fork re-sync deferred: the locator was walked too recently"
+                                                                );
+                                                            } else {
+                                                                self.fork_rewalk.record_walk(now);
+                                                                let locator = self.chain.get_locator().await;
+                                                                if !self.request_headers_from_peer(None, locator, 500) {
+                                                                    info!(peer = %peer, "fork re-sync deferred: a sync round is already open");
+                                                                }
                                                             }
                                                         } else {
+                                                            if joined > 0 {
+                                                                self.fork_rewalk.record_progress();
+                                                            }
                                                             let mut pm = self.peer_manager_lock();
                                                             pm.report_good_behavior(&peer);
                                                         }

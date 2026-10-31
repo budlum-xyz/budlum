@@ -2759,28 +2759,10 @@ impl ChainActor {
                     let _ = tx.send(info);
                 }
                 ChainCommand::GetLocator(tx) => {
-                    let mut locator = Vec::new();
-                    let mut step = 1;
-                    let mut current = self.blockchain.chain.len().saturating_sub(1);
-                    while current > 0 && locator.len() < 10 {
-                        locator.push(self.blockchain.chain[current].hash.clone());
-                        current = current.saturating_sub(step);
-                        step *= 2;
-                    }
-                    if locator.is_empty() && !self.blockchain.chain.is_empty() {
-                        locator.push(self.blockchain.chain[0].hash.clone());
-                    }
-                    let _ = tx.send(locator);
+                    let _ = tx.send(self.blockchain.get_locator());
                 }
                 ChainCommand::FindCommonHeight(locator, tx) => {
-                    let common = locator.iter().find_map(|hash| {
-                        self.blockchain
-                            .chain
-                            .iter()
-                            .position(|b| &b.hash == hash)
-                            .map(|p| p as u64)
-                    });
-                    let _ = tx.send(common);
+                    let _ = tx.send(self.blockchain.find_common_height(&locator));
                 }
                 ChainCommand::GetQcBlob(height, tx) => {
                     let res = self.blockchain.get_qc_blob(height);
