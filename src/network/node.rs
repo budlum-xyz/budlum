@@ -3574,12 +3574,40 @@ impl Node {
                                                     }
                                                 }
                                                 Err(e) => {
-                                                    warn!("Block validation failed: {e}");
+                                                    // `Previous hash mismatch` is a race, not a
+                                                    // forgery: the tip this node validated against
+                                                    // moved between the cheap checks and this call
+                                                    // (another arm imported a block at the same
+                                                    // height), and the same answer is what a peer on
+                                                    // the branch that won the slot sends. Ten of them
+                                                    // at `INVALID_BLOCK_PENALTY` ban an honest
+                                                    // validator for an hour, which is the mesh
+                                                    // silencing the node whose block it needs
+                                                    // (AF-09). The sender is still demoted, never
+                                                    // silenced; every other refusal keeps the
+                                                    // banning verdict.
+                                                    let unjoined = e.contains("Previous hash mismatch");
+                                                    warn!(
+                                                        peer = %peer_id,
+                                                        "Block validation failed (unjoined={unjoined}): {e}"
+                                                    );
                                                     {
                                                         let mut pm = self.peer_manager_lock();
-                                                        pm.report_invalid_block(&peer_id);
+                                                        if unjoined {
+                                                            pm.report_unjoined_block(&peer_id);
+                                                        } else {
+                                                            pm.report_invalid_block(&peer_id);
+                                                        }
                                                     }
-                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
+                                                    self.report_gossip(
+                                                        &id,
+                                                        &peer_id,
+                                                        if unjoined {
+                                                            gossipsub::MessageAcceptance::Ignore
+                                                        } else {
+                                                            gossipsub::MessageAcceptance::Reject
+                                                        },
+                                                    );
                                                     continue;
                                                 }
                                             }
@@ -4720,7 +4748,7 @@ impl Node {
                                                             // repetition and took the devnet's
                                                             // own validators out of the mesh.
                                                             self.peer_manager_lock()
-                                                                .report_stale_sync_batch(&peer);
+                                                                .report_unjoined_block(&peer);
                                                             let locator = self.chain.get_locator().await;
                                                             if !self.request_headers_from_peer(None, locator, 500) {
                                                                 info!(peer = %peer, "fork re-sync deferred: a sync round is already open");
