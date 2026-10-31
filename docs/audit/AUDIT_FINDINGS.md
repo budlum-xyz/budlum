@@ -319,12 +319,15 @@ distinct defects, and the three on #97 to two.
   reorging on every slot. That change is not in this round: it is a consensus rule, the
   current run has to show whether it is still needed, and shipping a rule change on a
   suspicion is worse than shipping it with a failing log that names it.
-- **Status:** **open.** The certificate classification and the ban-from-fork path are
-  fixed and tested; `Devnet Multi-Node Smoke` is green on `829b3ee` and that run is the
-  evidence that the two bans were the mechanism, but the step-7 producer count has
-  failed before and passed after on unchanged logic, so it stays open until a run
-  passes on a tree that carries this fix. This is a testnet-readiness blocker (Testnet
-  Readiness Gate, "network layer" and "consensus and tokenomics").
+- **Status:** **closed on `testnet-quantum`.** `Devnet Multi-Node Smoke` (check-run
+  `124505840033`) ran to `success` on `2530221` for 17 minutes, and that tree carries all
+  three fixes: the certificate classification (`64d0a85`), the sync `Blocks` arm
+  (`5c5c178`) and the gossip `Block` arm (`f85145d`). The two earlier runs that were
+  green on a tree carrying only the first fix are what kept this record open, because
+  the ban was still reachable from the other two arms. The step-7 producer count, the
+  step-6 catch-up and the step-10 restart are one harness run, so the green run is the
+  pass the record was waiting for. The fork-point tie-break above stays recorded as a
+  design note and not as open work: nothing in this run asks for it.
 
 ### AF-10 - 558 lines of consensus-round tests that no `mod` declared (`ci`, `medium`)
 
@@ -449,7 +452,7 @@ item is `pass` only when a named job is green on that branch.
 | No `unwrap`/`panic!`/`todo!`/`unimplemented!` on production paths | workspace | `Gates (a suite that cannot run is not a protection)` | red for `dead-public-api-is-ratcheted` -> this round |
 | README, install/run steps, config examples, testnet join doc | `README.md`, `README.tr.md`, `docs/TESTNET.md`, `docs/OPERATOR*` | `Repo Lint` | red for AF-10 to AF-14, each closed in this round |
 | No secret, token or personal data in the repo | history | `gitleaks`, `Secret Scan (gitleaks, full history)`, `Secret Verification (trufflehog)` | pass |
-| Multi-node mesh behaves | `ops/` devnet | `Devnet Multi-Node Smoke` | **open - AF-09** |
+| Multi-node mesh behaves | `ops/` devnet | `Devnet Multi-Node Smoke` | pass on `2530221` (AF-09 closed) |
 
 ## Decisions taken in this round (architecture-first, conservative)
 
