@@ -959,6 +959,21 @@ impl Node {
         }
     }
 
+    /// Does a finality-certificate refusal say this node lacks the block,
+    /// rather than that the peer lied?
+    ///
+    /// Two refusals belong here: the checkpoint block is not in this node's
+    /// chain yet, and this node holds a different block at that height (a
+    /// sibling fork). Both are conditions this node can fix by syncing, so
+    /// neither may be counted against the peer - a ban silences the peer that
+    /// would have carried this node across the fork.
+    fn finality_cert_names_a_block_we_lack(error: &str) -> bool {
+        let block_missing = error.contains("We don't have block at height");
+        let sibling_fork = error.contains("Certificate hash")
+            && error.contains("mismatch with our block hash");
+        block_missing || sibling_fork
+    }
+
     /// Queue a validated missing QC, even when all fetch slots are busy.
     fn request_qc_blob(&mut self, peer: PeerId, epoch: u64, height: u64, hash: String) {
         if height == 0
@@ -4163,6 +4178,28 @@ impl Node {
                                                     );
                                                     self.request_qc_blob(peer_id, epoch, checkpoint_height, qc_checkpoint_hash);
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
+                                                } else if Self::finality_cert_names_a_block_we_lack(&e) {
+                                                    // A certificate for a checkpoint this node
+                                                    // does not hold, or holds a sibling of, is
+                                                    // a statement about WHERE THIS NODE IS -
+                                                    // behind, or on the losing side of a fork -
+                                                    // not about what the peer did. Counting it as
+                                                    // bad behaviour bans an honest peer, and a
+                                                    // ban costs this node the very messages it
+                                                    // needs to converge: the devnet mesh
+                                                    // measured exactly that (node2 banned
+                                                    // node1 over a height-2 sibling fork and
+                                                    // then ignored every announcement for the
+                                                    // next hour, stuck at tip 8 while node1
+                                                    // reached 41). Ask for the chain if the peer
+                                                    // is genuinely ahead, take the message as
+                                                    // information, and do not penalise it.
+                                                    warn!(
+                                                        "FinalityCert from {peer_id} names a checkpoint this node does not share (height={checkpoint_height}); treating it as a sync signal, not as peer misbehaviour"
+                                                    );
+                                                    self.sync_if_behind(peer_id, checkpoint_height)
+                                                        .await;
+                                                    self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                 } else {
                                                     self.peer_manager_lock().report_bad_behavior(&peer_id);
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Reject);
@@ -5463,6 +5500,34 @@ mod sync_handler_order_tests {
             !code.contains(&old),
             "the guard must use the aggregator height"
         );
+    }
+
+    /// A certificate for a checkpoint this node lacks, or holds a sibling of,
+    /// is a statement about where this node is - not evidence of peer
+    /// misbehaviour, and not a reason to ban the peer that would carry this
+    /// node across the fork.
+    #[test]
+    fn a_fork_or_a_missing_block_is_not_peer_misbehaviour() {
+        assert!(super::Node::finality_cert_names_a_block_we_lack(
+            "We don't have block at height 2 yet"
+        ));
+        assert!(super::Node::finality_cert_names_a_block_we_lack(
+            "Certificate hash 42270eadc3c1e745549f144102915ff24a8b96 mismatch with our block \
+             hash b05ae228ef2d8bd68b70a629ac2bfaac51dae9ae at height 2"
+        ));
+        // Everything else keeps the old verdict, which does penalise the peer.
+        assert!(!super::Node::finality_cert_names_a_block_we_lack(
+            "Missing verified QC blob for epoch 0, height 2"
+        ));
+        assert!(!super::Node::finality_cert_names_a_block_we_lack(
+            "aggregate signature does not verify"
+        ));
+        assert!(!super::Node::finality_cert_names_a_block_we_lack(
+            "Height 7 is not a valid checkpoint height"
+        ));
+        assert!(!super::Node::finality_cert_names_a_block_we_lack(
+            "Validator set hash mismatch"
+        ));
     }
 
     /// The cid a Bitswap response is checked against comes from the
