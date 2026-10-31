@@ -329,6 +329,46 @@ distinct defects, and the three on #97 to two.
   pass the record was waiting for. The fork-point tie-break above stays recorded as a
   design note and not as open work: nothing in this run asks for it.
 
+### AF-16 - A fork was refused as a clock error, so the node could not reorg (`devnet`, `blocker`)
+
+- **Where:** `src/consensus/mod.rs:373` (`full_validate`), reached from
+  `Blockchain::validate_and_add_block`. Job `124539476950`, `Devnet Multi-Node Smoke`
+  on `3fb7381`: `FAIL: only 3 of 4 validators produced in blocks 1..=89`.
+- **Observed:** node4 logged `sync block refused peer=... index=2 error=Consensus
+  validation failed: Consensus error: Block timestamp not monotonic. Prev:
+  1793453778952, Current: 1793453776952` twenty-two times, the same peer and the same
+  index every time, and never logged `Added block` at all: it stayed at height 1 while
+  the rest of the mesh reached 89. The producer the harness never saw was node4's, so
+  step 7 counted 3 of 4.
+- **Root cause:** `full_validate` priced the block's timestamp against `chain.last()` -
+  which is *this node's* tip - before any check that the block names that tip as its
+  parent. node4 held its own block #1 (stamped two seconds later than the sibling that
+  won the slot), so every block #2 of the winning branch was compared with a block it
+  does not descend from, and because its stamp was lower the refusal read "Block
+  timestamp not monotonic". That string is not `Previous hash mismatch`, which is the
+  one string the sync `Blocks` arm treats as a fork signal: `fork_retry` stayed false,
+  the locator was never re-walked, no reorg was attempted, and the node re-asked the
+  same peer for the same index every second until the harness gave up. The ordering of
+  two cheap checks turned a recoverable fork into a permanent one.
+- **Fix:** `full_validate` compares `block.previous_hash` with the tip's hash *before*
+  the timestamp is priced, and refuses an unjoined block with the same
+  `Previous hash mismatch` message the engines already produce for that condition. For
+  a block that does name our tip as its parent nothing changes: the timestamp is still
+  priced against the same `prev_block` on the next line. The sibling's block is then
+  classified correctly - fork signal in the sync loop (locator re-walk, reorg by fork
+  choice) and an unjoined block, not an invalid one, in the peer's score (AF-09).
+- **Regression test:** `a_fork_is_named_a_fork_and_not_a_clock_error`
+  (`src/tests/consensus_expanded.rs`): a block on a sibling of our tip must be refused
+  with `Previous hash mismatch` and must not mention the clock, and the canary in the
+  same test re-parents the identical timestamp on our own tip and asserts the
+  monotonicity rule still fires. The two tests that reach the timestamp guard by hand
+  (`adversarial_p2p`, `wall_clock_locks`) already parent their blocks on the tip under
+  test, which is what the new ordering requires and what they always meant.
+- **Status:** fix pushed; `Devnet Multi-Node Smoke` has to confirm it, so the record
+  stays open until a run passes on a tree that carries it. Reopens AF-09's root cause
+  at the layer below the three ban paths: those removed the punishment for a fork, this
+  removes the reason the fork could not heal.
+
 ### AF-10 - 558 lines of consensus-round tests that no `mod` declared (`ci`, `medium`)
 
 - **Where:** `src/tests/p01_consensus_rounds.rs` (558 lines), gate
