@@ -13,6 +13,39 @@ Severity: `blocker` (build/consensus/security), `high`, `medium`, `low`.
 
 ---
 
+## Round 2 - 2026-10-31 (continuation)
+
+Round 1 closed the review threads and the first wave of red checks. Round 2 is what the
+remaining red checks were hiding: a gate suite aborts at its first failing gate, and a
+workflow cancels the run of a branch when a newer commit arrives, so each round peels
+one layer and shows the next. This round also re-read the devnet logs end to end.
+
+| Commit | What it closes | Evidence |
+|---|---|---|
+| `64d0a85` | AF-09 part 1: a certificate for a block this node lacks, or holds a sibling of, is a sync signal, not peer misbehaviour. | classifier test in `src/network/node.rs` |
+| `829b3ee` | AF-10 (orphan test file), AF-11 (idle registry items), AF-12 (third `try_add_balance`), AF-13 (this ledger's own gate failures) | `Repo Lint` gates |
+| `380cd9e` | AF-14: the STARK soundness section no longer matched `build_config` (batched columns 930 against a trace of 1073) | `stark-soundness --check`; the regenerated rows were validated by reproducing the committed section byte for byte at the old column count |
+| `5c5c178` | AF-09 part 2: a sync batch that does not join this chain is a fork signal, not an invalid block | `report_unjoined_block` and its floor test |
+| `95a9ffa` | the #110 traceability matrix (`docs/audit/TESTNET_TRACEABILITY.md`) | every directive line mapped to code, test and job |
+| `f85145d` | AF-09 part 3: the same classification on the gossip `Block` arm, and the report renamed to `report_unjoined_block` because it is no longer a sync-only signal | the arm branches on the refusal string; `Ignore` instead of `Reject` for that one case |
+| `9e50669` | AF-15: a doc line in the new test tripped `clippy::doc_lazy_continuation` on the next-stable toolchain | `Clippy drift (next stable toolchain)` |
+| `aef7b57`, `0c4d0ad` | the AF-09 mechanism, and AF-15's record | this file |
+| `60b5e36` | the source lock `a_block_that_does_not_join_the_chain_is_not_a_forgery`, the panic-bar reading (per-site, module computed), and the recorded resource-table gap | `Budlum Core library test`, this file |
+
+AF-08 (the timing-side-channel measurement) closed by re-measurement, not by a code
+change, and the record says so. Nothing was closed as a false positive, and no gate was
+weakened: no test deleted, no `#[ignore]`, no baseline raised, no lint downgraded.
+
+### AF-01 to AF-15 status at the end of round 2
+
+`AF-08` closed by re-measurement with the job green on a tree that does not touch the
+primitive. `AF-01` to `AF-07`, `AF-10` to `AF-15` closed by code. `AF-09` is the only
+record still open, and it stays open until `Devnet Multi-Node Smoke` passes on a tree
+that carries all three of its fixes - its step 7 has failed and passed on unchanged
+logic before, so one green run is the bar.
+
+---
+
 ## Round 1 - 2026-10-31
 
 Status of the two open pull requests at the start of the round:
