@@ -10,6 +10,9 @@ pub const RATE_LIMIT_PENALTY: i32 = -3;
 /// design: the ask was this node's own choice, so an unanswerable one costs
 /// the peer its place in the sync order, not an hour of silence.
 const UNANSWERED_REQUEST_PENALTY: i32 = -5;
+/// A batch that does not join this chain: a fork signal, priced like an
+/// unanswered request and, like it, floored above the ban threshold.
+const STALE_BATCH_PENALTY: i32 = -5;
 pub const SLOW_SYNC_PENALTY: i32 = -5;
 pub const INVALID_HANDSHAKE_PENALTY: i32 = -20;
 pub const GOOD_BEHAVIOR_REWARD: i32 = 1;
@@ -649,6 +652,35 @@ impl PeerManager {
             .max(MIN_SCORE.saturating_add(1));
         score.last_seen = Some(Instant::now());
     }
+    /// A sync batch that does not continue this chain.
+    ///
+    /// `validate_and_add_block` answers `Previous hash mismatch` for two
+    /// situations that look alike on the wire and are not alike at all: our
+    /// own tip moved between the request and the answer (another arm of the
+    /// node imported a block first), or the peer is serving a fork that does
+    /// not contain our tip. Neither is a malformed block, and neither is proof
+    /// that the sender forged anything: on a mesh where a slot can have more
+    /// than one elected leader, a peer sitting on the winning branch is
+    /// expected to answer with a suffix that does not join the losing one.
+    /// Charging it as an invalid block let a four-validator devnet ban its own
+    /// validators over an ordinary fork and then fail to reach finality.
+    ///
+    /// The score still moves: a peer that answers every round with a batch
+    /// that cannot be joined sinks in `get_best_peers`, so the re-walk this
+    /// node performs asks someone else next time. The floor is one point above
+    /// [`BAN_THRESHOLD`], so this path can demote a peer but never silence it.
+    /// Refusals that do prove malice keep their own paths: a block whose own
+    /// hash does not match its contents, a forged vote, an oversized message.
+    pub fn report_stale_sync_batch(&mut self, peer_id: &PeerId) {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
+        score.score = score
+            .score
+            .saturating_add(STALE_BATCH_PENALTY)
+            .max(MIN_SCORE.saturating_add(1));
+        score.last_seen = Some(Instant::now());
+    }
     pub fn report_invalid_handshake(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
@@ -797,6 +829,53 @@ mod tests {
         assert!(manager.is_banned(&peer));
         assert!(manager.get_score(&peer) <= BAN_THRESHOLD);
     }
+    /// A batch that does not join this chain demotes the sender but never bans.
+    ///
+    /// This is the devnet failure in one test. A sync answer refused with
+    /// `Previous hash mismatch` is what a peer on another branch of the same
+    /// slot says, and the receiving node used to charge it as an invalid block:
+    /// ten such answers (a minute of ordinary fork traffic) banned a validator
+    /// for an hour, and the mesh lost the very node whose block it needed. The
+    /// peer is still demoted - it must sink below a peer that answers usefully
+    /// - and the score must stop one point above the ban threshold however long
+    /// the fork lasts.
+    #[test]
+    fn stale_sync_batches_demote_but_never_ban() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        let useful = test_peer_id();
+        manager.report_good_behavior(&useful);
+        for _ in 0..64 {
+            manager.report_stale_sync_batch(&peer);
+        }
+        assert!(!manager.is_banned(&peer), "a fork answer must not ban a peer");
+        let score = manager.get_score(&peer);
+        assert_eq!(
+            score,
+            MIN_SCORE + 1,
+            "the stale-batch score must floor one point above the ban threshold"
+        );
+        assert!(score < manager.get_score(&useful));
+        assert_eq!(
+            manager.get_best_peers(2).last().copied(),
+            Some(peer),
+            "a peer that keeps answering with an unjoinable batch must be asked last"
+        );
+    }
+
+    /// The canary for the test above: the same number of *invalid block*
+    /// reports still bans, so the floor is a property of this one path and not
+    /// of the score arithmetic in general.
+    #[test]
+    fn stale_batch_floor_is_load_bearing() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        for _ in 0..64 {
+            manager.report_invalid_block(&peer);
+        }
+        assert!(manager.is_banned(&peer));
+    }
+
     #[test]
     fn test_unban_peer() {
         let mut manager = PeerManager::new();
@@ -1294,6 +1373,9 @@ mod tests {
             ("report_good_behavior", |m, p| m.report_good_behavior(p)),
             ("report_unanswered_request", |m, p| {
                 m.report_unanswered_request(p)
+            }),
+            ("report_stale_sync_batch", |m, p| {
+                m.report_stale_sync_batch(p)
             }),
             ("report_slow_sync", |m, p| m.report_slow_sync(p)),
             ("report_invalid_handshake", |m, p| {
