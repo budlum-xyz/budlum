@@ -206,9 +206,28 @@ distinct defects, and the three on #97 to two.
   `Block validation failed: Previous hash mismatch`. The same job is green on #97, so
   the regression is in the testnet branch's networking/consensus wiring, not the
   harness.
-- **Status:** **open.** This is a testnet-readiness blocker (Testnet Hazırlık Kapısı,
-  "Ağ katmanı" and "Konsensüs ve tokenomics" items). It needs a local devnet run to
-  root-cause; a source-only guess would be a stub, which the directive forbids.
+- **Root cause found in the logs (and fixed in the tree):** the mesh does not punish
+  a *fork* correctly. node1 and node2 each produced a block at height 2 (both were
+  elected in slot 4, which the stake-weighted threshold permits), so node2 heard a
+  finality certificate for `42270e…` while holding `b05ae2…` at that height. The
+  handler in `src/network/node.rs` counted **every** certificate failure other than
+  "Missing verified QC blob" as peer misbehaviour, so node2 banned node1 for 3600 s
+  and from then on logged `Ignoring message from banned peer` — it silenced the one
+  peer that could have carried it across the fork, and stayed at tip 8 while node1
+  reached 41. A certificate for a checkpoint this node does not hold, or holds a
+  sibling of, says where *this node* is, not what the peer did.
+- **Fix:** `Node::finality_cert_names_a_block_we_lack` classifies those two refusals
+  (`We don't have block at height N`, `Certificate hash … mismatch with our block hash
+  … at height N`); the handler now treats them as a sync signal —
+  `sync_if_behind(peer, height)` plus `MessageAcceptance::Ignore` — instead of
+  `report_bad_behavior` + `Reject`. Every other refusal (bad aggregate signature,
+  wrong height, set-hash mismatch, a QC this node is missing) keeps the old verdict,
+  so a lying peer still loses reputation and still gets rejected.
+- **Regression test:** `a_fork_or_a_missing_block_is_not_peer_misbehaviour`
+  (`src/network/node.rs`), which pins both directions of the classification.
+- **Status:** fix pushed; **the devnet smoke run has to confirm it**, so the finding
+  stays open until `Devnet Multi-Node Smoke` is green. This is a testnet-readiness
+  blocker (Testnet Hazırlık Kapısı, "Ağ katmanı" and "Konsensüs ve tokenomics").
 
 ---
 
