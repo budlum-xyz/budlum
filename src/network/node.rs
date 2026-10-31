@@ -721,6 +721,10 @@ pub struct Node {
     /// iteration, the peer's rate limiter stops serving it, and the round
     /// hangs (`ForkRewalkGate`, AF-17).
     fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate,
+    /// Votes that arrived before this node had the round to count them in
+    /// (`DeferredVotes`, AF-18). They are replayed when the round opens,
+    /// because a vote can never be retransmitted by its author.
+    deferred_votes: crate::network::deferred_votes::DeferredVotes,
     pub pending_bitswap_fetches: PendingBitswapFetches,
     /// The content id each outbound Bitswap request asked for. A response is
     /// checked against this, not against the cid the response claims.
@@ -2061,6 +2065,7 @@ impl Node {
             sync_started_at,
             active_sync_request: None,
             fork_rewalk: crate::network::fork_rewalk::ForkRewalkGate::new(),
+            deferred_votes: crate::network::deferred_votes::DeferredVotes::new(),
             pending_bitswap_fetches: HashMap::new(),
             bitswap_pending_attempts: HashMap::new(),
             bitswap_requests: HashMap::new(),
@@ -2626,6 +2631,63 @@ impl Node {
                     // nodes one block apart vote at different heights, and a
                     // vote only counts in an aggregator that holds its own
                     // height: no round ever saw a quorum.
+                    let agg_state = self.chain.get_aggregator_state().await;
+                    // Votes that landed while this node had no round to count
+                    // them in are held by (epoch, height) and replayed the
+                    // first beat after that round opens. A vote is published
+                    // once - the same bytes are a duplicate to gossipsub - so
+                    // a dropped vote is a vote the author cannot re-send, and
+                    // the round it belonged to is short a validator forever
+                    // (AF-18).
+                    if agg_state.active {
+                        let due = self
+                            .deferred_votes
+                            .take_for(agg_state.epoch, agg_state.checkpoint_height);
+                        if !due.is_empty() {
+                            info!(
+                                "Finality: replaying {} vote(s) held for checkpoint height {} (epoch {})",
+                                due.len(),
+                                agg_state.checkpoint_height,
+                                agg_state.epoch
+                            );
+                        }
+                        for vote in due {
+                            match vote {
+                                crate::network::deferred_votes::DeferredVote::Prevote(vote) => {
+                                    if let Err(e) = self.chain.handle_prevote(vote).await {
+                                        tracing::debug!("held prevote still refused: {e}");
+                                    }
+                                }
+                                crate::network::deferred_votes::DeferredVote::Precommit(vote) => {
+                                    match self.chain.handle_precommit(vote).await {
+                                        Ok(Some(cert)) => {
+                                            let topic = gossipsub::IdentTopic::new("blocks");
+                                            let _ = self.swarm.behaviour_mut().gossipsub.publish(
+                                                topic,
+                                                NetworkMessage::FinalityCert {
+                                                    epoch: cert.epoch,
+                                                    checkpoint_height: cert.checkpoint_height,
+                                                    checkpoint_hash: cert.checkpoint_hash,
+                                                    agg_sig_bls: cert.agg_sig_bls,
+                                                    bitmap: cert.bitmap,
+                                                    set_hash: cert.set_hash,
+                                                    scheme_id:
+                                                        crate::chain::finality::BLS_SCHEME_RFC9380_V1
+                                                            .to_string(),
+                                                }
+                                                .to_bytes(),
+                                            );
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => tracing::debug!("held precommit still refused: {e}"),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // The replay above may have just supplied the prevote
+                    // quorum this beat is about to check, so the state is read
+                    // again rather than acted on one beat late.
                     let agg_state = self.chain.get_aggregator_state().await;
                     let precommit_retry = agg_state.active
                         && agg_state.prevote_quorum_reached
@@ -4058,7 +4120,7 @@ impl Node {
                                             sig_bls,
                                             auth_sig,
                                         };
-                                        match self.chain.handle_prevote(prevote).await {
+                                        match self.chain.handle_prevote(prevote.clone()).await {
                                             Ok(_) => {
                                                 {
                                                     let mut pm = self.peer_manager_lock();
@@ -4068,6 +4130,17 @@ impl Node {
                                             Err(e) => {
                                                 warn!("Prevote from {peer_id} rejected: {e}");
                                                 if refusal_is_round_scope(&e) {
+                                                    // The round may simply not be
+                                                    // open yet, and a vote is
+                                                    // published once: hold it
+                                                    // for the round it names
+                                                    // instead of spending its
+                                                    // only delivery (AF-18).
+                                                    self.deferred_votes.push(
+                                                        prevote.epoch,
+                                                        prevote.checkpoint_height,
+                                                        crate::network::deferred_votes::DeferredVote::Prevote(prevote),
+                                                    );
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     continue;
                                                 }
@@ -4109,7 +4182,7 @@ impl Node {
                                             auth_sig,
                                             pq_sig,
                                         };
-                                        match self.chain.handle_precommit(precommit).await {
+                                        match self.chain.handle_precommit(precommit.clone()).await {
                                             Ok(Some(cert)) => {
                                                 info!("FinalityCert produced from precommit: epoch={}, height={}", cert.epoch, cert.checkpoint_height);
                                                 {
@@ -4142,6 +4215,20 @@ impl Node {
                                             Err(e) => {
                                                 warn!("Precommit from {peer_id} rejected: {e}");
                                                 if refusal_is_round_scope(&e) {
+                                                    // `Cannot precommit before
+                                                    // prevote quorum` is the
+                                                    // common case here: the
+                                                    // prevotes that justify this
+                                                    // precommit are still being
+                                                    // replayed. Hold the vote for
+                                                    // the round it names rather
+                                                    // than dropping its only
+                                                    // delivery (AF-18).
+                                                    self.deferred_votes.push(
+                                                        precommit.epoch,
+                                                        precommit.checkpoint_height,
+                                                        crate::network::deferred_votes::DeferredVote::Precommit(precommit),
+                                                    );
                                                     self.report_gossip(&id, &peer_id, gossipsub::MessageAcceptance::Ignore);
                                                     continue;
                                                 }
