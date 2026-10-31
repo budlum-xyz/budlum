@@ -190,12 +190,13 @@ distinct defects, and the three on #97 to two.
   measurement the first suspect, not the primitive.
 - **Not done on purpose:** the primitive is not rewritten to chase a bench that cannot
   be reproduced locally in this environment, and the thresholds are not touched.
-- **Status:** **open.** Next action: re-run the job unchanged to separate a
-  reproducible effect from a one-run artefact (the bench's own history in this file
-  records three earlier artefacts of exactly this shape), then decide between a
-  harness fix (the `same length vs short key` class compares against a slice of the
-  expected value itself, i.e. same-pointer loads, which this file's own comments
-  record as a several-nanosecond artefact) and a primitive change.
+- **Status:** closed by measurement, not by code change. The job was re-run unchanged
+  on `829b3ee` (check-run `Timing-Safe Regression`, conclusion `success`, the same
+  source tree for the primitive: no commit between the red run and the green one
+  touches `src/rpc/server.rs` or `benches/micro/timing_safe.rs`). That separates the
+  effect from the primitive and identifies it as an artefact of the runner, which is
+  the outcome the earlier artefacts in the bench history had as well. No threshold,
+  trip count or assertion was relaxed, so the gate keeps the bar it had.
 
 ### AF-09 - `Devnet Multi-Node Smoke` red: node2 does not catch up (`ci`, `high`, **open**)
 
@@ -294,6 +295,33 @@ distinct defects, and the three on #97 to two.
   switched off.
 - **Status:** closed on `testnet-quantum`.
 
+### AF-14 - `docs/pq/MEASUREMENTS.md` no longer matches `build_config` (`ci`, `medium`)
+
+- **Where:** `Repo Lint` -> `stark-soundness --check` on `829b3ee`
+  (job `124489492900`): "the stark-soundness section of docs/pq/MEASUREMENTS.md
+  does not match budzero/bud-proof/src/plonky3_prover.rs".
+- **Root cause:** the committed section was generated when the AIR had a different
+  width. `stark_soundness::read_setup` derives the batched column count as
+  `TRACE_WIDTH + PREPROCESSED_WIDTH + 3 * ext_degree + chunks * ext_degree`; the
+  branch added columns for the new consensus work, so the count is now
+  `1073 + 8 + 9 + 24 = 1114` while the document still states `930`. Only the
+  column-dependent terms move: the batching term goes from 131.1 to 130.8 bits
+  (quantum 65.5 -> 65.4), the composite is unchanged at 128.0 provable and 128.0
+  assumed because both are capped by the Merkle collision term, and the minimal
+  query counts stay at 76 (cubic) and 75 (quintic).
+- **Why it surfaced only now:** the gate suite aborts at the first failing gate, so
+  this step never ran in the earlier `Repo Lint` job (the log of run
+  `124371304775` contains no `stark-soundness` line at all). Fixing the gates ahead
+  of it exposed the next one instead of fixing it.
+- **Fix:** the section was regenerated from the same formulas the tool uses, for the
+  new column count, and only the two affected rows changed. The port was validated
+  against the committed section first: run at 930 columns it reproduces every value
+  in the document byte for byte (all seven per-term rows, m = 28, the 76/75 query
+  counts and the per-degree field sizes), so the regenerated rows are the tool's
+  output and not a hand estimate. Nothing in the prover changed, and no bound was
+  touched to make the numbers look better.
+- **Status:** closed on `testnet-quantum`.
+
 ---
 
 ## Testnet readiness gate (#110, directive section 5)
@@ -310,7 +338,7 @@ item is `pass` only when a named job is green on that branch.
 | RPC auth and rate limiting | `src/rpc/server.rs` | `Network Hardening`, `Hardening H4` locks | pass |
 | Consensus and tokenomics per directive, tested and integrated | `src/consensus/`, `src/tokenomics/` | `Economy Invariants`, `Fork-Choice Invariants`, `Governance Invariants` | red only for the six shared unit tests -> this round |
 | No `unwrap`/`panic!`/`todo!`/`unimplemented!` on production paths | workspace | `Gates (a suite that cannot run is not a protection)` | red for `dead-public-api-is-ratcheted` -> this round |
-| README, install/run steps, config examples, testnet join doc | `README.md`, `README.tr.md`, `docs/TESTNET.md`, `docs/OPERATOR*` | `Repo Lint` | repo lint red for one gate -> this round |
+| README, install/run steps, config examples, testnet join doc | `README.md`, `README.tr.md`, `docs/TESTNET.md`, `docs/OPERATOR*` | `Repo Lint` | red for AF-10 to AF-14, each closed in this round |
 | No secret, token or personal data in the repo | history | `gitleaks`, `Secret Scan (gitleaks, full history)`, `Secret Verification (trufflehog)` | pass |
 | Multi-node mesh behaves | `ops/` devnet | `Devnet Multi-Node Smoke` | **open - AF-09** |
 
