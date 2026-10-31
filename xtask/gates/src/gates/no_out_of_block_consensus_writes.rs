@@ -66,6 +66,7 @@ const CALLS: &[(&str, Class)] = &[
     ("global_header", Read),
     ("global_header_proof", Read),
     ("get_qc_blob", Read),
+    ("get_locator", Read),
     ("get_state_root", Read),
     ("get_state_snapshot", Read),
     ("get_transaction_by_hash", Read),
