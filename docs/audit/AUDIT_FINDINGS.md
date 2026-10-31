@@ -11,6 +11,10 @@ Sources are marked as `Strix` (the security agent), `bot` (any automated reviewe
 
 Severity: `blocker` (build/consensus/security), `high`, `medium`, `low`.
 
+The directive traceability matrix is next to this file: `docs/audit/TESTNET_TRACEABILITY.md` maps every #110 directive line to its code,
+its test and the job that runs it. A line with no code is unfinished work, and a
+line with no test is unverified work, so both files are read together.
+
 ---
 
 ## Round 2 - 2026-10-31 (continuation)
@@ -302,13 +306,19 @@ distinct defects, and the three on #97 to two.
   has two or more winners with probability `1 - (3/4)^4 - 4*(1/4)*(3/4)^3` about 26 %
   and no winner at round 0 with probability `(3/4)^4` about 32 %. With four equal validators the threshold admits each one
   with probability 1/4 per round, so a slot has two or more winners with probability
-  Equal-height candidates are resolved deterministically (`resolve_split_tie` on the
-  tip when `fork_choice_score` - chain length - ties), so the mesh converges, but a
-  producer whose branch loses the tie resolver and whose node is then cut off by a ban
-  has no second chance inside the harness's 240 s window. What would remain to
-  instrument is the losing branch's reorg: whether `reorg_to_peer_suffix` runs at all
-  when both tips are at the same height and its batch is refused as "not a better
-  chain".
+  Equal-height candidates are resolved deterministically by `resolve_split_tie`
+  (`src/consensus/split_resolver.rs`), whose order is `(weight, height, block_hash,
+  proposer)` and whose last field is identical for the same block, so two nodes holding
+  the same pair of branches always agree. What they do not necessarily get is a
+  *stable* preference: `pos.rs::is_better_chain` passes `SplitCandidate::from_chain_tip`,
+  so the comparison is made on the two tips, and two branches growing at the same rate
+  hand the decision back and forth (branch A can lead at height 10 and lose at height 11
+  without either branch changing). A tie-break that is a function of the fork point -
+  the first index where the two chains differ - instead of the tip would make the
+  preference monotone under extension, which is what stops a two-branch mesh from
+  reorging on every slot. That change is not in this round: it is a consensus rule, the
+  current run has to show whether it is still needed, and shipping a rule change on a
+  suspicion is worse than shipping it with a failing log that names it.
 - **Status:** **open.** The certificate classification and the ban-from-fork path are
   fixed and tested; `Devnet Multi-Node Smoke` is green on `829b3ee` and that run is the
   evidence that the two bans were the mechanism, but the step-7 producer count has
