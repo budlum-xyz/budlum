@@ -78,6 +78,74 @@ fn test_blockchain_future_timestamp_buffer() {
     );
 }
 
+/// A block from a competing branch is a fork, not a clock error.
+///
+/// `full_validate` priced a block's timestamp against *this node's* tip before
+/// it looked at the block's parent, so a block built on a sibling of our tip was
+/// judged against a block it does not descend from. When its stamp sat below
+/// ours the refusal read `Block timestamp not monotonic`, and the network layer
+/// does not know that string: it is not the fork signal (`Previous hash
+/// mismatch`) that makes the sync loop re-walk its locator, so the node asked
+/// for the same index again every second and never moved. In the devnet run
+/// that closed AF-09 a validator stayed at height 1 while the mesh reached 89,
+/// and its blocks were never on the chain the harness reads.
+///
+/// The refusal an unjoined block earns must be the one the fork path watches,
+/// and the timestamp rule must still fire for a block that *does* name our tip.
+#[test]
+fn a_fork_is_named_a_fork_and_not_a_clock_error() {
+    // `ConsensusEngine` is already imported at the top of this file.
+    use crate::core::account::AccountState;
+
+    let engine = PoWEngine::new(0);
+    let state = AccountState::new();
+
+    // `Block::new` leaves `hash` empty, so every block that has to be told apart
+    // by hash is stamped with its own before it is used as a parent.
+    let mut genesis = Block::new(0, "0".repeat(64), vec![]);
+    genesis.timestamp = 1_000;
+    genesis.hash = genesis.calculate_hash();
+    let mut ours = Block::new(1, genesis.hash.clone(), vec![]);
+    ours.timestamp = 5_000;
+    ours.hash = ours.calculate_hash();
+    let chain = vec![genesis.clone(), ours.clone()];
+
+    // Another node's tip at the same height, and its child.
+    let mut sibling = Block::new(1, genesis.hash.clone(), vec![]);
+    sibling.timestamp = 4_000;
+    sibling.hash = sibling.calculate_hash();
+    let mut on_sibling = Block::new(2, sibling.hash.clone(), vec![]);
+    on_sibling.timestamp = 4_500;
+    on_sibling.hash = on_sibling.calculate_hash();
+
+    let fork = engine
+        .full_validate(&on_sibling, &chain, &state)
+        .expect_err("a block on another branch is not a block on ours");
+    assert!(
+        fork.0.contains("Previous hash mismatch"),
+        "the fork path watches this exact string, got: {}",
+        fork.0
+    );
+    assert!(
+        !fork.0.contains("not monotonic"),
+        "the clock must not be blamed for a block that is not ours: {}",
+        fork.0
+    );
+
+    // Canary: the same timestamp, parented on our tip, still hits the clock rule.
+    let mut on_ours = Block::new(2, ours.hash.clone(), vec![]);
+    on_ours.timestamp = 4_500;
+    on_ours.hash = on_ours.calculate_hash();
+    let clock = engine
+        .full_validate(&on_ours, &chain, &state)
+        .expect_err("a block that regresses our tip's clock must still be refused");
+    assert!(
+        clock.0.contains("not monotonic"),
+        "the timestamp rule must keep firing for our own successor, got: {}",
+        clock.0
+    );
+}
+
 macro_rules! gen_pow_difficulty_tests {
     ($($name:ident, $diff:expr),*) => {
         $(

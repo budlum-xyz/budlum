@@ -380,6 +380,29 @@ pub trait ConsensusEngine: Send + Sync {
             return self.validate_block(block, chain, state);
         }
         let prev_block = chain.last();
+        // Fork before clock. `validate_timestamp` prices the block against
+        // `prev_block`, and `prev_block` is *this* node's tip: a block from a
+        // competing branch was then judged against a parent it does not have,
+        // and when its stamp sat below that tip's stamp the refusal read "Block
+        // timestamp not monotonic". That string is not the fork signal the sync
+        // loop watches for (`Previous hash mismatch`), so the node neither
+        // re-walked its locator nor reorged - it asked for the same index again
+        // every second and never moved. A devnet node stayed at height 1 for the
+        // whole run that way while the rest of the mesh reached 89, and its
+        // blocks were never on the chain the harness reads (AF-09).
+        //
+        // The linkage test is two fields and it is the one the engines already
+        // make, with the same message, so ordering it first changes no verdict
+        // for a block that does name our tip as its parent: its timestamp is
+        // still priced against the same `prev_block` below.
+        if let Some(prev) = prev_block {
+            if block.previous_hash != prev.hash {
+                return Err(ConsensusError(format!(
+                    "Previous hash mismatch. Expected: {}, Got: {}",
+                    prev.hash, block.previous_hash
+                )));
+            }
+        }
         self.validate_timestamp(block, prev_block)?;
         self.validate_block_size(block)?;
         self.validate_block(block, chain, state)?;
