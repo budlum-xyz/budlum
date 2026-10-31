@@ -591,6 +591,56 @@ item is `pass` only when a named job is green on that branch.
   step 6. The ledger entry stays open only until the gate bookkeeping above is green in
   the same job that carries it.
 
+### AF-18 - A finality vote that arrived before the round opened was lost for good (`devnet`, `blocker`)
+
+- **Where:** the gossip arms for `Prevote` and `Precommit` in
+  `src/network/node.rs` (`refusal_is_round_scope`), and the vote beat in the same
+  file. Job `124634428303`, `Devnet Multi-Node Smoke` on `68a0a83`:
+  `FAIL: finality did not advance (first finalized height seen: Some(6))`.
+- **Observed:** the log holds 498 `Cannot precommit before prevote quorum` refusals and
+  repeats `No active finality aggregator`. Node5's vote witness shows every vote it
+  ever counted arriving through node1 (`propagation_source = JDzf`): four voters at
+  heights 2, 4 and 6, and at height 8 only node1's own prevote, which it refused with
+  `No active finality aggregator` because its round was not open yet. node1 collected
+  three of the four prevotes at height 8 and precommitted, then re-published that
+  precommit every beat for the rest of the run: `the round has no precommit quorum
+  yet`. No follower ever precommitted, so node1 never reached a precommit quorum and
+  the height could not finalize. The same tree had passed the same job on `7535554`
+  an hour earlier.
+- **Root cause:** two facts that are harmless apart and fatal together. First, the
+  devnet mesh is a star - `ops/docker-compose.yml` gives every follower
+  `--dial=/dns4/node1/tcp/4001` and nothing else, and no two followers are connected -
+  so a follower sees another follower's vote only when node1 relays it. Second, a vote
+  is published exactly once and cannot be retransmitted: the payload is signed over
+  its own content, so a retry is byte-identical, and gossipsub answers byte-identical
+  with `Duplicate` and sends nothing (`Failed to gossip a finality vote: Duplicate;
+  height 8 stays unvoted and is retried`, node4, 498 times). This node spent that
+  single delivery on nothing whenever the vote landed before its aggregator held that
+  epoch and height: the arm refused it as round-scope, answered `Ignore`, and dropped
+  it. The author cannot send it again, and the receiver has nothing to ask for. Every
+  node then waits for a vote that has already been delivered and thrown away.
+- **Fix:** `DeferredVotes` (`src/network/deferred_votes.rs`) holds a round-scope
+  refused vote by its `(epoch, height)` in a bounded queue (64 entries, oldest
+  dropped), and the vote beat replays the held votes for the round its aggregator
+  holds, at the moment that round opens. A held vote is not counted early: it goes
+  through the same `handle_prevote` / `handle_precommit` checks, so nothing is
+  admitted that the round would have refused, and the safety rule "no precommit
+  before the node's own prevote quorum" is untouched. A replayed precommit that
+  completes the quorum publishes the resulting `FinalityCert` exactly as the gossip
+  arm does. The aggregator state is read again after the replay so the same beat
+  signs its own vote rather than acting one beat late.
+- **Regression tests:** three tests in `src/network/deferred_votes.rs` - a vote held
+  for height 8 comes back once its round opens and is not replayed twice, a vote held
+  for another round stays held, another epoch is a different round, and the queue
+  drops the oldest past the cap.
+- **Open part, recorded rather than hidden:** the vote path still depends on the
+  star's hub relaying between followers. The deferral removes the *loss* - a dropped
+  delivery no longer costs the round - but not the relay dependency itself, and the
+  durable fix is a point-to-point vote exchange over the `/sync` protocol, which is a
+  protocol addition and is tracked in `docs/MAINNET_READINESS.md` rather than being
+  half-landed here.
+- **Status:** fix pushed; the devnet has to confirm it.
+
 ## Panic bar: what was read, not just what the lints say
 
 `todo!` and `unimplemented!` appear nowhere in `src/`, `crates/`, `budzero/` or `bud/`
