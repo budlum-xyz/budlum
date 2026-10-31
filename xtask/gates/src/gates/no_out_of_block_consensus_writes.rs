@@ -60,6 +60,7 @@ const CALLS: &[(&str, Class)] = &[
     ("external_domain_registration", Read),
     ("external_quorum_round", Read),
     ("external_quorum_rounds", Read),
+    ("find_common_height", Read),
     ("fund_development_account", DevnetOnly),
     ("get_aggregator_state", Read),
     ("global_header", Read),
