@@ -2271,10 +2271,18 @@ impl AccountState {
         // counts against the fixed cap if it is recorded. Left out of
         // `burned_total`, every slashed bond reopened its own amount as
         // minting headroom - the same hole the external-bond and storage-bond
-        // slashes had, fixed the same way.
-        if penalty > 0 {
-            self.burned_total = self.burned_total.saturating_add(penalty);
-        }
+        // slashes had.
+        //
+        // It is recorded ONCE, by `slash_validator`, which measures the drop
+        // in committed supply across the whole call (`record_destroyed_since`).
+        // That measurement already covers every part this body cuts - the
+        // bond, the queue, the delegation positions, the delegation exits and
+        // the cross-role sweep - so adding `penalty` here as well booked the
+        // slash twice: a 1 200 penalty left `burned_total` at 2 400 and closed
+        // twice as much minting headroom as the slash destroyed
+        // (`a_validator_slash_records_what_it_destroyed` measured exactly
+        // that, 2400 against 1200). Recording in the wrapper and not here
+        // keeps the one measurement that cannot miss a part.
 
         let jail_epochs = 7;
         validator.jail_until = self.epoch_index.saturating_add(jail_epochs);
