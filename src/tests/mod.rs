@@ -49,6 +49,11 @@ pub mod manifest_commitment_locks;
 #[cfg(test)]
 pub mod multi_consensus_locks;
 pub mod operator_kill_chaos;
+// P01 consensus-round behaviour and the P01 negative-validation batch. The file
+// existed and no `mod` declared it, so rustc never read it: 558 lines of round
+// tests that grepped like live coverage and ran nowhere.
+#[cfg(test)]
+pub mod p01_consensus_rounds;
 #[cfg(test)]
 pub mod poisoned_lock_locks;
 #[cfg(test)]
