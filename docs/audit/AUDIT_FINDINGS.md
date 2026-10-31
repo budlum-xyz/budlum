@@ -254,8 +254,8 @@ distinct defects, and the three on #97 to two.
 - **Still open - "only 3 of 4 validators produced":** the remaining symptom is
   structural, not a penalty. With four equal validators the threshold admits each one
   with probability 1/4 per round, so a slot has two or more winners with probability
-  `1 - (3/4)^4 - 4·(1/4)·(3/4)^3 about 26 %` and no winner at round 0 with probability
-  `(3/4)^4 ≈ 32 %`. Equal-height candidates are resolved deterministically
+  `1 - (3/4)^4 - 4*(1/4)*(3/4)^3 about 26 %` and no winner at round 0 with probability
+  `(3/4)^4 is about 32 %`. Equal-height candidates are resolved deterministically
   (`resolve_split_tie` on the tip when `fork_choice_score` - chain length - ties), so
   the mesh converges, but on the run that failed a producer's blocks were never in the
   winning branch that the harness reads, and there was no second chance inside its
