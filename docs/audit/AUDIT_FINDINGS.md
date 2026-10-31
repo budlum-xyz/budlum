@@ -370,6 +370,19 @@ distinct defects, and the three on #97 to two.
   touched to make the numbers look better.
 - **Status:** closed on `testnet-quantum`.
 
+### AF-15 - `Clippy drift (next stable toolchain)` red on a doc line in the new test (`ci`, `low`)
+
+- **Where:** `src/network/peer_manager.rs:841`, the doc comment of
+  `stale_sync_batches_demote_but_never_ban`, job `124501936025`.
+- **Root cause:** a paragraph in that doc comment had a line starting with `- `, so
+  `clippy::doc_lazy_continuation` read the rest of the paragraph as a list item and
+  refused the unindented continuation below it. The stable-toolchain clippy of
+  `Budlum Core quality` does not have the lint yet; the next-stable job is what
+  catches it, which is the job's purpose.
+- **Fix:** the paragraph is reflowed so no line begins with a bullet marker. No
+  `#[allow]` and no lint configuration was touched.
+- **Status:** closed on `testnet-quantum`.
+
 ---
 
 ## Testnet readiness gate (#110, directive section 5)
@@ -412,3 +425,15 @@ item is `pass` only when a named job is green on that branch.
    lie and the gate's own body check would refute it.
 6. **`ROUND_PRICE_WINDOW` (AF-06).** The constant stays private and the doc adjusts;
    making it public to satisfy rustdoc would widen the public surface to fix a typo.
+
+## Known gaps that are recorded, not hidden
+
+1. **Validator resource table (`docs/TESTNET.md`, "Validator resources").** Both
+   profiles read "not yet measured". The numbers come from
+   `budlum-tools resource-sample` against a live validator over ten minutes, which no
+   CI job runs and which cannot be produced from a smoke test. Writing plausible
+   numbers there would be a placeholder dressed as a measurement, which the directive
+   forbids, so the table stays empty and `docs/MAINNET_READINESS.md` already tracks it
+   as an open item with the tool named. The testnet participation document is complete
+   in every other respect: endpoints, ports, genesis, wallet, faucet, transaction,
+   staking, joining, upgrades and the two rehearsals.
