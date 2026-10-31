@@ -5613,6 +5613,54 @@ impl Blockchain {
         }
         Ok(state)
     }
+    /// Entries in a locator. The protocol accepts
+    /// `MAX_HEADER_LOCATOR_HASHES`; the power-of-two stride below reaches
+    /// genesis from a chain of 512 blocks well inside that ceiling.
+    const LOCATOR_MAX_HASHES: usize = 16;
+
+    /// The block hashes this chain offers a peer that is asking where the two
+    /// of them last agreed: newest first, with a power-of-two stride so a long
+    /// chain still fits in one message, and **always ending at genesis**.
+    ///
+    /// The last entry is the whole point. A locator that stops short of
+    /// genesis names no ancestor at all when the peer has diverged at the
+    /// first block, which is exactly what happens when two validators produce
+    /// block 1 into the same slot. The peer then answers from its own height 0,
+    /// the follower skips every block it already holds as "not the next one",
+    /// refuses the first block at its own height for a parent it does not
+    /// share, and can never name a fork point to reorg to: it re-asks forever.
+    /// Measured on the devnet, one follower stalled for 119s that way.
+    pub fn get_locator(&self) -> Vec<String> {
+        let mut locator = Vec::new();
+        if self.chain.is_empty() {
+            return locator;
+        }
+        let mut step = 1usize;
+        let mut current = self.chain.len() - 1;
+        while locator.len() < LOCATOR_MAX_HASHES {
+            locator.push(self.chain[current].hash.clone());
+            if current == 0 {
+                break;
+            }
+            current = current.saturating_sub(step);
+            step = step.saturating_mul(2);
+        }
+        locator
+    }
+
+    /// The height of the newest block the locating peer and this chain share.
+    ///
+    /// The locator arrives newest-first, so the first entry that this chain
+    /// holds is the best common ancestor it names.
+    pub fn find_common_height(&self, locator: &[String]) -> Option<u64> {
+        locator.iter().find_map(|hash| {
+            self.chain
+                .iter()
+                .position(|block| &block.hash == hash)
+                .map(|position| position as u64)
+        })
+    }
+
     pub fn find_fork_point(&self, other_chain: &[Block]) -> Option<usize> {
         let common_len = self.chain.len().min(other_chain.len());
         for (index, (ours, theirs)) in self.chain.iter().zip(other_chain.iter()).enumerate() {
@@ -10211,6 +10259,58 @@ mod bond_and_reorg_tests {
             right.produce_block(Address::from([3u8; 32])).unwrap();
         }
         (left, right)
+    }
+
+    /// Two validators that both produce block 1 share nothing but genesis.
+    /// The locator has to say so, or the peer cannot name that ancestor.
+    #[test]
+    fn a_fork_at_the_first_block_still_names_genesis_in_the_locator() {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
+
+        let mut left = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        let mut right = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        left.produce_block(Address::from([1u8; 32])).unwrap();
+        right.produce_block(Address::from([2u8; 32])).unwrap();
+        assert_ne!(left.chain[1].hash, right.chain[1].hash, "the fork is real");
+
+        let locator = right.get_locator();
+        assert_eq!(
+            locator.last(),
+            Some(&left.chain[0].hash),
+            "genesis is the ancestor both chains share and must be named"
+        );
+        // The peer answers from one past the common ancestor. Naming genesis
+        // makes the server start at height 1 - the fork block itself - which
+        // is what the follower needs to see to reorg. A locator that stopped
+        // at its own height 1 named nothing here (find_common_height returned
+        // None), the server fell back to height 0, and the follower skipped
+        // every block it already held and refused the one above it forever.
+        assert_eq!(left.find_common_height(&locator), Some(0));
+        assert_eq!(
+            left.find_common_height(&locator).map(|h| h + 1),
+            Some(1),
+            "the served range starts at the fork block"
+        );
+    }
+
+    #[test]
+    fn the_locator_is_newest_first_within_the_protocol_ceiling() {
+        use crate::consensus::PoWEngine;
+        use std::sync::Arc;
+
+        let mut chain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        for _ in 0..40 {
+            chain.produce_block(Address::from([7u8; 32])).unwrap();
+        }
+        let locator = chain.get_locator();
+        assert_eq!(locator.first(), Some(&chain.chain.last().unwrap().hash));
+        assert_eq!(locator.last(), Some(&chain.chain[0].hash));
+        assert!(
+            locator.len() <= crate::network::protocol::MAX_HEADER_LOCATOR_HASHES,
+            "a locator the peer would refuse is not a locator"
+        );
+        assert_eq!(chain.find_common_height(&locator), Some(40));
     }
 
     #[test]
