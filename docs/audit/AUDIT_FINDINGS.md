@@ -431,6 +431,25 @@ item is `pass` only when a named job is green on that branch.
 6. **`ROUND_PRICE_WINDOW` (AF-06).** The constant stays private and the doc adjusts;
    making it public to satisfy rustdoc would widen the public surface to fix a typo.
 
+## Panic bar: what was read, not just what the lints say
+
+`todo!` and `unimplemented!` appear nowhere in `src/`, `crates/`, `budzero/` or `bud/`
+outside test modules. `unwrap`/`expect` are denied workspace-wide for library and binary
+targets (`Cargo.toml` `[lints.clippy]`), so the panics that remain are `unreachable!`
+calls. Each one was located and read, and the enclosing module was computed rather than
+guessed:
+
+| Site | Enclosing module | Why it cannot be reached by input |
+|---|---|---|
+| `src/core/block.rs:491` | none (production) | `slice::chunks(2)` yields only 1- and 2-element slices; the arm is unreachable by construction. |
+| `src/storage/db.rs:167` | none (production) | the bounded retry loop returns on success, on the final attempt and on every non-lock error; only the loop's arithmetic is left. |
+| `src/security/quantum_canary.rs:366` | `weierstrass` (production) | try-and-increment over a 32-bit counter; exhausting it needs 2^32 consecutive SHA3 outputs that all fail to decode as a curve point. Honest reading: not a compile-time invariant, but not reachable by an input either, because the counter is internal and the digest is a hash of a fixed label. |
+| `src/security/quantum_canary.rs:375` | `weierstrass` (production) | `expand_message_xmd` with fixed, valid lengths. |
+| `src/domain/finality_adapter.rs:1999`, `src/registry/evidence.rs:1019,1038`, `src/domain/storage_deal.rs:5588`, `src/storage/generated.rs:1536,1577,1594`, `src/core/transaction.rs:5146-5348` (eight), `src/main.rs:2132` | `tests`, `v29_signing_tests` | test modules: a panic is the right behaviour there. |
+
+Nothing was suppressed to make this true: no `#[allow]`, no baseline entry, no lint
+downgrade, and the count above is the tree's, not a report's.
+
 ## Known gaps that are recorded, not hidden
 
 1. **Validator resource table (`docs/TESTNET.md`, "Validator resources").** Both
