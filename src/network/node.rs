@@ -4707,17 +4707,20 @@ impl Node {
                                                         }
                                                         self.clear_sync_round();
                                                         if fork_retry {
-                                                            // A batch that does not continue this
-                                                            // chain is not a good contribution, so
-                                                            // the sender is charged rather than
-                                                            // rewarded: `report_invalid_block`
-                                                            // demotes it in the sync order, and the
-                                                            // re-walk below therefore asks someone
-                                                            // else. A peer that answers every round
-                                                            // with a mismatched batch cannot keep
-                                                            // the flag by being the only one asked.
+                                                            // A batch that does not join this
+                                                            // chain is a fork signal, not a
+                                                            // malformed block: the sender may be
+                                                            // sitting on a branch that won its
+                                                            // slot, and this node may simply have
+                                                            // moved its tip mid-flight. So the
+                                                            // sender is demoted in the sync order
+                                                            // (the re-walk below then asks someone
+                                                            // else) without being charged for an
+                                                            // invalid block, which bans on
+                                                            // repetition and took the devnet's
+                                                            // own validators out of the mesh.
                                                             self.peer_manager_lock()
-                                                                .report_invalid_block(&peer);
+                                                                .report_stale_sync_batch(&peer);
                                                             let locator = self.chain.get_locator().await;
                                                             if !self.request_headers_from_peer(None, locator, 500) {
                                                                 info!(peer = %peer, "fork re-sync deferred: a sync round is already open");
