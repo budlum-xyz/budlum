@@ -850,7 +850,10 @@ mod tests {
         for _ in 0..64 {
             manager.report_unjoined_block(&peer);
         }
-        assert!(!manager.is_banned(&peer), "a fork answer must not ban a peer");
+        assert!(
+            !manager.is_banned(&peer),
+            "a fork answer must not ban a peer"
+        );
         let score = manager.get_score(&peer);
         assert_eq!(
             score,
