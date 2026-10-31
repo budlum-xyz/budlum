@@ -5637,7 +5637,7 @@ impl Blockchain {
         }
         let mut step = 1usize;
         let mut current = self.chain.len() - 1;
-        while locator.len() < LOCATOR_MAX_HASHES {
+        while locator.len() < Self::LOCATOR_MAX_HASHES {
             locator.push(self.chain[current].hash.clone());
             if current == 0 {
                 break;
