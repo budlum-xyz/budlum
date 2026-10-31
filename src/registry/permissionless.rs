@@ -61,6 +61,11 @@ pub const MAX_SLASHING_HISTORY: usize = 4096;
 /// present are ever read; older epochs read as no commission, which pays the
 /// delegator rather than the validator. Changing this value is a consensus
 /// change: the retained window is part of the registry root.
+///
+/// exposed for: a client that reconstructs the registry read path (the
+/// explorer and the indexer both replay `ValidatorCommission` rows) needs the
+/// same bound to know when an epoch stops having a rate; the constant is the
+/// published half of the rule `validator_commission_ppm_at` applies.
 pub const MAX_COMMISSION_RATE_HISTORY: usize = 64;
 
 /// Reasons a registered member can be slashed. Explicitly enumerated so the
@@ -292,6 +297,12 @@ pub struct ClaimableReward {
 /// A change is prospective: the epoch that sets it keeps the rate it accrued
 /// under, so a reprice in the block that closes an epoch cannot tax that
 /// epoch's delegated rewards.
+///
+/// exposed for: `ValidatorCommission::rates` is a public field, so the element
+/// type has to be public as well - `src/bin/budlum-indexer.rs` walks the rate
+/// history through that field, and a reader of the profile needs the same
+/// epoch-by-epoch list. The type is named by the field rather than by a call,
+/// which is why the idle-code gate asks for this line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommissionRate {
     /// The first epoch whose rewards are taxed at `commission_ppm`.
