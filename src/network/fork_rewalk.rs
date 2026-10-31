@@ -19,10 +19,10 @@
 //! batch clears the counter, and the next block announcement asks again.
 
 /// First window between two locator walks, in seconds.
-pub(crate) const FORK_REWALK_BASE_SECS: u64 = 1;
+const FORK_REWALK_BASE_SECS: u64 = 1;
 
 /// Widest window between two locator walks, in seconds.
-pub(crate) const FORK_REWALK_MAX_SECS: u64 = 8;
+const FORK_REWALK_MAX_SECS: u64 = 8;
 
 /// Doublings before the window stops growing.
 const FORK_REWALK_MAX_SHIFT: u32 = 3;
