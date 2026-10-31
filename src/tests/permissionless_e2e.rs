@@ -53,9 +53,14 @@ fn test_multi_validator_permissionless_lifecycle_and_slashing() {
         absentee_reg.stake < 20_000,
         "absentee stake must be slashed"
     );
+    let jailed = bc
+        .state
+        .validators
+        .get(&absentee)
+        .expect("the absentee is still a validator");
     assert!(
-        !bc.state.registry.is_active(&absentee, roles::VALIDATOR),
-        "absentee must be jailed"
+        jailed.jailed && !jailed.active && !jailed.slashed,
+        "absentee must be in a timed jail (BLG-0087, decision B)"
     );
 
     // V1 and v2 should remain active and unslashed

@@ -21,6 +21,217 @@ impl Error for ConsensusError {}
 pub const MAX_FUTURE_BLOCK_TIME_MS: u128 = 15 * 1000;
 pub const MAX_PAST_BLOCK_TIME_MS: u128 = 2 * 60 * 60 * 1000;
 pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
+/// How many leader-election rounds one slot may run (P01-F01, P01-F02).
+///
+/// A slot with no elected leader used to stall forever: the VRF seed had no
+/// retry term, so every retry tick drew the same (empty) result. A round term
+/// in the seed re-rolls the election, and the round threshold multiplier
+/// widens eligibility geometrically, so a slot fills after a bounded number
+/// of rounds even with a minority of the validators online.
+pub const MAX_LEADER_ROUNDS: u64 = 16;
+/// Wall-clock spacing between leader rounds of one slot (P01-F01, P01-F02).
+///
+/// Claiming round `r` costs `r` timeouts, and the price is charged twice:
+/// the block timestamp must sit at least
+/// `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS` after its parent, and the
+/// claim must be affordable by the verifying node's clock
+/// ([`affordable_leader_round`]). Without the floor every validator would jump
+/// straight to the widest round and the retry term would buy nothing but forks;
+/// without the clock the floor is free, because the producer writes both of the
+/// numbers it compares (CWE-807). The floor also removes the "stay 1 s ahead of
+/// the parent" steering channel (P01-F20): a later round can no longer be
+/// claimed on the minimum step.
+pub const ROUND_TIMEOUT_MS: u128 = 3 * 1000;
+
+/// Wall clock, milliseconds since the Unix epoch.
+///
+/// One definition for the round pricing below: the producer and the verifier
+/// must ask the same question the same way, or the round stops being priced at
+/// all (CWE-807).
+pub fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+/// When this node first adopted a block it committed, keyed by hash.
+///
+/// The round price is "how long ago did the parent land", and a header cannot
+/// answer that: production stamps blocks from the slot schedule
+/// (`genesis_time + index * slot_ms`), so a chain that has fallen behind its
+/// schedule carries parent stamps that are minutes older than the moment the
+/// parent actually landed. Pricing straight off the stamp let the gate
+/// saturate - at 49 s of lag every round up to [`MAX_LEADER_ROUNDS`] was
+/// affordable at once (CWE-807) - while capping the stamp instead froze the
+/// retry ladder for genuinely stalled slots.
+///
+/// A node does know when it adopted a block, and that fact cannot be inflated:
+/// a peer can delay delivery, which only makes this node stricter (and
+/// self-heals, because `now` keeps moving while the adoption time does not),
+/// but it can never backdate it.
+///
+/// The book holds the blocks this node committed, up to
+/// `ROUND_PRICE_WINDOW`, and only chain commit writes it, never validation:
+///
+/// - Writing from validation would price a parent and its child milliseconds
+///   apart whenever a single pass walks several blocks (fork recovery through
+///   a peer's candidate chain, replay), so a legitimately produced retry block
+///   inside that chain would be refused and a node stuck on a minority fork
+///   could never adopt the better one.
+/// - The window covers every parent a reorg candidate can legally name: a
+///   candidate forks at most [`MAX_REORG_DEPTH`] below the tip, so the fork
+///   block is always one this node committed. Beyond the window a parent has
+///   no sighting, and a claim on it prices at round 0 - the strict direction,
+///   never a producer's header.
+/// - The first sighting wins, so re-committing a block (a reorg back onto it,
+///   a restore of the same tip) cannot backdate its price, and a reorg inside
+///   the window cannot evict the sighting of a block still on the live chain.
+pub struct RoundPriceBook {
+    seen: std::sync::Mutex<std::collections::VecDeque<(String, u128)>>,
+}
+
+/// How many committed blocks the round price book remembers.
+///
+/// One more than [`MAX_REORG_DEPTH`]: the deepest block a reorg candidate may
+/// fork at is `MAX_REORG_DEPTH` below the tip, and the window has to hold the
+/// tip itself as well.
+const ROUND_PRICE_WINDOW: usize = MAX_REORG_DEPTH + 1;
+
+impl Default for RoundPriceBook {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RoundPriceBook {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            seen: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    /// Record that `block_hash` was committed at `now_ms`.
+    ///
+    /// Called from the chain commit path, and from a restore for the tip a
+    /// node loads from disk. A poisoned lock is treated as "no adoption
+    /// recorded" rather than as a panicking consensus path.
+    pub fn note_tip_block(&self, block_hash: &str, now_ms: u128) {
+        let Ok(mut seen) = self.seen.lock() else {
+            return;
+        };
+        if seen.iter().any(|(hash, _)| hash == block_hash) {
+            // First sighting wins: a re-commit cannot backdate the price.
+            return;
+        }
+        seen.push_back((block_hash.to_string(), now_ms));
+        while seen.len() > ROUND_PRICE_WINDOW {
+            seen.pop_front();
+        }
+    }
+
+    /// When this node first committed `block_hash`, while it is still inside
+    /// the window.
+    ///
+    /// A parent outside the window - deeper history, a block a peer only
+    /// described - has no sighting, and its round price is 0 by
+    /// [`affordable_leader_round`]. That is the strict direction: nothing a
+    /// peer says about a header can price a round.
+    #[must_use]
+    pub fn seen_at(&self, block_hash: &str) -> Option<u128> {
+        let Ok(seen) = self.seen.lock() else {
+            return None;
+        };
+        seen.iter()
+            .find(|(hash, _)| hash == block_hash)
+            .map(|(_, at)| *at)
+    }
+
+    /// The highest round this node may *claim*, from the producer's side.
+    ///
+    /// The same rule the verifier applies, which is the point: propose and
+    /// verify cannot drift apart. Both sides anchor at the parent's stamp, so
+    /// a claim this node finds affordable is affordable to every node that
+    /// holds the parent; this node's sighting only matters for a parent
+    /// stamped ahead of the moment it was seen.
+    #[must_use]
+    pub fn claimable_round_for(
+        &self,
+        parent_hash: &str,
+        parent_timestamp_ms: u128,
+        now_ms: u128,
+    ) -> u64 {
+        affordable_leader_round(parent_timestamp_ms, self.seen_at(parent_hash), now_ms)
+    }
+}
+
+/// The highest leader round a slot can have reached by `now_ms`.
+///
+/// Round `r` is affordable once `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
+/// has elapsed since the parent block was published; the result is capped at
+/// [`MAX_LEADER_ROUNDS`].
+///
+/// This is the *pricing* half of the round rule, and it is deliberately
+/// clock-based. The other half - the floor "`block.timestamp` must be at least
+/// `parent + MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`" - compares two
+/// values the producer writes, so on its own it prices nothing: the timestamp
+/// may sit up to [`MAX_FUTURE_BLOCK_TIME_MS`] ahead of the verifier, which makes
+/// rounds `0..=MAX_FUTURE_BLOCK_TIME_MS / ROUND_TIMEOUT_MS` affordable the
+/// instant the parent lands. Every authority or validator elected in one of
+/// those rounds could then publish a valid block for a slot it does not lead,
+/// and a slot would routinely have several valid competing blocks.
+///
+/// Both sides use this function: the producer clamps the round it claims, the
+/// verifier refuses a claim above it. A verifier whose clock trails a producer
+/// by more than one [`ROUND_TIMEOUT_MS`] refuses that producer's retry-round
+/// block; round 0 - the ordinary case - is unaffected, so a skewed node still
+/// follows the chain, and the next round's leader can produce instead.
+///
+/// # The anchor
+///
+/// Both sides price a claim with this function, so the anchor has to be a
+/// value every node holding the parent can read: the parent's own stamp. A
+/// sighting is node-local - it is this node's boot time for a tip restored
+/// from disk, and its start time for genesis - so pricing from it makes two
+/// honest nodes price the same claim by different numbers. A claim the
+/// producer finds affordable and the verifier does not is not a warning: the
+/// block is refused there for good, the slot runs again on the other side of
+/// the boundary, and the mesh keeps two chains that both look valid at home.
+///
+/// `parent_seen_ms` therefore only ever *lowers* the anchor. A parent stamped
+/// ahead of the moment this node saw it is priced from the sighting, so a
+/// future-dated header cannot buy the rounds between the two, and the ladder
+/// recovers on its own once the moment the header names has passed - returning
+/// 0 outright would let one future-stamped block kill the retry term for that
+/// height. A parent stamped behind the sighting is priced from its stamp: the
+/// stamp is the shared clock, and a stalled slot walks the whole ladder up to
+/// [`MAX_LEADER_ROUNDS`] at the same round on every node.
+///
+/// The book keeps every block this node committed inside
+/// `ROUND_PRICE_WINDOW`. Two commits of the same block are therefore
+/// interchangeable for pricing: the window bounds what a reorg candidate can
+/// re-price, and the stamp makes the value agree across the mesh.
+#[must_use]
+pub fn affordable_leader_round(
+    parent_timestamp_ms: u128,
+    parent_seen_ms: Option<u128>,
+    now_ms: u128,
+) -> u64 {
+    // The earlier of the two: a future stamp cannot buy the rounds between the
+    // stamp and the sighting, and a sighting later than the stamp does not
+    // cost the producer the rounds the shared clock says have passed. With no
+    // sighting at all - genesis, a restarted tip, a parent only synced - the
+    // stamp is the only value on offer, and every node reads the same one.
+    let anchor_ms =
+        parent_seen_ms.map_or(parent_timestamp_ms, |seen| seen.min(parent_timestamp_ms));
+    let spaced = now_ms
+        .saturating_sub(anchor_ms)
+        .saturating_sub(MIN_BLOCK_INTERVAL_MS);
+    u64::try_from(spaced / ROUND_TIMEOUT_MS)
+        .unwrap_or(u64::MAX)
+        .min(MAX_LEADER_ROUNDS)
+}
 /// Consensus block-size ceiling, measured over the **JSON** encoding.
 ///
 /// Distinct from `network::protocol::MAX_BLOCK_SIZE` (1 MiB) on purpose, and
@@ -42,6 +253,16 @@ pub const MIN_BLOCK_INTERVAL_MS: u128 = 1000;
 /// above this one (JSON), or gossip starts admitting blocks every validator
 /// then refuses.
 pub const MAX_BLOCK_SIZE: usize = 1_000_000;
+/// Largest single slashing-evidence entry a block may carry.
+///
+/// Enforced where evidence is admitted (`submit_slashing_evidence`), where it
+/// is inlined into a block, and where the consensus engine hands its pool
+/// over, so an entry that is accepted is always small enough to be included in
+/// some future block. The block builder also reserves this much room for
+/// evidence before it spends the rest of the budget on transactions, so a
+/// saturated mempool cannot starve a queued double-sign proof out of every
+/// block.
+pub const MAX_SLASHING_EVIDENCE_BYTES: usize = 65_536;
 pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 5000;
 pub const MAX_REORG_DEPTH: usize = 100;
 use crate::core::account::AccountState;
@@ -81,11 +302,22 @@ pub trait ConsensusEngine: Send + Sync {
         state: &AccountState,
     ) -> Result<(), ConsensusError>;
 
+    /// Record that `block_hash` is now this node's tip, adopted at `at_ms`.
+    ///
+    /// Engines that price rounds (PoA, PoS) keep the observation; the default
+    /// does nothing, because an engine with no round term has nothing to
+    /// price. Only adoption writes it - the block-apply path and the restore
+    /// path - never validation: a pass that walks several blocks (a peer's
+    /// candidate chain, a replay) must not price a parent and its child
+    /// milliseconds apart, or a legitimate retry block inside that chain would
+    /// be refused.
+    fn note_block_seen(&self, _block_hash: &str, _at_ms: u128) {}
+
     /// The kind of chain this engine produces blocks for.
     ///
     /// `AccountState::execution_domain` is stamped from this at every point
     /// a state is built or replaced, and it is what the identity write gate
-    /// consults. The default is `PoS`, which is mainnet L1's fact and keeps
+    /// consults. The default is `PoS`, which is the Budlum mainnet fact and keeps
     /// the master registry closed: an engine that does not declare itself
     /// does not open a gated write. `PoAEngine` overrides; nothing else may.
     fn domain_kind(&self) -> crate::domain::ConsensusKind {
@@ -96,6 +328,15 @@ pub trait ConsensusEngine: Send + Sync {
         _block: &Block,
         _storage: Option<&crate::storage::db::Storage>,
     ) -> Result<(), ConsensusError> {
+        Ok(())
+    }
+
+    /// Look at a block received from the network, before the chain accepts or
+    /// rejects it, for proof of producer misbehaviour. It must not change
+    /// chain state and must not write checkpoints: the block may never
+    /// commit. The default is a no-op; `PoSEngine` turns a signed rival block
+    /// into double-sign evidence (BLG-0011).
+    fn observe_received_block(&self, _block: &Block) -> Result<(), ConsensusError> {
         Ok(())
     }
 
@@ -110,6 +351,22 @@ pub trait ConsensusEngine: Send + Sync {
     fn record_block_with_chain(
         &self,
         _block: &Block,
+        _chain: &[Block],
+        _storage: Option<&crate::storage::db::Storage>,
+    ) {
+    }
+
+    /// The chain reports the height finalised by quorum certificates
+    /// (P01-F04).
+    ///
+    /// A checkpoint written at local commit time is not a finality claim: two
+    /// nodes commit different blocks at an epoch boundary and then reject each
+    /// other's chains forever. Checkpoints are therefore held pending until
+    /// the height they name is finalised, and this method is how the chain
+    /// hands that finality to the engine. The default is a no-op.
+    fn note_finalized_height(
+        &self,
+        _height: u64,
         _chain: &[Block],
         _storage: Option<&crate::storage::db::Storage>,
     ) {
@@ -200,6 +457,9 @@ pub trait ConsensusEngine: Send + Sync {
         }
         chains.iter().max_by_key(|c| c.len()).copied()
     }
+    /// Test-only depth probe (P01-F21: `try_reorg` enforces the depth limit
+    /// on the live path; nothing production-side calls this).
+    #[cfg(test)]
     fn can_reorg(&self, current_chain: &[Block], new_chain: &[Block]) -> bool {
         if new_chain.len() <= current_chain.len() {
             return false;
@@ -249,10 +509,117 @@ pub trait ConsensusEngine: Send + Sync {
     fn is_better_chain(&self, current: &[Block], candidate: &[Block]) -> bool {
         self.fork_choice_score(candidate) > self.fork_choice_score(current)
     }
+
+    /// Whether `is_better_chain` can never prefer a candidate that is strictly
+    /// shorter than the current chain.
+    ///
+    /// `try_reorg_suffix` uses this to answer a peer batch that cannot win
+    /// before it materializes the local prefix (CWE-400). The default is the
+    /// length-based rule below, where a shorter chain scores strictly less.
+    /// Engines that score work or checkpoints - where a shorter chain can
+    /// legitimately be the better one - must report `false`, or the shortcut
+    /// would refuse a heavier fork.
+    fn shorter_chain_can_never_win(&self) -> bool {
+        true
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A claim is priced from the parent's stamp, which every node reads the
+    /// same way, and the ladder still walks in real time.
+    ///
+    /// Pricing from when this node happened to commit the parent put the same
+    /// claim on different sides of the boundary at different nodes - a boot
+    /// time, a restart or a sync of a few seconds is already more than a
+    /// round - and a refused claim is a fork the refusing node keeps, because
+    /// the block is refused for good and the slot runs again on the other
+    /// side. The devnet mesh split into two chains at height 1 exactly so, on
+    /// the first block, where the parent is genesis and every node had booted
+    /// a few seconds apart. The stamp is the shared value, so both sides of
+    /// the rule price the same claim identically, and a future-dated header
+    /// still cannot buy the rounds between its stamp and the sighting.
+    #[test]
+    fn a_claim_is_priced_by_the_shared_stamp_and_the_ladder_walks_in_real_time() {
+        let now = 1_700_000_000_000u128;
+        let stale_stamp = now - 600_000; // ten minutes behind the schedule
+
+        // One parent, three sightings: the node that committed it at once,
+        // the node that restarted and loaded it, and the node that has no
+        // sighting at all. Same price, because the anchor is the stamp.
+        assert_eq!(
+            affordable_leader_round(stale_stamp, Some(stale_stamp), now),
+            MAX_LEADER_ROUNDS
+        );
+        assert_eq!(
+            affordable_leader_round(stale_stamp, Some(now - 10_000), now),
+            MAX_LEADER_ROUNDS
+        );
+        assert_eq!(
+            affordable_leader_round(stale_stamp, None, now),
+            MAX_LEADER_ROUNDS
+        );
+
+        // One round per `ROUND_TIMEOUT_MS`, as the constant says.
+        assert_eq!(
+            affordable_leader_round(stale_stamp, Some(stale_stamp), stale_stamp + 7_500),
+            2
+        );
+
+        // A future-dated parent is priced from the moment this node saw it,
+        // and recovers by itself once the moment it names has passed: a stamp
+        // can lower the anchor, never raise it.
+        assert_eq!(
+            affordable_leader_round(now + 60_000, Some(now - 1_000), now),
+            0
+        );
+        assert_eq!(affordable_leader_round(now + 60_000, None, now), 0);
+        assert_eq!(
+            affordable_leader_round(now + 60_000, Some(now - 1_000), now + 109_000),
+            MAX_LEADER_ROUNDS
+        );
+    }
+
+    /// The book holds the blocks this node committed, inside the reorg
+    /// window, and nothing a peer can move.
+    ///
+    /// Written only by commit: a candidate chain replayed through validation
+    /// cannot write an entry, the first sighting of a block wins so a re-commit
+    /// cannot backdate it, and every block a reorg candidate may fork at keeps
+    /// its sighting because the window is as deep as `MAX_REORG_DEPTH`.
+    #[test]
+    fn the_round_price_book_holds_the_committed_reorg_window() {
+        let book = RoundPriceBook::new();
+        assert_eq!(book.seen_at("aa"), None);
+
+        book.note_tip_block("aa", 1_000);
+        assert_eq!(book.seen_at("aa"), Some(1_000));
+        assert_eq!(book.seen_at("bb"), None, "an unseen block has no sighting");
+
+        // A committed ancestor keeps its sighting when the tip moves past it:
+        // that is the fork block of every reorg candidate.
+        book.note_tip_block("bb", 5_000);
+        assert_eq!(book.seen_at("aa"), Some(1_000));
+        assert_eq!(book.seen_at("bb"), Some(5_000));
+
+        // Re-committing a block does not backdate its first sighting.
+        book.note_tip_block("aa", 9_000);
+        assert_eq!(book.seen_at("aa"), Some(1_000));
+
+        // The window is bounded: only the last `ROUND_PRICE_WINDOW` blocks are
+        // remembered, so the book cannot be grown without limit.
+        for height in 0..(ROUND_PRICE_WINDOW as u64 + 5) {
+            book.note_tip_block(&format!("h{height}"), 10_000 + u128::from(height));
+        }
+        assert_eq!(book.seen_at("aa"), None, "evicted from the window");
+        assert_eq!(
+            book.seen_at(&format!("h{}", ROUND_PRICE_WINDOW as u64 + 4)),
+            Some(10_000 + u128::from(ROUND_PRICE_WINDOW as u64) + 4)
+        );
+        assert_eq!(ROUND_PRICE_WINDOW, MAX_REORG_DEPTH + 1);
+    }
+
     #[test]
     fn test_constants() {
         assert_eq!(MAX_FUTURE_BLOCK_TIME_MS, 15_000);
@@ -310,6 +677,36 @@ mod tests {
             deep_new.push(block(h, &format!("{prev}-fork")));
         }
         assert!(!engine.can_reorg(&deep_current, &deep_new));
+    }
+
+    /// The suffix reorg shortcut is only applied where it is sound.
+    ///
+    /// `try_reorg_suffix` answers a batch that cannot win before it
+    /// materializes the local prefix, and it may only do that on an engine
+    /// where a strictly shorter chain can never win. Length-based PoA
+    /// qualifies; PoW (accumulated work) and PoS (checkpoint score) do not,
+    /// because a shorter chain can be heavier or carry a better checkpoint.
+    /// An engine that flips this without updating the shortcut would refuse
+    /// honest reorgs, and flipping the shortcut without the engine would let
+    /// a peer force the copy. Both directions are pinned here.
+    #[test]
+    fn only_length_based_engines_may_reject_a_shorter_candidate() {
+        use crate::consensus::poa::{PoAConfig, PoAEngine};
+        use crate::consensus::pos::{PoSConfig, PoSEngine};
+        use crate::consensus::pow::PoWEngine;
+
+        assert!(
+            PoAEngine::new(PoAConfig::default(), None).shorter_chain_can_never_win(),
+            "PoA scores chain length"
+        );
+        assert!(
+            !PoWEngine::new(0).shorter_chain_can_never_win(),
+            "accumulated work lets a shorter chain win; the shortcut must not apply"
+        );
+        assert!(
+            !PoSEngine::new(PoSConfig::default(), None).shorter_chain_can_never_win(),
+            "a checkpoint score lets a shorter chain win; the shortcut must not apply"
+        );
     }
 
     /// A longer candidate that shares no block with the current slice is a

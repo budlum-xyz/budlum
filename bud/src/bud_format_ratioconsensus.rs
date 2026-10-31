@@ -66,7 +66,7 @@ impl RatioConsensus {
 
     /// The candidate pool: only the experts of the GIVEN format (multiple
     /// pipeline candidates). The ratios carry EVIDENCE
-    /// (RealBench/measure_ratios.py seed=7 - K19). The content class BONUS
+    /// (RealBench/measure_ratios seed=7 - K19). The content class BONUS
     /// decides between the pipelines of that format (K84).
     pub fn candidate_pool(format: FormatCodec, class: ContentClass) -> Vec<RatioCandidateAgent> {
         let mut pool = match format {
@@ -229,6 +229,11 @@ impl RatioConsensus {
         if bytes.len() != pos + 32 {
             return None;
         }
+        // The vote count must give the quorum `finalize` computes, and the
+        // ratio must be a real number; a record that fails this is forged.
+        if votes == 0 || quorum != votes - (votes - 1) / 3 || !final_ratio.is_finite() {
+            return None;
+        }
         let rec = RatioConsensus {
             final_pipe: final_pipe.to_string(),
             final_ratio,
@@ -301,6 +306,17 @@ mod tests {
         let mut bad = blob.clone();
         *bad.last_mut().unwrap() ^= 0x01;
         assert!(RatioConsensus::from_blob(&bad).is_none());
+    }
+
+    #[test]
+    fn from_blob_refuses_a_vote_count_below_the_quorum() {
+        let pool = RatioConsensus::candidate_pool(FormatCodec::Json, ContentClass::Structured);
+        let mut rec = RatioConsensus::finalize(pool, 7, 1).expect("consensus");
+        rec.votes = 1;
+        assert!(RatioConsensus::from_blob(&rec.to_blob()).is_none());
+        rec.votes = 7;
+        rec.final_ratio = f64::NAN;
+        assert!(RatioConsensus::from_blob(&rec.to_blob()).is_none());
     }
 
     #[test]

@@ -8,11 +8,11 @@
 # caught CVE-2026-32314 / GHSA-vxx9-2994-q338 - a remotely triggerable panic
 # (DoS) in yamux that requires NO authentication, CVSS 8.7. On the same tree
 # `cargo audit` said "0 vulnerabilities found", because this record has no
-# RustSec counterpart (rustsec/advisory-db/crates/yamux -> 404). In an L1 node's
+# RustSec counterpart (rustsec/advisory-db/crates/yamux -> 404). In a chain node's
 # P2P multiplexer this is a class cargo-audit structurally cannot see.
 #
 # Gate policy: a finding = FAIL (NO `continue-on-error`). Exceptions live in
-# .quality/osv-scanner.toml and budzero/osv-scanner.toml, each written with
+# osv-scanner.toml (repository root) and budzero/osv-scanner.toml, each written with
 # evidence of why it is UNREACHABLE in the code (VEX logic). A reachable finding
 # is not ignored, the dependency is upgraded.
 #
@@ -77,8 +77,15 @@ jobs:
           version = "0.12.1"
           source = "registry+https://github.com/rust-lang/crates.io-index"
           CANARY
-          if osv-scanner scan source --lockfile=/tmp/osv-canary/Cargo.lock; then
+          if osv-scanner scan source --lockfile=/tmp/osv-canary/Cargo.lock > /tmp/osv-canary/out.txt 2>&1; then
             echo "ERROR: OSV failed to catch the canary (yamux 0.12.1 / GHSA-vxx9-2994-q338) -> the scan is untrustworthy (vacuous gate)!"
+            exit 1
+          fi
+          # A scanner failure (network, database) also exits non-zero. Only a
+          # report that names the known advisory counts as a catch.
+          if ! grep -q "GHSA-vxx9-2994-q338" /tmp/osv-canary/out.txt; then
+            echo "ERROR: OSV failed for a reason other than the canary finding."
+            tail -30 /tmp/osv-canary/out.txt
             exit 1
           fi
           echo "Canary caught -> the OSV alarm works."
@@ -100,7 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           osv-scanner scan source \
-            --config=.quality/osv-scanner.toml \
+            --config=osv-scanner.toml \
             --lockfile=Cargo.lock \
             --lockfile=budzero/Cargo.lock \
             --lockfile=fuzz/Cargo.lock \

@@ -11,7 +11,7 @@
 //! anything but 1 into a hard violation, independent of proof validity.
 //!
 //! The nullifier flag is reported but *not* judged here: whether a derived
-//! nullifier was already spent is the L1 note registry's question (S1), which
+//! nullifier was already spent is the chain note registry's question (S1), which
 //! is a consensus-surface decision, not a shape check. Splitting the two keeps
 //! this module pure - no state access, no set lookup - so every node derives
 //! the same verdict from the same events.
@@ -54,7 +54,7 @@ pub enum TransferVerdict {
     /// whether the STARK proof itself verified.
     ConservationViolation { conservation: u64 },
     /// Conservation holds. The nullifier flag travels with the verdict; its
-    /// spent-status is the L1 registry's question (S1).
+    /// spent-status is the chain registry's question (S1).
     ConservationHolds { nullifier: u64 },
 }
 

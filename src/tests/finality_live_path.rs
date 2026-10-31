@@ -28,8 +28,6 @@
 //! - Rate-limited invalid-signature slashing:
 //!   `repeated_invalid_signatures_trigger_slash` covers that.
 
-#![allow(clippy::needless_range_loop)]
-
 use crate::chain::finality::{
     pop_signing_message, sign_bls, sign_bls_pop, FinalityAggregator, Prevote, ValidatorEntry,
     ValidatorSetSnapshot,
@@ -79,11 +77,13 @@ fn make_snapshot(n: usize, epoch: u64, stake_each: u64) -> (ValidatorSetSnapshot
 
 fn sign_prevote(sk: &Scalar, epoch: u64, height: u64, hash: &str, voter: Address) -> Prevote {
     let mut v = Prevote {
+        chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
         epoch,
         checkpoint_height: height,
         checkpoint_hash: hash.to_string(),
         voter_id: voter,
         sig_bls: vec![],
+        auth_sig: Vec::new(),
     };
     v.sig_bls = sign_bls(sk, &v.signing_message());
     v
@@ -101,8 +101,8 @@ fn live_path_epoch_change_isolates_votes() {
     let (snap1, sks1) = make_snapshot(4, 1, 1000);
     let mut agg1 = FinalityAggregator::new(1, 10, "H".into(), snap1.clone());
     // 3 of 4 prevote, so the epoch 1 window takes 3 votes.
-    for i in 0..3 {
-        let pv = sign_prevote(&sks1[i], 1, 10, "H", snap1.validators[i].address);
+    for (sk, v) in sks1.iter().zip(snap1.validators.iter()).take(3) {
+        let pv = sign_prevote(sk, 1, 10, "H", v.address);
         agg1.add_prevote(pv).expect("epoch 1 prevote");
     }
     assert_eq!(
@@ -120,7 +120,16 @@ fn live_path_epoch_change_isolates_votes() {
     agg2.add_prevote(pv2).expect("epoch 2 prevote");
     assert_eq!(agg2.prevotes.len(), 1);
     // The epoch 1 aggregator is still in its own window, unaffected.
-    assert_eq!(agg1.prevotes.len(), 3, "epoch 1 penceresi kirletilmemeli");
+    assert_eq!(agg1.prevotes.len(), 3, "the epoch 1 window must stay clean");
+
+    // A stale vote: a validly signed epoch 1 vote sent to the epoch 2
+    // aggregator is refused and does not enter its window.
+    let stale = sign_prevote(&sks1[3], 1, 10, "H", snap1.validators[3].address);
+    let error = agg2
+        .add_prevote(stale)
+        .expect_err("an old-epoch vote must not enter the new window");
+    assert!(error.contains("epoch mismatch"), "{error}");
+    assert_eq!(agg2.prevotes.len(), 1, "the new window is unchanged");
 }
 
 // 2.2 - A late prevote (a height mismatch)
@@ -138,18 +147,14 @@ fn live_path_prevote_with_wrong_height_rejected() {
     agg.add_prevote(pv_ok)
         .expect("the right height is accepted");
 
-    // The wrong height=11. Because the signature was made over a different
-    // message, it DOES NOT MATCH what the aggregator expects, so it is refused.
+    // The wrong height=11 is refused by the height check.
     let pv_bad = sign_prevote(&sks[0], 1, 11, "H", snap.validators[0].address);
     let err = agg
         .add_prevote(pv_bad)
         .expect_err("a signature at the wrong height has to be invalid");
-    let err_lower = err.to_lowercase();
     assert!(
-        err_lower.contains("invalid")
-            || err_lower.contains("signature")
-            || err_lower.contains("mismatch")
-            || err_lower.contains("height")
+        err.contains("height mismatch"),
+        "the wrong height must be refused by the height check: {err}"
     );
     // Only the first vote reached the aggregator.
     assert_eq!(agg.prevotes.len(), 1);
@@ -179,7 +184,13 @@ fn live_path_double_sign_window_is_tight() {
 
     // 3rd vote (SAME voter, DIFFERENT hash) - hash mismatch + evidence.
     let pv_conflict = sign_prevote(&sks[0], 1, 10, "H2", snap.validators[0].address);
-    let _ = agg.add_prevote(pv_conflict); // refused, but it produces evidence
+    let conflict_err = agg
+        .add_prevote(pv_conflict)
+        .expect_err("a conflicting hash from the same voter has to be refused");
+    assert!(
+        conflict_err.contains("hash mismatch"),
+        "the conflicting vote must be refused for its hash: {conflict_err}"
+    );
     assert_eq!(agg.prevotes.len(), 1, "only the first vote may count");
     assert_eq!(
         agg.detected_equivocations.len(),
@@ -221,4 +232,75 @@ fn live_path_snapshot_hash_distinguishes_sets() {
     // The SAME set deterministically produces the same hash.
     let hash_a2 = ValidatorSetSnapshot::compute_hash(&snap_a.validators);
     assert_eq!(hash_a, hash_a2, "compute_hash has to be deterministic");
+}
+
+// 2.5 - The node's prevote epoch must be the aggregator's epoch (P10-F01)
+
+/// Regression for the finality-dead bug: node.rs derived the periodic
+/// prevote epoch as `checkpoint_height / checkpoint_interval` while the
+/// receiving aggregator (`Blockchain::start_prevote_task`) derives it as
+/// `checkpoint_height / epoch_len`. On mainnet (interval 10, epoch_len 100)
+/// every honest prevote was refused with "Prevote epoch mismatch", so the
+/// prevote quorum was never reached and native BLS finality never advanced
+/// on any network where the two divisors differ.
+#[test]
+fn node_prevote_epoch_reaches_the_aggregator() {
+    use crate::core::chain_config::{
+        epoch_len_for_chain_id, finality_checkpoint_interval_for_chain_id, Network,
+    };
+
+    for network in [Network::Mainnet, Network::Testnet, Network::Devnet] {
+        let chain_id = network.chain_id().value();
+        let interval = finality_checkpoint_interval_for_chain_id(chain_id);
+        let epoch_len = epoch_len_for_chain_id(chain_id);
+        assert!(interval > 0 && epoch_len > 0, "{network:?} divisors");
+
+        // A checkpoint height where the old interval divisor and the
+        // epoch-len divisor disagree, so the mismatch path is exercised.
+        let height = interval * epoch_len;
+        let checkpoint_height = (height / interval) * interval;
+        assert!(checkpoint_height > 0);
+        assert_ne!(
+            checkpoint_height / interval,
+            checkpoint_height / epoch_len,
+            "{network:?}: this height must distinguish the two divisors"
+        );
+
+        // The node's computation after the fix (node.rs periodic prevote).
+        let node_epoch = checkpoint_height / epoch_len;
+
+        // Drive a real prevote through a real aggregator built the way
+        // start_prevote_task builds it.
+        let (snap, sks) = make_snapshot(1, node_epoch, 1000);
+        let mut agg = FinalityAggregator::new(
+            node_epoch,
+            checkpoint_height,
+            "cp_hash".into(),
+            snap.clone(),
+        );
+        let pv = sign_prevote(
+            &sks[0],
+            node_epoch,
+            checkpoint_height,
+            "cp_hash",
+            snap.validators[0].address,
+        );
+        agg.add_prevote(pv).unwrap_or_else(|e| {
+            panic!("{network:?}: a prevote carrying the node's own epoch must reach the aggregator: {e}")
+        });
+
+        // The old buggy epoch must still be refused: proof that this height
+        // really exercises the mismatch path.
+        let stale = sign_prevote(
+            &sks[0],
+            checkpoint_height / interval,
+            checkpoint_height,
+            "cp_hash",
+            snap.validators[0].address,
+        );
+        let err = agg
+            .add_prevote(stale)
+            .expect_err("the old interval-based epoch must be refused");
+        assert!(err.contains("epoch mismatch"), "{err}");
+    }
 }

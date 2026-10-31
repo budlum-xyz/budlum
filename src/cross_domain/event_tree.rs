@@ -9,8 +9,6 @@ pub enum DomainEventKind {
     BridgeLocked,
     BridgeMinted,
     BridgeBurned,
-    BridgeUnlocked,
-    MessageEmitted,
     Custom(Vec<u8>),
 }
 
@@ -20,8 +18,6 @@ impl DomainEventKind {
             DomainEventKind::BridgeLocked => b"bridge-locked".to_vec(),
             DomainEventKind::BridgeMinted => b"bridge-minted".to_vec(),
             DomainEventKind::BridgeBurned => b"bridge-burned".to_vec(),
-            DomainEventKind::BridgeUnlocked => b"bridge-unlocked".to_vec(),
-            DomainEventKind::MessageEmitted => b"message-emitted".to_vec(),
             DomainEventKind::Custom(bytes) => {
                 let mut out = b"custom:".to_vec();
                 out.extend_from_slice(bytes);
@@ -126,7 +122,8 @@ impl MerkleProof {
             &self.siblings,
             crate::settlement::commitment_tree::merkle_node_hash,
             crate::settlement::commitment_tree::merkle_odd_promote_hash,
-        ) == expected_root
+        )
+        .is_some_and(|computed| computed == expected_root)
     }
 }
 

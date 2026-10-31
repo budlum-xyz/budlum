@@ -67,7 +67,7 @@ pub struct GlobalBlockHeader {
     #[serde(default)]
     pub ai_root: Option<Hash32>,
 
-    /// Identity master-registry root (KIMLIK-MIMARI Q2: reuse the roots,
+    /// Identity master-registry root (identity architecture note Q2: reuse the roots,
     /// do not mint an anchor mechanism).
     ///
     /// `None`: the identity registry has no state, so it claims no anchor -

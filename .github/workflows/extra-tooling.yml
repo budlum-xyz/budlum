@@ -41,7 +41,7 @@ jobs:
   # GATE: any cargo audit finding = FAIL.
   # cargo-auditable embeds the dependency list inside the binary, so
   # a distributed binary can be audited without the source tree
-  # (`cargo audit bin`). For an L1, being able to prove which crate versions
+  # (`cargo audit bin`). For a chain, being able to prove which crate versions
   # the operator's binary was built from is a real need.
   auditable-audit:
     name: Auditable + Audit (binary SBOM + CVE)
@@ -54,7 +54,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - name: Install protoc
@@ -134,7 +134,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -268,7 +268,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - name: Install protoc
@@ -339,7 +339,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -424,7 +424,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
 

@@ -55,6 +55,10 @@ impl TxClass {
 /// Fee in dollars for a transaction of `amount_usd`: base plus the cut.
 #[must_use]
 pub fn transaction_fee_usd(class: TxClass, amount_usd: f64) -> f64 {
+    // A negative or NaN amount is priced as zero: it must never lower the fee
+    // below the base or turn it into a refund. `f64::max` returns the other
+    // operand when one side is NaN.
+    let amount_usd = amount_usd.max(0.0);
     class.base_usd() + amount_usd * f64::from(class.rate_bps()) / BPS
 }
 
@@ -271,14 +275,18 @@ impl PromptWallet {
 
     /// Charge `tokens` at a measured serving rate, in dollars per million
     /// tokens, and debit the wallet. Returns the charged amount, or the
-    /// shortfall when the balance cannot cover the prompt.
+    /// shortfall when the balance cannot cover the prompt. A negative or
+    /// non-finite rate, or a balance that is not a non-negative number, is
+    /// refused and debits nothing: a charge can never credit the wallet.
     pub fn charge(
         &mut self,
         tokens: u64,
         dollars_per_million_tokens: f64,
     ) -> Result<f64, InsufficientBalance> {
         let fee = tokens as f64 / 1_000_000.0 * dollars_per_million_tokens;
-        if fee > self.balance_usd {
+        // Comparisons with NaN are false, so each check must be a positive one.
+        let valid = fee.is_finite() && fee >= 0.0 && self.balance_usd >= 0.0;
+        if !valid || fee > self.balance_usd {
             return Err(InsufficientBalance {
                 needed_usd: fee,
                 balance_usd: self.balance_usd,
@@ -533,6 +541,30 @@ mod fee_scenario_tests {
             approx(wallet.balance_usd, 0.001),
             "a failed charge debits nothing"
         );
+    }
+
+    #[test]
+    fn ai_charge_refuses_negative_and_nan_rates() {
+        for rate in [-38.2, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut wallet = PromptWallet::new(1.0);
+            assert!(wallet.charge(1_000, rate).is_err(), "rate {rate}");
+            assert!(
+                approx(wallet.balance_usd, 1.0),
+                "rate {rate} changed the balance"
+            );
+        }
+        let mut broke = PromptWallet::new(-1.0);
+        assert!(broke.charge(0, 38.2).is_err());
+        let mut nan = PromptWallet::new(f64::NAN);
+        assert!(nan.charge(0, 38.2).is_err());
+    }
+
+    #[test]
+    fn a_negative_or_nan_amount_never_lowers_the_fee_below_the_base() {
+        for amount in [-1_000.0, f64::NAN, f64::NEG_INFINITY] {
+            let fee = transaction_fee_usd(TxClass::Bridge, amount);
+            assert!(approx(fee, 0.01), "amount {amount} gave {fee}");
+        }
     }
 
     #[test]

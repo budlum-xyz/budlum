@@ -381,7 +381,7 @@ impl ReedSolomon {
         }
 
         let work = len.saturating_mul(self.m);
-        let parity = if work >= PARITY_ROW_WINDOW && self.m > 1 {
+        let parity = if !cfg!(miri) && work >= PARITY_ROW_WINDOW && self.m > 1 {
             use rayon::prelude::*;
             (0..self.m)
                 .into_par_iter()
@@ -652,9 +652,21 @@ impl EncodedObject {
                 s
             })
             .collect();
+        // Column commitments over every PARITY shard, in parity order. This is
+        // the only place in the tree where the encoded parity bytes and the
+        // manifest are in the same hand, which is why the roots are built here
+        // rather than reconstructed later: a commitment that cannot be built
+        // from the bytes it claims to describe is not a commitment.
+        let parity_roots: Vec<[u8; 32]> = self
+            .shards
+            .iter()
+            .skip(usize::try_from(self.scheme.k).unwrap_or(usize::MAX))
+            .map(|bytes| crate::storage::column_commitment::column_root(bytes))
+            .collect();
         ContentManifest::from_shards(shards)?
             .with_erasure(self.scheme)?
-            .with_content_size(self.total_size)
+            .with_content_size(self.total_size)?
+            .with_column_roots(parity_roots)
     }
 }
 
@@ -713,6 +725,9 @@ pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject
     })
 }
 
+/// Largest body [`verify_object_encoding`] re-encodes.
+const MAX_VERIFY_ENCODING_BYTES: usize = 64 * 1024 * 1024;
+
 /// Re-encode `data` under the scheme the claimed manifest declares and refuse
 /// if the result is a different object.
 ///
@@ -730,6 +745,34 @@ pub fn encode_object(data: &[u8], scheme: ErasureScheme) -> Result<EncodedObject
 /// Scheme/empty-object failures from [`encode_object`], or a mismatch when the
 /// claimed id / shard list is not the one re-encoding produces.
 pub fn verify_object_encoding(data: &[u8], claimed: &ContentManifest) -> Result<(), ErasureError> {
+    // The re-encode allocates stripe times n bytes, so the work follows the
+    // body size. The cap sits here, and not only in the callers, so a future
+    // caller cannot skip it. The length check is free and refuses a body that
+    // is not the object the claim describes before the coder runs.
+    if data.len() > MAX_VERIFY_ENCODING_BYTES {
+        return Err(ErasureError::ShardMismatch(format!(
+            "body of {} bytes is over the verify cap {MAX_VERIFY_ENCODING_BYTES}",
+            data.len()
+        )));
+    }
+    // The coder cuts the body into `k` stripes and emits `n` shards, so total
+    // allocation and Reed-Solomon work scale with `ceil(len / k) * n`. Reject
+    // caller-chosen expansion beyond honest erasure schemes before allocating.
+    const MAX_ENCODE_EXPANSION: u32 = 8;
+    let scheme = claimed.erasure;
+    if scheme.k == 0 || scheme.n > scheme.k.saturating_mul(MAX_ENCODE_EXPANSION) {
+        return Err(ErasureError::InvalidScheme(format!(
+            "claimed scheme (k={}, n={}) expands the body by more than {MAX_ENCODE_EXPANSION}x",
+            scheme.k, scheme.n
+        )));
+    }
+    if u64::try_from(data.len()).ok() != Some(claimed.content_size()) {
+        return Err(ErasureError::ShardMismatch(format!(
+            "body has {} bytes but the claim says {}",
+            data.len(),
+            claimed.content_size()
+        )));
+    }
     // Structural lies are cheaper to catch first; the coder is the expensive
     // half and should not run on a manifest that already fails the free checks.
     claimed
@@ -793,75 +836,86 @@ pub fn reconstruct_object(
         )));
     }
 
-    // Verify every reconstructed shard against the manifest, and try another
-    // k-subset when more than k shards survive: taking only the first k
-    // survivors means a single corrupted low-index survivor makes a
-    // recoverable object look unrecoverable (security review, MEDIUM).
-    // The integrity check is the same one the old code ran after
-    // the single attempt; now a failure with spare survivors retries with a
-    // different subset instead of giving up.
-    let verify_all = |all: &[Vec<u8>]| -> Result<(), ErasureError> {
-        for (i, bytes) in all.iter().enumerate() {
-            let idx = i as u32;
-            let Some(reference) = manifest.shards.iter().find(|s| s.index == idx) else {
-                return Err(ErasureError::ShardMismatch(format!(
-                    "manifest has no shard with index {idx}"
-                )));
-            };
-            if reference.shard_id != crate::storage::ContentId::of(bytes) {
-                return Err(ErasureError::IntegrityFailure { index: idx });
-            }
+    // Check every survivor against the manifest before decoding. A survivor
+    // whose bytes do not hash to the manifest's ContentId for its index is
+    // corrupt and is dropped, however many there are, so recovery works
+    // whenever k clean shards remain. One decode follows, not one per
+    // survivor. If fewer than k clean shards remain while k or more
+    // survived, a survivor is corrupt: that is reported as an integrity
+    // failure rather than as lost shards.
+    let mut clean: Vec<Option<Vec<u8>>> = Vec::with_capacity(present.len());
+    let mut first_corrupt: Option<u32> = None;
+    let mut survivors = 0usize;
+    let mut clean_count = 0usize;
+    for (i, shard) in present.iter().enumerate() {
+        let idx = i as u32;
+        let Some(bytes) = shard else {
+            clean.push(None);
+            continue;
+        };
+        survivors += 1;
+        let genuine = manifest
+            .shards
+            .iter()
+            .find(|s| s.index == idx)
+            .is_some_and(|s| s.shard_id == crate::storage::ContentId::of(bytes));
+        if genuine {
+            clean_count += 1;
+            clean.push(Some(bytes.clone()));
+        } else {
+            first_corrupt.get_or_insert(idx);
+            clean.push(None);
         }
-        Ok(())
-    };
-
-    let live: Vec<usize> = present
-        .iter()
-        .enumerate()
-        .filter_map(|(i, shard)| shard.as_ref().map(|_| i))
-        .collect();
-
-    // Candidate attempt closures: the first try uses the whole live set; if
-    // reconstruction with all survivors fails or verifies wrong and there
-    // are spare survivors, drop one survivor at a time and retry.
-    let attempt = |masked: &mut Vec<Option<Vec<u8>>>| -> Result<Vec<u8>, ErasureError> {
-        let all = rs.reconstruct(masked)?;
-        verify_all(&all)?;
-        let k = rs.data_shards();
-        let mut out = Vec::with_capacity(k * all[0].len());
-        for shard in all.iter().take(k) {
-            out.extend_from_slice(shard);
-        }
-        out.truncate(manifest.content_size() as usize);
-        Ok(out)
-    };
-
-    let mut masked = present.to_vec();
-    match attempt(&mut masked) {
-        Ok(out) => return Ok(out),
-        Err(_) if live.len() > rs.data_shards() => {
-            // Spare survivors exist: retry, dropping each live shard in
-            // turn so a corrupted low-index survivor no longer blocks a
-            // recoverable object.
-            for &drop in &live {
-                let mut trial = present.to_vec();
-                trial[drop] = None;
-                if let Ok(out) = attempt(&mut trial) {
-                    return Ok(out);
-                }
-            }
-        }
-        Err(e) => return Err(e),
+    }
+    let k = rs.data_shards();
+    let corruption_blocks = clean_count < k && survivors >= k;
+    if let Some(index) = first_corrupt.filter(|_| corruption_blocks) {
+        return Err(ErasureError::IntegrityFailure { index });
     }
 
-    let all = rs.reconstruct(present)?;
-    verify_all(&all)?;
-    let k = rs.data_shards();
-    let mut out = Vec::with_capacity(k * all[0].len());
+    // The decoded shards are checked again: a clean survivor set must still
+    // decode to the manifest's shards.
+    let all = rs.reconstruct(&clean)?;
+    for (i, bytes) in all.iter().enumerate() {
+        let idx = i as u32;
+        let Some(reference) = manifest.shards.iter().find(|s| s.index == idx) else {
+            return Err(ErasureError::ShardMismatch(format!(
+                "manifest has no shard with index {idx}"
+            )));
+        };
+        if reference.shard_id != crate::storage::ContentId::of(bytes) {
+            return Err(ErasureError::IntegrityFailure { index: idx });
+        }
+    }
+    object_from_data_shards(manifest, &all, k)
+}
+
+/// Join the `k` data shards and trim the stripe padding.
+///
+/// `encode_object` cuts the object into `k` stripes of `ceil(len / k)` bytes,
+/// so the object length is above `(k - 1) * stripe` and at most `k * stripe`.
+/// A `content_size` outside that range does not describe these shards.
+/// `validate_untrusted` only bounds it by all shards including parity, so it
+/// is checked here, before the bytes are handed back.
+fn object_from_data_shards(
+    manifest: &ContentManifest,
+    all: &[Vec<u8>],
+    k: usize,
+) -> Result<Vec<u8>, ErasureError> {
+    let stripe = all.first().map_or(0, Vec::len);
+    let region = (k as u64).saturating_mul(stripe as u64);
+    let floor = (k as u64).saturating_sub(1).saturating_mul(stripe as u64);
+    let size = manifest.content_size();
+    if size > region || size <= floor {
+        return Err(ErasureError::ShardMismatch(format!(
+            "content_size {size} does not fit {k} data shards of {stripe} bytes"
+        )));
+    }
+    let mut out = Vec::with_capacity(region as usize);
     for shard in all.iter().take(k) {
         out.extend_from_slice(shard);
     }
-    out.truncate(manifest.content_size() as usize);
+    out.truncate(size as usize);
     Ok(out)
 }
 
@@ -1450,6 +1504,18 @@ mod tests {
     }
 
     #[test]
+    fn verify_object_encoding_refuses_a_body_of_the_wrong_size_before_encoding() {
+        let data: Vec<u8> = (0u8..=200).cycle().take(900).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let manifest = encode_object(&data, scheme).unwrap().to_manifest().unwrap();
+        let err = verify_object_encoding(&data[..899], &manifest).expect_err("short body");
+        assert!(matches!(err, ErasureError::ShardMismatch(m) if m.contains("claim says")));
+        let huge = vec![0u8; MAX_VERIFY_ENCODING_BYTES + 1];
+        let err = verify_object_encoding(&huge, &manifest).expect_err("over cap");
+        assert!(matches!(err, ErasureError::ShardMismatch(m) if m.contains("verify cap")));
+    }
+
+    #[test]
     fn verify_object_encoding_refuses_a_swapped_payload() {
         let data: Vec<u8> = (0u8..=200).cycle().take(900).collect();
         let scheme = ErasureScheme { k: 4, n: 6 };
@@ -1494,6 +1560,58 @@ mod tests {
         assert!(matches!(
             rs.parity_row(2, &data),
             Err(ErasureError::ShardMismatch(_))
+        ));
+    }
+
+    /// P27-F06: a content_size that does not fit the data region is refused.
+    #[test]
+    fn a_content_size_outside_the_data_region_is_refused() {
+        let data: Vec<u8> = (0..=199u8).cycle().take(800).collect();
+        let scheme = ErasureScheme { k: 4, n: 6 };
+        let enc = encode_object(&data, scheme).unwrap();
+        let present: Vec<Option<Vec<u8>>> = enc.shards.iter().cloned().map(Some).collect();
+        // Shards hold 1200 bytes in all, the data region is 800.
+        let too_big = enc.to_manifest().unwrap().with_content_size(1_000).unwrap();
+        assert!(matches!(
+            reconstruct_object(&too_big, &present),
+            Err(ErasureError::ShardMismatch(_))
+        ));
+        let too_small = enc.to_manifest().unwrap().with_content_size(100).unwrap();
+        assert!(matches!(
+            reconstruct_object(&too_small, &present),
+            Err(ErasureError::ShardMismatch(_))
+        ));
+    }
+
+    /// P27-F07: two corrupted survivors must not block recovery while k clean
+    /// shards remain.
+    #[test]
+    fn two_corrupted_survivors_do_not_block_recovery() {
+        let data: Vec<u8> = (0..=199u8).cycle().take(800).collect();
+        let scheme = ErasureScheme { k: 4, n: 8 };
+        let enc = encode_object(&data, scheme).unwrap();
+        let manifest = enc.to_manifest().unwrap();
+        let mut present: Vec<Option<Vec<u8>>> = enc.shards.iter().cloned().map(Some).collect();
+        for i in [0usize, 5] {
+            if let Some(Some(s)) = present.get_mut(i) {
+                s[0] ^= 0xFF;
+            }
+        }
+        assert_eq!(reconstruct_object(&manifest, &present).unwrap(), data);
+    }
+
+    #[test]
+    fn verify_object_encoding_rejects_excessive_expansion_before_encode() {
+        let data = vec![42u8; 64];
+        let honest = encode_object(&data, ErasureScheme { k: 4, n: 6 })
+            .unwrap()
+            .to_manifest()
+            .unwrap();
+        let mut amplified = honest;
+        amplified.erasure = ErasureScheme { k: 1, n: 255 };
+        assert!(matches!(
+            verify_object_encoding(&data, &amplified),
+            Err(ErasureError::InvalidScheme(_))
         ));
     }
 }

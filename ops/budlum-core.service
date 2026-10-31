@@ -7,7 +7,7 @@
 #   journalctl -u budlum-core -f
 
 [Unit]
-Description=Budlum Core Layer-1 Node
+Description=Budlum Core Node
 Documentation=https://github.com/rade/budlum-core
 After=network-online.target
 Wants=network-online.target
@@ -45,8 +45,8 @@ ProtectHome=yes
 ReadWritePaths=/var/lib/budlum
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
-# Allow coredumps for debugging
-LimitCORE=infinity
+# No core dumps: a dump of a validator process can hold key material.
+LimitCORE=0
 
 # Restart policy
 Restart=on-failure
@@ -55,7 +55,10 @@ TimeoutStopSec=60s
 
 # Environment
 Environment=RUST_LOG=info
-Environment=BUDLUM_RPC_KEY=%d/budlum-rpc-key
+# The node reads the RPC key from the variable named here. The file holds one
+# line: BUDLUM_RPC_API_KEY=<key>. Make it readable by root only (mode 0600).
+Environment=BUDLUM_RPC_API_KEY_ENV=BUDLUM_RPC_API_KEY
+EnvironmentFile=/etc/budlum/rpc.env
 
 [Install]
 WantedBy=multi-user.target

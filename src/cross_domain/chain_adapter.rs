@@ -25,6 +25,29 @@ use bincode::Options;
 /// attacker would want.
 const MAX_RECEIPT_PROOF_BYTES: u64 = 4 * 1024;
 
+/// Test adapters have no external anchor to give, so the default
+/// `verify_observation` (BLG-0129) refuses them. This is the self-check they
+/// stand in with: decode the proof and verify it against the root the result
+/// itself carries. Valid for a stub only - it proves the result is
+/// self-consistent, nothing about the external chain.
+#[cfg(test)]
+pub(crate) fn self_checked_observation<A: ChainAdapter + ?Sized>(
+    adapter: &A,
+    result: &RelayerExternalResult,
+) -> Result<(), AdapterError> {
+    let proof: MerkleProof = bincode::options()
+        .with_fixint_encoding()
+        .with_limit(MAX_RECEIPT_PROOF_BYTES)
+        .deserialize(&result.receipt_proof)
+        .map_err(|e| {
+            AdapterError::ProofVerificationFailed(format!(
+                "adapter returned a receipt proof that does not decode within \
+                 {MAX_RECEIPT_PROOF_BYTES} bytes: {e}"
+            ))
+        })?;
+    adapter.verify_receipt_proof(&proof, &result.external_state_root, &result.tx_hash)
+}
+
 /// Errors from chain adapter operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdapterError {
@@ -128,7 +151,33 @@ pub trait ChainAdapter: Send + Sync {
     /// root and transaction hash. The decoder is the fixed-integer one that
     /// `bincode::serialize` writes, with a byte limit, so a length word in
     /// the input cannot ask for memory before the proof is checked.
+    /// The root an observation must agree with, from a source the adapter
+    /// TRUSTS (a checkpoint, a light client), never from the observation
+    /// itself. `None` (the default) means the adapter has no anchor; the
+    /// default [`Self::verify_observation`] then refuses the observation.
+    fn trusted_observation_root(&self) -> Option<Hash32> {
+        None
+    }
+
     fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
+        // BLG-0129 (P05-F22): the root must NOT come from the same result
+        // being verified - that only proved the result is self-consistent.
+        // The default fails closed: an adapter without a trusted anchor
+        // overrides this method with a real check.
+        let trusted = self.trusted_observation_root().ok_or_else(|| {
+            AdapterError::ProofVerificationFailed(
+                "no trusted observation root: refusing to check an observation \
+                 against a root the same result supplies"
+                    .into(),
+            )
+        })?;
+        if result.external_state_root != trusted {
+            return Err(AdapterError::ProofVerificationFailed(format!(
+                "observation root {} does not match the trusted root {}",
+                hex::encode(result.external_state_root),
+                hex::encode(trusted)
+            )));
+        }
         let proof: MerkleProof = bincode::options()
             .with_fixint_encoding()
             .with_limit(MAX_RECEIPT_PROOF_BYTES)
@@ -139,7 +188,7 @@ pub trait ChainAdapter: Send + Sync {
                      {MAX_RECEIPT_PROOF_BYTES} bytes: {e}"
                 ))
             })?;
-        self.verify_receipt_proof(&proof, &result.external_state_root, &result.tx_hash)
+        self.verify_receipt_proof(&proof, &trusted, &result.tx_hash)
     }
 
     /// Is this adapter configured well enough to be trusted with real value?
@@ -289,6 +338,22 @@ pub mod test_adapter {
                     "stub verification failed".into(),
                 ))
             }
+        }
+
+        // A STUB: it stands in for plumbing, so it self-checks on purpose.
+        // The default now fails closed (BLG-0129), and the stub has no
+        // anchor to give.
+        fn verify_observation(&self, result: &RelayerExternalResult) -> Result<(), AdapterError> {
+            let proof: MerkleProof = bincode::options()
+                .with_fixint_encoding()
+                .with_limit(MAX_RECEIPT_PROOF_BYTES)
+                .deserialize(&result.receipt_proof)
+                .map_err(|e| {
+                    AdapterError::ProofVerificationFailed(format!(
+                        "stub proof does not decode: {e}"
+                    ))
+                })?;
+            self.verify_receipt_proof(&proof, &result.external_state_root, &result.tx_hash)
         }
 
         async fn submit_transaction(

@@ -9,40 +9,24 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-const FLAGS: &[(&str, &str)] = &[("COL_REG_SAME", "r_same"), ("COL_MEM_SAME", "m_same")];
+const FLAGS: &[(&str, &str)] = &[
+    ("COL_REG_SAME", "r_same"),
+    ("COL_MEM_SAME", "m_same"),
+    ("COL_MEM_TOP_SAME", "m_top_same"),
+];
 
 fn strip_all(src: &str) -> String {
-    // block comments
-    let mut out = String::new();
-    let b = src.as_bytes();
-    let mut i = 0;
-    let mut depth = 0i32;
-    while i < b.len() {
-        if i + 1 < b.len() && b[i] == b'/' && b[i + 1] == b'*' {
-            depth += 1;
-            i += 2;
-            continue;
-        }
-        if depth > 0 && i + 1 < b.len() && b[i] == b'*' && b[i + 1] == b'/' {
-            depth -= 1;
-            i += 2;
-            continue;
-        }
-        if depth > 0 {
-            i += 1;
-            continue;
-        }
-        out.push(b[i] as char);
-        i += 1;
-    }
-    // line comments
-    let mut out2 = String::new();
-    for l in out.lines() {
-        let idx = l.find("//").unwrap_or(l.len());
-        out2.push_str(&l[..idx]);
-        out2.push('\n');
-    }
-    out2
+    // Literals and comments are blanked together: a `//` inside a string must
+    // not cut a line, and a string must not satisfy a substring check.
+    super::rust_literals::scrub(src)
+}
+
+/// Every `COL_*_SAME` column the scrubbed AIR names.
+fn same_columns(code: &str) -> std::collections::BTreeSet<String> {
+    code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| w.starts_with("COL_") && w.ends_with("_SAME"))
+        .map(str::to_string)
+        .collect()
 }
 
 /// `let <local>: AB::Expr = cur[COL_X]` present.
@@ -74,6 +58,17 @@ pub fn run(root: &Path) -> Result<String, String> {
     let code = strip_all(&src);
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
+
+    // A new same-ness column must be listed above, or nothing checks it.
+    for column in same_columns(&code) {
+        if !FLAGS.iter().any(|(c, _)| *c == column) {
+            problems.push(format!(
+                "{column} is a gating column the AIR uses and it is not in the FLAGS \
+                 list of this gate, so nothing checks that it is boolean and pinned. \
+                 Add it with the local it is read into."
+            ));
+        }
+    }
 
     for (column, local) in FLAGS {
         if !code.contains(column) {
@@ -146,7 +141,7 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-gf")?;
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
 
-    let good = "pub const COL_REG_SAME: usize = 28;\npub const COL_MEM_SAME: usize = 54;\n        let r_same: AB::Expr = cur[COL_REG_SAME].into();\n        builder.assert_bool(r_same.clone());\n        builder.when_transition().assert_eq(r_same.clone(), one.clone() - reg_diff_z);\n        let m_same: AB::Expr = cur[COL_MEM_SAME].into();\n        builder.assert_bool(m_same.clone());\n        builder.when_transition().assert_zero(\n            m_active.clone() * (one.clone() - m_same.clone()) * nm_val.clone(),\n        );\n";
+    let good = "pub const COL_REG_SAME: usize = 28;\npub const COL_MEM_SAME: usize = 54;\npub const COL_MEM_TOP_SAME: usize = 853;\n        let r_same: AB::Expr = cur[COL_REG_SAME].into();\n        builder.assert_bool(r_same.clone());\n        builder.when_transition().assert_eq(r_same.clone(), one.clone() - reg_diff_z);\n        let m_same: AB::Expr = cur[COL_MEM_SAME].into();\n        builder.assert_bool(m_same.clone());\n        builder.when_transition().assert_zero(\n            m_active.clone() * (one.clone() - m_same.clone()) * nm_val.clone(),\n        );\n        let m_top_same: AB::Expr = cur[COL_MEM_TOP_SAME].into();\n        builder.assert_bool(m_top_same.clone());\n        builder.when_transition().assert_eq(m_top_same.clone(), one.clone() - top_diff_z);\n";
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), good)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
@@ -165,4 +160,18 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "gating-flags canary OK: pinned PASSes and unpinned FAILs.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strings_are_blanked_and_new_same_columns_are_found() {
+        let code =
+            strip_all("let s = \"http://x assert_bool(r_same\"; cur[COL_NEW_SAME]; COL_REG_SAME");
+        assert!(!code.contains("assert_bool(r_same"));
+        let cols = same_columns(&code);
+        assert!(cols.contains("COL_NEW_SAME") && cols.contains("COL_REG_SAME"));
+    }
 }

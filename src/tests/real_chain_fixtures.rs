@@ -94,7 +94,7 @@ fn btc_merkle_root(txids: &[String]) -> String {
         .collect();
     while leaves.len() > 1 {
         if leaves.len() % 2 == 1 {
-            let last = *leaves.last().expect("tek eleman garantili");
+            let last = *leaves.last().expect("one element is guaranteed");
             leaves.push(last);
         }
         let mut next = Vec::with_capacity(leaves.len() / 2);

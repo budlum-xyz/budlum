@@ -159,9 +159,8 @@ fn key_material_in(enum_body: &str) -> Vec<String> {
         let mut i = 0;
         while let Some(rel) = lower[i..].find(word) {
             let abs = i + rel;
-            let prev_ok = abs == 0
-                || !(lower.as_bytes()[abs - 1].is_ascii_alphanumeric()
-                    || lower.as_bytes()[abs - 1] == b'_');
+            // A word start, or the tail of a compound such as `master_key`.
+            let prev_ok = abs == 0 || !lower.as_bytes()[abs - 1].is_ascii_alphanumeric();
             let mut j = abs + word.len();
             while j < lower.len()
                 && (lower.as_bytes()[j].is_ascii_alphanumeric() || lower.as_bytes()[j] == b'_')
@@ -181,46 +180,11 @@ fn key_material_in(enum_body: &str) -> Vec<String> {
             i = abs + word.len();
         }
     }
-    found
-}
-
-/// Is the test present as a real `#[test] fn`, allowing attributes between
-/// the marker and the name?
-fn test_is_present(locks: &str, name: &str) -> bool {
-    let needle = "#[test]";
-    let mut i = 0;
-    while let Some(rel) = locks[i..].find(needle) {
-        let mut j = i + rel + needle.len();
-        loop {
-            while j < locks.len() && locks.as_bytes()[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if locks[j..].starts_with("#[") {
-                if let Some(end) = locks[j..].find(']') {
-                    j += end + 1;
-                    continue;
-                }
-            }
-            break;
-        }
-        if locks[j..].starts_with("fn") {
-            let mut k = j + 2;
-            while k < locks.len() && locks.as_bytes()[k].is_ascii_whitespace() {
-                k += 1;
-            }
-            if locks[k..].starts_with(name) {
-                let mut m = k + name.len();
-                while m < locks.len() && locks.as_bytes()[m].is_ascii_whitespace() {
-                    m += 1;
-                }
-                if locks[m..].starts_with('(') {
-                    return true;
-                }
-            }
-        }
-        i = j;
+    // A tuple variant has no `name:`; raw bytes in its payload are key-shaped.
+    if lower.contains("[u8;") || lower.contains("vec<u8>") {
+        found.push(String::from("raw byte payload"));
     }
-    false
+    found
 }
 
 /// One group of checks: how many it contributed and what it found.
@@ -374,30 +338,95 @@ fn check_binding(code: &str) -> Checks {
 
 /// Every production caller must pass the manifest's own declaration, not a
 /// literal.
+///
+/// Calls are found with whitespace removed, so a call that rustfmt split over
+/// lines is still seen. At least one call has to exist: a check that matched
+/// nothing would pass for any code.
 fn check_call_sites(code: &str) -> Checks {
     let checked = 1;
     let mut problems = Vec::new();
-    let needle = "manifest_id_from_parts(&self.shards";
+    let compact: String = code.chars().filter(|c| !c.is_whitespace()).collect();
+    // The Stored helper forwards its own `encryption` parameter: inside
+    // `manifest_id_from_parts_stored` there is no `self` yet, and the
+    // parameter is precisely the declaration its callers hand it (the
+    // constructor stores that same value in the field). A call is excused
+    // from the `self.encryption` shape only inside that helper's body and
+    // only when the helper really binds the name as its parameter;
+    // everywhere else a bare `encryption` could be any literal a caller
+    // invented, which is the defect this check exists for.
+    let stored_span = stored_helper_span(&compact);
+    let needle = "manifest_id_from_parts(";
+    let mut calls = 0usize;
     let mut i = 0;
-    while let Some(rel) = code[i..].find(needle) {
+    while let Some(rel) = compact[i..].find(needle) {
         let abs = i + rel;
-        let rest = &code[abs + needle.len()..];
-        let close = rest.find(')').map(|d| abs + needle.len() + d);
-        let call = match close {
-            Some(c) => &code[abs..=c],
-            None => &code[abs..],
-        };
-        if !call.contains("self.encryption") {
+        i = abs + needle.len();
+        let before = &compact[..abs];
+        // The definition, and a longer name that merely ends the same way.
+        if before.ends_with("fn")
+            || before.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        {
+            continue;
+        }
+        calls += 1;
+        let mut depth = 0i32;
+        let mut end = compact.len();
+        for (k, c) in compact[abs + needle.len() - 1..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = abs + needle.len() - 1 + k;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let call = &compact[abs..end.min(compact.len())];
+        let forwards_own_param = stored_span.is_some_and(|(lo, hi)| abs >= lo && abs <= hi)
+            && call.contains(",encryption,");
+        if !call.contains("self.encryption") && !forwards_own_param {
             problems.push(format!(
-                "a `manifest_id_from_parts` call inside `ContentManifest` does \
-                 not pass `self.encryption`: {}. The id would then commit to a \
-                 declaration the manifest does not carry.",
-                call.trim()
+                "a `manifest_id_from_parts` call does not pass `self.encryption`: {call}. \
+                 The id would then commit to a declaration the manifest does not carry."
             ));
         }
-        i = abs + needle.len();
+    }
+    if calls == 0 {
+        problems.push(String::from(
+            "no call of `manifest_id_from_parts` was found, so nothing shows the id \
+             commits to the declaration.",
+        ));
     }
     Checks::new(checked, problems)
+}
+
+/// The byte span of `manifest_id_from_parts_stored` in whitespace-compact
+/// code, when the helper exists and binds `encryption: &ContentEncryption`
+/// as a parameter. `None` when either shape is missing, so a bare
+/// `encryption` argument is then accepted nowhere.
+fn stored_helper_span(compact: &str) -> Option<(usize, usize)> {
+    let start = compact.find("fnmanifest_id_from_parts_stored(")?;
+    let open = compact[start..].find('{')? + start;
+    if !compact[start..open].contains("encryption:&ContentEncryption") {
+        return None;
+    }
+    let mut depth = 0i32;
+    for (k, c) in compact[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((start, open + k));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The tag must be written out per variant, not derived from ordering.
@@ -445,7 +474,7 @@ fn check_tests(locks: &str) -> Checks {
     let checked = 1;
     let mut problems = Vec::new();
     for test in REQUIRED_TESTS {
-        if !test_is_present(locks, test) {
+        if !super::capability_modules_are_wired::test_is_live(locks, test) {
             problems.push(format!(
                 "required regression test `{test}` is missing or is not a `#[test]`."
             ));
@@ -669,7 +698,7 @@ fn write_fixture(
     }
     let mut locks = String::new();
     for n in names {
-        let _ = writeln!(locks, "#[test]\nfn {n}() {{}}\n");
+        let _ = writeln!(locks, "#[test]\nfn {n}() {{ assert!(true); }}\n");
     }
 
     std::fs::write(root.join(MANIFEST), manifest_src)
@@ -785,4 +814,42 @@ pub fn self_test() -> Result<String, String> {
         "content encryption declaration gate self-test OK: the corrected tree \
          passes and all 13 defect shapes are refused.",
     ))
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    #[test]
+    fn compound_names_and_byte_payloads_are_key_material() {
+        assert!(!key_material_in("master_key: Foo,").is_empty());
+        assert!(!key_material_in("ClientSide(ContentCipher, [u8; 32]),").is_empty());
+        assert!(key_material_in("ClientSide(ContentCipher),").is_empty());
+    }
+
+    #[test]
+    fn split_call_without_the_declaration_is_found_and_zero_calls_fail() {
+        let bad = "self.id = manifest_id_from_parts(\n    &self.shards,\n    &literal,\n);";
+        assert!(!check_call_sites(bad).problems.is_empty());
+        let good = "self.id = manifest_id_from_parts(\n    &self.shards,\n    &self.encryption,\n);\nfn manifest_id_from_parts(a: u8) {}";
+        assert!(check_call_sites(good).problems.is_empty());
+        assert!(!check_call_sites("fn other() {}").problems.is_empty());
+    }
+
+    #[test]
+    fn stored_helper_may_forward_its_own_parameter_and_nothing_else_may() {
+        // The helper has no `self`: forwarding the parameter it was handed
+        // is the declaration reaching the id, not a literal beside it.
+        let helper = "pub fn manifest_id_from_parts_stored(shards: &[u8], encryption: &ContentEncryption) -> u8 {\n    manifest_id_from_parts(shards, erasure, encryption, size)\n}\nfn manifest_id_from_parts(a: u8) {}";
+        assert!(check_call_sites(helper).problems.is_empty());
+        // The same bare name outside the helper is the invented-literal
+        // shape and stays a finding.
+        let stray =
+            "fn anywhere() { let id = manifest_id_from_parts(shards, erasure, encryption, size); }";
+        assert!(!check_call_sites(stray).problems.is_empty());
+        // And a helper that does not bind the name as its parameter does
+        // not earn the shape either.
+        let unbound = "pub fn manifest_id_from_parts_stored(shards: &[u8]) -> u8 {\n    manifest_id_from_parts(shards, erasure, encryption, size)\n}";
+        assert!(!check_call_sites(unbound).problems.is_empty());
+    }
 }

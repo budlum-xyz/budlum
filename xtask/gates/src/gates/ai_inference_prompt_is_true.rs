@@ -321,6 +321,8 @@ pub fn check_with_effort(
 /// the longer-name case.
 fn defines(source: &str, symbol: &str) -> bool {
     let needle = format!("fn {symbol}");
+    // A mention in a comment or a test is not a definition.
+    let source = &super::capability_modules_are_wired::code_only(source);
     let mut from = 0usize;
     while let Some(offset) = source[from..].find(&needle) {
         let at = from + offset;
@@ -427,7 +429,7 @@ pub fn check_mask_sites(
             ));
         }
         let source = read(path)?;
-        if !source.contains(call) {
+        if !super::capability_modules_are_wired::code_only(&source).contains(call) {
             let head = format!("the prompt promises `{phrase}` but `{call}` is gone from {path}");
             let body = "this is the direction that does not announce itself: the prompt still \
                         reads correctly to anyone auditing it, and the file now writes what it \
@@ -457,34 +459,89 @@ const ANSWER_NAMES: &[&str] = &["answer", "respond", "reply", "complete", "gener
 /// Returns the first answering function whose file never mentions a mask.
 pub fn check_answer_surface(files: &[(String, String)]) -> Result<usize, String> {
     let mut answering = 0usize;
-    for (name, source) in files {
+    for (name, raw) in files {
+        let source = super::capability_modules_are_wired::code_only(raw);
         for l in source.lines() {
             let t = l.trim_start();
-            let Some(rest) = t
-                .strip_prefix("pub fn ")
-                .or_else(|| t.strip_prefix("pub async fn "))
-            else {
+            let Some(rest) = [
+                "pub fn ",
+                "pub async fn ",
+                "pub(crate) fn ",
+                "pub(crate) async fn ",
+            ]
+            .iter()
+            .find_map(|p| t.strip_prefix(p)) else {
                 continue;
             };
-            let Some(word) = rest.split('(').next() else {
+            let Some(word) = rest.split(['(', '<']).next() else {
                 continue;
             };
             let word = word.trim();
-            if !ANSWER_NAMES.iter().any(|a| word.eq_ignore_ascii_case(a)) {
+            let lower = word.to_ascii_lowercase();
+            if !ANSWER_NAMES.iter().any(|a| lower.starts_with(a)) {
                 continue;
             }
             answering += 1;
-            if source.contains("redact_") {
+            if calls_mask(&source) {
                 continue;
             }
-            let head = format!("{name} defines `pub fn {word}`");
-            let body = "an answer leaves the runtime and the file never mentions a mask. The \
+            let head = format!("{name} defines `fn {word}`");
+            let body = "an answer leaves the runtime and the file never calls a mask. The \
                         prompt says no API key, token, password or private key may pass through \
                         into an output, and `redact_model_strings` exists for exactly this line.";
             return Err(format!("{head}: {body}"));
         }
     }
     Ok(answering)
+}
+
+/// Does the code call a function whose name starts with `redact_`?
+///
+/// An import or a mention in a comment is not a call.
+fn calls_mask(code: &str) -> bool {
+    let mut from = 0usize;
+    while let Some(pos) = code[from..].find("redact_") {
+        let at = from + pos;
+        let after = &code[at..];
+        let ident_len = after
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(after.len());
+        if after[ident_len..].trim_start().starts_with('(') {
+            return true;
+        }
+        from = at + 1;
+    }
+    false
+}
+
+/// Read every `.rs` file under `dir`, subdirectories included.
+///
+/// The name is the path below `base`.
+fn collect_rs_files(
+    base: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    for e in std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+        let Ok(e) = e else { continue };
+        let path = e.path();
+        if path.is_dir() {
+            collect_rs_files(base, &path, out)?;
+            continue;
+        }
+        if path.extension().and_then(|x| x.to_str()) != Some("rs") {
+            continue;
+        }
+        let text =
+            std::fs::read_to_string(&path).map_err(|x| format!("{}: {x}", path.display()))?;
+        let name = path
+            .strip_prefix(base)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        out.push((name, text));
+    }
+    Ok(())
 }
 
 /// Pull the prompt text itself out of the module's source.
@@ -593,22 +650,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let masked = check_mask_sites(prompt_text, &read)?;
     let core = root.join("crates/ai-inference/crates/ai-core/src");
     let mut core_files: Vec<(String, String)> = Vec::new();
-    for e in std::fs::read_dir(&core).map_err(|e| format!("{}: {e}", core.display()))? {
-        let Ok(e) = e else { continue };
-        let path = e.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("rs") {
-            continue;
-        }
-        let text =
-            std::fs::read_to_string(&path).map_err(|x| format!("{}: {x}", path.display()))?;
-        core_files.push((
-            path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-            text,
-        ));
-    }
+    collect_rs_files(&core, &core, &mut core_files)?;
     if core_files.len() < 3 {
         let head = format!(
             "only {} modules found under {}",
@@ -660,20 +702,20 @@ pub fn canary_masks_and_answers() -> Result<(), String> {
         ))
     };
     if let Err(e) = check_mask_sites(site_prompt, &masked_read) {
-        return Err(format!("canary 15: masked write paths were refused: {e}"));
+        return Err(format!("canary 19: masked write paths were refused: {e}"));
     }
     let plain_read = |_: &str| -> Result<String, String> {
         Ok(String::from("fn write(v: &Value) { disk.write(v) }"))
     };
     if check_mask_sites(site_prompt, &plain_read).is_ok() {
         return Err(String::from(
-            "canary 15: a log, cache and index that write what they were handed were accepted \
+            "canary 19: a log, cache and index that write what they were handed were accepted \
              while the prompt promises masking before storage.",
         ));
     }
     if check_mask_sites("a prompt that promises nothing", &masked_read).is_ok() {
         return Err(String::from(
-            "canary 15: the sentence went out of the prompt and the gate stayed quiet.",
+            "canary 19: the sentence went out of the prompt and the gate stayed quiet.",
         ));
     }
 
@@ -687,7 +729,7 @@ pub fn canary_masks_and_answers() -> Result<(), String> {
     )];
     if check_answer_surface(&bare).is_ok() {
         return Err(String::from(
-            "canary 16: an unmasked answering function was accepted while the prompt promises \
+            "canary 20: an unmasked answering function was accepted while the prompt promises \
              that no key reaches an output.",
         ));
     }
@@ -697,7 +739,7 @@ pub fn canary_masks_and_answers() -> Result<(), String> {
     )];
     if check_answer_surface(&masked_answer).is_err() {
         return Err(String::from(
-            "canary 16: an answering function that masks its own output was refused.",
+            "canary 20: an answering function that masks its own output was refused.",
         ));
     }
     let quiet = vec![(
@@ -706,7 +748,7 @@ pub fn canary_masks_and_answers() -> Result<(), String> {
     )];
     if check_answer_surface(&quiet).is_err() {
         return Err(String::from(
-            "canary 16: a module that answers nothing was refused. The check has to stay quiet \
+            "canary 20: a module that answers nothing was refused. The check has to stay quiet \
              until an answer surface exists.",
         ));
     }
@@ -826,7 +868,7 @@ pub const GENERATION_CLAIM_MARKERS: &[&str] = &[\"generate images\", \"create an
     backed_promise_canaries()?;
     effort_figure_canaries()?;
 
-    Ok(String::from("ai-inference-prompt-is-true: 18 canaries"))
+    Ok(String::from("ai-inference-prompt-is-true: 20 canaries"))
 }
 
 /// Canaries 15-18: the quoted effort range against `effort.rs`.
@@ -960,4 +1002,29 @@ There is no fourth channel.
     canary_masks_and_answers()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn answer_surface_sees_prefixed_names_and_ignores_a_mask_in_a_comment() {
+        let files = vec![(
+            String::from("a.rs"),
+            String::from("// redact_model_strings(x)\nuse x::redact_text;\npub(crate) fn answer_request() {}\n"),
+        )];
+        assert!(check_answer_surface(&files).is_err());
+        let ok = vec![(
+            String::from("a.rs"),
+            String::from("pub fn answer_request() { redact_model_strings(x); }\n"),
+        )];
+        assert_eq!(check_answer_surface(&ok), Ok(1));
+    }
+
+    #[test]
+    fn comment_does_not_define_or_mask() {
+        assert!(!defines("// fn unservable_reason()\n", "unservable_reason"));
+        assert!(defines("fn unservable_reason() {}\n", "unservable_reason"));
+    }
 }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.97.1"
 license = "LicenseRef-PolyForm-Shield-1.0.0"
-description = "Generic RoleId-based staking + slashing registry for Budlum's multi-domain L1. Master Verifier, Relayer, Attester, and any future role share one primitive."
+description = "Generic RoleId-based staking + slashing registry for Budlum's multi-domain chain. Master Verifier, Relayer, Attester, and any future role share one primitive."
 
 [lints]
 workspace = true

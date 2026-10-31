@@ -17,14 +17,20 @@
 //!
 //! ## Flows
 //!
-//! - **EthToBud:** the Ethereum RPC `eth_getLogs` gives a deposit event, which
-//!   becomes an MPT and header chain proof, submitted to Budlum through
-//!   `bud_submitRelayProof`, behind the registry gate and the stake. The
-//!   binary checks the gate before it starts this direction; the node checks
-//!   it again on every submission. Slashing reports come from consensus, the
-//!   relayer files none.
-//! - **BudToEth:** a Budlum burn event plus a finality proof becomes a
-//!   `claimUnlock` transaction to the Ethereum bridge contract.
+//! Status: NOT mainnet ready. Neither direction relays anything yet.
+//!
+//! - **EthToBud (design):** the Ethereum RPC `eth_getLogs` gives a deposit
+//!   event, which becomes an MPT and header chain proof, submitted to Budlum
+//!   through `bud_submitRelayProof`, behind the registry gate and the stake.
+//!   Today the deposit log is a placeholder (no topic filter, amount 0) and
+//!   proof assembly always refuses, so nothing is submitted.
+//! - **BudToEth (design):** a Budlum burn event plus a finality proof becomes a
+//!   `claimUnlock` transaction to the Ethereum bridge contract. Today burns are
+//!   found and reported only; the bridge contract does not exist yet.
+//!
+//! The binary checks the registry gate before it starts EthToBud; the node
+//! checks it again on every submission. Slashing reports come from consensus,
+//! the relayer files none.
 //!
 //! ## Running it
 //!
@@ -58,6 +64,9 @@ pub struct RelayerConfig {
     pub poll_interval_secs: u64,
     /// Used for the minimum stake check; the default is 1000.
     pub min_stake: u64,
+    /// A file that keeps the scan cursor across restarts. `None` keeps it in
+    /// memory only, and a restart then starts again from the head.
+    pub cursor_file: Option<String>,
 }
 
 /// The relay direction.
@@ -90,8 +99,60 @@ impl Default for RelayerConfig {
             relayer_address: "0x0".to_string(),
             poll_interval_secs: 10,
             min_stake: 1000,
+            cursor_file: None,
         }
     }
+}
+
+/// The cursor saved in `path`, if the file holds one block number.
+fn read_cursor(path: &str) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Save the cursor beside `path` and rename it over, so a crash cannot leave
+/// a truncated file.
+fn write_cursor(path: &str, block: u64) -> Result<(), String> {
+    let tmp = format!("{path}.tmp");
+    std::fs::write(&tmp, block.to_string()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// Largest RPC response body the relayer reads.
+const MAX_RPC_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Most blocks one `eth_getLogs` scan covers.
+const MAX_LOG_SCAN_BLOCKS: u64 = 2_000;
+
+/// Refuse a response body longer than the cap.
+fn check_body_len(len: usize) -> Result<(), String> {
+    if len > MAX_RPC_BODY_BYTES {
+        return Err(format!("response body of {len} bytes is too large"));
+    }
+    Ok(())
+}
+
+/// Read a JSON body but refuse one over the cap, also while it streams in.
+async fn read_json_bounded(mut resp: reqwest::Response) -> Result<serde_json::Value, String> {
+    if let Some(len) = resp.content_length() {
+        check_body_len(usize::try_from(len).unwrap_or(usize::MAX))?;
+    }
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        check_body_len(body.len().saturating_add(chunk.len()))?;
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|e| e.to_string())
+}
+
+/// The block range of the next scan: it starts after the cursor and never
+/// spans more than `MAX_LOG_SCAN_BLOCKS` blocks.
+fn scan_window(last_block: u64, latest: u64) -> (u64, u64) {
+    let from = last_block.saturating_add(1);
+    let to = match from.checked_add(MAX_LOG_SCAN_BLOCKS - 1) {
+        Some(cap) => latest.min(cap),
+        None => latest,
+    };
+    (from, to)
 }
 
 /// Minimal Ethereum deposit event (eth_getLogs'dan parse).
@@ -151,8 +212,7 @@ impl BudlumClient {
             .send()
             .await
             .map_err(|e| format!("Budlum RPC send failed ({method}): {e}"))?;
-        let json: serde_json::Value = resp
-            .json()
+        let json = read_json_bounded(resp)
             .await
             .map_err(|e| format!("Budlum RPC json parse failed: {e}"))?;
         if let Some(err) = json.get("error") {
@@ -178,23 +238,7 @@ impl BudlumClient {
                 "bud_registryActiveMembers returned unexpected JSON shape".to_string()
             })?;
 
-        let normalized = address.to_lowercase();
-        for entry in members {
-            if let Some(acc) = entry.get("address").and_then(|a| a.as_str()) {
-                if acc.to_lowercase() == normalized {
-                    return Ok(true);
-                }
-            } else if let Some(acc) = entry.get("account").and_then(|a| a.as_str()) {
-                if acc.to_lowercase() == normalized {
-                    return Ok(true);
-                }
-            } else if let Some(s) = entry.as_str() {
-                if s.to_lowercase() == normalized {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
+        Ok(members_contain(members, address))
     }
 
     /// Relay proof submit - bud_submitRelayProof
@@ -251,8 +295,7 @@ impl EthClient {
             .send()
             .await
             .map_err(|e| format!("Eth RPC {method} send failed: {e}"))?;
-        let json: serde_json::Value = resp
-            .json()
+        let json = read_json_bounded(resp)
             .await
             .map_err(|e| format!("Eth RPC json fail: {e}"))?;
         if let Some(err) = json.get("error") {
@@ -420,6 +463,11 @@ pub fn parse_args(args: &[String]) -> Result<RelayerConfig, String> {
                     .parse()
                     .map_err(|e| format!("Invalid --poll-interval: {e}"))?;
             }
+            "--cursor-file" => {
+                i += 1;
+                config.cursor_file =
+                    Some(args.get(i).ok_or("--cursor-file requires a value")?.clone());
+            }
             "--min-stake" => {
                 i += 1;
                 config.min_stake = args
@@ -441,8 +489,14 @@ pub fn parse_args(args: &[String]) -> Result<RelayerConfig, String> {
     Ok(config)
 }
 
+/// What the binary can do today. Shown in the usage text so `--help` does not
+/// promise a working relay.
+const STATUS_NOTICE: &str = "STATUS: not mainnet ready. No direction relays yet: eth-to-bud \
+cannot build deposit proofs, bud-to-eth only reports burns. Nothing is submitted.";
+
 fn print_usage() {
     eprintln!("budlum-relayer - F10 Universal Relayer (D1 permissionless + D4 unified registry)");
+    eprintln!("{STATUS_NOTICE}");
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  budlum-relayer --eth-rpc <URL> --budlum-rpc <URL> --bridge-address <ADDR>");
@@ -462,6 +516,7 @@ fn print_usage() {
     eprintln!(
         "  --min-stake <AMOUNT>       Min stake floor for permissionless gate (default: 1000)"
     );
+    eprintln!("  --cursor-file <PATH>       Keep the scan cursor across restarts");
     eprintln!("  -h, --help                 Show this help");
     eprintln!();
     eprintln!("Permissionless model (D1):");
@@ -493,19 +548,63 @@ pub fn run_relayer(config: &RelayerConfig) -> Result<(), String> {
             "bridge-address is placeholder (0x0); set real Ethereum bridge contract".into(),
         );
     }
-    if config.relayer_address == "0x0" || config.relayer_address.len() < 10 {
-        eprintln!("WARN: relayer-address is placeholder - permissionless gate will skip active check (devnet mode). Set real Budlum address for mainnet.");
+    if let Err(e) = validate_relayer_address(&config.relayer_address) {
+        // The submitting direction must name a real relayer. BudToEth submits
+        // nothing, so it only warns and its registry check reports "not active".
+        if config.direction == RelayDirection::EthToBud {
+            return Err(e);
+        }
+        eprintln!("WARN: {e}");
     }
 
     Ok(())
 }
 
+/// Lowercase an address and drop an optional `0x` prefix, so that
+/// `0xAB..` and `ab..` name the same account.
+fn normalize_address(address: &str) -> String {
+    let lower = address.trim().to_lowercase();
+    match lower.strip_prefix("0x") {
+        Some(rest) => rest.to_string(),
+        None => lower,
+    }
+}
+
+/// Is `address` among the registry members? A member is an object with an
+/// `address` or `account` field, or a plain string.
+fn members_contain(members: &[serde_json::Value], address: &str) -> bool {
+    let wanted = normalize_address(address);
+    members.iter().any(|entry| {
+        let member = entry
+            .get("address")
+            .and_then(|a| a.as_str())
+            .or_else(|| entry.get("account").and_then(|a| a.as_str()))
+            .or_else(|| entry.as_str());
+        member.is_some_and(|m| normalize_address(m) == wanted)
+    })
+}
+
+/// A relayer address is 32 bytes in hex, with an optional `0x` prefix.
+///
+/// The placeholder `0x0` (the default) and short values are refused. There is
+/// no devnet or mainnet switch in this binary, so no value may switch the
+/// registry check off.
+fn validate_relayer_address(address: &str) -> Result<(), String> {
+    let clean = address
+        .strip_prefix("0x")
+        .or_else(|| address.strip_prefix("0X"))
+        .unwrap_or(address);
+    if clean.len() == 64 && clean.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "relayer-address '{address}' is not a 32-byte hex Budlum address"
+        ))
+    }
+}
+
 /// Permissionless registration check - is relayer active?
 async fn check_relayer_active(budlum_client: &BudlumClient, config: &RelayerConfig) -> bool {
-    if config.relayer_address == "0x0" {
-        eprintln!("Devnet mode: relayer-address placeholder, skip active check (assume active).");
-        return true;
-    }
     match budlum_client
         .is_active_relayer(&config.relayer_address)
         .await
@@ -552,8 +651,15 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
         ));
     }
 
+    eprintln!("EthToBud: WARNING {STATUS_NOTICE}");
+
     let mut interval = tokio::time::interval(Duration::from_secs(config.poll_interval_secs));
+    let saved_cursor = config.cursor_file.as_deref().and_then(read_cursor);
     let mut last_block: u64 = loop {
+        if let Some(saved) = saved_cursor {
+            eprintln!("EthToBud: resuming from saved block {saved}");
+            break saved;
+        }
         interval.tick().await;
         match eth_client.get_block_number().await {
             Ok(bn) => {
@@ -572,6 +678,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
         }
     };
 
+    let mut window_attempts: u32 = 0;
     loop {
         interval.tick().await;
         // 1. Get latest finalized block (N-conf)
@@ -585,8 +692,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
         if latest <= last_block {
             continue;
         }
-        let from = last_block + 1;
-        let to = latest;
+        let (from, to) = scan_window(last_block, latest);
         eprintln!("EthToBud: scanning deposits from {from} to {to}");
 
         // 2. Get deposit logs
@@ -599,10 +705,13 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
         };
         if deposits.is_empty() {
             last_block = to;
+            window_attempts = 0;
+            save_cursor(&config, last_block);
             continue;
         }
         eprintln!("EthToBud: found {} deposit event(s)", deposits.len());
 
+        let mut window_failed = false;
         for dep in deposits {
             // 3. Build proof
             let proof_json = match eth_client.build_deposit_proof(&dep).await {
@@ -612,6 +721,7 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
                         "EthToBud: build_deposit_proof failed for {}: {e}",
                         dep.tx_hash
                     );
+                    window_failed = true;
                     continue;
                 }
             };
@@ -646,10 +756,53 @@ async fn run_eth_to_bud_loop(config: RelayerConfig) -> Result<(), String> {
                         "EthToBud: submit_relay_proof failed for {}: {e}",
                         dep.tx_hash
                     );
+                    window_failed = true;
                 }
             }
         }
-        last_block = to;
+        let (next_last, next_attempts) =
+            advance_cursor(last_block, to, window_failed, window_attempts);
+        if window_failed && next_last == to {
+            eprintln!(
+                "EthToBud: window {from}..{to} failed {MAX_WINDOW_ATTEMPTS} times; \
+                 skipping it, its deposits are NOT relayed"
+            );
+        }
+        last_block = next_last;
+        window_attempts = next_attempts;
+        save_cursor(&config, last_block);
+    }
+}
+
+/// Persist the cursor when a cursor file is configured. A failed write is
+/// logged and the loop goes on: the cursor is still held in memory.
+fn save_cursor(config: &RelayerConfig, block: u64) {
+    if let Some(path) = config.cursor_file.as_deref() {
+        if let Err(e) = write_cursor(path, block) {
+            eprintln!("EthToBud: cursor file could not be written: {e}");
+        }
+    }
+}
+
+/// How many times one scan window is retried before it is skipped.
+const MAX_WINDOW_ATTEMPTS: u32 = 5;
+
+/// The scan cursor after one window.
+///
+/// A window with a failed deposit is scanned again on the next tick, so a
+/// transient proof or submit error does not drop the deposit for good. After
+/// `MAX_WINDOW_ATTEMPTS` failures the window is skipped, so one permanently
+/// bad deposit cannot stall the loop. Returns the new cursor and the failed
+/// attempts so far on the current window.
+fn advance_cursor(last_block: u64, to: u64, window_failed: bool, attempts: u32) -> (u64, u32) {
+    if !window_failed {
+        return (to, 0);
+    }
+    let attempts = attempts.saturating_add(1);
+    if attempts >= MAX_WINDOW_ATTEMPTS {
+        (to, 0)
+    } else {
+        (last_block, attempts)
     }
 }
 
@@ -764,12 +917,25 @@ async fn budlum_head_height(client: &BudlumClient) -> Result<u64, String> {
 /// Hashes of burn transactions in one block.
 ///
 /// The node renders the transaction type with `{:?}`, so the wire value is the
-/// variant name. Matching on a prefix keeps a variant that carries fields
-/// (`BurnBridgeTransferWithEvent { .. }`) from being missed.
+/// variant name. The burn used to be applied by an operator RPC and is a
+/// `BridgeBurn` transaction now, so this matches `BridgeBurn(..)`; the old
+/// `BurnBridgeTransferWithEvent` name is kept in the match because a node on an
+/// older build still renders it that way, and a relayer that silently stopped
+/// detecting burns would look healthy while relaying nothing. Matching on a
+/// prefix keeps a variant that carries fields from being missed.
 async fn burn_events_in_block(client: &BudlumClient, height: u64) -> Result<Vec<String>, String> {
-    let params = serde_json::json!([format!("0x{height:x}"), true]);
-    let block = client.rpc_call("bud_getBlockByNumber", params).await?;
+    let block = client
+        .rpc_call("bud_getBlockByNumber", block_by_number_params(height))
+        .await?;
     Ok(burn_hashes_from_block(&block))
+}
+
+/// Positional parameters of `bud_getBlockByNumber`: exactly one `u64`.
+///
+/// The node declares `number: u64` (src/rpc/api.rs). A hex string or an extra
+/// flag is an invalid-params error, so every scan would fail.
+fn block_by_number_params(height: u64) -> serde_json::Value {
+    serde_json::json!([height])
 }
 
 /// Burn transaction hashes in a block payload.
@@ -782,9 +948,9 @@ fn burn_hashes_from_block(block: &serde_json::Value) -> Vec<String> {
     };
     txs.iter()
         .filter(|tx| {
-            tx.get("type")
-                .and_then(|t| t.as_str())
-                .is_some_and(|ty| ty.starts_with("BurnBridgeTransferWithEvent"))
+            tx.get("type").and_then(|t| t.as_str()).is_some_and(|ty| {
+                ty.starts_with("BridgeBurn") || ty.starts_with("BurnBridgeTransferWithEvent")
+            })
         })
         .map(|tx| {
             tx.get("hash")
@@ -856,7 +1022,105 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{burn_hashes_from_block, parse_hex_height};
+    use super::{
+        advance_cursor, block_by_number_params, burn_hashes_from_block, check_body_len,
+        parse_hex_height, scan_window, MAX_LOG_SCAN_BLOCKS, MAX_RPC_BODY_BYTES,
+        MAX_WINDOW_ATTEMPTS, STATUS_NOTICE,
+    };
+
+    #[test]
+    fn a_scan_window_and_a_body_are_bounded() {
+        assert_eq!(scan_window(10, 20), (11, 20));
+        assert_eq!(scan_window(10, 1_000_000), (11, 10 + MAX_LOG_SCAN_BLOCKS));
+        assert_eq!(scan_window(u64::MAX, u64::MAX), (u64::MAX, u64::MAX));
+        assert!(check_body_len(MAX_RPC_BODY_BYTES).is_ok());
+        assert!(check_body_len(MAX_RPC_BODY_BYTES + 1).is_err());
+    }
+
+    /// A failed window is retried and only skipped after the attempt limit.
+    #[test]
+    fn a_failed_window_is_retried_before_it_is_skipped() {
+        assert_eq!(advance_cursor(10, 20, false, 3), (20, 0));
+        assert_eq!(advance_cursor(10, 20, true, 0), (10, 1));
+        assert_eq!(
+            advance_cursor(10, 20, true, MAX_WINDOW_ATTEMPTS - 2),
+            (10, MAX_WINDOW_ATTEMPTS - 1)
+        );
+        assert_eq!(
+            advance_cursor(10, 20, true, MAX_WINDOW_ATTEMPTS - 1),
+            (20, 0)
+        );
+    }
+
+    /// The check used to compare lowercased strings, so a prefix difference
+    /// made an active relayer look inactive.
+    #[test]
+    fn membership_ignores_case_and_the_0x_prefix() {
+        let members = vec![
+            serde_json::json!({"address": "0xAABB"}),
+            serde_json::json!({"account": "ccdd"}),
+            serde_json::json!("0xEEFF"),
+        ];
+        assert!(members_contain(&members, "aabb"));
+        assert!(members_contain(&members, "0XCCDD"));
+        assert!(members_contain(&members, "eeff"));
+        assert!(!members_contain(&members, "0xaa"));
+        assert!(!members_contain(&[], "aabb"));
+    }
+
+    #[test]
+    fn a_placeholder_relayer_address_is_refused() {
+        assert!(validate_relayer_address("0x0").is_err());
+        assert!(validate_relayer_address("0xab").is_err());
+        assert!(validate_relayer_address(&"g".repeat(64)).is_err());
+        assert!(validate_relayer_address(&format!("0x{}", "ab".repeat(32))).is_ok());
+        assert!(validate_relayer_address(&"AB".repeat(32)).is_ok());
+    }
+
+    #[test]
+    fn the_cursor_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("relayer-cursor-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cursor").to_string_lossy().into_owned();
+        assert_eq!(read_cursor(&path), None);
+        write_cursor(&path, 1234).unwrap();
+        assert_eq!(read_cursor(&path), Some(1234));
+        std::fs::write(&path, "not a number").unwrap();
+        assert_eq!(read_cursor(&path), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let args = vec![
+            "budlum-relayer".to_string(),
+            "--cursor-file".to_string(),
+            "/tmp/c".to_string(),
+        ];
+        assert_eq!(
+            parse_args(&args).unwrap().cursor_file.as_deref(),
+            Some("/tmp/c")
+        );
+    }
+
+    #[test]
+    fn eth_to_bud_does_not_start_with_a_placeholder_relayer_address() {
+        let config = RelayerConfig {
+            bridge_address: format!("0x{}", "11".repeat(20)),
+            direction: RelayDirection::EthToBud,
+            ..RelayerConfig::default()
+        };
+        assert!(run_relayer(&config).is_err());
+        let ok = RelayerConfig {
+            relayer_address: format!("0x{}", "ab".repeat(32)),
+            ..config
+        };
+        assert!(run_relayer(&ok).is_ok());
+    }
+
+    /// The usage text must say that nothing is relayed yet.
+    #[test]
+    fn the_status_notice_says_nothing_is_relayed() {
+        assert!(STATUS_NOTICE.contains("not mainnet ready"));
+        assert!(STATUS_NOTICE.contains("Nothing is submitted"));
+    }
 
     fn block_with(types: &[&str]) -> serde_json::Value {
         let txs: Vec<serde_json::Value> = types
@@ -865,6 +1129,12 @@ mod tests {
             .map(|(i, t)| serde_json::json!({ "hash": format!("0x{i:02x}"), "type": t }))
             .collect();
         serde_json::json!({ "transactions": txs })
+    }
+
+    /// The node takes one numeric height; a hex string plus a flag is refused.
+    #[test]
+    fn block_by_number_sends_one_numeric_parameter() {
+        assert_eq!(block_by_number_params(42), serde_json::json!([42]));
     }
 
     /// The loop used to report nothing because it read nothing. A block that
@@ -876,10 +1146,25 @@ mod tests {
     }
 
     /// A variant rendered with its fields still has to match: `{:?}` prints
-    /// `BurnBridgeTransferWithEvent { .. }`, and an equality test would miss it.
+    /// `BridgeBurn(BridgeBurnTx { .. })`, and an equality test would miss it.
     #[test]
     fn a_burn_rendered_with_fields_is_found() {
-        let b = block_with(&["BurnBridgeTransferWithEvent { amount: 5 }"]);
+        let b = block_with(&["BridgeBurn(BridgeBurnTx { domain: 2 })"]);
+        assert_eq!(burn_hashes_from_block(&b).len(), 1);
+    }
+
+    /// The door the burn moved to: an in-block `BridgeBurn` transaction.
+    #[test]
+    fn the_in_block_burn_transaction_is_found() {
+        let b = block_with(&["Transfer", "BridgeBurn(BridgeBurnTx)", "Transfer"]);
+        assert_eq!(burn_hashes_from_block(&b), vec!["0x01".to_string()]);
+    }
+
+    /// A node on an older build still renders the old name, and a relayer that
+    /// stopped seeing those burns would relay nothing while looking healthy.
+    #[test]
+    fn the_legacy_render_is_still_found() {
+        let b = block_with(&["BurnBridgeTransferWithEvent"]);
         assert_eq!(burn_hashes_from_block(&b).len(), 1);
     }
 

@@ -1,6 +1,6 @@
 //! In-tree Recursive Length Prefix (RLP) - Ethereum Yellow Paper Appendix B.
 //!
-//! A minimal, auditable, independent implementation. **NO alloy and NO ethers**;
+//! A minimal, auditable, independent implementation. NO alloy and NO ethers;
 //! RFC Q3 selects `in_tree`, which fits the minimal-dependency rule and
 //! cargo-deny. Keccak256 is not used on the RLP side, only in the MPT node
 //! hash; RLP is pure byte encoding.
@@ -53,6 +53,9 @@ pub enum RlpError {
     /// Trailing bytes left unconsumed after decoding, which is an injection
     /// surface.
     TrailingBytes,
+    /// The item budget was exceeded (BLG-0123): one input byte can become
+    /// one heap-allocated item, so the total is bounded.
+    TooManyItems,
     /// The list nesting depth was exceeded, a DoS guard; RLP can technically nest
     /// arbitrarily deep.
     NestingTooDeep,
@@ -65,6 +68,7 @@ impl std::fmt::Display for RlpError {
             RlpError::InvalidLengthPrefix => write!(f, "rlp: invalid length prefix"),
             RlpError::NonCanonical => write!(f, "rlp: non-canonical encoding"),
             RlpError::TrailingBytes => write!(f, "rlp: trailing bytes after item"),
+            RlpError::TooManyItems => write!(f, "rlp: too many items"),
             RlpError::NestingTooDeep => write!(f, "rlp: nesting too deep"),
         }
     }
@@ -75,6 +79,10 @@ impl std::error::Error for RlpError {}
 /// The maximum list depth for RLP encoding, a DoS guard against decoding
 /// endlessly nested lists.
 const MAX_DEPTH: usize = 32;
+
+/// Most items one `decode` call will build (BLG-0123/P05-F16). Orders of
+/// magnitude past any honest header or proof and still finite.
+const MAX_ITEMS: usize = 100_000;
 
 /// Encodes an RLP `Item` canonically.
 pub fn encode(item: &Item) -> Vec<u8> {
@@ -133,10 +141,11 @@ fn trim_leading_zeros(n: usize) -> Vec<u8> {
     be[start..].to_vec()
 }
 
-/// Decodes an RLP byte stream. **The whole input must be consumed**; trailing
+/// Decodes an RLP byte stream. The whole input must be consumed; trailing
 /// bytes are FORBIDDEN.
 pub fn decode(input: &[u8]) -> Result<Item, RlpError> {
-    let (item, rest) = decode_at(input, 0)?;
+    let mut budget = MAX_ITEMS;
+    let (item, rest) = decode_at(input, 0, &mut budget)?;
     if !rest.is_empty() {
         return Err(RlpError::TrailingBytes);
     }
@@ -145,10 +154,21 @@ pub fn decode(input: &[u8]) -> Result<Item, RlpError> {
 
 /// Decodes one item from `input[consumed..]`, returning the item and the
 /// remaining bytes.
-fn decode_at(input: &[u8], depth: usize) -> Result<(Item, &[u8]), RlpError> {
+fn decode_at<'a>(
+    input: &'a [u8],
+    depth: usize,
+    budget: &mut usize,
+) -> Result<(Item, &'a [u8]), RlpError> {
     if depth > MAX_DEPTH {
         return Err(RlpError::NestingTooDeep);
     }
+    // BLG-0123 (P05-F16): every item costs a heap Vec, so one input byte
+    // could become one item. The budget bounds the amplification no matter
+    // what the caller's byte limit is.
+    if *budget == 0 {
+        return Err(RlpError::TooManyItems);
+    }
+    *budget -= 1;
     if input.is_empty() {
         return Err(RlpError::UnexpectedEof);
     }
@@ -162,6 +182,12 @@ fn decode_at(input: &[u8], depth: usize) -> Result<(Item, &[u8]), RlpError> {
     if first <= 0xb7 {
         let len = (first - 0x80) as usize;
         let payload = take_exact(&input[1..], len)?;
+        // BLG-0122 (P05-F15): a single byte below 0x80 has a one-byte
+        // form; the 0x81-prefixed spelling is non-canonical and refused,
+        // exactly as the module doc promises.
+        if len == 1 && payload[0] < 0x80 {
+            return Err(RlpError::NonCanonical);
+        }
         return Ok((Item::String(payload.to_vec()), &input[1 + len..]));
     }
     // Rule 3: a long string, 0xb8 through 0xbf.
@@ -179,7 +205,7 @@ fn decode_at(input: &[u8], depth: usize) -> Result<(Item, &[u8]), RlpError> {
     if first <= 0xf7 {
         let len = (first - 0xc0) as usize;
         let payload = take_exact(&input[1..], len)?;
-        let items = decode_list_items(payload, depth)?;
+        let items = decode_list_items(payload, depth, budget)?;
         return Ok((Item::List(items), &input[1 + len..]));
     }
     // Rule 5: a long list, 0xf8 through 0xff.
@@ -187,11 +213,11 @@ fn decode_at(input: &[u8], depth: usize) -> Result<(Item, &[u8]), RlpError> {
     let len = decode_length_value(&input[1..], len_of_len)?;
     let payload_start = 1 + len_of_len;
     let payload = take_exact(&input[payload_start..], len)?;
-    let items = decode_list_items(payload, depth)?;
+    let items = decode_list_items(payload, depth, budget)?;
     Ok((Item::List(items), &input[payload_start + len..]))
 }
 
-/// Reads a big-endian length from `len_of_len` bytes, with a **canonical check**:
+/// Reads a big-endian length from `len_of_len` bytes, with a canonical check:
 /// a leading zero and a zero length are FORBIDDEN.
 fn decode_length_value(input: &[u8], len_of_len: usize) -> Result<usize, RlpError> {
     let len_bytes = take_exact(input, len_of_len)?;
@@ -224,11 +250,15 @@ fn take_exact(input: &[u8], n: usize) -> Result<&[u8], RlpError> {
 
 /// Decodes a list payload by splitting it into items, one after another, all of
 /// which must be consumed.
-fn decode_list_items(payload: &[u8], depth: usize) -> Result<Vec<Item>, RlpError> {
+fn decode_list_items(
+    payload: &[u8],
+    depth: usize,
+    budget: &mut usize,
+) -> Result<Vec<Item>, RlpError> {
     let mut items = Vec::new();
     let mut rest = payload;
     while !rest.is_empty() {
-        let (item, remaining) = decode_at(rest, depth + 1)?;
+        let (item, remaining) = decode_at(rest, depth + 1, budget)?;
         items.push(item);
         rest = remaining;
     }
@@ -262,8 +292,10 @@ pub fn decode_uint(item: &Item) -> Result<u64, RlpError> {
         Item::String(b) => b,
         _ => return Err(RlpError::NonCanonical),
     };
-    if bytes.len() > 1 && bytes[0] == 0 {
-        return Err(RlpError::NonCanonical); // a leading-zero integer encoding
+    if !bytes.is_empty() && bytes[0] == 0 {
+        return Err(RlpError::NonCanonical); // leading-zero integer encoding,
+                                            // including the bare 0x00 spelling of zero (BLG-0122/P05-F15):
+                                            // canonical zero is the empty string, checked below.
     }
     if bytes.is_empty() {
         return Ok(0); // the empty string is the integer 0, canonically
@@ -479,5 +511,49 @@ mod tests {
         assert!(json.starts_with('['), "byte-array serde: {json}");
         let back: RlpBytes = serde_json::from_str(&json).unwrap();
         assert_eq!(back.decode().unwrap(), item);
+    }
+
+    /// BLG-0122 (P05-F15): non-canonical forms are refused exactly as the
+    /// module doc promises.
+    #[test]
+    fn non_canonical_forms_are_refused() {
+        // A one-byte string below 0x80 in the 0x81 form.
+        assert_eq!(decode(&[0x81, 0x00]), Err(RlpError::NonCanonical));
+        assert_eq!(decode(&[0x81, 0x2a]), Err(RlpError::NonCanonical));
+        // The bare byte is the canonical spelling of the same string.
+        assert!(decode(&[0x2a]).is_ok());
+        // Integer zero as a 0x00 byte: non-canonical (zero is the empty string).
+        let zero_byte = decode(&[0x00]).unwrap();
+        assert_eq!(decode_uint(&zero_byte), Err(RlpError::NonCanonical));
+        let empty = decode(&[0x80]).unwrap();
+        assert_eq!(decode_uint(&empty), Ok(0));
+    }
+
+    /// BLG-0123 (P05-F16): the item budget bounds the decode, whatever the
+    /// caller's byte limit is.
+    #[test]
+    fn decode_refuses_an_item_flood() {
+        // A long flat list of one-byte items: each byte becomes an item,
+        // so the flood is the budget, not the byte count.
+        let payload = vec![0x2au8; MAX_ITEMS + 1];
+        let mut enc = vec![0xfau8];
+        let len = (payload.len() as u32).to_be_bytes();
+        enc.extend_from_slice(&len[1..]);
+        enc.extend_from_slice(&payload);
+        assert!(matches!(decode(&enc), Err(RlpError::TooManyItems)));
+    }
+
+    /// BLG-0126 (P05-F19): a nested list past MAX_DEPTH is refused, not
+    /// recursed into.
+    #[test]
+    fn neg_nesting_too_deep_rejected() {
+        // Each level wraps the whole previous encoding in a list: 33 deep.
+        let mut enc = vec![0x80u8];
+        for _ in 0..(MAX_DEPTH + 1) {
+            let mut next = vec![0xc0u8 + enc.len() as u8];
+            next.extend_from_slice(&enc);
+            enc = next;
+        }
+        assert_eq!(decode(&enc), Err(RlpError::NestingTooDeep));
     }
 }

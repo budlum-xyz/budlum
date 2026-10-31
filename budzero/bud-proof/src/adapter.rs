@@ -133,7 +133,7 @@ pub fn memory_image_commitment_of_reads(reads: &[(u64, u64)]) -> [u8; 32] {
 /// The register companion to [`memory_image_commitment_of_reads`]. Both halves
 /// live in the same public input because widening it would mean changing
 /// `ExecutionPublicInputs`, which is declared twice and constructed in 62
-/// places across the L1, the CLI, the benchmarks and the fuzz targets, for a
+/// places across the chain, the CLI, the benchmarks and the fuzz targets, for a
 /// commitment that fits in bytes the struct already carries and the AIR
 /// already compares.
 ///

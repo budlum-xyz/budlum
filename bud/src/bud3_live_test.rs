@@ -24,7 +24,12 @@ fn fixture(name: &str) -> Vec<u8> {
 
 /// Original -> R3 recipe -> read back -> is it exact? (losslessness + full resolution)
 fn r3_roundtrip(original: &[u8], mime: &str) -> bool {
-    // 1) Produce the recipe (codec compression + the QR derivative commitment)
+    // 1) Produce the QR derivative with the real carousel, then the recipe
+    // (codec compression + the QR derivative commitment)
+    let derivative = match crate::bud_format_qrvideo::derive_stream(original, 1, 1) {
+        Some(d) => d,
+        None => return false,
+    };
     let t = R3Recipe::produce(
         original,
         mime,
@@ -32,8 +37,15 @@ fn r3_roundtrip(original: &[u8], mime: &str) -> bool {
             let mut c = zstd::bulk::Compressor::new(19).unwrap();
             c.compress(d).unwrap_or_else(|_| d.to_vec())
         },
-        b"qr-derivative-bytes",
+        &derivative,
     );
+    // The commitment binds the derivative the carousel produced, and the
+    // derivative itself is not kept.
+    if t.qr_derivative_commit != crate::bud_format_container::content_id(&derivative)
+        || !t.qr_is_not_stored()
+    {
+        return false;
+    }
     // 2) Decompress the body (zstd) -> the original
     let opened = zstd::bulk::Decompressor::new()
         .ok()

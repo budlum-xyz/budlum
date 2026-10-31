@@ -186,6 +186,8 @@ pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, WalletError> {
         })?;
         words.push(word);
     }
+    // The bits are the entropy, one byte per bit.
+    bits.zeroize();
 
     Ok(words.join(" "))
 }
@@ -219,7 +221,7 @@ pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
     for i in 0..(entropy_bits / 8) {
         let mut byte = 0u8;
         for j in 0..8 {
-            byte = (byte << 1) | (bits[i * 8 + j] as u8);
+            byte = (byte << 1) | bits[i * 8 + j];
         }
         entropy.push(byte);
     }
@@ -227,13 +229,16 @@ pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
     // Extract checksum
     let mut checksum = 0u8;
     for j in 0..checksum_bits {
-        checksum = (checksum << 1) | (bits[entropy_bits + j] as u8);
+        checksum = (checksum << 1) | bits[entropy_bits + j];
     }
+    // Zeroizing a Vec empties it, so the bits are wiped after the last read.
+    bits.zeroize();
 
     // Verify checksum
     let hash = Sha256::digest(&entropy);
     let expected_checksum = hash[0] >> (8 - checksum_bits);
     if checksum != expected_checksum {
+        entropy.zeroize();
         return Err(WalletError::InvalidMnemonic(
             "checksum mismatch - invalid mnemonic".into(),
         ));
@@ -299,10 +304,7 @@ impl std::error::Error for HedgedRndExhausted {}
 #[cfg(feature = "production")]
 impl HedgedRnd {
     fn take(&mut self, dst: &mut [u8]) -> Result<(), HedgedRndExhausted> {
-        let end = self
-            .pos
-            .checked_add(dst.len())
-            .ok_or(HedgedRndExhausted)?;
+        let end = self.pos.checked_add(dst.len()).ok_or(HedgedRndExhausted)?;
         let src = self.bytes.get(self.pos..end).ok_or(HedgedRndExhausted)?;
         dst.copy_from_slice(src);
         self.pos = end;
@@ -363,14 +365,30 @@ fn sign_message(sk: &SigningKey<MlDsa87>, message: &[u8]) -> SignatureBytes {
             Err(_) => None,
         }
     };
+    // BLG-0278 (P17-F12): the fallback is now a named decision, not a
+    // silent one. ML-DSA's DETERMINISTIC mode is the FIPS 204 approved default;
+    // the hedge is defense-in-depth against side channels on platforms that
+    // expose one. So a platform whose CSPRNG fails keeps producing VALID,
+    // FIPS-conformant signatures - just without the extra masking. What must
+    // not happen is the operator believing hedging is active when it never
+    // runs: that belief is tested below (`deterministic_fallback_signatures_
+    // verify` pins the fallback path's correctness), and the feature gate
+    // means non-production builds always take this exact path, so the tested
+    // code is the shipped code for the fallback.
+    #[cfg(feature = "production")]
+    let sig: Signature<MlDsa87> = hedged.unwrap_or_else(|| deterministic_fallback(sk, message));
     #[cfg(not(feature = "production"))]
-    let hedged: Option<Signature<MlDsa87>> = None;
-
-    let sig: Signature<MlDsa87> = hedged.unwrap_or_else(|| sk.sign(message));
+    let sig: Signature<MlDsa87> = deterministic_fallback(sk, message);
     let enc: EncodedSignature<MlDsa87> = sig.encode();
     let mut out = [0u8; ML_DSA_87_SIGNATURE_LEN];
     out.copy_from_slice(enc.as_ref());
     out
+}
+
+/// The explicit deterministic path (BLG-0278/P17-F12). Exists so the
+/// fallback has a name in the call graph and a target for the pinning test.
+fn deterministic_fallback(sk: &SigningKey<MlDsa87>, message: &[u8]) -> Signature<MlDsa87> {
+    sk.sign(message)
 }
 
 /// Verify an ML-DSA-87 signature against a 2592-byte public key.
@@ -414,6 +432,8 @@ pub struct RecoveryProposal {
     pub new_address: BudlumAddress,
     pub created_block: u64,
     pub executable_after: u64,
+    pub chain_id: u64,
+    pub account_nonce: u64,
 }
 
 impl RecoveryProposal {
@@ -422,6 +442,8 @@ impl RecoveryProposal {
         new_owner: PublicKeyBytes,
         policy: &SocialRecoveryPolicy,
         created_block: u64,
+        chain_id: u64,
+        account_nonce: u64,
     ) -> Result<Self, WalletError> {
         if current_owner == new_owner {
             return Err(WalletError::InvalidRecoveryProposal(
@@ -438,6 +460,8 @@ impl RecoveryProposal {
             new_owner,
             created_block,
             executable_after,
+            chain_id,
+            account_nonce,
         })
     }
 
@@ -445,13 +469,15 @@ impl RecoveryProposal {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V1");
-        hasher.update(&self.current_owner);
-        hasher.update(&self.current_address);
-        hasher.update(&self.new_owner);
-        hasher.update(&self.new_address);
-        hasher.update(&self.created_block.to_be_bytes());
-        hasher.update(&self.executable_after.to_be_bytes());
+        hasher.update(b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V3");
+        hasher.update(self.chain_id.to_be_bytes());
+        hasher.update(self.account_nonce.to_be_bytes());
+        hasher.update(self.current_owner);
+        hasher.update(self.current_address);
+        hasher.update(self.new_owner);
+        hasher.update(self.new_address);
+        hasher.update(self.created_block.to_be_bytes());
+        hasher.update(self.executable_after.to_be_bytes());
         hasher.finalize().into()
     }
 
@@ -475,8 +501,13 @@ impl RecoveryProposal {
         policy: &SocialRecoveryPolicy,
         approvals: &[GuardianApproval],
         current_block: u64,
+        expected_chain_id: u64,
+        current_account_nonce: u64,
     ) -> bool {
-        self.is_timelock_satisfied(current_block)
+        // Expected values must come from trusted current state, not the proposal.
+        self.chain_id == expected_chain_id
+            && self.account_nonce == current_account_nonce
+            && self.is_timelock_satisfied(current_block)
             && self.verify_guardian_approvals(policy, approvals)
     }
 }
@@ -616,8 +647,7 @@ pub struct Wallet {
 // state does not outlive the wallet either.
 impl Drop for Wallet {
     fn drop(&mut self) {
-        self.mnemonic.zeroize();
-        self.seed.zeroize();
+        self.zeroize_secrets();
     }
 }
 
@@ -641,7 +671,7 @@ pub type BudlumAddress = [u8; 32];
 ///
 /// A real TEE enclave (SGX/Nitro) is a separate integration track; this struct holds the preference +
 /// view-key material.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WalletPrivacyConfig {
     /// Whether network-level private transfer (the note/UTXO opcode family) is used.
     /// Default `false` - the user enables it in wallet settings (an option for the network).
@@ -655,6 +685,28 @@ pub struct WalletPrivacyConfig {
     /// User-generated view key (32 bytes). `None` = not generated yet.
     /// Shared manually with an authority for selective disclosure; never written to the chain.
     pub view_key: Option<[u8; 32]>,
+}
+
+impl std::fmt::Debug for WalletPrivacyConfig {
+    /// BLG-0280 (P17-F14): the derived Debug printed `view_key` in the
+    /// clear. The whole point of the key is that it stays off chain and off
+    /// logs - one `{config:?}` in an error path or a test panic message put
+    /// the selective-disclosure secret into whatever captured it. The redacted
+    /// form keeps every toggle visible and says only whether a key is set.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalletPrivacyConfig")
+            .field("note_privacy_enabled", &self.note_privacy_enabled)
+            .field("tee_enabled", &self.tee_enabled)
+            .field("prefer_client_side_tee", &self.prefer_client_side_tee)
+            .field(
+                "view_key",
+                &match self.view_key {
+                    Some(_) => "[set]",
+                    None => "[none]",
+                },
+            )
+            .finish()
+    }
 }
 
 impl Default for WalletPrivacyConfig {
@@ -754,10 +806,19 @@ pub const VIEW_KEY_VERSION: u32 = 1;
 
 /// The view-key package presented to an authority (section 10 #3).
 /// Closed to the public; delivered manually from the user wallet to the authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ViewKeyDisclosure {
     pub version: u32,
     pub view_key: [u8; 32],
+}
+
+impl std::fmt::Debug for ViewKeyDisclosure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewKeyDisclosure")
+            .field("version", &self.version)
+            .field("view_key", &"[redacted]")
+            .finish()
+    }
 }
 
 impl ViewKeyDisclosure {
@@ -952,6 +1013,13 @@ impl MultisigPolicy {
 }
 
 impl Wallet {
+    /// Wipe every secret the wallet itself holds: mnemonic, seed and the
+    /// view key. Called from `Drop`; kept separate so a test can observe it.
+    fn zeroize_secrets(&mut self) {
+        self.mnemonic.zeroize();
+        self.seed.zeroize();
+        self.privacy.view_key.zeroize();
+    }
     /// Create a new wallet (random entropy -> mnemonic -> seed -> keypair).
     ///
     /// `word_count`: 12 (128-bit entropy) or 24 (256-bit entropy).
@@ -969,7 +1037,7 @@ impl Wallet {
 
         // Production CSPRNG: real random entropy via getrandom
         #[cfg(feature = "production")]
-        let entropy = {
+        let mut entropy = {
             let mut buf = vec![0u8; entropy_len];
             getrandom::getrandom(&mut buf)
                 .map_err(|e| WalletError::ProductionEntropyUnavailable(e.to_string()))?;
@@ -982,15 +1050,19 @@ impl Wallet {
 
         #[cfg(not(feature = "production"))]
         {
-            return Err(WalletError::ProductionEntropyUnavailable(
+            Err(WalletError::ProductionEntropyUnavailable(
                 "Wallet::generate requires the 'production' feature for real CSPRNG entropy. \
                  Use Wallet::from_entropy() for test/dev, or build with --features production."
                     .into(),
-            ));
+            ))
         }
 
         #[cfg(feature = "production")]
-        Self::from_entropy(&entropy)
+        {
+            let wallet = Self::from_entropy(&entropy);
+            entropy.zeroize();
+            wallet
+        }
     }
 
     /// Build a wallet from entropy (BIP39 mnemonic + ML-DSA-87 seed).
@@ -1013,10 +1085,11 @@ impl Wallet {
         let mut hasher = Sha3_256::new();
         hasher.update(b"BUDLUM_MLDSA87_SEED_V1");
         hasher.update(entropy);
-        let seed_bytes = hasher.finalize();
+        let mut seed_bytes: [u8; 32] = hasher.finalize().into();
 
         let mut seed = [0u8; ML_DSA_87_SEED_LEN];
         seed.copy_from_slice(&seed_bytes);
+        seed_bytes.zeroize();
 
         let signing_key = signing_key_from_seed(&seed);
 
@@ -1033,15 +1106,17 @@ impl Wallet {
     /// Restore a wallet from a mnemonic (with BIP39 checksum verification).
     pub fn from_mnemonic(mnemonic: &str) -> Result<Self, WalletError> {
         // BIP39 reverse: mnemonic -> entropy (with checksum verification)
-        let entropy = mnemonic_to_entropy(mnemonic)?;
+        let mut entropy = mnemonic_to_entropy(mnemonic)?;
 
         let mut hasher = Sha3_256::new();
         hasher.update(b"BUDLUM_MLDSA87_SEED_V1");
         hasher.update(&entropy);
-        let seed_bytes = hasher.finalize();
+        entropy.zeroize();
+        let mut seed_bytes: [u8; 32] = hasher.finalize().into();
 
         let mut seed = [0u8; ML_DSA_87_SEED_LEN];
         seed.copy_from_slice(&seed_bytes);
+        seed_bytes.zeroize();
 
         let signing_key = signing_key_from_seed(&seed);
 
@@ -1113,9 +1188,11 @@ impl Wallet {
         verify_signature(public_key, message, signature)
     }
 
-    /// Seed (32-byte ML-DSA-87 xi - use carefully when exporting).
+    /// Seed (32-byte ML-DSA-87 xi). Not part of the public API: the raw
+    /// seed never leaves the wallet outside tests.
+    #[cfg(test)]
     #[must_use]
-    pub fn seed(&self) -> &[u8; ML_DSA_87_SEED_LEN] {
+    pub(crate) fn seed(&self) -> &[u8; ML_DSA_87_SEED_LEN] {
         &self.seed
     }
 
@@ -1303,10 +1380,19 @@ impl Wallet {
     ///
     /// Requires `note_privacy_enabled`. If `tee_enabled`, requires a live
     /// [`TeeRuntime`] and refuses to return plaintext witnesses without it.
+    /// Build a private-transfer intent.
+    ///
+    /// BLG-0275 (P17-F09): `chain_id` and `sender_nonce` come from the caller
+    /// (the network the relayer will submit to, the account nonce at signing
+    /// time) and are bound into the authorization signature; they are not
+    /// wallet state, and silently assuming either was how V1 became
+    /// replayable.
     pub fn build_private_transfer(
         &self,
         req: PrivateTransferRequest,
         runtime: &dyn TeeRuntime,
+        chain_id: u64,
+        sender_nonce: u64,
     ) -> Result<PrivateTransferIntent, WalletError> {
         if !self.privacy.note_privacy_enabled {
             return Err(WalletError::NotePrivacyDisabled);
@@ -1375,9 +1461,10 @@ impl Wallet {
             )));
         }
         let digest = privacy_transfer::public_digest(&nullifiers, &output_commitments);
-        let authorization_sig = self.sign(&digest);
-
-        Ok(PrivateTransferIntent {
+        // BLG-0275 (P17-F09): the signature covers the binding message, not
+        // the bare digest; construct the intent first and sign the exact helper
+        // relayers and verifiers call so producer and verifier cannot diverge.
+        let mut intent = PrivateTransferIntent {
             output_commitments,
             nullifiers,
             sum_in,
@@ -1385,8 +1472,43 @@ impl Wallet {
             inputs: vec![req.input],
             outputs,
             public_digest: digest,
-            authorization_sig,
-        })
+            chain_id,
+            sender: wallet_address,
+            sender_nonce,
+            authorization_sig: [0u8; ML_DSA_87_SIGNATURE_LEN],
+        };
+        let auth_msg = privacy_transfer::intent_authorization_message(&intent);
+        intent.authorization_sig = self.sign(&auth_msg);
+
+        Ok(intent)
+    }
+
+    /// The smallest blinding counter this wallet will still hand out.
+    ///
+    /// P17-F06: the counter lives in memory only, and `from_mnemonic` and
+    /// `from_entropy` start it at 0. A caller that restores a wallet must
+    /// persist this value and give it back through
+    /// [`Self::resume_blinding_counter`], or the first restored note reuses a
+    /// blinding the old wallet already spent.
+    #[must_use]
+    ///
+    /// WIRING: exposed for the host wallet application, which alone owns
+    /// persistence across sessions; this crate is the library and the
+    /// embedding app is the caller, as the note above records.
+    pub fn next_blinding_counter(&self) -> u64 {
+        self.next_blinding_counter
+    }
+
+    /// Restore the blinding counter saved from an earlier session. It only
+    /// moves forward: a value below the current one is ignored, so a stale
+    /// save cannot reopen counters that were already used.
+    ///
+    /// WIRING: exposed for the host wallet application restoring a
+    /// session, the other half of `next_blinding_counter` above.
+    pub fn resume_blinding_counter(&mut self, next: u64) {
+        if next > self.next_blinding_counter {
+            self.next_blinding_counter = next;
+        }
     }
 
     /// Convenience: create a fresh output note commitment for receiving funds
@@ -1455,6 +1577,62 @@ impl Wallet {
 mod tests {
     use super::*;
 
+    /// BLG-0281 (P17-F15): rotation is counter-indexed, so the property the
+    /// design depends on must be pinned: same (seed, counter) -> same key no
+    /// matter what key the wallet currently holds, distinct counters ->
+    /// distinct keys. The derivation is deliberately NOT chained through the
+    /// previous key - chaining would make the key unreproducible from the
+    /// seed, which is the whole recovery story - so "purity" is what has to
+    /// hold, and this is where it is said out loud.
+    #[test]
+    fn view_key_rotation_is_a_pure_function_of_seed_and_counter() {
+        let seed = [9u8; 32];
+        let mut w = WalletPrivacyConfig::default();
+        let k0 = w.rotate_view_key(&seed, 0);
+        let k1 = w.rotate_view_key(&seed, 1);
+        assert_ne!(k0, k1, "distinct counters must derive distinct keys");
+        assert_ne!(
+            k0,
+            derive_view_key(&seed),
+            "rotation #0 must differ from the unrotated key"
+        );
+        // Re-deriving counter 0 after the wallet moved on to k1 returns the
+        // SAME k0: no hidden dependence on current state.
+        assert_eq!(
+            w.rotate_view_key(&seed, 0),
+            k0,
+            "rotation must be reproducible"
+        );
+        let mut other_wallet = WalletPrivacyConfig::default();
+        assert_eq!(
+            other_wallet.rotate_view_key(&seed, 0),
+            k0,
+            "rotation must depend on the seed and counter only, not the wallet"
+        );
+        let _ = &mut other_wallet;
+    }
+
+    /// BLG-0278 (P17-F12): the deterministic fallback must be a working
+    /// signer, not a half-path. In non-production builds every signature
+    /// takes this exact route, so this test pins what the fallback produces:
+    /// verify-able under the wallet's key, and deterministic (same message,
+    /// same signature - the FIPS 204 default property that hedging removes).
+    /// The determinism half only holds on the fallback, so the test runs
+    /// exactly where the fallback is the whole story.
+    #[cfg(not(feature = "production"))]
+    #[test]
+    fn deterministic_fallback_signatures_verify_and_are_stable() {
+        let w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
+        let msg = b"private transfer authorization";
+        let a = w.sign(msg);
+        let b = w.sign(msg);
+        assert!(
+            Wallet::verify(&w.public_key(), msg, &a),
+            "a fallback-mode signature must verify"
+        );
+        assert_eq!(a, b, "deterministic mode must be byte-stable");
+    }
+
     #[test]
     fn generate_12_word_wallet() {
         let wallet = Wallet::from_entropy(&[0x42u8; 16]).expect("12-word wallet must succeed");
@@ -1473,6 +1651,19 @@ mod tests {
         let wallet = Wallet::from_entropy(&[0x42u8; 32]).expect("24-word wallet must succeed");
         let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
         assert_eq!(words.len(), 24, "must have 24 words");
+    }
+
+    /// P17-F06: a restored wallet resumes the saved counter and never goes back.
+    #[test]
+    fn a_resumed_blinding_counter_blocks_reuse_and_only_moves_forward() {
+        let mut wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        wallet.set_note_privacy_enabled(true);
+        wallet.resume_blinding_counter(5);
+        assert_eq!(wallet.next_blinding_counter(), 5);
+        assert!(wallet.prepare_receive_note(10, 4).is_err());
+        assert!(wallet.prepare_receive_note(10, 5).is_ok());
+        wallet.resume_blinding_counter(2);
+        assert_eq!(wallet.next_blinding_counter(), 6, "a stale save is ignored");
     }
 
     #[test]
@@ -1649,6 +1840,17 @@ mod tests {
     }
 
     #[test]
+    fn zeroize_secrets_wipes_seed_mnemonic_and_view_key() {
+        let mut wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
+        let _ = wallet.ensure_view_key();
+        assert!(wallet.privacy.view_key.is_some());
+        wallet.zeroize_secrets();
+        assert_eq!(wallet.seed, [0u8; ML_DSA_87_SEED_LEN]);
+        assert!(wallet.mnemonic.is_empty());
+        assert!(wallet.privacy.view_key.is_none());
+    }
+
+    #[test]
     fn binding_export_redacts_seed_and_counts_words() {
         let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let export = wallet.binding_export();
@@ -1701,7 +1903,6 @@ mod tests {
         // This test is a seal - it preserves wallet-core's permissionless principle.
         // README: "anyone can be a relayer, security through stake + slashing."
         // wallet-core is a WALLET, not a RELAYER.
-        assert!(true, "wallet-core has no relayer registration/stake code");
     }
 
     #[test]
@@ -1919,9 +2120,15 @@ mod tests {
         assert!(!rotated.guardians.contains(&g1.public_key()));
         assert!(rotated.guardians.contains(&replacement.public_key()));
 
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &rotated, 1_000)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &rotated,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
         let digest = proposal.digest();
         let compromised_quorum = [
             GuardianApproval {
@@ -1975,9 +2182,15 @@ mod tests {
         let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
 
         assert_eq!(proposal.current_address, owner.address());
         assert_eq!(proposal.new_address, new_owner.address());
@@ -1994,14 +2207,22 @@ mod tests {
         let other_new_owner = Wallet::from_entropy(&[9u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
         let changed_target = RecoveryProposal::new(
             owner.public_key(),
             other_new_owner.public_key(),
             &policy,
             1_000,
+            45_262,
+            0,
         )
         .unwrap();
         let mut changed_timelock = proposal.clone();
@@ -2024,9 +2245,15 @@ mod tests {
             100,
         )
         .unwrap();
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
         let digest = proposal.digest();
         let one = [GuardianApproval {
             public_key: g1.public_key(),
@@ -2056,8 +2283,18 @@ mod tests {
         assert!(!proposal.verify_guardian_approvals(&policy, &one));
         assert!(!proposal.verify_guardian_approvals(&policy, &wrong_digest));
         assert!(proposal.verify_guardian_approvals(&policy, &quorum));
-        assert!(!proposal.is_executable(&policy, &quorum, 1_099));
-        assert!(proposal.is_executable(&policy, &quorum, 1_100));
+        assert!(!proposal.is_executable(&policy, &quorum, 1_099, 45_262, 0));
+        assert!(proposal.is_executable(&policy, &quorum, 1_100, 45_262, 0));
+        assert!(!proposal.is_executable(&policy, &quorum, 1_100, 45_263, 0));
+        assert!(!proposal.is_executable(&policy, &quorum, 1_100, 45_262, 1));
+        let mut replay = proposal.clone();
+        replay.account_nonce = 1;
+        assert_ne!(proposal.digest(), replay.digest());
+        assert!(!replay.verify_guardian_approvals(&policy, &quorum));
+        replay = proposal.clone();
+        replay.chain_id = 45_263;
+        assert_ne!(proposal.digest(), replay.digest());
+        assert!(!replay.verify_guardian_approvals(&policy, &quorum));
     }
 
     #[test]
@@ -2066,14 +2303,22 @@ mod tests {
         let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
-        assert!(
-            RecoveryProposal::new(owner.public_key(), owner.public_key(), &policy, 1_000).is_err()
-        );
+        assert!(RecoveryProposal::new(
+            owner.public_key(),
+            owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0
+        )
+        .is_err());
         assert!(RecoveryProposal::new(
             owner.public_key(),
             new_owner.public_key(),
             &policy,
             u64::MAX,
+            45_262,
+            0
         )
         .is_err());
     }
@@ -2131,6 +2376,13 @@ mod tests {
         assert!(hex.starts_with("vk1:1:"));
         let parsed = ViewKeyDisclosure::from_hex(&hex).expect("parse");
         assert_eq!(parsed, disclosure);
+        // Debug is used by error paths and assert macros; only the explicit
+        // export operation may reveal the selective-disclosure secret.
+        let debug = format!("{disclosure:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(debug.contains("version: 1"));
+        assert!(!debug.contains(&format!("{:?}", disclosure.view_key)));
+        assert!(!debug.contains(&hex::encode(disclosure.view_key)));
     }
 
     #[test]
@@ -2181,8 +2433,60 @@ mod tests {
             change_blinding: None,
         };
         let rt = w.default_tee_runtime();
-        let err = w.build_private_transfer(req, &rt).unwrap_err();
+        let err = w.build_private_transfer(req, &rt, 45262, 0).unwrap_err();
         assert!(matches!(err, WalletError::NotePrivacyDisabled));
+    }
+
+    /// BLG-0280 (P17-F14): the derived Debug printed the note opening, and a
+    /// wallet formats witnesses into error and test output. Redacting only
+    /// `spend_secret` left `amount`, `blinding` and `recipient_tag` - the three
+    /// field elements `privacy_commit` exists to hide - readable, and both the
+    /// intent and the request derive Debug over them. This pins every path a
+    /// formatted value takes to the terminal.
+    #[test]
+    fn a_formatted_transfer_never_prints_the_note_opening() {
+        let w = Wallet::from_entropy(&[0x44u8; 16]).unwrap();
+        let inp = PrivateNoteInput {
+            amount: 987_654_321,
+            recipient_tag: 112_233_445_566,
+            blinding: 77_889_900_112,
+            spend_secret: 1_234_567_890,
+        };
+        let req = PrivateTransferRequest {
+            input: inp.clone(),
+            to: [7u8; 32],
+            // Public on the wire by design; kept distinct from the secrets so
+            // the assertion below is about them and not about this.
+            send_amount: 55,
+            output_blinding: 55_667_788_990,
+            change_recipient_tag: Some(43_211),
+            change_blinding: Some(99_887_766_554),
+        };
+        let out = PrivateNoteOutput {
+            amount: 987_654_321,
+            recipient: [7u8; 32],
+            recipient_tag: 112_233_445_566,
+            blinding: 55_667_788_990,
+        };
+        let rendered = format!("{inp:?} {req:?} {out:?}");
+        for secret in [
+            "987654321",
+            "112233445566",
+            "77889900112",
+            "1234567890",
+            "55667788990",
+            "99887766554",
+            "43211",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "the formatted transfer printed {secret}: {rendered}"
+            );
+        }
+        assert!(rendered.contains("[redacted]"));
+        // The public half still prints: a redaction that hid everything would
+        // pass the assertions above while telling a reader nothing.
+        assert!(rendered.contains("send_amount: 55"));
     }
 
     /// Two notes that share a blinding share a commitment: an observer learns
@@ -2236,16 +2540,38 @@ mod tests {
             change_blinding: None,
         };
         let rt = w.default_tee_runtime();
-        let intent = w.build_private_transfer(req, &rt).unwrap();
+        let intent = w.build_private_transfer(req, &rt, 45262, 3).unwrap();
         assert_eq!(intent.sum_in, intent.sum_out);
         assert_eq!(intent.sum_in, 100);
         assert_eq!(intent.nullifiers.len(), 1);
         assert_eq!(intent.output_commitments.len(), 1);
         assert!(Wallet::verify(
             &w.public_key(),
-            &intent.public_digest,
+            &privacy_transfer::intent_authorization_message(&intent),
             &intent.authorization_sig
         ));
+        // BLG-0275: the same signature on another chain (or another nonce)
+        // must not verify - the replay V1 allowed.
+        let mut foreign = intent.clone();
+        foreign.chain_id = 1;
+        assert!(
+            !Wallet::verify(
+                &w.public_key(),
+                &privacy_transfer::intent_authorization_message(&foreign),
+                &foreign.authorization_sig
+            ),
+            "an authorization bound to chain 45262 must not verify on chain 1"
+        );
+        let mut reused = intent.clone();
+        reused.sender_nonce = 4;
+        assert!(
+            !Wallet::verify(
+                &w.public_key(),
+                &privacy_transfer::intent_authorization_message(&reused),
+                &reused.authorization_sig
+            ),
+            "an authorization must not survive a nonce bump"
+        );
     }
 
     #[test]
@@ -2264,7 +2590,7 @@ mod tests {
             change_blinding: Some(12),
         };
         let intent = w
-            .build_private_transfer(req, &w.default_tee_runtime())
+            .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap();
         assert_eq!(intent.output_commitments.len(), 2);
         assert_eq!(intent.sum_out, 100);
@@ -2286,7 +2612,7 @@ mod tests {
             change_blinding: Some(12),
         };
         let err = w
-            .build_private_transfer(req, &w.default_tee_runtime())
+            .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
     }
@@ -2312,7 +2638,7 @@ mod tests {
             change_recipient_tag: None,
             change_blinding: None,
         };
-        let err = w.build_private_transfer(req, &rt).unwrap_err();
+        let err = w.build_private_transfer(req, &rt, 45262, 0).unwrap_err();
         assert!(matches!(err, WalletError::TeeUnavailable(_)));
     }
 
@@ -2444,7 +2770,7 @@ mod tests {
             change_blinding: None,
         };
         let err = w
-            .build_private_transfer(req, &w.default_tee_runtime())
+            .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
     }

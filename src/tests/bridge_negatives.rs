@@ -161,9 +161,13 @@ fn forged_proof_against_committed_root_rejected() {
     forged_tree.push(forged_event);
     let forged_proof = forged_tree.proof(0).unwrap();
 
-    let res =
-        f.bc.submit_relay_proof(f.message_id, f.relayer, &forged_proof, 1);
-    assert!(res.is_err(), "forged proof must never mint");
+    let err =
+        f.bc.submit_relay_proof(f.message_id, f.relayer, &forged_proof, 1)
+            .unwrap_err();
+    assert!(
+        err.contains("Merkle proof does not verify"),
+        "forged proof must never mint: {err}"
+    );
     // Bridge state must still show the transfer un-minted (pending path only).
     let t = f.bc.state.bridge_state.get_transfer(&f.message_id).unwrap();
     assert!(!matches!(
@@ -183,8 +187,13 @@ fn replay_same_relay_proof_rejected() {
     f.bc.submit_relay_proof(f.message_id, f.relayer, &proof, 1)
         .unwrap(); // positive path still holds
 
-    let replay = f.bc.submit_relay_proof(f.message_id, f.relayer, &proof, 1);
-    assert!(replay.is_err(), "replayed relay proof must be rejected");
+    let err =
+        f.bc.submit_relay_proof(f.message_id, f.relayer, &proof, 1)
+            .unwrap_err();
+    assert!(
+        err.contains("no pending relay"),
+        "replayed relay proof must be rejected: {err}"
+    );
 }
 
 /// [N3] No committed anchor at all → the relayer cannot self-attest a root.
@@ -192,10 +201,12 @@ fn replay_same_relay_proof_rejected() {
 fn relay_proof_without_committed_anchor_rejected() {
     let mut f = honest_fixture(true);
     let proof = f.tree.proof(0).unwrap();
-    let res = f.bc.submit_relay_proof(f.message_id, f.relayer, &proof, 1);
+    let err =
+        f.bc.submit_relay_proof(f.message_id, f.relayer, &proof, 1)
+            .unwrap_err();
     assert!(
-        res.is_err(),
-        "proof without a chain-committed event root must be rejected"
+        err.contains("No committed event root"),
+        "proof without a chain-committed event root must be rejected: {err}"
     );
 }
 
@@ -206,10 +217,12 @@ fn relay_proof_with_wrong_domain_anchor_rejected() {
     let mut f = honest_fixture(true);
     anchor_commitment(&mut f, 1, 10); // commitment lands on domain 2, not source domain 1
     let proof = f.tree.proof(0).unwrap();
-    let res = f.bc.submit_relay_proof(f.message_id, f.relayer, &proof, 1);
+    let err =
+        f.bc.submit_relay_proof(f.message_id, f.relayer, &proof, 1)
+            .unwrap_err();
     assert!(
-        res.is_err(),
-        "cross-domain anchor substitution must be rejected"
+        err.contains("No committed event root"),
+        "cross-domain anchor substitution must be rejected: {err}"
     );
 }
 
@@ -219,8 +232,13 @@ fn inactive_relayer_proof_rejected() {
     let mut f = honest_fixture(false); // relayer NOT registered
     anchor_commitment(&mut f, 0, 10);
     let proof = f.tree.proof(0).unwrap();
-    let res = f.bc.submit_relay_proof(f.message_id, f.relayer, &proof, 1);
-    assert!(res.is_err(), "inactive relayer must be rejected");
+    let err =
+        f.bc.submit_relay_proof(f.message_id, f.relayer, &proof, 1)
+            .unwrap_err();
+    assert!(
+        err.contains("is not an active relayer"),
+        "inactive relayer must be rejected: {err}"
+    );
 }
 
 /// [N6] Relaying a message that was never enqueued/observed is rejected
@@ -231,6 +249,74 @@ fn unknown_message_proof_rejected() {
     anchor_commitment(&mut f, 0, 10);
     let proof = f.tree.proof(0).unwrap();
     let ghost_id = hash(b"GHOST_MESSAGE");
-    let res = f.bc.submit_relay_proof(ghost_id, f.relayer, &proof, 1);
-    assert!(res.is_err(), "unknown message relay must be rejected");
+    let err =
+        f.bc.submit_relay_proof(ghost_id, f.relayer, &proof, 1)
+            .unwrap_err();
+    assert!(
+        err.contains("no pending relay"),
+        "unknown message relay must be rejected: {err}"
+    );
+}
+
+/// The two bridge doors are transactions, not RPC mutations.
+///
+/// `bridge_state` and `message_registry` are folded into the state root, so a
+/// node that applied a burn or a relayed message from a request path sealed
+/// blocks its peers reject. These four checks pin the shape of the fix: the
+/// transaction types exist and are signed, the executor applies them, and the
+/// out-of-block methods are gone from production code.
+#[test]
+fn the_bridge_doors_are_transactions_and_the_out_of_block_paths_are_test_only() {
+    let source = include_str!("../chain/blockchain.rs");
+    // Both resetting methods still exist for the suites, but only behind
+    // `#[cfg(test)]`: a production caller cannot reach them.
+    // The names are checked from the other side now: the writer must either
+    // be gone from this file, or - where a suite still needs one - live
+    // behind `#[cfg(test)]`. What may not exist is a production path that
+    // writes the message registry or the bridge outside block execution.
+    for name in [
+        "fn burn_bridge_transfer_with_event(",
+        "fn submit_relayed_cross_domain_message(",
+        "fn submit_cross_domain_message(",
+    ] {
+        let Some(at) = source.find(name) else {
+            continue;
+        };
+        let before = &source[..at];
+        let gate = before.rfind("#[cfg(test)]").map(|i| i + 200 >= at);
+        assert_eq!(
+            gate,
+            Some(true),
+            "{name} must be `#[cfg(test)]`-gated: it writes consensus state \
+             outside block execution"
+        );
+    }
+
+    // The transaction types carry the writes instead.
+    let tx_source = include_str!("../core/transaction.rs");
+    for needle in [
+        "BridgeBurn(BridgeBurnTx)",
+        "CrossDomainMessage(crate::cross_domain::message::CrossDomainMessage)",
+        "TransactionType::BridgeBurn(_) => 50",
+        "TransactionType::CrossDomainMessage(_) => 51",
+    ] {
+        assert!(
+            tx_source.contains(needle),
+            "the transaction type must exist: {needle}"
+        );
+    }
+
+    // And the executor is where they are applied.
+    let executor = include_str!("../execution/executor.rs");
+    for needle in [
+        "TransactionType::BridgeBurn(burn) =>",
+        "crate::cross_domain::bridge::apply_burn_to_state(",
+        "TransactionType::CrossDomainMessage(message) =>",
+        "crate::cross_domain::message::register_relayed_on_state(",
+    ] {
+        assert!(
+            executor.contains(needle),
+            "the executor must apply it in block: {needle}"
+        );
+    }
 }

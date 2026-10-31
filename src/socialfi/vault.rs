@@ -84,6 +84,12 @@ pub enum VaultError {
     /// would be the caller declaring an authority it does not have.
     #[error("token {id} belongs to {}; the sender named it as if it were theirs", .holder.to_hex())]
     NotOwner { id: u64, holder: Address },
+    /// The folder already holds the most members one folder may hold.
+    #[error("folder {0} is full")]
+    FolderFull(u64),
+    /// The registry already holds the most folders it may hold.
+    #[error("the vault registry is full")]
+    TooManyFolders,
 }
 
 /// The folder-to-membership map. Pure state, no clock, no ownership: those
@@ -95,6 +101,13 @@ pub struct VaultRegistry {
 }
 
 impl VaultRegistry {
+    /// Most members one folder can hold. It bounds the membership scans.
+    pub const MAX_MEMBERS_PER_FOLDER: usize = 1_000;
+
+    /// Most folders the registry can hold. With the member cap it bounds the
+    /// scan in `referenced_by`.
+    pub const MAX_FOLDERS: usize = 100_000;
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -102,6 +115,9 @@ impl VaultRegistry {
 
     /// A folder that exists and holds nothing is still a folder.
     pub fn register_folder(&mut self, folder: u64) -> Result<(), VaultError> {
+        if self.folders.len() >= Self::MAX_FOLDERS && !self.folders.contains(&folder) {
+            return Err(VaultError::TooManyFolders);
+        }
         if !self.folders.insert(folder) {
             return Err(VaultError::AlreadyFolder(folder));
         }
@@ -169,6 +185,9 @@ impl VaultRegistry {
         if list.contains(&member) {
             return Err(VaultError::AlreadyMember(member, folder));
         }
+        if list.len() >= Self::MAX_MEMBERS_PER_FOLDER {
+            return Err(VaultError::FolderFull(folder));
+        }
         list.push(member);
         Ok(())
     }
@@ -214,6 +233,13 @@ impl VaultRegistry {
         if self.contains(to, member) {
             return Err(VaultError::AlreadyMember(member, to));
         }
+        if self
+            .members
+            .get(&to)
+            .is_some_and(|m| m.len() >= Self::MAX_MEMBERS_PER_FOLDER)
+        {
+            return Err(VaultError::FolderFull(to));
+        }
         self.extract_member(from, member)?;
         self.add_member(to, member)?;
         Ok(())
@@ -233,24 +259,21 @@ impl VaultRegistry {
     /// members only; leaves cannot contain anything, so the walk terminates
     /// at the forest's bottom and the cycle test stays honest at its top.
     fn reaches(&self, from: u64, target: u64) -> bool {
+        // Explicit stack: nesting depth is user-controlled, so native
+        // recursion here could overflow the stack of every applying node.
         let mut seen = BTreeSet::new();
-        self.reaches_walk(from, target, &mut seen)
-    }
-
-    fn reaches_walk(&self, from: u64, target: u64, seen: &mut BTreeSet<u64>) -> bool {
-        if from == target {
-            return true;
-        }
-        if !seen.insert(from) {
-            return false;
-        }
-        let Some(members) = self.members.get(&from) else {
-            return false;
-        };
-        for member in members {
-            if self.folders.contains(member) && self.reaches_walk(*member, target, seen) {
+        let mut stack = vec![from];
+        while let Some(node) = stack.pop() {
+            if node == target {
                 return true;
             }
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(members) = self.members.get(&node) else {
+                continue;
+            };
+            stack.extend(members.iter().copied().filter(|m| self.folders.contains(m)));
         }
         false
     }
@@ -398,6 +421,42 @@ pub fn execute_vault_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cycle_check_survives_a_very_deep_folder_chain() {
+        // BLG-0712: the walk must not use native recursion.
+        let depth: u64 = 200_000;
+        let mut vault = VaultRegistry::new();
+        for id in 1..=depth {
+            vault.folders.insert(id);
+            vault.members.insert(id, Vec::new());
+        }
+        for id in 1..depth {
+            if let Some(list) = vault.members.get_mut(&id) {
+                list.push(id + 1);
+            }
+        }
+        assert_eq!(vault.add_member(depth, 1), Err(VaultError::Cycle(depth, 1)));
+    }
+
+    #[test]
+    fn a_folder_refuses_members_past_the_cap() {
+        let mut v = VaultRegistry::new();
+        v.register_folder(1).unwrap();
+        for id in 0..VaultRegistry::MAX_MEMBERS_PER_FOLDER as u64 {
+            v.add_member(1, 10_000 + id).unwrap();
+        }
+        assert_eq!(v.add_member(1, 99_999), Err(VaultError::FolderFull(1)));
+    }
+
+    #[test]
+    fn the_registry_refuses_folders_past_the_total_cap() {
+        let mut v = VaultRegistry::new();
+        for id in 0..VaultRegistry::MAX_FOLDERS as u64 {
+            v.register_folder(id).unwrap();
+        }
+        assert_eq!(v.register_folder(u64::MAX), Err(VaultError::TooManyFolders));
+    }
 
     fn two_folders() -> (VaultRegistry, u64, u64) {
         let mut v = VaultRegistry::new();

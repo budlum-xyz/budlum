@@ -57,7 +57,9 @@ fn statements(code: &str) -> Vec<String> {
             break;
         };
         let end = stmt_start + "builder".len() + i + 1 + end_rel;
-        out.push(rest[..end].to_string());
+        // Only the statement itself: the text since the previous statement
+        // would let a `let` that reads another column vouch for this one.
+        out.push(rest[stmt_start..end].to_string());
         rest = &rest[end + 1..];
     }
     out
@@ -236,7 +238,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut checked = 0usize;
 
     for (column, accumulates, risk) in ACCUMULATORS {
-        if !src.contains(column) {
+        if !code.contains(column) {
             problems.push(format!(
                 "{column} is gone from the AIR. If the accumulator was removed the \
                  entry here should go with it, in the same commit, with the reason."
@@ -349,4 +351,19 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "accumulators canary OK: pinned PASSes and unpinned FAILs; the statement scanner survives a trailing word and a wide character.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statement_does_not_carry_the_text_before_it() {
+        let code =
+            "let g = cur[COL_GAS_USED].into();\nbuilder.when_first_row().assert_zero(other);\n";
+        let st = statements(code);
+        assert_eq!(st.len(), 1);
+        assert!(!st[0].contains("COL_GAS_USED"));
+        assert!(st[0].starts_with("builder"));
+    }
 }

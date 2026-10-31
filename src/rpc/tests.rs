@@ -68,7 +68,10 @@ mod rpc_tests {
             MethodKind, SlotDisclosure, VerificationMethod,
         };
         let poa = crate::domain::ConsensusKind::PoA;
-        let subject = Address::from([1u8; 32]);
+        // The receipt is signed by the subject's account key (BLG-0097), and
+        // the V4 address IS that key, so the subject is derived from it.
+        let subject_keys = crate::crypto::primitives::KeyPair::generate().expect("keypair");
+        let subject = Address::from(subject_keys.public_key_bytes());
         let issuer = Address::from([2u8; 32]);
         let requester = Address::from([3u8; 32]);
         let mut registry = IdentityRegistry::new();
@@ -124,7 +127,7 @@ mod rpc_tests {
                 0,
             )
             .expect("issue against the seeded records");
-        let (filled, receipt) = build_presentation(
+        let (filled, mut receipt) = build_presentation(
             &registry,
             &requester,
             &subject,
@@ -139,6 +142,7 @@ mod rpc_tests {
             0,
         )
         .expect("the fixture must fill");
+        receipt.sign(&subject_keys);
         (
             registry, subject, requester, receipt, filled, id, credential,
         )
@@ -438,6 +442,23 @@ mod rpc_tests {
     }
 
     #[tokio::test]
+    async fn social_delete_is_refused_outside_a_block() {
+        let (_server, bc) = setup().await;
+        let auth = crate::storage::GrantAuthorization {
+            owner_key: [0u8; crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN],
+            signature: Vec::new(),
+        };
+        let err = bc
+            .social_delete(crate::storage::ContentId::of(b"x"), auth, 1)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("state-root") && err.contains("bud_sendRawTransaction"),
+            "the refusal must name the diverging root and the door that does work, got: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_rpc_block_methods() {
         let (server, bc) = setup().await;
         let block_number = server.block_number().await.unwrap();
@@ -523,17 +544,18 @@ mod rpc_tests {
             .get_transaction_receipt(hex_tx_hash.clone())
             .await
             .unwrap();
-        error_to_json_result(server.get_transaction_receipt(hex_tx_hash.clone()).await);
+        // A second read of the same pending receipt answers the same way.
+        let again = server
+            .get_transaction_receipt(hex_tx_hash.clone())
+            .await
+            .expect("a pending receipt query must not error");
+        assert_eq!(again, receipt);
         println!(
             "bud_getTransactionReceipt (pending): {}",
             serde_json::to_string_pretty(&receipt).unwrap()
         );
 
         assert!(receipt.is_null());
-    }
-
-    fn error_to_json_result<T>(res: Result<T, jsonrpsee::types::error::ErrorObjectOwned>) {
-        let _ = res;
     }
 
     #[tokio::test]
@@ -547,6 +569,10 @@ mod rpc_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.code(), -32602);
+        assert!(
+            !err.message().is_empty(),
+            "an invalid-params refusal must carry a reason"
+        );
         println!("Error Case (Invalid Params): {err}");
     }
 
@@ -762,7 +788,11 @@ mod rpc_tests {
         // The relayed submit path requires the sender to be an active relayer.
         // Fund and register a relayer (staking == registration), then use it as
         // The message sender.
-        let relayer = Address::from_hex(&"07".repeat(32)).unwrap();
+        // The message envelope is signed (BLG-0113): the V4 address IS the
+        // Ed25519 public key, so the relayer is derived from the key that
+        // signs.
+        let relayer_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let relayer = Address::from(relayer_keys.public_key_bytes());
         chain
             .credit_development_account(&relayer, 5_000)
             .await
@@ -772,7 +802,7 @@ mod rpc_tests {
             .await
             .unwrap();
 
-        let cross_domain_msg = crate::cross_domain::CrossDomainMessage::new(
+        let mut cross_domain_msg = crate::cross_domain::CrossDomainMessage::new(
             crate::cross_domain::message::CrossDomainMessageParams {
                 source_domain: 1,
                 target_domain: 2,
@@ -786,14 +816,66 @@ mod rpc_tests {
                 expiry_height: 100,
             },
         );
+        cross_domain_msg.sign_sender_ed25519(&relayer_keys);
 
-        let msg_result = server
+        // The relay is a transaction now, and a transaction is signed by the
+        // node's consensus signer. This chain runs PoW with no signer (by
+        // design), so the door must refuse with that reason rather than
+        // half-register anything.
+        let signerless = server
             .submit_cross_domain_message(cross_domain_msg.clone())
             .await
-            .unwrap();
+            .expect_err("a node with no consensus signer cannot build a transaction");
+        assert!(
+            signerless.message().contains("No consensus signer"),
+            "the refusal names the missing signer: {}",
+            signerless.message()
+        );
+
+        // The same call on a chain whose node holds a signer answers with the
+        // TRANSACTION hash, not the message id: `message_registry` is in the
+        // state root, so nothing is registered until a block carries it.
+        let node_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+        let node_addr = Address::from(node_keys.public_key_bytes());
+        let node_signer = Arc::new(crate::crypto::signer::KeyPairSigner::new(node_keys));
+        let mut relay_bc = Blockchain::new(
+            Arc::new(crate::consensus::pos::PoSEngine::with_signer(
+                crate::consensus::pos::PoSConfig::default(),
+                None,
+                node_signer.clone(),
+            )),
+            None,
+            45262,
+            None,
+        );
+        relay_bc.state.add_balance(&relayer, 5_000);
+        relay_bc
+            .state
+            .bond_relayer(&relayer, 2_000)
+            .expect("the relayer bonds");
+        relay_bc.state.add_balance(&node_addr, 5_000);
+        let (relay_server, relay_chain) = setup_with_blockchain(relay_bc).await;
+        let msg_result = relay_server
+            .submit_cross_domain_message(cross_domain_msg.clone())
+            .await
+            .expect("a signed transaction is built and queued");
+        let hash_hex = msg_result
+            .strip_prefix("0x")
+            .expect("an RPC transaction hash is 0x-prefixed");
         assert_eq!(
+            hex::decode(hash_hex).expect("valid hex").len(),
+            32,
+            "the answer is the 32-byte transaction hash: {msg_result}"
+        );
+        assert_ne!(
             msg_result,
-            format!("0x{}", hex::encode(cross_domain_msg.message_id))
+            format!("0x{}", hex::encode(cross_domain_msg.message_id)),
+            "the message id is not a receipt: registration needs a block"
+        );
+        assert_eq!(
+            relay_chain.get_mempool_size().await,
+            1,
+            "the relay is queued as a transaction"
         );
 
         let asset_id = crate::cross_domain::AssetId([42u8; 32]);
@@ -824,7 +906,7 @@ mod rpc_tests {
     }
 
     #[tokio::test]
-    async fn test_storage_rpc_full_lifecycle_register_deal_challenge_answer() {
+    async fn the_storage_write_rpcs_refuse_and_name_their_transaction_doors() {
         let (server, bc) = setup().await;
         let manifest = crate::storage::ContentManifest::from_bytes_sliced(
             b"hello storage rpc lifecycle test",
@@ -832,278 +914,115 @@ mod rpc_tests {
         )
         .unwrap();
         let s_id = manifest.shards[0].shard_id;
-
-        let reg_res = server
-            .storage_register_manifest(manifest.clone())
+        let op = Address::from([31u8; 32]);
+        let payer = Address::from([32u8; 32]);
+        bc.credit_development_account(&payer, 100_000_000)
             .await
-            .unwrap();
-        assert_eq!(reg_res["shardCount"], manifest.shard_count);
+            .expect("devnet credit");
+        let payer_before = bc.get_balance(&payer).await;
+        let economics = crate::domain::storage_deal::StorageEconomicsParams {
+            operator_bond: 2_000_000,
+            fee_per_byte_epoch: 10,
+        };
+
+        let refusals = [
+            (
+                server
+                    .storage_register_manifest(manifest.clone())
+                    .await
+                    .expect_err("manifest registration is a transaction"),
+                "StorageTx::RegisterManifest",
+            ),
+            (
+                server
+                    .storage_open_deal(
+                        1,
+                        manifest.clone(),
+                        format!("0x{}", hex::encode(s_id.0)),
+                        format!("0x{}", op.to_hex()),
+                        format!("0x{}", payer.to_hex()),
+                        0,
+                        10,
+                        100,
+                        economics.clone(),
+                        crate::domain::storage_params::StorageDomainParams::default(),
+                        Some(valid_merkle_proof()),
+                        Some([0x42u8; 32]),
+                        7,
+                        String::new(),
+                        String::new(),
+                    )
+                    .await
+                    .expect_err("deal opening is a transaction"),
+                "StorageTx::OpenDeal",
+            ),
+            (
+                server
+                    .storage_accept_reallocation(
+                        0,
+                        format!("0x{}", op.to_hex()),
+                        format!("0x{}", payer.to_hex()),
+                        0,
+                        10,
+                        economics,
+                        crate::domain::storage_params::StorageDomainParams::default(),
+                        None,
+                        None,
+                        7,
+                        String::new(),
+                        String::new(),
+                    )
+                    .await
+                    .expect_err("repair acceptance is a transaction"),
+                "StorageTx::AcceptReallocation",
+            ),
+            (
+                server
+                    .storage_open_challenge(
+                        crate::domain::storage_deal::RetrievalChallengeRequest {
+                            deal_id: 0,
+                            byte_start: 0,
+                            byte_end: 15,
+                            challenge_epoch: 0,
+                            deadline_epoch: 25,
+                            opener_bond: 50,
+                            opener: Some(payer),
+                            opener_signature: None,
+                        },
+                    )
+                    .await
+                    .expect_err("challenge opening is a transaction"),
+                "StorageTx::OpenChallenge",
+            ),
+            (
+                server
+                    .storage_answer_challenge(crate::domain::storage_deal::RetrievalResponse {
+                        challenge_id: 0,
+                        _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
+                        responder: op,
+                        response_epoch: 18,
+                        responder_signature: None,
+                        proof_bytes: None,
+                    })
+                    .await
+                    .expect_err("challenge answers are transactions"),
+                "StorageTx::AnswerChallenge",
+            ),
+        ];
+        for (err, door) in refusals {
+            assert!(
+                err.message().contains(door) && err.message().contains("bud_sendRawTransaction"),
+                "the refusal names {door}: {}",
+                err.message()
+            );
+        }
 
         let get_man = server
             .storage_get_manifest(format!("0x{}", hex::encode(manifest.manifest_id.0)))
             .await
             .unwrap();
-        assert_eq!(get_man["found"], true);
-
-        let op_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let op = Address::from(op_keypair.public_key_bytes());
-        let payer_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let payer = Address::from(payer_keypair.public_key_bytes());
-
-        // Give payer and operator enough balance for deal fees and bond
-        bc.credit_development_account(&payer, 100_000_000)
-            .await
-            .expect("devnet credit");
-        bc.credit_development_account(&op, 100_000_000)
-            .await
-            .expect("devnet credit");
-
-        // The deal-open RPC now requires both the payer and the operator to
-        // sign the exact deal parameters. Without these, an unsigned call
-        // could spend any account the caller names (HIGH, CWE-862).
-        // The preimage also binds the manifest-derived shard size and the
-        // manifest id, because the chain prices the escrow from the manifest
-        // entry; a signature must not survive a forged manifest (HIGH,
-        // CWE-347). A caller-chosen request_id is bound too, so one signed
-        // authorization cannot be replayed (MEDIUM, CWE-294).
-        let request_id: u64 = 7;
-        let deal_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_OPEN_DEAL_V1",
-            &1u32.to_le_bytes(),
-            s_id.as_bytes(),
-            op.as_bytes(),
-            payer.as_bytes(),
-            &0u8.to_le_bytes(),
-            &10u64.to_le_bytes(),
-            &100u64.to_le_bytes(),
-            &u64::from(manifest.shards[0].size).to_le_bytes(),
-            manifest.manifest_id.as_bytes(),
-            &10u64.to_le_bytes(),
-            &2_000_000u64.to_le_bytes(),
-            &request_id.to_le_bytes(),
-        ]);
-        let payer_sig = payer_keypair.sign(&deal_msg).to_vec();
-        let op_sig = op_keypair.sign(&deal_msg).to_vec();
-
-        let deal_res = server
-            .storage_open_deal(
-                1,
-                manifest.clone(),
-                format!("0x{}", hex::encode(s_id.0)),
-                format!("0x{}", op.to_hex()),
-                format!("0x{}", payer.to_hex()),
-                0,
-                10,
-                100,
-                crate::domain::storage_deal::StorageEconomicsParams {
-                    operator_bond: 2_000_000,
-                    fee_per_byte_epoch: 10,
-                },
-                crate::domain::storage_params::StorageDomainParams::default(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-                request_id,
-                hex::encode(payer_sig.clone()),
-                hex::encode(op_sig.clone()),
-            )
-            .await
-            .unwrap();
-        let deal_id = deal_res["dealId"].as_u64().unwrap();
-
-        let watcher_keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let watcher = Address::from(watcher_keypair.public_key_bytes());
-        // The opener bond is now really debited from the opener's balance, so
-        // The watcher requires one. The field was previously documented as
-        // Debited and never was, which let a freshly generated key with a zero
-        // Balance open a challenge - exactly what this test was doing.
-        bc.credit_development_account(&watcher, 100_000)
-            .await
-            .expect("devnet credit");
-        let open_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_OPEN_CHALLENGE_V1",
-            &deal_id.to_le_bytes(),
-            &0u64.to_le_bytes(),
-            &15u64.to_le_bytes(),
-            &15u64.to_le_bytes(),
-            &25u64.to_le_bytes(),
-            &50u64.to_le_bytes(),
-            watcher.as_bytes(),
-        ]);
-        let open_sig = watcher_keypair.sign(&open_msg).to_vec();
-
-        let chal_res = server
-            .storage_open_challenge(crate::domain::storage_deal::RetrievalChallengeRequest {
-                deal_id,
-                byte_start: 0,
-                byte_end: 15,
-                challenge_epoch: 15,
-                deadline_epoch: 25,
-                opener_bond: 50,
-                opener: Some(watcher),
-                opener_signature: Some(open_sig),
-            })
-            .await
-            .unwrap();
-        let challenge_id = chal_res["challengeId"].as_u64().unwrap();
-
-        let answer_msg = crate::core::hash::hash_fields_bytes(&[
-            b"BUD_ANSWER_CHALLENGE_V1",
-            &challenge_id.to_le_bytes(),
-            &[0xAA; 32],
-            op.as_bytes(),
-            &18u64.to_le_bytes(),
-        ]);
-        let answer_sig = op_keypair.sign(&answer_msg).to_vec();
-
-        let ans_res = server
-            .storage_answer_challenge(crate::domain::storage_deal::RetrievalResponse {
-                challenge_id,
-                _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
-                responder: op,
-                response_epoch: 18,
-                responder_signature: Some(answer_sig),
-                proof_bytes: Some(b"test-mock-proof".to_vec()),
-            })
-            .await
-            .unwrap();
-        assert_eq!(ans_res["outcome"], "Answered");
-
-        let outcome = server.storage_get_outcome(challenge_id).await.unwrap();
-        assert_eq!(outcome["challengeId"], serde_json::json!(challenge_id));
-        assert_eq!(outcome["outcome"], "Answered");
-        assert_eq!(
-            outcome["proofKind"], "interim_availability_only",
-            "retrieval results must not be presented as full Proof-of-Storage"
-        );
-        assert_eq!(outcome["proof_kind"], "interim_availability_only");
-
-        // HIGH (CWE-862) regression: an unsigned deal open must be
-        // refused before any balance changes. The signatures are required,
-        // so an empty/forged pair is rejected by the RPC, never reaching the
-        // chain path that debits escrow and locks bond.
-        let unsigned = server
-            .storage_open_deal(
-                1,
-                manifest.clone(),
-                format!("0x{}", hex::encode(s_id.0)),
-                format!("0x{}", op.to_hex()),
-                format!("0x{}", payer.to_hex()),
-                0,
-                10,
-                100,
-                crate::domain::storage_deal::StorageEconomicsParams {
-                    operator_bond: 2_000_000,
-                    fee_per_byte_epoch: 10,
-                },
-                crate::domain::storage_params::StorageDomainParams::default(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-                request_id,
-                String::new(),
-                String::new(),
-            )
-            .await;
-        assert!(
-            unsigned.is_err(),
-            "an unsigned deal open must be refused, not debit arbitrary accounts"
-        );
-
-        // A signature from the wrong key must also be refused.
-        let wrong_key = crate::crypto::primitives::KeyPair::generate().unwrap();
-        let wrong_sig = hex::encode(wrong_key.sign(&deal_msg));
-        let wrong_payer = server
-            .storage_open_deal(
-                1,
-                manifest.clone(),
-                format!("0x{}", hex::encode(s_id.0)),
-                format!("0x{}", op.to_hex()),
-                format!("0x{}", payer.to_hex()),
-                0,
-                10,
-                100,
-                crate::domain::storage_deal::StorageEconomicsParams {
-                    operator_bond: 2_000_000,
-                    fee_per_byte_epoch: 10,
-                },
-                crate::domain::storage_params::StorageDomainParams::default(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-                request_id,
-                wrong_sig,
-                hex::encode(op_sig.clone()),
-            )
-            .await;
-        assert!(
-            wrong_payer.is_err(),
-            "a payer signature from the wrong key must be refused"
-        );
-
-        // HIGH (CWE-347) regression: the signed preimage binds the
-        // manifest-derived shard size and the manifest id, so a valid
-        // signature cannot be replayed against a forged manifest that
-        // declares a larger shard for the same shard_id. The chain prices
-        // the escrow from that size, so without this binding the forgery
-        // would debit more than either signer authorized.
-        let mut forged = manifest.clone();
-        forged.shards[0].size = 999_999;
-        let forged_res = server
-            .storage_open_deal(
-                1,
-                forged,
-                format!("0x{}", hex::encode(s_id.0)),
-                format!("0x{}", op.to_hex()),
-                format!("0x{}", payer.to_hex()),
-                0,
-                10,
-                100,
-                crate::domain::storage_deal::StorageEconomicsParams {
-                    operator_bond: 2_000_000,
-                    fee_per_byte_epoch: 10,
-                },
-                crate::domain::storage_params::StorageDomainParams::default(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-                request_id,
-                hex::encode(payer_sig.clone()),
-                hex::encode(op_sig.clone()),
-            )
-            .await;
-        assert!(
-            forged_res.is_err(),
-            "a signature must not survive a manifest that changes the escrow size"
-        );
-
-        // MEDIUM (CWE-294) regression: the same signed deal-open must
-        // not be replayable. The first call above opened an ACTIVE deal over
-        // (manifest, shard, operator, replica 0, epochs 10..100); resending
-        // the same signed request must be refused by the chain's duplicate
-        // active-deal guard before any escrow or bond moves again.
-        let replay = server
-            .storage_open_deal(
-                1,
-                manifest.clone(),
-                format!("0x{}", hex::encode(s_id.0)),
-                format!("0x{}", op.to_hex()),
-                format!("0x{}", payer.to_hex()),
-                0,
-                10,
-                100,
-                crate::domain::storage_deal::StorageEconomicsParams {
-                    operator_bond: 2_000_000,
-                    fee_per_byte_epoch: 10,
-                },
-                crate::domain::storage_params::StorageDomainParams::default(),
-                Some(valid_merkle_proof()),
-                Some([0x42u8; 32]),
-                request_id,
-                hex::encode(payer_sig.clone()),
-                hex::encode(op_sig.clone()),
-            )
-            .await;
-        assert!(
-            replay.is_err(),
-            "the same signed deal-open must not be replayable for a second escrow debit"
-        );
+        assert_eq!(get_man["found"], false, "a refused call registers nothing");
+        assert_eq!(bc.get_balance(&payer).await, payer_before);
     }
 
     #[tokio::test]
@@ -1209,6 +1128,55 @@ mod rpc_tests {
         assert_eq!(refused.code(), -32004);
     }
 
+    /// Every operator-gated mutating method answers -32004 on a public
+    /// listener, before any argument is parsed or any state is touched.
+    #[tokio::test]
+    async fn rpc_tests_operator_methods_refused_on_public_listener() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45265, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node_struct = Node::new(chain.clone()).unwrap();
+        let node_client = node_struct.get_client();
+        let public_server = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Public,
+        );
+        let address = format!("0x{}", "01".repeat(32));
+        let codes = [
+            public_server
+                .register_external_domain(serde_json::json!({}))
+                .await
+                .expect_err("registerExternalDomain")
+                .code(),
+            public_server
+                .registry_bond_relayer(address.clone(), 1)
+                .await
+                .expect_err("registryBondRelayer")
+                .code(),
+            public_server
+                .registry_bond_prover(address, 1)
+                .await
+                .expect_err("registryBondProver")
+                .code(),
+            public_server
+                .request_prune(None)
+                .await
+                .expect_err("requestPrune")
+                .code(),
+            public_server
+                .seal_global_header()
+                .await
+                .expect_err("sealGlobalHeader")
+                .code(),
+        ];
+        assert_eq!(codes, [-32004; 5]);
+    }
+
     /// On an operator listener the peer-id format is validated before any
     /// work is handed to the node: a syntactically empty id stops at
     /// -32602 and the mode gate did not fire, proving validation order
@@ -1221,5 +1189,142 @@ mod rpc_tests {
             .await
             .expect_err("empty peer id must fail format validation");
         assert_eq!(empty.code(), -32602);
+    }
+
+    /// Zero bytes are content too: the sealed RPC path emits a feed for them.
+    #[tokio::test]
+    async fn rpc_tests_qr_feed_accepts_empty_content_when_sealed() {
+        let (server, _chain) = setup().await;
+        let seed = "ab".repeat(32);
+        let preview = server
+            .storage_qr_feed_preview(String::new(), 64, None, Some(seed.clone()))
+            .await
+            .expect("sealed empty preview");
+        let key = crate::storage::payload_crypt::PayloadKey::derive(&[0xabu8; 32]);
+        let total = u32::try_from(preview["k"].as_u64().expect("k")).unwrap();
+        let burst = server
+            .storage_qr_feed_frames(String::new(), 64, 0, total, Some(seed))
+            .await
+            .expect("sealed empty frames");
+        assert_eq!(burst["count"], total);
+        let mut dec = crate::storage::qr_carousel::CarouselDecoder::new();
+        for f in burst["frames"].as_array().expect("frames array") {
+            let frame = hex::decode(f.as_str().expect("hex frame")).expect("frame hex");
+            let wire = &frame[crate::storage::qr_frame::THREE_FRAME_HEADER_LEN..];
+            let d = crate::storage::qr_carousel::Drop::from_bytes(wire).expect("drop");
+            dec.push(&d).expect("push");
+        }
+        let packed = dec.finish().expect("carousel finish");
+        let (kind, sealed) = crate::storage::qr_payload::unpack_payload(&packed).expect("unpack");
+        assert_eq!(
+            kind,
+            crate::storage::qr_payload::PayloadKind::EncryptedContent
+        );
+        let clear = crate::storage::payload_crypt::open_payload(&key, &sealed).expect("open");
+        assert!(clear.is_empty());
+    }
+
+    /// Without a seed the gated preview of empty content is still refused as a
+    /// bad request, as it is for any other body.
+    #[tokio::test]
+    async fn rpc_tests_qr_feed_empty_content_without_seed_is_refused() {
+        let (server, _chain) = setup().await;
+        let refused = server
+            .storage_qr_feed_preview(String::new(), 200, None, None)
+            .await
+            .expect_err("unsealed gated preview must be refused");
+        assert_eq!(refused.code(), -32602);
+        assert!(
+            refused
+                .message()
+                .contains("neither sealed nor declared ciphertext"),
+            "unexpected message: {}",
+            refused.message()
+        );
+    }
+
+    /// The external evidence intake carries an unsigned submitter, so the
+    /// public listener must refuse it before the payload is even parsed.
+    #[tokio::test]
+    async fn rpc_tests_submit_external_evidence_refused_on_public_listener() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45265, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node_struct = Node::new(chain.clone()).unwrap();
+        let node_client = node_struct.get_client();
+        let public_server = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Public,
+        );
+        let refused = public_server
+            .submit_external_evidence(serde_json::json!({}))
+            .await
+            .expect_err("public listener must refuse external evidence");
+        assert_eq!(refused.code(), -32004);
+    }
+
+    /// Storage calls that change node-local state outside a block are
+    /// operator-only: the public listener refuses them with -32004.
+    #[tokio::test]
+    async fn rpc_tests_storage_mutations_refused_on_public_listener() {
+        let consensus = Arc::new(PoWEngine::new(0));
+        let blockchain = Blockchain::new(consensus, None, 45266, None);
+        let (chain_actor, chain) = ChainActor::new(blockchain);
+        tokio::spawn(async move {
+            chain_actor.run().await;
+        });
+        let node_struct = Node::new(chain.clone()).unwrap();
+        let node_client = node_struct.get_client();
+        let public_server = RpcServer::with_security_and_mode(
+            chain.clone(),
+            node_client,
+            RpcSecurityConfig::operator_default(),
+            RpcMode::Public,
+        );
+        let response = crate::domain::storage_deal::RetrievalResponse {
+            challenge_id: 1,
+            _range_hash: crate::storage::content_id::ContentId([0xAA; 32]),
+            responder: Address::from([9u8; 32]),
+            response_epoch: 1,
+            responder_signature: None,
+            proof_bytes: None,
+        };
+        let refused = public_server
+            .storage_answer_challenge(response)
+            .await
+            .expect_err("public listener must refuse storage_answer_challenge");
+        assert_eq!(refused.code(), -32004);
+        let refused_commit = public_server
+            .storage_register_confidential_commit(
+                "aa".repeat(32),
+                "xchacha20poly1305".to_string(),
+                "bb".repeat(32),
+                "hash_only".to_string(),
+                None,
+            )
+            .await
+            .expect_err("public listener must refuse confidential commit mutation");
+        assert_eq!(refused_commit.code(), -32004);
+    }
+
+    /// The re-encode check refuses a body over the shared 1 MiB cap before
+    /// it decodes or encodes anything.
+    #[tokio::test]
+    async fn rpc_tests_verify_encoding_refuses_oversized_body() {
+        let (server, _chain) = setup().await;
+        let manifest =
+            crate::storage::ContentManifest::from_bytes_sliced(b"small body", 16).unwrap();
+        let big = "00".repeat(crate::storage::emit::MAX_PREVIEW_CONTENT_BYTES + 1);
+        let refused = server
+            .storage_verify_encoding(big, manifest)
+            .await
+            .expect_err("oversized body must be refused");
+        assert!(refused.message().contains("verify cap"));
+        assert_eq!(refused.code(), -32602);
     }
 }

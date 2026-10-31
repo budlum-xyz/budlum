@@ -107,12 +107,11 @@ pub fn step_cost(name: &str) -> Option<&'static StepCost> {
 }
 
 /// The total CPU time of the pipeline (seconds per TB) - the price function
-/// input.
-pub fn pipeline_cpu_sec_per_tb(steps: &[&str]) -> f64 {
+/// input. A step that is not in the table gives no price: `None`, never zero.
+pub fn pipeline_cpu_sec_per_tb(steps: &[&str]) -> Option<f64> {
     steps
         .iter()
-        .filter_map(|s| step_cost(s))
-        .map(|s| s.cpu_sec_per_tb)
+        .map(|s| step_cost(s).map(|c| c.cpu_sec_per_tb))
         .sum()
 }
 
@@ -121,8 +120,8 @@ pub fn pipeline_cpu_sec_per_tb(steps: &[&str]) -> f64 {
 pub const USD_PER_CPU_SEC: f64 = 0.00002;
 
 /// The production cost of the pipeline: dollars per TB.
-pub fn pipeline_production_usd_per_tb(steps: &[&str]) -> f64 {
-    pipeline_cpu_sec_per_tb(steps) * USD_PER_CPU_SEC
+pub fn pipeline_production_usd_per_tb(steps: &[&str]) -> Option<f64> {
+    pipeline_cpu_sec_per_tb(steps).map(|sec| sec * USD_PER_CPU_SEC)
 }
 
 /// The evidence digest (deterministic).
@@ -157,22 +156,26 @@ mod tests {
 
     #[test]
     fn an_easy_pipeline_is_cheap_and_a_heavy_one_is_expensive() {
-        let light = pipeline_production_usd_per_tb(&["detect", "structural-split", "zstd-3"]);
+        let light = pipeline_production_usd_per_tb(&["detect", "structural-split", "zstd-3"])
+            .expect("known steps");
         let heavy = pipeline_production_usd_per_tb(&[
             "detect",
             "columnar-json",
             "zstd-19",
             "cauchy-erasure-enc",
             "sha3-256",
-        ]);
+        ])
+        .expect("known steps");
         assert!(heavy > light);
         assert!(light > 0.0);
     }
 
     #[test]
-    fn an_unknown_step_contributes_zero() {
+    fn an_unknown_step_gives_no_price() {
         assert!(step_cost("no-such-step").is_none());
-        assert_eq!(pipeline_cpu_sec_per_tb(&["none"]), 0.0);
+        assert_eq!(pipeline_cpu_sec_per_tb(&["none"]), None);
+        assert_eq!(pipeline_cpu_sec_per_tb(&["detect", "none"]), None);
+        assert!(pipeline_production_usd_per_tb(&["none"]).is_none());
     }
 
     #[test]

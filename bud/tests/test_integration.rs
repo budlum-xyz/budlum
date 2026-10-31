@@ -284,6 +284,20 @@ fn json_columnar_exact_byte_identical() {
     );
 }
 
+/// Parses a JSON array and returns its records as sorted strings, so two
+/// arrays compare as record sets.
+fn record_set(json: &[u8]) -> Result<Vec<String>, String> {
+    let value: serde_json::Value = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+    let mut rows: Vec<String> = value
+        .as_array()
+        .ok_or_else(|| String::from("not a json array"))?
+        .iter()
+        .map(|r| r.to_string())
+        .collect();
+    rows.sort();
+    Ok(rows)
+}
+
 #[test]
 fn json_columnar_ratio_gain_documented() {
     // EVIDENCE FOR THE INVENTION: on the same corpus, raw zstd < Exact columnar < OrderFree columnar
@@ -330,9 +344,9 @@ fn json_columnar_ratio_gain_documented() {
         restore_json_columnar(&exact, ColumnarMode::Exact).unwrap(),
         j
     );
-    // OrderFree roundtrip: the record set is equal (an ordered comparison needs JSON parsing -
-    // already verified in the module test; here only the size relation is the canary)
-    let _ = free;
+    // OrderFree roundtrip: the record set is equal
+    let back_free = restore_json_columnar(&free, ColumnarMode::OrderFree).expect("free restore");
+    assert_eq!(record_set(&back_free), record_set(&j));
 }
 
 #[test]
@@ -379,7 +393,8 @@ fn json_columnar_typed_numeric_gain() {
         restore_json_columnar(&exact, ColumnarMode::Exact).unwrap(),
         j
     );
-    let _ = free;
+    let back_free = restore_json_columnar(&free, ColumnarMode::OrderFree).expect("free restore");
+    assert_eq!(record_set(&back_free), record_set(&j));
 }
 
 #[test]
@@ -429,7 +444,7 @@ fn json_columnar_orderfree_beats_exact_on_repetitive() {
         j
     );
     let back_free = restore_json_columnar(&free, ColumnarMode::OrderFree).expect("free restore");
-    let _ = back_free;
+    assert_eq!(record_set(&back_free), record_set(&j));
 }
 
 #[test]

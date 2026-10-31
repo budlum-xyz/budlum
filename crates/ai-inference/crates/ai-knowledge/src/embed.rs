@@ -10,6 +10,22 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Folds a lowercase Turkish letter to its ASCII form, so the ASCII stopword
+/// list and the tokeniser see whole words. The combining dot above, left by
+/// lowercasing a dotted capital i, is dropped.
+fn fold_to_ascii(c: char) -> Option<char> {
+    match c {
+        '\u{e7}' => Some('c'),
+        '\u{11f}' => Some('g'),
+        '\u{131}' => Some('i'),
+        '\u{f6}' => Some('o'),
+        '\u{15f}' => Some('s'),
+        '\u{fc}' => Some('u'),
+        '\u{307}' => None,
+        other => Some(other),
+    }
+}
+
 /// A vector is a dimensioned array of `f64`.
 pub type EmbeddingVector = Vec<f64>;
 
@@ -62,8 +78,12 @@ impl TfIdfEmbedder {
     }
 
     fn tokenize(text: &str) -> Vec<String> {
-        let lower = text.to_lowercase();
-        lower
+        let folded: String = text
+            .to_lowercase()
+            .chars()
+            .filter_map(fold_to_ascii)
+            .collect();
+        folded
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|t| t.len() >= 2 && !STOPWORDS.contains(t))
             .map(ToString::to_string)
@@ -241,6 +261,14 @@ mod tests {
         assert_eq!(TfIdfEmbedder::cosine_similarity(&empty, &empty), 0.0);
         let zero = vec![0.0; 8];
         assert_eq!(TfIdfEmbedder::cosine_similarity(&zero, &zero), 0.0);
+    }
+
+    #[test]
+    fn tokenize_folds_diacritics_to_whole_words() {
+        assert_eq!(
+            TfIdfEmbedder::tokenize("g\u{fc}zel \u{e7}ok \u{130}\u{15f}ik"),
+            vec!["guzel".to_string(), "isik".to_string()]
+        );
     }
 
     #[test]

@@ -38,9 +38,13 @@ pub fn decide_repair(
     if lost == 0 {
         return Some(RepairAction::Defer { until_epoch: 0 }); // nothing lost
     }
-    if lost >= tolerated {
-        // the tolerance is exceeded -> repair now, from helper nodes if
-        // possible
+    if lost > tolerated {
+        // More is lost than the code can repair: repairing from helpers
+        // would produce wrong data, so the object is rebuilt from scratch.
+        return Some(RepairAction::RebuildFromScratch);
+    }
+    if lost == tolerated {
+        // at the limit -> repair now, from helper nodes
         return Some(RepairAction::RepairNow { helpers: 2 });
     }
     // if there is a read request, repair now (the user should not feel the
@@ -49,7 +53,8 @@ pub fn decide_repair(
         return Some(RepairAction::RepairNow { helpers: 1 });
     }
     // with no budget, defer; repair once the age threshold is passed
-    let age_threshold = if budget_per_epoch <= 0.0 {
+    // (a NaN budget is no budget)
+    let age_threshold = if budget_per_epoch.is_nan() || budget_per_epoch <= 0.0 {
         0
     } else {
         (1.0 / budget_per_epoch.max(0.001)) as u64
@@ -89,9 +94,30 @@ mod tests {
     #[test]
     fn exceeding_the_tolerance_repairs_now() {
         assert!(matches!(
-            decide_repair(3, 2, 0, false, 0.5),
+            decide_repair(2, 2, 0, false, 0.5),
             Some(RepairAction::RepairNow { .. })
         ));
+    }
+
+    #[test]
+    fn more_loss_than_the_code_repairs_rebuilds_from_scratch() {
+        assert_eq!(
+            decide_repair(3, 2, 0, false, 0.5),
+            Some(RepairAction::RebuildFromScratch)
+        );
+        // a read request does not change that
+        assert_eq!(
+            decide_repair(3, 2, 0, true, 0.5),
+            Some(RepairAction::RebuildFromScratch)
+        );
+    }
+
+    #[test]
+    fn a_nan_budget_is_no_budget() {
+        assert_eq!(
+            decide_repair(1, 2, 1, false, f64::NAN),
+            Some(RepairAction::Defer { until_epoch: 2 })
+        );
     }
 
     #[test]

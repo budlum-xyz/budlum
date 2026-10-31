@@ -11,9 +11,9 @@
 //!   a shard root is comparable with the whole-state root.
 //! * A single commitment over all shard roots ([`shards_commitment`]) is
 //!   folded into the block header (`Block::shards_root`) and therefore into
-//!   the block hash the BLS finality certificate seals: after activation, a
-//!   validator rejects any block whose shards commitment does not match the
-//!   replayed state.
+//!   the block hash the BLS finality certificate seals. Enforcement is not
+//!   wired: no validation rule recomputes the commitment yet, so today a
+//!   block with a wrong `shards_root` is not rejected for that reason.
 //! * A transfer between two shards is a single state transition: the source
 //!   shard is debited and the destination shard credited in one
 //!   `apply_transaction` call, so the pair commits together or not at all
@@ -129,6 +129,25 @@ fn internal_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Folds a non-empty leaf layer to a root. An odd node is promoted to the
+/// next layer unchanged instead of being hashed with itself, so a layer
+/// `[a, b, c]` and `[a, b, c, c]` cannot share a root (the CVE-2012-2459
+/// shape).
+fn fold_leaves(mut leaves: Vec<[u8; 32]>) -> [u8; 32] {
+    while leaves.len() > 1 {
+        let mut next = Vec::with_capacity(leaves.len().div_ceil(2));
+        for pair in leaves.chunks(2) {
+            match pair {
+                [left, right] => next.push(internal_node(left, right)),
+                [odd] => next.push(*odd),
+                _ => {}
+            }
+        }
+        leaves = next;
+    }
+    leaves.first().copied().unwrap_or([0u8; 32])
+}
+
 /// The Merkle root over the accounts of one shard, in `calculate_state_root`
 /// leaf format. Accounts are iterated in address order (the state map is a
 /// `BTreeMap`), so the root is deterministic.
@@ -137,7 +156,7 @@ fn internal_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 /// whole-state tree's handling of empty state.
 #[must_use]
 pub fn shard_state_root(state: &AccountState, shard: ShardId, num_shards: u16) -> [u8; 32] {
-    let mut leaves: Vec<[u8; 32]> = state
+    let leaves: Vec<[u8; 32]> = state
         .accounts
         .iter()
         .filter(|(address, _)| shard_of(address, num_shards) == shard)
@@ -146,52 +165,22 @@ pub fn shard_state_root(state: &AccountState, shard: ShardId, num_shards: u16) -
     if leaves.is_empty() {
         return internal_node(&[0u8; 32], &[0u8; 32]);
     }
-    while leaves.len() > 1 {
-        let mut next = Vec::with_capacity(leaves.len().div_ceil(2));
-        let mut i = 0;
-        while i < leaves.len() {
-            let left = leaves[i];
-            let right = if i + 1 < leaves.len() {
-                leaves[i + 1]
-            } else {
-                left
-            };
-            next.push(internal_node(&left, &right));
-            i += 2;
-        }
-        leaves = next;
-    }
-    leaves[0]
+    fold_leaves(leaves)
 }
 
 /// The commitment over all per-shard roots, in shard order.
 ///
 /// This is the value a block header carries in `Block::shards_root` when
-/// sharding is active; because it is a deterministic function of state, the
-/// validator re-computes it on replay and rejects a block that commits to
-/// anything else.
+/// sharding is active. Nothing computes or checks it during block validation
+/// yet (P20-F03): the commitment is a deterministic function of state that a
+/// future validator rule can recompute, but today no code rejects a mismatch.
 #[must_use]
 pub fn shards_commitment(state: &AccountState, num_shards: u16) -> [u8; 32] {
     let num_shards = num_shards.clamp(1, MAX_SHARDS);
-    let mut leaves: Vec<[u8; 32]> = (0..num_shards)
+    let leaves: Vec<[u8; 32]> = (0..num_shards)
         .map(|shard| shard_state_root(state, ShardId(shard), num_shards))
         .collect();
-    while leaves.len() > 1 {
-        let mut next = Vec::with_capacity(leaves.len().div_ceil(2));
-        let mut i = 0;
-        while i < leaves.len() {
-            let left = leaves[i];
-            let right = if i + 1 < leaves.len() {
-                leaves[i + 1]
-            } else {
-                left
-            };
-            next.push(internal_node(&left, &right));
-            i += 2;
-        }
-        leaves = next;
-    }
-    leaves[0]
+    fold_leaves(leaves)
 }
 
 /// Apply a cross-shard transfer atomically.
@@ -231,13 +220,13 @@ pub fn apply_cross_shard_transfer(
     }
 
     let total_cost = tx.total_cost();
-    let sender = state.get_or_create(&tx.from);
-    if sender.balance < total_cost {
+    // Read-only checks: `get_or_create` would insert empty accounts into
+    // the state on a rejected transfer.
+    if state.get_balance(&tx.from) < total_cost {
         return Err("insufficient balance for cross-shard transfer".into());
     }
-    let receiver = state.get_or_create(&tx.to);
-    receiver
-        .balance
+    state
+        .get_balance(&tx.to)
         .checked_add(tx.amount)
         .ok_or_else(|| "receiver balance overflow on cross-shard transfer".to_string())?;
 
@@ -279,6 +268,17 @@ mod tests {
             DEFAULT_CHAIN_ID,
             TransactionType::Transfer,
         )
+    }
+
+    #[test]
+    fn odd_node_is_promoted_not_paired_with_itself() {
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let c = [3u8; 32];
+        let three = fold_leaves(vec![a, b, c]);
+        assert_eq!(three, internal_node(&internal_node(&a, &b), &c));
+        assert_ne!(three, fold_leaves(vec![a, b, c, c]));
+        assert_eq!(fold_leaves(vec![a]), a);
     }
 
     #[test]
@@ -363,6 +363,16 @@ mod tests {
         assert_eq!(state.get_or_create(&addr(0)).balance, 100 - 45);
         assert_eq!(state.get_or_create(&addr(1)).balance, 40);
         assert_eq!(state.get_or_create(&addr(0)).nonce, 1);
+    }
+
+    /// P20-F04: a rejected transfer must not create accounts.
+    #[test]
+    fn p20_f04_rejected_transfer_creates_no_accounts() {
+        let mut state = AccountState::new();
+        let tx = transfer(addr(0), addr(1), 40, 5);
+        assert!(apply_cross_shard_transfer(&mut state, &tx, 2).is_err());
+        assert!(!state.accounts.contains_key(&addr(0)));
+        assert!(!state.accounts.contains_key(&addr(1)));
     }
 
     #[test]

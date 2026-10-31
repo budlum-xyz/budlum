@@ -30,6 +30,12 @@ fn varint_read(b: &[u8], pos: &mut usize) -> Option<u64> {
         *pos += 1;
         v |= ((byte & 0x7F) as u64) << shift;
         if byte & 0x80 == 0 {
+            // One value has one encoding: a last byte of zero after a
+            // continuation is an overlong form, and at shift 63 only the
+            // lowest bit still fits the u64.
+            if (shift > 0 && byte == 0) || (shift == 63 && byte > 1) {
+                return None;
+            }
             return Some(v);
         }
         shift += 7;
@@ -103,6 +109,10 @@ pub fn wal_restore(t: &[u8]) -> Option<Vec<Vec<u8>>> {
         out.push(rec.to_vec());
         pos = end;
     }
+    // Bytes after the last record would give a second blob for the same list.
+    if pos != t.len() {
+        return None;
+    }
     Some(out)
 }
 
@@ -157,6 +167,25 @@ mod tests {
         assert!(wal_restore(&t).is_none());
         t.push(b'd');
         assert_eq!(wal_restore(&t).unwrap(), vec![b"abcd".to_vec()]);
+    }
+
+    #[test]
+    fn a_blob_has_one_byte_form() {
+        let recs = [b"ab".to_vec()];
+        let refs: Vec<&[u8]> = recs.iter().map(|r| r.as_slice()).collect();
+        let mut t = wal_transform(&refs).unwrap();
+        assert!(wal_restore(&t).is_some());
+        t.push(0);
+        assert!(wal_restore(&t).is_none(), "trailing bytes are refused");
+        // An overlong length (0x82 0x00 for 2) is refused.
+        let mut o = b"WAL1|".to_vec();
+        o.extend_from_slice(&1u32.to_le_bytes());
+        o.extend_from_slice(&[0xF1, 0x82, 0x00, 0xF2, b'a', b'b']);
+        assert!(wal_restore(&o).is_none());
+        // A tenth byte above 1 would drop bits.
+        let mut pos = 0usize;
+        let big = [0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02];
+        assert!(varint_read(&big, &mut pos).is_none());
     }
 
     #[test]

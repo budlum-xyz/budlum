@@ -96,21 +96,33 @@ fn body_of<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     None
 }
 
-/// Does this production text contain `.slash(` or `.slash_role_only(`?
+/// Does this production text contain `.slash(`, `.slash_role_only(`, or the
+/// path forms `Type::slash(` and `Type::slash_role_only(`?
 fn has_slash_call(prod: &str) -> bool {
-    let mut from = 0usize;
-    while let Some(pos) = prod[from..].find(".slash") {
-        let abs = from + pos;
-        let mut rest = &prod[abs + ".slash".len()..];
-        if rest.starts_with("_role_only") {
-            rest = &rest["_role_only".len()..];
+    for marker in [".slash", "::slash"] {
+        let mut from = 0usize;
+        while let Some(pos) = prod[from..].find(marker) {
+            let abs = from + pos;
+            let mut rest = &prod[abs + marker.len()..];
+            if rest.starts_with("_role_only") {
+                rest = &rest["_role_only".len()..];
+            }
+            if skip_py_ws(rest).starts_with('(') {
+                return true;
+            }
+            from = abs + 1;
         }
-        if skip_py_ws(rest).starts_with('(') {
-            return true;
-        }
-        from = abs + 1;
     }
     false
+}
+
+/// Production text of a file: line comments blanked and every
+/// `#[cfg(test)]` item removed (a test module, a function, or a one-line
+/// `use`). Cutting the file at the first `#[cfg(test)]` instead hid all the
+/// production code after a single early test-only item, such as the helper
+/// at the top of `src/core/transaction.rs`.
+fn production_text(raw: &str) -> String {
+    crate::gates::guards_reachable::strip_test_mods(&strip_comments(raw))
 }
 
 fn walk_rs(dir: &std::path::Path, root: &Path, out: &mut Vec<(std::path::PathBuf, String)>) {
@@ -144,7 +156,7 @@ fn src_rs_files(root: &Path) -> Vec<(std::path::PathBuf, String)> {
 
 /// Production files under `src/` (outside the allowed and test trees) whose
 /// text calls the bare `slash`.
-fn unexpected_slash_callers(root: &Path) -> Vec<String> {
+fn unexpected_slash_callers(root: &Path) -> Result<Vec<String>, String> {
     let allowed = [
         "src/core/account.rs",
         "src/execution/executor.rs",
@@ -167,20 +179,31 @@ fn unexpected_slash_callers(root: &Path) -> Vec<String> {
         {
             continue;
         }
-        let text = strip_comments(&std::fs::read_to_string(&full).unwrap_or_default());
-        let prod = text.split("#[cfg(test)]").next().unwrap_or(&text);
-        if has_slash_call(prod) {
+        // An unreadable file is a failure, not a clean file.
+        let raw = std::fs::read_to_string(&full)
+            .map_err(|e| format!("FAIL: cannot read {}: {e}", full.display()))?;
+        // The external-domain registry's `slash` checks its own provenance
+        // (see the allowed list above), so a call through
+        // `self.external_intake.registry` is the sanctioned shape. Compare on
+        // whitespace-free text so a rustfmt line break cannot hide or expose it.
+        let compact: String = production_text(&raw)
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .replace("self.external_intake.registry.slash(", "");
+        if has_slash_call(&compact) {
             unexpected.push(rel);
         }
     }
     unexpected.sort();
-    unexpected
+    Ok(unexpected)
 }
 
 /// Does any `.rs` file under `src/` hold both `ProofProvenance::Unverified`
 /// and a `#[test]`?
 fn has_unverified_test(root: &Path) -> bool {
     src_rs_files(root).iter().any(|(full, _rel)| {
+        // Unreadable (for example non-UTF-8) files cannot hold the test.
         let text = std::fs::read_to_string(full).unwrap_or_default();
         text.contains("ProofProvenance::Unverified") && text.contains("#[test]")
     })
@@ -205,8 +228,8 @@ pub fn run(root: &Path) -> Result<String, String> {
 
     let ev_code = strip_comments(&std::fs::read_to_string(&evidence).unwrap_or_default());
     let reg_raw = std::fs::read_to_string(&registry).unwrap_or_default();
-    let reg_code = strip_comments(&reg_raw);
-    let reg_prod = reg_code.split("#[cfg(test)]").next().unwrap_or(&reg_code);
+    let reg_prod = production_text(&reg_raw);
+    let reg_prod = reg_prod.as_str();
 
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
@@ -268,7 +291,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     // 3. The bare `slash` may only be reached from paths that already sit
     //    behind consensus.
     checked += 1;
-    let unexpected = unexpected_slash_callers(root);
+    let unexpected = unexpected_slash_callers(root)?;
     if !unexpected.is_empty() {
         problems.push(format!(
             "a new caller reaches the bare `slash` without going through \
@@ -410,6 +433,13 @@ fn build_fixture(
     // A third caller appears when the fixture asks for one.
     let rpc = if caller_mode == "extra" {
         "async fn submit(&self) { let _ = self.registry.slash(a, r, c, s); }\n"
+    } else if caller_mode == "after_cfg_test_item" {
+        // A single test-only item above the production caller must not hide it.
+        "#[cfg(test)]\nfn helper() {}\nasync fn submit(&self) { let _ = self.registry.slash(a, r, c, s); }\n"
+    } else if caller_mode == "path_form" {
+        "async fn submit(&self) { let _ = PermissionlessRegistry::slash(&mut r, a, r, c, s); }\n"
+    } else if caller_mode == "test_only" {
+        "async fn submit(&self) {}\n#[cfg(test)]\nmod tests { fn t() { r.slash(a, r, c, s); } }\n"
     } else {
         "async fn submit(&self) { let _ = self.registry.slash_from_report(&report); }\n"
     };
@@ -468,11 +498,31 @@ pub fn self_test() -> Result<String, String> {
     let dir = build_fixture("ok", "ok", "extra", "present")?;
     expect_finding(&dir, "a new caller reaching the bare slash", false)?;
 
+    // 7b. The third caller sits after a single early `#[cfg(test)]` item.
+    let dir = build_fixture("ok", "ok", "after_cfg_test_item", "present")?;
+    expect_finding(&dir, "a caller after an early cfg(test) item", false)?;
+
+    // 7c. The caller uses the path form `Type::slash(..)`.
+    let dir = build_fixture("ok", "ok", "path_form", "present")?;
+    expect_finding(&dir, "a path-form caller of the bare slash", false)?;
+
+    // 7d. A slash call that lives only in a test module is not a finding.
+    let dir = build_fixture("ok", "ok", "test_only", "present")?;
+    expect_finding(&dir, "a slash call confined to a test module", true)?;
+
     // 8. Nothing asserts the refusal.
     let dir = build_fixture("ok", "ok", "ok", "absent")?;
     expect_finding(&dir, "a missing regression test", false)?;
 
     Ok(String::from(
-        "evidence provenance gate self-test OK: 7 canaries",
+        "evidence provenance gate self-test OK: 10 canaries",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn self_test_passes() {
+        super::self_test().expect("evidence-provenance self-test");
+    }
 }

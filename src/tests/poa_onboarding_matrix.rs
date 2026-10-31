@@ -3,7 +3,7 @@
 //! It covers the full lifecycle of the
 //! [`crate::registry::poa_onboarding::PoAOnboarding`] module, the whitelist
 //! requirement, the KYC expiry behaviour
-//! Ve karar denetim (audit) izini kapsar.
+//! and the decision audit trail.
 //!
 //! These tests are NOT part of the `cargo test --lib poa_isolation` gate,
 //! because their names do not contain `poa_isolation`; they run in the general

@@ -71,6 +71,11 @@ pub const PROPAGATION_WINDOW_MS: u128 = 5_000; // 5 seconds
 /// Is `MIN_PEER_SCORE`.
 pub const MAX_DUPLICATE_COUNT: u64 = 1_000;
 
+/// Score the duplicate penalty regains per second. A relay is charged for
+/// a duplicate it cannot tell apart from a fresh message, so the charge
+/// must fade: slow replays then never add up to a ban, a flood still does.
+const DUPLICATE_RECOVERY_PER_SEC: f64 = 0.05;
+
 /// Result of a deduplication check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DedupResult {
@@ -89,6 +94,9 @@ pub struct PeerScore {
     pub invalid_count: u64,
     pub timely_count: u64,
     pub last_message_at: u64, // timestamp in ms
+    /// Part of `score` that duplicate charges still hold. Fades with time.
+    duplicate_penalty: f64,
+    last_duplicate_at: Option<std::time::Instant>,
 }
 
 impl PeerScore {
@@ -100,7 +108,22 @@ impl PeerScore {
             invalid_count: 0,
             timely_count: 0,
             last_message_at: 0,
+            duplicate_penalty: 0.0,
+            last_duplicate_at: None,
         }
+    }
+
+    /// Give back the part of the duplicate charge that has faded, and let
+    /// the duplicate counter drain by one per second.
+    fn recover_duplicates(&mut self, now: std::time::Instant) {
+        if let Some(last) = self.last_duplicate_at {
+            let secs = now.saturating_duration_since(last).as_secs_f64();
+            let back = (secs * DUPLICATE_RECOVERY_PER_SEC).min(self.duplicate_penalty);
+            self.score += back;
+            self.duplicate_penalty -= back;
+            self.duplicate_count = self.duplicate_count.saturating_sub(secs as u64);
+        }
+        self.last_duplicate_at = Some(now);
     }
 
     pub fn is_below_threshold(&self) -> bool {
@@ -149,6 +172,9 @@ pub struct GossipDedup {
 
 impl GossipDedup {
     pub fn new(window_size: usize) -> Self {
+        // A zero window would never evict: the set would grow without bound and the
+        // utilization ratio would divide by zero.
+        let window_size = window_size.max(1);
         Self {
             seen_set: HashSet::with_capacity(window_size),
             seen_order: VecDeque::with_capacity(window_size),
@@ -171,7 +197,9 @@ impl GossipDedup {
             // Duplicate - record on peer score
             self.total_duplicates += 1;
             let score = self.peer_scores.entry(*peer).or_default();
+            score.recover_duplicates(std::time::Instant::now());
             score.score += SCORE_DUPLICATE;
+            score.duplicate_penalty -= SCORE_DUPLICATE;
             score.duplicate_count += 1;
             score.score = score.score.clamp(-100.0, MAX_PEER_SCORE);
             self.enforce_score_ceiling();
@@ -189,6 +217,18 @@ impl GossipDedup {
         self.total_processed += 1;
 
         DedupResult::New
+    }
+
+    /// Forget a message recorded by [`Self::check_and_record`].
+    ///
+    /// Used when the message was dropped for a reason that says nothing about
+    /// its content, such as a sender that has not finished the handshake. The
+    /// same bytes must stay processable when an honest peer delivers them.
+    pub fn forget(&mut self, message_bytes: &[u8]) {
+        let hash = hash_message(message_bytes);
+        if self.seen_set.remove(&hash) {
+            self.seen_order.retain(|seen| *seen != hash);
+        }
     }
 
     /// Record a valid message from a peer (called after successful processing).
@@ -385,6 +425,41 @@ fn hash_message(data: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_forgotten_message_is_new_again() {
+        let mut dedup = GossipDedup::new(64);
+        let peer = libp2p::PeerId::random();
+        assert!(matches!(
+            dedup.check_and_record(b"block bytes", &peer),
+            DedupResult::New
+        ));
+        dedup.forget(b"block bytes");
+        assert!(matches!(
+            dedup.check_and_record(b"block bytes", &peer),
+            DedupResult::New
+        ));
+    }
+
+    /// A relay that forwards one old message every minute must not drift
+    /// to a ban, because the duplicate charge fades.
+    #[test]
+    fn slow_duplicate_replays_do_not_ban_the_relay() {
+        let mut dedup = GossipDedup::new(64);
+        let relay = libp2p::PeerId::random();
+        let _ = dedup.check_and_record(b"old message", &relay);
+        for _ in 0..100 {
+            if let Some(s) = dedup.peer_scores.get_mut(&relay) {
+                s.last_duplicate_at =
+                    std::time::Instant::now().checked_sub(std::time::Duration::from_secs(60));
+            }
+            assert_eq!(
+                dedup.check_and_record(b"old message", &relay),
+                DedupResult::Duplicate
+            );
+        }
+        assert!(!dedup.peer_should_be_banned(&relay));
+    }
 
     /// A distinct peer id per message must not grow the score table without
     /// bound.
@@ -643,6 +718,18 @@ mod tests {
 
         assert_eq!(dedup.total_processed(), 3); // 3 new
         assert_eq!(dedup.total_duplicates(), 1); // 1 dup
+    }
+
+    #[test]
+    fn a_zero_window_is_clamped_and_stays_bounded() {
+        let mut dedup = GossipDedup::new(0);
+        let p = libp2p::PeerId::random();
+        for i in 0..50u8 {
+            dedup.check_and_record(&[i], &p);
+        }
+        assert_eq!(dedup.seen_set.len(), 1);
+        assert_eq!(dedup.seen_order.len(), 1);
+        assert!(dedup.window_utilization().is_finite());
     }
 
     #[test]

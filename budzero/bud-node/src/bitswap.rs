@@ -70,8 +70,11 @@ impl libp2p::request_response::Codec for BitswapCodec {
         T: futures::AsyncRead + Unpin + Send,
     {
         use futures::AsyncReadExt;
+        // A request is one content id (32 bytes plus framing): read a small
+        // multiple, not the 16 MiB a response may carry, so an open inbound
+        // stream cannot pin a chunk-sized buffer before decode runs.
         let mut buf = Vec::new();
-        io.take(MAX_MESSAGE_SIZE as u64)
+        io.take(MAX_REQUEST_BYTES as u64 + 1)
             .read_to_end(&mut buf)
             .await?;
         decode_request(&buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -128,6 +131,9 @@ impl libp2p::request_response::Codec for BitswapCodec {
 
 /// Maximum message size: 16 MiB + overhead for CID and metadata.
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024 + 256;
+
+/// Largest request accepted. A valid request is a bincode-encoded content id.
+const MAX_REQUEST_BYTES: usize = 256;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
@@ -261,16 +267,20 @@ fn bounded_bincode() -> impl bincode::Options {
         .with_limit(MAX_MESSAGE_SIZE as u64)
 }
 
-/// Decode a Bitswap request from bytes.
+/// Decode a Bitswap request from bytes. Trailing bytes are refused: a request
+/// has exactly one encoding.
 pub fn decode_request(bytes: &[u8]) -> Result<BitswapRequest, CodecError> {
     use bincode::Options;
-    if bytes.len() > MAX_MESSAGE_SIZE {
+    if bytes.len() > MAX_REQUEST_BYTES {
         return Err(CodecError::TooLarge {
             size: bytes.len(),
-            max: MAX_MESSAGE_SIZE,
+            max: MAX_REQUEST_BYTES,
         });
     }
-    bounded_bincode()
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .with_limit(MAX_REQUEST_BYTES as u64)
         .deserialize(bytes)
         .map_err(|e| CodecError::Deserialize(e.to_string()))
 }
@@ -314,6 +324,23 @@ mod tests {
         let bytes = encode_request(&req).unwrap();
         let decoded = decode_request(&bytes).unwrap();
         assert_eq!(decoded.want_cid, req.want_cid);
+    }
+
+    /// P41-F09: a request has one encoding and a small ceiling.
+    #[test]
+    fn a_request_with_trailing_bytes_or_over_the_ceiling_is_refused() {
+        let req = BitswapRequest {
+            want_cid: ContentId::of(b"test chunk"),
+        };
+        let mut bytes = encode_request(&req).unwrap();
+        assert!(decode_request(&bytes).is_ok());
+        bytes.push(0);
+        assert!(decode_request(&bytes).is_err());
+        let big = vec![0u8; MAX_REQUEST_BYTES + 1];
+        assert!(matches!(
+            decode_request(&big),
+            Err(CodecError::TooLarge { .. })
+        ));
     }
 
     #[test]

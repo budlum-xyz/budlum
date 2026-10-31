@@ -108,6 +108,18 @@ fn the_recovering_helper_exists_and_no_site_exits() {
     );
 }
 
+/// Lines that touch `peer_manager.lock()` directly. The helper itself, which
+/// recovers with `unwrap_or_else`, and doc comments are not violations.
+fn direct_peer_manager_lock_lines(src: &str) -> Vec<(usize, &str)> {
+    src.lines()
+        .enumerate()
+        .map(|(i, line)| (i + 1, line))
+        .filter(|(_, line)| line.contains("peer_manager.lock()"))
+        .filter(|(_, line)| !line.trim_start().starts_with("///"))
+        .filter(|(_, line)| !line.contains("unwrap_or_else"))
+        .collect()
+}
+
 /// A poisoned lock must not switch a security bound OFF.
 ///
 /// `node.rs` recovered from poisoning in 76 places through
@@ -202,15 +214,7 @@ fn no_peer_manager_site_reads_the_lock_directly() {
     let src =
         fs::read_to_string(repo_root().join("src/network/node.rs")).expect("node.rs is readable");
 
-    let raw: Vec<(usize, &str)> = src
-        .lines()
-        .enumerate()
-        .map(|(i, line)| (i + 1, line))
-        .filter(|(_, line)| line.contains("peer_manager.lock()"))
-        .filter(|(_, line)| !line.trim_start().starts_with("///"))
-        // The helper itself is the one place allowed to touch the raw lock.
-        .filter(|(_, line)| !line.contains("unwrap_or_else"))
-        .collect();
+    let raw = direct_peer_manager_lock_lines(&src);
 
     assert!(
         raw.is_empty(),
@@ -230,12 +234,8 @@ fn the_direct_lock_scan_can_still_detect_a_violation() {
         "            if let Ok(mut pm) = self.peer_manager.lock() {",
         "        let ok = self.peer_manager.lock().is_ok_and(|mut pm| pm.check_rate_limit(&p));",
     ];
-    let caught = planted
-        .iter()
-        .filter(|line| line.contains("peer_manager.lock()"))
-        .filter(|line| !line.trim_start().starts_with("///"))
-        .filter(|line| !line.contains("unwrap_or_else"))
-        .count();
+    let planted_source = planted.join("\n");
+    let caught = direct_peer_manager_lock_lines(&planted_source).len();
     assert_eq!(
         caught, 2,
         "the scan used by no_peer_manager_site_reads_the_lock_directly cannot \

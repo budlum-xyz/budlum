@@ -17,8 +17,6 @@
 # They are kept out of this file because this is the one the README points at,
 # and a default that is only safe while nobody copies it is not a default.
 
-version: "3.9"
-
 services:
   node1:
     build:
