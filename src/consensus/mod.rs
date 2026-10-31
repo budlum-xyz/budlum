@@ -72,7 +72,7 @@ pub fn now_millis() -> u128 {
 /// but it can never backdate it.
 ///
 /// The book holds the blocks this node committed, up to
-/// [`ROUND_PRICE_WINDOW`], and only chain commit writes it, never validation:
+/// `ROUND_PRICE_WINDOW`, and only chain commit writes it, never validation:
 ///
 /// - Writing from validation would price a parent and its child milliseconds
 ///   apart whenever a single pass walks several blocks (fork recovery through
@@ -209,7 +209,7 @@ impl RoundPriceBook {
 /// [`MAX_LEADER_ROUNDS`] at the same round on every node.
 ///
 /// The book keeps every block this node committed inside
-/// [`ROUND_PRICE_WINDOW`]. Two commits of the same block are therefore
+/// `ROUND_PRICE_WINDOW`. Two commits of the same block are therefore
 /// interchangeable for pricing: the window bounds what a reorg candidate can
 /// re-price, and the stamp makes the value agree across the mesh.
 #[must_use]
