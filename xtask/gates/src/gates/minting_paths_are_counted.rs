@@ -53,8 +53,8 @@ const MOVE_FN: &str = "try_add_balance";
 const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
     (
         "src/chain/blockchain.rs",
-        10,
-        "ten calls, each one puts back or splits money this ledger already \
+        11,
+        "eleven calls, each one puts back or splits money this ledger already \
          took from another place. \
          One in the verified-burn unlock (decision K4-A): the owner gets back \
          the burned amount, which the lock debited from the owner less the \
@@ -77,6 +77,13 @@ const TRANSFER_JUSTIFICATIONS: &[(&str, usize, &str)] = &[
          One in the block-application storage prune: the operator bond that \
          `open_deal` debited, returned when the owner burns the content and \
          the prune ends the deal early. \
+         One in `refund_unserved_storage_fee`: the unserved part of a slashed \
+         deal's prepaid fee, returned to the payer that `open_deal` debited it \
+         from. The deal is no longer `Active`, so the supply denominator no \
+         longer counts the epochs it will not serve, and returning that amount \
+         to its payer keeps the committed total level - the payer's own money \
+         changing place, not new supply. A deal written before the payer field \
+         existed refunds nothing, so this line cannot invent a recipient. \
          One in that same prune: the storage fee for the epochs the ended \
          deal will no longer serve, which `open_deal` debited from the payer \
          up front, returned to that payer; what the operator already earned \
