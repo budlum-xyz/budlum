@@ -227,8 +227,8 @@ distinct defects, and the three on #97 to two.
 - **Regression test:** `a_fork_or_a_missing_block_is_not_peer_misbehaviour`
   (`src/network/node.rs`), which pins both directions of the classification.
 - **Second sink, found in the next run (the ban came from somewhere else):** the
-  devnet that failed on `64d0a85`'s predecessor banned `12D3KooWL3sp...` for 3600 s from
-  the *sync* path, not the certificate path: `sync block refused ... index=7 ...
+  devnet that failed on the run before `64d0a85` banned `12D3KooWL3sp...` for 3600 s
+  from the *sync* path, not the certificate path: `sync block refused ... index=7 ...
   Previous hash mismatch` followed immediately by `Peer ... banned`. The `Blocks` arm
   classified the `fork_retry` flag - raised when `validate_and_add_block` answers
   `Previous hash mismatch` - as `report_invalid_block`. That answer has two honest
@@ -236,21 +236,26 @@ distinct defects, and the three on #97 to two.
   moved between request and answer, or the peer is serving the branch that won the
   slot. On a four-validator mesh a slot has more than one elected leader often enough
   that this is ordinary traffic, and at `INVALID_BLOCK_PENALTY` ten such answers
-  (`BAN_THRESHOLD` is -100) silence a validator for an hour - which is the same
-  failure one level down: the node bans the peer that could carry it across the fork.
-- **Fix (this round):** `PeerManager::report_stale_sync_batch` - the fork signal keeps
-  moving the score (the peer sinks in `get_best_peers`, so the re-walk that follows
-  asks someone else) but is floored at `MIN_SCORE + 1`, one point above
-  `BAN_THRESHOLD`, so it can demote a peer and never silence it. The sync `Blocks` arm
-  now calls it instead of `report_invalid_block`. A genuine invalid block keeps the
-  banning path: the gossip `Block` arm still charges `report_invalid_block` for a block
-  whose own hash does not match its contents, and the oversized-batch refusal still
-  charges it as well.
-- **Regression test:** `stale_sync_batches_demote_but_never_ban` plus its canary
-  `stale_batch_floor_is_load_bearing` (`src/network/peer_manager.rs`): 64 stale batches
-  demote to exactly `MIN_SCORE + 1`, are never banned, and are asked last, while 64
-  invalid-block reports still ban. The H5 score-ceiling walk over every entry point
-  gains the new method, so the ceiling keeps its coverage.
+  (`BAN_THRESHOLD` is -100) silence a validator for an hour.
+- **Third sink, found while fixing the first two:** the gossip `Block` arm had the
+  same shape. `validate_and_add_block` runs after the cheap checks, so a block at
+  `height + 1` that fails with `Previous hash mismatch` because the tip moved in the
+  meantime was charged as a forged block. Same penalty, same ban, and it needs one
+  message per slot rather than one batch per second to reach it.
+- **Fix (this round):** `PeerManager::report_unjoined_block` - the fork signal keeps
+  moving the score (the peer sinks in `get_best_peers`, so the next re-walk asks
+  someone else) but is floored at `MIN_SCORE + 1`, one point above `BAN_THRESHOLD`, so
+  it can demote a peer and never silence it. Both the sync `Blocks` arm and the gossip
+  `Block` arm call it for that one refusal string; the gossip arm also answers
+  `MessageAcceptance::Ignore` for it instead of `Reject`, because there is nothing
+  wrong with the message. A genuine invalid block keeps the banning path: a block
+  whose own hash does not match its contents, an oversized batch, an oversized
+  message, a forged vote and an invalid handshake all keep their own penalties.
+- **Regression test:** `unjoined_blocks_demote_but_never_ban` plus its canary
+  `unjoined_block_floor_is_load_bearing` (`src/network/peer_manager.rs`): 64 unjoined
+  reports demote to exactly `MIN_SCORE + 1`, are never banned, and are asked last,
+  while 64 invalid-block reports still ban. The H5 score-ceiling walk over every entry
+  point gains the new method, so the ceiling keeps its coverage.
 - **Most likely cause of "only 3 of 4 validators produced":** the same ban, one hop
   further. Step 7 counts distinct `producer` values in the blocks *node1* holds. A
   node1 that banned the fourth validator for an hour never receives that validator's
@@ -373,7 +378,7 @@ distinct defects, and the three on #97 to two.
 ### AF-15 - `Clippy drift (next stable toolchain)` red on a doc line in the new test (`ci`, `low`)
 
 - **Where:** `src/network/peer_manager.rs:841`, the doc comment of
-  `stale_sync_batches_demote_but_never_ban`, job `124501936025`.
+  `unjoined_blocks_demote_but_never_ban`, job `124501936025`.
 - **Root cause:** a paragraph in that doc comment had a line starting with `- `, so
   `clippy::doc_lazy_continuation` read the rest of the paragraph as a list item and
   refused the unindented continuation below it. The stable-toolchain clippy of
