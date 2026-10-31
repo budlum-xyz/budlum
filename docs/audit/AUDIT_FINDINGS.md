@@ -251,18 +251,26 @@ distinct defects, and the three on #97 to two.
   demote to exactly `MIN_SCORE + 1`, are never banned, and are asked last, while 64
   invalid-block reports still ban. The H5 score-ceiling walk over every entry point
   gains the new method, so the ceiling keeps its coverage.
-- **Still open - "only 3 of 4 validators produced":** the remaining symptom is
-  structural, not a penalty. With four equal validators the threshold admits each one
+- **Most likely cause of "only 3 of 4 validators produced":** the same ban, one hop
+  further. Step 7 counts distinct `producer` values in the blocks *node1* holds. A
+  node1 that banned the fourth validator for an hour never receives that validator's
+  blocks at all, so its blocks cannot appear in node1's chain however often it wins its
+  slot - and the run that failed has exactly that shape (`... banned for 3600s` six
+  lines above the reported refusal). Removing the two ban sources is therefore the
+  fix for the producer count as well, not just for the catch-up step; if a run still
+  fails step 7 with no ban in its log, the structural reading below is what remains.
+- **If the producer count still fails - the structural reading:** with four equal
+  validators the threshold admits each one with probability 1/4 per round, so a slot
+  has two or more winners with probability `1 - (3/4)^4 - 4*(1/4)*(3/4)^3` about 26 %
+  and no winner at round 0 with probability `(3/4)^4` about 32 %. With four equal validators the threshold admits each one
   with probability 1/4 per round, so a slot has two or more winners with probability
-  `1 - (3/4)^4 - 4*(1/4)*(3/4)^3 about 26 %` and no winner at round 0 with probability
-  `(3/4)^4 is about 32 %`. Equal-height candidates are resolved deterministically
-  (`resolve_split_tie` on the tip when `fork_choice_score` - chain length - ties), so
-  the mesh converges, but on the run that failed a producer's blocks were never in the
-  winning branch that the harness reads, and there was no second chance inside its
-  240 s window. This needs the fork to heal *before* the next slot on every node, not
-  a wider penalty; the next step is to instrument the losing branch's reorg (whether
-  `reorg_to_peer_suffix` runs at all when both tips are at the same height) and treat
-  that as the remaining AF-09 work.
+  Equal-height candidates are resolved deterministically (`resolve_split_tie` on the
+  tip when `fork_choice_score` - chain length - ties), so the mesh converges, but a
+  producer whose branch loses the tie resolver and whose node is then cut off by a ban
+  has no second chance inside the harness's 240 s window. What would remain to
+  instrument is the losing branch's reorg: whether `reorg_to_peer_suffix` runs at all
+  when both tips are at the same height and its batch is refused as "not a better
+  chain".
 - **Status:** **open.** The certificate classification and the ban-from-fork path are
   fixed and tested; `Devnet Multi-Node Smoke` is green on `829b3ee` and that run is the
   evidence that the two bans were the mechanism, but the step-7 producer count has
