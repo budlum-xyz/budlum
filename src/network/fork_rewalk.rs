@@ -122,6 +122,9 @@ mod tests {
         assert_eq!(gate.backoff_secs(), 4);
         gate.record_progress();
         assert_eq!(gate.backoff_secs(), FORK_REWALK_BASE_SECS);
-        assert!(gate.may_walk(1_002), "progress makes the next walk immediate");
+        assert!(
+            gate.may_walk(1_002),
+            "progress makes the next walk immediate"
+        );
     }
 }
