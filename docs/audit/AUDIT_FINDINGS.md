@@ -412,13 +412,26 @@ distinct defects, and the three on #97 to two.
   this step never ran in the earlier `Repo Lint` job (the log of run
   `124371304775` contains no `stark-soundness` line at all). Fixing the gates ahead
   of it exposed the next one instead of fixing it.
-- **Fix:** the section was regenerated from the same formulas the tool uses, for the
-  new column count, and only the two affected rows changed. The port was validated
-  against the committed section first: run at 930 columns it reproduces every value
-  in the document byte for byte (all seven per-term rows, m = 28, the 76/75 query
-  counts and the per-degree field sizes), so the regenerated rows are the tool's
+- **Fix, part 1 (the numbers):** the section was regenerated from the same formulas the
+  tool uses, for the new column count, and only the two affected rows changed. The port
+  was validated against the committed section first: run at 930 columns it reproduces
+  every value in the document byte for byte (all seven per-term rows, m = 28, the 76/75
+  query counts and the per-degree field sizes), so the regenerated rows are the tool's
   output and not a hand estimate. Nothing in the prover changed, and no bound was
   touched to make the numbers look better.
+- **Root cause, part 2 (the reason the gate stayed red after part 1):** the generator's
+  own text had a typo. `render_section` wrote `"Thetarget is {..} bits provable"` while
+  the document says `"The target is 128 bits provable: met."`, so `--check` refused the
+  whole section no matter what the numbers said. The document was right and the
+  generator was wrong, so the fix is in the generator: the format string now reads
+  `"The target is {TARGET_BITS:.0} bits provable: {}."`. Hand-editing the document to
+  match the typo would have made the gate pass by making the output worse, and no other
+  caller or test pins that string (it appears once in the tree).
+- **Why part 2 took a second run to see:** `stark-soundness` is one step near the end of
+  the `Repo Lint` suite, which stops at the first failing step, and a branch push cancels
+  the previous run. Part 1 fixed the numbers and the run reported the same one-line
+  summary - which reads identically for "the numbers are wrong" and "the prose is
+  wrong", because the tool checks the block as one string.
 - **Status:** closed on `testnet-quantum`.
 
 ### AF-15 - `Clippy drift (next stable toolchain)` red on a doc line in the new test (`ci`, `low`)

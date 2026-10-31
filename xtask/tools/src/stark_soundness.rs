@@ -749,7 +749,7 @@ because the comment in `config.rs` quotes it, and it ignores every other term.",
     );
     let _ = writeln!(
         s,
-        "Thetarget is {TARGET_BITS:.0} bits provable: {}.\n",
+        "The target is {TARGET_BITS:.0} bits provable: {}.\n",
         if v.provable.bits() >= TARGET_BITS {
             "met"
         } else {
