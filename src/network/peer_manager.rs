@@ -836,9 +836,9 @@ mod tests {
     /// slot says, and the receiving node used to charge it as an invalid block:
     /// ten such answers (a minute of ordinary fork traffic) banned a validator
     /// for an hour, and the mesh lost the very node whose block it needed. The
-    /// peer is still demoted - it must sink below a peer that answers usefully
-    /// - and the score must stop one point above the ban threshold however long
-    /// the fork lasts.
+    /// peer is still demoted, because it must sink below a peer that answers
+    /// usefully, and the score must stop one point above the ban threshold
+    /// however long the fork lasts.
     #[test]
     fn stale_sync_batches_demote_but_never_ban() {
         let mut manager = PeerManager::new();
