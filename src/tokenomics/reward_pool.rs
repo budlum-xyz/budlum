@@ -382,12 +382,17 @@ mod tests {
         let pool = reward_pool_account();
         let mut state = crate::core::account::AccountState::new();
         state.add_validator(validator, 1_000);
+        // Set during epoch 0, so it prices epoch 1: the rate is prospective.
+        // Set before the delegation exists, because the registry caps a first
+        // rate at `max_commission_change_ppm_per_epoch` (1 %) once stake is
+        // delegated; the 10 % rate below is what the split is measured
+        // against, not what the cap would allow a validator with delegators
+        // to take in one epoch.
+        state.set_validator_commission(&validator, 100_000).unwrap();
         state.add_balance(&delegator, 100);
         state
             .delegate_to_validator(&delegator, &validator, 100)
             .unwrap();
-        // Set during epoch 0, so it prices epoch 1: the rate is prospective.
-        state.set_validator_commission(&validator, 100_000).unwrap();
         state.epoch_index = 1;
         state.add_balance(&pool, 1_100);
         let schedule = RewardPoolSchedule {
@@ -422,12 +427,16 @@ mod tests {
         let pool = reward_pool_account();
         let mut state = crate::core::account::AccountState::new();
         state.add_validator(validator, 1_000);
+        // The epoch being closed is 0; the new rate starts at epoch 1. As
+        // above, the rate is set while nothing is delegated: the per-epoch
+        // change cap bounds a first rate only for a validator that already
+        // holds delegations, and what this test measures is the epoch the
+        // rate starts pricing.
+        state.set_validator_commission(&validator, 100_000).unwrap();
         state.add_balance(&delegator, 100);
         state
             .delegate_to_validator(&delegator, &validator, 100)
             .unwrap();
-        // The epoch being closed is 0; the new rate starts at epoch 1.
-        state.set_validator_commission(&validator, 100_000).unwrap();
         assert_eq!(state.registry.validator_commission_ppm_at(&validator, 0), 0);
         assert_eq!(
             state.registry.validator_commission_ppm_at(&validator, 1),

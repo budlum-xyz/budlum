@@ -28,6 +28,10 @@ pub fn validator_profile(state: &AccountState, address: &Address) -> Option<serd
         .delegation_unbonding_for(address)
         .iter()
         .fold(0u64, |total, entry| total.saturating_add(entry.amount));
+    // The live rate, read through the registry accessor: one place states
+    // what a validator charges today, and the profile is the caller that
+    // shows it to a delegator.
+    let commission_ppm = registry.validator_commission_ppm(address);
     let commission = registry.validator_commission(address);
     let slashes: Vec<serde_json::Value> = registry
         .slashing_history_for(address)
@@ -47,7 +51,7 @@ pub fn validator_profile(state: &AccountState, address: &Address) -> Option<serd
         "delegatedStake": delegated,
         "delegators": delegators,
         "pendingDelegationExit": pending_exit,
-        "commissionPpm": commission.map_or(0, |c| c.commission_ppm),
+        "commissionPpm": commission_ppm,
         "commissionLastChangeEpoch": commission.map(|c| c.last_change_epoch),
         // The first epoch the live rate prices, so a delegator can see a
         // change before it taxes their rewards.
@@ -88,11 +92,18 @@ mod tests {
         let delegator = Address::from([0x62; 32]);
         let mut state = AccountState::new();
         state.add_validator(validator, 10_000);
+        // The rate is set before the delegation exists, because the registry
+        // caps a first rate at `max_commission_change_ppm_per_epoch` once
+        // stake is delegated (a validator holding delegators cannot jump from
+        // 0 to a high rate in one epoch and take the jump out of their next
+        // payout). The profile states the rate that is in force either way;
+        // what is being pinned here is that it reports 5 %, not which epoch
+        // the registry would have allowed it in.
+        state.set_validator_commission(&validator, 50_000).unwrap();
         state.add_balance(&delegator, 500);
         state
             .delegate_to_validator(&delegator, &validator, 500)
             .unwrap();
-        state.set_validator_commission(&validator, 50_000).unwrap();
 
         let profile = validator_profile(&state, &validator).unwrap();
         assert_eq!(profile["stake"], 10_500);
