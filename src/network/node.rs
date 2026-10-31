@@ -969,8 +969,8 @@ impl Node {
     /// would have carried this node across the fork.
     fn finality_cert_names_a_block_we_lack(error: &str) -> bool {
         let block_missing = error.contains("We don't have block at height");
-        let sibling_fork = error.contains("Certificate hash")
-            && error.contains("mismatch with our block hash");
+        let sibling_fork =
+            error.contains("Certificate hash") && error.contains("mismatch with our block hash");
         block_missing || sibling_fork
     }
 
