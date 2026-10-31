@@ -2202,6 +2202,13 @@ jobs:
         run: |
           cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- stark-soundness --self-test
           cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- stark-soundness --check
+      # `pq-measure --timings` builds examples/pq_measure.rs, and that is the
+      # node library, whose build script compiles proto/budlum/network/protocol.proto.
+      # Every other job that builds the library installs protoc first; this one
+      # did not, because until the steps above stopped failing no run had ever
+      # reached this step. It failed with `Could not find protoc` from build.rs.
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       # the size, QC blob and daily traffic tables of docs/pq/MEASUREMENTS.md come
       # from the node library (examples/pq_measure.rs) and must be current. The timings
       # depend on the machine: they are produced here and uploaded, never compared.
