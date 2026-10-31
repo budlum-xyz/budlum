@@ -1,6 +1,6 @@
 use super::{
-    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, RoundPriceBook,
-    MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS,
+    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
 };
 use crate::core::account::{AccountState, Validator};
 use crate::core::address::Address;
@@ -91,14 +91,10 @@ pub struct PoAEngine {
     /// Addresses can be considered for PoA leadership even if other validators
     /// Are active in the permissionless state.
     authorities: Vec<Address>,
-    /// When this node first saw each recently validated block.
-    ///
-    /// A leader round is priced by "how long ago did the parent land", and the
-    /// parent's header timestamp is not that: production stamps blocks from the
-    /// slot schedule, so a lagging chain carries stamps far older than the
-    /// moment the block landed. The observation time is the fact only this node
-    /// has, and no peer can backdate it.
-    round_prices: RoundPriceBook,
+    /// The validator-suite composite key of the
+    /// same authority, when its key set holds an ML-DSA-65 key. Blocks are
+    /// then signed in the composite form, the only one mainnet admits.
+    composite: Option<Arc<crate::crypto::composite::CompositeKeypair>>,
 }
 
 impl PoAEngine {
@@ -108,8 +104,19 @@ impl PoAEngine {
             keypair,
             signer: None,
             authorities: Vec::new(),
-            round_prices: RoundPriceBook::new(),
+            composite: None,
         }
+    }
+
+    /// Sign with `keypair` (validator suite) instead of the bare Ed25519 key
+    /// when its Ed25519 half is the leader.
+    #[must_use]
+    pub fn with_composite_key(
+        mut self,
+        keypair: crate::crypto::composite::CompositeKeypair,
+    ) -> Self {
+        self.composite = Some(Arc::new(keypair));
+        self
     }
 
     pub fn with_signer(
@@ -122,7 +129,7 @@ impl PoAEngine {
             keypair,
             signer: Some(signer),
             authorities: Vec::new(),
-            round_prices: RoundPriceBook::new(),
+            composite: None,
         }
     }
     pub fn with_config(
@@ -135,7 +142,7 @@ impl PoAEngine {
             keypair,
             signer: None,
             authorities: validators,
-            round_prices: RoundPriceBook::new(),
+            composite: None,
         }
     }
 
@@ -216,7 +223,7 @@ impl PoAEngine {
     /// `block_index` and the active validator set fingerprint so the next
     /// Leader is not a trivial sequential prediction. Still fully
     /// Deterministic (all nodes agree); full VRF can replace this later.
-    /// Test-only convenience wrapper (P01-F21: production routes through
+    /// Test-only convenience wrapper (production routes through
     /// `expected_proposer_with_entropy`).
     #[cfg(test)]
     pub fn expected_proposer<'a>(
@@ -229,7 +236,7 @@ impl PoAEngine {
 
     /// Expected proposer with external entropy for unpredictability.
     ///
-    /// `round` is the leader-failure retry term (P01-F02): a slot whose
+    /// `round` is the leader-failure retry term: a slot whose
     /// round-0 leader is offline advances to round 1 on timeout, and each
     /// round hashes to a different leader. Validation recovers the round
     /// from `block.nonce`.
@@ -250,7 +257,7 @@ impl PoAEngine {
     /// Public inputs (block_index + validator set), allowing DoS/bribery
     /// Attacks. Now the leader is unpredictable until the previous block
     /// Is produced, since its hash is unknown beforehand.
-    /// Test-only convenience wrapper (P01-F21).
+    /// Test-only convenience wrapper.
     #[cfg(test)]
     pub fn leader_slot(block_index: u64, active_validators: &[&Validator]) -> Option<usize> {
         Self::leader_slot_with_entropy(block_index, active_validators, &[0u8; 32], 0)
@@ -258,9 +265,9 @@ impl PoAEngine {
 
     /// Leader selection with external entropy (e.g., previous block hash).
     ///
-    /// The round term (P01-F02) re-rolls the pick for a stalled slot. The
+    /// The round term re-rolls the pick for a stalled slot. The
     /// nonce is the round and is capped and time-priced in validation
-    /// (P01-F10), so the leader of one slot cannot farm favourable next
+    /// so the leader of one slot cannot farm favourable next
     /// leaders by varying the nonce: only `0..MAX_LEADER_ROUNDS` exist and
     /// claiming a later one costs wall time. The seed is the grandparent's
     /// hash, which is fixed before the previous slot is produced, so the
@@ -293,7 +300,7 @@ impl PoAEngine {
         // This makes the leader unpredictable until the previous block
         // Is durably committed - preventing pre-computation attacks.
         hasher.update(entropy);
-        // P01-F02: the retry round re-rolls the leader for a stalled slot.
+        // The retry round re-rolls the leader for a stalled slot.
         hasher.update(round.to_le_bytes());
         // Fingerprint the ordered set (callers pass address-sorted active set).
         hasher.update((n as u64).to_le_bytes());
@@ -333,7 +340,7 @@ impl PoAEngine {
             our_addrs.push(Address::from(kp.public_key_bytes()));
         }
 
-        // Leader rounds (P01-F02). The affordable rounds are priced by wall
+        // Leader rounds. The affordable rounds are priced by wall
         // time since the parent landed: round `r` needs
         // `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS` to have elapsed, the
         // same floor validation applies. A slot whose round-0 leader is
@@ -343,8 +350,7 @@ impl PoAEngine {
         // validation enforces, so a producer can never claim a round this node
         // would not itself accept.
         let round_cap = parent_timestamp.map_or(MAX_LEADER_ROUNDS, |prev_ts| {
-            self.round_prices
-                .claimable_round_for(&block.previous_hash, prev_ts, now_millis())
+            affordable_leader_round(prev_ts, now_millis())
         });
 
         for round in 0..=round_cap {
@@ -362,7 +368,7 @@ impl PoAEngine {
             if our_addrs.contains(&expected.address) {
                 block.producer = Some(expected.address);
                 // The block nonce carries the round; validation reads it back
-                // and re-prices it (P01-F10: the nonce is no longer a free
+                // and re-prices it (the nonce is no longer a free
                 // grinding field).
                 block.nonce = round;
                 if let Some(prev_ts) = parent_timestamp {
@@ -424,8 +430,22 @@ impl PoAEngine {
                 }
             } else if let Some(kp) = &self.keypair {
                 let our_addr = Address::from(kp.public_key_bytes());
+                let composite = self.composite.as_ref().filter(|keypair| {
+                    keypair
+                        .public_key()
+                        .is_ok_and(|public| Address::from(public.ed) == our_addr)
+                });
                 if our_addr == expected_signer_addr {
-                    block.sign(kp);
+                    if let Some(keypair) = composite {
+                        use rand::Rng;
+                        let mut rnd = [0u8; 32];
+                        rand::rng().fill_bytes(&mut rnd);
+                        block
+                            .sign_composite(keypair, &rnd)
+                            .map_err(ConsensusError)?;
+                    } else {
+                        block.sign(kp);
+                    }
                     info!(
                         "PoA: Block {} signed by us ({})",
                         block.index, expected_signer_addr
@@ -447,7 +467,7 @@ impl PoAEngine {
 
 impl ConsensusEngine for PoAEngine {
     /// The identity master registry opens writes on the PoA authority's
-    /// chain and nowhere else (identity architecture note §2). This is that declaration:
+    /// chain and nowhere else (identity architecture note). This is that declaration:
     /// the gate reads it from the engine the node itself started with.
     fn domain_kind(&self) -> crate::domain::ConsensusKind {
         crate::domain::ConsensusKind::PoA
@@ -459,7 +479,7 @@ impl ConsensusEngine for PoAEngine {
     }
 
     /// Chain-aware preview: the parent timestamp prices the leader rounds
-    /// (P01-F02), so production must go through this variant.
+    /// so production must go through this variant.
     fn preview_block_with_chain(
         &self,
         block: &mut Block,
@@ -530,7 +550,7 @@ impl ConsensusEngine for PoAEngine {
 
         let active_refs = self.active_authorities(state);
         if !active_refs.is_empty() {
-            // The block nonce carries the leader round (P01-F02, P01-F10).
+            // The block nonce carries the leader round.
             // The round is capped, and claiming a later one is time-priced,
             // so the nonce is a bounded retry term and not a free grinding
             // field for steering the next slot's leader.
@@ -569,17 +589,12 @@ impl ConsensusEngine for PoAEngine {
                     // itself with, so an authority cannot publish a valid block
                     // for a round another authority leads.
                     // Priced from the parent's stamp, which every node
-                    // holding the parent reads the same way. Pricing from
-                    // this node's own sighting instead put the same claim on
-                    // different sides of the boundary wherever nodes booted
-                    // or synced seconds apart, and a claim refused here is a
-                    // block refused for good: the mesh kept two chains. A
-                    // future stamp still buys no round.
-                    let affordable = affordable_leader_round(
-                        prev.timestamp,
-                        self.round_prices.seen_at(&prev.hash),
-                        now_millis(),
-                    );
+                    // holding the parent reads the same way: a node-local
+                    // sighting put the same claim on different sides of the
+                    // boundary wherever nodes booted or synced seconds apart,
+                    // and a claim refused here is a block refused for good.
+                    // A future stamp buys no round, on any node.
+                    let affordable = affordable_leader_round(prev.timestamp, now_millis());
                     if round > affordable {
                         return Err(ConsensusError(format!(
                             "PoA leader round {round} claimed before it elapsed: only round \
@@ -609,7 +624,7 @@ impl ConsensusEngine for PoAEngine {
             // remembered the signature and forgot the proposer would accept a
             // validly signed block from the wrong authority for that slot.
             // The function existed and nothing reached it.
-            if !block.verify_signature_with_pubkey(&expected.address) {
+            if !block.verify_signature_with_pubkey_in(&state.scheme_registry, &expected.address) {
                 return Err(ConsensusError(format!(
                     "Block {} is not a valid signature from the expected proposer {}, got {}",
                     block.index, expected.address, producer
@@ -626,9 +641,6 @@ impl ConsensusEngine for PoAEngine {
             ));
         }
         Ok(())
-    }
-    fn note_block_seen(&self, block_hash: &str, at_ms: u128) {
-        self.round_prices.note_tip_block(block_hash, at_ms);
     }
     fn consensus_type(&self) -> &'static str {
         "PoA"
@@ -1011,6 +1023,25 @@ mod tests {
             engine_two.active_authorities(&state).is_empty(),
             "domain 2 authorised an account only domain 1's admin touched"
         );
+    }
+
+    /// an authority whose key set holds its ML-DSA-65 key signs the
+    /// composite block form, and the block verifies.
+    #[test]
+    fn a_poa_authority_with_a_pq_key_signs_composite_blocks() {
+        let keys = crate::crypto::primitives::ValidatorKeys::generate().unwrap();
+        let pubkey = Address::from(keys.sig_key.public_key_bytes());
+        let mut state = AccountState::new();
+        state.validators.insert(pubkey, Validator::new(pubkey, 0));
+        state.validators.get_mut(&pubkey).unwrap().active = true;
+        let composite = keys.composite_keypair().unwrap();
+        let engine = PoAEngine::new(PoAConfig::default(), Some(keys.sig_key.clone()))
+            .with_composite_key(composite);
+        let mut block = Block::new(1, "prev".into(), vec![]);
+        engine.prepare_block(&mut block, &state).unwrap();
+        assert_eq!(block.producer, Some(pubkey));
+        assert!(block.composite_pq_key().is_some());
+        assert!(block.verify_signature());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! E1: K3/K4 durable alarm & quarantine ledger.
+//! durable alarm & quarantine ledger.
 //!
 //! A node-local, restart-surviving record of consensus-integrity events:
 //! domains frozen for equivocation and offenders slashed through the
@@ -49,7 +49,7 @@ pub struct AlarmEntry {
     pub severity: u8,
 }
 
-/// Persistent K3/K4 alarm & quarantine ledger.
+/// Persistent alarm & quarantine ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct QuarantineLedger {
     #[serde(with = "crate::core::map_keys")]
@@ -89,7 +89,7 @@ impl QuarantineLedger {
         );
     }
 
-    /// Drops alarms older than `retention_blocks` (BLG-0105/P04-F23): the
+    /// Drops alarms older than `retention_blocks`: the
     /// alarm log is history, and history that is never trimmed is a disk
     /// bill paid forever. Quarantine entries are live state - a frozen
     /// entity stays frozen until [`QuarantineLedger::release_entity`] - so
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(ledger, back);
     }
 
-    /// BLG-0105 (P04-F23): alarms are trimmed by age; live quarantine
+    /// Alarms are trimmed by age; live quarantine
     /// entries are not (a frozen entity stays frozen until released).
     #[test]
     fn alarms_trim_by_age_and_quarantine_survives_until_released() {

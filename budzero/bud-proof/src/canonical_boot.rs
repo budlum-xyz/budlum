@@ -71,7 +71,7 @@ fn pin_bytes(hex: &str) -> Result<[u8; 32], String> {
 }
 
 /// Reconcile the independent pin sources for the private-transfer program
-/// (K2 of the regeneration design). The schema is pinned in independent
+/// ( of the regeneration design). The schema is pinned in independent
 /// places; at boot two of them are wired - the VM builder stream and the
 /// canonical-set pin table - and the reconciliation is a strict majority over
 /// the sources actually present. A torn source is re-derived from the schema,

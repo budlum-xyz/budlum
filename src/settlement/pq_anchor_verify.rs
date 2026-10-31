@@ -1,55 +1,79 @@
+//! WIRING: unwired - verify_anchor_light is reached only from the anchor-ledger tests in this tree; the finality consumer that will call it is not in this tree yet.
 //! Verification of the post-quantum anchors [`super::pq_anchor`] emits.
 //!
-//! WIRING: unwired - the node emits and rotates anchors today
-//! (`emit_anchor_node_local`, `rotate_anchor_key_with_committee`), but no
-//! production path ingests a remote anchor yet: the light client verifies
-//! quorum-certificate checkpoints, not anchor records. These entry points
-//! are pinned by the `pq_anchor` test suite and wait for the remote-anchor
-//! consumer (light client or peer sync) they were written for; they stay
-//! public so that consumer needs no API change to call them.
+//! WIRING: the node verifies the anchors it emits before it logs them
+//! (`Blockchain::emit_anchor_for`), and the light client path
+//! (`verify_anchor_light`) is the entry point for the remote-anchor consumer:
+//! the light client verifies quorum-certificate checkpoints today, not anchor
+//! records, so the light entry point is pinned by the `pq_anchor` test suite
+//! until that consumer lands and stays public so it needs no API change.
 
-use super::pq_anchor::{
-    anchor_payload_for, AnchorError, AnchorKeyEntry, AnchorSignature, AnchorSignatureAlgorithm,
-    PqAnchor,
-};
+use super::anchor_ledger::{AnchorKeyLedger, KeyFamily, ANCHOR_KEY_COUNT, ANCHOR_THRESHOLD};
+use super::pq_anchor::{AnchorError, AnchorSignature, AnchorSignatureAlgorithm, PqAnchor};
 
+/// Verify one anchor signature under the ledger key bytes (ML-DSA-87,
+/// `BDLM/ANCHOR/V2`).
 pub(crate) fn verify_one(
+    public_key: &[u8],
+    payload: &[u8],
+    signature: &[u8],
+) -> Result<(), AnchorError> {
+    verify_in_context(
+        AnchorSignatureAlgorithm::MlDsa87,
+        public_key,
+        payload,
+        crate::crypto::ctx::ANCHOR_V2,
+        signature,
+    )
+}
+
+/// Verify one Root Seal signature under the ledger key bytes
+/// (SLH-DSA-SHAKE-256s, `BDLM/SEAL/V1`).
+pub(crate) fn verify_seal_signature(
+    public_key: &[u8],
+    payload: &[u8],
+    signature: &[u8],
+) -> Result<(), AnchorError> {
+    verify_in_context(
+        AnchorSignatureAlgorithm::SlhDsaShake256s,
+        public_key,
+        payload,
+        crate::crypto::ctx::SEAL_V1,
+        signature,
+    )
+}
+
+/// Verify one signature of a supported algorithm under the named context,
+/// through the verification facade (both ML-DSA libraries must accept).
+pub(crate) fn verify_in_context(
     algorithm: AnchorSignatureAlgorithm,
     public_key: &[u8],
     payload: &[u8],
+    ctx: &[u8],
     signature: &[u8],
 ) -> Result<(), AnchorError> {
     if !algorithm.is_supported() {
         return Err(AnchorError::UnsupportedAlgorithm { algorithm });
     }
-    crate::crypto::primitives::verify_ml_dsa_87_signature(payload, signature, public_key)
+    let Some(scheme) = algorithm.scheme_id() else {
+        return Err(AnchorError::UnsupportedAlgorithm { algorithm });
+    };
+    crate::crypto::pq::verify(scheme, public_key, payload, ctx, signature)
         .map_err(|_| AnchorError::InvalidSignature)
 }
 
-/// Ensures a signer's (algorithm, key) pair is authorized by the keybook
-/// **for the anchor's key epoch** (BLG-0070): a rotated-out entry cannot
-/// authorize anything, however it got into the book.
-fn in_keybook(
-    keybook: &[AnchorKeyEntry],
-    algorithm: AnchorSignatureAlgorithm,
-    public_key: &[u8],
-    key_epoch: u32,
-) -> bool {
-    keybook
-        .iter()
-        .any(|e| e.algorithm == algorithm && e.public_key == public_key && e.key_epoch == key_epoch)
-}
+/// How many signatures one anchor may carry: one per
+/// ledger key. Each costs an ML-DSA-87 verification; an unbounded list is a
+/// DoS multiplier.
+pub const MAX_ANCHOR_SIGNATURES: usize = ANCHOR_KEY_COUNT;
 
-/// BLG-0075 (P03-F18): how many signatures one anchor may carry. Each one
-/// costs an ML-DSA-87 verification; an unbounded list is a DoS multiplier.
-pub const MAX_ANCHOR_SIGNATURES: usize = 8;
-
-/// BLG-0075: refuse oversized or self-duplicate signature lists before any
-/// expensive verification runs.
+/// Refuse oversized or self-duplicate signature lists before any
+/// expensive verification runs. An empty list reaches no threshold.
 pub(crate) fn check_signature_list(signatures: &[AnchorSignature]) -> Result<(), AnchorError> {
     if signatures.is_empty() {
-        return Err(AnchorError::MissingAlgorithm {
-            algorithm: AnchorSignatureAlgorithm::MlDsa87,
+        return Err(AnchorError::ThresholdNotReached {
+            required: ANCHOR_THRESHOLD,
+            valid: 0,
         });
     }
     if signatures.len() > MAX_ANCHOR_SIGNATURES {
@@ -59,104 +83,99 @@ pub(crate) fn check_signature_list(signatures: &[AnchorSignature]) -> Result<(),
         });
     }
     for (i, sig) in signatures.iter().enumerate() {
-        for prev in signatures.iter().take(i) {
-            if prev.algorithm == sig.algorithm && prev.public_key == sig.public_key {
-                return Err(AnchorError::DuplicateSignature);
-            }
+        if signatures
+            .iter()
+            .take(i)
+            .any(|prev| prev.key_index == sig.key_index)
+        {
+            return Err(AnchorError::DuplicateSignature);
         }
     }
     Ok(())
 }
 
-/// Full verification: every signature verifies, every signer is keybooked,
-/// and every supported algorithm the production profile expects is present.
-/// A reserved-algorithm signature does not breed an automatic pass: reserved
-/// families fail closed at signature verification anyway.
+/// The checks both verification paths share, before any signature is
+/// verified: bounded list, the chain, and the key epoch (an anchor
+/// from a rotated-out epoch is dead on arrival).
+fn precheck(anchor: &PqAnchor, ledger: &AnchorKeyLedger) -> Result<(), AnchorError> {
+    check_signature_list(&anchor.signatures)?;
+    if anchor.chain_id != ledger.chain_id {
+        return Err(AnchorError::WrongChain {
+            expected: ledger.chain_id,
+            got: anchor.chain_id,
+        });
+    }
+    if anchor.key_epoch != ledger.key_epoch {
+        return Err(AnchorError::StaleAnchorEpoch {
+            anchor_epoch: anchor.key_epoch,
+            current_epoch: ledger.key_epoch,
+        });
+    }
+    Ok(())
+}
+
+/// Full verification: every listed signature names a ledger key and verifies,
+/// and at least two distinct keys that are not suspended did so.
+///
+/// A signature of a suspended key still has to verify (a forged one is a
+/// fault), but it does not count toward the threshold.
 ///
 /// # Errors
 ///
 /// The first [`AnchorError`] that applies.
-pub fn verify_anchor_full(
-    anchor: &PqAnchor,
-    keybook: &[AnchorKeyEntry],
-    current_key_epoch: u32,
-) -> Result<(), AnchorError> {
-    check_signature_list(&anchor.signatures)?;
-    // BLG-0070 (P03-F13): an anchor from a rotated-out epoch is dead on
-    // arrival. Without this comparison an old key kept verifying until the
-    // keybook was edited by hand.
-    if anchor.key_epoch != current_key_epoch {
-        return Err(AnchorError::StaleAnchorEpoch {
-            anchor_epoch: anchor.key_epoch,
-            current_epoch: current_key_epoch,
-        });
-    }
-    let payload = anchor_payload_for(
-        anchor.height,
-        &anchor.aggregate_root,
-        anchor.stark_root.as_ref(),
-        anchor.crossdomain_root.as_ref(),
-        anchor.key_epoch,
-    );
+pub fn verify_anchor_full(anchor: &PqAnchor, ledger: &AnchorKeyLedger) -> Result<(), AnchorError> {
+    precheck(anchor, ledger)?;
+    let payload = anchor.payload();
+    let mut live = 0usize;
     for sig in &anchor.signatures {
-        if !in_keybook(keybook, sig.algorithm, &sig.public_key, anchor.key_epoch) {
-            return Err(AnchorError::SignerNotInKeybook);
+        let Some(public_key) = ledger.anchor_key(sig.key_index) else {
+            return Err(AnchorError::UnknownKeyIndex {
+                index: sig.key_index,
+            });
+        };
+        verify_one(public_key, &payload, &sig.signature)?;
+        if !ledger.is_suspended(KeyFamily::Anchor, sig.key_index, anchor.key_epoch) {
+            live += 1;
         }
-        verify_one(sig.algorithm, &sig.public_key, &payload, &sig.signature)?;
     }
-    if !anchor
-        .signatures
-        .iter()
-        .any(|s| s.algorithm == AnchorSignatureAlgorithm::MlDsa87)
-    {
-        return Err(AnchorError::MissingAlgorithm {
-            algorithm: AnchorSignatureAlgorithm::MlDsa87,
+    if live < ANCHOR_THRESHOLD {
+        return Err(AnchorError::ThresholdNotReached {
+            required: ANCHOR_THRESHOLD,
+            valid: live,
         });
     }
     Ok(())
 }
 
-/// Light verification for wallets and mesh nodes (threshold-of-algorithms):
-/// any ONE supported, keybooked, verifying signature is enough. The
-/// heavy-node rule ([`verify_anchor_full`]) still applies to everything
-/// carrying production weight; accepting one-algorithm verification is how
-/// the small-payload goal survives the future dual-signature upgrade rather
-/// than being undone by it.
+/// Light verification for wallets and mesh nodes. It asks for the same
+/// threshold as [`verify_anchor_full`]: a light client does not get a lower
+/// bar, only a cheaper walk. Signatures that do not verify are skipped and
+/// the walk stops as soon as two distinct live keys have verified.
 ///
 /// # Errors
 ///
-/// [`AnchorError::MissingAlgorithm`] when no single supported signature
-/// verifies against the keybook.
-pub fn verify_anchor_light(
-    anchor: &PqAnchor,
-    keybook: &[AnchorKeyEntry],
-    current_key_epoch: u32,
-) -> Result<(), AnchorError> {
-    // BLG-0075: the same list bound applies to the light path.
-    check_signature_list(&anchor.signatures)?;
-    // BLG-0070: light verification applies the same epoch rule.
-    if anchor.key_epoch != current_key_epoch {
-        return Err(AnchorError::StaleAnchorEpoch {
-            anchor_epoch: anchor.key_epoch,
-            current_epoch: current_key_epoch,
-        });
-    }
-    let payload = anchor_payload_for(
-        anchor.height,
-        &anchor.aggregate_root,
-        anchor.stark_root.as_ref(),
-        anchor.crossdomain_root.as_ref(),
-        anchor.key_epoch,
-    );
+/// [`AnchorError::ThresholdNotReached`] when fewer than two live keys verify,
+/// or the precheck refusals (chain, epoch, list bounds).
+pub fn verify_anchor_light(anchor: &PqAnchor, ledger: &AnchorKeyLedger) -> Result<(), AnchorError> {
+    precheck(anchor, ledger)?;
+    let payload = anchor.payload();
+    let mut live = 0usize;
     for sig in &anchor.signatures {
-        if !in_keybook(keybook, sig.algorithm, &sig.public_key, anchor.key_epoch) {
+        let Some(public_key) = ledger.anchor_key(sig.key_index) else {
+            continue;
+        };
+        if ledger.is_suspended(KeyFamily::Anchor, sig.key_index, anchor.key_epoch) {
             continue;
         }
-        if verify_one(sig.algorithm, &sig.public_key, &payload, &sig.signature).is_ok() {
-            return Ok(());
+        if verify_one(public_key, &payload, &sig.signature).is_ok() {
+            live += 1;
+            if live >= ANCHOR_THRESHOLD {
+                return Ok(());
+            }
         }
     }
-    Err(AnchorError::MissingAlgorithm {
-        algorithm: AnchorSignatureAlgorithm::MlDsa87,
+    Err(AnchorError::ThresholdNotReached {
+        required: ANCHOR_THRESHOLD,
+        valid: live,
     })
 }

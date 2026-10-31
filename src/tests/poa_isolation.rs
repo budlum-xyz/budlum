@@ -318,8 +318,7 @@ mod poa_compliance_gate {
     }
 
     /// A PoA domain whose registered operator is `addr(id)` - the operator
-    /// holds compliance authority while the domain has no admins yet
-    /// (BLG-0091).
+    /// holds compliance authority while the domain has no admins yet.
     fn poa_domain(id: u32) -> ConsensusDomain {
         let mut d = default_domain(
             id,
@@ -416,7 +415,9 @@ mod poa_compliance_gate {
         // it would bypass the gate that verifies the record is consistent with the template; the record
         // already says the template operator must equal the domain operator.
         let operator = bc
-            .domain_registry
+            .state
+            .settlement
+            .domains
             .get(11)
             .and_then(|d| d.operator)
             .expect("the operator of the registered domain");
@@ -488,7 +489,7 @@ mod poa_compliance_gate {
         );
     }
 
-    /// BLG-0091 (P04-F09): the unfreeze exists and clears the gate, and a
+    /// The unfreeze exists and clears the gate, and a
     /// governance-queued request is applied through the same verified path.
     #[test]
     fn an_unfreeze_clears_the_gate_and_the_queue_applies() {

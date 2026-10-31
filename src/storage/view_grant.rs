@@ -13,7 +13,7 @@
 //! R2/R3 in the cost tables are **not** a third edition. They are body-cost
 //! regimes on the Classic path. If it has a body, it is 2.0 (Classic). If it
 //! is recipe-only with zero held bytes, it is 3.0 (Three). Calling a stored
-//! JPEG "3.0 because we wrapped it in QR" is a category error (K13).
+//! JPEG "3.0 because we wrapped it in QR" is a category error.
 //!
 //! # What a grant is
 //!
@@ -202,7 +202,13 @@ impl GrantAuthorization {
             .map_err(|_| GrantAuthError::VerifierUnavailable)
     }
 
-    /// Whether `digest` is signed by `owner`'s key.
+    /// Whether `digest` is signed by `owner`'s key, under the genesis scheme
+    /// statuses.
+    ///
+    /// This is the off-chain and self-check entry point. Anything that runs
+    /// inside block execution must call [`Self::verify_in`] with
+    /// `state.scheme_registry`: a scheme the chain has disabled would
+    /// otherwise keep binding operators and owners on the genesis default.
     ///
     /// # Errors
     ///
@@ -210,10 +216,30 @@ impl GrantAuthorization {
     /// [`GrantAuthError::BadSignature`] when the signature does not verify, which
     /// includes a binary built without the `wallet-ml-dsa` feature.
     pub fn verify(&self, digest: &[u8; 32], owner: &Address) -> Result<(), GrantAuthError> {
+        self.verify_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            digest,
+            owner,
+        )
+    }
+
+    /// [`Self::verify`] under the scheme statuses of a chain.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::verify`].
+    pub fn verify_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        digest: &[u8; 32],
+        owner: &Address,
+    ) -> Result<(), GrantAuthError> {
         if &self.derived_owner()? != owner {
             return Err(GrantAuthError::WrongOwner);
         }
-        crate::crypto::primitives::verify_ml_dsa_87_signature(
+        crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+            registry,
+            crate::crypto::ctx::STORAGE_V2,
             digest,
             &self.signature,
             &self.owner_key,
@@ -826,7 +852,7 @@ mod tests {
         ContentId([b; 32])
     }
 
-    /// P28-F17: a stored registry whose three fields disagree is refused.
+    /// A stored registry whose three fields disagree is refused.
     #[test]
     fn a_registry_row_whose_fields_disagree_is_refused_on_load() {
         let mut reg = ViewGrantRegistry::new();
@@ -876,7 +902,7 @@ mod tests {
         reg.revoke(id, addr(2), 10).unwrap();
     }
 
-    /// P28-F19: the digest and the commitment share one tag table, and the
+    /// The digest and the commitment share one tag table, and the
     /// bytes stay what they were on chain.
     #[test]
     fn confidential_proof_and_cipher_tags_are_frozen() {
@@ -945,7 +971,7 @@ mod tests {
         );
     }
 
-    /// P28-F16: chain id and nonce enter every signed digest.
+    /// Chain id and nonce enter every signed digest.
     #[test]
     fn signed_digests_bind_chain_id_and_nonce() {
         let issue = |c: u64, n: u64| {
@@ -1022,7 +1048,7 @@ mod tests {
 
     /// A grant minted by somebody else opens nothing.
     ///
-    /// The `issuer` field is not a claim the book waves through: without this
+    /// The `issuer` field is not a claim the book changes through: without this
     /// rule any caller could hand out public view access to content it does not
     /// own, and the access model would be decoration.
     #[test]

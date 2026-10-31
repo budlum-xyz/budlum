@@ -116,7 +116,7 @@ fn decode<T: DeserializeOwned>(value: &[u8]) -> std::io::Result<T> {
 #[derive(Debug)]
 pub struct Storage {
     db: Db,
-    /// BLG-0190 (P09-F11): a test-only knob that makes the storage-economics
+    /// A test-only knob that makes the storage-economics
     /// persist fail for real, so the accounting paths' `?` propagation can
     /// be EXERCISED instead of grepped. Never set outside `cfg(test)`; no
     /// production behaviour reads it.
@@ -275,7 +275,7 @@ impl Storage {
     /// Reads every row twice and accepts the result only when both passes
     /// agree and no durable commit is in flight. sled offers no point in time
     /// iterator, so a commit landing mid-scan would otherwise be copied
-    /// half way (P26-F13).
+    /// half way.
     fn read_consistent_entries(&self) -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let read = || -> std::io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
             let mut rows = Vec::new();
@@ -548,9 +548,9 @@ impl Storage {
                 batch.remove(b"CANONICAL_HEIGHT");
             }
 
-            // 4.: Roll bridge state back to the previous durable tip.
+            // 4. Roll bridge state back to the previous durable tip.
             // Durable commits store BRIDGE_STATE_AT:{h}. On interrupt at H we
-            // Must not leave a newer BRIDGE_STATE than the restored tip (H-1).
+            // must not leave a newer BRIDGE_STATE than the restored tip (H-1).
             batch.remove(format!("BRIDGE_STATE_AT:{height}").as_bytes());
             if height > 0 {
                 let prev = height - 1;
@@ -659,10 +659,10 @@ impl Storage {
 
         // 9. Bridge state. Every durable height gets a snapshot: a commit
         // that carries no new bridge state carries the live one forward, so
-        // that a rollback from the next height finds the state that was
-        // valid here. Without it, an interrupted commit at H+1 read the
-        // missing `BRIDGE_STATE_AT:H` as "no bridge state" and deleted the
-        // live `BRIDGE_STATE` that a commit at H had never touched.
+        // that a rollback from the next height finds the state that was valid
+        // here. Without it, an interrupted commit at H+1 read the missing
+        // `BRIDGE_STATE_AT:H` as "no bridge state" and deleted the live
+        // `BRIDGE_STATE` that a commit at H had never touched.
         let at = format!("BRIDGE_STATE_AT:{}", batch.block.index);
         if let Some(ref bridge_state) = batch.bridge_state {
             let val = encode(bridge_state)?;
@@ -741,6 +741,43 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    /// Drop the witnesses of the block at `height` and keep its body.
+    /// The block hash and the witness root are untouched: neither covers the
+    /// witnesses. Returns `false` when there is no such block or it was
+    /// already pruned. The caller decides when (`witness_retention::may_prune`).
+    ///
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the read, the encode or the write.
+    pub fn prune_block_witnesses(&self, height: u64) -> std::io::Result<bool> {
+        let marker = format!("WITNESS_PRUNED:{height}");
+        if self.db.get(marker.as_bytes())?.is_some() {
+            return Ok(false);
+        }
+        let Some(block) = self.get_block_by_height(height)? else {
+            return Ok(false);
+        };
+        let mut batch = sled::Batch::default();
+        batch.insert(block.hash.as_bytes(), encode(&block.without_witnesses())?);
+        batch.insert(marker.as_bytes(), &[1u8][..]);
+        self.db.apply_batch(batch)?;
+        self.db.flush()?;
+        Ok(true)
+    }
+
+    /// Whether the witnesses of the block at `height` were pruned.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the read.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn is_witness_pruned(&self, height: u64) -> std::io::Result<bool> {
+        Ok(self
+            .db
+            .get(format!("WITNESS_PRUNED:{height}").as_bytes())?
+            .is_some())
+    }
+
     pub fn delete_block(&self, height: u64) -> std::io::Result<()> {
         let key = format!("HEIGHT:{height}");
         if let Some(hash_val) = self.db.get(key.as_bytes())? {
@@ -762,6 +799,7 @@ impl Storage {
             batch.remove(format!("STATE_ROOT:{height}").as_bytes());
             batch.remove(format!("FINALITY_CERT:{height}").as_bytes());
             batch.remove(format!("QC_BLOB:{height}").as_bytes());
+            batch.remove(format!("WITNESS_PRUNED:{height}").as_bytes());
             self.db.apply_batch(batch)?;
             self.db.flush()?;
         }
@@ -776,8 +814,30 @@ impl Storage {
         height: u64,
         blob: &crate::consensus::qc::QcBlob,
     ) -> std::io::Result<()> {
+        use crate::consensus::qc::qc_blob_max_bytes;
+        if blob.checkpoint_height != height
+            || !blob.verify_merkle_root()
+            || blob.pq_signatures.len() > 2048
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid QC blob",
+            ));
+        }
+        let payload = blob
+            .to_bytes()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if payload.len() > qc_blob_max_bytes(2048) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "QC blob exceeds storage limit",
+            ));
+        }
+        // Distinguish new binary rows from pre-upgrade bincode rows. Never
+        // guess the format by trying two parsers on a malformed new row.
+        let mut val = b"BDLM_QC_BIN_V2\0".to_vec();
+        val.extend_from_slice(&payload);
         let key = format!("QC_BLOB:{height}");
-        let val = encode(blob)?;
         self.db.insert(key.as_bytes(), val)?;
         self.db.flush()?;
         Ok(())
@@ -790,13 +850,43 @@ impl Storage {
         &self,
         height: u64,
     ) -> std::io::Result<Option<crate::consensus::qc::QcBlob>> {
+        use crate::consensus::qc::{qc_blob_max_bytes, QcBlob};
         let key = format!("QC_BLOB:{height}");
-        if let Some(val) = self.db.get(key.as_bytes())? {
-            let blob = decode(&val)?;
-            Ok(Some(blob))
-        } else {
-            Ok(None)
+        let Some(val) = self.db.get(key.as_bytes())? else {
+            return Ok(None);
+        };
+        const MAGIC: &[u8] = b"BDLM_QC_BIN_V2\0";
+        let max = qc_blob_max_bytes(2048);
+        if val.len() > max + MAGIC.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "QC blob row exceeds storage limit",
+            ));
         }
+        let blob: QcBlob = if let Some(payload) = val.strip_prefix(MAGIC) {
+            QcBlob::from_bytes(payload, 2048)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+        } else {
+            // Earlier releases persisted QcBlob with bincode. Restrict this
+            // compatibility reader to those rows and bound its allocation.
+            use bincode::Options;
+            bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .with_limit(max as u64)
+                .deserialize(&val)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?
+        };
+        if blob.checkpoint_height != height
+            || blob.pq_signatures.len() > 2048
+            || !blob.verify_merkle_root()
+            || blob.validate_size(blob.pq_signatures.len()).is_err()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid stored QC blob",
+            ));
+        }
+        Ok(Some(blob))
     }
     /// # Errors
     ///
@@ -876,6 +966,43 @@ impl Storage {
         self.db.remove(key.as_bytes())?;
         self.db.flush()?;
         Ok(())
+    }
+
+    /// Persist a Handoff Certificate. Unlike a QC blob it has no
+    /// TTL and is never pruned: it is the chain a light client follows.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when encoding or the write fails.
+    /// exposed for: storage surface - the key-package door's readers land with the custody path.
+    pub fn save_handoff_cert(
+        &self,
+        cert: &crate::consensus::handoff::HandoffCertificate,
+    ) -> std::io::Result<()> {
+        let key = format!("HANDOFF_CERT:{:020}", cert.epoch);
+        self.db.insert(key.as_bytes(), encode(cert)?)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// Every stored Handoff Certificate, oldest epoch first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the scan or a decode fails.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn load_handoff_certs(
+        &self,
+    ) -> std::io::Result<Vec<crate::consensus::handoff::HandoffCertificate>> {
+        let mut out = Vec::new();
+        for item in self.db.scan_prefix(b"HANDOFF_CERT:") {
+            let (_, val) = item?;
+            out.push(decode::<crate::consensus::handoff::HandoffCertificate>(
+                &val,
+            )?);
+        }
+        out.sort_by_key(|cert| cert.epoch);
+        Ok(out)
     }
 
     pub fn save_finality_cert(
@@ -1060,6 +1187,50 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
+    /// Record the state root opening of the checkpoint block that built
+    /// global header `global_height`: node-local proof material a
+    /// light client checks the header against.
+    ///
+    /// # Errors
+    ///
+    /// The store's write error.
+    pub fn save_global_header_opening(
+        &self,
+        global_height: u64,
+        body: &[u8; 32],
+    ) -> std::io::Result<()> {
+        let key = format!("GLOBAL_HEADER_OPENING:{global_height}");
+        self.db.insert(key.as_bytes(), body.to_vec())?;
+        Ok(())
+    }
+
+    /// Every recorded state root opening, by global height. A row that is
+    /// not 32 bytes is skipped: the opening is proof material a verifier
+    /// rechecks, not state.
+    ///
+    /// # Errors
+    ///
+    /// The store's read error.
+    pub fn load_global_header_openings(
+        &self,
+    ) -> std::io::Result<std::collections::BTreeMap<u64, [u8; 32]>> {
+        let mut out = std::collections::BTreeMap::new();
+        for item in self.db.scan_prefix(b"GLOBAL_HEADER_OPENING:") {
+            let (key, val) = item?;
+            let Some(height) = std::str::from_utf8(&key)
+                .ok()
+                .and_then(|k| k.strip_prefix("GLOBAL_HEADER_OPENING:"))
+                .and_then(|h| h.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if let Ok(body) = <[u8; 32]>::try_from(val.as_ref()) {
+                out.insert(height, body);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn get_global_header(&self, height: u64) -> std::io::Result<Option<GlobalBlockHeader>> {
         let key = format!("GLOBAL_HEADER:{height}");
         if let Some(val) = self.db.get(key.as_bytes())? {
@@ -1081,6 +1252,101 @@ impl Storage {
         }
         headers.sort_by_key(|header| header.global_height);
         Ok(headers)
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn save_quarantine_ledger(
+        &self,
+        ledger: &crate::registry::QuarantineLedger,
+    ) -> std::io::Result<()> {
+        let val = encode(ledger)?;
+        self.db.insert(b"QUARANTINE_LEDGER", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    pub fn load_quarantine_ledger(
+        &self,
+    ) -> std::io::Result<Option<crate::registry::QuarantineLedger>> {
+        if let Some(val) = self.db.get(b"QUARANTINE_LEDGER")? {
+            let decoded = decode(&val)?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn save_storage_registry(
+        &self,
+        registry: &crate::domain::storage_deal::StorageRegistry,
+    ) -> std::io::Result<()> {
+        let val = encode(registry)?;
+        self.db.insert(
+            b"STORAGE_REGISTRY_VERSION",
+            STORAGE_REGISTRY_ROW_VERSION.to_le_bytes().to_vec(),
+        )?;
+        self.db.insert(b"STORAGE_REGISTRY", val)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    /// # Errors
+    ///
+    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
+    /// conditions.
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub fn load_storage_registry(
+        &self,
+    ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
+        if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
+            let version = self.db.get(b"STORAGE_REGISTRY_VERSION")?;
+            let expected_version = STORAGE_REGISTRY_ROW_VERSION.to_le_bytes();
+            // No tag means the row was written before the tag existed, which is
+            // still the row this build writes: it must load, or every node that
+            // ever persisted a registry refuses to boot after an upgrade. A row
+            // that does carry a tag from another build is still refused.
+            if version
+                .as_deref()
+                .is_some_and(|tag| tag != expected_version.as_slice())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "STORAGE_REGISTRY row has no matching version tag; a row from another build \
+                     is refused",
+                ));
+            }
+            // One shape only. A row written before the settled-ticket queue
+            // used to be padded with an empty queue and accepted; the queue
+            // is part of the registry root and decides when a ticket row is
+            // dropped, so the padded node split from its peers at the first
+            // retention cutoff. Such a row is reported, not repaired.
+            let decoded =
+                decode::<crate::domain::storage_deal::StorageRegistry>(&val).map_err(|error| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "STORAGE_REGISTRY row does not decode as the current StorageRegistry \
+                             shape; a row from an older build cannot be loaded without changing \
+                             the committed registry root, so it is refused: {error}"
+                        ),
+                    )
+                })?;
+            Ok(Some(decoded))
+        } else {
+            Ok(None)
+        }
     }
 
     /// # Errors
@@ -1185,99 +1451,6 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
-    pub fn save_quarantine_ledger(
-        &self,
-        ledger: &crate::registry::QuarantineLedger,
-    ) -> std::io::Result<()> {
-        let val = encode(ledger)?;
-        self.db.insert(b"QUARANTINE_LEDGER", val)?;
-        self.db.flush()?;
-        Ok(())
-    }
-
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    pub fn load_quarantine_ledger(
-        &self,
-    ) -> std::io::Result<Option<crate::registry::QuarantineLedger>> {
-        if let Some(val) = self.db.get(b"QUARANTINE_LEDGER")? {
-            let decoded = decode(&val)?;
-            Ok(Some(decoded))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    pub fn save_storage_registry(
-        &self,
-        registry: &crate::domain::storage_deal::StorageRegistry,
-    ) -> std::io::Result<()> {
-        let val = encode(registry)?;
-        self.db.insert(
-            b"STORAGE_REGISTRY_VERSION",
-            STORAGE_REGISTRY_ROW_VERSION.to_le_bytes().to_vec(),
-        )?;
-        self.db.insert(b"STORAGE_REGISTRY", val)?;
-        self.db.flush()?;
-        Ok(())
-    }
-
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
-    pub fn load_storage_registry(
-        &self,
-    ) -> std::io::Result<Option<crate::domain::storage_deal::StorageRegistry>> {
-        if let Some(val) = self.db.get(b"STORAGE_REGISTRY")? {
-            let version = self.db.get(b"STORAGE_REGISTRY_VERSION")?;
-            let expected_version = STORAGE_REGISTRY_ROW_VERSION.to_le_bytes();
-            // No tag means the row was written before the tag existed, which is
-            // still the row this build writes: it must load, or every node that
-            // ever persisted a registry refuses to boot after an upgrade. A row
-            // that does carry a tag from another build is still refused.
-            if version
-                .as_deref()
-                .is_some_and(|tag| tag != expected_version.as_slice())
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "STORAGE_REGISTRY row has no matching version tag; a row from another build \
-                     is refused",
-                ));
-            }
-            // One shape only. A row written before the settled-ticket queue
-            // used to be padded with an empty queue and accepted; the queue
-            // is part of the registry root and decides when a ticket row is
-            // dropped, so the padded node split from its peers at the first
-            // retention cutoff. Such a row is reported, not repaired.
-            let decoded =
-                decode::<crate::domain::storage_deal::StorageRegistry>(&val).map_err(|error| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "STORAGE_REGISTRY row does not decode as the current StorageRegistry \
-                             shape; a row from an older build cannot be loaded without changing \
-                             the committed registry root, so it is refused: {error}"
-                        ),
-                    )
-                })?;
-            Ok(Some(decoded))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// # Errors
-    ///
-    /// Propagates `std::io::Error` from the step that failed; its variants name the refused
-    /// conditions.
     pub fn save_proof_claim_registry(
         &self,
         registry: &crate::prover::ProofClaimRegistry,
@@ -1307,8 +1480,9 @@ impl Storage {
     ///
     /// Propagates `std::io::Error` from the step that failed; its variants name the refused
     /// conditions.
-    /// BLG-0190 (P09-F11): arm/disarm the test-only persist failure.
+    /// Arm/disarm the test-only persist failure.
     #[cfg(test)]
+    #[allow(dead_code)] // armed by the economics persistence tests only.
     pub(crate) fn set_fail_economics_writes(&self, on: bool) {
         self.fail_economics_writes
             .store(on, std::sync::atomic::Ordering::Relaxed);
@@ -1324,7 +1498,7 @@ impl Storage {
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             return Err(std::io::Error::other(
-                "injected storage-economics persist failure (BLG-0190)",
+                "injected storage-economics persist failure",
             ));
         }
         let val = encode(snapshot)?;
@@ -2184,7 +2358,94 @@ mod tests {
     /// node booting: a row with NO tag is the legacy row this build still
     /// writes and must load; a row with a FOREIGN tag is refused.
     #[test]
-    fn storage_registry_row_needs_its_version_tag() {
+    fn qc_blob_binary_storage_and_legacy_bincode_are_readable() {
+        use crate::consensus::qc::{PqSignatureEntry, QcBlob};
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let blob = QcBlob::new(
+            3,
+            100,
+            "checkpoint".into(),
+            vec![PqSignatureEntry {
+                validator_index: 0,
+                validator_address: "validator".into(),
+                pq_signature: vec![4; 3309],
+            }],
+        );
+        storage.save_qc_blob(100, &blob).unwrap();
+        let bytes = storage.db().get(b"QC_BLOB:100").unwrap().unwrap();
+        assert!(bytes.starts_with(b"BDLM_QC_BIN_V2\0"));
+        assert_eq!(
+            storage
+                .get_qc_blob(100)
+                .unwrap()
+                .unwrap()
+                .to_bytes()
+                .unwrap(),
+            blob.to_bytes().unwrap()
+        );
+
+        storage
+            .db()
+            .insert(b"QC_BLOB:100", bincode::serialize(&blob).unwrap())
+            .unwrap();
+        assert_eq!(
+            storage
+                .get_qc_blob(100)
+                .unwrap()
+                .unwrap()
+                .to_bytes()
+                .unwrap(),
+            blob.to_bytes().unwrap()
+        );
+        storage.save_qc_blob(100, &blob).unwrap();
+        assert!(storage.get_qc_blob(99).unwrap().is_none());
+    }
+
+    #[test]
+    fn qc_blob_storage_rejects_corruption_and_cross_height_rows() {
+        use crate::consensus::qc::{PqSignatureEntry, QcBlob};
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let mut blob = QcBlob::new(
+            3,
+            100,
+            "checkpoint".into(),
+            vec![PqSignatureEntry {
+                validator_index: 0,
+                validator_address: "validator".into(),
+                pq_signature: vec![4; 3309],
+            }],
+        );
+        assert_eq!(
+            storage.save_qc_blob(99, &blob).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        blob.merkle_root = "bad".into();
+        assert_eq!(
+            storage.save_qc_blob(100, &blob).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        blob.merkle_root = QcBlob::compute_merkle_root(&blob.pq_signatures);
+        let mut binary = b"BDLM_QC_BIN_V2\0".to_vec();
+        binary.extend_from_slice(&blob.to_bytes().unwrap());
+        storage.db().insert(b"QC_BLOB:99", binary.clone()).unwrap();
+        assert_eq!(
+            storage.get_qc_blob(99).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        binary.pop();
+        storage.db().insert(b"QC_BLOB:100", binary).unwrap();
+        assert_eq!(
+            storage.get_qc_blob(100).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    /// A storage registry row written before the tag existed still loads; a
+    /// tag from another build is still refused.
+    #[test]
+    fn a_storage_registry_row_from_before_the_tag_still_loads() {
         let dir = tempdir().unwrap();
         let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
         let registry = crate::domain::storage_deal::StorageRegistry::default();
@@ -2302,7 +2563,8 @@ mod tests {
             .insert(b"BRIDGE_STATE_AT:1", bridge_h1_bytes.as_slice())
             .unwrap();
 
-        // 5b. Simulate interrupted commit at height 2 with poisoned bridge state.
+        // 5b. Simulate an interrupted commit at height 2 with a poisoned
+        // bridge state, so the rollback has something to undo.
         storage.db.insert(b"IN_PROGRESS_HEIGHT", b"2").unwrap();
         let mut block2 = Block::new(2, block.hash.clone(), vec![]);
         block2.hash = block2.calculate_hash();
@@ -2480,7 +2742,7 @@ mod tests {
         assert!(storage.db.get(b"MEMPOOL:corrupt").unwrap().is_none());
     }
 
-    /// BLG-0023: one bad SEEN record failed the whole load, so the node ran
+    /// One bad SEEN record failed the whole load, so the node ran
     /// with no checkpoints and no double-sign memory.
     #[test]
     fn load_all_seen_blocks_skips_corrupt_records() {
@@ -2614,7 +2876,7 @@ mod tests {
         (blocks, tx_hash)
     }
 
-    /// P26-F07: a commit over a height that already holds a block writes no
+    /// A commit over a height that already holds a block writes no
     /// recovery marker, so recovery can never delete the committed block.
     #[test]
     fn a_recommit_of_a_committed_height_needs_no_progress_marker() {
@@ -2641,7 +2903,7 @@ mod tests {
         assert!(storage.get_block_by_height(1).unwrap().is_some());
     }
 
-    /// P26-F06: a `previous_hash` cycle ends the walk with an error instead of
+    /// A `previous_hash` cycle ends the walk with an error instead of
     /// looping on the boot path.
     #[test]
     fn a_previous_hash_cycle_is_an_error_not_a_loop() {
@@ -2656,7 +2918,7 @@ mod tests {
         assert!(storage.repair_index().is_err());
     }
 
-    /// P26-F06: a record stored under a key other than its own hash is refused.
+    /// A record stored under a key other than its own hash is refused.
     #[test]
     fn a_record_under_the_wrong_hash_is_refused() {
         let dir = tempdir().unwrap();
@@ -2672,7 +2934,7 @@ mod tests {
         assert!(storage.load_chain().is_err());
     }
 
-    /// P26-F02: `delete_block` left the `TX_IDX` row pointing at a deleted block.
+    /// `delete_block` left the `TX_IDX` row pointing at a deleted block.
     #[test]
     fn delete_block_removes_its_tx_index_rows() {
         let dir = tempdir().unwrap();
@@ -2684,7 +2946,7 @@ mod tests {
         assert_eq!(storage.get_tx_block_height(&tx_hash).unwrap(), None);
     }
 
-    /// P26-F02: a pruned prefix is not reported as damage by the audit.
+    /// A pruned prefix is not reported as damage by the audit.
     #[test]
     fn check_integrity_accepts_a_pruned_prefix_but_not_a_gap() {
         let dir = tempdir().unwrap();
@@ -2698,7 +2960,7 @@ mod tests {
         assert!(!storage.check_integrity().unwrap().is_empty());
     }
 
-    /// P26-F02: a dangling height index is an error, not a short chain.
+    /// A dangling height index is an error, not a short chain.
     #[test]
     fn load_chain_reports_a_missing_indexed_parent() {
         let dir = tempdir().unwrap();
@@ -2709,6 +2971,22 @@ mod tests {
 
         storage.db.remove(blocks[1].hash.as_bytes()).unwrap();
         assert!(storage.load_chain().is_err());
+    }
+
+    #[test]
+    fn pruning_witnesses_keeps_the_block_hash_and_happens_once() {
+        let dir = tempdir().unwrap();
+        let storage = Storage::new(dir.path().to_str().unwrap()).unwrap();
+        let blocks = commit_chain(&storage, 3);
+        assert!(!storage.is_witness_pruned(1).unwrap());
+        assert!(storage.prune_block_witnesses(1).unwrap());
+        assert!(storage.is_witness_pruned(1).unwrap());
+        assert!(!storage.prune_block_witnesses(1).unwrap());
+        let kept = storage.get_block_by_height(1).unwrap().expect("body kept");
+        assert_eq!(kept.hash, blocks[1].hash);
+        assert!(kept.transactions.iter().all(|tx| tx.signature.is_none()));
+        storage.delete_block(1).unwrap();
+        assert!(!storage.is_witness_pruned(1).unwrap());
     }
 }
 
@@ -2780,7 +3058,7 @@ mod storage_decode_locks {
         assert!(super::decode::<Stored>(b"\xff\xff\xff").is_err());
     }
 
-    /// P26-F05: a database written by a newer schema is refused, not opened.
+    /// A database written by a newer schema is refused, not opened.
     #[test]
     fn a_newer_schema_version_refuses_to_open() {
         let dir = tempfile::tempdir().expect("tempdir");

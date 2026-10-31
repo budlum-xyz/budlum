@@ -1,6 +1,6 @@
 use super::{
-    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, RoundPriceBook,
-    MAX_LEADER_ROUNDS, MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
+    affordable_leader_round, now_millis, ConsensusEngine, ConsensusError, MAX_LEADER_ROUNDS,
+    MIN_BLOCK_INTERVAL_MS, ROUND_TIMEOUT_MS,
 };
 use crate::core::account::AccountState;
 use crate::core::address::Address;
@@ -36,7 +36,7 @@ impl Default for PoSConfig {
     fn default() -> Self {
         PoSConfig {
             min_stake: 1000,
-            // P01-F21: the reward/penalty/unbonding knobs were never read by
+            // The reward/penalty/unbonding knobs were never read by
             // any code path and are gone; slashing ratios come from
             // `RegistryParams`, unbonding from `UNBONDING_EPOCHS`, rewards
             // from tokenomics. A knob nobody reads is a lie to operators.
@@ -88,7 +88,7 @@ use tracing::{info, warn};
 
 /// Slashing evidence seen for `(producer, height)`: the header and its
 /// signature. Named so `PoSEngine`'s fields stay readable without an
-/// `allow(clippy::type_complexity)` (P01-F26).
+/// `allow(clippy::type_complexity)`.
 type SeenBlocks = HashMap<(Address, u64), (BlockHeader, Vec<u8>)>;
 
 pub struct PoSEngine {
@@ -96,7 +96,7 @@ pub struct PoSEngine {
     seen_blocks: RwLock<SeenBlocks>,
     pub slashing_evidence: RwLock<Vec<SlashingEvidence>>,
     checkpoints: RwLock<Vec<Checkpoint>>,
-    /// Epoch-boundary checkpoints awaiting a quorum certificate (P01-F04).
+    /// Epoch-boundary checkpoints awaiting a quorum certificate.
     ///
     /// A checkpoint written at local commit time is a race: each node at a
     /// boundary height commits whichever block it saw first and then refuses
@@ -107,14 +107,8 @@ pub struct PoSEngine {
     validator_keys: Option<ValidatorKeys>,
     signer: Option<Arc<dyn ConsensusSigner>>,
     epoch_seed: RwLock<[u8; 32]>,
-    /// When this node first saw each recently validated block.
-    ///
-    /// A leader round is priced by "how long ago did the parent land", and the
-    /// parent's header timestamp is not that: production stamps blocks from the
-    /// slot schedule, so a lagging chain carries stamps far older than the
-    /// moment the block landed. The observation time is the fact only this node
-    /// has, and no peer can backdate it.
-    round_prices: RoundPriceBook,
+    /// This node's Filiz Chain, when it produces with one.
+    filiz_chain: Option<Arc<crate::consensus::filiz::FilizChain>>,
 }
 impl PoSEngine {
     /// `PoSConfig::epoch_length` is a public field and nothing rejects zero
@@ -137,7 +131,7 @@ impl PoSEngine {
             validator_keys,
             signer: None,
             epoch_seed: RwLock::new([0u8; 32]),
-            round_prices: RoundPriceBook::new(),
+            filiz_chain: None,
         }
     }
 
@@ -155,8 +149,45 @@ impl PoSEngine {
             validator_keys,
             signer: Some(signer),
             epoch_seed: RwLock::new([0u8; 32]),
-            round_prices: RoundPriceBook::new(),
+            filiz_chain: None,
         }
+    }
+
+    /// Produce with `chain` once its commitment is registered and active.
+    /// Until then the engine keeps the VRF path.
+    #[must_use]
+    pub fn with_filiz_chain(mut self, chain: crate::consensus::filiz::FilizChain) -> Self {
+        self.filiz_chain = Some(Arc::new(chain));
+        self
+    }
+
+    /// The Filiz reveal this node opens for `validator` at `epoch`: `None`
+    /// when the validator has no active registration (the VRF path applies).
+    ///
+    /// # Errors
+    ///
+    /// The validator registered a chain this node does not hold, or the held
+    /// chain does not open the registered commitment.
+    fn own_filiz_reveal(
+        &self,
+        validator: &crate::core::account::Validator,
+        epoch: u64,
+    ) -> Result<Option<crate::consensus::filiz::Link>, ConsensusError> {
+        let Some(commitment) = validator.filiz.as_ref().and_then(|r| r.at_epoch(epoch)) else {
+            return Ok(None);
+        };
+        let chain = self.filiz_chain.as_ref().ok_or_else(|| {
+            ConsensusError("The validator registered a Filiz Chain this node does not hold".into())
+        })?;
+        let reveal = chain
+            .reveal_for_remaining(commitment.remaining())
+            .map_err(|e| ConsensusError(format!("Filiz reveal unavailable: {e:?}")))?;
+        if !commitment.accepts(&reveal) {
+            return Err(ConsensusError(
+                "This node's Filiz Chain does not open the registered commitment".into(),
+            ));
+        }
+        Ok(Some(reveal))
     }
 
     pub fn verify_evidence(&self, evidence: &SlashingEvidence) -> bool {
@@ -174,7 +205,7 @@ impl PoSEngine {
         Ok(before - guard.len())
     }
 
-    /// Test inspection of the committed checkpoint list (P01-F21: no
+    /// Test inspection of the committed checkpoint list (no
     /// production caller; the production surface is `last_checkpoint`).
     #[cfg(test)]
     pub fn get_checkpoints(&self) -> Result<Vec<Checkpoint>, ConsensusError> {
@@ -198,7 +229,7 @@ impl PoSEngine {
     }
 
     /// Durably record one checkpoint. Called by `add_checkpoint` and by the
-    /// finality promotion path (`note_finalized_height`, P01-F04).
+    /// finality promotion path (`note_finalized_height`).
     fn commit_checkpoint(
         &self,
         checkpoint: &Checkpoint,
@@ -282,7 +313,7 @@ impl PoSEngine {
     }
 
     /// Derive epoch randomness from a canonical, already-established VRF
-    /// Transcript. Epoch `E` consumes epoch `E-2`, giving the source transcript
+    /// Transcript. Epoch `E` consumes epoch ` `, giving the source transcript
     /// A full epoch to settle before it controls leader selection. Only verified
     /// VRF outputs and producer identities enter the transcript: block hashes,
     /// Timestamps and transaction ordering are deliberately excluded so a
@@ -372,7 +403,7 @@ impl PoSEngine {
 
     /// Canonical slot seed used by both local production and remote validation.
     ///
-    /// `round` is the leader-election retry term (P01-F01): slot `s` runs
+    /// `round` is the leader-election retry term: slot `s` runs
     /// rounds `0..MAX_LEADER_ROUNDS`, and each round draws a different VRF
     /// seed, so a slot with no eligible leader in round 0 re-rolls instead of
     /// stalling forever. Validation recovers the round from `block.nonce`.
@@ -408,7 +439,7 @@ impl PoSEngine {
     /// Backward-compatible diagnostic helper. Consensus production and
     /// Validation use `calculate_seed_with_chain`; this method only exposes the
     /// Latest replay-derived cache to callers that used the former API.
-    /// Test-only (P01-F21): no production caller.
+    /// Test-only: no production caller.
     #[cfg(test)]
     pub fn calculate_seed(
         &self,
@@ -436,7 +467,7 @@ impl PoSEngine {
         hasher.finalize().into()
     }
 
-    /// The leadership threshold for a slot (P01-F01).
+    /// The leadership threshold for a slot.
     ///
     /// Stake-proportional and **round-independent**. The round term re-rolls
     /// the election seed, which is what breaks a stalled slot's fixed draw; it
@@ -480,7 +511,7 @@ impl PoSEngine {
         let y = u64::from_le_bytes(hash[0..8].try_into().unwrap_or([0; 8]));
         y < threshold
     }
-    /// Test mirror of the validator-admission rule (P01-F21: no production
+    /// Test mirror of the validator-admission rule (no production
     /// caller; `validate_block` enforces the same predicate inline).
     #[cfg(test)]
     pub fn is_validator(&self, pubkey: &Address, state: &AccountState) -> bool {
@@ -489,7 +520,7 @@ impl PoSEngine {
             .is_some_and(|v| v.active && !v.slashed && v.stake >= self.config.min_stake)
     }
 
-    /// Lock-order fixture (P01-F21): the POS_STATE writer is gone; this
+    /// Lock-order fixture: the POS_STATE writer is gone; this
     /// stays only so `consensus_lock_order_loom` can pin the checkpoints ->
     /// slashing_evidence lock order.
     #[cfg(test)]
@@ -524,7 +555,9 @@ impl PoSEngine {
         block.slot = slot;
 
         let active_validators = state.get_active_validators();
-        let total_stake = state.get_total_stake();
+        // Stake plus Mikoriza restaked weight; equal to the stake on
+        // a chain without allocations.
+        let total_stake = state.get_total_voting_weight();
 
         // Fail-closed when validator set is empty.
         // Previously this returned Ok which allowed hash-only blocks without
@@ -537,9 +570,20 @@ impl PoSEngine {
             ));
         }
 
-        if let Some(keys) = &self.validator_keys {
-            let pubkey = Address::from(keys.sig_key.public_key_bytes());
-
+        // The producer identity is the signing backend's when there is one
+        // (an HSM), else the local key set's. With an active Filiz Chain the
+        // election needs no VRF key, so an HSM-only validator produces too
+        //.
+        let identity = self
+            .signer
+            .as_ref()
+            .map(|signer| signer.address())
+            .or_else(|| {
+                self.validator_keys
+                    .as_ref()
+                    .map(|keys| Address::from(keys.sig_key.public_key_bytes()))
+            });
+        if let Some(pubkey) = identity {
             if let Some(validator) = state.get_validator(&pubkey) {
                 // Eligibility, not the two flags it is made of: `is_eligible`
                 // also carries the liveness-fault jail, so a validator serving
@@ -549,7 +593,7 @@ impl PoSEngine {
                     && validator.stake >= self.config.min_stake
                 {
                     if block.vrf_output.is_empty() || block.vrf_proof.is_empty() {
-                        // Leader rounds (P01-F01). A stalled slot widens the
+                        // Leader rounds. A stalled slot widens the
                         // threshold and re-rolls the seed as wall time
                         // advances, instead of retrying the same losing draw
                         // forever. The round a producer may claim is priced by
@@ -560,12 +604,9 @@ impl PoSEngine {
                         // The same pricing function validation enforces, so
                         // propose and verify cannot drift apart.
                         let round_cap = chain.last().map_or(MAX_LEADER_ROUNDS, |prev| {
-                            self.round_prices.claimable_round_for(
-                                &prev.hash,
-                                prev.timestamp,
-                                now_millis(),
-                            )
+                            affordable_leader_round(prev.timestamp, now_millis())
                         });
+                        let filiz_reveal = self.own_filiz_reveal(validator, epoch)?;
                         let mut elected = false;
                         for round in 0..=round_cap {
                             let seed = self.calculate_seed_with_chain(
@@ -575,20 +616,43 @@ impl PoSEngine {
                                 round,
                                 chain,
                             )?;
-                            let (vrf_io, vrf_proof, _) = keys.vrf_key.vrf_sign(
-                                schnorrkel::context::signing_context(b"BUDLUM_VRF").bytes(&seed),
-                            );
-                            let vrf_output = vrf_io.to_preout().to_bytes();
-                            let proof_bytes = vrf_proof.to_bytes();
+                            // Filiz: the proof is the reveal and the
+                            // output is bound to the seed of this round. The
+                            // VRF path stays for a validator with no active
+                            // registration.
+                            let (vrf_output, proof_bytes) = if let Some(reveal) = filiz_reveal {
+                                (
+                                    crate::consensus::filiz::eligibility_output(
+                                        &pubkey.0,
+                                        &reveal,
+                                        &seed,
+                                        block.chain_id,
+                                        slot,
+                                    ),
+                                    reveal.to_vec(),
+                                )
+                            } else {
+                                let keys = self.validator_keys.as_ref().ok_or_else(|| {
+                                    ConsensusError(
+                                        "No VRF key and no active Filiz Chain for this validator"
+                                            .into(),
+                                    )
+                                })?;
+                                let (vrf_io, vrf_proof, _) = keys.vrf_key.vrf_sign(
+                                    schnorrkel::context::signing_context(b"BUDLUM_VRF")
+                                        .bytes(&seed),
+                                );
+                                (vrf_io.to_preout().to_bytes(), vrf_proof.to_bytes().to_vec())
+                            };
 
                             let threshold = self.calculate_vrf_threshold_for_round(
-                                validator.stake,
+                                validator.voting_weight(),
                                 total_stake,
                                 round,
                             );
                             if self.check_vrf_threshold(&vrf_output, threshold) {
                                 block.vrf_output = vrf_output.to_vec();
-                                block.vrf_proof = proof_bytes.to_vec();
+                                block.vrf_proof = proof_bytes;
                                 // The block nonce carries the round: it is
                                 // the retry term both sides read back.
                                 block.nonce = round;
@@ -667,7 +731,7 @@ impl PoSEngine {
         ))
     }
 }
-/// The one structural check for double-sign evidence (P01-F25).
+/// The one structural check for double-sign evidence.
 ///
 /// `Blockchain::verify_slashing_evidence` and `PoSEngine::verify_evidence`
 /// used to restate this independently. Two copies of a consensus check drift,
@@ -736,7 +800,21 @@ impl ConsensusEngine for PoSEngine {
 
         if let Some(keys) = &self.validator_keys {
             if block.producer == Some(Address::from(keys.sig_key.public_key_bytes())) {
-                block.sign(&keys.sig_key);
+                // A key set with its ML-DSA-65 key signs the composite block
+                // form, the only one mainnet admits.
+                if keys.pq_key.is_some() {
+                    use rand::Rng;
+                    let keypair = keys
+                        .composite_keypair()
+                        .map_err(|e| ConsensusError(format!("composite key: {e}")))?;
+                    let mut rnd = [0u8; 32];
+                    rand::rng().fill_bytes(&mut rnd);
+                    block
+                        .sign_composite(&keypair, &rnd)
+                        .map_err(ConsensusError)?;
+                } else {
+                    block.sign(&keys.sig_key);
+                }
                 return Ok(());
             }
         }
@@ -795,7 +873,7 @@ impl ConsensusEngine for PoSEngine {
             // The cheap Ed25519 check runs first. The validator set hash
             // Does BLS and PQ key checks for every active validator, and an
             // Unsigned block from a peer must not cost that work.
-            if !block.verify_signature() {
+            if !block.verify_signature_in(&state.scheme_registry) {
                 return Err(ConsensusError("Invalid block signature".into()));
             }
             let expected_set_hash = state
@@ -819,20 +897,29 @@ impl ConsensusEngine for PoSEngine {
             {
                 return Err(ConsensusError("Producer is not an active validator".into()));
             }
-
-            if validator.vrf_public_key.is_empty() {
-                return Err(ConsensusError(
-                    "Producer has no registered VRF public key".into(),
-                ));
+            // The ML-DSA-65 half of a composite block signature must be the
+            // key the producer registered: the stateless check only
+            // knows that the Ed25519 half is the producer.
+            // A producer with no registered ML-DSA-65 key (a devnet genesis
+            // validator) has nothing to bind; mainnet readiness requires one.
+            if let Some(pq) = block.composite_pq_key() {
+                if !validator.pq_public_key.is_empty() && validator.pq_public_key != pq {
+                    return Err(ConsensusError(
+                        "Block signature's ML-DSA-65 key is not the producer's registered key"
+                            .into(),
+                    ));
+                }
             }
 
-            if let Ok(public_key) = schnorrkel::PublicKey::from_bytes(&validator.vrf_public_key) {
-                // The block nonce carries the leader round (P01-F01). The
-                // round is capped and time-priced: a block claiming round `r`
-                // must sit at least `MIN_BLOCK_INTERVAL_MS + r * ROUND_TIMEOUT_MS`
-                // after its parent, so a later, wider round cannot be claimed
-                // on the cheap (P01-F20).
-                let round = block.nonce;
+            // The block nonce carries the leader round. Read it before the
+            // VRF key is parsed: a round the verifier refuses must not depend
+            // on a later check passing.
+            let round = block.nonce;
+            if schnorrkel::PublicKey::from_bytes(&validator.vrf_public_key).is_ok() {
+                // The round is capped and time-priced: a block claiming round
+                // `r` must sit at least `MIN_BLOCK_INTERVAL_MS + r *
+                // ROUND_TIMEOUT_MS` after its parent, so a later, wider round
+                // cannot be claimed on the cheap.
                 if round > MAX_LEADER_ROUNDS {
                     return Err(ConsensusError(format!(
                         "PoS leader round {round} exceeds the cap {MAX_LEADER_ROUNDS}"
@@ -860,17 +947,12 @@ impl ConsensusEngine for PoSEngine {
                         // this node's clock, with the function the producer
                         // clamps itself with.
                         // Priced from the parent's stamp, which every node
-                        // holding the parent reads the same way. Pricing from
-                        // this node's own sighting instead put the same claim
-                        // on different sides of the boundary wherever nodes
-                        // booted or synced seconds apart, and a claim refused
-                        // here is a block refused for good: the mesh kept two
-                        // chains. A future stamp still buys no round.
-                        let affordable = affordable_leader_round(
-                            prev.timestamp,
-                            self.round_prices.seen_at(&prev.hash),
-                            now_millis(),
-                        );
+                        // holding the parent reads the same way: a node-local
+                        // sighting put the same claim on different sides of
+                        // the boundary wherever nodes booted or synced seconds
+                        // apart, and a claim refused here is a block refused
+                        // for good. A future stamp buys no round, on any node.
+                        let affordable = affordable_leader_round(prev.timestamp, now_millis());
                         if round > affordable {
                             return Err(ConsensusError(format!(
                                 "PoS leader round {round} claimed before it elapsed: only \
@@ -879,46 +961,83 @@ impl ConsensusEngine for PoSEngine {
                         }
                     }
                 }
-                let seed = self.calculate_seed_with_chain(
-                    block.chain_id,
-                    block.epoch,
-                    block.slot,
-                    round,
-                    chain,
-                )?;
+            }
+            let seed = self.calculate_seed_with_chain(
+                block.chain_id,
+                block.epoch,
+                block.slot,
+                round,
+                chain,
+            )?;
+            if block.vrf_output.len() != 32 {
+                return Err(ConsensusError("Invalid VRF output length".into()));
+            }
 
-                let mut output_bytes = [0u8; 32];
-                if block.vrf_output.len() == 32 {
-                    output_bytes.copy_from_slice(&block.vrf_output);
-                } else {
-                    return Err(ConsensusError("Invalid VRF output length".into()));
+            if let Some(commitment) = validator
+                .filiz
+                .as_ref()
+                .and_then(|registration| registration.at_epoch(block.epoch))
+            {
+                // Filiz: an active registration replaces the
+                // VRF. The proof is the reveal opening the commitment, and the
+                // output is the eligibility value of that reveal for this
+                // round's seed. Nobody but the owner knew the reveal before.
+                let reveal = <[u8; 32]>::try_from(block.vrf_proof.as_slice()).map_err(|_| {
+                    ConsensusError("A Filiz block must carry a 32-byte reveal".into())
+                })?;
+                if !commitment.accepts(&reveal) {
+                    return Err(ConsensusError(
+                        "Filiz reveal does not open the producer's registered commitment".into(),
+                    ));
                 }
-
-                if let Ok(vrf_preout) = schnorrkel::vrf::VRFPreOut::from_bytes(&output_bytes) {
-                    if let Ok(vrf_proof) = schnorrkel::vrf::VRFProof::from_bytes(&block.vrf_proof) {
-                        if public_key
-                            .vrf_verify(
-                                schnorrkel::context::signing_context(b"BUDLUM_VRF").bytes(&seed),
-                                &vrf_preout,
-                                &vrf_proof,
-                            )
-                            .is_err()
-                        {
-                            return Err(ConsensusError("VRF proof verification failed".into()));
-                        }
-                    } else {
-                        return Err(ConsensusError("Invalid VRF proof format".into()));
-                    }
-                } else {
-                    return Err(ConsensusError("Invalid VRF output format".into()));
+                let expected = crate::consensus::filiz::eligibility_output(
+                    &producer.0,
+                    &reveal,
+                    &seed,
+                    block.chain_id,
+                    block.slot,
+                );
+                if block.vrf_output.as_slice() != expected.as_slice() {
+                    return Err(ConsensusError(
+                        "Filiz eligibility output does not match the reveal".into(),
+                    ));
                 }
             } else {
-                return Err(ConsensusError("Invalid VRF public key format".into()));
+                if crate::core::chain_config::Network::from_chain_id(block.chain_id)
+                    == Some(crate::core::chain_config::Network::Mainnet)
+                {
+                    return Err(ConsensusError(
+                        "A mainnet producer must elect itself with a registered Filiz Chain".into(),
+                    ));
+                }
+                if validator.vrf_public_key.is_empty() {
+                    return Err(ConsensusError(
+                        "Producer has no registered VRF public key".into(),
+                    ));
+                }
+                let public_key = schnorrkel::PublicKey::from_bytes(&validator.vrf_public_key)
+                    .map_err(|_| ConsensusError("Invalid VRF public key format".into()))?;
+                let mut output_bytes = [0u8; 32];
+                output_bytes.copy_from_slice(&block.vrf_output);
+                let vrf_preout = schnorrkel::vrf::VRFPreOut::from_bytes(&output_bytes)
+                    .map_err(|_| ConsensusError("Invalid VRF output format".into()))?;
+                let vrf_proof = schnorrkel::vrf::VRFProof::from_bytes(&block.vrf_proof)
+                    .map_err(|_| ConsensusError("Invalid VRF proof format".into()))?;
+                if public_key
+                    .vrf_verify(
+                        schnorrkel::context::signing_context(b"BUDLUM_VRF").bytes(&seed),
+                        &vrf_preout,
+                        &vrf_proof,
+                    )
+                    .is_err()
+                {
+                    return Err(ConsensusError("VRF proof verification failed".into()));
+                }
             }
 
             let threshold = self.calculate_vrf_threshold_for_round(
-                validator.stake,
-                state.get_total_stake(),
+                validator.voting_weight(),
+                state.get_total_voting_weight(),
                 block.nonce,
             );
             if !self.check_vrf_threshold(&block.vrf_output, threshold) {
@@ -956,14 +1075,27 @@ impl ConsensusEngine for PoSEngine {
         }
         Ok(())
     }
-    fn note_block_seen(&self, block_hash: &str, at_ms: u128) {
-        self.round_prices.note_tip_block(block_hash, at_ms);
-    }
     fn consensus_type(&self) -> &'static str {
         "PoS"
     }
     fn signer(&self) -> Option<&dyn ConsensusSigner> {
         self.signer.as_ref().map(std::convert::AsRef::as_ref)
+    }
+    /// The consensus key, not the signer backend.
+    ///
+    /// `signer()` is only populated for an HSM-backed node: a node started
+    /// with a validator key file keeps that key in `validator_keys` and leaves
+    /// `signer` empty. Finality used to ask `signer()` alone, so such a node
+    /// reported no validator address and never cast a vote - the devnet mesh
+    /// produced blocks and never finalized one.
+    fn validator_address(&self) -> Option<crate::core::address::Address> {
+        self.validator_keys
+            .as_ref()
+            .map(crate::crypto::primitives::ValidatorKeys::address)
+            .or_else(|| {
+                self.signer()
+                    .map(crate::crypto::signer::ConsensusSigner::address)
+            })
     }
     fn bls_secret_key(&self) -> Option<bls12_381::Scalar> {
         self.validator_keys
@@ -977,6 +1109,19 @@ impl ConsensusEngine for PoSEngine {
             .and_then(|k| k.bls_key.as_ref())
             .map(|b| b.public_key.clone())
             .or_else(|| self.signer.as_ref().and_then(|s| s.bls_public_key()))
+    }
+    fn pq_sign(&self, ctx: &[u8], msg: &[u8]) -> Result<Vec<u8>, String> {
+        if let Some(key) = self.validator_keys.as_ref().and_then(|k| k.pq_key.as_ref()) {
+            return key
+                .sign(ctx, msg)
+                .map_err(|e| format!("PQ signer failed: {e}"));
+        }
+        match self.signer() {
+            Some(signer) => signer
+                .pq_sign(ctx, msg)
+                .map_err(|e| format!("PQ signer backend failed: {e}")),
+            None => Err("no PQ signing key on this node".into()),
+        }
     }
     fn info(&self) -> String {
         format!(
@@ -1090,7 +1235,7 @@ impl ConsensusEngine for PoSEngine {
             }
         } else {
             if block.index > 0 && block.index.is_multiple_of(epoch_length) {
-                // P01-F04: the boundary block is parked, not checkpointed.
+                // The boundary block is parked, not checkpointed.
                 // A checkpoint written at local commit time splits the net
                 // whenever two leaders exist at the boundary: each node
                 // commits the block it saw first and then refuses the other
@@ -1158,7 +1303,7 @@ impl ConsensusEngine for PoSEngine {
     }
 
     /// Promote parked epoch-boundary checkpoints the chain has finalised
-    /// (P01-F04). Only a block the finalised chain actually holds is
+    /// Only a block the finalised chain actually holds is
     /// promoted; a parked checkpoint on a losing fork is dropped.
     fn note_finalized_height(
         &self,
@@ -1358,12 +1503,6 @@ impl ConsensusEngine for PoSEngine {
             return Err(ConsensusError("PoS epoch length must be non-zero".into()));
         }
         if let Some(tip) = chain.last() {
-            // The restored tip has no sighting in the round price book, and
-            // its header may be a schedule artifact from before the restart.
-            // The moment this node loaded it is the only honest observation
-            // time: round 0 is claimable for the next slot, and the ladder
-            // starts walking from here instead of from a stamp in the past.
-            self.round_prices.note_tip_block(&tip.hash, now_millis());
             let next_slot = tip.index.saturating_add(1);
             let next_epoch = next_slot / self.config.epoch_length;
             let randomness = self.epoch_randomness_from_chain(tip.chain_id, next_epoch, &chain)?;
@@ -1441,6 +1580,23 @@ mod tests {
         tx
     }
 
+    /// A node started with a validator key file is a validator even though it
+    /// has no signer backend: the finality loop reads `validator_address`, and
+    /// while it read `signer()` alone every key-file node reported "not a
+    /// validator", cast no vote, and the devnet mesh never finalized a
+    /// checkpoint it kept producing.
+    #[test]
+    fn a_key_file_validator_reports_its_address_without_a_signer_backend() {
+        let keys = ValidatorKeys::generate().unwrap();
+        let expected = keys.address();
+        let engine = PoSEngine::new(PoSConfig::default(), Some(keys));
+        assert!(
+            engine.signer().is_none(),
+            "a key-file node holds no signer backend"
+        );
+        assert_eq!(engine.validator_address(), Some(expected));
+    }
+
     #[test]
     fn test_validator_threshold() {
         let mut state = AccountState::new();
@@ -1482,7 +1638,7 @@ mod tests {
         assert!(engine.verify_evidence(&evidence));
     }
 
-    /// BLG-0011: a signed rival block seen on the receive path (it never
+    /// A signed rival block seen on the receive path (it never
     /// commits) must still produce double-sign evidence, and a forged one must
     /// not.
     #[test]
@@ -1516,7 +1672,7 @@ mod tests {
         assert_eq!(engine.slashing_evidence.read().unwrap().len(), 1);
     }
 
-    /// BLG-0020: an unsigned block must fail on the cheap signature check,
+    /// An unsigned block must fail on the cheap signature check,
     /// before the validator set hash does BLS and PQ work for every validator.
     #[test]
     fn unsigned_block_fails_before_the_validator_set_hash() {
@@ -1543,7 +1699,7 @@ mod tests {
         );
     }
 
-    /// BLG-0021: the memory map of seen blocks was pruned to two epochs, but
+    /// The memory map of seen blocks was pruned to two epochs, but
     /// the SEEN records on disk stayed forever and were all loaded at start.
     #[test]
     fn pruning_seen_blocks_also_removes_the_persisted_records() {
@@ -1570,7 +1726,7 @@ mod tests {
         assert!(on_disk.keys().all(|(_, slot)| *slot == 21));
     }
 
-    /// BLG-0019: a node that is not the leader for the slot drops the block it
+    /// A node that is not the leader for the slot drops the block it
     /// tried to build. The evidence in the pool must stay in the pool then.
     #[test]
     fn failed_block_preview_keeps_the_evidence_pool() {
@@ -1597,7 +1753,7 @@ mod tests {
         );
     }
 
-    /// BLG-0010: a block below the local checkpoint is part of every candidate
+    /// A block below the local checkpoint is part of every candidate
     /// chain that honours it. `validate_block` must not reject it for that
     /// reason, or `try_reorg` and `is_valid` fail on block 1.
     #[test]
@@ -1777,7 +1933,7 @@ mod tests {
     }
 
     /// F-184/185/186: the consensus penalty constants are integer
-    /// fixed-point, not f64 expressions. P01-F21 removed the never-read
+    /// fixed-point, not f64 expressions. removed the never-read
     /// `PoSConfig` knobs this used to assert on; the live constants are the
     /// `RegistryParams` slash ratios, which are what is pinned now.
     #[test]

@@ -187,7 +187,7 @@ impl BudHeader {
             dictionary_hash: [0u8; 32],
             tier: 1,
             // v1 stores no erasure code: (0, 0) says so. Real repair needs
-            // bud_format_erasure and a stored layout (see BLG-0568).
+            // bud_format_erasure and a stored layout.
             erasure_k: 0,
             erasure_p: 0,
             version_number: 1,
@@ -265,12 +265,12 @@ impl BudFile {
         }
     }
 
-    /// K25/K-BUD-STREAM real implementation: decompress chunk by chunk, with a
+    /// /K-BUD-STREAM real implementation: decompress chunk by chunk, with a
     /// 100MB total bound and a 16MB single-chunk bound - zip bomb / OOM
     /// protection (2026-08-16, S.88 literature).
     pub const MAX_DECOMPRESSED_BYTES: usize = 100 * 1024 * 1024; // 100 MB
     pub const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024; // 16 MB tek chunk
-    pub const MAX_RATIO: f64 = 100.0; // K25: >100:1 RED (reporting only; the gate uses MAX_RATIO_FIXED)
+    pub const MAX_RATIO: f64 = 100.0; // >100:1 RED (reporting only; the gate uses MAX_RATIO_FIXED)
 
     pub fn decode_streaming<F: FnMut(&[u8]) -> Result<(), &'static str>>(
         &self,
@@ -297,7 +297,7 @@ impl BudFile {
         Ok(total)
     }
 
-    /// Compression ratio (original / payload). > MAX_RATIO => a suspected zip bomb (K25).
+    /// Compression ratio (original / payload). > MAX_RATIO => a suspected zip bomb.
     pub fn ratio(&self, original_len: usize) -> f64 {
         let payload: usize = self.chunks.iter().map(|c| c.data.len()).sum();
         if payload == 0 {
@@ -329,21 +329,21 @@ impl BudFile {
     /// cannot authenticate itself, so the call belongs where the publisher's
     /// identity is known and not in the parser.
     pub fn verify_pq_signature_with(&self, trusted_key: &[u8]) -> Result<(), &'static str> {
-        let sig = self.pq_signature.as_ref().ok_or("KQ-BUD-PQ: no sig")?;
+        let sig = self.pq_signature.as_ref().ok_or("bud pq: no sig")?;
         let pk = trusted_key;
         // ML-DSA-87: decode the key and the signature
         let enc_vk = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(pk)
-            .map_err(|_| "KQ-BUD-PQ: invalid public key")?;
+            .map_err(|_| "bud pq: invalid public key")?;
         let vk87 = ml_dsa::VerifyingKey::<ml_dsa::MlDsa87>::decode(&enc_vk);
         let sig87 = ml_dsa::Signature::<ml_dsa::MlDsa87>::try_from(sig.as_slice())
-            .map_err(|_| "KQ-BUD-PQ: invalid signature")?;
+            .map_err(|_| "bud pq: invalid signature")?;
         // domain-etiketli mesaj: BDLM_PQ_SIGN_V1 || content_id
         let mut msg = Vec::with_capacity(13 + 32);
         msg.extend_from_slice(b"BDLM_PQ_SIGN_V1");
         msg.extend_from_slice(&self.header.content_id);
         use ml_dsa::signature::Verifier as _;
         vk87.verify(&msg, &sig87)
-            .map_err(|_| "KQ-BUD-PQ: the signature did not verify")
+            .map_err(|_| "bud pq: the signature did not verify")
     }
 
     /// Producing a PQ-signed .bud (test/production): sign with ML-DSA-87.
@@ -401,11 +401,11 @@ impl BudFile {
             // authorisation on the strength of the embedded key.
             self.pq_signature
                 .as_ref()
-                .ok_or("KQ-BUD-PQ: no sig")
+                .ok_or("bud pq: no sig")
                 .and_then(|sig| {
                     ml_dsa::Signature::<ml_dsa::MlDsa87>::try_from(sig.as_slice())
                         .map(|_| ())
-                        .map_err(|_| "KQ-BUD-PQ: invalid signature")
+                        .map_err(|_| "bud pq: invalid signature")
                 })?;
         }
         if self.header.flags.is_delta() && self.header.previous_version_hash == [0u8; 32] {
@@ -419,7 +419,7 @@ impl BudFile {
     }
 
     /// Serialise without silent truncation: a field that does not fit its
-    /// length prefix is an error (BLG-0574).
+    /// length prefix is an error.
     pub fn try_to_bytes(&self) -> Result<Vec<u8>, &'static str> {
         fn len16(n: usize) -> Result<[u8; 2], &'static str> {
             u16::try_from(n)
@@ -504,7 +504,7 @@ impl BudFile {
         if data[0..8] != BUD_MAGIC {
             return Err("K-BUD: magic");
         }
-        // K38: a minimum of 14 bytes for the version+class+mime_len reads (magic 8 + 2+2+2)
+        // A minimum of 14 bytes for the version+class+mime_len reads (magic 8 + 2+2+2)
         if data.len() < 14 {
             return Err("K-BUD: hdr2");
         }
@@ -606,7 +606,7 @@ impl BudFile {
         let mut merkle = [0u8; 32];
         merkle.copy_from_slice(&data[off..off + 32]);
         off += 32;
-        // K38: bounds check BEFORE the length reads - input ending inside the merkle must not PANIC
+        // Bounds check BEFORE the length reads - input ending inside the merkle must not PANIC
         if data.len() < off + 2 {
             return Err("K-BUD: siglen");
         }
@@ -719,7 +719,7 @@ pub struct MultiRatioConsensus;
 
 impl MultiRatioConsensus {
     /// The ratio of a candidate, measured from its payload. A hand-written
-    /// literal is a claim, not a measurement (BLG-0573).
+    /// literal is a claim, not a measurement.
     fn measured_ratio(original_len: usize, payload_len: usize) -> f64 {
         if payload_len == 0 {
             return 1.0;
@@ -924,7 +924,7 @@ impl BudGates {
     pub fn k_bud(f: &BudFile) -> Result<(), &'static str> {
         f.decode().map(|_| ())
     }
-    /// K25: a ratio over 100:1 => refused as a suspected zip bomb.
+    /// A ratio over 100:1 => refused as a suspected zip bomb.
     ///
     /// The comparison runs in fixed point, not on `f64`. This decides whether
     /// an object is accepted, and a float division is allowed to differ in its
@@ -1211,7 +1211,7 @@ mod tests {
     }
     #[test]
     fn from_bytes_never_panics_on_truncation() {
-        // K38: from_bytes must not PANIC at any truncation length (it returns Err)
+        // From_bytes must not PANIC at any truncation length (it returns Err)
         let f = BudFile::encode(
             b"merhaba",
             BudFormatClass::Json,
@@ -1362,7 +1362,7 @@ mod tests {
 
     #[test]
     fn select_best_nan_ratio_never_panics() {
-        // K38: a candidate with a NaN ratio must not break the ordering
+        // A candidate with a NaN ratio must not break the ordering
         let nan_cands = vec![
             RatioCandidate {
                 pipe_id: 1,

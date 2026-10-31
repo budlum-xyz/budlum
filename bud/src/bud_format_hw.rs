@@ -164,7 +164,7 @@ mod tests {
         );
     }
 
-    /// BLG-0607: the tape price follows its stated source and unavailable
+    /// The tape price follows its stated source and unavailable
     /// media are never picked, even when they are cheaper.
     #[test]
     fn tape_price_matches_its_source_and_unavailable_media_are_skipped() {

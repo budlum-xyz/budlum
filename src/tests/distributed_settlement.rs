@@ -202,7 +202,7 @@ mod distributed_settlement_tests {
         .unwrap();
 
         n1.chain_handle
-            .submit_domain_commitment(com2)
+            .submit_domain_commitment(com2.clone())
             .await
             .unwrap();
         assert_eq!(
@@ -228,11 +228,23 @@ mod distributed_settlement_tests {
             .await
             .unwrap();
 
+        // The buffer is consensus state and was written outside any
+        // block, so the restart (a replay of the stored blocks) dropped it.
+        // Height 1 alone advances the domain; height 2 has to arrive again.
         sleep(Duration::from_millis(500)).await;
         assert_eq!(
             n2.chain_handle.get_domain_height(1).await.unwrap(),
+            1,
+            "an out-of-block buffered commitment must not survive a restart"
+        );
+        n2.chain_handle
+            .submit_domain_commitment(com2)
+            .await
+            .unwrap();
+        assert_eq!(
+            n2.chain_handle.get_domain_height(1).await.unwrap(),
             2,
-            "Height 2 should be applied after restart and H1"
+            "Height 2 applies once it arrives after H1"
         );
 
         n2.stop().await;
@@ -285,9 +297,15 @@ mod distributed_settlement_tests {
         )
         .unwrap();
 
+        // The freeze was written outside any block, so the restart (a
+        // replay of the stored blocks) does not bring it back. The domain is
+        // active again and height 2 is buffered behind the missing height 1.
         let res2 = n2.chain_handle.submit_domain_commitment(com2).await;
-        assert!(res2.is_err());
-        assert!(res2.unwrap_err().contains("frozen"));
+        assert!(
+            res2.is_ok(),
+            "an out-of-block freeze must not survive a restart"
+        );
+        assert_eq!(n2.chain_handle.get_domain_height(1).await.unwrap(), 0);
 
         n2.stop().await;
     }
@@ -300,6 +318,12 @@ mod distributed_settlement_tests {
 
         let port = free_port();
         let n1 = NodeHarness::new(port, vec![], Some(path.clone())).await;
+        let root_empty = n1
+            .chain_handle
+            .build_global_header(None)
+            .await
+            .unwrap()
+            .domain_commitment_root;
         let mut b1 = Block::new(1, "h1".into(), vec![]);
         b1.hash = "h1".repeat(32);
         let mut com_pow = DomainCommitment::from_block(
@@ -345,18 +369,31 @@ mod distributed_settlement_tests {
         n1.stop().await;
 
         let n2 = NodeHarness::new(port, vec![], Some(path.clone())).await;
+        // The commitments were accepted outside any block, so the restart
+        // (a replay of the stored blocks) rebuilds the registry without them.
         let header = n2.chain_handle.build_global_header(None).await.unwrap();
+        assert_ne!(root_before, root_empty);
         assert_eq!(
-            header.domain_commitment_root, root_before,
-            "the commitment root must survive a restart unchanged"
+            header.domain_commitment_root, root_empty,
+            "out-of-block commitments must not survive a restart"
         );
 
         n2.stop().await;
     }
 
-    #[tokio::test]
-    async fn test_adversarial_finality_proofs() {
-        let n = NodeHarness::new(free_port(), vec![], None).await;
+    /// the finality verdict the `SettlementTx::SubmitCommitment` door
+    /// reaches refuses adversarial proofs before anything is applied.
+    #[test]
+    fn test_adversarial_finality_proofs() {
+        let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        bc.register_consensus_domain(default_domain(
+            1,
+            ConsensusKind::PoW,
+            45262,
+            "pow-header-chain-v1",
+            0,
+        ))
+        .unwrap();
         let alice = test_addr_from_byte(1u8);
         let mut b = Block::new(1, "h".into(), vec![]);
         b.hash = "h".repeat(32);
@@ -370,13 +407,7 @@ mod distributed_settlement_tests {
         let proof = FinalityProof::PoWHeaderChain { headers: vec![] };
         com.finality_proof_hash = [0xFFu8; 32];
 
-        let res = n
-            .chain_handle
-            .submit_verified_domain_commitment(crate::domain::VerifiedDomainCommitment {
-                commitment: com,
-                proof,
-            })
-            .await;
+        let res = bc.submit_verified_domain_commitment(com, proof);
         assert!(res.is_err());
         let err = res.unwrap_err();
         // An empty PoW header chain is rejected by the bounded
@@ -397,13 +428,7 @@ mod distributed_settlement_tests {
         let proof2 = FinalityProof::PoWHeaderChain { headers: vec![] };
         com2.finality_proof_hash = hash_finality_proof(&proof2).unwrap();
 
-        let res2 = n
-            .chain_handle
-            .submit_verified_domain_commitment(crate::domain::VerifiedDomainCommitment {
-                commitment: com2,
-                proof: proof2,
-            })
-            .await;
+        let res2 = bc.submit_verified_domain_commitment(com2, proof2);
         assert!(res2.is_err());
         let err2 = res2.unwrap_err();
         // May fail on insufficient work, missing PoW bits, or not finalized.
@@ -420,11 +445,14 @@ mod distributed_settlement_tests {
             "unexpected rejection reason: {err2}"
         );
         assert_eq!(
-            n.chain_handle.get_domain_height(1).await.unwrap(),
+            bc.state
+                .settlement
+                .domains
+                .get(1)
+                .unwrap()
+                .last_committed_height,
             0,
             "Should NOT be applied"
         );
-
-        n.stop().await;
     }
 }

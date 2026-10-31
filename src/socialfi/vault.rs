@@ -283,6 +283,16 @@ impl VaultRegistry {
         self.folders.is_empty()
     }
 
+    #[must_use]
+    pub fn folder_count(&self) -> usize {
+        self.folders.len()
+    }
+
+    #[must_use]
+    pub fn membership_count(&self) -> usize {
+        self.members.values().map(Vec::len).sum()
+    }
+
     /// The vault's anchor - `BDLM_VAULT_V1`, the `NftRegistry::root` family
     /// of conventions: counts beside contents, one parse of the stream.
     /// Membership order is hashed as stored (registration order): the root
@@ -424,7 +434,7 @@ mod tests {
 
     #[test]
     fn cycle_check_survives_a_very_deep_folder_chain() {
-        // BLG-0712: the walk must not use native recursion.
+        // The walk must not use native recursion.
         let depth: u64 = 200_000;
         let mut vault = VaultRegistry::new();
         for id in 1..=depth {

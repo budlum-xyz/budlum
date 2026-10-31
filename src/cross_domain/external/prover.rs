@@ -105,7 +105,7 @@ impl ProverBond {
             evidence_digest,
             amount_atoms: taken,
             challenger,
-            // BLG-0141 (P06-F13): the reward comes out of the slashed bond,
+            // The reward comes out of the slashed bond,
             // so it cannot exceed what was taken - a floor that outran the
             // slash would pay the challenger from nowhere.
             challenge_reward_atoms: challenge_reward_atoms.min(taken),

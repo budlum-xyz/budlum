@@ -1,9 +1,9 @@
-//! A8 - Three NFT metadata pin (plan §CH A8 / G4).
+//! A8 - Three NFT metadata pin (G4).
 //!
 //! WIRING: `storage::emit::qr_feed_preview` builds the pin from the recipe it
 //! just metered and refuses a feed whose pin does not track that recipe, so a
 //! token and its feed cannot end up naming different objects. The minting
-//! transaction still has to carry the same commitment (plan §A8).
+//! transaction still has to carry the same commitment.
 //!
 //! On-chain / marketplace metadata must never carry a raw seed or payload key.
 //! It pins the recipe commitment, visibility policy label, and an optional
@@ -146,7 +146,7 @@ impl From<QrVideoError> for ThreeNftRegistryError {
     }
 }
 
-/// The single durable object B.U.D. 3.0 keeps (§19.4 K15): the tarif record.
+/// The single durable object B.U.D. 3.0 keeps: the tarif record.
 ///
 /// A body is never a separate object. A record either produces its content
 /// from a seed ([`RecipeRecord::Generated`], held bytes = 0, generated on demand)
@@ -190,7 +190,7 @@ impl RecipeRecord {
         Self::Generated { recipe }
     }
 
-    /// The rent-accounted byte count (K14b/K15): zero for a production
+    /// The rent-accounted byte count: zero for a production
     /// recipe, the body length for a with_body record. This is the number the
     /// fee model's rent meter runs over.
     #[must_use]
@@ -511,7 +511,7 @@ mod nft_registry_tests {
     }
 
     /// A with_body record reports exactly the body length it holds, so the
-    /// rent meter (K14b/K15) can run over the `WithBody.body` field and over
+    /// rent meter can run over the `WithBody.body` field and over
     /// nothing else.
     #[test]
     fn govdeli_record_reports_the_body_length_it_holds() {

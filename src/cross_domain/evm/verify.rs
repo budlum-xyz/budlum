@@ -1,3 +1,4 @@
+//! WIRING: unwired - verify_evm_receipt's production caller is adapter.rs, which declares itself unwired in this tree; the observed relayer path that wires it is not in this tree yet.
 //! F10.2 security core: `verify_evm_receipt`, the deterministic orchestrator.
 //!
 //! Combines the steps of RFC section 4.1 (the ETH -> Budlum mint flow) into a
@@ -10,7 +11,7 @@
 //! 1. `header_chain`: target plus confirmations. The chain is linked by
 //!    parent hash and number - that alone is not finality. Finality comes
 //!    from `sync_attestation` (verified) or the trusted checkpoint that the
-//!    chain must touch (BLG-0111 interim); the deposit refuses with
+//!    chain must touch; the deposit refuses with
 //!    neither (RFC Q2, N-conf).
 //! 2. `proof_nodes` plus `target_header.receipts_root`: MPT verify yields the
 //!    receipt bytes.
@@ -289,7 +290,7 @@ pub fn verify_evm_receipt(
     }
 
     // 5. Deposit log match.
-    // BLG-0139 (P06-F10): the log WITH its position. A receipt can hold two
+    // The log WITH its position. A receipt can hold two
     // deposit logs; the replay identity names the one that was proven.
     let (log_index, log) = receipt
         .find_log_indexed(proof.emitter_address, proof.deposit_topic0)
@@ -307,7 +308,7 @@ pub fn verify_evm_receipt(
     // indistinguishable from one that is switched off. What it does buy is
     // that a proof which *claims* PoS finality has that claim checked rather
     // than trusted.
-    // BLG-0111 (P05-F04, karar B with A interim): finality evidence is
+    // (karar B with A interim): finality evidence is
     // MANDATORY in one of two forms. B is the standing rule - a sync
     // committee attestation is verified rather than trusted. A is the
     // interim form - the chain must touch the operator's trusted
@@ -472,7 +473,7 @@ pub(crate) mod fixtures {
 mod tests {
     use super::*;
 
-    /// BLG-0111 (P05-F04): the fixtures anchor at their own target header -
+    /// The fixtures anchor at their own target header -
     /// the checkpoint rule is pinned by its own tests; every other fixture
     /// test keeps its old contract under that anchor.
     fn verify_fixture(proof: &EvmDepositProof<'_>) -> Result<VerifiedDeposit, VerifyError> {

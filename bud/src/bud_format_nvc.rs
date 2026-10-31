@@ -1,12 +1,12 @@
 //! B.U.D. 2.0 - NVC (NEURAL VIDEO CODEC) INTEGERIZE CORE (ideas3.0 + F22 path)
 //!
 //! The "things I could not do" research (2026-08-16): the **16-bit model
-//! integerization** of DCVC-RT (K1=512, K2=8192; int32 accumulator; sigmoid LUT)
+//! integerization** of DCVC-RT ( =512, =8192; int32 accumulator; sigmoid LUT)
 //! yields cross-device DETERMINISM (arXiv 2502.20762, CVPR 2025). This lines up
 //! exactly with B.U.D.'s "no floats" rule - once integerized, an NVC can perform
 //! consensus-safe deterministic production.
 //!
-//! This module is the bud core of that pattern: int16 input -> K1/K2 scaling ->
+//! This module is the bud core of that pattern: int16 input -> scaling ->
 //! int32 accumulator -> sigmoid LUT -> int16 output. Deterministic (NO floating
 //! point). Full network training happens in a GPU production cohort; what lives
 //! here is a repeatable HELLO flow.
@@ -18,7 +18,7 @@ use sha3::{Digest, Sha3_256};
 pub const NVC_MAGIC: [u8; 8] = *b"\xB5NVC1\0\0\0";
 
 // DCVC-RT integerization constants (from the paper).
-pub const K1: i32 = 512; // f64 -> int16: round(v * K1)
+pub const K1: i32 = 512; // f64 -> int16: round(v *)
 pub const K2: i32 = 8192; // int16 -> f64-scaled: the LUT input scale
 
 /// Scale an f64 value to int16 (deterministic rounding: half up).
@@ -28,7 +28,7 @@ pub fn to_int16(v: f64) -> i16 {
 }
 
 /// Sigmoid LUT (precomputed, deterministic): int16 input -> 0..255 output.
-/// sigma(x) ~= 1/(1+e^-x) - 2048 samples over x in [-8, 8] (at the K2 scale).
+/// sigma(x) ~= 1/(1+e^-x) - 2048 samples over x in [-8, 8] (at the scale).
 /// The values are fixed here as constants (round(255 / (1 + e^-x))), so no
 /// libm call runs at use time and every target reads the same table.
 pub const SIGMOID_LUT_SIZE: usize = 2048;
@@ -128,8 +128,8 @@ const SIGMOID_LUT: [u8; SIGMOID_LUT_SIZE] = [
 ];
 
 /// Sigmoid: int x -> LUT (deterministic; integer arithmetic only).
-/// The LUT covers x in [-8, 8] at the K2 scale: the index is
-/// round((x + K2) * (size - 1) / (2 * K2)), half up, clamped to the table.
+/// The LUT covers x in [-8, 8] at the scale: the index is
+/// round((x +) * (size - 1) / (2 *)), half up, clamped to the table.
 pub fn sigmoid_int(x: i32) -> u8 {
     let shifted = i64::from(x) + i64::from(K2);
     if shifted < 0 {
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn accumulator_does_not_overflow_at_a_realistic_scale() {
-        // Realistic scale: inputs of +/-1000 (K1=512 scaled activations)
+        // Realistic scale: inputs of +/-1000 ( =512 scaled activations)
         let w = vec![1000i16; 256];
         let x = vec![1000i16; 256];
         let acc = dense_int(&w, &x, 0);

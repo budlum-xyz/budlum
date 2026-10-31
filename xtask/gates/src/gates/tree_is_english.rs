@@ -94,6 +94,10 @@ const ALLOWED_FILES: &[&str] = &[
     // the file is honest; the alternative is obfuscating the dictionary until
     // nobody can audit what the gate actually bans.
     "xtask/gates/src/gates/tree_is_english.rs",
+    // The claims gate scans the Turkish README too, so the phrases the
+    // forbids and the scope words it looks for have to be written in
+    // Turkish in its lists. The lists are the only Turkish in the file.
+    "xtask/gates/src/gates/pq_claims_are_backed.rs",
 ];
 
 /// Path fragments whose contents are a Turkish localisation.

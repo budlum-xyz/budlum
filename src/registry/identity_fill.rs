@@ -113,7 +113,7 @@ pub enum FillError {
     /// The receipt opens more fields than a verifier will check. Each entry
     /// costs hashing work, and the receipt comes from outside.
     TooManyEntries { max: usize },
-    /// BLG-0097 (P04-F15): the receipt carries no subject signature. An
+    /// The receipt carries no subject signature. An
     /// unsigned receipt can be rewritten - requester, document and epoch
     /// alike - and still verify, which is what this variant refuses.
     UnsignedReceipt,
@@ -375,7 +375,7 @@ pub struct PresentationReceipt {
     pub document_digest: [u8; 32],
     pub epoch: u64,
     pub entries: Vec<ReceiptEntry>,
-    /// BLG-0097 (P04-F15): the subject's Ed25519 account key - the V4
+    /// The subject's Ed25519 account key - the V4
     /// derivation makes the key bytes the address itself, so a verifier
     /// needs no registry lookup to know who must have signed.
     #[serde(default)]
@@ -424,7 +424,7 @@ impl PresentationReceipt {
         acc
     }
 
-    /// Sign the receipt with the subject's account key (BLG-0097). The
+    /// Sign the receipt with the subject's account key. The
     /// signature covers [`Self::digest`] - every field above, requester,
     /// document digest and epoch included.
     pub fn sign(&mut self, keypair: &crate::crypto::primitives::KeyPair) {
@@ -434,7 +434,7 @@ impl PresentationReceipt {
     }
 
     /// Verify the subject signature against [`Self::digest`]
-    /// (BLG-0097). An unsigned receipt, a receipt whose signer is not the
+    /// An unsigned receipt, a receipt whose signer is not the
     /// subject, and a rewritten receipt all answer here - before any
     /// semantic check trusts the values the signature covers.
     ///
@@ -564,7 +564,7 @@ pub fn build_presentation(
             document_digest,
             epoch,
             entries,
-            // BLG-0097: the subject signs the digest before presenting; the
+            // The subject signs the digest before presenting; the
             // fill itself holds no key and must not pretend to one.
             subject_public_key: Vec::new(),
             signature: Vec::new(),
@@ -607,7 +607,7 @@ pub fn check_receipt(
             max: MAX_RECEIPT_ENTRIES,
         });
     }
-    // BLG-0097 (P04-F15): the subject's signature first. Every value read
+    // The subject's signature first. Every value read
     // below - requester, document digest, epoch - is inside the signed
     // digest; a receipt whose signature does not hold gets to assert
     // nothing.
@@ -697,7 +697,7 @@ mod tests {
         assert!(matches!(template_slots("{{ }}"), Err(FillError::EmptySlot)));
     }
 
-    /// BLG-0098: a receipt with an unbounded entry list is refused before
+    /// A receipt with an unbounded entry list is refused before
     /// any entry is hashed.
     #[test]
     fn receipt_with_too_many_entries_is_refused() {
@@ -761,7 +761,7 @@ mod tests {
             IdentityRecord, MethodKind, VerificationMethod,
         };
         use crate::registry::IdentityRegistry;
-        // BLG-0097 (P04-F15): the subject is an account-key holder - the
+        // The subject is an account-key holder - the
         // presentation receipt must be signable and is verified as such.
         let subject_key = crate::crypto::primitives::KeyPair::generate().unwrap();
         let subject = Address::from(subject_key.public_key_bytes());
@@ -847,7 +847,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(filled, "Customer: Elif Ayaz.");
-        // BLG-0097: an unsigned receipt is refused first; the signed one
+        // An unsigned receipt is refused first; the signed one
         // passes, and the signature covers requester, document and epoch.
         assert_eq!(
             check_receipt(&registry, &receipt, &requester, &filled),

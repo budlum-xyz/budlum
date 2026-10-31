@@ -51,6 +51,12 @@ COPY crates/note-packing/ ./crates/note-packing/
 # Optional feature-gated research crate (`bpqs-research`); path dependencies
 # must exist in the build context even when their feature is off.
 COPY crates/bpqs/ ./crates/bpqs/
+# The BIP-39 wordlist is compiled straight into the wallet crate
+# (`mod bip39_wordlist` in `crates/wallet-core/src/lib.rs`), so a context
+# without the crate cannot build the node's wallet feature at all: the
+# include resolves a path that does not exist in the image. Path
+# dependencies are copied, not vendored - same rule as note-packing above.
+COPY crates/wallet-core/ ./crates/wallet-core/
 
 # Is the compiler really the pinned version: BEFORE the build, inside the image.
 # Without this line a binary produced by the wrong compiler would be published
@@ -75,7 +81,10 @@ RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
 # Pass the PROTOC env explicitly to the build: prost-build resolves protoc
 # could not find it, docker-smoke reported 'Could not find protoc'.
 RUN PROTOC=/usr/bin/protoc cargo build --release --locked && \
-    cp target/release/budlum-core /usr/local/bin/budlum-core
+    cp target/release/budlum-core /usr/local/bin/budlum-core && \
+    cp target/release/bud /usr/local/bin/bud && \
+    cp target/release/budlum-faucet /usr/local/bin/budlum-faucet && \
+    cp target/release/budlum-indexer /usr/local/bin/budlum-indexer
 
 # ── Stage 2: Runtime ────────────────────────────────────────
 FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
@@ -120,6 +129,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core
+# The CLI runs the validator key generation and the genesis ceremony
+# (`bud validator init`, `bud genesis assemble`) in the compose rehearsal.
+COPY --from=builder /usr/local/bin/bud /usr/local/bin/bud
+# One image, four roles: validator and RPC
+# node (budlum-core), faucet (budlum-faucet) and explorer API
+# (budlum-indexer). ops/testnet-local.yml picks the role by entrypoint.
+COPY --from=builder /usr/local/bin/budlum-faucet /usr/local/bin/budlum-faucet
+COPY --from=builder /usr/local/bin/budlum-indexer /usr/local/bin/budlum-indexer
 
 # Hadolint DL3066: non-numeric user-id. The user is created with the deterministic
 # UID 1000 and `USER 1000` uses the numeric form, so it resolves on the host side
@@ -130,7 +147,7 @@ RUN useradd --create-home --shell /bin/bash --uid 1000 budlum
 # inherits the image directory ownership on first mount - if it is not created
 # owned by budlum beforehand the container (USER 1000) gets EACCES during storage
 # init and falls into a restart loop (a defect caught in the first CI run, 2026-07-18).
-RUN mkdir -p /home/budlum/data /home/budlum/secrets \
+RUN mkdir -p /home/budlum/data /home/budlum/secrets /home/budlum/ceremony \
     && chown -R 1000:1000 /home/budlum
 
 USER 1000
@@ -142,9 +159,9 @@ EXPOSE 4001 8545 8546 9090
 
 # HEALTHCHECK (Security Plan section 3.7): verifies that the RPC port is listening.
 # `curl` is kept in the runtime image for this legitimate health check use.
-# If the container is up but the RPC does not answer it is marked unhealthy.
-# The JSON form (hadolint DL3025): `curl -f` is already in fail mode - it returns
-# exit 1 on a failed connection, which makes the healthcheck's healthy/unhealthy decision.
+# If the container is up but the RPC port does not answer it is marked unhealthy.
+# The JSON form is hadolint DL3025's; the healthy/unhealthy decision is made by
+# curl's connect/timeout exit status, see P61-F03 below.
 # F-20: JSON-RPC probe on the public listener the image actually binds
 # (8545). Compose's operator listener (8546) is opt-in via
 # --rpc-operator-listener; a default `docker run` never opens it, so a

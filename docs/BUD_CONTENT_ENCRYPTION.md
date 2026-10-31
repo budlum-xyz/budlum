@@ -76,6 +76,28 @@ they stop a "let us just add one wrapped key" change from passing silently.
 Key delivery is the job of the access-grant layer: `AccessGrant` on chain
 first, with the DM as notification only.
 
+## Key delivery by HPKE package
+
+For a named-grantee view grant the key travels as a sealed package
+(`src/storage/key_package.rs`). The content key (256 bits) is encrypted to
+the grantee's HPKE public key with RFC 9180 Base mode: KEM 0x647a
+(MLKEM768-X25519), KDF HKDF-SHA256, AEAD ChaCha20-Poly1305. KEM 0x0020
+(X25519 only) is refused when a package is decoded, so a package whose key
+exchange is classical alone never enters the grant path. What this buys against a
+recorded package is a claim of the transport rung and lives in `docs/pq/CLAIMS.md`.
+
+The package is carried off chain (DM, storage node, link). The chain keeps
+only its hash, and that hash is the grant's `key_id`. The `key_id` already
+enters the signed issuance digest and the grant commitment, so the package is
+bound to the permission record without a new wire field. Opening checks, in
+this order: the grant is live, it names this content and this grantee, and
+the package hash equals the `key_id`. A modified, swapped or revoked package
+is refused before any decryption runs. The HPKE `info` and `aad` bind the
+content, the issuer and the grantee as well.
+
+A public-link grant has no recipient; its key travels in the link and this
+mechanism does not apply.
+
 ## Why only authenticated ciphers
 
 `ContentCipher` names three AEADs: AES-256-GCM, ChaCha20-Poly1305, and
@@ -115,8 +137,9 @@ To avoid overstating the scope, explicitly:
 2. **Shard bytes are not verified as consistent with the declaration.** An
    uploader can say `ClientSide` and upload cleartext; beyond the 16-byte
    bound there is no mechanism that catches it.
-3. **Key distribution is not solved.** The declaration does not say how the
-   key arrives.
+3. **Key distribution is outside the declaration.** The declaration does not
+   say how the key arrives; the HPKE key package above is the delivery for
+   named-grantee grants.
 4. **The operator is not forced to honour the declaration.** An operator
    seeing `Plaintext` can read the content, and nothing prevents that reading.
    A TEE on the storage node is being designed for this; it does not exist

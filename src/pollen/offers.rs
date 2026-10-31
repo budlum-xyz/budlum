@@ -375,7 +375,32 @@ impl MarketplaceRegistry {
         Ok(())
     }
 
+    /// exposed for: pollen surface - offer/data-rights readers land with the pollen rollout.
     pub fn create_access_grant(&mut self, grant: AccessGrant) -> Result<GrantId, String> {
+        self.create_access_grant_checked(grant, true)
+    }
+
+    /// Record a grant whose owner signed the carrying transaction.
+    ///
+    /// The in-block door requires `grant.owner == tx.from`, and the
+    /// transaction signature (V7 composite on mainnet) is the owner's word,
+    /// so the embedded 64-byte owner signature (an Ed25519 signature by an
+    /// address that is an Ed25519 key) is not asked for. A V3 owner has no
+    /// such key.
+    ///
+    /// # Errors
+    ///
+    /// Every check of [`Self::create_access_grant`] but the embedded
+    /// signature.
+    pub fn create_access_grant_by_owner(&mut self, grant: AccessGrant) -> Result<GrantId, String> {
+        self.create_access_grant_checked(grant, false)
+    }
+
+    fn create_access_grant_checked(
+        &mut self,
+        grant: AccessGrant,
+        check_embedded_signature: bool,
+    ) -> Result<GrantId, String> {
         grant.validate_shape()?;
         let asset = self
             .data_assets
@@ -391,12 +416,14 @@ impl MarketplaceRegistry {
         // signature being verified cryptographically - any 64 bytes that were
         // not the sentinel counted as valid. The signature now has to be a real
         // signature of the owner address, which is an ed25519 public key.
-        crate::crypto::primitives::verify_signature(
-            &grant.signing_hash(),
-            grant.owner_signature.as_bytes(),
-            grant.owner.as_bytes(),
-        )
-        .map_err(|e| format!("AccessGrant owner signature invalid: {e}"))?;
+        if check_embedded_signature {
+            crate::crypto::primitives::verify_signature(
+                &grant.signing_hash(),
+                grant.owner_signature.as_bytes(),
+                grant.owner.as_bytes(),
+            )
+            .map_err(|e| format!("AccessGrant owner signature invalid: {e}"))?;
+        }
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
         }
@@ -506,6 +533,28 @@ impl MarketplaceRegistry {
         &mut self,
         authorization: SaleAuthorization,
     ) -> Result<SaleAuthorizationId, String> {
+        self.create_sale_authorization_checked(authorization, true)
+    }
+
+    /// Record a sale authorization whose seller signed the carrying
+    /// transaction: see [`Self::create_access_grant_by_owner`].
+    ///
+    /// # Errors
+    ///
+    /// Every check of [`Self::create_sale_authorization`] but the embedded
+    /// signature.
+    pub fn create_sale_authorization_by_seller(
+        &mut self,
+        authorization: SaleAuthorization,
+    ) -> Result<SaleAuthorizationId, String> {
+        self.create_sale_authorization_checked(authorization, false)
+    }
+
+    fn create_sale_authorization_checked(
+        &mut self,
+        authorization: SaleAuthorization,
+        check_embedded_signature: bool,
+    ) -> Result<SaleAuthorizationId, String> {
         authorization.validate_shape()?;
         let asset = self
             .data_assets
@@ -522,12 +571,14 @@ impl MarketplaceRegistry {
         // could forge an authorization for somebody else's asset. The signature
         // now has to be a real signature of the seller address, which is an
         // ed25519 public key.
-        crate::crypto::primitives::verify_signature(
-            &authorization.signing_hash(),
-            authorization.seller_signature.as_bytes(),
-            authorization.seller.as_bytes(),
-        )
-        .map_err(|e| format!("SaleAuthorization seller signature invalid: {e}"))?;
+        if check_embedded_signature {
+            crate::crypto::primitives::verify_signature(
+                &authorization.signing_hash(),
+                authorization.seller_signature.as_bytes(),
+                authorization.seller.as_bytes(),
+            )
+            .map_err(|e| format!("SaleAuthorization seller signature invalid: {e}"))?;
+        }
         if self
             .sale_authorizations
             .contains_key(&authorization.authorization_id)

@@ -1,4 +1,4 @@
-//! Transfer decision-vector extraction (K1 of the BudZero regeneration design).
+//! Transfer decision-vector extraction ( of the BudZero regeneration design).
 //!
 //! The canonical private-transfer program logs exactly two verdicts, in
 //! order: conservation (Σinputs == Σoutputs) and the nullifier derivation

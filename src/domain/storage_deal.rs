@@ -1,5 +1,5 @@
 //! B.U.D. storage deals and retrieval challenges (
-//! Vision §8.5).
+//! Vision).
 //!
 //! **Production boundary:** the BudZKVM `VerifyMerkle` 64-depth soundness gate
 //! Is still treated as incomplete for mainnet claims. Every `open_deal` requires
@@ -21,12 +21,12 @@
 //!    Slashing-from-missed-challenge as a "this operator is unresponsive" signal,
 //!    NOT as a "this operator is destroying provable storage" signal.
 //!
-//! Data-sovereignty rule (plan §0.5): anyone (any account, no
+//! Data-sovereignty rule: anyone (any account, no
 //! Role required) may open a `RetrievalChallenge` and may submit a
 //! `StorageDeal`. There is no team-gated "official monitor" role.
 //!
 //! WIRING: wired - the durability half of this module is driven from
-//! `run_storage_maintenance` in `src/chain/chain_actor.rs`: the per-object
+//! the block-end maintenance in `src/chain/storage_maintenance.rs`: the per-object
 //! repair margin from `objects_below_own_repair_margin`, the shard view from
 //! `under_replicated_shards`, the repair action from
 //! `open_repair_tickets_for_free_slots`, and the placement advisory from
@@ -419,7 +419,7 @@ pub struct CodingAudit {
 /// it ever sees - so a pass is a spot check, not a proof of storage. Nothing in
 /// consensus reads `Passed`: deals stay `Active`, bonds do not move and repair
 /// is not suppressed by it, so an audit that passes buys the operator nothing
-/// it did not already have ([BLG-0152 S2]).
+/// it did not already have.
 ///
 /// The commitment is what makes the first half true. Before it, a memorised
 /// consistent column of some other object passed every audit, because the
@@ -725,7 +725,7 @@ pub struct StorageReallocationTicket {
 /// And `ChallengeResult`s for a single storage domain. Backed by
 /// `BTreeMap` (the same primitive `permissionless::PermissionlessRegistry`
 /// Uses) so the registry is deterministic, cloneable, and
-/// `bincode`-serializable for sled storage (vision §8.4 atomic
+/// `bincode`-serializable for sled storage (vision atomic
 /// Persistence).
 ///
 /// **No admin hook**, no `pause_all`, no `freeze`, no team-only method
@@ -838,8 +838,8 @@ pub struct StorageRegistry {
     /// New fields go at the end: the registry row is bincode, which is
     /// positional, so a new field anywhere else would make every stored
     /// registry unreadable. `#[serde(default)]` keeps JSON snapshots taken
-    /// before the field loadable. A bincode row from an older build is
-    /// refused by `load_storage_registry`, not padded.
+    /// before the field loadable. A bincode snapshot from an older build is
+    /// refused, not padded.
     #[serde(default)]
     settled_tickets: BTreeMap<u64, Vec<u64>>,
     /// Next id for a stored coding audit.
@@ -867,9 +867,82 @@ pub struct StorageRegistry {
     /// registration never grants exclusive control over another party's content id.
     #[serde(default)]
     manifest_claims: std::collections::BTreeSet<(ContentId, Address)>,
+    /// The storage accounting the block-end maintenance keeps: the reward
+    /// cursor that stops an operator being paid twice for an epoch, the
+    /// slash and burn totals, and the recent economics events. It used to
+    /// live on `Blockchain`, written after the block outside the state
+    /// root and restored from a side store.
+    /// Last field: bincode is positional.
+    #[serde(default)]
+    pub economics: StorageEconomicsLedger,
 }
 
 use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageEconomicsEventKind {
+    OperatorRewardAccrued,
+    OperatorBondSlashed,
+    /// A deal reached `deal_end_epoch` without being slashed and its operator
+    /// bond was returned. The counterpart to `OperatorBondSlashed`: without it
+    /// the only recorded end-of-life for a bond was losing it.
+    OperatorBondReturned,
+    /// A slashed deal's unserved prepaid fee went back to the account that
+    /// escrowed it. The deal leaves the supply denominator with the slash, so
+    /// the refund is what keeps the committed total level instead of opening
+    /// minting headroom the fee never burned.
+    PayerRefund,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageEconomicsEvent {
+    pub epoch: u64,
+    pub deal_id: u64,
+    pub operator: Address,
+    pub amount: u64,
+    pub balance_effect: u64,
+    pub kind: StorageEconomicsEventKind,
+}
+
+/// How many economics events the ledger keeps. The oldest leave first, so
+/// the ledger stays bounded on a chain that runs for years.
+pub const MAX_STORAGE_ECONOMICS_EVENTS: usize = 4096;
+
+/// The storage accounting that is consensus state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageEconomicsLedger {
+    pub slashed_bond_total: u64,
+    pub burned_bond_total: u64,
+    pub operator_rewards: BTreeMap<Address, u64>,
+    /// The epoch each deal has been paid through: the only thing standing
+    /// between an operator and being paid twice for the same epoch.
+    pub last_reward_epoch: BTreeMap<u64, u64>,
+    pub events: Vec<StorageEconomicsEvent>,
+}
+
+impl StorageEconomicsLedger {
+    /// Append an event, dropping the oldest past the bound.
+    pub fn record(&mut self, event: StorageEconomicsEvent) {
+        self.events.push(event);
+        if self.events.len() > MAX_STORAGE_ECONOMICS_EVENTS {
+            let excess = self.events.len() - MAX_STORAGE_ECONOMICS_EVENTS;
+            self.events.drain(..excess);
+        }
+    }
+
+    /// True when nothing was ever accounted.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The digest the registry root folds.
+    #[must_use]
+    pub fn root(&self) -> [u8; 32] {
+        let encoded = bincode::serialize(self).unwrap_or_else(|_| SERIALIZE_FAILED.to_vec());
+        hash_fields_bytes(&[b"BDLM_STORAGE_ECONOMICS_LEDGER_V1", &encoded])
+    }
+}
 
 /// Errors emitted by the registry. Enum-tagged for audit.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1054,7 +1127,7 @@ pub enum StorageError {
         deal_id: u64,
         max: usize,
     },
-    /// F-18: too many concurrent open challenges across every manifest
+    /// Too many concurrent open challenges across every manifest
     /// of one operator. The (operator, manifest) interval alone lets an
     /// attacker scale I/O with the number of manifests.
     TooManyOpenChallengesPerOperator {
@@ -1263,6 +1336,26 @@ impl StorageRegistry {
         Self::default()
     }
 
+    #[must_use]
+    pub fn manifest_count(&self) -> usize {
+        self.manifests.len()
+    }
+
+    #[must_use]
+    pub fn deal_count(&self) -> usize {
+        self.deals.len()
+    }
+
+    #[must_use]
+    pub fn challenge_count(&self) -> usize {
+        self.challenges.len()
+    }
+
+    #[must_use]
+    pub fn result_count(&self) -> usize {
+        self.results.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.next_deal_id == 0
             && self.next_challenge_id == 0
@@ -1440,6 +1533,12 @@ impl StorageRegistry {
                 hasher.update(manifest_id.0);
                 hasher.update(claimant.as_bytes());
             }
+        }
+        // The reward cursor decides what the next maintenance pays, so two
+        // nodes that disagree about it pay different amounts a block later.
+        // Empty contributes no bytes.
+        if !self.economics.is_empty() {
+            hasher.update(self.economics.root());
         }
         hasher.finalize().into()
     }
@@ -1896,12 +1995,56 @@ impl StorageRegistry {
         let issuer = auth
             .derived_owner()
             .map_err(crate::storage::ViewGrantError::Authorization)?;
-        if !self.has_claim(&content_id, &issuer) {
-            return match self.owner_of(&content_id) {
+        self.check_grant_issuer(&content_id, issuer)?;
+        let digest = crate::storage::grant_issue_digest(
+            chain_id,
+            self.view_grants.issued(),
+            &content_id,
+            &issuer,
+            &terms,
+        );
+        auth.verify(&digest, &issuer)
+            .map_err(crate::storage::ViewGrantError::Authorization)?;
+        self.issue_view_grant_as(issuer, content_id, terms)
+    }
+
+    /// Issue a view grant on behalf of an `issuer` whose word is already
+    /// proven: the in-block door (`StorageTx::IssueViewGrant`) passes the
+    /// signed transaction sender, whose signature the block verified under
+    /// the chain's scheme statuses.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::ViewGrantError`] for unknown content or an issuer
+    /// that does not hold the content.
+    pub fn issue_view_grant_as(
+        &mut self,
+        issuer: Address,
+        content_id: ContentId,
+        terms: crate::storage::GrantIssueTerms,
+    ) -> Result<u64, crate::storage::ViewGrantError> {
+        self.check_grant_issuer(&content_id, issuer)?;
+        self.view_grants.issue(
+            content_id,
+            issuer,
+            terms.grantee,
+            terms.key_id,
+            terms.policy,
+            terms.opened_epoch,
+        )
+    }
+
+    fn check_grant_issuer(
+        &self,
+        content_id: &ContentId,
+        issuer: Address,
+    ) -> Result<(), crate::storage::ViewGrantError> {
+        if !self.has_claim(content_id, &issuer) {
+            return match self.owner_of(content_id) {
                 Some(owner) => Err(crate::storage::ViewGrantError::NotOwner { issuer, owner }),
                 None => {
-                    if self.manifests.contains_key(&content_id)
-                        || self.confidential_commits.contains_key(&content_id)
+                    if self.manifests.contains_key(content_id)
+                        || self.confidential_commits.contains_key(content_id)
                     {
                         Err(crate::storage::ViewGrantError::NotOwner {
                             issuer,
@@ -1913,23 +2056,7 @@ impl StorageRegistry {
                 }
             };
         }
-        let digest = crate::storage::grant_issue_digest(
-            chain_id,
-            self.view_grants.issued(),
-            &content_id,
-            &issuer,
-            &terms,
-        );
-        auth.verify(&digest, &issuer)
-            .map_err(crate::storage::ViewGrantError::Authorization)?;
-        self.view_grants.issue(
-            content_id,
-            issuer,
-            terms.grantee,
-            terms.key_id,
-            terms.policy,
-            terms.opened_epoch,
-        )
+        Ok(())
     }
 
     /// Revoke one grant. Returns the row that was revoked, because whatever has
@@ -1965,6 +2092,36 @@ impl StorageRegistry {
         }
         auth.verify(&digest, &grant.issuer)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
+        self.view_grants.revoke(grant_id, caller, at_epoch)?;
+        Ok(grant)
+    }
+
+    /// Revoke one grant on behalf of a `caller` whose word is already proven
+    /// (the in-block door passes the signed sender). Only the grant's issuer
+    /// may revoke it, the same rule the authorization path enforces by
+    /// checking the signature against the issuer.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::ViewGrantError`] for an unknown id or a caller who
+    /// did not issue the grant.
+    pub fn revoke_view_grant_as(
+        &mut self,
+        caller: Address,
+        grant_id: u64,
+        at_epoch: u64,
+    ) -> Result<crate::storage::ViewGrant, crate::storage::ViewGrantError> {
+        let grant = self
+            .view_grants
+            .get(grant_id)
+            .ok_or(crate::storage::ViewGrantError::UnknownGrant(grant_id))?
+            .clone();
+        if caller != grant.issuer {
+            return Err(crate::storage::ViewGrantError::NotOwner {
+                issuer: caller,
+                owner: grant.issuer,
+            });
+        }
         self.view_grants.revoke(grant_id, caller, at_epoch)?;
         Ok(grant)
     }
@@ -2036,6 +2193,21 @@ impl StorageRegistry {
         let digest = crate::storage::confidential_commit_digest(&commit, &owner);
         auth.verify(&digest, &owner)
             .map_err(|e| format!("confidential commit authorization: {e}"))?;
+        self.register_confidential_commit_as(owner, commit)
+    }
+
+    /// Register a confidential body commit for an `owner` whose word is
+    /// already proven: the in-block door (`StorageTx::CommitConfidentialBody`)
+    /// passes the signed transaction sender.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::register_confidential_commit`].
+    pub fn register_confidential_commit_as(
+        &mut self,
+        owner: Address,
+        commit: crate::storage::ConfidentialBodyCommit,
+    ) -> Result<[u8; 32], String> {
         if let Some(m) = self.manifests.get(&commit.content_id) {
             if !m.edition.admits_body() {
                 return Err(String::from(
@@ -2360,6 +2532,31 @@ impl StorageRegistry {
         );
         auth.verify(&digest, &owner)
             .map_err(crate::storage::ViewGrantError::Authorization)?;
+        self.social_delete_as(caller, content_id, at_epoch)
+    }
+
+    /// Social delete on behalf of a `caller` whose word is already proven
+    /// (the in-block door passes the signed sender).
+    ///
+    /// # Errors
+    ///
+    /// [`crate::storage::ViewGrantError`] for unknown content or a caller who
+    /// is not the owner.
+    pub fn social_delete_as(
+        &mut self,
+        caller: Address,
+        content_id: ContentId,
+        at_epoch: u64,
+    ) -> Result<crate::storage::DeleteOutcome, crate::storage::ViewGrantError> {
+        let owner = self
+            .owner_of(&content_id)
+            .ok_or(crate::storage::ViewGrantError::UnknownContent)?;
+        if caller != owner {
+            return Err(crate::storage::ViewGrantError::NotOwner {
+                issuer: caller,
+                owner,
+            });
+        }
         let mut hook = crate::storage::three_hooks::NopThreeHook;
         Ok(crate::storage::process_social_delete(
             &mut self.view_grants,
@@ -2397,12 +2594,12 @@ impl StorageRegistry {
     /// not free.
     pub const MIN_OPENER_BOND: u64 = 1;
 
-    /// F-18: concurrent open challenges across every manifest of one
+    /// Concurrent open challenges across every manifest of one
     /// operator. The (operator, manifest) interval alone lets an attacker
     /// scale I/O with the number of manifests the operator holds.
     pub const MAX_OPEN_CHALLENGES_PER_OPERATOR: usize = 16;
 
-    /// F-19: mainnet floor above the uncalibrated 1-unit-per-`KiB` rate.
+    /// Mainnet floor above the uncalibrated 1-unit-per-`KiB` rate.
     /// `required_opener_bond` for 16 `MiB` is 16_384; this floor dominates it.
     /// Storage economics stay disabled on mainnet today; the constant is
     /// the policy the actor will apply the day that gate opens.
@@ -4064,7 +4261,7 @@ impl StorageRegistry {
         // challenge slash settles only an `Active` deal, so expiring under an
         // open challenge would strand the opener's bond and make silence
         // unpunishable. Held until the challenge closes, and the next epoch's
-        // sweep expires it then - the same rule the prune applies (BLG-0365).
+        // sweep expires it then - the same rule the prune applies.
         let open_challenges = self
             .challenges
             .values()
@@ -4520,7 +4717,7 @@ impl StorageRegistry {
     /// only settles `Active` deals, so a prune that flipped them straight to
     /// `Expired` made the bond - and the operator's whole stake for serving
     /// the object until its owner burned it - vanish from circulation
-    /// (P23-F01). The caller credits the returns; the content is gone by
+    /// The caller credits the returns; the content is gone by
     /// definition here, so the strand guard `expire_deal` applies does not.
     /// Fees for the partial epoch in progress are not settled: accrual is
     /// per completed epoch, the same rule a slashed deal follows.
@@ -4536,7 +4733,7 @@ impl StorageRegistry {
             .map(|d| (d.deal_id, d.operator, d.economics.operator_bond))
             .collect();
 
-        // BLG-0365 (P24-F06): an open retrieval challenge is a live question
+        // An open retrieval challenge is a live question
         // about these exact bytes. Pruning under it would expire the deal,
         // `finalize_missed_challenge` would then refuse with DealNotActive,
         // and the challenge would never close - the opener's bond stuck, the
@@ -4593,7 +4790,7 @@ impl StorageRegistry {
 
 /// Canonical, domain-tagged byte encoding of a `StorageDeal`. Used in
 /// Audit logs and the (future) `GlobalBlockHeader.storage_root` aggregation
-/// (vision §8.4).
+/// (vision).
 pub fn storage_deal_leaf_hash(deal: &StorageDeal) -> Hash32 {
     let status = [match deal.status {
         DealStatus::Active => 0,
@@ -4887,7 +5084,7 @@ mod tests {
         );
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&digest).to_vec(),
+            signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
         };
         reg.issue_view_grant(
             1,
@@ -4983,7 +5180,7 @@ mod tests {
         );
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&digest).to_vec(),
+            signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
         };
         let before = reg.root();
         reg.issue_view_grant(
@@ -5001,7 +5198,7 @@ mod tests {
         assert_ne!(before, reg.root(), "a live grant must reach the state root");
     }
 
-    /// P28-F16: a captured issue authorisation cannot be replayed after the
+    /// A captured issue authorisation cannot be replayed after the
     /// grant is revoked, and a signature made for another chain is refused.
     #[cfg(feature = "wallet-ml-dsa")]
     #[test]
@@ -5031,7 +5228,7 @@ mod tests {
             );
             crate::storage::GrantAuthorization {
                 owner_key: kp.public_key_bytes(),
-                signature: kp.sign(&d).to_vec(),
+                signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &d).to_vec(),
             }
         };
         let other_chain = sign(2, 0);
@@ -5065,7 +5262,7 @@ mod tests {
         let revoke_d = crate::storage::grant_revoke_digest(1, grant, &owner, 4);
         let revoke = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&revoke_d).to_vec(),
+            signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &revoke_d).to_vec(),
         };
         reg.revoke_view_grant(1, grant, &revoke, 4).expect("revoke");
         assert!(
@@ -5111,7 +5308,9 @@ mod tests {
         );
         let issue = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&issue_digest).to_vec(),
+            signature: kp
+                .sign(crate::crypto::ctx::STORAGE_V2, &issue_digest)
+                .to_vec(),
         };
         let grant = reg
             .issue_view_grant(
@@ -5146,7 +5345,9 @@ mod tests {
         let revoke_digest = crate::storage::grant_revoke_digest(1, grant, &owner, 4);
         let revoke = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&revoke_digest).to_vec(),
+            signature: kp
+                .sign(crate::crypto::ctx::STORAGE_V2, &revoke_digest)
+                .to_vec(),
         };
         reg.revoke_view_grant(1, grant, &revoke, 4)
             .expect("the owner's signed revocation");
@@ -5783,7 +5984,7 @@ mod tests {
                 commit,
                 crate::storage::GrantAuthorization {
                     owner_key: kp.public_key_bytes(),
-                    signature: kp.sign(&digest).to_vec(),
+                    signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
                 },
             )
         };
@@ -6257,7 +6458,7 @@ mod tests {
 
     #[test]
     fn a_full_id_counter_refuses_instead_of_overflowing() {
-        // P23-F15: the counters used a bare `+= 1`. With overflow checks on
+        // The counters used a bare `+= 1`. With overflow checks on
         // that is a panic, so a full counter must be a clean refusal.
         let m = good_manifest();
         let mut reg = StorageRegistry::new();
@@ -7226,7 +7427,7 @@ mod tests {
         assert!(matches!(err, StorageError::InvalidMerkleProof(_)));
     }
 
-    /// BLG-0365 (P24-F06): prune defers while a retrieval challenge is open
+    /// Prune defers while a retrieval challenge is open
     /// on one of the deals, and proceeds once the challenge has been
     /// finalized (the deal leaves Active with it).
     #[test]
@@ -7421,7 +7622,7 @@ mod tests {
         // Prune the content.
         let (pruned, bond_returns) = reg.prune_content(&manifest_id, 150);
         assert_eq!(pruned, 2);
-        // P23-F01: every expired deal hands its operator bond back to the
+        // Every expired deal hands its operator bond back to the
         // caller for settlement; the old u64-only return dropped them.
         assert_eq!(bond_returns.len(), 2);
         assert!(bond_returns.iter().all(|(_, bond)| *bond > 0));
@@ -8454,7 +8655,7 @@ mod tests {
             let (mut reg, _, manifest) = coded();
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
-            // BLG-0365 refuses a prune under an open audit, so the
+            // refuses a prune under an open audit, so the
             // gone-manifest state is entered directly, as the expiry
             // sweep leaves it.
             reg.manifests.remove(&manifest.manifest_id);
@@ -8477,7 +8678,7 @@ mod tests {
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
             let (column, parity, proof) = honest(&encoded, &rec.audit);
-            // BLG-0365 refuses a prune under an open audit, so the
+            // refuses a prune under an open audit, so the
             // gone-manifest state is entered directly, as the expiry
             // sweep leaves it.
             reg.manifests.remove(&manifest.manifest_id);
@@ -8499,7 +8700,7 @@ mod tests {
             let id = open(&mut reg, &manifest, 1);
             let rec = stored(&reg, id);
             let (column, parity, proof) = honest(&encoded, &rec.audit);
-            // BLG-0365 refuses a prune under an open audit, so the
+            // refuses a prune under an open audit, so the
             // gone-manifest state is entered directly, as the expiry
             // sweep leaves it.
             reg.manifests.remove(&manifest.manifest_id);
@@ -9108,7 +9309,7 @@ mod demand_driven_replication_tests {
         let digest = crate::storage::confidential_commit_digest(&commit, &owner);
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&digest).to_vec(),
+            signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
         };
         let err = reg
             .register_confidential_commit(commit, &auth)
@@ -9139,7 +9340,7 @@ mod demand_driven_replication_tests {
         let digest = crate::storage::confidential_commit_digest(&commit, &owner);
         let auth = crate::storage::GrantAuthorization {
             owner_key: kp.public_key_bytes(),
-            signature: kp.sign(&digest).to_vec(),
+            signature: kp.sign(crate::crypto::ctx::STORAGE_V2, &digest).to_vec(),
         };
         let c = reg.register_confidential_commit(commit, &auth).unwrap();
         assert_eq!(c.len(), 32);

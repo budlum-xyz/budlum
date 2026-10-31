@@ -175,7 +175,7 @@ pub enum RoundError {
     RoundClosed { state: String },
     #[error("round is full: the policy admits {max} participants")]
     RoundFull { max: usize },
-    /// BLG-0152 (P07-F07, decision A): bytes that cannot be read as evidence
+    /// Bytes that cannot be read as evidence
     /// at all are the caller's problem, never a vote. They must not open a
     /// round or count toward any threshold.
     #[error("the bytes are not evidence and cannot vote: {reason}")]
@@ -263,7 +263,7 @@ impl QuorumRounds {
         let Some(policy) = self.policies.get(&domain).copied() else {
             return Err(RoundError::NoQuorumPolicy);
         };
-        // BLG-0152 (P07-F07, decision A): bytes the adapter cannot even read
+        // Bytes the adapter cannot even read
         // are not answers about a claim. Folding them in as refusal votes let
         // one bonded prover open a retained round per garbage height and
         // close a real height with a refusal quorum before honest evidence
@@ -280,7 +280,7 @@ impl QuorumRounds {
         let key = RoundKey { domain, height };
         match self.rounds.get_mut(&key) {
             Some(round) => {
-                // BLG-0152 (P07-F07, decision B): an AgreedRefusal answered
+                // An AgreedRefusal answered
                 // the bytes that were actually submitted. A later, DIFFERENT
                 // evidence at the same height is a new question and must not
                 // be censored by it. Same bytes after a refusal stay closed.
@@ -429,7 +429,7 @@ impl QuorumRounds {
     /// Sweeps rounds older than [`ROUND_RETENTION_BLOCKS`]. Called from the
     /// same block-commit hook that drives the registry clock.
     ///
-    /// BLG-0164 (P07-F19): a `Disputed` round is evidence - who disputed
+    /// A `Disputed` round is evidence - who disputed
     /// what - and the challenge game can resolve it far later than the
     /// retention window. Sweeping it erased the record while the domain
     /// stayed Faulted. Disputed rounds are kept until they resolve.
@@ -464,7 +464,7 @@ impl QuorumRounds {
 /// Maps an adapter error to the answer kind the quorum counts. The split the
 /// quorum module insists on: a refusal about the *claim* participates, a
 /// failure about the *prover or transport* does not.
-/// The most rounds one domain may have open at once (BLG-0152/P07-F07).
+/// The most rounds one domain may have open at once.
 ///
 /// Convenience: pub so the intake side can refuse against the same
 /// per-domain round cap the quorum enforces in this module.
@@ -473,7 +473,7 @@ pub const MAX_OPEN_ROUNDS_PER_DOMAIN: usize = 64;
 /// Whether an adapter refusal says nothing about a claim - the bytes could
 /// not be read as evidence at all (wrong adapter, wrong version, malformed,
 /// declaration mismatch). Such a refusal is the caller's problem and is not
-/// a vote in anyone's quorum (BLG-0152/P07-F07).
+/// a vote in anyone's quorum.
 fn is_not_a_vote(err: &AdapterError) -> bool {
     matches!(
         err,
@@ -827,7 +827,7 @@ mod tests {
         let listed: Vec<u64> = rounds.rounds_of(&key()).iter().map(|r| r.height).collect();
         assert_eq!(listed, vec![5, 9], "BTreeMap order is height order");
     }
-    /// BLG-0152 (P07-F07): unreadable bytes are not votes and open no round;
+    /// Unreadable bytes are not votes and open no round;
     /// an AgreedRefusal censors only the bytes it actually answered.
     #[test]
     fn garbage_bytes_never_vote_and_a_refusal_only_closes_its_own_bytes() {

@@ -48,6 +48,10 @@ impl std::fmt::Display for PrivacyLevel {
     }
 }
 
+/// Archive bootnodes a mainnet node must list.
+/// exposed for: the CLI surface - the commands that read these land with their subcommand wiring.
+pub const MAINNET_MIN_ARCHIVE_BOOTNODES: usize = 5;
+
 #[derive(Parser, Debug, Clone)]
 #[command(name = "budlum-core")]
 #[command(about = "Budlum privacy-focused blockchain node")]
@@ -78,6 +82,11 @@ pub struct NodeConfig {
 
     #[arg(skip)]
     pub bootnodes: Vec<String>,
+
+    /// Archive bootnodes: the peers a regenerating node asks
+    /// for the witnesses it pruned. Mainnet needs at least five.
+    #[arg(skip)]
+    pub archive_bootnodes: Vec<String>,
 
     #[arg(long, default_value = "./data/budlum.db")]
     pub db_path: String,
@@ -241,6 +250,15 @@ pub struct NodeConfig {
     #[arg(long)]
     pub rpc_trusted_proxies: Vec<String>,
 
+    /// PEM certificate chain for the in-process RPC TLS listener.
+    /// Needs `--rpc-tls-key-file` too. The listener offers X25519MLKEM768 only.
+    #[arg(long)]
+    pub rpc_tls_cert_file: Option<String>,
+
+    /// PEM private key (PKCS#8, PKCS#1 or SEC1) for the RPC TLS listener.
+    #[arg(long)]
+    pub rpc_tls_key_file: Option<String>,
+
     #[arg(long)]
     pub metrics_listener: Option<String>,
 
@@ -281,19 +299,22 @@ pub struct NodeConfig {
     #[arg(long)]
     pub pkcs11_pq_mechanism: Option<String>,
     /// Operator-configured BLS public key (hex), cross-checked against the
-    /// HSM-held PUBLIC_KEY object at startup (P02-F01 decision B).
+    /// HSM-held PUBLIC_KEY object at startup.
     #[arg(long)]
     pub pkcs11_bls_public_key: Option<String>,
     /// Operator-configured PQ public key (hex), cross-checked the same way.
     #[arg(long)]
     pub pkcs11_pq_public_key: Option<String>,
 
+    /// Label of the validator ML-DSA-65 key pair in the token. When set the
+    /// PQ key signs through the PKCS#11 3.2 standard mechanism, the
+    /// first path; `pkcs11_pq_mechanism` is the fallback for tokens without 3.2.
     #[arg(long)]
-    pub features_governance: bool,
+    pub pkcs11_pq_key_label: Option<String>,
 
-    #[arg(long)]
-    pub features_zkvm_contracts: bool,
-
+    /// Enable the node-local pruning manager. Consensus governance is always
+    /// represented by its signed `Vote` transactions; it is not a startup
+    /// feature switch.
     #[arg(long)]
     pub features_pruning: bool,
 
@@ -317,11 +338,15 @@ pub struct NodeConfig {
 
     #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
     pub storage_mandatory_sharding: bool,
+
+    /// `[anchor]` section: the PQ anchor emission of this node.
+    #[arg(skip)]
+    pub anchor: AnchorSection,
     // --- Outbound bridge (relayer) ---
     //
     // `RelayerWorker::with_adapters` existed and nothing called it, because
     // the node carried no way to say what an adapter should point at.
-    // BLG-0135 (P06-F06, decision B): the `--evm-bridge-address` registration
+    // The `--evm-bridge-address` registration
     // is REMOVED. The EVM bridge leg has no live end-to-end route (the
     // off-chain half is a stub that refuses at broadcast), and a registration
     // surface that reads as "production" while the leg cannot operate was the
@@ -341,6 +366,7 @@ impl Default for NodeConfig {
             port: None,
             bootstrap: None,
             bootnodes: Vec::new(),
+            archive_bootnodes: Vec::new(),
             db_path: "./data/budlum.db".to_string(),
             validators_file: "./validators.json".to_string(),
             validator_address: None,
@@ -353,7 +379,7 @@ impl Default for NodeConfig {
             config: None,
             metrics_port: 9090,
             rpc_enabled: true,
-            // (security audit §5 wiring) secure-by-default for
+            // (security audit wiring) secure-by-default for
             // NodeConfig::default. The previous `false` here meant
             // `main.rs:557`'s `RpcSecurityConfig::from_env(config.rpc_auth_required, ...)`
             // Silently opened a public, unauthenticated RPC at startup
@@ -399,6 +425,8 @@ impl Default for NodeConfig {
             rpc_public_listener: None,
             rpc_operator_listener: None,
             rpc_trusted_proxies: Vec::new(),
+            rpc_tls_cert_file: None,
+            rpc_tls_key_file: None,
             metrics_listener: None,
             signer_backend: None,
             raw_signer_backend: None,
@@ -411,14 +439,14 @@ impl Default for NodeConfig {
             pkcs11_pq_mechanism: None,
             pkcs11_bls_public_key: None,
             pkcs11_pq_public_key: None,
-            features_governance: false,
-            features_zkvm_contracts: false,
+            pkcs11_pq_key_label: None,
             features_pruning: false,
             features_verify_merkle: false,
             features_archive_mode: false,
             storage_enabled: true,
             storage_replication_factor: 3,
             storage_mandatory_sharding: true,
+            anchor: AnchorSection::default(),
         }
     }
 }
@@ -437,6 +465,52 @@ pub struct FileConfig {
     pub validator: Option<ValidatorSection>,
     pub features: Option<FeaturesSection>,
     pub consensus: Option<ConsensusSection>, // for integration of other sections
+    pub anchor: Option<AnchorSection>,
+}
+
+/// The `[anchor]` section: how this node emits PQ anchors.
+///
+/// `mode = "off"` (default) emits nothing. `"devnet"` signs with the public
+/// development keys and refuses any chain but devnet. `"production"` signs
+/// with the node's own HSM keys, needs the genesis `anchor_ledger`, a key
+/// ceremony record attested by the cold committee and a passing self-test.
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// exposed for: the CLI surface - the commands that read these land with their subcommand wiring.
+pub struct AnchorSection {
+    /// off | devnet | production
+    pub mode: Option<String>,
+    /// Node-local anchor log (JSONL); the seal log sits next to it.
+    pub log_path: Option<String>,
+    /// The ceremony record JSON file (production).
+    pub ceremony_file: Option<String>,
+    /// The cold wallet committee file that attests the ceremony (production).
+    pub cold_committee_file: Option<String>,
+    /// PKCS#11 token holding this node's anchor and seal keys (production).
+    pub pkcs11: Option<AnchorPkcs11Section>,
+}
+
+/// The token and the key objects of the anchor signers of this node.
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// exposed for: the CLI surface - the commands that read these land with their subcommand wiring.
+pub struct AnchorPkcs11Section {
+    pub module_path: Option<String>,
+    pub slot_id: Option<u64>,
+    pub token_pin_env: Option<String>,
+    /// One entry per ledger slot this node signs for.
+    pub anchor_keys: Option<Vec<AnchorKeyLabel>>,
+    /// Label of the SLH-DSA-SHAKE-256s Root Seal key object.
+    pub seal_key_label: Option<String>,
+}
+
+/// The key object of one anchor ledger slot.
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+#[serde(deny_unknown_fields)]
+/// exposed for: the CLI surface - the commands that read these land with their subcommand wiring.
+pub struct AnchorKeyLabel {
+    pub slot: u8,
+    pub label: String,
 }
 
 #[derive(Debug, serde::Deserialize, Default, Clone)]
@@ -476,6 +550,8 @@ pub struct StorageSection {
 pub struct P2pSection {
     pub identity_file: Option<String>,
     pub bootnodes: Option<Vec<String>>,
+    /// Archive bootnodes that serve witnesses (`/budlum/witness/1.0.0`).
+    pub archive_bootnodes: Option<Vec<String>>,
     pub dns_seeds: Option<Vec<String>>,
     pub max_peers: Option<usize>,
     pub banned_peer_db: Option<String>,
@@ -489,6 +565,8 @@ pub struct RpcSection {
     pub public_listener: Option<String>,
     pub operator_listener: Option<String>,
     pub trusted_proxies: Option<Vec<String>>,
+    pub tls_cert_file: Option<String>,
+    pub tls_key_file: Option<String>,
     pub enabled: Option<bool>,
     pub api_key_env: Option<String>,
     pub host: Option<String>, // backwards-compatibility
@@ -534,9 +612,11 @@ pub struct Pkcs11Section {
     /// If absent, BLS signing falls back to software (data object).
     pub bls_mechanism: Option<String>,
     /// Operator-configured BLS/PQ public keys (hex) for the startup
-    /// cross-check (P02-F01 decision B).
+    /// cross-check.
     pub bls_public_key: Option<String>,
     pub pq_public_key: Option<String>,
+    /// Label of the ML-DSA-65 key pair signed with through PKCS#11 3.2.
+    pub pq_key_label: Option<String>,
     /// Vendor-native PQ/Dilithium mechanism ID.
     pub pq_mechanism: Option<String>,
 }
@@ -544,8 +624,6 @@ pub struct Pkcs11Section {
 #[derive(Debug, serde::Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct FeaturesSection {
-    pub governance: Option<bool>,
-    pub zkvm_contracts: Option<bool>,
     pub pruning: Option<bool>,
     /// F2 config-driven: VerifyMerkle staged rollout gate controlled via config
     /// True = gate open (MainnetActivation::full), false = gate closed (default reject)
@@ -725,6 +803,11 @@ impl NodeConfig {
                     self.bootnodes.extend(addresses);
                 }
             }
+            if self.archive_bootnodes.is_empty() {
+                if let Some(addresses) = p2p.archive_bootnodes {
+                    self.archive_bootnodes = addresses;
+                }
+            }
             if self.dns_seeds.is_empty() {
                 if let Some(seeds) = p2p.dns_seeds {
                     self.dns_seeds = seeds;
@@ -774,6 +857,12 @@ impl NodeConfig {
                 if let Some(proxies) = rpc.trusted_proxies {
                     self.rpc_trusted_proxies = proxies;
                 }
+            }
+            if self.rpc_tls_cert_file.is_none() {
+                self.rpc_tls_cert_file = rpc.tls_cert_file;
+            }
+            if self.rpc_tls_key_file.is_none() {
+                self.rpc_tls_key_file = rpc.tls_key_file;
             }
             if let Some(allowed) = rpc.allowed_ips {
                 self.rpc_allowed_ips = allowed;
@@ -867,6 +956,9 @@ impl NodeConfig {
                     if self.pkcs11_pq_public_key.is_none() {
                         self.pkcs11_pq_public_key = pkcs11.pq_public_key;
                     }
+                    if self.pkcs11_pq_key_label.is_none() {
+                        self.pkcs11_pq_key_label = pkcs11.pq_key_label;
+                    }
                 }
                 if let Some(socket) = signer.hsm_socket_path {
                     self.hsm_socket_path = socket;
@@ -881,12 +973,6 @@ impl NodeConfig {
         }
 
         if let Some(features) = fc.features {
-            if let Some(gov) = features.governance {
-                self.features_governance = gov;
-            }
-            if let Some(zkvm) = features.zkvm_contracts {
-                self.features_zkvm_contracts = zkvm;
-            }
             if let Some(pruning) = features.pruning {
                 self.features_pruning = pruning;
             }
@@ -902,6 +988,10 @@ impl NodeConfig {
             if let Some(storage) = features.storage {
                 self.storage_enabled = storage;
             }
+        }
+
+        if let Some(anchor) = fc.anchor {
+            self.anchor = anchor;
         }
 
         if let Some(consensus) = fc.consensus {
@@ -1161,6 +1251,14 @@ impl NodeConfig {
                 std::process::exit(1);
             }
 
+            // a node that regenerates asks archive peers for the
+            // witnesses it pruned. Fewer than five distinct archive bootnodes
+            // leave one failure away from no witness source.
+            if let Some(reason) = self.mainnet_archive_bootnode_violation() {
+                eprintln!("CRITICAL SECURITY FAILURE: {reason}");
+                std::process::exit(1);
+            }
+
             // Rule 4: No placeholder genesis files on mainnet!
             if let Some(ref genesis) = self.genesis_file {
                 if genesis.contains("placeholder")
@@ -1175,12 +1273,14 @@ impl NodeConfig {
                 std::process::exit(1);
             }
 
-            if self.features_governance || self.features_zkvm_contracts || self.features_pruning {
-                eprintln!("CRITICAL SECURITY FAILURE: governance, zkvm_contracts and pruning must remain disabled for Mainnet v1.");
+            if self.features_pruning {
+                eprintln!(
+                    "CRITICAL SECURITY FAILURE: pruning must remain disabled for Mainnet v1."
+                );
                 std::process::exit(1);
             }
 
-            // F-01: a non-empty bootnode list that still names the ceremony
+            // A non-empty bootnode list that still names the ceremony
             // template (RFC 5737 / "placeholder") is not a launch config.
             if let Some(bad) = crate::core::chain_config::first_placeholder_peer(&self.bootnodes) {
                 eprintln!(
@@ -1195,7 +1295,7 @@ impl NodeConfig {
                 std::process::exit(1);
             }
 
-            // F-13: the checked-in mainnet profile must not advertise an open
+            // The checked-in mainnet profile must not advertise an open
             // VerifyMerkle gate. The VM ignores this flag today; refusing it
             // here keeps a future wiring from silently enabling an unfinished
             // verifier.
@@ -1225,7 +1325,66 @@ impl NodeConfig {
         if self.rpc_allowed_ips.is_empty() {
             return Some("mainnet refuses an RPC listener with an empty allowed_ips list");
         }
+        match (&self.rpc_tls_cert_file, &self.rpc_tls_key_file) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Some("rpc tls_cert_file and tls_key_file must be set together");
+            }
+            (None, None) if !self.public_rpc_listener_is_loopback() => {
+                return Some(
+                    "mainnet refuses a public RPC listener off loopback without TLS (set rpc tls_cert_file and tls_key_file)",
+                );
+            }
+            _ => {}
+        }
         None
+    }
+
+    /// The mainnet archive bootnode rule: every role except an
+    /// archive node lists at least [`MAINNET_MIN_ARCHIVE_BOOTNODES`] distinct
+    /// archive bootnodes, none of them a ceremony placeholder.
+    #[must_use]
+    /// exposed for: the CLI surface - the commands that read these land with their subcommand wiring.
+    pub fn mainnet_archive_bootnode_violation(&self) -> Option<String> {
+        if self.role == "archive" {
+            return None;
+        }
+        let distinct: std::collections::BTreeSet<&str> = self
+            .archive_bootnodes
+            .iter()
+            .map(|entry| entry.trim())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        if distinct.len() < MAINNET_MIN_ARCHIVE_BOOTNODES {
+            return Some(format!(
+                "mainnet needs at least {MAINNET_MIN_ARCHIVE_BOOTNODES} distinct p2p.archive_bootnodes, got {}",
+                distinct.len()
+            ));
+        }
+        if let Some(bad) =
+            crate::core::chain_config::first_placeholder_peer(&self.archive_bootnodes)
+        {
+            return Some(format!(
+                "mainnet archive bootnode is still a ceremony placeholder: {bad}"
+            ));
+        }
+        None
+    }
+
+    /// Whether the public RPC listener binds a loopback address only. A host
+    /// name other than `localhost` is not trusted to resolve to loopback.
+    fn public_rpc_listener_is_loopback(&self) -> bool {
+        let listener = self
+            .rpc_public_listener
+            .clone()
+            .unwrap_or_else(|| format!("{}:{}", self.rpc_host, self.rpc_port));
+        let Some((host, _port)) = parse_listener(&listener) else {
+            return false;
+        };
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
     }
 
     // Node role based rules to avoid opening unnecessary listeners.
@@ -1419,6 +1578,53 @@ mod tests {
     }
 
     #[test]
+    fn mainnet_needs_five_distinct_archive_bootnodes() {
+        let with = |nodes: &[&str], role: &str| NodeConfig {
+            role: role.to_string(),
+            archive_bootnodes: nodes.iter().map(|n| (*n).to_string()).collect(),
+            ..Default::default()
+        };
+        let five = [
+            "/dns4/a.archive-nodes.net/tcp/1",
+            "/dns4/b.archive-nodes.net/tcp/1",
+            "/dns4/c.archive-nodes.net/tcp/1",
+            "/dns4/d.archive-nodes.net/tcp/1",
+            "/dns4/e.archive-nodes.net/tcp/1",
+        ];
+        assert_eq!(
+            with(&five, "validator").mainnet_archive_bootnode_violation(),
+            None
+        );
+        // Four, or five with a repeat, are not five.
+        assert!(with(&five[..4], "validator")
+            .mainnet_archive_bootnode_violation()
+            .is_some());
+        let repeated = [five[0], five[0], five[1], five[2], five[3]];
+        assert!(with(&repeated, "validator")
+            .mainnet_archive_bootnode_violation()
+            .is_some());
+        assert!(with(&[], "rpc")
+            .mainnet_archive_bootnode_violation()
+            .is_some());
+        // An archive node is its own witness source.
+        assert_eq!(
+            with(&[], "archive").mainnet_archive_bootnode_violation(),
+            None
+        );
+        // A ceremony placeholder does not count as a launch configuration.
+        let placeholder = [
+            five[0],
+            five[1],
+            five[2],
+            five[3],
+            "/dns4/placeholder.archive-nodes.net/tcp/1",
+        ];
+        assert!(with(&placeholder, "validator")
+            .mainnet_archive_bootnode_violation()
+            .is_some());
+    }
+
+    #[test]
     fn test_consensus_type_parsing() {
         assert_eq!(ConsensusType::PoW as u8, 0);
     }
@@ -1476,6 +1682,12 @@ mod tests {
         assert!(default.storage_enabled);
         assert!(default.storage_mandatory_sharding);
         assert!(default.mobile_charging);
+    }
+
+    #[test]
+    fn removed_noop_feature_switches_are_not_accepted() {
+        assert!(NodeConfig::try_parse_from(["budlum", "--features-governance"]).is_err());
+        assert!(NodeConfig::try_parse_from(["budlum", "--features-zkvm-contracts"]).is_err());
     }
 
     #[test]
@@ -1590,6 +1802,34 @@ mod tests {
         assert!(cfg.mainnet_rpc_violation().is_none());
     }
 
+    /// on mainnet an RPC listener off loopback needs TLS.
+    #[test]
+    fn mainnet_rpc_off_loopback_needs_tls() {
+        let mut cfg = NodeConfig {
+            network: Network::Mainnet,
+            role: "rpc".into(),
+            rpc_host: "0.0.0.0".into(),
+            ..Default::default()
+        };
+        assert!(cfg.mainnet_rpc_violation().is_some());
+        cfg.rpc_tls_cert_file = Some("cert.pem".into());
+        assert!(
+            cfg.mainnet_rpc_violation().is_some(),
+            "a certificate without a key is not a TLS listener"
+        );
+        cfg.rpc_tls_key_file = Some("key.pem".into());
+        assert!(cfg.mainnet_rpc_violation().is_none());
+
+        cfg.rpc_tls_cert_file = None;
+        cfg.rpc_tls_key_file = None;
+        cfg.rpc_host = "127.0.0.1".into();
+        assert!(cfg.mainnet_rpc_violation().is_none());
+        cfg.rpc_public_listener = Some("[::1]:8545".into());
+        assert!(cfg.mainnet_rpc_violation().is_none());
+        cfg.rpc_public_listener = Some("rpc.example.org:8545".into());
+        assert!(cfg.mainnet_rpc_violation().is_some());
+    }
+
     #[test]
     fn rpc_allowed_ips_file_config_overrides_secure_default() {
         let mut cfg = NodeConfig::default();
@@ -1650,6 +1890,16 @@ mod persona_config_tests {
                 toml::from_str(&content).unwrap_or_else(|e| panic!("parse {path}: {e}"));
             assert!(fc.network.is_some(), "{path} needs [network]");
             assert!(fc.node.is_some(), "{path} needs [node]");
+        }
+    }
+
+    #[test]
+    fn removed_feature_keys_are_rejected_by_strict_schema() {
+        for key in ["governance", "zkvm_contracts"] {
+            let config = format!("[features]\n{key} = false\n");
+            let error = toml::from_str::<FileConfig>(&config)
+                .expect_err("removed feature keys must not parse");
+            assert!(error.to_string().contains(key), "unexpected error: {error}");
         }
     }
 }

@@ -154,7 +154,7 @@ impl HuffmanCoder {
             first[l] = c;
             c = (c + count[l] as u64) << 1;
         }
-        // walk the body bits - K38: orig_len comes from an UNTRUSTED header;
+        // walk the body bits -: orig_len comes from an UNTRUSTED header;
         // with_capacity(orig_len) would make a huge allocation for a small file
         // (OOM DoS). Lazy growth: a genuinely large decompression is already
         // bounded by the body size.
@@ -317,7 +317,7 @@ impl HuffmanCoder {
 mod tests {
     use super::*;
 
-    /// BLG-0609: counts that follow the Fibonacci numbers give a plain
+    /// Counts that follow the Fibonacci numbers give a plain
     /// Huffman tree of depth 33; the limited tree must still round trip.
     #[test]
     fn fibonacci_counts_round_trip_within_the_code_length_limit() {

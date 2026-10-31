@@ -39,34 +39,36 @@
 //! # WIRING STATUS - read this before trusting anything below
 //!
 //! **Wired through [`intake`]** - with the limit spelled out here
-//! (BLG-0166/P07-F21): the attestation is NOT part of any block or header
+//! The attestation is NOT part of any block or header
 //! yet. `state_digest` is an RPC value a consumer can compare; nothing in
 //! consensus commits it until the `GlobalBlockHeader` root lands. The two
 //! consensus decisions the earlier version of this notice deferred were
 //! made, in writing, in `intake.rs`'s module docs:
 //!
-//! 1. The registry lives on `Blockchain` as `external_intake`
-//!    ([`IntakeState`]), persisted by the storage layer and clocked from
-//!    block commit.
+//! 1. The registry lives in the account state as
+//!    `settlement.external_intake` ([`IntakeState`]), written only by the
+//!    `ExternalDomain` transaction door ([`external_tx`]), folded into the
+//!    state root, and clocked at block end.
 //! 2. An accepted attestation is committed through the intake's
 //!    deterministic state digest (`IntakeState::state_digest`, exposed as
 //!    `bud_getExternalIntakeDigest`); the `GlobalBlockHeader` gains a root
 //!    when the first real external domain earns one.
 //!
-//! The production entry points are `Blockchain::register_external_domain` /
-//! `submit_external_evidence` (behind `ChainCommand`s and the
-//! `bud_registerExternalDomain` / `bud_submitExternalEvidence` /
-//! `bud_getExternalDomains` RPC surface), and the
-//! `verify_domain_commitment_finality` dispatch reaches
-//! [`ExternalDomainFinalityBridge`] for a `Custom` domain bound to
-//! [`EXTERNAL_DOMAIN_FINALITY_ADAPTER`]. Re-derive before believing, as
-//! always: `grep -rn 'external_intake' src/ --include='*.rs'`.
+//! The production entry points are the `ExternalDomain` transaction variants
+//! (registration, evidence, prover bond, readmission, version fork, quorum
+//! policy), applied by the executor; the `bud_getExternalDomains` family
+//! reads the result, and the `verify_domain_commitment_finality` dispatch
+//! reaches [`ExternalDomainFinalityBridge`] for a `Custom` domain bound to
+//! [`EXTERNAL_DOMAIN_FINALITY_ADAPTER`]. The old write RPCs refuse and name
+//! the transaction. Re-derive before believing, as always:
+//! `grep -rn 'external_intake' src/ --include='*.rs'`.
 //!
-//! **Limit of that claim (P07-F21).** The call sites are wired, but the
-//! attestations are not part of any block or header: the digest is an RPC
-//! value only, and the intake is written outside block execution. Two nodes
-//! agree on it only if they saw the same calls. This is the external-roots
-//! gap tracked in STATUS.md section 4.5.
+//! **Limit of that claim.** The intake is now in the state root, so two
+//! nodes that applied the same blocks hold the same intake. The
+//! `GlobalBlockHeader` does not carry its digest yet (
+//!). Prover slashing has no door: it needs a proof that an accepted
+//! attestation was false, which is not defined yet, so
+//! `bud_slashExternalProver` is closed.
 //!
 //! # The rule underneath all six
 //!
@@ -79,6 +81,7 @@
 pub mod domain_bridge;
 pub mod ethereum;
 pub mod evm_hybrid;
+pub mod external_tx;
 pub mod intake;
 pub mod intake_quorum;
 pub mod profile;
@@ -105,6 +108,9 @@ pub use evm_hybrid::{
     PrecompileObservation, BLS_G1_ADD_ADDRESS, BLS_G1_MSM_ADDRESS, BLS_G2_ADD_ADDRESS,
     BLS_G2_MSM_ADDRESS, BLS_MAP_FP2_TO_G2_ADDRESS, BLS_MAP_FP_TO_G1_ADDRESS, BLS_PAIRING_ADDRESS,
     MAX_ML_DSA_FIELD_BYTES, ML_DSA_ETH_ADDRESS, ML_DSA_FIPS_ADDRESS,
+};
+pub use external_tx::{
+    execute_external_domain_tx, ExternalDomainTx, ExternalDomainTxContext, ExternalDomainTxError,
 };
 pub use intake::{AdapterSpec, IntakeEntry, IntakeError, IntakeState, RegistrationRequest};
 pub use intake_quorum::{
@@ -140,6 +146,8 @@ pub use zkvm_proof::{
 mod tests {
     use super::*;
     use crate::core::address::Address;
+    use crate::crypto::facts::{CryptoFacts, ObservedScheme};
+    use crate::crypto::scheme::SchemeId;
 
     fn addr(b: u8) -> Address {
         Address([b; 32])
@@ -596,7 +604,7 @@ mod tests {
     // profile
     // ---------------------------------------------------------------------
 
-    /// BLG-0161 (P07-F16): a fork lands only on a version the adapter
+    /// A fork lands only on a version the adapter
     /// accepts, and a policy whose every window has sunset cannot serve.
     #[test]
     fn a_fork_only_lands_on_a_version_the_adapter_accepts() {
@@ -660,12 +668,14 @@ mod tests {
             last_accepted_height: Some(99),
             last_verified_at: Some(50),
             last_backing: Some(SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
                 signers: 400,
                 required: 342,
                 total_weight: 512,
                 slashable: false,
             }),
             history: Vec::new(),
+            crypto_facts: CryptoFacts::new(),
         };
         let p = profile_of(&record);
         assert_eq!(p.bond_atoms, 1_000);
@@ -709,6 +719,7 @@ mod tests {
             last_verified_at: None,
             last_backing: None,
             history: Vec::new(),
+            crypto_facts: CryptoFacts::new(),
         };
         let p = profile_of(&record);
         assert_eq!(
@@ -838,7 +849,7 @@ mod tests {
         );
     }
 
-    /// BLG-0141 (P06-F13): the reward is paid out of the slashed bond, so a
+    /// The reward is paid out of the slashed bond, so a
     /// floor larger than the slash is capped at the slash.
     #[test]
     fn a_challenge_reward_never_exceeds_what_was_slashed() {
@@ -979,6 +990,90 @@ mod tests {
         }
     }
 
+    /// the Ethereum adapter names the one scheme it verified, and a
+    /// refused update names nothing.
+    #[test]
+    fn the_ethereum_adapter_reports_bls_and_only_for_accepted_updates() {
+        use crate::crypto::facts::QuantumClass;
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(StrictTestBls)),
+        );
+        let evidence = sync_evidence(&adapter, 64, 128, 0);
+        let mut facts = CryptoFacts::new();
+        adapter
+            .verify_observed(&evidence, &VerificationPolicy::strict(1_000), &mut facts)
+            .expect("a well-formed update verifies");
+        assert_eq!(
+            facts.count(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG)),
+            1
+        );
+        assert_eq!(facts.observed().len(), 1);
+        assert_eq!(facts.quantum_class(), Some(QuantumClass::Classical));
+
+        let mut shallow = VerificationPolicy::strict(1_000);
+        shallow.min_depth = 10_000;
+        let mut refused = CryptoFacts::new();
+        assert!(adapter
+            .verify_observed(&evidence, &shallow, &mut refused)
+            .is_err());
+        assert!(refused.is_empty());
+    }
+
+    /// a proof system names its assumption; a signature set names its
+    /// scheme; a backing with neither names nothing.
+    #[test]
+    fn backings_and_proof_systems_name_their_assumptions() {
+        use crate::crypto::facts::{AssumptionClass, QuantumClass};
+        assert_eq!(
+            ProofSystem::Groth16.assumption_class(),
+            AssumptionClass::ClassicalPairing
+        );
+        assert_eq!(
+            ProofSystem::Plonk.assumption_class(),
+            AssumptionClass::ClassicalPairing
+        );
+        assert_eq!(ProofSystem::Stark.assumption_class(), AssumptionClass::Hash);
+        assert_eq!(
+            ProofSystem::BudlumZkVm.assumption_class(),
+            AssumptionClass::Hash
+        );
+        let zk = SecurityBacking::Zk {
+            system: ProofSystem::BudlumZkVm,
+            public_inputs_digest: [0; 32],
+        };
+        assert_eq!(
+            zk.observed_scheme().map(ObservedScheme::quantum_class),
+            Some(QuantumClass::Hash)
+        );
+        let pairing = SecurityBacking::Zk {
+            system: ProofSystem::Groth16,
+            public_inputs_digest: [0; 32],
+        };
+        assert_eq!(
+            pairing.observed_scheme().map(ObservedScheme::quantum_class),
+            Some(QuantumClass::Classical)
+        );
+        let set = SecurityBacking::SignatureSet {
+            scheme: ObservedScheme::Secp256k1,
+            signers: 1,
+            required: 1,
+            total_weight: 1,
+            slashable: true,
+        };
+        assert_eq!(set.observed_scheme(), Some(ObservedScheme::Secp256k1));
+        assert_eq!(SecurityBacking::None.observed_scheme(), None);
+        assert_eq!(
+            SecurityBacking::Authority { count: 3 }.observed_scheme(),
+            None
+        );
+        assert_eq!(
+            SecurityBacking::Work { difficulty_bits: 1 }.observed_scheme(),
+            None
+        );
+    }
+
     #[test]
     fn a_participation_one_short_of_the_threshold_is_refused() {
         let adapter = EthereumSyncAdapter::new(
@@ -1106,7 +1201,7 @@ mod tests {
 
     /// Builds a well-formed evidence sample for the sync adapter.
     /// The committee the sync tests pin: matches `sync_evidence`'s payload
-    /// key and period (BLG-0130/P06-F01).
+    /// key and period.
     fn test_committee() -> crate::cross_domain::external::ethereum::PinnedCommittee {
         crate::cross_domain::external::ethereum::PinnedCommittee {
             period: 0,
@@ -1135,7 +1230,7 @@ mod tests {
         let descriptor = adapter.descriptor();
         RawConsensusEvidence {
             adapter: descriptor.id,
-            // BLG-0131 (P06-F02): the ethereum-sync evidence format is v2.
+            // The ethereum-sync evidence format is v2.
             evidence_version: 2,
             network: "testnet".to_string(),
             payload: payload.clone(),

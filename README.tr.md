@@ -1,19 +1,20 @@
 ![Budlum](assets/budlum-konsensuslerin-konsensusu.png)
 
-Budlum veri egemenliğine ve toplumsal yeşermeye odaklanmış internetin bir sonraki katmanıdır.
+Budlum, veri egemenliğine ve toplumsal yeşermeye odaklanmış, internetin bir sonraki katmanıdır.
 
-Budlum, izin gerektirmeyen bir Evrensel Uzlaşma Katmanıdır. Diğer zincirlerle yarışmaz, onları *uzlaştırır*.
+Budlum, konsensüslerin konsensüsüdür.
+
+Her ağ kendi kurallarını korur. Budlum, bu ağların kesinliğini tek bir kanıtta birleştirir.
+
 PoW, PoS, PoA, BFT ve ZK alanlarının her biri kendi konsensüsünü korur; Budlum bu alanların
 kesinlik kanıtlarını doğrular ve alanlar arası değer transferini tek bir `GlobalBlockHeader`
 üzerinde kriptografik bir olgu olarak kaydeder. Veri, anahtar ve hesaplama egemenliği
-katılımcılarda kalır.
-
-Evrensel Uzlaşma Katmanı, birbirinden farklı ağların altındaki ortak zemindir: bir olguyu
-hangi konsensüsün ürettiğini sormaz, yalnızca o olgunun kesinlik kanıtının geçerli olup
-olmadığını sorar. Böylece değer, bir aracıya güvenmeden alanlar arasında hareket eder.
+katılımcılarda kalır: katman, bir olguyu hangi konsensüsün ürettiğini değil, o olgu için
+hangi kesinlik kanıtının geçerli olduğunu sorar. Böylece değer, bir aracıya güvenmeden
+alanlar arasında hareket eder.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-3863%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-4358%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -53,7 +54,7 @@ olmadığını sorar. Böylece değer, bir aracıya güvenmeden alanlar arasınd
 | --- | --- |
 | **Parçalanma.** Binlerce yalıtılmış zincir; her birinin kendi kesinliği var, hiçbiri diğerininkini doğrulayamıyor. | *Herhangi* bir alanın kesinlik kanıtını doğrulayan ve sonucu tek bir küresel başlığa kaydeden bir uzlaşma katmanı. |
 | **Köprü riski.** Emanetçi ve çoklu imza köprüleri milyarlarca dolar kaybettirdi; arızalar neredeyse her zaman eksik doğrulamadan kaynaklandı, kırık kriptografiden değil. | Her mint işleminin sınırlı bir kanıtı yeniden hesapladığı ve alacak yazmadan önce yük özetini `(asset_id, amount)` değerlerinden yeniden türettiği bir `lock -> mint -> burn -> unlock` yaşam döngüsü. |
-| **Kuantum ufku.** Ed25519 ve ECDSA'nın, bugün başlatılan bir zincirin ömrü içinde kırılabilir olması bekleniyor. | Melez kesinlik: BLS12-381 toplu imzaların yanında kuantum sonrası bir şema (varsayılan ML-DSA-65 - FIPS 204 NIST nihai; eski Dilithium5 yalnızca göç için mevcut). |
+| **Kuantum ufku.** Ed25519 ve ECDSA'nın, bugün başlatılan bir zincirin ömrü içinde kırılabilir olması bekleniyor. | Melez kesinlik: BLS12-381 toplu imzaların yanında kuantum sonrası bir şema (varsayılan ML-DSA-65 - FIPS 204 NIST nihai; eski Dilithium5 yalnızca göç için mevcut). <!-- claim:L-FINALITY-01 --> |
 | **Kullanıcı verisinin operatör emanetinde olması.** Depolaması, RPC'si ve çıkarımı tek bir şirkette sonlanan "merkeziyetsiz" ağlar. | Yönetici anahtarı yok, duraklatma kancası yok, beyaz liste yok. Depolama, RPC ve yapay zeka uç noktaları herhangi bir düğümde çalışır; katılım izinle değil, teminatla kapılanır. |
 | **Doğrulanamayan zincir dışı hesaplama.** Arkasında hiçbir şey olmadan olgu diye sunulan yapay zeka çıktısı. | Yürütmenin STARK kanıtlarını üreten, ağaç içi bir zkVM (BudZero). Çıkarım kanıtı *doğrulaması* henüz etkin değildir; işlem yolu doğrulanmamış bir sonuca güvenmek yerine [kapalı biçimde başarısız olur](docs/AI_VERIFICATION_STATUS.md). |
 
@@ -262,7 +263,6 @@ cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push   # fmt + clippy, s
 | Özellik | Varsayılan | Etki |
 | --- | --- | --- |
 | `pq-ml-dsa` | Açık | FIPS 204 ML-DSA (NIST nihai) - ML-DSA-65 doğrulayıcı imzaları (`ml-dsa`). Şema genesis içine yazılır; derlemesi zincirle çelişen bir düğüm başlamayı reddeder |
-| `pq-dilithium` | - | Eski Dilithium5 (tur 3, NIST nihai öncesi) imzaları (`pqcrypto-dilithium`). Yalnızca göç için tutulur, varsayılan değildir |
 | `p2p-mdns` | - | Yalnızca devnet için yerel eş keşfi. mDNS uyarıları erişilemez kalsın diye sürüm derlemelerinden bilerek çıkarılmıştır |
 
 `cargo build --all-features` komutunun **başarısız olması beklenir**: PQ arka uçları
@@ -299,6 +299,23 @@ Profiller [`config/`](config) altında yaşar: [`devnet.toml`](config/devnet.tom
 tutucudur ve kapalı biçimde başarısız olan bir koruma bunları reddeder. Böylece kimse
 bir tören dosyasına karşı yanlışlıkla "ana ağ" başlatamaz.
 
+### Testnet
+
+Testnet, ana ağın provasıdır: aynı kod yolu, aynı arz kuralları ve aynı
+doğrulayıcı töreni. Yalnızca profil, genesis ve parametre değerleri farklıdır.
+Zincir kimliği `45261`, ağ imzası `BDLT`. Özet:
+
+- Cüzdan: `bud wallet create` (ML-DSA-87, 24 kelime).
+- BUD almak: musluk adres başına günde 100 BUD verir.
+- Doğrulayıcı olmak: en az 1.000 BUD teminat, bkz.
+  [docs/VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md).
+- Delegasyon: `bud delegate`, bkz. [docs/DELEGATION.md](docs/DELEGATION.md).
+- Düğüm: `budlum-core --config config/testnet.toml`.
+
+Uç noktalar, parametreler ve yerel prova için bkz.
+[docs/TESTNET.md](docs/TESTNET.md); ana ağ öncesi kapılar için
+[docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
+
 ### Düğüm rolleri
 
 `--role` bir düğümün hangi profille çalışacağını seçer: `validator`, `sentry`, `seed`,
@@ -309,7 +326,7 @@ tutar ve hiçbir açık dinleyici açmaz.
 
 > [!IMPORTANT]
 > **Ana ağ doğrulayıcıları PKCS#11 üzerinden imzalamak zorundadır.** Diske dayalı
-> `ValidatorKeys`, yani bir dosyada duran BLS ve kuantum sonrası malzeme, ana ağ
+> `ValidatorKeys`, yani bir dosyada duran BLS ve ML-DSA anahtar malzemesi, ana ağ
 > profilinde reddedilir. Bu bir tavsiye değildir; düğüm başlamayı reddeder.
 
 ### İşletme
@@ -439,8 +456,11 @@ depoda hiçbir yerde "denetlenmiş" iddiası yapılmaz.
 
 ## Proje durumu
 
+**Kuantum güvenliği, güncel basamak (İ-0):** Budlum kuantum tehdidine eksiksiz bir planla yaklaşır. Her katmanın tanımlı bir çözümü, ölçütü ve tamamlanma kapısı vardır. Budlum cüzdan çekirdeği bugün NIST FIPS 204 ML-DSA-87 ile imza atar. <!-- claim:S-I0 -->
+İddiaların kaydı, her birinin kanıtı ve hangi basamağı gerektirdiği [`docs/pq/CLAIMS.md`](docs/pq/CLAIMS.md) dosyasındadır; yalnızca ulaşılan basamağın cümlesi kullanılır.
+
 **Uygulanmış ve test edilmiş:** Evrensel Uzlaşma Katmanı üzerinde heterojen konsensüs
-(PoW/PoS/PoA/BFT) · BLS + kuantum sonrası melez kesinlik · alan kayıt defteri ve kesinlik
+(PoW/PoS/PoA/BFT) · BLS + kuantum sonrası melez kesinlik <!-- claim:L-FINALITY-01 --> · alan kayıt defteri ve kesinlik
 adaptörleri · sahtecilik kapılarıyla alanlar arası köprü yaşam döngüsü · kesinti ve
 çözülme ile izinsiz teminat kayıt defteri · STARK kanıtlamalı ağaç içi BudZKVM · anlaşma ve
 meydan okuma ekonomisiyle B.U.D. depolama · BNS `.bud` adları · Pollen veri pazarı ·

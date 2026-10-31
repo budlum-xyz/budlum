@@ -3,7 +3,7 @@
 //!
 //! Remaining work item #15: secure deduplication over encrypted content. Full
 //! FHE (homomorphic search over the ciphertext) is long term; THIS layer WRAPS
-//! the proven pattern of K20: convergent encryption (a content-derived key)
+//! the proven pattern of: convergent encryption (a content-derived key)
 //! plus a PoW ownership proof. Identical encrypted content deduplicates
 //! SAFELY, and different content never collides. Side-channel note (F253):
 //! verification is timed by the PoW.
@@ -37,7 +37,7 @@ pub fn cipher_content_id(data: &[u8], key: &[u8; 32]) -> [u8; 32] {
 
 /// The secure deduplication decision: the same identity makes a dedup
 /// candidate, verified by PoW.
-/// `pow_bits`: the ownership-proof difficulty (K20 - sybil/poison
+/// `pow_bits`: the ownership-proof difficulty (sybil/poison
 /// resistance).
 pub fn secure_dedup_candidate(data: &[u8], pow_bits: u32) -> Option<([u8; 32], bool)> {
     if data.is_empty() {
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn pow_challenge_integration() {
-        // Compatibility with the PowChallenge of K20: the same difficulty
+        // Compatibility with the PowChallenge of: the same difficulty
         // language.
         let ch = PowChallenge::new([0u8; 32], 8);
         assert_eq!(ch.difficulty, 8);

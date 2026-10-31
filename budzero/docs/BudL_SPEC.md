@@ -242,7 +242,7 @@ This list is the set of names the compiler actually knows. Sources:
 | `msg::sender() -> u64` | Syscall(imm=1) | The caller |
 | `msg::nonce() -> u64` | Syscall(imm=3) | The caller's nonce |
 | `block::number() -> u64` | Syscall(imm=2) | Block height |
-| `verify_merkle_proof(root, leaf, path) -> u64` | VerifyMerkle | 64-depth SMT, gated off on mainnet |
+| `verify_merkle_proof(path) -> u64` | VerifyMerkle | 64-depth SMT over 256-bit nodes. `path` is the constant address of a window of 265 words: key, leaf (4), 64 siblings (4 each), root (4). Gated off on mainnet |
 | `emit Event(...)` | Log | Event emission (a statement, not a function) |
 
 ### Planned, not there yet

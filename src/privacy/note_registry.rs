@@ -40,7 +40,7 @@ pub const MAX_SPENT_NULLIFIERS: usize = 262_144;
 /// admitted, the two views cannot disagree about what is spent.
 #[must_use]
 pub fn is_note_hash(h: &NoteHash) -> bool {
-    // BLG-0284 (P17-F18): both halves of the shape check now live behind one
+    // Both halves of the shape check now live behind one
     // fallible accessor in the crate that owns the packing, so admission and
     // the zkVM's `is_spent(u64)` view fold through the SAME checked path.
     budlum_note_packing::field_of_packed_hash(h).is_some()
@@ -50,7 +50,7 @@ pub fn is_note_hash(h: &NoteHash) -> bool {
 pub struct L1NoteRegistry {
     live_commitments: BTreeSet<NoteHash>,
     spent_nullifiers: BTreeSet<NoteHash>,
-    /// BLG-0058 (P03-F01, decision B): the spent *note* set, bound to the
+    /// The spent *note* set, bound to the
     /// commitment. A nullifier alone cannot close the loop while proofs are
     /// free inputs: one commitment yields a fresh nullifier per proof, so a
     /// spent commitment could be re-inserted and spent again. The commitment
@@ -76,6 +76,11 @@ impl L1NoteRegistry {
         self.spent_nullifiers.len()
     }
 
+    #[must_use]
+    pub fn spent_commitment_count(&self) -> usize {
+        self.spent_commitments.len()
+    }
+
     pub fn contains_commitment(&self, c: &NoteHash) -> bool {
         self.live_commitments.contains(c)
     }
@@ -84,7 +89,7 @@ impl L1NoteRegistry {
         self.spent_nullifiers.contains(n)
     }
 
-    /// BLG-0058: has this *note* been spent already? The chain-internal
+    /// Has this *note* been spent already? The chain-internal
     /// filter (decision A) that stops resurrection.
     ///
     /// WIRING: the spent-note half of the double-spend pair, exposed
@@ -100,7 +105,7 @@ impl L1NoteRegistry {
         if self.live_commitments.contains(&commitment) {
             return Err("note commitment already live".into());
         }
-        // BLG-0058: a spent note cannot be resurrected. Without this check a
+        // A spent note cannot be resurrected. Without this check a
         // PrivacyNoteInsert revived the commitment and a fresh proof minted a
         // fresh nullifier, letting the same note be spent again.
         if self.is_commitment_spent(&commitment) {
@@ -135,7 +140,7 @@ impl L1NoteRegistry {
         if spent_commitments.len() != nullifiers.len() {
             return Err("spent_commitments/nullifiers length mismatch".into());
         }
-        // BLG-0058 (decision C): the binding check is not optional. Without
+        // (decision C): the binding check is not optional. Without
         // proofs the nullifier is a free input and a commitment could be
         // spent once per proof; the legacy no-binding path is gone.
         if nullifier_proofs.len() != nullifiers.len() {
@@ -267,7 +272,7 @@ impl L1NoteRegistry {
         for n in &self.spent_nullifiers {
             h.update(n);
         }
-        // BLG-0058: the spent note set is consensus state and must commit.
+        // The spent note set is consensus state and must commit.
         h.update((self.spent_commitments.len() as u64).to_le_bytes());
         for c in &self.spent_commitments {
             h.update(c);
@@ -277,7 +282,7 @@ impl L1NoteRegistry {
 
     /// Derive nullifier from commitment and proof.
     ///
-    /// BLG-0061 (P03-F04): the result is a *packed note hash* - a canonical
+    /// The result is a *packed note hash* - a canonical
     /// Goldilocks element in the low eight bytes and zeros above - because a
     /// raw SHA-256 output fails `is_note_hash` and every derived nullifier
     /// would be refused at the transaction boundary. The digest is reduced
@@ -319,7 +324,7 @@ impl L1NoteRegistry {
 mod tests {
     use super::*;
 
-    /// BLG-0061: a derived nullifier must be note-shaped or the transaction
+    /// A derived nullifier must be note-shaped or the transaction
     /// boundary (is_note_hash) would refuse every proof-bound transfer.
     #[test]
     fn derived_nullifiers_are_note_shaped() {
@@ -382,7 +387,7 @@ mod tests {
         );
 
         // And the note cannot be spent twice, which is the guarantee that
-        // silently disappears if the two packings drift apart. BLG-0058: the
+        // silently disappears if the two packings drift apart.: the
         // spent *commitment* is refused even with a fresh proof and a fresh
         // nullifier.
         let second = budlum_note_packing::hash_from_field(0x9900_AABB_CCDD_EEFF);

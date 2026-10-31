@@ -76,7 +76,7 @@ impl DomainLifecycleState {
         }
     }
 
-    fn tag(&self) -> u8 {
+    pub(crate) fn tag(&self) -> u8 {
         match self {
             Self::Draft => 1,
             Self::Active => 2,

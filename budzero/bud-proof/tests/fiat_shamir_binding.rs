@@ -119,9 +119,10 @@ fn both_sides_absorb_the_same_items_before_the_first_challenge() {
 
     // `security_parameters` is in this list for the same reason the others
     // are, and it was the last one missing. The FRI parameters decide the
-    // soundness error and the grinding cost: measured, the current set is
-    // roughly 316 bits, and `num_queries = 1` with `log_blowup = 1` and no
-    // grinding is one bit and produces a proof of the same shape. Least
+    // soundness error and the grinding cost: `stark-soundness` computes the
+    // current set at 128 bits or more provable, and `num_queries = 1` with
+    // `log_blowup = 1` and no grinding is one bit and produces a proof of the
+    // same shape. Least
     // Authority's Plonky3 audit found exactly this, a challenger that absorbed
     // neither the FRI config nor the degree. Our degrees were already here.
     for item in [

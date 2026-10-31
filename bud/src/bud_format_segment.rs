@@ -1,13 +1,13 @@
 //! B.U.D. 2.0 - Segment Ledger (the segmented chain storage pattern)
 //!
-//! K88-1: the segment storage pattern for the chain core - 64MB segments,
+//! -1: the segment storage pattern for the chain core - 64MB segments,
 //! `len(4) + data + crc32(4)` records, and a corrupt record REFUSED on a CRC
-//! mismatch. The B.U.D. version: SHA3-256 integrity (stronger than CRC32 - K38),
+//! mismatch. The B.U.D. version: SHA3-256 integrity (stronger than CRC32 -),
 //! a length prefix, bomb protection (the segment ceiling), deterministic.
 //!
 //! This module is the core of storing .bud records (production proofs, PACTs,
 //! regeneration challenges, checkpoints) ON CHAIN as segments: an append-only
-//! ledger (the I1 PACT record plus the K89 blockchain integration).
+//! ledger (the I1 PACT record plus the blockchain integration).
 //!
 //! Kod: `#![forbid(unsafe_code)]`, panik'siz.
 
@@ -56,7 +56,7 @@ impl SegmentLedger {
         Some(self.total_bytes)
     }
 
-    /// Record integrity: verify the digest (K38).
+    /// Record integrity: verify the digest.
     pub fn verify_entry(data: &[u8], digest: &[u8; 32]) -> bool {
         Self::entry_digest(data) == *digest
     }

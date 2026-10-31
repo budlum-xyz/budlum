@@ -14,7 +14,7 @@
 //!
 //! Two modes:
 //! - **Exact**: columns follow the original record order -> decode returns the original JSON exactly
-//!   (K38: `decode(encode(d)) == d`). Key order is preserved through preserve_order.
+//!   (`decode(encode(d)) == d`). Key order is preserved through preserve_order.
 //! - **OrderFree**: records are sorted deterministically (numeric comparison on numeric
 //!   columns) -> the ratio improves; decode reproduces the record SET exactly, the order may change
 //!   (KF2: the data is preserved, order is a formatting matter).
@@ -40,7 +40,7 @@ const MAX_KEY_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnarMode {
-    Exact = 0,     // byte-identical (K38)
+    Exact = 0,     // byte-identical
     OrderFree = 1, // the record set is preserved (KF2), higher ratio
 }
 
@@ -363,7 +363,7 @@ pub fn columnar_to_blob(col: &JsonColumnar) -> Option<Vec<u8>> {
             }
         }
     }
-    // K38 integrity: a domain-tagged SHA3-256 digest (tamper detection, the K3 pattern)
+    // integrity: a domain-tagged SHA3-256 digest (tamper detection, the pattern)
     use sha3::{Digest, Sha3_256};
     let mut h = Sha3_256::new();
     h.update(b"BDLM_BUD_COLUMNAR_V1");
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn exact_roundtrip_byte_identical() {
-        // K38: in Exact mode decode(encode(d)) == d (byte for byte) - with typed columns
+        // In Exact mode decode(encode(d)) == d (byte for byte) - with typed columns
         let d = sample_json();
         let col = columnar_encode(&d, ColumnarMode::Exact).expect("regular JSON encodes");
         let back = columnar_decode(&col).expect("decode");
@@ -746,7 +746,7 @@ mod tests {
 
     #[test]
     fn blob_never_panics_on_arbitrary() {
-        // K38: from_blob is panic free on random bytes (it returns None)
+        // From_blob is panic free on random bytes (it returns None)
         struct Rng(u64);
         impl Rng {
             fn next(&mut self) -> u64 {
@@ -832,7 +832,7 @@ mod tests {
 
     #[test]
     fn numeric_columns_are_typed() {
-        // K38: numeric JSON values are stored as U64/I64/F64 in the column (binary)
+        // Numeric JSON values are stored as U64/I64/F64 in the column (binary)
         let d = br#"[{"a":1,"b":-5,"c":2.5,"d":true,"e":"x"}]"#;
         let col = columnar_encode(d, ColumnarMode::Exact).unwrap();
         assert_eq!(col.col_types[0], ColType::U64);

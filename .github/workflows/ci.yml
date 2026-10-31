@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    # Run on the normal protected bases and on stacked continuation bases.
+    # `arena/**` covers this repository's generated continuation branches;
+    # `consensus-of-consensuses` keeps upstream stack covered.
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, 'arena/**']
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -179,8 +182,19 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
+      - name: Public service admission tests
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          cargo test --bin budlum-faucet --bin budlum-indexer 2>&1 | tee /tmp/public-service-tests.log
+          for name in direct_and_proxy_modes_are_explicit_and_fail_closed a_partial_request_body_times_out incomplete_headers_expire_and_release_a_connection_slot; do
+            grep -Eq "${name} \.\.\. ok" /tmp/public-service-tests.log || {
+              echo "::error::public service regression $name did not pass"
+              exit 1
+            }
+          done
   budlum-bpqs:
-    # P02-F04 (BLG-0040): crates/bpqs was a package no workflow tested - the
+    # Crates/bpqs was a package no workflow tested - the
     # fuzz target and a cargo-hack check were not a test gate. The research
     # line's KAT freeze, its quota counter and its verifier refusals all live
     # here, and a silent break in them is exactly what a gate exists for.
@@ -239,33 +253,22 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core-quality
-      - name: Feature canary - --all-features MUST BE REFUSED
+      # pq-dilithium took the mutually-exclusive pair with it (304cfe8): the
+      # remaining backends coexist, so --all-features MUST BUILD. A refusal
+      # here now means a feature broke, and a guard that no longer exists
+      # cannot be what refused it.
+      - name: "Feature canary - --all-features MUST BUILD"
         if: always() && steps.rust.outcome == 'success'
         run: |
           set -uo pipefail
-          # The canary asserts that `--all-features` is REFUSED. With stderr
-          # sent to /dev/null it asserted only that cargo exited non-zero, and
-          # cargo exits non-zero for a hundred reasons that have nothing to do
-          # with the guard: a syntax error, a missing protoc, an unresolved
-          # dependency. In every one of those states this step printed
-          # "Canary OK" - the guard could have been deleted and this gate would
-          # still have said it was there. The reason is read instead of
-          # discarded: the refusal must be the `compile_error!` in
-          # src/crypto/primitives.rs, by its own text.
-          set +e
           cargo check --all-features > /tmp/all-features.log 2>&1
           status=$?
-          set -e
-          if [ "$status" -eq 0 ]; then
-            echo "ERROR: --all-features compiled -> no compile_error guard (vacuous gate!)"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::--all-features failed to build - a feature combination is broken."
+            tail -n 30 /tmp/all-features.log | sed -e 's/^/::error::/'
             exit 1
           fi
-          if ! grep -q "mutually exclusive validator backends" /tmp/all-features.log; then
-            echo "::error::--all-features failed (exit $status) but NOT on the compile_error guard - this canary cannot tell a working guard from a broken build."
-            tail -n 20 /tmp/all-features.log | sed -e 's/^/::error::/'
-            exit 1
-          fi
-          echo "Canary OK: --all-features was refused with compile_error as expected (PQ backends are mutually exclusive)."
+          echo "Canary OK: --all-features builds (all validator backends coexist)."
       - name: cargo doc (Item 6 - public API documentation)
         if: always() && steps.rust.outcome == 'success'
         run: |
@@ -642,8 +645,8 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- guards-are-reachable 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       # `guards-are-reachable` covers the refusal-shaped subset. The rest of the
-      # public surface had no ratchet at all: docs/AUDIT-DEAD-PUB-API-2026-09-10.md
-      # measured what that costs and asked for this file, and a gate added here is
+      # public surface had no ratchet at all: measuring what that costs is what
+      # asked for this file, and a gate added here is
       # worthless if nothing runs it, which is the failure the comment above this
       # block was written about.
       - name: Dead public API canary
@@ -963,7 +966,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud-e2e /tmp/bud-e2e.txt
 
   economy-invariants:
-    # : EIP-1559 + reward-pool + committed-supply denominator locks.
+    # EIP-1559 + reward-pool + committed-supply denominator locks.
     # Name canary prevents a vacuous green if tests are renamed/deleted.
     name: Economy Invariants
     runs-on: ubuntu-latest
@@ -989,7 +992,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- economy-invariants /tmp/economy-invariants.txt
 
   fork-choice-gate:
-    # : per-domain fork-choice/lifecycle named tests.
+    # per-domain fork-choice/lifecycle named tests.
     # Name canary prevents a vacuous green if fork-choice tests are renamed/deleted.
     name: Fork-Choice Invariants
     runs-on: ubuntu-latest
@@ -1015,7 +1018,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- fork-choice /tmp/fork-choice-gate.txt
 
   storage-provider-gate:
-    # : StorageProvider trait + mock implementation named tests.
+    # StorageProvider trait + mock implementation named tests.
     name: StorageProvider Gate
     runs-on: ubuntu-latest
     steps:
@@ -1047,7 +1050,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-provider /tmp/storage-provider-gate.txt
 
   node-classification-gate:
-    # : full/archive node classification + pruning policy named tests.
+    # full/archive node classification + pruning policy named tests.
     # Name canary prevents a vacuous green if classification tests are renamed/deleted.
     name: Node Classification
     runs-on: ubuntu-latest
@@ -1073,7 +1076,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- node-classification /tmp/node-classification-gate.txt
 
   network-hardening-gate:
-    # : network hardening named tests.
+    # network hardening named tests.
     # Name canary prevents a vacuous green if H5/H11.12 tests are renamed/deleted.
     name: Network Hardening
     runs-on: ubuntu-latest
@@ -1131,7 +1134,7 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- serialize-map-keys-are-strings
 
   poa-compliance-gate:
-    # : MASAK/AML hooks are isolated to PoA domains only.
+    # MASAK/AML hooks are isolated to PoA domains only.
     name: PoA Compliance Isolation
     runs-on: ubuntu-latest
     steps:
@@ -1156,7 +1159,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- poa-compliance /tmp/poa-compliance-gate.txt
 
   governance-invariants:
-    # : minimal on-chain governance parameter whitelist + activation timelock.
+    # minimal on-chain governance parameter whitelist + activation timelock.
     name: Governance Invariants
     runs-on: ubuntu-latest
     steps:
@@ -1180,8 +1183,47 @@ jobs:
           cargo test --lib governance 2>&1 | tee /tmp/governance-invariants-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- governance-invariants /tmp/governance-invariants-gate.txt
 
+  pq-core:
+    # to and: the scheme registry, the dual-verifier facade (RustCrypto
+    # ml-dsa and libcrux-ml-dsa must both accept), the NIST ACVP and Wycheproof vectors,
+    # the explicit bug vectors, the composite signature and the seed wiping. The named
+    # tests are required (`pq-core-gate`); the differential test then runs a million
+    # inputs through both libraries in release.
+    name: PQ Core
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: PQ core gate self-test
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-core-gate --self-test
+      - name: PQ core tests
+        run: |
+          set -euo pipefail
+          cargo test --lib crypto:: 2>&1 | tee /tmp/pq-core-gate.txt
+          cargo test --lib pq_verifier_disagreement_is_exported 2>&1 | tee -a /tmp/pq-core-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-core-gate /tmp/pq-core-gate.txt
+      - name: Differential test, one million inputs through both ML-DSA libraries
+        run: |
+          set -euo pipefail
+          BUDLUM_PQ_DIFF_CASES=1000000 cargo test --release --manifest-path crates/wallet-core/Cargo.toml --lib pq_vectors_differential_random_inputs -- --nocapture
+      - name: Vectors in release (SLH-DSA-SHAKE-256s signing included)
+        run: |
+          set -euo pipefail
+          cargo test --release --manifest-path crates/wallet-core/Cargo.toml --lib pq_vectors_
+
   wallet-core-gate:
-    # : wallet-core multisig/social recovery primitives.
+    # wallet-core multisig/social recovery primitives.
     name: Wallet Core
     runs-on: ubuntu-latest
     steps:
@@ -1206,7 +1248,15 @@ jobs:
           cargo test --manifest-path crates/wallet-core/Cargo.toml --features wasm --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
           # The production feature is the build that reads OS entropy and signs hedged.
           cargo test --manifest-path crates/wallet-core/Cargo.toml --features production --lib
+          # the JSON-RPC bodies and readers.
+          cargo test --manifest-path crates/wallet-core/Cargo.toml --features rpc --lib rpc
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-core-gate /tmp/wallet-core-gate.txt
+      - name: wallet-core browser build (wasm32, BrowserWallet exports)
+        run: |
+          set -euo pipefail
+          rustup target add wasm32-unknown-unknown
+          cargo build --manifest-path crates/wallet-core/Cargo.toml --lib --release \
+            --target wasm32-unknown-unknown --features wasm
 
   # ============================ Budscan (web3 tarayici cekirdegi) ============================
   budscan:
@@ -1257,7 +1307,7 @@ jobs:
 
   # ============================ Standalone crates: bpqs and note-packing ============================
   standalone-crates:
-    # P58-F01: both crates carry their own lock file and are not members of the root
+    # Both crates carry their own lock file and are not members of the root
     # package, so `cargo test --lib` at the root never runs their tests. Without this
     # job a break in the note packing code or in the BPQS research line stays green.
     name: Standalone crates (bpqs, note-packing)
@@ -1374,7 +1424,7 @@ jobs:
           fi
 
   dependency-audit:
-    # : cargo audit + SBOM generation + SBOM artifact.
+    # cargo audit + SBOM generation + SBOM artifact.
     name: Dependency Audit + SBOM
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -1654,7 +1704,7 @@ jobs:
           retention-days: 30
 
   secret-scan:
-    # : secret scan over the FULL git history (fetch-depth: 0).
+    # secret scan over the FULL git history (fetch-depth: 0).
     # We use the gitleaks OSS binary: the official GitHub Action asks organisation
     # repos for GITLEAKS_LICENSE (an external registration); the binary runs the same engine
     # without a licence. Version + sha256 are pinned. Moving to the official action
@@ -1721,7 +1771,7 @@ jobs:
         run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose
 
   timing-safe:
-    # : static scan for raw equality in RPC/crypto + dudect-style
+    # static scan for raw equality in RPC/crypto + dudect-style
     # Istatistiksel zamanlama regresyon testi (cargo bench).
     name: Timing-Safe Regression
     runs-on: ubuntu-latest
@@ -1827,12 +1877,18 @@ jobs:
           ignore-unfixed: false
 
   coverage:
-    # : nextest + llvm-cov, ratchet gate (Q-7b1(a)).
+    # nextest + llvm-cov, ratchet gate (Q-7b1(a)).
     # Baseline evidence 2026-07-17: lines 64.15% (14493/22594), 531/531 PASS.
     # Tools are version+sha256 pinned (nextest verified byte for byte against the official .sha256 asset).
     name: Coverage (nextest + llvm-cov, ratchet)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45 minutes used to be enough and stopped being enough without the suite
+    # getting slower: it got longer. The run on `7535554` was still walking the
+    # suite at 44 minutes (2383 of 4355 tests at 17 minutes, plus the instrumented
+    # build, plus a single cold-quorum test that took over a minute), and the
+    # runner cancelled it at 45:00 - a green suite reported as a red gate. The
+    # budget is raised, the ratchet is untouched.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1896,7 +1952,7 @@ jobs:
           retention-days: 30
 
   repo-lint:
-    # : actionlint + buf + genesis schema (one combined static gate).
+    # actionlint + buf + genesis schema (one combined static gate).
     # Tools are version+sha256 pinned. buf breaking, when buf.yaml is present on main,
     # becomes active (the baseline is established with this wave - SKIP on the first run is an honest marker).
     # the zizmor workflow security lint also runs in this job (with canary, zero-finding policy).
@@ -2010,6 +2066,25 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-node-address-agree --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-node-address-agree
+      # no object is accepted on a classical signature alone. Every use of
+      # ed25519_dalek, schnorrkel, bls12_381, x25519 or libp2p::noise in production
+      # code needs an entry in docs/pq/classical_allowlist.toml. Count mode: the
+      # baseline only falls and is locked at zero when Phase 3 ends.
+      - name: classical crypto is paired gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- classical-crypto-is-paired --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- classical-crypto-is-paired
+      # INV-03: a scheme is named, never guessed from a length.
+      - name: scheme is never inferred gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- scheme-is-never-inferred --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- scheme-is-never-inferred
+      # every ML-DSA and SLH-DSA call carries a context from src/crypto/ctx.rs,
+      # and the library primitives are called only inside the facade.
+      - name: PQ contexts are bound gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-ctx-is-bound --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-ctx-is-bound
       # The tree is written in English. Turkish is allowed in exactly three
       # places: README.tr.md, a Turkish localisation directory whose strings are
       # what the Turkish user reads, and the word "Türkçe" as the label on the
@@ -2040,6 +2115,27 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes
+      # BudZero proofs are STARKs and rest on a hash only. A Groth16, KZG or
+      # BN254 crate in any manifest, or a verifier arm for the external labels,
+      # would put a pairing assumption on a verification path.
+      - name: no pairing-based SNARK on a verification path + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-pairing-snark-in-verification-path --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-pairing-snark-in-verification-path
+      # INV-12: a function named like a security verdict whose whole body is a
+      # literal tells the reader a question was asked and answered when nothing
+      # was checked.
+      - name: no constant security verdicts + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-constant-security-verdicts --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-constant-security-verdicts
+      # INV-11: a quantum statement in a README or in docs/ carries a claim id from
+      # docs/pq/CLAIMS.md, the claim's evidence exists, and the claim has reached
+      # its rung. Nothing stands in the repository that the register does not back.
+      - name: quantum claims are backed + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-claims-are-backed --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-claims-are-backed
       # A fuzz target only fuzzes if three files agree: the harness, the
       # [[bin]] in fuzz/Cargo.toml, and a workflow that runs it. If one of the
       # three is missing the target appears in the list and does nothing.
@@ -2094,8 +2190,8 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- cross-table-checks-use-last-row
       # The Fiat-Shamir transcript carried the degrees, the commitments and the
       # public values, but not the FRI parameters, and those decide what a
-      # proof is worth: measured, log_blowup 3 with 100 queries and 16 grinding
-      # bits is roughly 316 bits, while 1 query with log_blowup 1 and no
+      # proof is worth: the stark-soundness tool puts the current set at 128 bits
+      # or more provable, while 1 query with log_blowup 1 and no
       # grinding is one bit and produces a proof of the same shape. Least
       # Authority found this exact class in Plonky3. Absorbing them is half the
       # fix; the other half is that the absorbed numbers must be read out of
@@ -2105,6 +2201,35 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-parameters-are-derived --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-parameters-are-derived
+      # the measured soundness of the configuration. The generated section of
+      # docs/pq/MEASUREMENTS.md must be the one computed from build_config, and the
+      # provable reading (no assumption) must reach 128 bits.
+      - name: is the STARK provably 128 bit and the measurement current + canary
+        run: |
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- stark-soundness --self-test
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- stark-soundness --check
+      # `pq-measure --timings` builds examples/pq_measure.rs, and that is the
+      # node library, whose build script compiles proto/budlum/network/protocol.proto.
+      # Every other job that builds the library installs protoc first; this one
+      # did not, because until the steps above stopped failing no run had ever
+      # reached this step. It failed with `Could not find protoc` from build.rs.
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # the size, QC blob and daily traffic tables of docs/pq/MEASUREMENTS.md come
+      # from the node library (examples/pq_measure.rs) and must be current. The timings
+      # depend on the machine: they are produced here and uploaded, never compared.
+      - name: are the post-quantum measurement tables current + timings artifact
+        run: |
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- pq-measure --self-test
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- pq-measure --check
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- propagation-sim --check
+          mkdir -p pq-measure-out
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- pq-measure --timings | tee pq-measure-out/timings.md
+      - name: upload the post-quantum timings
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pq-measure-timings
+          path: pq-measure-out/timings.md
       # A transition constrains the difference between consecutive rows and
       # never says where the sequence starts. COL_EVENT_DIGEST_0 had only a
       # transition and a last-row comparison, so the whole accumulator could
@@ -2184,7 +2309,8 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size
       # Two entry points take a manifest an untrusted caller built.
-      # `RegisterStorageManifest` ran `validate_untrusted`; `open_deal` ran
+      # Registration (now the `StorageTx::RegisterManifest` door) ran
+      # `validate_untrusted`; `open_deal` ran
       # `verify_id` and stopped, and it is the path that also takes the payer's
       # money. `verify_id` proves the id derives from the fields present, not
       # that they agree: `manifest_id` covers k and n, so three data shards

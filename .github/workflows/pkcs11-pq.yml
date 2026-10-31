@@ -1,0 +1,86 @@
+name: PKCS#11 3.2 post-quantum token
+
+# the anchor and Root Seal keys sign through the PKCS#11 3.2
+# standard mechanisms (CKM_ML_DSA, CKM_SLH_DSA). CI has no HSM, so it runs a
+# software token with 3.2 support (kryoptic, built against OpenSSL 3.5 with
+# the `pqc` feature). The token is a test fixture only: mainnet refuses a
+# software token (src/crypto/mainnet_policy.rs).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
+
+concurrency:
+  group: pkcs11-pq-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  KRYOPTIC_REF: v1.5.4
+  OPENSSL_REF: openssl-3.5.0
+
+jobs:
+  kryoptic-pq-token:
+    name: Software token with PKCS#11 3.2 (kryoptic)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq protobuf-compiler clang libclang-dev libsqlite3-dev perl
+      - name: Fetch OpenSSL and kryoptic sources
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$OPENSSL_REF" https://github.com/openssl/openssl.git "$RUNNER_TEMP/openssl"
+          git clone --depth 1 --branch "$KRYOPTIC_REF" https://github.com/latchset/kryoptic.git "$RUNNER_TEMP/kryoptic"
+      - name: Build kryoptic with ML-DSA and SLH-DSA (static OpenSSL 3.5)
+        env:
+          KRYOPTIC_OPENSSL_SOURCES: ${{ runner.temp }}/openssl
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/kryoptic"
+          # The workspace disables ossl's default features. With defaults off,
+          # `standard,pqc` alone selects no OpenSSL backend at all: ossl's
+          # build script receives no version metadata and aborts. Explicitly
+          # enable the static-source ossl-sys backend; `dynamic` would instead
+          # use the runner's system OpenSSL, which may not support ML-DSA.
+          cargo build --release -p kryoptic --no-default-features --features standard,pqc,ossl/ossl-sys
+          test -f target/release/libkryoptic_pkcs11.so
+      - name: Token configuration
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/kryoptic.conf" <<CONF
+          [[slots]]
+          slot = 1
+          dbtype = "sqlite"
+          dbargs = "$RUNNER_TEMP/token.sql"
+          CONF
+          echo "KRYOPTIC_CONF=$RUNNER_TEMP/kryoptic.conf" >> "$GITHUB_ENV"
+          echo "BUDLUM_PKCS11_32_MODULE=$RUNNER_TEMP/kryoptic/target/release/libkryoptic_pkcs11.so" >> "$GITHUB_ENV"
+      - name: PKCS#11 3.2 post-quantum signing test
+        run: |
+          set -euo pipefail
+          test -f "$BUDLUM_PKCS11_32_MODULE"
+          cargo test --lib --release pkcs11_pq_tests -- --nocapture --test-threads=1 2>&1 | tee /tmp/pkcs11-pq.txt
+          # The test returns early when the module variable is unset; the job
+          # must prove it really ran against the token.
+          if grep -q "did not run" /tmp/pkcs11-pq.txt; then
+            echo "the token test did not run" >&2
+            exit 1
+          fi
+          grep -q "test result: ok. 1 passed" /tmp/pkcs11-pq.txt

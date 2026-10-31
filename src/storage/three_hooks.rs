@@ -1,4 +1,4 @@
-//! G5 - revoke / social event hooks (plan §CH G5).
+//! G5 - revoke / social event hooks.
 //!
 //! The chain already revokes grants (`ViewGrantRegistry`). Product surfaces
 //! (DM delete, social fi, UI toast) need a **callback** when revoke happens so

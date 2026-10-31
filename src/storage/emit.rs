@@ -856,7 +856,7 @@ pub fn qr_feed_preview(
     // is still nobody's plaintext, and the visibility enforcement below reads
     // this rather than asking a client to seal the same bytes twice.
     //
-    // The claim alone is not enough (P28-F02): the supplied body has to be the
+    // The claim alone is not enough: the supplied body has to be the
     // bytes that manifest describes, or any caller could attach a client-side
     // encryption claim to plaintext and have the guard below switched off.
     let declared_ciphertext =
@@ -871,7 +871,7 @@ pub fn qr_feed_preview(
         });
     }
     // The manifest checks, including the regeneration of a recipe body, run
-    // before the encode is paid for (P28-F04): a refusal there costs no encode.
+    // before the encode is paid for: a refusal there costs no encode.
     let mut regenerated_len = None;
     let mut seed_is_public = false;
     if let Some(manifest) = manifest {
@@ -1303,7 +1303,7 @@ pub fn qr_feed_preview(
         (receipt.content_id, receipt.provider_commitment)
     } else {
         // Without a manifest the object a publish stores is the container the
-        // carousel carries, so that is the id reported (P28-F03). A clear-body
+        // carousel carries, so that is the id reported. A clear-body
         // container of the caller's bytes is not what any publish of this feed
         // produces, and for a sealed feed it would be a hash of the plaintext.
         (ContentId::of(&pipe.packed), [0u8; 32])
@@ -1470,7 +1470,7 @@ pub fn qr_feed_frames_burst(
             limit: policy.max_burst_frames,
         });
     }
-    // The A9 budget applies to a burst as it does to a preview (P28-F04): a
+    // The A9 budget applies to a burst as it does to a preview: a
     // burst re-encodes the whole body, so it is metered for the pack, the
     // drops it plans and the seal before the encode is paid for.
     let mut meter = ThreeMeter::with_budget(policy.meter_budget);
@@ -1637,7 +1637,7 @@ mod tests {
         assert!(p.a4_agreement);
     }
 
-    /// P28-F02: a client-side encryption claim over a body that is not the
+    /// A client-side encryption claim over a body that is not the
     /// manifest's bytes does not switch the unsealed-gated guard off.
     #[test]
     fn a_ciphertext_claim_over_a_foreign_body_is_still_unsealed_gated() {
@@ -1660,7 +1660,7 @@ mod tests {
         ));
     }
 
-    /// P28-F03: without a manifest the reported id is the id of the container
+    /// Without a manifest the reported id is the id of the container
     /// the feed carries.
     #[test]
     fn a_manifestless_preview_reports_the_id_of_the_carried_container() {
@@ -1674,7 +1674,7 @@ mod tests {
         assert_ne!(p.content_id, ContentId::of(&plain_container));
     }
 
-    /// P28-F04: a burst is metered like a preview, so a budget too small for
+    /// A burst is metered like a preview, so a budget too small for
     /// the planned drops refuses it before the encode.
     #[test]
     fn a_burst_is_metered() {

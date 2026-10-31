@@ -37,10 +37,10 @@ mod tests {
         );
 
         // A chain launched with the other backend must be refused outright.
-        let other = if PQ_SCHEME_ID == "dilithium5" {
+        let other = if PQ_SCHEME_ID == "ml-dsa-87" {
             "ml-dsa-65"
         } else {
-            "dilithium5"
+            "ml-dsa-87"
         };
         cfg.pq_scheme = Some(other.to_string());
         let err = cfg
@@ -284,7 +284,7 @@ mod tests {
 /// A boundary committed before a restart is still a fork-choice anchor after
 /// it.
 ///
-/// Epoch boundaries stopped being written at commit time (P01-F04: a local
+/// Epoch boundaries stopped being written at commit time (a local
 /// write split the net at a boundary two leaders raced), and were parked in an
 /// in-memory list instead. Nothing persisted or reloaded that list, and no
 /// startup path replays committed blocks through the engine, so a boundary

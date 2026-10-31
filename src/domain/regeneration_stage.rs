@@ -56,6 +56,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::pq_canonical::SealId;
+use crate::crypto::scheme::{SchemeFamily, SchemeId};
+
 /// The life stages a node's state can be in. Ordered: an earlier stage can be
 /// grown forward into a later one, and a later one can be reverted into an
 /// earlier one. Never the reverse.
@@ -122,6 +125,22 @@ pub struct StageSnapshot {
     /// Material carried forward from the stage being left. See
     /// [`Transdifferentiated`].
     pub carried: Transdifferentiated,
+    /// The seal the commitment rests on. A snapshot without a
+    /// seal, or whose seal has no post-quantum family behind it, is refused by
+    /// [`RegenerationLedger::revert`], `revert_after_forgery` and `grow`.
+    #[serde(default)]
+    pub seal: Option<SealId>,
+}
+
+impl StageSnapshot {
+    /// Whether the snapshot rests on a post-quantum seal that belongs to its
+    /// stage and height.
+    #[must_use]
+    pub fn is_pq_sealed(&self) -> bool {
+        self.seal
+            .as_ref()
+            .is_some_and(|seal| seal.anchors(self.stage, self.height))
+    }
 }
 
 /// Material reclassified rather than discarded.
@@ -146,6 +165,88 @@ pub struct Transdifferentiated {
     pub proofs_discarded: u64,
     /// Registry and domain records re-filed under the earlier stage.
     pub records_refiled: u64,
+    /// Classical-family proofs about heights at or below the target. They are
+    /// not reusable: their soundness rests on an assumption a quantum computer
+    /// breaks, so regeneration re-derives them from the post-quantum stage
+    /// instead of trusting them.
+    #[serde(default)]
+    pub proofs_classical_rederive: u64,
+}
+
+/// The assumption family of a stored proof, as far as reversion cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProofFamily {
+    /// Hash, lattice or STARK based: survives the fall of the classical
+    /// families.
+    PostQuantum,
+    /// Elliptic curve or pairing based.
+    Classical,
+}
+
+impl ProofFamily {
+    /// The family of the scheme a proof is signed or proven under. A scheme
+    /// the table does not list is classical: an unknown scheme earns no
+    /// trust.
+    #[must_use]
+    /// WIRING: the scheme-aware repair assessment consumes this - the production caller lands with the regen-health wiring.
+    pub fn of_scheme(scheme: SchemeId) -> Self {
+        match scheme.info().map(|info| info.family) {
+            Some(
+                SchemeFamily::Lattice
+                | SchemeFamily::Hash
+                | SchemeFamily::LatticeKem
+                | SchemeFamily::Stark,
+            ) => Self::PostQuantum,
+            _ => Self::Classical,
+        }
+    }
+}
+
+impl Transdifferentiated {
+    /// Sort the proofs a node holds for a reversion to `target_height`:
+    /// post-quantum proofs at or below it are reusable, classical ones at or
+    /// below it are marked for re-derivation and never reusable, anything
+    /// above it is discarded.
+    #[must_use]
+    pub fn classify(
+        target_height: u64,
+        proofs: &[(u64, ProofFamily)],
+        records_refiled: u64,
+    ) -> Self {
+        let mut carried = Self {
+            records_refiled,
+            ..Self::default()
+        };
+        for (height, family) in proofs {
+            if *height > target_height {
+                carried.proofs_discarded = carried.proofs_discarded.saturating_add(1);
+                continue;
+            }
+            match family {
+                ProofFamily::PostQuantum => {
+                    carried.proofs_reusable = carried.proofs_reusable.saturating_add(1);
+                }
+                ProofFamily::Classical => {
+                    carried.proofs_classical_rederive =
+                        carried.proofs_classical_rederive.saturating_add(1);
+                }
+            }
+        }
+        carried
+    }
+}
+
+/// Whether a proof may be used directly by the re-growth after a reversion to
+/// `ledger_height`: only a post-quantum proof about a height the ledger still
+/// holds. A classical proof is never used directly.
+#[must_use]
+/// WIRING: the repair verdict consumes this after a reversion - the production caller lands with the regen-health wiring.
+pub fn proof_usable_after_reversion(
+    family: ProofFamily,
+    proof_height: u64,
+    ledger_height: u64,
+) -> bool {
+    family == ProofFamily::PostQuantum && proof_height <= ledger_height
 }
 
 /// Why a reversion was triggered. Recorded, because a reversion that nobody can
@@ -247,6 +348,11 @@ pub enum ReversionError {
     /// deliberately not a warning.
     #[error("reversion target at height {height} is not canonical: commitment does not match")]
     TargetNotCanonical { height: u64 },
+    /// The target does not rest on a post-quantum seal: no seal,
+    /// a seal of another stage or height, or a seal signed only by classical
+    /// schemes. A source signed only classically is never canonical.
+    #[error("reversion target at height {height} is not sealed by a post-quantum family")]
+    TargetNotPqSealed { height: u64 },
     /// A reversion may never move the node to a future height.
     #[error("reversion target height {requested} is ahead of current height {current}")]
     TargetAhead { current: u64, requested: u64 },
@@ -408,7 +514,7 @@ impl RegenerationLedger {
         //    through this call.
         //    A same-stage target is not a reversion either: it would record
         //    an event with `from == to`, which `validate` rejects, so one
-        //    accepted call would brick the ledger (P24-F01).
+        //    accepted call would brick the ledger.
         let wanted = match self.stage.reversions_to(target.stage) {
             Some(steps) if steps > 0 => steps,
             _ => {
@@ -422,6 +528,15 @@ impl RegenerationLedger {
             return Err(ReversionError::TargetAhead {
                 current: self.height,
                 requested: target.height,
+            });
+        }
+
+        // 2a. Seal. The target must rest on a post-quantum seal; a
+        //     commitment that only a classical signature backs is not a
+        //     source, whatever the canonical closure says.
+        if !target.is_pq_sealed() {
+            return Err(ReversionError::TargetNotPqSealed {
+                height: target.height,
             });
         }
 
@@ -550,10 +665,15 @@ impl RegenerationLedger {
         }
         // The only legal target here is Polyp, so this is always a full
         // reversion. The policy switch applies to this door like any other
-        // (P24-F02). The lifetime budget is not checked: the counters of a
+        // The lifetime budget is not checked: the counters of a
         // forged trail carry no meaning.
         if !policy.allow_full_reversion {
             return Err(ReversionError::FullReversionForbidden);
+        }
+        if !target.is_pq_sealed() {
+            return Err(ReversionError::TargetNotPqSealed {
+                height: target.height,
+            });
         }
         if canonical(target.stage, target.height) != Some(target.commitment) {
             return Err(ReversionError::TargetNotCanonical {
@@ -598,7 +718,7 @@ impl RegenerationLedger {
             return Err(ReversionError::InvalidLedger { rule });
         }
         // At the last stage there is nothing to grow into. `unwrap_or(self)`
-        // used to make Medusa to Medusa the "next" stage (P24-F07).
+        // used to make Medusa to Medusa the "next" stage.
         if self.stage.later() != Some(snapshot.stage) {
             return Err(ReversionError::GrowthNotNext {
                 from: self.stage,
@@ -609,6 +729,11 @@ impl RegenerationLedger {
             return Err(ReversionError::GrowthBehind {
                 current: self.height,
                 requested: snapshot.height,
+            });
+        }
+        if !snapshot.is_pq_sealed() {
+            return Err(ReversionError::TargetNotPqSealed {
+                height: snapshot.height,
             });
         }
         if canonical(snapshot.stage, snapshot.height) != Some(snapshot.commitment) {
@@ -638,7 +763,7 @@ impl RegenerationLedger {
         stage_height: &dyn Fn(Stage) -> Option<u64>,
     ) -> Option<Stage> {
         // A reversion goes strictly earlier: the current stage holds the
-        // damaged view, and `revert` refuses a same-stage target (P24-F01).
+        // damaged view, and `revert` refuses a same-stage target.
         let mut candidate = self.stage.earlier();
         while let Some(stage) = candidate {
             if stage_height(stage).is_some_and(|height| height <= damaged_below) {
@@ -722,10 +847,11 @@ mod tests {
             height,
             commitment: canonical(Stage::Medusa, height).unwrap_or([0; 32]),
             carried: Transdifferentiated::default(),
+            seal: Some(crate::domain::pq_canonical::test_seal(stage, height)),
         }
     }
 
-    /// P24-F01: a same-stage target used to be accepted, recorded an event
+    /// A same-stage target used to be accepted, recorded an event
     /// with `from == to`, and the next `validate` rejected the whole ledger.
     #[test]
     fn a_same_stage_target_is_refused_and_leaves_the_ledger_valid() {
@@ -795,6 +921,7 @@ mod tests {
                 proofs_reusable: 2,
                 proofs_discarded: 1,
                 records_refiled: 0,
+                proofs_classical_rederive: 0,
             },
             event_number: 1,
         };
@@ -1045,6 +1172,7 @@ mod tests {
             proofs_reusable: u64::MAX,
             proofs_discarded: 0,
             records_refiled: 1,
+            proofs_classical_rederive: 0,
         };
         let err = ledger
             .revert(
@@ -1108,6 +1236,7 @@ mod tests {
             proofs_reusable: 40,
             proofs_discarded: 60,
             records_refiled: 5,
+            proofs_classical_rederive: 0,
         };
         ledger
             .revert(
@@ -1227,7 +1356,7 @@ mod tests {
     fn the_cheapest_target_is_the_shallowest_one_that_clears_the_damage() {
         let ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
         // The current stage is never a target: a reversion goes strictly
-        // earlier, and `revert` refuses a same-stage target (P24-F01).
+        // earlier, and `revert` refuses a same-stage target.
         let stage_height = |stage| match stage {
             Stage::Medusa => Some(100),
             Stage::Ephyra => Some(60),
@@ -1289,6 +1418,7 @@ mod tests {
                     proofs_reusable: 3,
                     proofs_discarded: 0,
                     records_refiled: 1,
+                    proofs_classical_rederive: 0,
                 },
                 event_number: 1,
             });
@@ -1307,6 +1437,7 @@ mod tests {
                         height: 0,
                         commitment: [0x11; 32],
                         carried: Default::default(),
+                        seal: Some(crate::domain::pq_canonical::test_seal(Stage::Polyp, 0)),
                     },
                     Stress::RepairFailed,
                     &ReversionPolicy::default(),
@@ -1330,6 +1461,7 @@ mod tests {
                         height: 0,
                         commitment: [0x11; 32],
                         carried: Default::default(),
+                        seal: Some(crate::domain::pq_canonical::test_seal(Stage::Polyp, 0)),
                     },
                     Stress::RepairFailed,
                     &policy,
@@ -1350,6 +1482,7 @@ mod tests {
                         height: 50,
                         commitment: [0x22; 32],
                         carried: Default::default(),
+                        seal: Some(crate::domain::pq_canonical::test_seal(Stage::Ephyra, 50)),
                     },
                     Stress::RepairFailed,
                     &ReversionPolicy::default(),
@@ -1372,6 +1505,7 @@ mod tests {
                         height: 0,
                         commitment: [0xFF; 32],
                         carried: Default::default(),
+                        seal: Some(crate::domain::pq_canonical::test_seal(Stage::Polyp, 0)),
                     },
                     Stress::RepairFailed,
                     &ReversionPolicy::default(),
@@ -1391,6 +1525,7 @@ mod tests {
                         height: 0,
                         commitment: [0x11; 32],
                         carried: Default::default(),
+                        seal: Some(crate::domain::pq_canonical::test_seal(Stage::Polyp, 0)),
                     },
                     Stress::RepairFailed,
                     &ReversionPolicy::default(),
@@ -1414,6 +1549,7 @@ mod tests {
                         height: 50,
                         commitment: [0x22; 32],
                         carried: Default::default(),
+                        seal: Some(crate::domain::pq_canonical::test_seal(Stage::Ephyra, 50)),
                     },
                     &canonical,
                 )

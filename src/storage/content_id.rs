@@ -1,11 +1,11 @@
 //! B.U.D. content addressing.
 //!
-//! Vision §8.2 originally proposed a *double-hash* `ContentId` carrying both
+//! Vision originally proposed a *double-hash* `ContentId` carrying both
 //! An IPFS multihash and a Poseidon4 hash. The Poseidon primitive is not
 //! Wired into `budlum-core` (it lives in `BudZKVM`), so we use the
 //! Existing domain-separated SHA-256 (`hash_fields_bytes`) with the
 //! `BDLM_CONTENT_V1` domain tag. This is exactly the same trade-off the Tur
-//! 14 plan §3.1 makes:
+//! 14 makes:
 //!
 //! > "Content addressing: the `ContentId` type, based on a Poseidon4 hash - the
 //! >  same family as the `poseidon4_hash` primitive already used in BudZero, so no new
@@ -15,7 +15,7 @@
 //! So it can never collide with another 32-byte field that happens to be
 //! Hashed the same way in a different module.
 //!
-//! Plan §0.5 (data-sovereignty / team-independence rule),
+//! Plan (data-sovereignty / team-independence rule),
 //! `ContentId` is a **pure on-chain data shape** - no network calls, no
 //! "Budlum Inc. indexer" dependency, no admin/pause hook. Any independent
 //! Node can compute it from the raw chunk bytes alone.
@@ -47,9 +47,9 @@ impl ContentId {
 
     /// Compute the `ContentId` of a chunk plus an explicit sub-chunk byte
     /// Range (used by `RetrievalChallenge` to pin a deterministic
-    /// Sub-range within a chunk - vision §8.3 /).
+    /// Sub-range within a chunk - vision /).
     ///
-    /// **Critically (plan §2.5):** the resulting `ContentId` is
+    /// **Critically:** the resulting `ContentId` is
     /// Only a byte-range hash, not a proof-of-storage. The full chunk can
     /// Be discarded and a fresh chunk holding only the requested range
     /// Can still answer the challenge. This is the documented

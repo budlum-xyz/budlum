@@ -119,6 +119,17 @@ pub fn zk_program_hash(program: &[u64]) -> Hash32 {
 /// height, the window applies in full.
 pub const MAX_ZK_PROOF_HEIGHT_LAG: u64 = 128;
 
+/// How far one accepted zk claim may carry a domain's tip.
+///
+/// An accepted claim parks the domain's `last_committed_height`, and nothing
+/// lowers it: a claim behind the tip is stale. A submitter free to name any
+/// height could therefore park the tip at `u64::MAX` with one verified proof
+/// over a trivial program and freeze the domain's settlement for good, which
+/// costs only the proof fee. The cap turns that into a bounded jump - the tip
+/// may move at most this many heights per accepted claim, so an honest claim
+/// always becomes admissible again once the domain's real height catches up.
+pub const MAX_ZK_CLAIM_ADVANCE: u64 = 8 * MAX_ZK_PROOF_HEIGHT_LAG;
+
 impl ZkProofSubmission {
     /// Canonical hash binding the transport message to the proof payload. The
     /// `message.payload_hash` MUST equal this, so a message cannot be replayed
@@ -154,7 +165,7 @@ impl ZkProofSubmission {
         // Infeasible to fail from untrusted input (no fallible custom Serialize,
         // Writing to a Vec), so a failure is a deterministic programming error we
         // Fail-fast on rather than hide.
-        // P18-F10: if the envelope cannot be serialized (a programming error),
+        // If the envelope cannot be serialized (a programming error),
         // the fallback still carries the raw proof bytes and the envelope
         // identity, so two different proofs never share one binding hash.
         let proof_bytes = bincode::serialize(proof).unwrap_or_else(|_| {
@@ -244,6 +255,9 @@ pub enum ProofAcceptance {
     Accepted { rewarded: bool, reward: u64 },
     /// A previously-accepted, identical claim (same final state root). No-op.
     Idempotent,
+    /// The STARK did not verify. The proof fee is burned and no claim is
+    /// recorded: the submitter asked the chain to verify a false proof.
+    Rejected,
 }
 
 /// Errors from proof submission.
@@ -263,7 +277,7 @@ pub enum ProofError {
     },
     /// Insufficient balance to pay the submission fee.
     InsufficientFee { have: u64, need: u64 },
-    /// The claim registry is at its capacity (BLG-0294).
+    /// The claim registry is at its capacity.
     RegistryFull { cap: usize },
 }
 
@@ -297,7 +311,7 @@ impl std::fmt::Display for ProofError {
 
 impl std::error::Error for ProofError {}
 
-/// Hard capacity of [`ProofClaimRegistry`] (BLG-0294, P18-F09).
+/// Hard capacity of [`ProofClaimRegistry`].
 ///
 /// The registry had no bound and no pruning, and it is consensus-critical,
 /// which rules the two options apart from how they look elsewhere: pruning
@@ -305,7 +319,7 @@ impl std::error::Error for ProofError {}
 /// statement - a claim dropped for domain height H lets a *new* proof assert a
 /// different root for H today. So no horizon is safe here while proofs are
 /// accepted for any past height, and the bound is enforced by refusal
-/// instead: entries cost a burned fee (post BLG-0287 operator gate), reaching
+/// instead: entries cost a burned fee (post operator gate), reaching
 /// 100k means paying it 100k times, and past the cap every node refuses the
 /// same way, so the boundary is deterministic. Write-per-save stays too - the
 /// submission path runs outside block execution, and a crash that lost a
@@ -335,6 +349,27 @@ impl ProofClaimRegistry {
         self.claims.len()
     }
 
+    /// A commitment to every accepted claim, in key order. Empty folds the
+    /// empty-tree root.
+    #[must_use]
+    pub fn root(&self) -> Hash32 {
+        let leaves: Vec<Hash32> = self
+            .claims
+            .values()
+            .map(|claim| {
+                crate::core::hash::hash_fields_bytes(&[
+                    b"BDLM_PROOF_CLAIM_LEAF_V1",
+                    &claim.key.domain_id.to_le_bytes(),
+                    &claim.key.target_height.to_le_bytes(),
+                    &claim.final_state_root,
+                    claim.prover.as_bytes(),
+                    &[u8::from(claim.rewarded)],
+                ])
+            })
+            .collect();
+        crate::settlement::commitment_tree::merkle_root(&leaves)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.claims.is_empty()
     }
@@ -361,7 +396,7 @@ impl ProofClaimRegistry {
 
     /// Persist a newly accepted claim.
     ///
-    /// BLG-0294: refuses at [`MAX_PROOF_CLAIMS`] rather than growing without
+    /// Refuses at [`MAX_PROOF_CLAIMS`] rather than growing without
     /// bound; the caller maps the refusal onto the submission path.
     pub fn record(&mut self, claim: AcceptedProofClaim) -> Result<(), ProofError> {
         if self.claims.len() >= MAX_PROOF_CLAIMS {
@@ -394,7 +429,7 @@ mod tests {
         }
     }
 
-    /// BLG-0294: the cap refuses at the boundary and the refusal is total -
+    /// The cap refuses at the boundary and the refusal is total -
     /// the registry state is untouched, so a full registry still answers
     /// its recorded claims and still classifies duplicates correctly.
     /// Filling 100k keys is a loop of BTreeMap inserts; keep it cheap by

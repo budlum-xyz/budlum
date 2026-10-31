@@ -3,12 +3,70 @@ mod tests {
     use crate::chain::blockchain::Blockchain;
     use crate::consensus::pow::PoWEngine;
     use crate::core::address::Address;
+    use crate::domain::deal_open::{
+        accept_reallocation_escrowed, open_deal_escrowed, DealOpenTerms, ReallocationTerms,
+    };
     use crate::domain::storage_deal::{ReallocationStatus, StorageEconomicsParams, FEE_RATE_SCALE};
     use crate::domain::storage_params::StorageDomainParams;
-    use crate::storage::db::Storage;
     use crate::storage::manifest::ContentManifest;
     use std::sync::Arc;
-    use tempfile::tempdir;
+
+    /// The shared escrow paths the `StorageTx::OpenDeal` and
+    /// `StorageTx::AcceptReallocation` doors call, driven on a test chain's
+    /// state at its tip's clock, with no fee reserve. The out-of-block
+    /// wrappers these tests used to call were removed with the operator RPCs
+    /// behind them; the economics under test live in `deal_open`.
+    trait SharedEscrow {
+        fn open_deal_through_shared_escrow(
+            &mut self,
+            terms: &DealOpenTerms<'_>,
+            payer: Address,
+            domain_params: &StorageDomainParams,
+        ) -> Result<u64, String>;
+
+        fn accept_reallocation_through_shared_escrow(
+            &mut self,
+            terms: &ReallocationTerms,
+            payer: Address,
+            domain_params: &StorageDomainParams,
+        ) -> Result<u64, String>;
+    }
+
+    impl SharedEscrow for Blockchain {
+        fn open_deal_through_shared_escrow(
+            &mut self,
+            terms: &DealOpenTerms<'_>,
+            payer: Address,
+            domain_params: &StorageDomainParams,
+        ) -> Result<u64, String> {
+            let now_unix_secs = self.current_unix_secs();
+            open_deal_escrowed(
+                &mut self.state,
+                terms,
+                payer,
+                now_unix_secs,
+                domain_params.min_operator_bond,
+                0,
+            )
+        }
+
+        fn accept_reallocation_through_shared_escrow(
+            &mut self,
+            terms: &ReallocationTerms,
+            payer: Address,
+            domain_params: &StorageDomainParams,
+        ) -> Result<u64, String> {
+            let now_unix_secs = self.current_unix_secs();
+            accept_reallocation_escrowed(
+                &mut self.state,
+                terms,
+                payer,
+                now_unix_secs,
+                domain_params.min_operator_bond,
+                0,
+            )
+        }
+    }
 
     #[test]
     fn test_storage_maintenance_fail_closed_regression() {
@@ -26,14 +84,13 @@ mod tests {
         // We ensure fail-closed logic works as intended.
     }
 
+    /// the economics ledger (reward cursor, slash and burn totals,
+    /// events) lives in the storage registry, so the state root commits it
+    /// and a restart replays it from the blocks instead of a side store.
     #[test]
-    fn storage_economics_state_persists_across_restart() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("storage_econ.db");
-        let db_path = db_path.to_string_lossy().to_string();
-        let storage = Storage::new(&db_path).unwrap();
+    fn storage_economics_ledger_is_consensus_state() {
         let consensus = Arc::new(PoWEngine::new(0));
-        let mut blockchain = Blockchain::new(consensus, Some(storage), 45262, None);
+        let mut blockchain = Blockchain::new(consensus, None, 45262, None);
 
         let operator = Address::from([1u8; 32]);
         let payer = Address::from([2u8; 32]);
@@ -73,22 +130,25 @@ mod tests {
         };
 
         let deal_id = blockchain
-            .open_storage_deal_with_escrow(
-                42,
-                &manifest,
-                shard_id,
-                operator,
+            .open_deal_through_shared_escrow(
+                &DealOpenTerms {
+                    domain_id: 42,
+                    manifest: &manifest,
+                    shard_id,
+                    operator,
+                    replica_index: 0,
+                    start_epoch: 0,
+                    end_epoch: 10,
+                    economics: economics.clone(),
+                    merkle_proof: Some(proof),
+                    storage_root: Some([0x42u8; 32]),
+                },
                 payer,
-                0,
-                0,
-                10,
-                economics.clone(),
                 &params,
-                Some(proof),
-                Some([0x42u8; 32]),
             )
             .unwrap();
 
+        let root_before = blockchain.state.calculate_state_root();
         let (rewarded, total_reward) = blockchain.accrue_storage_operator_rewards(1).unwrap();
         assert_eq!(rewarded, 1);
         assert_eq!(total_reward, 10);
@@ -102,139 +162,15 @@ mod tests {
         assert_eq!(finalized, 1);
         assert_eq!(total_slashed, economics.operator_bond);
         assert_eq!(challenge_id, 0);
-        assert!(!blockchain.storage_operator_rewards.is_empty());
-        assert!(blockchain.storage_slashed_bond_total > 0);
+        let ledger = &blockchain.state.storage_registry.economics;
+        assert!(!ledger.operator_rewards.is_empty());
+        assert!(ledger.slashed_bond_total > 0);
+        assert!(ledger.last_reward_epoch.contains_key(&deal_id));
         assert!(!blockchain.storage_economics_events().is_empty());
-        let expected_rewards = blockchain.storage_operator_rewards.clone();
-        let expected_slashed = blockchain.storage_slashed_bond_total;
-        let expected_burned = blockchain.storage_burned_bond_total;
-        let expected_last_reward_epoch = blockchain.storage_last_reward_epoch.clone();
-        let expected_event_count = blockchain.storage_economics_events().len();
-        drop(blockchain);
-
-        let restarted = Blockchain::new(
-            Arc::new(PoWEngine::new(0)),
-            Some(Storage::new(&db_path).unwrap()),
-            45262,
-            None,
-        );
-        assert_eq!(restarted.storage_operator_rewards, expected_rewards);
-        assert_eq!(restarted.storage_slashed_bond_total, expected_slashed);
-        assert_eq!(restarted.storage_burned_bond_total, expected_burned);
-        assert_eq!(
-            restarted.storage_last_reward_epoch,
-            expected_last_reward_epoch
-        );
-        assert_eq!(
-            restarted.storage_economics_events().len(),
-            expected_event_count
-        );
-    }
-
-    /// All four storage accounting paths must surface a failed persist.
-    ///
-    /// `apply_storage_bond_slash`, `finalize_missed_storage_challenges` and
-    /// `finalize_expired_storage_deals` all end with
-    /// `self.persist_storage_economics_state()?`. `accrue_storage_operator_rewards`
-    /// Ended with `let _ = self.persist_storage_economics_state();` - the one
-    /// Path of the four that dropped the failure, and the one where dropping
-    /// It costs the most.
-    ///
-    /// `storage_last_reward_epoch` is the only thing between an operator and
-    /// Being paid twice for the same epoch. The balance credit commits with
-    /// The block; the "already paid through epoch N" cursor lives in the
-    /// Economics snapshot. A dropped write plus a restart reloads the old
-    /// Cursor and pays every epoch since a second time, out of an escrow
-    /// Funded once.
-    ///
-    /// The scan half of the persist-failure rule. BLG-0190 (P09-F11): the
-    /// three paths a test can drive are now EXERCISED at runtime (see
-    /// `a_failed_persist_propagates_out_of_the_accounting_paths`); this scan
-    /// remains only for `finalize_missed_storage_challenges`, whose path
-    /// cannot be driven in-memory because issuing a challenge needs VRF
-    /// entropy on the chain tip that the test harness cannot mint. Canary:
-    /// drop the `?` in it and this still fails.
-    #[test]
-    fn the_missed_challenge_path_propagates_a_failed_persist() {
-        let src = include_str!("blockchain.rs");
-
-        // Line-based and doc-comment-aware. A raw `str::matches` over the whole
-        // file also counts the doc-comment on `accrue_storage_operator_rewards`
-        // that quotes the old `let _ = ...` line to explain what changed - so
-        // the test failed on its own documentation. Same mistake as scanning a
-        // gate script that contains the string it scans for.
-        let dropped: Vec<usize> = src
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| {
-                let trimmed = line.trim_start();
-                !trimmed.starts_with("//")
-                    && trimmed.contains("let _ = self.persist_storage_economics_state()")
-            })
-            .map(|(i, _)| i + 1)
-            .collect();
-        assert!(
-            dropped.is_empty(),
-            "a storage accounting path is dropping its persist failure at \
-             blockchain.rs lines {dropped:?}"
-        );
-
-        let name = "pub fn finalize_missed_storage_challenges";
-        let at = src
-            .find(name)
-            .unwrap_or_else(|| panic!("{name} must still exist"));
-        // The window is the function itself: from its signature to the
-        // next `pub fn` (or the end of the file), on byte offsets that
-        // `find` returns, so no fixed width can split a multi-byte
-        // character or reach into the next function.
-        let rest = &src[at + name.len()..];
-        let end = rest
-            .find("\n    pub fn ")
-            .map_or(src.len(), |off| at + name.len() + off);
-        let body = &src[at..end];
-        assert!(
-            body.contains("self.persist_storage_economics_state()?"),
-            "{name} must propagate a failed persist, not drop it"
-        );
-    }
-
-    /// BLG-0190 (P09-F11): the persist failure is REAL here - `Storage`
-    /// carries a test-only knob that makes `save_storage_economics_state`
-    /// return `io::Error`, and the accounting paths run on a chain with an
-    /// actual store attached. A dropped `?` (a `let _ =`) now fails these
-    /// assertions at runtime, not by grepping the file.
-    #[test]
-    fn a_failed_persist_propagates_out_of_the_accounting_paths() {
-        let dir = tempdir().expect("tempdir");
-        let store =
-            Storage::new(dir.path().join("chain.db").to_str().unwrap()).expect("open the store");
-        store.set_fail_economics_writes(true);
-        let consensus = Arc::new(PoWEngine::new(0));
-        let mut bc = Blockchain::new(consensus, Some(store), 45262, None);
-        let (deal_id, operator, _bond, _after) = blockchain_with_one_deal_in(10, &mut bc);
-
-        let err = bc
-            .accrue_storage_operator_rewards(5)
-            .expect_err("accrue must propagate the failed persist");
-        assert!(
-            err.contains("Failed to persist storage economics state"),
-            "accrue must name the persist failure, got: {err}"
-        );
-
-        let err = bc
-            .finalize_expired_storage_deals(20)
-            .expect_err("expiry settlement must propagate the failed persist");
-        assert!(
-            err.contains("Failed to persist storage economics state"),
-            "finalize_expired must name the persist failure, got: {err}"
-        );
-
-        let err = bc
-            .apply_storage_bond_slash(20, deal_id, operator, 1, "test slash")
-            .expect_err("a slash must propagate the failed persist");
-        assert!(
-            err.contains("Failed to persist storage economics state"),
-            "apply_storage_bond_slash must name the persist failure, got: {err}"
+        assert_ne!(
+            blockchain.state.calculate_state_root(),
+            root_before,
+            "the economics ledger must be committed by the state root"
         );
     }
 
@@ -250,7 +186,7 @@ mod tests {
     }
 
     /// The deal-setup half, on a caller-supplied chain (which may or may not
-    /// have storage attached) - BLG-0190 needs the same fixture on a chain
+    /// have storage attached) - needs the same fixture on a chain
     /// with a real store.
     fn blockchain_with_one_deal_in(
         deal_end_epoch: u64,
@@ -287,19 +223,21 @@ mod tests {
         };
 
         let deal_id = blockchain
-            .open_storage_deal_with_escrow(
-                42,
-                &manifest,
-                shard_id,
-                operator,
+            .open_deal_through_shared_escrow(
+                &DealOpenTerms {
+                    domain_id: 42,
+                    manifest: &manifest,
+                    shard_id,
+                    operator,
+                    replica_index: 0,
+                    start_epoch: 0,
+                    end_epoch: deal_end_epoch,
+                    economics: economics.clone(),
+                    merkle_proof: Some(proof.clone()),
+                    storage_root: Some([0x42u8; 32]),
+                },
                 payer,
-                0,
-                0,
-                deal_end_epoch,
-                economics.clone(),
                 &params,
-                Some(proof.clone()),
-                Some([0x42u8; 32]),
             )
             .unwrap();
 
@@ -313,19 +251,21 @@ mod tests {
         blockchain.state.add_balance(&spare, 5_000_000);
         blockchain.state.add_balance(&payer, 5_000_000);
         blockchain
-            .open_storage_deal_with_escrow(
-                42,
-                &manifest,
-                shard_id,
-                spare,
+            .open_deal_through_shared_escrow(
+                &DealOpenTerms {
+                    domain_id: 42,
+                    manifest: &manifest,
+                    shard_id,
+                    operator: spare,
+                    replica_index: 1,
+                    start_epoch: 0,
+                    end_epoch: deal_end_epoch.saturating_add(1_000),
+                    economics: economics.clone(),
+                    merkle_proof: Some(proof),
+                    storage_root: Some([0x42u8; 32]),
+                },
                 payer,
-                1,
-                0,
-                deal_end_epoch.saturating_add(1_000),
-                economics.clone(),
                 &params,
-                Some(proof),
-                Some([0x42u8; 32]),
             )
             .unwrap();
 
@@ -515,16 +455,18 @@ mod tests {
         let op_before = blockchain.state.get_balance(&operator);
 
         let replacement_deal_id = blockchain
-            .accept_storage_reallocation_with_escrow(
-                ticket_id,
-                operator,
+            .accept_reallocation_through_shared_escrow(
+                &ReallocationTerms {
+                    ticket_id,
+                    replacement_operator: operator,
+                    start_epoch: 0,
+                    end_epoch: 10,
+                    economics: economics.clone(),
+                    merkle_proof: Some(proof),
+                    storage_root: Some([0x42u8; 32]),
+                },
                 payer,
-                0,
-                10,
-                economics.clone(),
                 &params,
-                Some(proof),
-                Some([0x42u8; 32]),
             )
             .expect("the replacement opens with escrow");
 
@@ -591,16 +533,18 @@ mod tests {
         let op_before = blockchain.state.get_balance(&operator);
 
         let err = blockchain
-            .accept_storage_reallocation_with_escrow(
-                ticket_id,
-                operator,
+            .accept_reallocation_through_shared_escrow(
+                &ReallocationTerms {
+                    ticket_id,
+                    replacement_operator: operator,
+                    start_epoch: 0,
+                    end_epoch: 10,
+                    economics,
+                    merkle_proof: Some(proof),
+                    storage_root: Some([0x42u8; 32]),
+                },
                 payer,
-                0,
-                10,
-                economics,
                 &params,
-                Some(proof),
-                Some([0x42u8; 32]),
             )
             .expect_err("the slashed operator may not replace itself");
         assert!(err.contains("slashed operator"), "got: {err}");
@@ -620,16 +564,18 @@ mod tests {
         let (mut blockchain, ticket_id, operator, payer, economics, params, proof) =
             blockchain_with_never_placed_ticket();
         let first = blockchain
-            .accept_storage_reallocation_with_escrow(
-                ticket_id,
-                operator,
+            .accept_reallocation_through_shared_escrow(
+                &ReallocationTerms {
+                    ticket_id,
+                    replacement_operator: operator,
+                    start_epoch: 0,
+                    end_epoch: 10,
+                    economics: economics.clone(),
+                    merkle_proof: Some(proof.clone()),
+                    storage_root: Some([0x42u8; 32]),
+                },
                 payer,
-                0,
-                10,
-                economics.clone(),
                 &params,
-                Some(proof.clone()),
-                Some([0x42u8; 32]),
             )
             .expect("first acceptance opens the replacement");
         let payer_before = blockchain.state.get_balance(&payer);
@@ -637,16 +583,18 @@ mod tests {
         let second_operator = Address::from([24u8; 32]);
         blockchain.state.add_balance(&second_operator, 5_000_000);
         let err = blockchain
-            .accept_storage_reallocation_with_escrow(
-                ticket_id,
-                second_operator,
+            .accept_reallocation_through_shared_escrow(
+                &ReallocationTerms {
+                    ticket_id,
+                    replacement_operator: second_operator,
+                    start_epoch: 0,
+                    end_epoch: 10,
+                    economics: economics.clone(),
+                    merkle_proof: Some(proof),
+                    storage_root: Some([0x42u8; 32]),
+                },
                 payer,
-                0,
-                10,
-                economics.clone(),
                 &params,
-                Some(proof),
-                Some([0x42u8; 32]),
             )
             .expect_err("a filled ticket cannot be accepted again");
         assert!(err.contains("not open for acceptance"), "got: {err}");
@@ -668,16 +616,18 @@ mod tests {
         let op_before = blockchain.state.get_balance(&operator);
 
         let err = blockchain
-            .accept_storage_reallocation_with_escrow(
-                ticket_id,
-                operator,
+            .accept_reallocation_through_shared_escrow(
+                &ReallocationTerms {
+                    ticket_id,
+                    replacement_operator: operator,
+                    start_epoch: 0,
+                    end_epoch: 10,
+                    economics: economics.clone(),
+                    merkle_proof: None,
+                    storage_root: None,
+                },
                 payer,
-                0,
-                10,
-                economics.clone(),
                 &params,
-                None,
-                None,
             )
             .expect_err("the merkle envelope is mandatory on the replacement too");
         assert!(

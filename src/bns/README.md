@@ -16,13 +16,15 @@
 
 ## Current behaviour (locked by tests)
 
-Registration and resolve, expiration, renewal, owner-only subdomains, refusal
-of invalid names, transfer, full resolve through storage, and cost scaling.
+Registration and resolve, expiration, renewal and transfer transaction doors,
+owner-only subdomains, refusal of invalid names, full resolve through storage,
+and cost scaling.
 
 ## Test suite
 
-- 9 tests in total: `src/tests/bns.rs` (2) and `src/tests/bns_expanded.rs` (7).
-  Eight of them carry the `test_bns_` prefix.
+- 14 tests in total: `src/tests/bns.rs` (2) and
+  `src/tests/bns_expanded.rs` (12). The suite covers both registry methods and
+  the signed transaction executor doors.
 - They run inside the core lib suite (`cargo test --lib`). The CI gates are
   **`bns-gate`** and **`bns-names`** in `xtask/gates`, both protected against a
   vacuous pass.

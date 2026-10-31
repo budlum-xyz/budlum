@@ -1,6 +1,6 @@
 //! B.U.D. 2.0 invention - video content class plus codec selection, 2026-08-16.
 //!
-//! Finding K84, from a real ffmpeg measurement: "x265 always beats x264" is
+//! Finding, from a real ffmpeg measurement: "x265 always beats x264" is
 //! WRONG - it depends on the content type, and x264 won on the testsrc2
 //! pattern. Static and temporal content reached 1300-1600x while moving content
 //! reached 70-206x. So this module:
@@ -28,7 +28,7 @@ pub enum VideoContentClass {
     HighMotion, // heavy motion: sport, action, drone
 }
 
-/// A measured codec suggestion, from the K84 table over a synthetic corpus, so
+/// A measured codec suggestion, from the table over a synthetic corpus, so
 /// the comparison is internally consistent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
@@ -40,10 +40,10 @@ pub enum VideoCodec {
 #[derive(Debug, Clone, Copy)]
 pub struct VideoSuggestion {
     pub codec: VideoCodec,
-    pub gop_frames: u32,         // storage: LONG GOP (K85)
+    pub gop_frames: u32,         // storage: LONG GOP
     pub scenecut_threshold: u8,  // per content class: 60 for sport, 10 for slides
     pub lossless: bool,          // lossless mode suggestion, for archival
-    pub expected_ratio_min: f64, // the K84 measured range, synthetic
+    pub expected_ratio_min: f64, // the measured range, synthetic
     pub expected_ratio_max: f64,
 }
 
@@ -66,7 +66,7 @@ impl VideoSuggestion {
         }
     }
 
-    /// The suggestion for a content class, from the K84 and K85 measurements:
+    /// The suggestion for a content class, from the and measurements:
     ///
     /// - Static: AV1, a very long GOP of 240 or more, a low scenecut of 10,
     ///   giving 1300-1600x.
@@ -76,7 +76,7 @@ impl VideoSuggestion {
     ///   70-200x.
     ///
     /// The H.264 and HEVC alternatives are in the table; AV1 also led in the
-    /// lossless measurement (K84).
+    /// lossless measurement.
     pub fn for_class(class: VideoContentClass) -> Self {
         match class {
             VideoContentClass::Static => Self::new(VideoCodec::Av1, 240, 10, false, 1300.0, 1600.0),
@@ -87,7 +87,7 @@ impl VideoSuggestion {
         }
     }
 
-    /// The archival suggestion: AV1 lossless. K84 measured svtav1-lossless at
+    /// The archival suggestion: AV1 lossless. measured svtav1-lossless at
     /// 134x, the leader among lossless.
     pub fn archival(class: VideoContentClass) -> Self {
         match class {
@@ -194,7 +194,7 @@ impl BudVideoRecord {
         }
     }
 
-    /// Consistency (K38): does the ratio match the sizes, and are the values
+    /// Consistency: does the ratio match the sizes, and are the values
     /// valid.
     pub fn verify(&self) -> bool {
         if !self.claimed_ratio.is_finite() || self.claimed_ratio <= 0.0 {
@@ -211,7 +211,7 @@ impl BudVideoRecord {
         (self.claimed_ratio - actual).abs() <= 0.01
     }
 
-    /// K19: does the claim fit the measured range of its content class? An
+    /// Does the claim fit the measured range of its content class? An
     /// invented ratio is refused.
     pub fn plausible(&self, suggestion: &VideoSuggestion) -> bool {
         self.claimed_ratio >= suggestion.expected_ratio_min * 0.5

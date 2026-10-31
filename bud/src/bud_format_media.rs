@@ -17,9 +17,9 @@
 //! | YUV 320x240 raw video to AV1 | libsvtav1 crf 10 | 904x |
 //! | H.264 to AV1, already compressed | libsvtav1 crf 30 | 0.67x, NO gain, lossy tier |
 //!
-//! The canary rule, in the K19 pattern: the numbers in this table cannot be
+//! The canary rule, in the pattern: the numbers in this table cannot be
 //! claimed ABOVE THE MEASUREMENT. A `holds_honest(name, ratio)` call REFUSES
-//! when the claimed ratio is above the measured one. K80's "20% saving" claim
+//! when the claimed ratio is above the measured one. 's "20% saving" claim
 //! was never measured against a real photograph, so what is recorded here for
 //! that row is the measured AVIF value rather than lossless JPEG to JXL. That
 //! is honesty.
@@ -69,7 +69,7 @@ pub fn bench_get(name: &str) -> Option<&'static MediaBench> {
     MEDIA_BENCHES.iter().find(|b| b.name == name)
 }
 
-/// The honesty canary: a claimed ratio cannot be above the measured one (K19).
+/// The honesty canary: a claimed ratio cannot be above the measured one.
 ///
 /// `tolerance` is the measurement uncertainty; the default of 1.0 means the
 /// claim must be at most the measurement.
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn the_media_canary_refuses_a_claim_above_the_measurement() {
-        // K19: a claim above the measurement is REFUSED.
+        // A claim above the measurement is REFUSED.
         assert!(!holds_honest("BMP->AVIF-lossless", 16.0, 1.0));
         assert!(!holds_honest("PNG->JXL-lossless", 4.3, 1.0));
         assert!(!holds_honest("YUV->AV1", 1000.0, 1.0));

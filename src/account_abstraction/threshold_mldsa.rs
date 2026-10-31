@@ -51,7 +51,7 @@
 //! that does not meet the threshold is refused.
 
 use crate::crypto::primitives::{
-    verify_ml_dsa_87_signature, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
+    verify_ml_dsa_87_signature_in, ML_DSA_87_PUBLIC_KEY_LEN, ML_DSA_87_SIGNATURE_LEN,
 };
 
 /// The largest number of owners an account can carry.
@@ -87,33 +87,33 @@ pub enum ThresholdError {
 impl core::fmt::Display for ThresholdError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NoOwners => write!(f, "KQ-THRESHOLD-MLDSA: owner set is empty"),
+            Self::NoOwners => write!(f, "threshold mldsa: owner set is empty"),
             Self::TooManyOwners { count } => write!(
                 f,
-                "KQ-THRESHOLD-MLDSA: {count} owners exceeds the {MAX_THRESHOLD_OWNERS} allowed"
+                "threshold mldsa: {count} owners exceeds the {MAX_THRESHOLD_OWNERS} allowed"
             ),
             Self::DuplicateOwner => {
-                write!(f, "KQ-THRESHOLD-MLDSA: the owner set repeats a key")
+                write!(f, "threshold mldsa: the owner set repeats a key")
             }
-            Self::ZeroThreshold => write!(f, "KQ-THRESHOLD-MLDSA: threshold is zero"),
+            Self::ZeroThreshold => write!(f, "threshold mldsa: threshold is zero"),
             Self::ThresholdAboveOwnerCount { threshold, owners } => write!(
                 f,
-                "KQ-THRESHOLD-MLDSA: threshold {threshold} exceeds {owners} owners and can never be met"
+                "threshold mldsa: threshold {threshold} exceeds {owners} owners and can never be met"
             ),
             Self::ThresholdNotMet { valid, threshold } => write!(
                 f,
-                "KQ-THRESHOLD-MLDSA: {valid} valid signatures below the threshold of {threshold}"
+                "threshold mldsa: {valid} valid signatures below the threshold of {threshold}"
             ),
             Self::UnknownSigner { index } => write!(
                 f,
-                "KQ-THRESHOLD-MLDSA: signature {index} is from a key outside the owner set"
+                "threshold mldsa: signature {index} is from a key outside the owner set"
             ),
             Self::RepeatedSigner { index } => write!(
                 f,
-                "KQ-THRESHOLD-MLDSA: signature {index} repeats an owner that already signed"
+                "threshold mldsa: signature {index} repeats an owner that already signed"
             ),
             Self::InvalidSignature { index } => {
-                write!(f, "KQ-THRESHOLD-MLDSA: signature {index} does not verify")
+                write!(f, "threshold mldsa: signature {index} does not verify")
             }
         }
     }
@@ -211,6 +211,24 @@ impl MultisigPolicy {
         message: &[u8],
         signatures: &[OwnerSignature],
     ) -> Result<(), ThresholdError> {
+        self.verify_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            message,
+            signatures,
+        )
+    }
+
+    /// [`Self::verify`] under the scheme statuses of a chain.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::verify`].
+    pub fn verify_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        message: &[u8],
+        signatures: &[OwnerSignature],
+    ) -> Result<(), ThresholdError> {
         let mut seen: Vec<&[u8; ML_DSA_87_PUBLIC_KEY_LEN]> = Vec::with_capacity(signatures.len());
         for (index, entry) in signatures.iter().enumerate() {
             if !self.owners.contains(&entry.public_key) {
@@ -219,8 +237,14 @@ impl MultisigPolicy {
             if seen.contains(&&entry.public_key) {
                 return Err(ThresholdError::RepeatedSigner { index });
             }
-            verify_ml_dsa_87_signature(message, &entry.signature, &entry.public_key)
-                .map_err(|_| ThresholdError::InvalidSignature { index })?;
+            verify_ml_dsa_87_signature_in(
+                registry,
+                crate::crypto::ctx::TX_V6,
+                message,
+                &entry.signature,
+                &entry.public_key,
+            )
+            .map_err(|_| ThresholdError::InvalidSignature { index })?;
             seen.push(&entry.public_key);
         }
         if seen.len() < self.threshold {
@@ -248,7 +272,7 @@ impl MultisigAuthorization {
     }
 }
 
-/// The KQ-* gate surface: the single entry point the production path calls.
+/// The gate surface: the single entry point the production path calls.
 pub struct ThresholdGates;
 
 impl ThresholdGates {
@@ -278,7 +302,7 @@ mod tests {
     fn sign_with(kp: &WalletKeyPair, msg: &[u8]) -> OwnerSignature {
         OwnerSignature {
             public_key: kp.public_key_bytes(),
-            signature: kp.sign(msg),
+            signature: kp.sign(crate::crypto::ctx::TX_V6, msg),
         }
     }
 

@@ -1,12 +1,12 @@
 //! B.U.D. 2.0 - the time series transform: time deltas plus XOR, 2026-08-16.
 //!
-//! K92: time series compression at 10 to 12 times, using the delta between
+//! Time series compression at 10 to 12 times, using the delta between
 //! consecutive timestamps plus XOR over the floating point values. This is the
 //! B.U.D. domain transform for telemetry and measurement data: it turns
 //! `(ts, value)` pairs into a stream of time deltas and XOR bits, which sees
 //! the high-entropy float differences that zstd cannot.
 //!
-//! It is lossless: encode then decode gives back the original (K38). It is
+//! It is lossless: encode then decode gives back the original. It is
 //! panic-free, unsafe-free and deterministic.
 //!
 //! The XOR coding: each value is XORed with the previous one. If the difference
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn roundtrip_lossless() {
-        // K38: encode then decode gives back the original, losslessly.
+        // Encode then decode gives back the original, losslessly.
         for jitter in [false, true] {
             let series = gen_series(1000, jitter);
             let col = TimeSeriesColumnar::encode(&series).expect("encode");

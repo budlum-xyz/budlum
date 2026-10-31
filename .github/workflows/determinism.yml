@@ -212,3 +212,106 @@ jobs:
             exit 1
           fi
           echo "OK: the consensus output is BYTE-EQUAL on all three platforms."
+
+  pq-vector-determinism:
+    # the ML-DSA and SLH-DSA vectors (NIST ACVP, Wycheproof, the explicit bug
+    # vectors) give every vector the same verdict on every platform. The wallet crate
+    # mounts the node's own PQ source files (`crates/wallet-core/src/crypto.rs`), so
+    # the very same code and vectors run on wasm32 too. Each platform prints one digest
+    # over all verdicts and the compare job demands byte equality.
+    name: PQ vectors (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x86_64-portable
+            os: ubuntu-latest
+            rustflags: ""
+          - platform: x86_64-native
+            os: ubuntu-latest
+            rustflags: "-C target-cpu=native"
+          - platform: aarch64
+            os: ubuntu-24.04-arm
+            rustflags: ""
+          - platform: wasm32
+            os: ubuntu-latest
+            rustflags: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - name: Install wasmtime (wasm32 only, sha256 pinned)
+        if: matrix.platform == 'wasm32'
+        run: |
+          set -euo pipefail
+          rustup target add wasm32-wasip1
+          curl -fsSL -o /tmp/wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v50.0.0/wasmtime-v50.0.0-x86_64-linux.tar.xz
+          echo "77c19ee0437991f9ac7837b9c269d9c7076744f85dad263fea5214cc2723c7ff  /tmp/wasmtime.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/wasmtime.tar.xz -C /tmp
+          echo "/tmp/wasmtime-v50.0.0-x86_64-linux" >> "$GITHUB_PATH"
+      - name: Run the PQ vectors
+        shell: bash
+        env:
+          PQ_PLATFORM: ${{ matrix.platform }}
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          set -euo pipefail
+          if [ "$PQ_PLATFORM" = "wasm32" ]; then
+            export CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime
+            cargo test --release --manifest-path crates/wallet-core/Cargo.toml --lib --target wasm32-wasip1 pq_vectors_ -- --nocapture 2>&1 | tee "pq-$PQ_PLATFORM.txt"
+          else
+            cargo test --release --manifest-path crates/wallet-core/Cargo.toml --lib pq_vectors_ -- --nocapture 2>&1 | tee "pq-$PQ_PLATFORM.txt"
+          fi
+          grep -oE "PQ_VECTOR_DIGEST=[0-9a-f]{64}" "pq-$PQ_PLATFORM.txt" | tail -1 | cut -d= -f2 > "pq-digest-$PQ_PLATFORM.hex"
+          test -s "pq-digest-$PQ_PLATFORM.hex"
+          D=$(cat "pq-digest-$PQ_PLATFORM.hex")
+          echo "PQ_VECTOR_DIGEST ($PQ_PLATFORM): $D"
+          test "${#D}" -eq 64
+      - name: Upload the digest artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pq-digest-${{ matrix.platform }}
+          path: pq-digest-${{ matrix.platform }}.hex
+          if-no-files-found: error
+          retention-days: 30
+
+  pq-digest-compare:
+    # The complement of pq-vector-determinism: the four platform digests are byte-equal.
+    name: PQ Digest Compare (x86_64 = native = aarch64 = wasm32)
+    needs: pq-vector-determinism
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect the digest artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: pq-digest-*
+          merge-multiple: true
+          path: pq-digests
+      - name: Byte-equality gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l pq-digests/
+          first=""
+          for p in x86_64-portable x86_64-native aarch64 wasm32; do
+            f="pq-digests/pq-digest-$p.hex"
+            if [ ! -s "$f" ]; then
+              echo "FAIL: missing digest artifact: $f"
+              exit 1
+            fi
+            d=$(cat "$f")
+            echo "$p: $d"
+            if [ -z "$first" ]; then
+              first="$d"
+            elif [ "$d" != "$first" ]; then
+              echo "FAIL: the PQ vector verdicts differ across platforms ($p)."
+              exit 1
+            fi
+          done
+          echo "OK: every vector has the same verdict on all four platforms."

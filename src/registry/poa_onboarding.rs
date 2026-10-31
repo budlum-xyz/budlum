@@ -69,7 +69,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Forever, defeating the re-KYC discipline.
 pub const DEFAULT_KYC_HORIZON: u64 = 100_000;
 
-/// BLG-0094 (P04-F12): the validity horizon had no upper bound, so an admin
+/// The validity horizon had no upper bound, so an admin
 /// could stamp an effectively permanent dossier and the re-KYC discipline
 /// would never bite. A finite ceiling in blocks; even at a one-second block
 /// this is years of run time, and it can only be reached deliberately.
@@ -199,6 +199,21 @@ impl PoAOnboarding {
     #[must_use]
     pub fn audit_log(&self) -> &[OnboardingEvent] {
         &self.audit
+    }
+
+    #[must_use]
+    pub fn audit_event_count(&self) -> usize {
+        self.audit.len()
+    }
+
+    #[must_use]
+    pub fn membership_count(&self) -> usize {
+        self.registry.member_count()
+    }
+
+    #[must_use]
+    pub fn admin_count(&self) -> usize {
+        self.registry.admin_count()
     }
 
     // ---- lifecycle -------------------------------------------------------
@@ -368,14 +383,14 @@ impl PoAOnboarding {
                 domain,
             });
         }
-        // BLG-0093 (P04-F11): the refreshed dossier is WRITTEN to the member
+        // The refreshed dossier is WRITTEN to the member
         // record - renewing used to move the expiry horizon and leave the
         // commitment naming the original submission forever.
         self.registry
             .update_kyc_commitment(domain, applicant, new_kyc_commitment)?;
         let expiry = at_block.saturating_add(validity_horizon);
         self.kyc_expiry.insert((domain, applicant), expiry);
-        // BLG-0094 (P04-F12): clear the one-shot expiry log entry so the
+        // Clear the one-shot expiry log entry so the
         // expiry after THIS renewal is recorded again instead of being
         // swallowed by the stale mark.
         self.logged_expiry.remove(&(domain, applicant));
@@ -391,7 +406,7 @@ impl PoAOnboarding {
         Ok(())
     }
 
-    /// BLG-0094 (P04-F12): remove an admin from a domain (see
+    /// Remove an admin from a domain (see
     /// [`PoaMembershipRegistry::remove_admin`] for the last-admin rule).
     pub fn remove_admin(
         &mut self,
@@ -403,7 +418,7 @@ impl PoAOnboarding {
 
     // ---- enforcement -----------------------------------------------------
 
-    /// BLG-0090 (P04-F08): the deterministic fold of the admission state -
+    /// The deterministic fold of the admission state -
     /// admin set, member dossiers, KYC expiries and the audit trail. This
     /// enters the state root and the snapshot digest, so a snapshot that
     /// drops an admission record diverges instead of quietly unpermissioning
@@ -488,7 +503,7 @@ impl PoAOnboarding {
     }
 }
 
-/// The PoA admission door at the transaction layer (BLG-0089 / P04-F07).
+/// The PoA admission door at the transaction layer.
 ///
 /// Carries the registry's own operations and nothing else - the shape and
 /// its semantics cannot drift from the one body
@@ -499,7 +514,7 @@ impl PoAOnboarding {
 pub enum PoAOnboardingTx {
     /// Extend the admin set (an existing admin, or governance, bootstraps).
     AddAdmin { domain: DomainId, admin: Address },
-    /// Remove an admin (BLG-0094). The last admin of a domain refuses.
+    /// Remove an admin. The last admin of a domain refuses.
     RemoveAdmin { domain: DomainId, admin: Address },
     /// A candidate applies for themselves; nothing else is accepted.
     SubmitApplication {
@@ -524,7 +539,7 @@ pub enum PoAOnboardingTx {
         member: Address,
         reason: String,
     },
-    /// Admin refreshes an active member's dossier (BLG-0093 writes it).
+    /// Admin refreshes an active member's dossier ( writes it).
     RenewKyc {
         domain: DomainId,
         member: Address,
@@ -534,7 +549,7 @@ pub enum PoAOnboardingTx {
 }
 
 /// Run one PoA admission operation with the authority the SENDER actually
-/// has (BLG-0089 / P04-F07).
+/// has.
 ///
 /// Two doors and only two: a candidate applies for themselves, and an admin
 /// of the target domain decides. The first admin of a domain arrives through
@@ -634,7 +649,7 @@ mod tests {
         const _: () = assert!(DEFAULT_KYC_HORIZON > 0);
     }
 
-    // BLG-0107 (P04-F25): the stale `too_many_lines` allow is gone with the
+    // The stale `too_many_lines` allow is gone with the
     // refactor that shrank this test; no allow without a reason and a date.
     #[test]
     fn whitelist_member_round_trip() {
@@ -648,7 +663,7 @@ mod tests {
         assert!(poa.whitelist(0, 0).contains(&member));
     }
 
-    /// BLG-0089 (P04-F07): the first admin of a domain arrives through
+    /// The first admin of a domain arrives through
     /// governance (`add_admin` at the trust root); the door appoints only
     /// behind an existing admin, so nobody self-appoints.
     #[test]
@@ -681,7 +696,7 @@ mod tests {
         assert!(onboarding.registry().is_admin(0, &addr(2)));
     }
 
-    /// BLG-0089 (P04-F07): a candidate applies for themselves - the door
+    /// A candidate applies for themselves - the door
     /// carries no applicant id to retarget.
     #[test]
     fn a_candidate_applies_for_themselves() {
@@ -713,7 +728,7 @@ mod tests {
         assert!(onboarding.is_authorized_now(0, &applicant, 50));
     }
 
-    /// BLG-0093 + BLG-0094 (P04-F11/F12): renewal writes the new dossier
+    /// +(F12): renewal writes the new dossier
     /// and reopens the expiry log for the NEXT expiry.
     #[test]
     fn renew_kyc_writes_the_dossier_and_reopens_the_expiry_log() {
@@ -753,7 +768,7 @@ mod tests {
         );
     }
 
-    /// BLG-0094 (P04-F12): the validity horizon is bounded.
+    /// The validity horizon is bounded.
     #[test]
     fn a_validity_horizon_beyond_the_bound_is_refused() {
         let mut onboarding = PoAOnboarding::new();
@@ -770,7 +785,7 @@ mod tests {
         ));
     }
 
-    /// BLG-0094 (P04-F12): admins may remove admins but never the last one;
+    /// Admins may remove admins but never the last one;
     /// governance can (force_remove_admin).
     #[test]
     fn the_last_admin_refuses_removal_through_the_door() {

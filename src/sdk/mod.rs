@@ -48,9 +48,10 @@
 //! believes those domains will be started. The three sections were deleted, and
 //! what is left is what the project actually has: its name and its version.
 //!
-//! WIRING: unwired - this is a file-format schema for a project file that
-//! lives outside the node. Nothing in the node reads `budlum.toml`, and
-//! nothing should: it describes a developer's project, not chain state.
+//! WIRING: wired to `bud dev init` and `bud dev info` (src/bin/bud.rs). It
+//! is a file-format schema for a project file that lives outside the node:
+//! nothing in the node reads `budlum.toml`, and nothing should, because it
+//! describes a developer's project, not chain state.
 
 /// The `budlum.toml` project configuration schema.
 ///

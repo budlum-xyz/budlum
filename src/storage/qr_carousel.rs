@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 systematic carousel fountain (plan §CH A2, K-QR-KARUSEL).
+//! B.U.D. 3.0 systematic carousel fountain.
 //!
 //! Encodes a packed Three payload (A1) into a deterministic sequence of
 //! *drops*. Each drop is either a systematic source block or an XOR repair
@@ -61,7 +61,7 @@ pub const MAX_BLOCK_LEN: u16 = 8 * 1024 - DROP_HEADER_LEN as u16;
 /// of 5 at 8% loss.
 ///
 /// The permillage is NOT carried by the recipe or the video header, yet
-/// `recipe.stream_id` is the fold of a pass whose length depends on it (P29-F04).
+/// `recipe.stream_id` is the fold of a pass whose length depends on it.
 /// A retune therefore invalidates every stored fold pin. Until the recipe
 /// carries the value itself, any change must be a deliberate format bump: the
 /// `oneshot_permillage_is_pinned_by_the_stream_id_fold` test names the
@@ -293,7 +293,7 @@ impl Drop {
         if version != DROP_VERSION {
             return Err(CarouselError::BadVersion(version));
         }
-        // BLG-0431: V1 defines no flags and its padding byte is zero.
+        // V1 defines no flags and its padding byte is zero.
         // Refuse aliases instead of interpreting reserved bytes differently.
         if bytes.get(5) != Some(&0) || bytes.get(19) != Some(&0) {
             return Err(CarouselError::NonCanonicalHeader);
@@ -426,7 +426,7 @@ impl CarouselEncoder {
 /// How many drops a fixed-length channel should carry for loss rate `p_milli`
 /// (loss probability in thousandths, e.g. 300 = 30%).
 ///
-/// Formula (spec K-QR-FAZLALIK, carousel): `n >= k * T * 1.02` with
+/// Formula (spec, carousel): `n >= k * T * 1.02` with
 /// `T ≥ 1/(1-p)`, floored as integer arithmetic in milli-units.
 #[must_use]
 pub fn planned_drop_count(k: u16, p_milli: u32) -> u32 {
@@ -588,7 +588,7 @@ impl CarouselDecoder {
     ///
     /// Parameter mismatch across drops.
     pub fn push(&mut self, drop: &Drop) -> Result<(), CarouselError> {
-        // BLG-0432: validate every caller-supplied field before recording the
+        // Validate every caller-supplied field before recording the
         // stream or allocating decoder state, including hand-built Drops.
         drop.params.validate()?;
         if drop.body.len() != usize::from(drop.params.block_len) {
@@ -1064,7 +1064,7 @@ fn bitset_xor(dst: &mut [u64], src: &[u64]) {
 
 #[cfg(test)]
 mod tests {
-    /// P29-F04: `recipe.stream_id` folds a pass of `oneshot_drop_count`
+    /// `recipe.stream_id` folds a pass of `oneshot_drop_count`
     /// frames, so the permillage and the pass length are part of the recipe
     /// format. Changing either requires a recipe version bump.
     #[test]
@@ -1144,7 +1144,7 @@ mod tests {
         assert!(dec.is_complete(), "missing {}", dec.missing());
         assert_eq!(dec.finish().unwrap(), payload);
     }
-    /// The K10 claim, measured in-tree: at zero loss the systematic pass closes
+    /// The claim, measured in-tree: at zero loss the systematic pass closes
     /// the whole payload, and a tenth of the stream is enough to hold a tenth of
     /// the source contiguously. `BUD-3.0-SARTNAME.md` item 8 asserted this from a
     /// Python harness that is in no repo; the assertion below is the reproducible

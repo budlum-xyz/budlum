@@ -278,7 +278,7 @@ where
         let entries = Vec::<(Key, Value)>::deserialize(deserializer)?;
         // The serializer writes a BTreeMap in key order, so a stored row is
         // strictly ascending. Accepting anything else would let two byte
-        // strings decode to one map (P20-F13); the JSON path already rejects
+        // strings decode to one map; the JSON path already rejects
         // duplicates.
         if entries.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
             return Err(de::Error::custom(

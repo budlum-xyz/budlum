@@ -277,7 +277,7 @@ where
     // Vector space and so separating each element of `E` into `e + 1 = [E: F]` elements of `F`.
     //
     // Domain lies in the base field `F`; split
-    // `Q(x)` into `e + 1` polynomials `Q_0(x), ... , Q_e(x)` each contained in `F`.
+    // `Q(x)` into `e + 1` polynomials `Q_0(x), ..., Q_e(x)` each contained in `F`.
     // Such that `Q(x) = [Q_0(x), ... ,Q_e(x)]` holds for all `x` in `F`.
     let quotient_flat = RowMajorMatrix::new_col(quotient_values).flatten_to_base();
 

@@ -9,7 +9,7 @@ pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 /// which is stricter in both value and encoding. See that constant for the
 /// comparison and for why this one must stay the looser of the two.
 pub const MAX_BLOCK_SIZE: usize = 1024 * 1024;
-pub const MAX_TX_SIZE: usize = 100 * 1024;
+pub const MAX_TX_SIZE: usize = crate::consensus::budget::MAX_TX_BYTES;
 /// Maximum number of full blocks returned in one range-sync response.
 ///
 /// This is derived from the transport frame ceiling instead of being an
@@ -112,6 +112,9 @@ pub enum NetworkMessage {
         voter_id: String,
         sig_bls: Vec<u8>,
         auth_sig: Vec<u8>,
+        /// The signer's ML-DSA attestation of the same checkpoint; see
+        /// [`crate::chain::finality::Precommit::pq_sig`].
+        pq_sig: Vec<u8>,
     },
 
     FinalityCert {
@@ -127,14 +130,20 @@ pub enum NetworkMessage {
     GetQcBlob {
         epoch: u64,
         checkpoint_height: u64,
+        /// Zero denotes the first chunk (and the legacy two-field request).
+        chunk_index: u32,
     },
 
     QcBlobResponse {
         epoch: u64,
         checkpoint_height: u64,
         checkpoint_hash: String,
+        /// One chunk of the binary QC V2 blob. A blob of a thousand
+        /// validators is several megabytes and travels as numbered chunks.
         blob_data: Vec<u8>,
         found: bool,
+        chunk_index: u32,
+        chunk_count: u32,
     },
 
     QcFaultProof {
@@ -165,7 +174,7 @@ impl NetworkMessage {
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge(bytes.len()));
         }
-        // Only the canonical encoding is accepted (P36-F07). Dedup keys and
+        // Only the canonical encoding is accepted. Dedup keys and
         // gossipsub ids hash the raw bytes, but prost skips unknown fields and
         // accepts any field order and overlong varints, so one signed object
         // could be re-wrapped into unlimited byte strings that each look new.
@@ -282,7 +291,7 @@ pub fn is_canonical_hash(hash: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// P36-F07: an appended unknown field decodes to the same message but is
+    /// An appended unknown field decodes to the same message but is
     /// not the canonical encoding, so the validated entry point refuses it.
     #[test]
     fn a_non_canonical_encoding_of_a_valid_message_is_refused() {
@@ -318,6 +327,7 @@ mod tests {
                         voter_id: voter_id.clone(),
                         sig_bls: vec![1; 48],
                         auth_sig: vec![2; 48],
+                        pq_sig: vec![3; 16],
                     }
                 } else {
                     NetworkMessage::Prevote {

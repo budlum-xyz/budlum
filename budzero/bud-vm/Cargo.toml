@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 bud-isa = { path = "../bud-isa" }
+# The Poseidon parameter set is defined once, in the crate the wallet and the node read too.
+budlum-note-packing = { path = "../../crates/note-packing" }
 serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1"
 

@@ -113,9 +113,8 @@ impl VersionPolicy {
     /// schedule is empty or everything has sunset, which is itself a state a
     /// domain should not be in.
     #[must_use]
-    /// WIRING: wired - the fork-scheduling path
-    /// (`Blockchain::schedule_external_fork`) logs this at schedule time now
-    /// that the external tree is bound to consensus.
+    /// WIRING: wired - the domain status RPC reports the version live at the
+    /// registry clock (`currentVersionAtClock`).
     pub fn current_version_at(&self, height: u64) -> Option<u32> {
         self.windows
             .iter()
@@ -132,9 +131,9 @@ impl VersionPolicy {
     /// A fork into an already-known version, a fork height in the past
     /// relative to the version it replaces, or a grace window wider than the
     /// domain allows.
-    /// WIRING: wired - fork scheduling is the `bud_scheduleExternalFork`
-    /// governance action (`Blockchain::schedule_external_fork`); the rules
-    /// stay pinned by this module's tests.
+    /// WIRING: wired - fork scheduling is the registrant's
+    /// `ExternalDomainTx::ScheduleFork` transaction, applied in block; the
+    /// rules stay pinned by this module's tests.
     pub fn schedule_fork(
         &mut self,
         old_version: u32,
@@ -148,7 +147,7 @@ impl VersionPolicy {
                 version: new_version,
             });
         }
-        // BLG-0161 (P07-F16): a fork may only land on a version the adapter
+        // A fork may only land on a version the adapter
         // actually accepts. Without this, an operator could schedule a
         // version the adapter refuses and sunset the one it does, leaving
         // the domain with no usable version.

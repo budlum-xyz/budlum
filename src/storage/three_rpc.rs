@@ -1,4 +1,4 @@
-//! G3 reveal RPC surface (plan §CH G3).
+//! G3 reveal RPC surface.
 //!
 //! [`three_reveal`](crate::storage::three_reveal)`::RevealSession` is the
 //! in-memory re-emit engine; this module is the *RPC-facing* wrapper that a

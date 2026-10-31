@@ -57,18 +57,10 @@ reason = "instant unmaintained (a maintenance warning); transitive, not a direct
 id = "RUSTSEC-2024-0436"
 reason = "paste unmaintained (a maintenance warning, not a vulnerability); a proc-macro, no runtime surface."
 
-[[IgnoredVulns]]
-id = "RUSTSEC-2024-0380"
-reason = "pqcrypto-dilithium was replaced by pqcrypto-mldsa; the PQ backend migration touches the consensus critical signature format, a separately planned task (the pq-ml-dsa feature exists)."
 
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0163"
-reason = "pqcrypto-internals unmaintained (upstream PQClean is being archived) - to be handled together with the PQ backend migration task."
-
-[[IgnoredVulns]]
-id = "RUSTSEC-2026-0162"
-reason = "pqcrypto-traits unmaintained (upstream PQClean is being archived) - to be handled together with the PQ backend migration task."
-
+# 2026-10-26: the three pqcrypto records (RUSTSEC-2024-0380, RUSTSEC-2026-0162,
+# RUSTSEC-2026-0163) were DELETED with the crates they described. The legacy Dilithium5
+# path (PQClean) is gone; ML-DSA comes from RustCrypto `ml-dsa` and `libcrux-ml-dsa`.
 
 # 2026-08-18: CI red roots (repository-wide transitive findings).
 # 2026-08-28: lru via rqrr (transitive). rqrr 0.9 -> 0.10.1 moved lru to 0.16.4,
@@ -116,3 +108,7 @@ ecosystem = "crates.io"
 vulnerability.ignore = true
 effectiveUntil = 2027-01-31
 reason = "GHSA-qwgh-2vcv-g2f7 requires a panicking caller-supplied compress callback whose caught panic leaves the buffer cursor corrupted; the only 0.10 instantiation is ExpandMsgXmd<Sha256> in bls12_381's hash_to_curve, which uses sha2's infallible compression and never runs under catch_unwind. Not upgradable in place: the fix (block-buffer 0.12.1) is incompatible with digest 0.10, which is pinned for the bls12_381 0.9 API."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0173"
+reason = "proc-macro-error2 unmaintained (a maintenance warning, not a vulnerability); a proc-macro helper reached only through a third-party macro crate at compile time, no runtime surface."
