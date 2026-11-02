@@ -54,9 +54,21 @@ contract Receiver is BudlumPaymentReceiver {
     }
 }
 
-/// A second account that fulfils through the executor: the per-solver guard
+/// A second account that fulfils through the executor: the per-account guard
 /// must let it through even after the test contract has used its own slot.
 contract Filler {
+    function bind(GraftExecutor executor, bytes32 solver) external {
+        executor.registerSolverKey(solver);
+    }
+
+    function run(GraftExecutor executor, bytes32 intent, address target) external {
+        executor.execute(intent, target, abi.encodeCall(Counter.bump, ()), hex"01");
+    }
+}
+
+/// An account that binds somebody else's solver key and fulfils with its own
+/// harmless call: the griefing move the per-account slot has to absorb.
+contract Attacker {
     function bind(GraftExecutor executor, bytes32 solver) external {
         executor.registerSolverKey(solver);
     }
@@ -113,25 +125,51 @@ contract GraftTest is Harness {
         bytes32 intent = keccak256("intent");
         executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
         assertEq(counter.count(), 1, "the call was made");
+        assertTrue(executor.fulfilled(intent, address(this)), "the caller's own slot is used");
         vm.expectPartialRevert(GraftExecutor.AlreadyFulfilled.selector);
         executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
     }
 
-    /// The once-per-intent guard is per solver: a second account cannot burn
-    /// the id, and cannot be blocked by the first solver either.
-    function test_the_once_per_intent_guard_is_per_solver() public {
+    /// The once-per-intent guard is per executing account: a second account
+    /// cannot burn the id, and cannot be blocked by the first account either.
+    function test_the_once_per_intent_guard_is_per_account() public {
         bytes32 intent = keccak256("contested-intent");
         executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
-        assertTrue(executor.fulfilled(intent, SOLVER), "the caller's slot is used");
+        assertTrue(executor.fulfilled(intent, address(this)), "the caller's slot is used");
         assertEq(counter.count(), 1, "the call was made");
 
-        // Another solver still gets to fulfil the same intent: the first
+        // Another account still gets to fulfil the same intent: the first
         // one cannot burn the id for everyone.
         Filler filler = new Filler();
         filler.bind(executor, bytes32(uint256(2)));
         filler.run(executor, intent, address(counter));
-        assertTrue(executor.fulfilled(intent, bytes32(uint256(2))), "the other solver's slot was free");
+        assertTrue(executor.fulfilled(intent, address(filler)), "the other account's slot was free");
         assertEq(counter.count(), 2, "the second call was made too");
+    }
+
+    /// Binding somebody else's Budlum key no longer spends that solver's slot.
+    ///
+    /// `registerSolverKey` is permissionless and proves nothing, so an attacker
+    /// could bind the awarded solver's address and `execute` the intent with its
+    /// own target: the awarded solver then reverted `AlreadyFulfilled` forever,
+    /// could never emit the event the settlement door requires, and the
+    /// deadline handed anyone the liveness slash of its bond. The slot is the
+    /// executing account's now, so the griefing move buys nothing.
+    function test_binding_another_solvers_key_cannot_burn_its_slot() public {
+        bytes32 intent = keccak256("griefed-intent");
+        Attacker attacker = new Attacker();
+
+        // The attacker names the awarded solver and fulfils with a harmless call.
+        attacker.bind(executor, SOLVER);
+        attacker.run(executor, intent, address(counter));
+        assertEq(counter.count(), 1, "the attacker's call went through");
+
+        // The real solver is not blocked: the intent is theirs to fulfil, and
+        // their event still carries their own key.
+        executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
+        assertEq(counter.count(), 2, "the awarded solver still fulfils the intent");
+        assertTrue(executor.fulfilled(intent, address(this)), "the solver's own slot is used");
+        assertTrue(executor.fulfilled(intent, address(attacker)), "and the attacker only spent its own");
     }
 
     /// A fulfilment names the solver the executing account bound, never one the
@@ -162,7 +200,7 @@ contract GraftTest is Harness {
     }
 
     /// The payload hash the settlement door checks commits to the bound
-    /// solver, and the slot `execute` spends is that solver's.
+    /// solver, and the slot `execute` spends is the executing account's.
     function test_the_payload_hash_commits_to_the_bound_solver() public {
         bytes32 intent = keccak256("bound-solver-intent");
         bytes32 callHash = keccak256(abi.encodeCall(Counter.bump, ()));
@@ -174,7 +212,8 @@ contract GraftTest is Harness {
             "the payload hash commits to the solver"
         );
         executor.execute(intent, address(counter), abi.encodeCall(Counter.bump, ()), hex"01");
-        assertTrue(executor.fulfilled(intent, SOLVER), "the bound solver's slot is the one used");
+        assertTrue(executor.fulfilled(intent, address(this)), "the executor's own slot is the one used");
+        assertEq(executor.solverKey(address(this)), SOLVER, "and the event names the bound solver");
     }
 
     function test_a_call_to_an_address_with_no_code_is_refused() public {
@@ -187,7 +226,7 @@ contract GraftTest is Harness {
         executor.execute(
             keccak256("intent"), address(counter), abi.encodeCall(Counter.fail, ()), hex"01"
         );
-        assertTrue(!executor.fulfilled(keccak256("intent"), SOLVER), "not marked fulfilled");
+        assertTrue(!executor.fulfilled(keccak256("intent"), address(this)), "not marked fulfilled");
     }
 
     function _proof(Receiver receiver, FinalityStub finality, bytes32 graftId)
