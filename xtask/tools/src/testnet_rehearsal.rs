@@ -189,6 +189,12 @@ struct Verdict {
 /// How many scenarios a full rehearsal runs.
 const SCENARIOS: usize = 11;
 
+/// The chain the rehearsal runs against, and the replay domain every `bud`
+/// invocation must name: the testnet profile pins `chain_id = 45261` and
+/// `bud` refuses to sign without being told the domain by hand, because the
+/// node's `bud_chainId` answer is untrusted input.
+const CHAIN_ID: u64 = 45261;
+
 fn compose(root: &Path, extra: &[&str]) -> Result<String, String> {
     let out = Command::new("docker")
         .arg("compose")
@@ -210,10 +216,12 @@ fn compose(root: &Path, extra: &[&str]) -> Result<String, String> {
     }
 }
 
-/// Run `bud` inside the RPC container, against its own public listener,
-/// with the rehearsal wallet password in the environment.
-fn bud(root: &Path, args: &[&str]) -> Result<String, String> {
-    let mut full = vec![
+/// The `docker compose exec` arguments of one `bud` run inside the RPC
+/// container: the chain the rehearsal signs for is named here, once, so no
+/// scenario can sign for whatever chain the node happens to answer with.
+#[must_use]
+fn bud_args(args: &[&str]) -> Vec<String> {
+    let mut full: Vec<String> = [
         "exec",
         "-T",
         "-e",
@@ -222,8 +230,20 @@ fn bud(root: &Path, args: &[&str]) -> Result<String, String> {
         "bud",
         "--rpc-url",
         "http://127.0.0.1:8545",
-    ];
-    full.extend_from_slice(args);
+        "--signing-chain-id",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    full.push(CHAIN_ID.to_string());
+    full.extend(args.iter().map(|s| (*s).to_string()));
+    full
+}
+
+/// Run `bud` inside the RPC container, against its own public listener,
+/// with the rehearsal wallet password in the environment.
+fn bud(root: &Path, args: &[&str]) -> Result<String, String> {
+    let full = bud_args(args);
     let out = Command::new("docker")
         .arg("compose")
         .args(["-f", COMPOSE_FILE])
@@ -843,6 +863,32 @@ mod tests {
         let options = Options::parse(&["--compose", "--report", "out.md"]).expect("compose");
         assert_eq!(options.report, Some(PathBuf::from("out.md")));
         assert!(Options::parse(&["--compose", "--report"]).is_err());
+    }
+
+    /// Every scenario signs through `bud_args`, so the replay domain is named
+    /// once, before the subcommand, and the profile's chain id is what it
+    /// names (`docs/TESTNET.md`, the AF-28 finding).
+    #[test]
+    fn every_bud_call_names_the_chain_it_signs_for() {
+        let args = bud_args(&["tx", "send", "--to", "0xab", "--amount", "1"]);
+        let flag = args
+            .iter()
+            .position(|a| a == "--signing-chain-id")
+            .expect("the rehearsal must pass --signing-chain-id");
+        assert_eq!(
+            args[flag + 1],
+            CHAIN_ID.to_string(),
+            "the flag carries the chain id"
+        );
+        let subcommand = args
+            .iter()
+            .position(|a| a == "tx")
+            .expect("the subcommand is present");
+        assert!(
+            flag < subcommand,
+            "--signing-chain-id is global: it precedes the subcommand"
+        );
+        assert_eq!(CHAIN_ID, 45261, "the rehearsal's profile is chain 45261");
     }
 
     #[test]
