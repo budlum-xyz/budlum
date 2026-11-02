@@ -823,6 +823,31 @@ no test, gate or lint was weakened.
   `test_an_intent_is_fulfilled_once`, `test_the_once_per_intent_guard_is_per_account` and
   `test_the_payload_hash_commits_to_the_bound_solver`.
 
+### AF-28 - `bud` signed with the chain id the node supplied (`cli`, `medium`)
+
+- **Where:** `src/bin/bud.rs`. The Strix thread was opened against `bud tx send` on #97
+  (`consensus-of-consensuses`); the same construction exists in this tree in four places -
+  `run_tx_send`, `send_v5` (every wallet-backed command: stake, unstake, delegate,
+  undelegate, redelegate, claim, BNS, Graft, domain), `send_signed` (the validator
+  transactions) and `run_validator_join` (the consensus-key registration digest) - each of
+  which read `bud_chainId` from the node and put the answer inside the signature.
+- **Observed:** a seed controls the same address on every network, so the chain id is the
+  only thing that says where a signature is valid. Taken from the node, it let the node
+  choose: a hostile peer, or anyone on the plaintext path to it, could present itself as
+  another chain and submit the captured transaction there, at a nonce it also chose.
+- **Fix:** the chain is named by the operator (`--signing-chain-id`, a global flag with no
+  default) and the node's answer is only ever compared against it. `node_chain_id` is the
+  single door through which the node's `bud_chainId` may enter a signing path; it refuses
+  when the flag is absent and when the ids differ, both before anything is signed. The
+  same fix landed on #97 for its `bud tx send` (`--chain-id` there, a required
+  subcommand flag, because that tree has the one signing path).
+- **Regression tests:** `a_node_on_another_network_cannot_choose_the_replay_domain` and
+  `the_chain_to_sign_for_is_a_global_flag` (`src/bin/bud.rs`).
+- **Decision note:** a process-wide cell set once from `argv` rather than a parameter
+  threaded through fourteen `send_v5` call sites. The property being defended is that no
+  signing path can skip the check, and the cell makes the check the only way to obtain the
+  value; a parameter is a thing a future call site can forget to pass.
+
 ### AF-19 to AF-27 status
 
 All nine are closed by code and tests in the same tree; CI on the head that carries them

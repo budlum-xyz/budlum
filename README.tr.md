@@ -365,8 +365,14 @@ Aynı ağaçta asgari bir CLI istemcisi de bulunur:
 ```bash
 cargo run --bin bud -- query balance <adres>
 cargo run --bin bud -- query block latest
-cargo run --bin bud -- tx send --to <adres> --amount <n> --priv-key <hex-tohum>
+cargo run --bin bud -- --signing-chain-id 45261 tx send --to <adres> --amount <n> --priv-key <hex-tohum>
 ```
+
+Imza atan her komut `--signing-chain-id` alir (`45260` mainnet, `45261` testnet, `45262`
+devnet). Imzanin tasidigi tekrar-oynatma alaninin tek kaynagi budur: dugumun
+`bud_chainId` yaniti bu degerle karsilastirilir ve uyusmazlik imza harcanmadan once
+reddedilir; cunku bir tohum her agda ayni adresi kontrol eder ve zincir kimligini secen
+bir dugum, isleminizin nerede gecerli olacagini secmis olur.
 
 ---
 

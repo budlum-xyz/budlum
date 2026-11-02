@@ -41,6 +41,17 @@ struct Cli {
     /// The node's JSON-RPC endpoint.
     #[arg(long, global = true, default_value = DEFAULT_RPC_URL)]
     rpc_url: String,
+    /// The chain this invocation signs for: `45260` mainnet, `45261` testnet,
+    /// `45262` devnet.
+    ///
+    /// Required by every command that signs. The node's `bud_chainId` answer is
+    /// compared against it and a mismatch is refused before a signature is
+    /// spent: a seed controls the same address on every network, so a node that
+    /// chose the id chose where the signature we make is valid, and could
+    /// present itself as another chain. Naming the network is the only way to
+    /// sign for the one you mean.
+    #[arg(long, global = true)]
+    signing_chain_id: Option<u64>,
     #[command(subcommand)]
     command: Command,
 }
@@ -824,6 +835,55 @@ fn parse_rpc_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> 
     }
 }
 
+/// The chain this invocation signs for, as named on the command line.
+///
+/// Written once from `argv` before any signing path runs and only read after
+/// that. A process-wide cell rather than a parameter because the alternative is
+/// threading the value through every `send_v5` call site, and the one thing
+/// that must not be possible is a signing path that quietly skips the check.
+static SIGNING_CHAIN_ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Record `--signing-chain-id`, if it was given.
+fn set_signing_chain_id(value: Option<u64>) {
+    if let Some(value) = value {
+        let _ = SIGNING_CHAIN_ID.set(value);
+    }
+}
+
+/// Whether the node's answer is the chain the operator named.
+///
+/// Split out so it can be tested without a node: the whole point is that this
+/// comparison, and not the node's answer, decides the replay domain.
+fn chain_id_binding(node_chain_id: u64, requested: u64) -> Result<u64, String> {
+    if node_chain_id != requested {
+        return Err(format!(
+            "the node serves chain id {node_chain_id}, but --signing-chain-id {requested} was \
+             given; refusing to sign for a network you did not name"
+        ));
+    }
+    Ok(requested)
+}
+
+/// The node's `bud_chainId`, taken only if it is the chain `--signing-chain-id`
+/// names.
+///
+/// Every signing path in this binary goes through here rather than through a
+/// bare `bud_chainId` call, so no command can quietly sign for whatever network
+/// it happens to be talking to.
+fn node_chain_id(rpc_url: &str) -> Result<u64, String> {
+    let Some(requested) = SIGNING_CHAIN_ID.get().copied() else {
+        return Err(
+            "--signing-chain-id <id> is required to sign (45260 mainnet, 45261 testnet, \
+             45262 devnet): the node's answer is untrusted input, and a signature carrying a \
+             chain id the node chose is a signature for the node's network, not yours"
+                .to_string(),
+        );
+    };
+    let value = rpc_call(rpc_url, "bud_chainId", serde_json::json!([]))?;
+    let node = parse_rpc_u64(&value, "bud_chainId")?;
+    chain_id_binding(node, requested)
+}
+
 /// Build an unsigned transfer bound to `chain_id`.
 fn build_transfer(
     from: Address,
@@ -870,11 +930,10 @@ fn run_tx_send(
         }
     };
 
-    // The chain id comes from the node, so the signature is bound to the
-    // network the node serves and never to a compiled-in default.
-    let chain_id_value = rpc_call(rpc_url, "bud_chainId", serde_json::json!([]))?;
-    let chain_id = parse_rpc_u64(&chain_id_value, "bud_chainId")?;
-    println!("chain id (from node): {chain_id}");
+    // The signature's replay domain is the chain the operator named; the node's
+    // answer can only agree with it or be refused.
+    let chain_id = node_chain_id(rpc_url)?;
+    println!("chain id: {chain_id} (named with --signing-chain-id)");
 
     // V4 is refused on mainnet: say so before a signature is spent.
     if chain_id
@@ -1137,8 +1196,10 @@ fn send_signed(
     let from = keys.address();
     let nonce_value = rpc_call(rpc_url, "bud_getNonce", serde_json::json!([from.to_hex()]))?;
     let nonce = parse_rpc_u64(&nonce_value, "bud_getNonce")?;
-    let chain_id_value = rpc_call(rpc_url, "bud_chainId", serde_json::json!([]))?;
-    let chain_id = parse_rpc_u64(&chain_id_value, "bud_chainId")?;
+    // The validator transactions are signed for the chain the operator named:
+    // a signature is valid wherever its chain id says, and the node does not get
+    // to choose that.
+    let chain_id = node_chain_id(rpc_url)?;
     let mut tx = Transaction::new_with_chain_id(
         from,
         Address::zero(),
@@ -1184,8 +1245,7 @@ fn run_validator_join(
     let stake = stake_bud
         .checked_mul(budlum_core::tokenomics::BUD_UNIT)
         .ok_or("stake overflows the base unit")?;
-    let chain_id_value = rpc_call(rpc_url, "bud_chainId", serde_json::json!([]))?;
-    let chain_id = parse_rpc_u64(&chain_id_value, "bud_chainId")?;
+    let chain_id = node_chain_id(rpc_url)?;
     let registration = keys
         .consensus_key_registration(chain_id)
         .map_err(|e| format!("consensus keys: {e}"))?;
@@ -1277,8 +1337,7 @@ fn run_validator_filiz(
     let keys = budlum_core::crypto::primitives::ValidatorKeys::load(key_file)
         .map_err(|e| format!("cannot load {}: {e}", key_file.display()))?;
     let seed = budlum_core::consensus::filiz::read_seed_file(seed_file)?;
-    let chain_id_value = rpc_call(rpc_url, "bud_chainId", serde_json::json!([]))?;
-    let chain_id = parse_rpc_u64(&chain_id_value, "bud_chainId")?;
+    let chain_id = node_chain_id(rpc_url)?;
     let chain = budlum_core::consensus::filiz::chain_for_network(keys.address().0, seed, chain_id)
         .map_err(|e| format!("Filiz chain: {e:?}"))?;
     let sent = send_signed(
@@ -1907,7 +1966,9 @@ fn send_v5(
     nonce: Option<u64>,
 ) -> Result<(), String> {
     let from = key.address();
-    let chain_id_value = rpc_call(rpc_url, "bud_chainId", serde_json::json!([]))?;
+    // Checked before anything is signed, so a wallet transfer is valid on the
+    // network the operator named and nowhere else.
+    let chain_id = node_chain_id(rpc_url)?;
     tx.from = from;
     tx.nonce = match nonce {
         Some(n) => n,
@@ -1917,7 +1978,7 @@ fn send_v5(
             parse_rpc_u64(&nonce_value, "bud_getNonce")?
         }
     };
-    tx.chain_id = parse_rpc_u64(&chain_id_value, "bud_chainId")?;
+    tx.chain_id = chain_id;
     match key {
         WalletKey::V3(account) => {
             use rand::Rng;
@@ -2082,6 +2143,7 @@ fn run_node_identity(
 
 fn main() {
     let cli = Cli::parse();
+    set_signing_chain_id(cli.signing_chain_id);
     let result = match &cli.command {
         Command::Tx { action } => match action {
             TxAction::Send {
@@ -2366,6 +2428,46 @@ mod tests {
 
     /// The CLI help names the product by its approved name, not
     /// by the banned layer-one term.
+    /// The node may not choose the replay domain of a signature this CLI makes.
+    ///
+    /// A seed controls the same address on every network, so a transfer signed
+    /// with a chain id the node supplied is a transfer the node's network - or
+    /// any network that node speaks for - can replay. The id is the operator's
+    /// to name, and the node's answer can only agree or be refused.
+    #[test]
+    fn a_node_on_another_network_cannot_choose_the_replay_domain() {
+        assert_eq!(chain_id_binding(45_262, 45_262).expect("agreement"), 45_262);
+        let err = chain_id_binding(45_260, 45_262)
+            .expect_err("a node on another network must not receive a signature");
+        assert!(
+            err.contains("refusing to sign for a network you did not name"),
+            "{err}"
+        );
+        assert!(err.contains("45260") && err.contains("45262"), "{err}");
+    }
+
+    /// The flag exists on the top-level command and reaches every subcommand,
+    /// so no signing path can be run without the operator having named a chain
+    /// (the run-time refusal is in `node_chain_id`).
+    #[test]
+    fn the_chain_to_sign_for_is_a_global_flag() {
+        use clap::CommandFactory;
+        let cli = Cli::command();
+        let flag = cli
+            .get_arguments()
+            .find(|arg| arg.get_id() == "signing_chain_id")
+            .expect("--signing-chain-id is a top-level argument");
+        // clap propagates a global argument into every subcommand, so no
+        // signing subcommand can be reached without it being on the command
+        // line. There is deliberately no default: a default is a compiled-in
+        // network, which is the same mistake in a quieter form.
+        assert!(flag.is_global_set(), "every subcommand inherits it");
+        assert!(
+            flag.get_default_values().is_empty(),
+            "the chain is named, never defaulted"
+        );
+    }
+
     #[test]
     fn cli_help_does_not_use_the_layer_one_term() {
         use clap::CommandFactory;
