@@ -863,6 +863,82 @@ is the confirmation. No finding in this round was closed as a false positive or 
 stub, and the one place where a conservative refusal stands in for the full fix (AF-24)
 says so in its own entry and in the module note.
 
+### AF-30 - three gate inputs the bundle work left behind (`ci`, `medium`)
+
+Found by running the repository gates over the tree that carries AF-19 to AF-28 rather than
+trusting the previous green: three of them were red, and each named a real loose end.
+
+- **Where:** `xtask/gates/pins/budzero-tree.pins`, `xtask/gates/src/gates/no_out_of_block_consensus_writes.rs`,
+  `src/chain/chain_actor.rs`, `src/chain/blockchain.rs`, `src/mempool/pool.rs`,
+  `src/rpc/server.rs`, `src/bin/budlum-light.rs`.
+- **Observed 1 - `tree-pin` red.** AF-24's change to `budzero/bud-pul/src/pul_air.rs` and
+  `keccak_chip.rs` landed without re-pinning the budzero tree, so the integrity gate could not
+  tell an intentional edit from an outside one: both pins were stale. Fixed by re-pinning the
+  two files (`tree-pin --pin`), which is the gate's own documented procedure for an intentional
+  change; the pin file is committed with the change that moved it.
+- **Observed 2 - `no-out-of-block-consensus-writes` red.** `ChainActor` now calls
+  `Blockchain::add_transaction_bundle` and the call was unclassified. Classified `NodeLocal`,
+  with the reason written where the next reader looks: a bundle admission touches the pool and
+  its pool file, never `self.state`, so a node that admits a bundle and loses it still holds
+  the same state root as its peers.
+- **Observed 3 - `no-idle-code` red, and the five items were genuinely idle.** AF-19 made
+  bundle admission atomic inside the pool, which removed the last external caller of
+  `ChainActor::remove_transaction`, `ChainCommand::RemoveTransaction` and
+  `Blockchain::remove_transaction`: the per-member rollback that needed them no longer exists,
+  and `Blockchain::add_transaction_bundle` persists only after the pool has admitted every
+  member. Deleting the three doors is the honest fix, and the `remove_transaction` entry left
+  `no_out_of_block_consensus_writes::CALLS` with it. `Mempool::remove_transaction` stays: the
+  pool's journal still uses it, and `Blockchain` still calls it from the two places that drop
+  a transaction the chain itself invalidated.
+- **Observed 3, the other two items, wired rather than deleted:** `BundleRefusal` is now the
+  return type all the way up (`Mempool` -> `Blockchain` -> `ChainCommand` -> `ChainActor`), and
+  `bud_sendTxBundle` puts the refused member's index in the JSON-RPC error's `data` as
+  `{"member": n}` as well as in the message - which is the client-facing half of AF-19 that a
+  `String` was throwing away. `LightClient::with_scheme_registry` (AF-22's operator door) is
+  wired into its production path: `budlum-light --scheme-registry <file>` parses the registry,
+  refuses anything that is not exactly the scheme and suite tables, and installs it before a
+  single checkpoint is judged, so the verifier judges a checkpoint by the policy the chain
+  publishes instead of by a fresh genesis.
+- **Regression tests:** `a_pinned_registry_must_be_the_whole_table` (`src/bin/budlum-light.rs`)
+  for the door, the three `Mempool` bundle tests for the refusal path that now carries its
+  index to the RPC answer, and the gates themselves: `tree-pin`, `no-out-of-block-consensus-writes`,
+  `no-idle-code`, `dead-public-api-is-ratcheted` and `guards-are-reachable` re-run green over
+  the tree.
+
+### AF-29 - the seven dependency-bump PRs are red because `main` is red (`ci`, `medium`)
+
+- **Where:** #113 to #119 (dependabot). Audit of all seven: their own diffs are
+  dependency-only, and 62 to 72 of their checks already pass.
+- **Observed, job by job:** the red sets repeat the same names - `Secret Scan (gitleaks, full
+  history)` (nine `generic-api-key` findings, every one of them in main's history:
+  `fuzz/Cargo.lock`, `crates/wallet-core/Cargo.lock`, `Cargo.lock`, `src/crypto/pq.rs`,
+  `budzero/bud-vm/src/lib.rs`, `budzero/bud-proof/src/plonky3_prover.rs`,
+  `src/cli/commands.rs` - lockfile checksums, ML-DSA type names, `let key = 0x..u64` test
+  fixtures and one `self.pkcs11_pq_key_label = ...` field copy), `Cargo Deny (root)`
+  (RUSTSEC-2026-0385, -0346, -0347, -0348, -0349, -0382, -0381), `OSV Scanner` (the fuzz
+  lockfile), `docker-smoke` (Trivy on the runtime image: `perl-base` CVE-2026-13221, fixed in
+  `5.36.0-7+deb12u4`, while main's pinned `bookworm-slim` digest ships `+deb12u3`), plus
+  `Repo Lint`, `Coverage`, `Stage 1 (pinned/independent)`, `Auditable + Audit`, `Grype` and
+  `Dependency Audit + SBOM`.
+- **Verified, not assumed:** every one of those is reproducible on main's head (`c5b06799`,
+  72 green of 1236 check-runs, with `RustSec drift` red on repeat) and already fixed in
+   `consensus-of-consensuses`: the `.gitleaks.toml` allowlists are path-AND-line scoped
+  (`644f021`), the root and sub-lockfiles carry rustls 0.23.46, rustls-webpki 0.103.16,
+  webpki-roots 1.0.10 or later, tokio 1.53.3 or later, quinn-proto 0.11.19 (and
+  `crates/wallet-core` is on chacha20 0.10.2), and `ops/Dockerfile` pins the newer
+  `bookworm-slim` digest with `perl-base` named in the install line so a sliding digest
+  cannot reintroduce it.
+- **Decision:** no code change and no workflow change inside those seven branches. Their
+  branches cannot see the fix because their base cannot, and rewriting their lockfiles would
+  copy it into seven places and hand the branch that really carries it seven conflicts. They
+  go green when `consensus-of-consensuses` lands on `main`; a rebase after that is free.
+- **The one exception is not a failing diff:** #114 to #117 bump the p3 crates to 0.8.0 and
+  break the build (`CryptographicHasher` / `PseudoCompressionFunction` bounds,
+  `PreprocessedProverData::as_ref`). p3 is pinned `=0.7.0` deliberately - the AIR layouts are
+  const-asserted against it and `docs/pq/MEASUREMENTS.md` is measured on it - so 0.8.0 is a
+  migration round with a fresh soundness measurement, not a dependency bump. Recorded as a
+  decision rather than closed silently.
+
 ## Panic bar: what was read, not just what the lints say
 
 `todo!` and `unimplemented!` appear nowhere in `src/`, `crates/`, `budzero/` or `bud/`

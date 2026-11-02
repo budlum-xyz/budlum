@@ -57,10 +57,10 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::storage::merkle_trie::AccountProofBundle>>,
     ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
-    AddTransactionBundle(Vec<Transaction>, oneshot::Sender<Result<(), String>>),
-    /// Take a transaction back out of the pool; the bundle door rolls a
-    /// partially admitted bundle back through this.
-    RemoveTransaction(String, oneshot::Sender<Option<Transaction>>),
+    AddTransactionBundle(
+        Vec<Transaction>,
+        oneshot::Sender<Result<(), crate::mempool::pool::BundleRefusal>>,
+    ),
     ProduceBlock(Address, oneshot::Sender<Option<(Block, Vec<[u8; 32]>)>>),
     ValidateAndAddBlock(Block, oneshot::Sender<Result<Vec<[u8; 32]>, String>>),
     GetTransactionByHash(String, oneshot::Sender<Option<Transaction>>),
@@ -627,25 +627,32 @@ impl ChainHandle {
     /// several turns can be interleaved with a block production that takes
     /// half of it, and the all-or-none promise would then be made by the RPC
     /// layer rather than by the pool.
-    pub async fn add_transaction_bundle(&self, txs: Vec<Transaction>) -> Result<(), String> {
+    /// Admit a bundle all or none. The refusal names the member the pool
+    /// objected to, so the caller can fix the body it sent instead of
+    /// retrying the same one forever.
+    pub async fn add_transaction_bundle(
+        &self,
+        txs: Vec<Transaction>,
+    ) -> Result<(), crate::mempool::pool::BundleRefusal> {
+        use crate::mempool::pool::{BundleRefusal, MempoolError};
         let (res_tx, res_rx) = oneshot::channel();
-        let _ = self
+        if self
             .tx
             .send(ChainCommand::AddTransactionBundle(txs, res_tx))
-            .await;
-        res_rx
             .await
-            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
-    }
-
-    /// Take a transaction back out of the pool. `None` means it was not there.
-    pub async fn remove_transaction(&self, tx_hash: &str) -> Option<Transaction> {
-        let (res_tx, res_rx) = oneshot::channel();
-        let _ = self
-            .tx
-            .send(ChainCommand::RemoveTransaction(tx_hash.to_string(), res_tx))
-            .await;
-        res_rx.await.unwrap_or(None)
+            .is_err()
+        {
+            return Err(BundleRefusal {
+                index: 0,
+                cause: MempoolError::InvalidTransaction("the chain actor is gone".to_string()),
+            });
+        }
+        res_rx.await.unwrap_or_else(|_| {
+            Err(BundleRefusal {
+                index: 0,
+                cause: MempoolError::InvalidTransaction("actor dropped the admission".to_string()),
+            })
+        })
     }
 
     pub async fn produce_block(&self, producer: Address) -> Option<(Block, Vec<[u8; 32]>)> {
@@ -2554,9 +2561,6 @@ impl ChainActor {
                 }
                 ChainCommand::AddTransactionBundle(txs, res_tx) => {
                     let _ = res_tx.send(self.blockchain.add_transaction_bundle(txs));
-                }
-                ChainCommand::RemoveTransaction(tx_hash, res_tx) => {
-                    let _ = res_tx.send(self.blockchain.remove_transaction(&tx_hash));
                 }
                 ChainCommand::ProduceBlock(producer, tx) => {
                     let result = self.blockchain.produce_block(producer);
