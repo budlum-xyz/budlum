@@ -295,6 +295,35 @@ Profiles live in [`config/`](config): [`devnet.toml`](config/devnet.toml),
 a fail-closed guard rejects them, so no one can accidentally start "mainnet" against a
 ceremony file.
 
+### Testnet
+
+Testnet is mainnet's rehearsal: the same code path, the same supply rules, the same validator
+ceremony. Only the profile, the genesis and the parameter values differ - chain id `45261`,
+network id `BDLT`.
+
+- **Wallet:** `bud wallet create --key-file ./secrets/wallet.json` (ML-DSA-87, 24 words).
+- **Get BUD:** the faucet grants 100 BUD per address per day. Ask it for a transfer like any
+  other: `curl -X POST https://faucet.<TESTNET_DOMAIN>/request -d '{"address":"0x<your address>"}'`.
+- **Become a validator:** at least 1,000 BUD of stake, then `bud validator join`; see
+  [docs/VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md).
+- **Delegate:** `bud delegate`, see [docs/DELEGATION.md](docs/DELEGATION.md).
+- **Run a node:** `budlum-core --config config/testnet.toml`.
+
+Every command that signs names its replay domain with `--signing-chain-id 45261` (`45260`
+mainnet, `45262` devnet). It has no default and the node's `bud_chainId` answer is only
+compared against it: a seed controls the same address on every network, so a node that chose
+the id would be choosing where your signature is valid.
+
+The **testnet readiness gate** - clean build and green CI, genesis/config/node start end to
+end, restart persistence with consistent counters, the network layer's size and rate limits,
+RPC auth and rate limiting, consensus and tokenomics, the panic bar, the operator docs and a
+secret-free history - is recorded row by row, with the code location and the test and the CI
+job that runs it, in
+[docs/audit/TESTNET_TRACEABILITY.md](docs/audit/TESTNET_TRACEABILITY.md). Endpoints,
+parameters and the local rehearsal are in [docs/TESTNET.md](docs/TESTNET.md); the gates that
+still stand between testnet and mainnet are in
+[docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
+
 ### Node roles
 
 `--role` selects the profile a node runs under: `validator`, `sentry`, `seed`, `rpc`,
