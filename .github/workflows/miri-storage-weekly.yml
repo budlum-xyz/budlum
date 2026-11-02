@@ -33,7 +33,7 @@ jobs:
       - name: Install pinned nightly Rust with Miri
         run: |
           rustup toolchain install nightly-2026-07-19 --component miri
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: miri-storage-weekly-${{ matrix.shard_index }}
           cache-on-failure: true
