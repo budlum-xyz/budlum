@@ -17,6 +17,29 @@ pub struct ClientIdentity {
     direct: bool,
 }
 
+/// The identity a per-client limit is charged against.
+///
+/// A host is delegated at least a `/64` and may source from every address in
+/// it, so bucketing on the bare IPv6 address hands one host 2^64 free
+/// identities: every per-client window in the indexer and the faucet - and the
+/// node budget behind them - resets by picking the next address. The bucket is
+/// therefore the `/64` prefix, which is what a delegation actually is, and the
+/// low 64 bits are zeroed so two addresses of one prefix compare equal.
+///
+/// IPv4 is unchanged (a `/32` is one host), and an IPv4-mapped address is
+/// normalised to IPv4 first, so a dual-stack listener cannot be walked around
+/// by prefixing `::ffff:`.
+fn bucket(ip: IpAddr) -> IpAddr {
+    match canonical(ip) {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            let mut octets = v6.octets();
+            octets[8..].fill(0);
+            IpAddr::V6(std::net::Ipv6Addr::from(octets))
+        }
+    }
+}
+
 fn canonical(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
@@ -43,7 +66,7 @@ impl ClientIdentity {
         if self.direct {
             // Direct clients can write XFF themselves. It is never a source
             // of identity unless the immediate peer is a configured proxy.
-            return Ok(peer);
+            return Ok(bucket(peer));
         }
         if !self.trusted.contains(&peer) {
             return Err("connection did not come from a trusted proxy");
@@ -70,6 +93,7 @@ impl ClientIdentity {
         hops.into_iter()
             .rev()
             .find(|ip| !self.trusted.contains(ip))
+            .map(bucket)
             .ok_or("X-Forwarded-For contains no untrusted client")
     }
 }
@@ -78,6 +102,45 @@ impl ClientIdentity {
 mod tests {
     use super::*;
     use hyper::header::HeaderValue;
+
+    /// One delegation is one identity, in both modes, and a second prefix is
+    /// a second identity. Without the `/64` bucket a single host could rotate
+    /// the low 64 bits and walk past every per-client limit.
+    #[test]
+    fn an_ipv6_prefix_is_one_identity_and_another_prefix_is_not() {
+        let first: IpAddr = "2001:db8:abcd:12::1".parse().unwrap();
+        let second: IpAddr = "2001:db8:abcd:12:ffff:ffff:ffff:ffff".parse().unwrap();
+        let other_prefix: IpAddr = "2001:db8:abcd:13::1".parse().unwrap();
+        assert_eq!(bucket(first), bucket(second), "one /64 is one identity");
+        assert_ne!(bucket(first), bucket(other_prefix));
+        assert_eq!(
+            bucket(first).to_string(),
+            "2001:db8:abcd:12::",
+            "the low 64 bits are zeroed"
+        );
+
+        let direct = ClientIdentity::new(true, vec![]).unwrap();
+        assert_eq!(direct.client_ip(first, &HeaderMap::new()), Ok(bucket(first)));
+        assert_eq!(
+            direct.client_ip(second, &HeaderMap::new()),
+            Ok(bucket(first)),
+            "direct mode charges the prefix, not the address"
+        );
+
+        let proxy: IpAddr = "127.0.0.1".parse().unwrap();
+        let proxied = ClientIdentity::new(false, vec![proxy]).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("2001:db8:abcd:12:dead:beef::9"),
+        );
+        assert_eq!(proxied.client_ip(proxy, &headers), Ok(bucket(first)));
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("2001:db8:abcd:13::7"),
+        );
+        assert_eq!(proxied.client_ip(proxy, &headers), Ok(bucket(other_prefix)));
+    }
 
     #[test]
     fn direct_and_proxy_modes_are_explicit_and_fail_closed() {
