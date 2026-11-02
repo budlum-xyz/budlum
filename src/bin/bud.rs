@@ -122,6 +122,18 @@ enum TxAction {
         /// Transaction nonce (fetched from the node with `bud_getNonce` if omitted).
         #[arg(long)]
         nonce: Option<u64>,
+        /// The chain id this transfer is signed for: `45260` mainnet, `45261`
+        /// testnet, `45262` devnet.
+        ///
+        /// Required, and never taken from the node. The node's `bud_chainId`
+        /// answer is untrusted input; it is compared against this value and a
+        /// mismatch is refused before anything is signed. Without it the peer
+        /// chose the signature's replay domain: a seed controls the same
+        /// address on every network, so a hostile node could present itself as
+        /// another chain and submit the captured transfer there at a nonce it
+        /// also chose.
+        #[arg(long, required = true)]
+        chain_id: u64,
     },
 }
 
@@ -322,6 +334,22 @@ fn build_transfer(
     )
 }
 
+/// Refuse to sign for a network other than the one the user named.
+///
+/// `bud tx send` signs a transfer whose replay domain is the chain id inside
+/// it. Taking that id from the node let the node pick the network the
+/// signature would be valid on; the id the user typed is the only trusted
+/// source, so the node's answer can only agree or be refused.
+fn chain_id_must_match(node_chain_id: u64, requested_chain_id: u64) -> Result<(), String> {
+    if node_chain_id == requested_chain_id {
+        return Ok(());
+    }
+    Err(format!(
+        "the node serves chain id {node_chain_id}, but --chain-id {requested_chain_id} was \
+         requested; refusing to sign for a network you did not name"
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_tx_send(
     rpc_url: &str,
@@ -330,6 +358,7 @@ fn run_tx_send(
     priv_key_file: Option<&std::path::Path>,
     fee: u64,
     nonce: Option<u64>,
+    requested_chain_id: u64,
 ) -> Result<(), String> {
     let seed = parse_seed(&load_priv_key(priv_key_file)?)?;
     let keypair = KeyPair::from_seed(&seed).map_err(|e| format!("key derivation: {e}"))?;
@@ -347,11 +376,15 @@ fn run_tx_send(
         }
     };
 
-    // The chain id comes from the node, so the signature is bound to the
-    // network the node serves and never to a compiled-in default.
+    // The node's answer is untrusted input: a hostile peer, or anyone on the
+    // plaintext path to it, would otherwise put its own replay domain inside
+    // the signature. It is checked against the chain id the user named, and a
+    // mismatch is refused before anything is signed.
     let chain_id_value = rpc_call(rpc_url, "bud_chainId", serde_json::json!([]))?;
-    let chain_id = parse_rpc_u64(&chain_id_value, "bud_chainId")?;
-    println!("chain id (from node): {chain_id}");
+    let node_chain_id = parse_rpc_u64(&chain_id_value, "bud_chainId")?;
+    chain_id_must_match(node_chain_id, requested_chain_id)?;
+    let chain_id = requested_chain_id;
+    println!("chain id: {chain_id} (node serves {node_chain_id})");
 
     // Build and sign the transaction.
     let mut tx = build_transfer(from, to_addr, amount, fee, nonce, chain_id);
@@ -524,6 +557,7 @@ fn main() {
                 priv_key_file,
                 fee,
                 nonce,
+                chain_id,
             } => run_tx_send(
                 &cli.rpc_url,
                 to,
@@ -531,6 +565,7 @@ fn main() {
                 priv_key_file.as_deref(),
                 *fee,
                 *nonce,
+                *chain_id,
             ),
         },
         Command::Query { action } => match action {
@@ -584,6 +619,44 @@ mod tests {
                 "subcommand help uses the banned term: {sub_help}"
             );
         }
+    }
+
+    /// The node may not choose the signature's replay domain: the chain id the
+    /// user named is the only one this CLI signs for.
+    #[test]
+    fn a_node_serving_another_chain_refuses_to_sign() {
+        assert!(chain_id_must_match(45262, 45262).is_ok());
+        let err = chain_id_must_match(45260, 45262)
+            .expect_err("a node on another network must not receive a signature");
+        assert!(
+            err.contains("refusing to sign for a network you did not name"),
+            "{err}"
+        );
+        assert!(err.contains("45260") && err.contains("45262"), "{err}");
+    }
+
+    /// The flag is required: a run that names no network cannot be signed for
+    /// one the node picked.
+    #[test]
+    fn tx_send_requires_an_explicit_chain_id() {
+        use clap::CommandFactory;
+        let cli = Cli::command();
+        let tx = cli
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "tx")
+            .expect("tx subcommand");
+        let send = tx
+            .get_subcommands()
+            .find(|sub| sub.get_name() == "send")
+            .expect("tx send subcommand");
+        let chain_id = send
+            .get_arguments()
+            .find(|arg| arg.get_id() == "chain_id")
+            .expect("--chain-id is an argument of tx send");
+        assert!(
+            chain_id.is_required_set(),
+            "--chain-id must be required, or the node chooses the replay domain"
+        );
     }
 
     #[test]
