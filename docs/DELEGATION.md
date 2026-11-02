@@ -98,15 +98,18 @@ validator and its delegators earn nothing until the jail ends.
 ## 6. Command line
 
 ```
-bud delegate --key-file wallet.key --validator <address> --amount-bud 100
-bud undelegate --key-file wallet.key --validator <address> --amount-bud 40
-bud withdraw-delegation --key-file wallet.key --validator <address>
-bud redelegate --key-file wallet.key --from-validator <address> --to-validator <address> --amount-bud 40
-bud claim-rewards --key-file wallet.key --validator <address>
-bud validator commission --key-file ./secrets/testnet-validator.key --rate-ppm 50000
+bud --signing-chain-id 45261 delegate --key-file wallet.key --validator <address> --amount-bud 100
+bud --signing-chain-id 45261 undelegate --key-file wallet.key --validator <address> --amount-bud 40
+bud --signing-chain-id 45261 withdraw-delegation --key-file wallet.key --validator <address>
+bud --signing-chain-id 45261 redelegate --key-file wallet.key --from-validator <address> --to-validator <address> --amount-bud 40
+bud --signing-chain-id 45261 claim-rewards --key-file wallet.key --validator <address>
+bud --signing-chain-id 45261 validator commission --key-file ./secrets/testnet-validator.key --rate-ppm 50000
 ```
 
 The wallet password comes from `--password-file` or `BUD_WALLET_PASSWORD`.
+`--signing-chain-id` (45260 mainnet, 45261 testnet, 45262 devnet) is the
+replay domain every signature carries; it is required, has no default, and the
+client refuses to sign when the node answers with a different chain id.
 
 ## 7. Reading the state
 
