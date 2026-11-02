@@ -11,7 +11,7 @@ use bud_vm::{Step, Vm};
 use p3_challenger::{HashChallenger, SerializingChallenger64};
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
-use p3_field::extension::BinomialExtensionField;
+use p3_field::extension::CubicTrinomialExtensionField;
 use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 use p3_fri::TwoAdicFriPcs;
 use p3_goldilocks::Goldilocks;
@@ -25,7 +25,12 @@ use std::boxed::Box;
 use tiny_keccak::{Hasher, Keccak};
 use tracing::{debug, info};
 
-type MyExtensionField = BinomialExtensionField<Goldilocks, 2>;
+// The challenge field is the cubic extension of Goldilocks, about 2^192 elements.
+// The quadratic extension is about 2^128: with the trace-length and column factors
+// of the AIR and the DEEP quotient, no query count lifts the provable bound to
+// 128 bits over it. A larger
+// degree is chosen from the ones `p3-goldilocks` provides (2, 3 and 5).
+type MyExtensionField = CubicTrinomialExtensionField<Goldilocks>;
 type MyHasher = SerializingHasher<Keccak256Hash>;
 type MyCompress = CompressionFunctionFromHasher<Keccak256Hash, 2, 32>;
 type MyMmcs = MerkleTreeMmcs<Goldilocks, u8, MyHasher, MyCompress, 2, 32>;
@@ -72,6 +77,47 @@ fn mem_key(tid: u64, addr: u64) -> u64 {
 
 pub struct Plonky3Adapter;
 
+/// The STARK configuration of every BudZero proof, exposed so that an AIR outside the
+/// VM trace is proven and verified with
+/// the same field, hash, FRI parameters and transcript binding, never with a second set.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
+pub type ChipStarkConfig = MyConfig;
+
+/// A proof of a chip AIR under [`ChipStarkConfig`].
+pub type ChipProof = crate::bud_stark::Proof<MyConfig>;
+
+/// Proves a chip AIR with the BudZero parameters.
+#[allow(clippy::multiple_bound_locations, clippy::type_repetition_in_bounds)]
+pub fn prove_chip<
+    #[cfg(debug_assertions)] A: for<'a> p3_air::Air<p3_air::DebugConstraintBuilder<'a, Goldilocks>>,
+    #[cfg(not(debug_assertions))] A,
+>(
+    air: &A,
+    trace: RowMajorMatrix<Goldilocks>,
+    public_values: &[Goldilocks],
+) -> ChipProof
+where
+    A: p3_air::Air<crate::bud_stark::SymbolicAirBuilder<Goldilocks>>
+        + for<'a> p3_air::Air<crate::bud_stark::ProverConstraintFolder<'a, MyConfig>>,
+{
+    let config = build_config();
+    crate::bud_stark::prove(&config, air, trace, None, public_values)
+}
+
+/// Verifies a chip proof with the BudZero parameters.
+pub fn verify_chip<A>(
+    air: &A,
+    proof: &ChipProof,
+    public_values: &[Goldilocks],
+) -> Result<(), String>
+where
+    A: p3_air::Air<crate::bud_stark::SymbolicAirBuilder<Goldilocks>>
+        + for<'a> p3_air::Air<crate::bud_stark::VerifierConstraintFolder<'a, MyConfig>>,
+{
+    let config = build_config();
+    crate::bud_stark::verify(&config, air, proof, public_values).map_err(|e| format!("{e:?}"))
+}
+
 fn build_config() -> MyConfig {
     let hash = MyHasher::new(Keccak256Hash {});
     let compress = MyCompress::new(Keccak256Hash {});
@@ -81,7 +127,10 @@ fn build_config() -> MyConfig {
         log_blowup: 3,
         max_log_arity: 2,
         log_final_poly_len: 0,
-        num_queries: 100,
+        // The smallest count that makes `stark-soundness` report at least 128 bits
+        // provable (no assumption) over the cubic extension with the grinding below.
+        // Change it only together with `docs/pq/MEASUREMENTS.md`.
+        num_queries: 76,
         commit_proof_of_work_bits: 16,
         query_proof_of_work_bits: 16,
         mmcs: challenge_mmcs,
@@ -148,6 +197,33 @@ fn rd_value_kept(step: &Step) -> u64 {
     } else {
         step.registers[step.dst_idx as usize]
     }
+}
+
+/// The initial 12-lane state of a gadget row: the given words, then zeros (the capacity).
+fn poseidon_lanes(head: &[u64]) -> [u64; POSEIDON_WIDTH] {
+    let mut lanes = [0u64; POSEIDON_WIDTH];
+    for (lane, word) in lanes.iter_mut().zip(head.iter()) {
+        *lane = *word;
+    }
+    lanes
+}
+
+/// The gadget state of the last row of a Merkle path group: the two children ordered by
+/// the key bit, left child in lanes 0..4 and right child in lanes 4..8.
+fn merkle_hash_lanes(step: &Step) -> Option<[u64; POSEIDON_WIDTH]> {
+    let round = usize::from(step.merkle_round?);
+    if round % 4 != 3 || !(4..bud_vm::MERKLE_ROOT_ROUND).contains(&round) {
+        return None;
+    }
+    let level = round / 4 - 1;
+    let bit = (step.merkle_key? >> level) & 1;
+    let cur = step.merkle_current?;
+    let buf = step.merkle_sibling?;
+    let (left, right) = if bit == 0 { (cur, buf) } else { (buf, cur) };
+    let mut lanes = [0u64; POSEIDON_WIDTH];
+    lanes[..4].copy_from_slice(&left);
+    lanes[4..8].copy_from_slice(&right);
+    Some(lanes)
 }
 
 fn register_events(trace: &[Step]) -> Vec<RegEvent> {
@@ -747,8 +823,8 @@ pub fn trace_matrix(
         // Poseidon witness: fill 4-round state + S-box intermediates
         // + Poseidon: fill Poseidon witness columns for any opcode that
         // Uses the shared 4-round gadget (Poseidon / PrivacyCommit / NullifierCheck).
-        let poseidon_init: Option<[u64; 8]> = match opcode {
-            bud_isa::Opcode::Poseidon => Some([step.src1_val, step.src2_val, 0, 0, 0, 0, 0, 0]),
+        let poseidon_init: Option<[u64; POSEIDON_WIDTH]> = match opcode {
+            bud_isa::Opcode::Poseidon => Some(poseidon_lanes(&[step.src1_val, step.src2_val])),
             bud_isa::Opcode::PrivacyCommit => {
                 // HIGH (CWE-682, 2026-08-17): VM layout'i
                 // poseidon4_hash3(amount=rs1, blinding=rs2, recipient=imm).
@@ -762,11 +838,11 @@ pub fn trace_matrix(
                 } else {
                     imm as u64
                 };
-                Some([step.src1_val, step.src2_val, recipient, 0, 0, 0, 0, 0])
+                Some(poseidon_lanes(&[step.src1_val, step.src2_val, recipient]))
             }
             bud_isa::Opcode::NullifierCheck => {
                 // State = [secret=rs2, DOMAIN_NULLIFIER, 0..]
-                Some([step.src2_val, bud_vm::DOMAIN_NULLIFIER, 0, 0, 0, 0, 0, 0])
+                Some(poseidon_lanes(&[step.src2_val, bud_vm::DOMAIN_NULLIFIER]))
             }
             bud_isa::Opcode::VerifyInference if !step.inference_is_expand => {
                 // Stage 3a: state = [model_c, input_c, 0..0]; the AIR binds
@@ -774,16 +850,10 @@ pub fn trace_matrix(
                 // constraint (rd = 1 iff output_c == Poseidon(model_c,
                 // input_c)). Expansion rows take the default None branch
                 // (no gadget on expansion rows).
-                Some([
+                Some(poseidon_lanes(&[
                     step.inference_model_commitment.unwrap_or(0),
                     step.inference_input_commitment.unwrap_or(0),
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                ])
+                ]))
             }
             bud_isa::Opcode::SWrite => {
                 let slot: u64 = if step.instruction.imm == -1 {
@@ -797,17 +867,17 @@ pub fn trace_matrix(
                     let hi = values[row_start + COL_STATE_WRITES_0 + 2 * k + 1].as_canonical_u64();
                     prev[k] = lo | (hi << 32);
                 }
-                Some([
+                Some(poseidon_lanes(&[
                     slot,
                     step.src1_val,
                     prev[0],
                     prev[1],
                     prev[2],
                     prev[3],
-                    0,
-                    0,
-                ])
+                ]))
             }
+            // The last row of a Merkle path group compresses two nodes.
+            bud_isa::Opcode::VerifyMerkle if step.merkle_is_expand => merkle_hash_lanes(step),
             _ => None,
         };
 
@@ -821,17 +891,18 @@ pub fn trace_matrix(
             // Same constants the AIR reads; see plonky3_air.rs.
             use bud_vm::{POSEIDON_MDS as mds, POSEIDON_RC_FULL as rc};
 
-            let mut s: [u64; 8] = init_state;
+            let mut s: [u64; POSEIDON_WIDTH] = init_state;
 
             for r in 0..POSEIDON_ROUNDS {
-                for i in 0..8 {
-                    values[row_start + COL_POSEIDON_STATE_BASE + r * 8 + i] = Goldilocks::new(s[i]);
+                for i in 0..POSEIDON_WIDTH {
+                    values[row_start + COL_POSEIDON_STATE_BASE + r * POSEIDON_WIDTH + i] =
+                        Goldilocks::new(s[i]);
                 }
 
                 let lanes = poseidon_sbox_lanes(r);
                 let sbox_off = poseidon_sbox_offset(r);
-                let mut sbox: [u64; 8] = [0; 8];
-                for i in 0..8 {
+                let mut sbox: [u64; POSEIDON_WIDTH] = [0; POSEIDON_WIDTH];
+                for i in 0..POSEIDON_WIDTH {
                     let s_rc = ((s[i] as u128 + rc[r][i] as u128) % P as u128) as u64;
                     if i < lanes {
                         let x2 = ((s_rc as u128 * s_rc as u128) % P as u128) as u64;
@@ -850,10 +921,10 @@ pub fn trace_matrix(
                 }
 
                 if r + 1 < POSEIDON_ROUNDS {
-                    let mut next: [u64; 8] = [0; 8];
-                    for i in 0..8 {
+                    let mut next: [u64; POSEIDON_WIDTH] = [0; POSEIDON_WIDTH];
+                    for i in 0..POSEIDON_WIDTH {
                         let mut sum: u128 = 0;
-                        for j in 0..8 {
+                        for j in 0..POSEIDON_WIDTH {
                             sum = (sum + mds[i][j] as u128 * sbox[j] as u128) % P as u128;
                         }
                         next[i] = sum as u64;
@@ -862,7 +933,7 @@ pub fn trace_matrix(
                 } else {
                     // Final round output = MDS row 0 * sbox (matches AIR / poseidon4_hash_state).
                     let mut sum: u128 = 0;
-                    for j in 0..8 {
+                    for j in 0..POSEIDON_WIDTH {
                         sum = (sum + mds[0][j] as u128 * sbox[j] as u128) % P as u128;
                     }
                     poseidon_out = sum as u64;
@@ -870,9 +941,9 @@ pub fn trace_matrix(
                     // needed (first 4 lanes become the next accumulator), not
                     // just lane 0.
                     if opcode == bud_isa::Opcode::SWrite {
-                        for i in 0..8 {
+                        for i in 0..POSEIDON_WIDTH {
                             let mut acc_sum: u128 = 0;
-                            for j in 0..8 {
+                            for j in 0..POSEIDON_WIDTH {
                                 acc_sum =
                                     (acc_sum + mds[i][j] as u128 * sbox[j] as u128) % P as u128;
                             }
@@ -971,152 +1042,90 @@ pub fn trace_matrix(
             // the AIR binds it to public[48..56].
         }
 
-        // (security audit) Merkle expansion rows. The
-        // Trace's CPU step is the original VerifyMerkle step on row
-        // `i` if `step.merkle_is_expand` is true *or* if it carries
-        // `merkle_key` (the original step's `merkle_key` patch
-        // Happens immediately after the step is pushed in VM,
-        // So we treat the first Merkle row in a sequence as the
-        // "original" one). The expansion rows are pushed
-        // Immediately after the original in `Vm::step`, so they
-        // Share the same `i` index here.
+        // Merkle expansion rows. The columns mirror the AIR constraints one for
+        // one: the group kind follows from the row index, the word index is one-hot, the
+        // node and the buffer are the VM's walk, and the root rows carry the comparison.
         if step.merkle_is_expand {
-            // Expansion row.
-            // `Vm::step` fills these four together with `merkle_is_expand`,
-            // so on an expansion row they are all present. Read as a group
-            // rather than unwrapped one by one: the guarantee lives in
-            // another crate, and a drift there must leave the row unwritten
-            // instead of aborting the prover mid-trace.
-            let (Some(key), Some(cur), Some(sibling), Some(round)) = (
+            // `Vm::step` fills these together with `merkle_is_expand`, so on an expansion
+            // row they are all present. Read as a group rather than unwrapped one by one:
+            // the guarantee lives in another crate, and a drift there must leave the row
+            // unwritten instead of aborting the prover mid-trace.
+            let (Some(key), Some(cur), Some(buf), Some(word), Some(round)) = (
                 step.merkle_key,
                 step.merkle_current,
                 step.merkle_sibling,
+                step.merkle_word,
                 step.merkle_round,
             ) else {
                 continue;
             };
-            let bit = (key >> round) & 1;
-            values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
-            values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(bit);
-            // Remaining key for this round. The AIR walks this down with
-            // `rem == 2 * rem' + bit`, which is what ties `bit` to `key`;
-            // without it the direction bits were free and a flipped bit
-            // produced a different root that the AIR still accepted.
-            // The value expected by the original row that started this
-            // expansion: the round-64 output that must be reached when the
-            // path ends. The original row comes immediately before the
-            // expansions, so we search backwards for the first non-expansion
-            // Merkle row. If none is found it stays 0 and the AIR's last-round
-            // equality breaks - rather than passing silently.
-            let final_merkle_value = trace[..i]
-                .iter()
-                .rev()
-                .find(|s| !s.merkle_is_expand)
-                .and_then(|s| s.merkle_current)
-                .unwrap_or(0);
-            values[row_start + COL_MERKLE_KEY_REM] = Goldilocks::new(key >> round);
-            values[row_start + COL_VM_MERKLE_CURRENT] = Goldilocks::new(cur);
-            values[row_start + COL_VM_MERKLE_SIBLING] = Goldilocks::new(sibling);
-            values[row_start + COL_VM_MERKLE_ROUND] = Goldilocks::new(round as u64);
-            values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(1);
-            // This column is no longer a flag but **a carried value**: the
-            // round-64 output the original row will compare against the root
-            // is carried unchanged through the expansion and checked for
-            // equality with the output produced in the last round
-            // (`plonky3_air.rs`, "The output of the last round ..."). It used
-            // to be a constant 0 here and the AIR never read the column, so
-            // the original row's value was bound to nothing.
-            values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(final_merkle_value);
-
-            // Poseidon witnesses: on every expansion row,
-            // Populate the x^2 / x^4 columns with the Goldilocks
-            // Poseidon single-round intermediates. We use the
-            // First round of the existing 4-round Poseidon
-            // (round constants RC[0], MDS first row).
-            //
-            // The first two state elements are `[cur, sibling]`
-            // Or `[sibling, cur]` depending on the bit; the rest
-            // Are zero (consistent with `Vm::poseidon4_hash`).
-            const P_GOLDILOCKS: u64 = 0xFFFFFFFF00000001; // 2^64 - 2^32 + 1
-            let p = P_GOLDILOCKS;
-            let rc0: [u64; 8] = [
-                0xdd5743e7f2a5a5d9,
-                0xcb3a864e58ada44b,
-                0xffa2449ed32f8cdc,
-                0x42025f65d6bd13ee,
-                0x7889175e25506323,
-                0x34b98bb03d24b737,
-                0xbdcc535ecc4faa2a,
-                0x5b20ad869fc0d033,
-            ];
-            let s0_in = if bit == 0 { cur } else { sibling };
-            let s1_in = if bit == 0 { sibling } else { cur };
-            // X^2 = (s + rc)^2 (mod P)
-            // (gate) use u128 for addition to prevent
-            // Goldilocks field overflow. `wrapping_add` wraps at u64::MAX
-            // But Goldilocks P = 2^64-2^32+1 < u64::MAX, so when
-            // S_in + rc0[i] > u64::MAX the wrapping_add result is wrong
-            // Mod P. The VM uses u128 correctly in `merkle_poseidon_round`.
-            for (i, s_in) in [s0_in, s1_in].iter().enumerate() {
-                let s_plus_rc = ((*s_in as u128 + rc0[i] as u128) % p as u128) as u64;
-                let x2 = ((s_plus_rc as u128 * s_plus_rc as u128) % p as u128) as u64;
-                let x4 = ((x2 as u128 * x2 as u128) % p as u128) as u64;
-                values[row_start + COL_MERKLE_POSEIDON_X2_0 + i] = Goldilocks::new(x2);
-                values[row_start + COL_MERKLE_POSEIDON_X4_0 + i] = Goldilocks::new(x4);
-            }
-            // Also fill the unused 6 elements with 0.
-            for i in 2..8 {
-                values[row_start + COL_MERKLE_POSEIDON_X2_0 + i] = Goldilocks::new(0);
-                values[row_start + COL_MERKLE_POSEIDON_X4_0 + i] = Goldilocks::new(0);
-            }
-        } else if let Some(key) = step.merkle_key {
-            // Original VerifyMerkle step. The VM patched this row
-            // With merkle_key immediately after push.
-            values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
-            values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(0);
-            // Merkle_current on the original step is the
-            // 64th-round Poseidon accumulator (the final
-            // Poseidon output of the path). The VM has
-            // Already populated this on the Step in `Vm::step`
-            // (Commit 3 trace layout decision: the original
-            // Step carries the 64th-round output, allowing
-            // The AIR to apply the final root check on the
-            // Original step's row, bridging to rd_val_new).
-            // The VM sets this on the original step; read it instead of
-            // asserting, so a change there leaves the column at zero rather
-            // than aborting the prover mid-trace.
-            let final_merkle = step.merkle_current.unwrap_or(0);
-            values[row_start + COL_VM_MERKLE_CURRENT] = Goldilocks::new(final_merkle);
-            // Merkle_round=0 on the original step so the AIR can
-            // Extract the right bit (key & 1) for the first
-            // Expansion row.
-            values[row_start + COL_VM_MERKLE_ROUND] = Goldilocks::new(0);
-            // The bit on the original step is bit-0 (key & 1);
-            // The expansion row 0 will write the real bit from
-            // `(key >> 0) & 1`. They should match.
-            values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(key & 1);
-            //: this is the "final" row of the
-            // VerifyMerkle path - the AIR uses the final_flag
-            // (1 only here) to apply the final root check on the
-            // *64th* expansion row's `merkle_current`.
-            values[row_start + COL_MERKLE_FINAL_FLAG] = Goldilocks::new(1);
-            // Inverse-witness for final root equality check.
-            // Rd_val_new is constrained to equal (final == root) as a field boolean.
-            let root = step.src1_val;
-            // Field subtraction, as for NullifierCheck above: the AIR forms
-            // `final - root` in Goldilocks, so `wrapping_sub` gives a wrong
-            // inverse witness whenever `final < root`.
-            let diff = bud_vm::field_sub_goldilocks(final_merkle, root);
-            let inv = if diff != 0 {
-                bud_vm::field_inverse_goldilocks(diff)
+            let round = usize::from(round);
+            let lane = round % 4;
+            let leaf_group = round < 4;
+            let root_group = round >= bud_vm::MERKLE_ROOT_ROUND;
+            let path_group = !leaf_group && !root_group;
+            let level = (round / 4).saturating_sub(1);
+            let bit = if path_group { (key >> level) & 1 } else { 0 };
+            let key_rem = if path_group {
+                key >> level
+            } else if leaf_group {
+                key
             } else {
                 0
             };
-            values[row_start + COL_MERKLE_DIFF_INV] = Goldilocks::new(inv);
+            values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
+            values[row_start + COL_VM_MERKLE_BIT] = Goldilocks::new(bit);
+            values[row_start + COL_MERKLE_KEY_REM] = Goldilocks::new(key_rem);
+            values[row_start + COL_VM_MERKLE_SIBLING] = Goldilocks::new(word);
+            values[row_start + COL_VM_MERKLE_ROUND] = Goldilocks::new(round as u64);
+            values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(1);
+            values[row_start + COL_MERKLE_LEAFG] = Goldilocks::new(u64::from(leaf_group));
+            values[row_start + COL_MERKLE_ROOTG] = Goldilocks::new(u64::from(root_group));
+            values[row_start + COL_MERKLE_HASH] =
+                Goldilocks::new(u64::from(path_group && lane == 3));
+            values[row_start + COL_MERKLE_OH + lane] = Goldilocks::new(1);
+            for k in 0..4 {
+                values[row_start + COL_MERKLE_CUR + k] = Goldilocks::new(cur[k]);
+                values[row_start + COL_MERKLE_BUF + k] = Goldilocks::new(buf[k]);
+            }
+            // The `rd` value of the original row, carried to the last row. The original
+            // row is the one before round 0.
+            let result = i
+                .checked_sub(round + 1)
+                .and_then(|origin| trace.get(origin))
+                .map_or(0, |origin| origin.dst_val);
+            values[row_start + COL_MERKLE_RESULT] = Goldilocks::new(result);
+            if root_group {
+                let diff = bud_vm::field_sub_goldilocks(cur[lane], word);
+                let inv = if diff == 0 {
+                    0
+                } else {
+                    bud_vm::field_inverse_goldilocks(diff)
+                };
+                let mut acc = 1u64;
+                for earlier in bud_vm::MERKLE_ROOT_ROUND..=round {
+                    let origin = i - (round - earlier);
+                    let earlier_step = &trace[origin];
+                    if let (Some(c), Some(w)) =
+                        (earlier_step.merkle_current, earlier_step.merkle_word)
+                    {
+                        if c[earlier % 4] != w {
+                            acc = 0;
+                        }
+                    }
+                }
+                values[row_start + COL_MERKLE_EQ] = Goldilocks::new(u64::from(diff == 0));
+                values[row_start + COL_MERKLE_DINV] = Goldilocks::new(inv);
+                values[row_start + COL_MERKLE_ACC] = Goldilocks::new(acc);
+            }
+        } else if let Some(key) = step.merkle_key {
+            // The original VerifyMerkle step carries the key, and the expansion rows
+            // that follow it carry everything else.
+            values[row_start + COL_VM_MERKLE_KEY] = Goldilocks::new(key);
+            values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(0);
         } else {
-            // Non-Merkle row. Force the merkle columns to zero so
-            // Any prover who tries to mark a non-VerifyMerkle row
-            // As expansion will be caught by the AIR.
+            // Non-Merkle row. Force the merkle columns to zero so that any prover who
+            // tries to mark a non-VerifyMerkle row as expansion will be caught by the AIR.
             values[row_start + COL_VM_MERKLE_IS_EXPAND] = Goldilocks::new(0);
         }
 
@@ -2426,59 +2435,321 @@ mod tests {
         )
     }
 
-    /// The `VerifyMerkle` fixture the forgery tests below start from: the
-    /// one-sibling path of `proves_verify_merkle_valid_1_depth`, run through
-    /// the honest VM.
-    fn merkle_one_depth_run() -> (Vec<u64>, Vm) {
+    /// The path window of a `VerifyMerkle`: the key, the leaf, 64 levels of siblings and
+    /// the root, as 8-byte words.
+    fn merkle_window(
+        key: u64,
+        leaf: [u64; 4],
+        siblings: &[[u64; 4]; 64],
+        root: [u64; 4],
+    ) -> Vec<u64> {
+        let mut words = vec![key];
+        words.extend_from_slice(&leaf);
+        for sibling in siblings {
+            words.extend_from_slice(sibling);
+        }
+        words.extend_from_slice(&root);
+        words
+    }
+
+    /// The root a walk from `leaf` reaches.
+    fn merkle_root_of(key: u64, leaf: [u64; 4], siblings: &[[u64; 4]; 64]) -> [u64; 4] {
+        let mut node = leaf;
+        for (level, sibling) in siblings.iter().enumerate() {
+            node = if (key >> level) & 1 == 0 {
+                bud_vm::merkle_node(node, *sibling)
+            } else {
+                bud_vm::merkle_node(*sibling, node)
+            };
+        }
+        node
+    }
+
+    /// The honest siblings the fixtures use: distinct words per level.
+    fn merkle_siblings() -> [[u64; 4]; 64] {
+        let mut siblings = [[0u64; 4]; 64];
+        for (level, sibling) in siblings.iter_mut().enumerate() {
+            let l = level as u64;
+            *sibling = [100 + l, 200 + l, 300 + l, 400 + l];
+        }
+        siblings
+    }
+
+    /// Run `VerifyMerkle` at address 256 over `words` through the honest VM.
+    fn merkle_run(words: &[u64]) -> (Vec<u64>, Vm) {
         let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
+            inst(Opcode::VerifyMerkle, 1, 0, 0, 256),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
-        let mut vm = Vm::new(1024);
-        let key: u64 = 0;
-        let mut siblings = [0u64; 64];
-        siblings[0] = 1;
-        let leaf: u64 = 0xBEEF;
-        let mut cur = leaf;
-        for &sib in siblings.iter() {
-            cur = bud_vm::merkle_poseidon_round(cur, sib);
+        let mut vm = Vm::new(4096);
+        for (i, word) in words.iter().enumerate() {
+            vm.memory[256 + 8 * i..264 + 8 * i].copy_from_slice(&word.to_le_bytes());
         }
-        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for (i, &sib) in siblings.iter().enumerate() {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sib.to_le_bytes());
-        }
-        vm.registers[2] = cur;
-        vm.registers[3] = leaf;
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
-        assert_eq!(vm.trace.len(), 66, "the original row, 64 rounds, Halt");
+        assert_eq!(
+            vm.trace.len(),
+            1 + bud_vm::MERKLE_ROUNDS + 1,
+            "the original row, one row per window word, Halt"
+        );
         (program, vm)
     }
 
-    /// Point a forged `VerifyMerkle` trace at the root its (altered) rounds
-    /// actually produce: re-run the chain from the leaf over whatever
-    /// siblings the expansion rows now carry, and make the original row, its
-    /// root operand and every register snapshot agree on the result. This is
-    /// what a prover forging a path does, because the root register is the
-    /// prover's to choose.
-    fn rechain_merkle_trace(trace: &mut [Step]) {
-        let mut cur = trace[0].src2_val;
-        for step in trace.iter_mut().filter(|s| s.merkle_is_expand) {
-            step.merkle_current = Some(cur);
-            let sib = step.merkle_sibling.expect("expansion rows carry one");
-            let bit = (step.merkle_key.expect("and the key") >> step.merkle_round.unwrap()) & 1;
-            cur = if bit == 0 {
-                bud_vm::merkle_poseidon_round(cur, sib)
-            } else {
-                bud_vm::merkle_poseidon_round(sib, cur)
-            };
+    /// The `VerifyMerkle` fixture the forgery tests start from: a real walk to its real
+    /// root.
+    fn merkle_one_depth_run() -> (Vec<u64>, Vm) {
+        let key = 0x5aa5_0ff0_1234_9876u64;
+        let leaf = [0xBEEF, 2, 3, 4];
+        let siblings = merkle_siblings();
+        let root = merkle_root_of(key, leaf, &siblings);
+        let (program, vm) = merkle_run(&merkle_window(key, leaf, &siblings, root));
+        assert_eq!(vm.registers[1], 1, "the honest walk reaches the root");
+        (program, vm)
+    }
+
+    #[test]
+    fn proves_verify_merkle_over_256_bit_nodes() {
+        let (program, vm) = merkle_one_depth_run();
+        let verdict = verify_forged_trace(&program, &vm.trace, vm.gas_limit, vm.gas_used);
+        assert!(verdict.is_ok(), "the honest walk must verify: {verdict:?}");
+    }
+
+    /// A walk that does not end at the root proves `rd = 0`, and the proof verifies:
+    /// the opcode answers a question, it does not insist on yes.
+    #[test]
+    fn proves_verify_merkle_returning_zero_for_an_incorrect_root() {
+        let key = 7u64;
+        let leaf = [1, 2, 3, 4];
+        let siblings = merkle_siblings();
+        let mut root = merkle_root_of(key, leaf, &siblings);
+        root[2] ^= 1;
+        let (program, vm) = merkle_run(&merkle_window(key, leaf, &siblings, root));
+        assert_eq!(vm.registers[1], 0, "a root off by one bit is not the root");
+        let verdict = verify_forged_trace(&program, &vm.trace, vm.gas_limit, vm.gas_used);
+        assert!(
+            verdict.is_ok(),
+            "an honest mismatch must verify: {verdict:?}"
+        );
+    }
+
+    /// Each of the four root words matters: the comparison is over 256 bits, not over one
+    /// element. A root that differs only in the first word, then only in the last word,
+    /// both prove `rd = 0`.
+    #[test]
+    fn verify_merkle_compares_every_word_of_the_root() {
+        let key = 3u64;
+        let leaf = [9, 8, 7, 6];
+        let siblings = merkle_siblings();
+        let honest = merkle_root_of(key, leaf, &siblings);
+        for word in [0usize, 3] {
+            let mut root = honest;
+            root[word] = root[word].wrapping_add(1) % bud_vm::GOLDILOCKS_P;
+            let (_, vm) = merkle_run(&merkle_window(key, leaf, &siblings, root));
+            assert_eq!(vm.registers[1], 0, "root word {word} must be compared");
         }
-        trace[0].merkle_current = Some(cur);
-        trace[0].src1_val = cur;
-        for step in trace.iter_mut() {
-            step.registers[2] = cur;
+    }
+
+    /// A `VerifyMerkle` with no expansion rows after it proves nothing: its result would
+    /// be the prover's to write.
+    #[test]
+    fn rejects_verify_merkle_without_expansion_rows() {
+        let (program, vm) = merkle_one_depth_run();
+        let mut trace = vm.trace.clone();
+        trace.drain(1..=bud_vm::MERKLE_ROUNDS);
+        trace[0].next_pc = 1;
+        assert_eq!(trace[0].dst_val, 1, "the claim being forged is a pass");
+
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
+        assert!(
+            verdict.is_err(),
+            "a VerifyMerkle row with no expansion block verified: its result \
+             was never derived from a path. verdict={verdict:?}"
+        );
+    }
+
+    /// A walk that stops after its first group proves membership under a root one
+    /// hash deep, unless the window length is pinned.
+    #[test]
+    fn rejects_verify_merkle_that_stops_early() {
+        let (program, vm) = merkle_one_depth_run();
+        let mut trace = vm.trace.clone();
+        // Keep the leaf group and the first level; end the walk there.
+        trace.drain(9..=bud_vm::MERKLE_ROUNDS);
+        trace[8].next_pc = 1;
+
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
+        assert!(
+            verdict.is_err(),
+            "a Merkle path cut to one level verified. verdict={verdict:?}"
+        );
+    }
+
+    /// The path buffer address may not move between rows of one path.
+    #[test]
+    fn rejects_verify_merkle_with_a_shifted_sibling_address() {
+        let (program, vm) = merkle_one_depth_run();
+        let mut trace = vm.trace.clone();
+        let shifted = trace[10].memory_addr.unwrap() + 8;
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&vm.memory[shifted..shifted + 8]);
+        let word = u64::from_le_bytes(word);
+        trace[10].instruction.imm += 8;
+        trace[10].memory_addr = Some(shifted);
+        trace[10].memory_val = Some(word);
+        trace[10].merkle_word = Some(word);
+
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
+        assert!(
+            verdict.is_err(),
+            "an expansion row whose address was shifted off the instruction's \
+             path buffer verified. verdict={verdict:?}"
+        );
+    }
+
+    /// A sibling word the walk consumed must be the word in memory: change the word and
+    /// the buffer on one row, leave memory alone.
+    #[test]
+    fn rejects_verify_merkle_with_a_sibling_not_in_memory() {
+        let (program, vm) = merkle_one_depth_run();
+        let mut trace = vm.trace.clone();
+        // Row 1 + 4 is the first word of the first level (round 4).
+        let row = 1 + 4;
+        let forged = trace[row].merkle_word.unwrap() ^ 0x55;
+        trace[row].merkle_word = Some(forged);
+        let mut buffer = trace[row].merkle_sibling.unwrap();
+        buffer[0] = forged;
+        trace[row].merkle_sibling = Some(buffer);
+
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
+        assert!(
+            verdict.is_err(),
+            "a sibling that is not the word in memory verified. verdict={verdict:?}"
+        );
+    }
+
+    /// An expansion row cannot stand alone: it is exempt from the program lookup, the
+    /// register argument and the gas charge, so it has to belong to a path.
+    #[test]
+    fn rejects_a_stray_merkle_expansion_row_that_stores() {
+        let program = vec![
+            inst(Opcode::Load, 1, 0, 0, 7),
+            inst(Opcode::Load, 2, 0, 0, 16),
+            inst(Opcode::Store, 0, 2, 1, 0),
+            inst(Opcode::Halt, 0, 0, 0, 0),
+        ];
+        let mut vm = Vm::new(64);
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+        assert_eq!(vm.trace.len(), 4);
+        assert_eq!(vm.trace[2].instruction.opcode, Opcode::Store);
+
+        let mut trace = vm.trace.clone();
+        let imm = 16;
+        let stray = &mut trace[2];
+        stray.instruction = Instruction {
+            opcode: Opcode::VerifyMerkle,
+            rd: 0,
+            rs1: 0,
+            rs2: 0,
+            imm,
+        };
+        stray.src1_idx = 0;
+        stray.src2_idx = 0;
+        stray.dst_idx = 0;
+        stray.src1_val = 0;
+        stray.src2_val = 0;
+        stray.dst_val = 0;
+        stray.memory_addr = Some(imm as usize + 8);
+        stray.memory_val = Some(5);
+        stray.is_memory_write = false;
+        stray.merkle_key = Some(0);
+        stray.merkle_current = Some([0; 4]);
+        stray.merkle_sibling = Some([5, 0, 0, 0]);
+        stray.merkle_word = Some(5);
+        stray.merkle_round = Some(0);
+        stray.merkle_is_expand = true;
+
+        let store_gas = Vm::gas_cost(Opcode::Store);
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used - store_gas);
+        assert!(
+            verdict.is_err(),
+            "a lone Merkle expansion row stood in for a Store and the proof \
+             verified. verdict={verdict:?}"
+        );
+    }
+
+    /// Flip the direction bit of one level and leave the key alone: the remaining-key
+    /// chain ties each bit to the key, so the proof is refused.
+    #[test]
+    fn rejects_verify_merkle_with_flipped_direction_bit() {
+        let (program, vm) = merkle_one_depth_run();
+        let verdict = verify_forged_matrix_full(
+            &program,
+            &vm.trace,
+            vm.gas_limit,
+            vm.gas_used,
+            None,
+            |values| {
+                // Round 4 to 7 are the four rows of the first level.
+                for round in 4..8usize {
+                    let at = (1 + round) * TRACE_WIDTH + COL_VM_MERKLE_BIT;
+                    let bit = values[at].as_canonical_u64();
+                    values[at] = Goldilocks::new(1 - bit);
+                }
+            },
+            |_, _, _| {},
+        );
+        assert!(
+            verdict.is_err(),
+            "a flipped direction bit verified. verdict={verdict:?}"
+        );
+    }
+
+    /// The gadget output is the next node: tamper the S-box witness of the first hash row.
+    #[test]
+    fn rejects_verify_merkle_with_tampered_poseidon_sbox() {
+        let (program, vm) = merkle_one_depth_run();
+        let verdict = verify_forged_matrix_full(
+            &program,
+            &vm.trace,
+            vm.gas_limit,
+            vm.gas_used,
+            None,
+            |values| {
+                // The first hash row is the last row of the first level: round 7.
+                let at = (1 + 7) * TRACE_WIDTH + COL_POSEIDON_X2_BASE;
+                values[at] = Goldilocks::new(12345);
+            },
+            |_, _, _| {},
+        );
+        assert!(
+            verdict.is_err(),
+            "a tampered S-box witness verified. verdict={verdict:?}"
+        );
+    }
+
+    /// The result the original row carries is the product of the root comparisons:
+    /// claim a pass for a walk that missed the root.
+    #[test]
+    fn rejects_verify_merkle_with_a_forged_result() {
+        let key = 5u64;
+        let leaf = [1, 1, 1, 1];
+        let siblings = merkle_siblings();
+        let mut root = merkle_root_of(key, leaf, &siblings);
+        root[1] ^= 1;
+        let (program, vm) = merkle_run(&merkle_window(key, leaf, &siblings, root));
+        assert_eq!(vm.registers[1], 0);
+        let mut trace = vm.trace.clone();
+        trace[0].dst_val = 1;
+        trace[0].registers[1] = 1;
+        for step in trace.iter_mut().skip(1) {
+            step.registers[1] = 1;
         }
+        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
+        assert!(
+            verdict.is_err(),
+            "a Merkle miss claimed as a pass verified. verdict={verdict:?}"
+        );
     }
 
     /// Run the program, tamper the trace, and assert that proving FAILS.
@@ -4379,146 +4650,6 @@ mod tests {
         );
     }
 
-    /// A `VerifyMerkle` with no expansion rows after it proves nothing.
-    ///
-    /// The root comparison lives on the original row and the only thing that
-    /// ties its `merkle_current` to a walked path is the expansion block that
-    /// follows. Leave the block out and the cell is the prover's to write: it
-    /// is set to the claimed root, the comparison holds, and `rd` is 1.
-    #[test]
-    fn rejects_verify_merkle_without_expansion_rows() {
-        let (program, vm) = merkle_one_depth_run();
-        let mut trace = vm.trace.clone();
-        trace.drain(1..65);
-        trace[0].next_pc = 1;
-        assert_eq!(trace[0].dst_val, 1, "the claim being forged is a pass");
-
-        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
-        assert!(
-            verdict.is_err(),
-            "a VerifyMerkle row with no expansion block verified: its result \
-             was never derived from a path. verdict={verdict:?}"
-        );
-    }
-
-    /// A path that stops after its first round proves membership under a
-    /// root only one hash deep.
-    ///
-    /// The key is zero, so every direction bit is zero and the shortened walk
-    /// satisfies every per-row rule: round 0 is followed by a row that is not
-    /// an expansion, which the terminator treats as the end of the path. The
-    /// claimed root is the round-0 output, so the comparison holds.
-    #[test]
-    fn rejects_verify_merkle_that_stops_early() {
-        let (program, vm) = merkle_one_depth_run();
-        let mut trace = vm.trace.clone();
-        trace.drain(2..65);
-        trace[1].next_pc = 1;
-        rechain_merkle_trace(&mut trace);
-        assert_eq!(trace.len(), 3, "original row, round 0, Halt");
-
-        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
-        assert!(
-            verdict.is_err(),
-            "a Merkle path cut to one round verified against a root one hash \
-             deep. verdict={verdict:?}"
-        );
-    }
-
-    /// The path buffer address may not move between rows of one path.
-    ///
-    /// Each expansion row's memory address is `imm + 8 + 8 * round`, and `imm`
-    /// on an expansion row is exempt from the program table, so nothing tied
-    /// it to the instruction's. Round 0 here reads the word round 1 reads, one
-    /// slot over, and the root is recomputed from what it found there: the
-    /// walk is over words the program laid out, but not along the path the
-    /// instruction names.
-    #[test]
-    fn rejects_verify_merkle_with_a_shifted_sibling_address() {
-        let (program, vm) = merkle_one_depth_run();
-        let mut trace = vm.trace.clone();
-        let shifted = trace[1].memory_addr.unwrap() + 8;
-        let mut word = [0u8; 8];
-        word.copy_from_slice(&vm.memory[shifted..shifted + 8]);
-        let word = u64::from_le_bytes(word);
-        trace[1].instruction.imm += 8;
-        trace[1].memory_addr = Some(shifted);
-        trace[1].memory_val = Some(word);
-        trace[1].merkle_sibling = Some(word);
-        rechain_merkle_trace(&mut trace);
-        assert_ne!(word, 1, "round 0 must now read a different word");
-
-        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used);
-        assert!(
-            verdict.is_err(),
-            "an expansion row whose address was shifted off the instruction's \
-             path buffer verified. verdict={verdict:?}"
-        );
-    }
-
-    /// A `VerifyMerkle` expansion row cannot stand alone.
-    ///
-    /// An expansion row is exempt from the program lookup, the register
-    /// argument and the gas charge, and nothing required it to belong to an
-    /// original `VerifyMerkle` row before it or to a path that runs its 64
-    /// rounds. The program here has no 0x1E in it. Its `Store` row is
-    /// replaced by a lone expansion row: the row for that pc is no longer
-    /// matched against the program, the register file is not asked about it,
-    /// and the store never happens. The proof still says the program ran to
-    /// the end, at the honest gas minus the skipped store.
-    #[test]
-    fn rejects_a_stray_merkle_expansion_row_that_stores() {
-        let program = vec![
-            inst(Opcode::Load, 1, 0, 0, 7),
-            inst(Opcode::Load, 2, 0, 0, 16),
-            inst(Opcode::Store, 0, 2, 1, 0),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(64);
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-        assert_eq!(vm.trace.len(), 4);
-        assert_eq!(vm.trace[2].instruction.opcode, Opcode::Store);
-
-        let mut trace = vm.trace.clone();
-        let sibling = 5u64;
-        // The expansion block reads the value the previous non-expansion row
-        // carries; give it the one this round produces.
-        trace[1].merkle_current = Some(bud_vm::merkle_poseidon_round(0, sibling));
-        let imm = 16;
-        let stray = &mut trace[2];
-        stray.instruction = Instruction {
-            opcode: Opcode::VerifyMerkle,
-            rd: 0,
-            rs1: 0,
-            rs2: 0,
-            imm,
-        };
-        stray.src1_idx = 0;
-        stray.src2_idx = 0;
-        stray.dst_idx = 0;
-        stray.src1_val = 0;
-        stray.src2_val = 0;
-        stray.dst_val = 0;
-        stray.memory_addr = Some(imm as usize + 8);
-        stray.memory_val = Some(sibling);
-        stray.is_memory_write = false;
-        stray.merkle_key = Some(0);
-        stray.merkle_current = Some(0);
-        stray.merkle_sibling = Some(sibling);
-        stray.merkle_round = Some(0);
-        stray.merkle_is_expand = true;
-
-        let store_gas = Vm::gas_cost(Opcode::Store);
-        let verdict = verify_forged_trace(&program, &trace, vm.gas_limit, vm.gas_used - store_gas);
-        assert!(
-            verdict.is_err(),
-            "a lone Merkle expansion row stood in for a Store and the proof \
-             verified: an instruction of the program was never executed. \
-             verdict={verdict:?}"
-        );
-    }
-
     /// `Assert` must accept any non-zero condition, as the VM does.
     ///
     /// The VM halts only when the condition is zero. The AIR asked for
@@ -5222,7 +5353,7 @@ mod tests {
     /// Strip the aux (LogUp) trace from an honest proof: the commitment and
     /// both openings together.
     ///
-    /// This is the shape of P15-F01, but built from a proof that was made
+    /// This is the shape of, but built from a proof that was made
     /// with the aux trace, so the PCS opening argument still covers it and
     /// the verifier must refuse. The forged shape, a proof that the prover
     /// built with no aux generator at all, is not tested here: it needs the
@@ -5776,7 +5907,7 @@ mod tests {
         }
     }
 
-    /// P15-F02: one proof has exactly one encoding. Bytes appended after a
+    /// One proof has exactly one encoding. Bytes appended after a
     /// valid proof are refused, so the proof hash and the relay fingerprint
     /// cannot be varied without invalidating the proof.
     #[test]
@@ -6016,7 +6147,7 @@ mod tests {
         });
     }
 
-    ///: PrivacyCommit Poseidon3 binding proves + verifies.
+    /// PrivacyCommit Poseidon3 binding proves + verifies.
     #[test]
     fn d2_proves_privacy_commit() {
         let amount = 100u64;
@@ -6296,7 +6427,7 @@ mod tests {
         assert_eq!(encoded & 0xFF, 0x1E);
     }
 
-    /// P12-F01 (K9-C: the AIR is not touched): each VerifyMerkle level hashes
+    /// Each VerifyMerkle level hashes
     /// with a single Poseidon round, which has no second preimage resistance,
     /// so the opcode must stay closed in production. This pins the closed
     /// gate where proofs are consumed: the default activation refuses the
@@ -6355,7 +6486,7 @@ mod tests {
             inst(Opcode::VerifyMerkle, 1, 2, 3, 0),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
-        let mut vm = Vm::new(1024);
+        let mut vm = Vm::new(4096);
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
 
@@ -9349,303 +9480,8 @@ mod tests {
         );
     }
 
-    /// A flipped direction bit must be refused.
-    ///
-    /// `merkle_bit` decides which side of the Poseidon pair the sibling goes
-    /// on, so it is the part of a Merkle path that says *where* the leaf sits.
-    /// It used to be constrained only to be boolean, and the AIR comment said
-    /// outright that "the prover can simply provide a valid bit column".
-    /// Measured against that version: flipping the round-0 bit, recomputing
-    /// the whole chain from it and leaving `merkle_key` untouched produced a
-    /// different root, and the proof still verified.
-    ///
-    /// `COL_MERKLE_KEY_REM` closes it with a shift chain
-    /// (`rem == 2 * rem' + bit`, seeded from the key, terminating at zero), so
-    /// a flipped bit no longer has a consistent remainder to sit in.
-    #[test]
-    fn rejects_verify_merkle_with_flipped_direction_bit() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        // key = 0 keeps every honest bit at 0, so flipping one is a clean,
-        // single-variable change.
-        vm.memory[256..264].copy_from_slice(&0u64.to_le_bytes());
-        for i in 0..64 {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&((1000 + i) as u64).to_le_bytes());
-        }
-        let _ = vm.run_receipt(&program);
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&inst| inst.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: [0u8; 32],
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
-
-        // Flip the round-0 direction bit and recompute the Poseidon chain
-        // from it, so the trace stays internally consistent everywhere the
-        // old AIR looked. `merkle_key` is deliberately left alone, that is
-        // the disagreement this test is about.
-        let row1 = TRACE_WIDTH;
-        let bit_before = matrix.values[row1 + COL_VM_MERKLE_BIT].as_canonical_u64();
-        let cur0 = matrix.values[row1 + COL_VM_MERKLE_CURRENT].as_canonical_u64();
-        let sib0 = matrix.values[row1 + COL_VM_MERKLE_SIBLING].as_canonical_u64();
-        matrix.values[row1 + COL_VM_MERKLE_BIT] = Goldilocks::new(1 - bit_before);
-
-        // Round 0's S-box witnesses have to be rebuilt too: flipping the bit
-        // swaps which of (current, sibling) is s0. Leaving them stale would
-        // trip the Poseidon identity instead, and the test would pass for a
-        // reason that has nothing to do with the direction bit, which is
-        // exactly what a first attempt at this test did.
-        let (f0, f1) = if bit_before == 0 {
-            (sib0, cur0)
-        } else {
-            (cur0, sib0)
-        };
-        for (i, v) in [f0, f1, 0, 0, 0, 0, 0, 0].iter().enumerate() {
-            let x = Goldilocks::new(*v) + Goldilocks::new(bud_vm::POSEIDON_RC_FULL[0][i]);
-            let x2 = x * x;
-            matrix.values[row1 + COL_MERKLE_POSEIDON_X2_0 + i] = x2;
-            matrix.values[row1 + COL_MERKLE_POSEIDON_X4_0 + i] = x2 * x2;
-        }
-
-        let mut running = bud_vm::merkle_poseidon_round(f0, f1);
-        for round in 1..64usize {
-            let base = (1 + round) * TRACE_WIDTH;
-            matrix.values[base + COL_VM_MERKLE_CURRENT] = Goldilocks::new(running);
-            let b = matrix.values[base + COL_VM_MERKLE_BIT].as_canonical_u64();
-            let sib = matrix.values[base + COL_VM_MERKLE_SIBLING].as_canonical_u64();
-            let (s0, s1) = if b == 0 {
-                (running, sib)
-            } else {
-                (sib, running)
-            };
-            let state = [s0, s1, 0, 0, 0, 0, 0, 0];
-            for (i, v) in state.iter().enumerate() {
-                let x = Goldilocks::new(*v) + Goldilocks::new(bud_vm::POSEIDON_RC_FULL[0][i]);
-                let x2 = x * x;
-                matrix.values[base + COL_MERKLE_POSEIDON_X2_0 + i] = x2;
-                matrix.values[base + COL_MERKLE_POSEIDON_X4_0 + i] = x2 * x2;
-            }
-            running = bud_vm::merkle_poseidon_round(s0, s1);
-        }
-
-        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
-        let air = BudAir {
-            num_steps: vm.trace.len(),
-            program: program.clone(),
-        };
-        let config = build_config();
-        let public_values = to_public_values(&pi);
-        let degree_bits = p3_util::log2_strict_usize(matrix.height());
-        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
-        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
-
-        // Proving a trace that violates a constraint panics inside Plonky3, so
-        // the attempt is caught. Whichever way it comes out, the tampered
-        // trace must not end up as a verifying proof, and the two outcomes
-        // are kept distinguishable rather than both being treated as success,
-        // because "the prover panicked" would otherwise mask a missing
-        // constraint just as well as a working one.
-        let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            prove_with_preprocessed(
-                &config,
-                &air,
-                matrix.clone(),
-                Some(crate::plonky3_prover::aux_trace_generator(
-                    matrix.clone(),
-                    n_cpu,
-                    program.clone(),
-                )),
-                &public_values,
-                preprocessed_ref,
-            )
-        }));
-
-        let rejected_at_proving = attempted.is_err();
-        let rejected_at_verification = match attempted {
-            Err(_) => false,
-            Ok(p3_proof) => {
-                let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
-                let envelope = ProofEnvelope {
-                    proof_format_version: PROOF_FORMAT_VERSION,
-                    backend: "Plonky3-Keccak-Goldilocks".to_string(),
-                    p3_version: "0.5.2".to_string(),
-                    fri_params_id: "test_fri_params".to_string(),
-                    public_inputs_hash: pi.hash(),
-                    proof_bytes,
-                    degree_bits: degree_bits as u32,
-                };
-                Plonky3Adapter::verify_with_activation(
-                    &envelope,
-                    &pi,
-                    &program,
-                    bud_isa::MainnetActivation::full(),
-                )
-                .is_err()
-            }
-        };
-
-        assert!(
-            rejected_at_proving || rejected_at_verification,
-            "a flipped Merkle direction bit produced a verifying proof: the \
-             path would prove membership at a position the key does not \
-             describe. proving_rejected={rejected_at_proving}, \
-             verification_rejected={rejected_at_verification}"
-        );
-    }
-
-    /// A claimed root the path did not produce must be refused.
-    ///
-    /// The root check compares the `merkle_current` cell of the **original**
-    /// VerifyMerkle row against the claimed root (`rs1_val`). The prover
-    /// writes the round-64 output into that cell - but no constraint forced
-    /// it. The 64 expansion rows compute the Poseidon chain correctly row by
-    /// row, and the result they arrive at was bound to nothing.
-    ///
-    /// The attacker builds the trace at VM level: it starts with a **valid**
-    /// path (the same setup as `proves_verify_merkle_valid_64_depth`), then
-    /// changes the claimed root and writes that new root into the original
-    /// step's `merkle_current` field, declaring a match. The expansion rows
-    /// are untouched - the chain stays internally consistent, only where it
-    /// arrives is ignored. `trace_matrix` produces every derived column
-    /// consistently from this trace, so there is no stale witness involved.
-    ///
-    /// Measured with the constraint removed: this proof **verified**
-    /// (`verify` Ok). With the constraint it is refused. That was exactly the
-    /// reason the opcode is kept off in production ("unfinished path
-    /// verification").
-    #[test]
-    fn rejects_verify_merkle_root_not_produced_by_the_path() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        let key: u64 = 7;
-        let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
-        let leaf: u64 = 0xBEEF;
-        let mut current = leaf;
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let bit = (key >> i) & 1;
-            current = if bit == 0 {
-                bud_vm::merkle_poseidon_round(current, sibling)
-            } else {
-                bud_vm::merkle_poseidon_round(sibling, current)
-            };
-        }
-        let honest_root = current;
-        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
-        }
-        vm.registers[2] = honest_root;
-        vm.registers[3] = leaf;
-
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-        assert_eq!(vm.trace.len(), 66);
-
-        // The attack: a different root is claimed and the original step
-        // carries that root instead of the result the path arrived at,
-        // declaring a match.
-        let forged_root = honest_root ^ 0xFFFF;
-        let mut trace = vm.trace.clone();
-        trace[0].src1_val = forged_root;
-        trace[0].registers[2] = forged_root;
-        trace[0].merkle_current = Some(forged_root);
-        trace[0].dst_val = 1;
-        for st in trace.iter_mut().skip(1) {
-            st.registers[1] = 1;
-            st.registers[2] = forged_root;
-        }
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&i| i.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: crate::adapter::initial_state_root_of(
-                crate::adapter::memory_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_memory_reads(&trace),
-                ),
-                crate::adapter::register_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_register_reads(&trace),
-                ),
-            ),
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Plonky3Adapter::prove(&trace, &pi, &program)
-        }));
-
-        let rejected_at_proving = match &attempted {
-            Err(_) => true,
-            Ok(Err(_)) => true,
-            Ok(Ok(_)) => false,
-        };
-        let rejected_at_verification = match attempted {
-            Ok(Ok(envelope)) => Plonky3Adapter::verify_with_activation(
-                &envelope,
-                &pi,
-                &program,
-                bud_isa::MainnetActivation::full(),
-            )
-            .is_err(),
-            _ => false,
-        };
-
-        assert!(
-            rejected_at_proving || rejected_at_verification,
-            "a root the path did not produce verified: 64 rounds were computed \
-             and their result skipped. proving_rejected={rejected_at_proving}, \
-             verification_rejected={rejected_at_verification}"
-        );
-    }
-
     /// A public scalar at or above the modulus is the same field element as
-    /// `value - p` (BLG-0218). One proof must not verify for both.
+    /// `value - p`. One proof must not verify for both.
     #[test]
     fn rejects_a_non_canonical_public_scalar() {
         let program = vec![
@@ -9662,972 +9498,6 @@ mod tests {
             Plonky3Adapter::verify(&aliased, &alias, &program),
             Err(VerifyError::PublicInputsMismatch)
         ));
-    }
-
-    /// An honest `VerifyMerkle` that does NOT match its claimed root must
-    /// still be provable (BLG-0219). The inverse witness of `final - root`
-    /// has to be taken in the field; with `wrapping_sub` it was wrong
-    /// whenever the path result was below the claimed root.
-    #[test]
-    fn proves_an_honest_verify_merkle_mismatch_when_final_is_below_root() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        let key: u64 = 7;
-        let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
-        let leaf: u64 = 0xBEEF;
-        let mut current = leaf;
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let bit = (key >> i) & 1;
-            current = if bit == 0 {
-                bud_vm::merkle_poseidon_round(current, sibling)
-            } else {
-                bud_vm::merkle_poseidon_round(sibling, current)
-            };
-        }
-        // The claimed root is above the path result, so `final < root`.
-        assert!(current < bud_vm::GOLDILOCKS_P - 1);
-        let claimed_root = current + 1;
-        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
-        }
-        vm.registers[2] = claimed_root;
-        vm.registers[3] = leaf;
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-        assert_eq!(vm.trace.len(), 66);
-        assert_eq!(vm.trace[0].dst_val, 0, "the honest result is a mismatch");
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&i| i.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: crate::adapter::initial_state_root_of(
-                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
-                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
-                    &vm.trace,
-                )),
-            ),
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).expect("honest proof");
-        Plonky3Adapter::verify_with_activation(
-            &envelope,
-            &pi,
-            &program,
-            bud_isa::MainnetActivation::full(),
-        )
-        .expect("an honest mismatch must verify");
-    }
-
-    /// (security audit) negative test for the Merkle
-    /// Expansion row transition. We take a valid VerifyMerkle
-    /// Trace (1 original + 64 expansion + 1 Halt = 66 rows) and
-    /// Tamper with one expansion row's `merkle_round` column so
-    /// That two consecutive expansion rows report the same round
-    /// Index. The AIR transition
-    ///   `is_expand * is_expand * (nxt_round - round - 1) = 0`
-    /// Forces the round index to increment by exactly 1 on every
-    /// Active transition, so this tampering is detected.
-    /// A sibling the program never read must not verify.
-    ///
-    /// `merkle_sibling` used to be a free witness column: the AIR consumed it
-    /// as a Poseidon input and nothing tied it to the bytes at
-    /// `path_addr + 8 + 8 * round`. Measured before the fix - 64 expansion
-    /// rows, 0 carrying a `memory_addr`, and 0 of the 65 path words present in
-    /// the memory argument - so a prover could walk a path that was never
-    /// written and still produce a verifying proof.
-    ///
-    /// The expansion rows now emit their reads, and the LogUp demands them at
-    /// the address the instruction's immediate implies, so swapping a sibling
-    /// for one the memory table does not supply leaves the argument
-    /// unbalanced.
-    #[test]
-    fn rejects_verify_merkle_with_a_sibling_not_in_memory() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        vm.memory[256..264].copy_from_slice(&0u64.to_le_bytes());
-        for i in 0..64 {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&((1000 + i) as u64).to_le_bytes());
-        }
-        let _ = vm.run_receipt(&program);
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&inst| inst.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: crate::adapter::initial_state_root_of(
-                crate::adapter::memory_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_memory_reads(&vm.trace),
-                ),
-                crate::adapter::register_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_register_reads(&vm.trace),
-                ),
-            ),
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
-
-        // Replace round 0's sibling with a value the program never read, and
-        // rebuild the Poseidon chain from it so the trace stays internally
-        // consistent everywhere except the memory argument.
-        let row1 = TRACE_WIDTH;
-        let cur0 = matrix.values[row1 + COL_VM_MERKLE_CURRENT].as_canonical_u64();
-        let bit0 = matrix.values[row1 + COL_VM_MERKLE_BIT].as_canonical_u64();
-        let forged_sibling = 424_242u64;
-        matrix.values[row1 + COL_VM_MERKLE_SIBLING] = Goldilocks::new(forged_sibling);
-
-        let (f0, f1) = if bit0 == 0 {
-            (cur0, forged_sibling)
-        } else {
-            (forged_sibling, cur0)
-        };
-        for (i, v) in [f0, f1, 0, 0, 0, 0, 0, 0].iter().enumerate() {
-            let x = Goldilocks::new(*v) + Goldilocks::new(bud_vm::POSEIDON_RC_FULL[0][i]);
-            let x2 = x * x;
-            matrix.values[row1 + COL_MERKLE_POSEIDON_X2_0 + i] = x2;
-            matrix.values[row1 + COL_MERKLE_POSEIDON_X4_0 + i] = x2 * x2;
-        }
-        let mut running = bud_vm::merkle_poseidon_round(f0, f1);
-        for round in 1..64usize {
-            let base = (1 + round) * TRACE_WIDTH;
-            matrix.values[base + COL_VM_MERKLE_CURRENT] = Goldilocks::new(running);
-            let b = matrix.values[base + COL_VM_MERKLE_BIT].as_canonical_u64();
-            let sib = matrix.values[base + COL_VM_MERKLE_SIBLING].as_canonical_u64();
-            let (s0, s1) = if b == 0 {
-                (running, sib)
-            } else {
-                (sib, running)
-            };
-            for (i, v) in [s0, s1, 0, 0, 0, 0, 0, 0].iter().enumerate() {
-                let x = Goldilocks::new(*v) + Goldilocks::new(bud_vm::POSEIDON_RC_FULL[0][i]);
-                let x2 = x * x;
-                matrix.values[base + COL_MERKLE_POSEIDON_X2_0 + i] = x2;
-                matrix.values[base + COL_MERKLE_POSEIDON_X4_0 + i] = x2 * x2;
-            }
-            running = bud_vm::merkle_poseidon_round(s0, s1);
-        }
-
-        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
-        let air = BudAir {
-            num_steps: vm.trace.len(),
-            program: program.clone(),
-        };
-        let config = build_config();
-        let public_values = to_public_values(&pi);
-        let degree_bits = p3_util::log2_strict_usize(matrix.height());
-        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
-        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
-
-        let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            prove_with_preprocessed(
-                &config,
-                &air,
-                matrix.clone(),
-                Some(crate::plonky3_prover::aux_trace_generator(
-                    matrix.clone(),
-                    n_cpu,
-                    program.clone(),
-                )),
-                &public_values,
-                preprocessed_ref,
-            )
-        }));
-
-        let rejected_at_proving = attempted.is_err();
-        let rejected_at_verification = match attempted {
-            Err(_) => false,
-            Ok(p3_proof) => {
-                let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
-                let envelope = ProofEnvelope {
-                    proof_format_version: PROOF_FORMAT_VERSION,
-                    backend: "Plonky3-Keccak-Goldilocks".to_string(),
-                    p3_version: "0.5.2".to_string(),
-                    fri_params_id: "test_fri_params".to_string(),
-                    public_inputs_hash: pi.hash(),
-                    proof_bytes,
-                    degree_bits: degree_bits as u32,
-                };
-                Plonky3Adapter::verify_with_activation(
-                    &envelope,
-                    &pi,
-                    &program,
-                    bud_isa::MainnetActivation::full(),
-                )
-                .is_err()
-            }
-        };
-
-        assert!(
-            rejected_at_proving || rejected_at_verification,
-            "a sibling that memory never supplied produced a verifying proof: \
-             the path would prove membership under values the program never \
-             read. proving_rejected={rejected_at_proving}, \
-             verification_rejected={rejected_at_verification}"
-        );
-    }
-
-    #[test]
-    fn rejects_verify_merkle_with_skipped_round() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        // Populate path memory at addr 256.
-        vm.memory[256..264].copy_from_slice(&7u64.to_le_bytes());
-        for i in 0..64 {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&((1000 + i) as u64).to_le_bytes());
-        }
-        let _ = vm.run_receipt(&program);
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&inst| inst.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: [0u8; 32],
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
-        // Tamper row 5 (the 5th expansion row, round 4): copy the
-        // Round index from row 6 (round 5) so we have two rows
-        // Claiming round=5. The AIR's round transition
-        // `nxt_round - cur_round - 1 = 0` is then violated on the
-        // 4->5 transition.
-        let row_5 = (1 + 5) * TRACE_WIDTH;
-        let row_6 = (1 + 6) * TRACE_WIDTH;
-        matrix.values[row_5 + COL_VM_MERKLE_ROUND] = matrix.values[row_6 + COL_VM_MERKLE_ROUND];
-        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
-
-        let air = BudAir {
-            num_steps: vm.trace.len(),
-            program: program.clone(),
-        };
-        let config = build_config();
-        let public_values = to_public_values(&pi);
-        let degree_bits = p3_util::log2_strict_usize(matrix.height());
-        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
-        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
-
-        let p3_proof = prove_with_preprocessed(
-            &config,
-            &air,
-            matrix.clone(),
-            Some(crate::plonky3_prover::aux_trace_generator(
-                matrix.clone(),
-                n_cpu,
-                program.clone(),
-            )),
-            &public_values,
-            preprocessed_ref,
-        );
-        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
-        let envelope = ProofEnvelope {
-            proof_format_version: PROOF_FORMAT_VERSION,
-            backend: "Plonky3-Keccak-Goldilocks".to_string(),
-            p3_version: "0.5.2".to_string(),
-            fri_params_id: "test_fri_params".to_string(),
-            public_inputs_hash: pi.hash(),
-            proof_bytes,
-            degree_bits: degree_bits as u32,
-        };
-
-        let res = Plonky3Adapter::verify_with_activation(
-            &envelope,
-            &pi,
-            &program,
-            bud_isa::MainnetActivation::full(),
-        );
-        assert!(
-            res.is_err(),
-            "Expected verification to FAIL with a skipped Merkle round, but it succeeded!"
-        );
-    }
-
-    /// (security audit) positive test for
-    /// The Poseidon single-round + final root check. We build a
-    /// Program that runs VerifyMerkle on a *real* 64-depth path
-    /// (constructed by walking the path in software) and assert
-    /// The proof verifies end-to-end.
-    ///
-    /// Commit 3.5 target: valid 64-depth path. Partial fixes landed in
-    /// (pre-round currents, single-round hash align, original-only
-    /// Root check, expand gas). The test below is not ignored.
-    /// Diagnostic: check expansion Poseidon chain + leaf bind on matrix
-    /// Without running the full STARK (isolates witness vs AIR constraint bugs).
-    #[test]
-    fn diagnose_verify_merkle_matrix_chain() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        let key: u64 = 7;
-        let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
-        let leaf: u64 = 0xBEEF;
-        let mut current = leaf;
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let bit = (key >> i) & 1;
-            current = if bit == 0 {
-                bud_vm::merkle_poseidon_round(current, sibling)
-            } else {
-                bud_vm::merkle_poseidon_round(sibling, current)
-            };
-        }
-        let root = current;
-        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
-        }
-        vm.registers[2] = root;
-        vm.registers[3] = leaf;
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success, "VM must accept valid path");
-        assert_eq!(vm.trace.len(), 66);
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&inst| inst.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: crate::adapter::initial_state_root_of(
-                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
-                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
-                    &vm.trace,
-                )),
-            ),
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-        let (matrix, _n_cpu) = trace_matrix(&vm.trace, &program, &pi);
-        assert_eq!(matrix.values.len() % TRACE_WIDTH, 0);
-        let n_rows = matrix.values.len() / TRACE_WIDTH;
-
-        // Row 0 = original VerifyMerkle
-        let r0 = 0;
-        let is_exp0 = matrix.values[r0 * TRACE_WIDTH + COL_VM_MERKLE_IS_EXPAND].as_canonical_u64();
-        let final_flag = matrix.values[r0 * TRACE_WIDTH + COL_MERKLE_FINAL_FLAG].as_canonical_u64();
-        let orig_cur = matrix.values[r0 * TRACE_WIDTH + COL_VM_MERKLE_CURRENT].as_canonical_u64();
-        let is_vm = matrix.values[r0 * TRACE_WIDTH + COL_IS_VERIFY_MERKLE].as_canonical_u64();
-        let rd_new = matrix.values[r0 * TRACE_WIDTH + COL_RD_VAL_NEW].as_canonical_u64();
-        println!(
-            "row0: is_expand={is_exp0} final_flag={final_flag} is_vm={is_vm} merkle_current={orig_cur:#x} root={root:#x} rd_new={rd_new}"
-        );
-        assert_eq!(is_exp0, 0);
-        assert_eq!(final_flag, 1);
-        assert_eq!(is_vm, 1);
-        assert_eq!(
-            orig_cur, root,
-            "original merkle_current must be final path root"
-        );
-        assert_eq!(rd_new, 1, "dst must be 1 for valid path");
-
-        // Expansion rows 1..64 (round 0..63)
-        let mut expected = leaf;
-        for round in 0..64u64 {
-            let r = (round + 1) as usize; // row index
-            let base = r * TRACE_WIDTH;
-            let is_exp = matrix.values[base + COL_VM_MERKLE_IS_EXPAND].as_canonical_u64();
-            let cur = matrix.values[base + COL_VM_MERKLE_CURRENT].as_canonical_u64();
-            let sib = matrix.values[base + COL_VM_MERKLE_SIBLING].as_canonical_u64();
-            let bit = matrix.values[base + COL_VM_MERKLE_BIT].as_canonical_u64();
-            let rnd = matrix.values[base + COL_VM_MERKLE_ROUND].as_canonical_u64();
-            let is_vm_r = matrix.values[base + COL_IS_VERIFY_MERKLE].as_canonical_u64();
-            assert_eq!(is_exp, 1, "row {r} expand");
-            assert_eq!(rnd, round, "row {r} round");
-            assert_eq!(
-                is_vm_r, 1,
-                "expansion still has opcode 0x1E so is_verify_merkle=1"
-            );
-            assert_eq!(cur, expected, "row {r} pre-round current");
-            assert_eq!(bit, (key >> round) & 1);
-            assert_eq!(sib, siblings[round as usize]);
-            let out = if bit == 0 {
-                bud_vm::merkle_poseidon_round(cur, sib)
-            } else {
-                bud_vm::merkle_poseidon_round(sib, cur)
-            };
-            // Next row current
-            if round < 63 {
-                let nxt =
-                    matrix.values[(r + 1) * TRACE_WIDTH + COL_VM_MERKLE_CURRENT].as_canonical_u64();
-                assert_eq!(nxt, out, "poseidon chain break at round {round}");
-            } else {
-                // Last expand: output should equal root / original.merkle_current
-                assert_eq!(out, root, "last expand poseidon output must equal root");
-            }
-            expected = out;
-        }
-        println!("matrix chain OK for 64-depth path (n_rows={n_rows})");
-    }
-
-    /// Q15 depth_1_test - 1 meaningful sibling, but VM always does 64 rounds (66 rows total)
-    /// This isolates whether InvalidProof is due to row count (64 vs small), we still do 64 rounds,
-    /// But 63 siblings are zero, so Poseidon chain is simple.
-    #[test]
-    fn proves_verify_merkle_valid_1_depth() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        let key: u64 = 0; // bit0=0, rest 0
-        let siblings: [u64; 64] = {
-            let mut arr = [0u64; 64];
-            arr[0] = 1;
-            arr
-        };
-        let leaf: u64 = 0xBEEF;
-        let mut cur = leaf;
-        for (i, &sib) in siblings.iter().enumerate() {
-            let bit = (key >> i) & 1;
-            cur = if bit == 0 {
-                bud_vm::merkle_poseidon_round(cur, sib)
-            } else {
-                bud_vm::merkle_poseidon_round(sib, cur)
-            };
-        }
-        let root = cur;
-        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for (i, &sib) in siblings.iter().enumerate() {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sib.to_le_bytes());
-        }
-        vm.registers[2] = root;
-        vm.registers[3] = leaf;
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-        assert_eq!(vm.trace.len(), 66); // VM always 1+64+1
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&inst| inst.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            // The VerifyMerkle path words are read from memory, so they are
-            // now part of the initial-memory commitment. Derive it rather
-            // than asserting a zero root: a hard-coded value here would have
-            // to be updated by hand every time the path changes, and getting
-            // it wrong looks exactly like a soundness failure.
-            initial_state_root: crate::adapter::initial_state_root_of(
-                crate::adapter::memory_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_memory_reads(&vm.trace),
-                ),
-                crate::adapter::register_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_register_reads(&vm.trace),
-                ),
-            ),
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify_with_activation(
-            &envelope,
-            &pi,
-            &program,
-            bud_isa::MainnetActivation::full(),
-        );
-        assert!(res.is_ok(), "1-depth should succeed: {:?}", res);
-    }
-
-    /// Q15 depth_2_test - 2 meaningful siblings, rest zero, still 66 rows
-    #[test]
-    fn proves_verify_merkle_valid_2_depth() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        let key: u64 = 2; // binary 10 -> bit0=0, bit1=1
-        let siblings: [u64; 64] = {
-            let mut arr = [0u64; 64];
-            arr[0] = 10;
-            arr[1] = 20;
-            arr
-        };
-        let leaf: u64 = 0xBEEF;
-        let mut cur = leaf;
-        for (i, &sib) in siblings.iter().enumerate() {
-            let bit = (key >> i) & 1;
-            cur = if bit == 0 {
-                bud_vm::merkle_poseidon_round(cur, sib)
-            } else {
-                bud_vm::merkle_poseidon_round(sib, cur)
-            };
-        }
-        let root = cur;
-        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for (i, &sib) in siblings.iter().enumerate() {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sib.to_le_bytes());
-        }
-        vm.registers[2] = root;
-        vm.registers[3] = leaf;
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-        assert_eq!(vm.trace.len(), 66); // 1 original + 2 expansion + Halt
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&inst| inst.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            // The VerifyMerkle path words are read from memory, so they are
-            // now part of the initial-memory commitment. Derive it rather
-            // than asserting a zero root: a hard-coded value here would have
-            // to be updated by hand every time the path changes, and getting
-            // it wrong looks exactly like a soundness failure.
-            initial_state_root: crate::adapter::initial_state_root_of(
-                crate::adapter::memory_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_memory_reads(&vm.trace),
-                ),
-                crate::adapter::register_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_register_reads(&vm.trace),
-                ),
-            ),
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify_with_activation(
-            &envelope,
-            &pi,
-            &program,
-            bud_isa::MainnetActivation::full(),
-        );
-        assert!(res.is_ok(), "2-depth should succeed: {:?}", res);
-    }
-
-    #[test]
-    fn proves_verify_merkle_valid_64_depth() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        // Build a deterministic path: key=7, siblings = (i*31) for
-        // I=0..63. Compute the leaf and root in software.
-        let key: u64 = 7;
-        let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
-        let leaf: u64 = 0xBEEF;
-        let mut current = leaf;
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let bit = (key >> i) & 1;
-            current = if bit == 0 {
-                bud_vm::merkle_poseidon_round(current, sibling)
-            } else {
-                bud_vm::merkle_poseidon_round(sibling, current)
-            };
-        }
-        let root = current;
-        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
-        }
-        vm.registers[2] = root;
-        vm.registers[3] = leaf;
-
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-        // 1 original + 64 expansion + 1 Halt = 66 rows.
-        assert_eq!(vm.trace.len(), 66);
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&inst| inst.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            // The VerifyMerkle path words are read from memory, so they are
-            // now part of the initial-memory commitment. Derive it rather
-            // than asserting a zero root: a hard-coded value here would have
-            // to be updated by hand every time the path changes, and getting
-            // it wrong looks exactly like a soundness failure.
-            initial_state_root: crate::adapter::initial_state_root_of(
-                crate::adapter::memory_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_memory_reads(&vm.trace),
-                ),
-                crate::adapter::register_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_register_reads(&vm.trace),
-                ),
-            ),
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        // End-to-end: prove and verify. If the AIR's Poseidon
-        // Single-round transition or final root check is broken,
-        // Verification will fail.
-        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        let res = Plonky3Adapter::verify_with_activation(
-            &envelope,
-            &pi,
-            &program,
-            bud_isa::MainnetActivation::full(),
-        );
-        assert!(
-            res.is_ok(),
-            "Expected verification to SUCCEED for a valid 64-depth path, but it failed: {:?}",
-            res
-        );
-    }
-
-    /// (security audit) negative test for
-    /// The final root check. Build a valid path, then tamper the
-    /// 64th expansion row's merkle_current to a value that
-    /// Doesn't match the (real) root. The inverse-witness check
-    /// Should reject.
-    #[test]
-    fn rejects_verify_merkle_with_tampered_final_accumulator() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        let key: u64 = 7;
-        let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
-        let leaf: u64 = 0xBEEF;
-        let mut current = leaf;
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let bit = (key >> i) & 1;
-            current = if bit == 0 {
-                bud_vm::merkle_poseidon_round(current, sibling)
-            } else {
-                bud_vm::merkle_poseidon_round(sibling, current)
-            };
-        }
-        let root = current;
-        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
-        }
-        vm.registers[2] = root;
-        vm.registers[3] = leaf;
-        let _ = vm.run_receipt(&program);
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&inst| inst.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: crate::adapter::initial_state_root_of(
-                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
-                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
-                    &vm.trace,
-                )),
-            ),
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
-        // Tamper the 64th expansion row (row 1+63=64) by setting
-        // Merkle_current to a value that does NOT equal the root
-        // But still passes the Poseidon transition (we keep the
-        // Next row's merkle_current unchanged, but the next row
-        // Is the original step which has merkle_current = root;
-        // The AIR's transition nxt = poseidon(cur) would fail on
-        // This row). To make the test focus on the *final root
-        // Check*, we keep the Poseidon transition intact and
-        // Instead tamper the original step's merkle_current
-        // (row 0): we change it to (root + 1) so the inverse
-        // Witness on the original step's row fails.
-        let row_0 = 0; // base offset of trace row 0
-        let new_root = root.wrapping_add(1);
-        matrix.values[row_0 + COL_VM_MERKLE_CURRENT] = Goldilocks::new(new_root);
-        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
-
-        let air = BudAir {
-            num_steps: vm.trace.len(),
-            program: program.clone(),
-        };
-        let config = build_config();
-        let public_values = to_public_values(&pi);
-        let degree_bits = p3_util::log2_strict_usize(matrix.height());
-        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
-        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
-
-        let p3_proof = prove_with_preprocessed(
-            &config,
-            &air,
-            matrix.clone(),
-            Some(crate::plonky3_prover::aux_trace_generator(
-                matrix.clone(),
-                n_cpu,
-                program.clone(),
-            )),
-            &public_values,
-            preprocessed_ref,
-        );
-        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
-        let envelope = ProofEnvelope {
-            proof_format_version: PROOF_FORMAT_VERSION,
-            backend: "Plonky3-Keccak-Goldilocks".to_string(),
-            p3_version: "0.5.2".to_string(),
-            fri_params_id: "test_fri_params".to_string(),
-            public_inputs_hash: pi.hash(),
-            proof_bytes,
-            degree_bits: degree_bits as u32,
-        };
-
-        let res = Plonky3Adapter::verify_with_activation(
-            &envelope,
-            &pi,
-            &program,
-            bud_isa::MainnetActivation::full(),
-        );
-        assert!(
-            res.is_err(),
-            "Expected verification to FAIL with a tampered final accumulator, but it succeeded!"
-        );
-    }
-
-    /// (security audit) negative test for
-    /// The Poseidon single-round transition. Build a valid path,
-    /// Then tamper one expansion row's Poseidon x^2 witness. The
-    /// S-box identity check should reject.
-    #[test]
-    fn rejects_verify_merkle_with_tampered_poseidon_sbox() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        let key: u64 = 7;
-        let siblings: [u64; 64] = std::array::from_fn(|i| ((i as u64) * 31) + 1);
-        let leaf: u64 = 0xBEEF;
-        let mut current = leaf;
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let bit = (key >> i) & 1;
-            current = if bit == 0 {
-                bud_vm::merkle_poseidon_round(current, sibling)
-            } else {
-                bud_vm::merkle_poseidon_round(sibling, current)
-            };
-        }
-        let root = current;
-        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for (i, &sibling) in siblings.iter().enumerate() {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
-        }
-        vm.registers[2] = root;
-        vm.registers[3] = leaf;
-        let _ = vm.run_receipt(&program);
-
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&inst| inst.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut program_hash = [0u8; 32];
-        hasher.finalize(&mut program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash,
-            initial_state_root: crate::adapter::initial_state_root_of(
-                crate::adapter::memory_image_commitment_of_reads(&initial_memory_reads(&vm.trace)),
-                crate::adapter::register_image_commitment_of_reads(&initial_register_reads(
-                    &vm.trace,
-                )),
-            ),
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        let (mut matrix, n_cpu) = trace_matrix(&vm.trace, &program, &pi);
-        // Tamper the Poseidon x^2 witness on round 5 (row 1+5=6)
-        // So the S-box identity x^2 = (s + rc)^2 fails.
-        let row_6 = (1 + 5) * TRACE_WIDTH;
-        matrix.values[row_6 + COL_MERKLE_POSEIDON_X2_0] = Goldilocks::new(12345);
-        let matrix = RowMajorMatrix::new(matrix.values, TRACE_WIDTH);
-
-        let air = BudAir {
-            num_steps: vm.trace.len(),
-            program: program.clone(),
-        };
-        let config = build_config();
-        let public_values = to_public_values(&pi);
-        let degree_bits = p3_util::log2_strict_usize(matrix.height());
-        let preprocessed = setup_preprocessed(&config, &air, degree_bits);
-        let preprocessed_ref = preprocessed.as_ref().map(|(p, _)| p);
-
-        let p3_proof = prove_with_preprocessed(
-            &config,
-            &air,
-            matrix.clone(),
-            Some(crate::plonky3_prover::aux_trace_generator(
-                matrix.clone(),
-                n_cpu,
-                program.clone(),
-            )),
-            &public_values,
-            preprocessed_ref,
-        );
-        let proof_bytes = postcard::to_allocvec(&p3_proof).unwrap();
-        let envelope = ProofEnvelope {
-            proof_format_version: PROOF_FORMAT_VERSION,
-            backend: "Plonky3-Keccak-Goldilocks".to_string(),
-            p3_version: "0.5.2".to_string(),
-            fri_params_id: "test_fri_params".to_string(),
-            public_inputs_hash: pi.hash(),
-            proof_bytes,
-            degree_bits: degree_bits as u32,
-        };
-
-        let res = Plonky3Adapter::verify_with_activation(
-            &envelope,
-            &pi,
-            &program,
-            bud_isa::MainnetActivation::full(),
-        );
-        assert!(
-            res.is_err(),
-            "Expected verification to FAIL with a tampered Poseidon S-box, but it succeeded!"
-        );
     }
 
     // --- Soundness negative tests (tampered trace rejection) ---
@@ -10757,7 +9627,7 @@ mod tests {
     /// Helper: prove a trivial Add+Halt program and return the envelope + the
     /// public inputs.
     ///
-    /// BLG-0232 (P14-F02): the old helper doc claimed the caller's
+    /// The old helper doc claimed the caller's
     /// between-prove-and-verify mutation "asserts that the AIR rejects" -
     /// it asserted nothing of the sort. The envelope pins
     /// `public_inputs_hash`, so a mutated `pi` was always refused at the
@@ -10770,7 +9640,7 @@ mod tests {
     /// reject. Fields whose AIR binding is an equality to the public inputs
     /// the prover itself copies (gas_limit, chain_id, exit_code, trace_len,
     /// event digest limbs 1..7) would PASS such a test - that gap is the
-    /// AIR-side finding P12-F04/P13-F01, tracked there, not papered over
+    /// AIR-side finding, tracked there, not papered over
     /// by a test that asserts acceptance.
     fn build_arith_proof() -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
         build_arith_proof_forged(|_| {})
@@ -10778,7 +9648,7 @@ mod tests {
 
     /// Prove with a FORGED public input baked in before proving: the envelope
     /// hash matches the forged values, so a verification failure can only
-    /// come from the AIR constraints (BLG-0232/P14-F02).
+    /// come from the AIR constraints.
     fn build_arith_proof_forged(
         forge: impl FnOnce(&mut ExecutionPublicInputs),
     ) -> (ProofEnvelope, ExecutionPublicInputs, Vec<u64>) {
@@ -10842,7 +9712,7 @@ mod tests {
     /// The AIR-level version of the test above: the forgery is baked in
     /// BEFORE proving, so the envelope agrees and only the constraint that
     /// compares the committed final memory fold against `COL_FINAL_ROOT` can
-    /// reject (BLG-0232/P14-F02).
+    /// reject.
     #[test]
     fn air_rejects_a_forged_final_state_root_baked_in_before_proving() {
         let (envelope, pi, program) =
@@ -10865,7 +9735,7 @@ mod tests {
         );
     }
 
-    /// BLG-0232 (P14-F02): the initial image is bound through the
+    /// The initial image is bound through the
     /// commitment of the read rows; baked in, the fold comparison still
     /// refuses the forgery.
     #[test]
@@ -10884,9 +9754,9 @@ mod tests {
         let (envelope, mut pi, program) = build_arith_proof();
         // Gas_limit differs from what the trace recorded.
         pi.gas_limit = pi.gas_limit.wrapping_add(1);
-        // BLG-0232 (P14-F02): the rejection here is the envelope hash gate -
+        // The rejection here is the envelope hash gate -
         // pinned by variant, not by `is_err`. An AIR-level binding for
-        // gas_limit is P12-F04's job (the column's only reader is the compare
+        // gas_limit is 's job (the column's only reader is the compare
         // to public inputs the prover copies), so baking this forgery in
         // would prove the hole, not close it.
         let res = Plonky3Adapter::verify(&envelope, &pi, &program);
@@ -11101,83 +9971,6 @@ mod tests {
                 trace[1].dst_val = 404;
             },
         );
-    }
-
-    #[test]
-    fn proves_verify_merkle_returning_zero_for_an_incorrect_root() {
-        let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
-            inst(Opcode::Halt, 0, 0, 0, 0),
-        ];
-        let mut vm = Vm::new(1024);
-        let key: u64 = 7;
-        let siblings: [u64; 64] = [1; 64];
-        let leaf: u64 = 0xBEEF;
-        // Incorrect root
-        let wrong_root = 0xBAD_C0DE;
-
-        vm.memory[256..264].copy_from_slice(&key.to_le_bytes());
-        for (i, sibling) in siblings.iter().enumerate() {
-            let off = 264 + i * 8;
-            vm.memory[off..off + 8].copy_from_slice(&sibling.to_le_bytes());
-        }
-        vm.registers[2] = wrong_root;
-        vm.registers[3] = leaf;
-
-        let receipt = vm.run_receipt(&program);
-        assert!(receipt.success);
-        // The VM should return 0 in rd_val_new because root doesn't match
-        assert_eq!(vm.registers[1], 0);
-
-        // The public inputs must bind to the REAL program hash: verify
-        // Recomputes keccak(program) and rejects dummies.
-        let program_bytes: Vec<u8> = program
-            .iter()
-            .flat_map(|&inst| inst.to_le_bytes().to_vec())
-            .collect();
-        let mut hasher = Keccak::v256();
-        hasher.update(&program_bytes);
-        let mut real_program_hash = [0u8; 32];
-        hasher.finalize(&mut real_program_hash);
-
-        let pi = ExecutionPublicInputs {
-            chain_id: 1,
-            program_hash: real_program_hash,
-            // The VerifyMerkle path words are read from memory, so they are
-            // now part of the initial-memory commitment. Derive it rather
-            // than asserting a zero root: a hard-coded value here would have
-            // to be updated by hand every time the path changes, and getting
-            // it wrong looks exactly like a soundness failure.
-            initial_state_root: crate::adapter::initial_state_root_of(
-                crate::adapter::memory_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_memory_reads(&vm.trace),
-                ),
-                crate::adapter::register_image_commitment_of_reads(
-                    &crate::plonky3_prover::initial_register_reads(&vm.trace),
-                ),
-            ),
-            final_state_root: [0u8; 32],
-            sender: 0,
-            nonce: 0,
-            block_height: 0,
-            gas_limit: vm.gas_limit,
-            gas_used: vm.gas_used,
-            exit_code: 0,
-            trace_len: vm.trace.len() as u64,
-            event_digest: [0u8; 32],
-            state_writes_digest: [0u8; 32],
-        };
-
-        // This proof SHOULD verify because we are proving that the VM
-        // CORRECTLY COMPUTES '0' when the root doesn't match.
-        let envelope = Plonky3Adapter::prove(&vm.trace, &pi, &program).unwrap();
-        assert!(Plonky3Adapter::verify_with_activation(
-            &envelope,
-            &pi,
-            &program,
-            bud_isa::MainnetActivation::full()
-        )
-        .is_ok());
     }
 
     /// VerifyInference AIR binding soundness test.

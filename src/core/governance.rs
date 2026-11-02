@@ -86,6 +86,7 @@ pub const GOVERNANCE_PARAMETER_WHITELIST: &[&str] = &[
     "transfer_fee_ppm",
     "swap_fee_ppm",
     "bridge_fee_ppm",
+    "app_fee_share_ppm",
     "ai_model_register_fee",
     "liveness_slashing_enabled",
 ];
@@ -150,6 +151,11 @@ pub fn validate_governance_parameter_update(key: &str, value: &str) -> Result<()
             params.bridge_fee_ppm = value
                 .parse::<u64>()
                 .map_err(|e| format!("invalid bridge_fee_ppm: {e}"))?;
+        }
+        "app_fee_share_ppm" => {
+            params.app_fee_share_ppm = value
+                .parse::<u64>()
+                .map_err(|e| format!("invalid app_fee_share_ppm: {e}"))?;
         }
         "malicious_slash_ratio_fixed" => {
             params.malicious_slash_ratio_fixed = value
@@ -241,22 +247,22 @@ pub enum ProposalType {
         expected_validator_set_hash: [u8; 32],
         justification_hash: [u8; 32],
     },
-    /// Bootstrap or extend a PoA domain's admin set (BLG-0089 / P04-F07).
+    /// Bootstrap or extend a PoA domain's admin set.
     /// Governance is the trust root: the first admin of a domain arrives
     /// here, never through a transaction that appoints itself.
     PoaAddAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Remove a PoA domain's admin by governance decision (BLG-0094). This
+    /// Remove a PoA domain's admin by governance decision. This
     /// is the only path that may take the last admin - the admin door
     /// refuses it, because unpermissioning a domain is a governance act.
     PoaRemoveAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Freeze an account on a PoA domain's compliance ledger (BLG-0091 /
-    /// P04-F09). Replaces the bare `bool` authority: the vote IS the
+    /// Freeze an account on a PoA domain's compliance ledger (
+    ///). Replaces the bare `bool` authority: the vote IS the
     /// authority, the named admin is the audit trail, and the domain kind
     /// is read from the domain record at application.
     FreezePoaAccount {
@@ -265,7 +271,7 @@ pub enum ProposalType {
         address: Address,
         reason_hash: [u8; 32],
     },
-    /// The reverse of [`Self::FreezePoaAccount`] (BLG-0091): a freeze with
+    /// The reverse of [`Self::FreezePoaAccount`]: a freeze with
     /// no unfreeze is a life sentence handed out by a compliance screen.
     UnfreezePoaAccount {
         domain_id: u32,
@@ -479,6 +485,19 @@ mod proposer_epoch_count_as_seq {
 }
 
 impl GovernanceState {
+    #[must_use]
+    pub fn proposal_count(&self) -> usize {
+        self.proposals.len()
+    }
+
+    #[must_use]
+    pub fn active_proposal_count(&self) -> usize {
+        self.proposals
+            .iter()
+            .filter(|proposal| proposal.status == ProposalStatus::Active)
+            .count()
+    }
+
     pub fn has_non_default_state(&self) -> bool {
         !self.proposals.is_empty()
             || self.next_proposal_id != 0
@@ -583,7 +602,7 @@ impl GovernanceState {
         // Validate proposal duration
         const MAX_PROPOSAL_DURATION: u64 = 100_000; // Maximum 100,000 epochs
                                                     // Minimum 10 epochs. A constitution amendment must also respect the
-                                                    // constitution's own MinConstitutionProposalEpochs (P20-F05).
+                                                    // constitution's own MinConstitutionProposalEpochs.
         let min_proposal_duration = match &p_type {
             ProposalType::SetConstitutionParameter(_) => self.constitution.min_proposal_epochs(),
             _ => 10,
@@ -610,7 +629,7 @@ impl GovernanceState {
         }
         // The fee multiplier is keyed per epoch, so spreading proposals over
         // many epochs keeps every one at 1x. Bound the open slots one
-        // proposer can hold at once (P20-F01).
+        // proposer can hold at once.
         let proposer_active = self
             .proposals
             .iter()
@@ -627,7 +646,7 @@ impl GovernanceState {
             .retain(|(_, epoch), _| *epoch >= current_epoch);
 
         // Closed proposals are history, not live state. Drop them after a
-        // retention window so the state and its root stay bounded (P20-F02).
+        // retention window so the state and its root stay bounded.
         // Active and Passed proposals are kept: they can still change state.
         self.proposals.retain(|p| {
             !matches!(p.status, ProposalStatus::Failed | ProposalStatus::Executed)
@@ -797,22 +816,22 @@ pub enum GovernanceAction {
         expected_validator_set_hash: [u8; 32],
         justification_hash: [u8; 32],
     },
-    /// Bootstrap or extend a PoA domain's admin set (BLG-0089 / P04-F07).
+    /// Bootstrap or extend a PoA domain's admin set.
     /// Governance is the trust root: the first admin of a domain arrives
     /// here, never through a transaction that appoints itself.
     PoaAddAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Remove a PoA domain's admin by governance decision (BLG-0094). This
+    /// Remove a PoA domain's admin by governance decision. This
     /// is the only path that may take the last admin - the admin door
     /// refuses it, because unpermissioning a domain is a governance act.
     PoaRemoveAdmin {
         domain_id: u32,
         admin: Address,
     },
-    /// Freeze an account on a PoA domain's compliance ledger (BLG-0091 /
-    /// P04-F09). Replaces the bare `bool` authority: the vote IS the
+    /// Freeze an account on a PoA domain's compliance ledger (
+    ///). Replaces the bare `bool` authority: the vote IS the
     /// authority, the named admin is the audit trail, and the domain kind
     /// is read from the domain record at application.
     FreezePoaAccount {
@@ -821,7 +840,7 @@ pub enum GovernanceAction {
         address: Address,
         reason_hash: [u8; 32],
     },
-    /// The reverse of [`Self::FreezePoaAccount`] (BLG-0091): a freeze with
+    /// The reverse of [`Self::FreezePoaAccount`]: a freeze with
     /// no unfreeze is a life sentence handed out by a compliance screen.
     UnfreezePoaAccount {
         domain_id: u32,
@@ -852,6 +871,10 @@ mod tests {
         }
         assert_eq!(
             validate_governance_parameter_update("ai_model_register_fee", "25"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_governance_parameter_update("app_fee_share_ppm", "400000"),
             Ok(())
         );
         assert!(validate_governance_parameter_update("ai_model_register_fee", "x").is_err());
@@ -1146,7 +1169,7 @@ mod tests {
         );
     }
 
-    /// P20-F05: the constitution's MinConstitutionProposalEpochs binds
+    /// The constitution's MinConstitutionProposalEpochs binds
     /// constitution amendments instead of the hard coded 10.
     #[test]
     fn p20_f05_amendment_respects_min_constitution_proposal_epochs() {
@@ -1176,7 +1199,7 @@ mod tests {
             .is_ok());
     }
 
-    /// P20-F07: proposals that execution would drop are refused up front.
+    /// Proposals that execution would drop are refused up front.
     #[test]
     fn p20_f07_unexecutable_proposals_are_refused_at_creation() {
         use crate::core::account::MAX_BASE_FEE;
@@ -1397,7 +1420,7 @@ mod l4_tests {
         assert_eq!(gov.proposal_fee_multiplier(&proposer, 0), 64);
     }
 
-    /// P20-F01: one proposer cannot fill the Active slots by using one
+    /// One proposer cannot fill the Active slots by using one
     /// proposal per epoch, which keeps the per-epoch fee multiplier at 1x.
     #[test]
     fn p20_f01_one_proposer_cannot_exhaust_active_slots() {
@@ -1419,7 +1442,7 @@ mod l4_tests {
             .is_ok());
     }
 
-    /// P20-F02: closed proposals leave state after the retention window.
+    /// Closed proposals leave state after the retention window.
     #[test]
     fn p20_f02_closed_proposals_are_pruned() {
         let mut gov = GovernanceState::default();

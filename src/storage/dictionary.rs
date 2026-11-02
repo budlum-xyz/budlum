@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn a_corrupt_dictionary_row_is_refused_on_load() {
-        // P27-F11: Deserialize used to accept any entry.
+        // Deserialize used to accept any entry.
         let entry = |size, refs, deletable_at_epoch| DictionaryEntry {
             size,
             refs,

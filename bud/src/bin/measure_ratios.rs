@@ -1,11 +1,11 @@
 // B.U.D. 2.0 - the deterministic compression ratio measurement tool
-// (K15/K2/K19). Rust port of the former scripts/measure_ratios.py.
+// Rust port of the former scripts/measure_ratios.py.
 //
 // Purpose: to verify the claimed ratios (for example JSON at 17.19x) against a
 // REAL measurement. This tool produces the deterministic corpus the
 // measurement runner uses and measures the JSON/CSV/LOG ratios with zstd-19
 // and xz-9. The output has to agree with FORMAT-V2.md section 7; if it does
-// not, the claim is wrong (the K19 canary).
+// not, the claim is wrong (the canary).
 //
 // Usage: cargo run --release --bin measure_ratios -- [--seed 7] [--rows 50000]
 //        [--dump DIR]   (writes json.bin/csv.bin/log.bin for sha256sum checks)
@@ -301,7 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     report("CSV", &c)?;
     report("LOG", &l)?;
 
-    // The canary (K19): is the claimed JSON 17.19x real?
+    // The canary: is the claimed JSON 17.19x real?
     let jr = j.len() as f64 / zstd19(&j)? as f64;
     println!();
     if jr < 17.19 {

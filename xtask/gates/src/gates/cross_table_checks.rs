@@ -19,7 +19,23 @@ use super::rust_literals;
 const ACCUMULATORS: &[(&str, &str)] = &[
     ("COL_MEM_INIT_ACC", "the memory table"),
     ("COL_REG_INIT_ACC", "the register table"),
+    ("COL_MERKLE_ACC", "the root rows"),
 ];
+
+/// Accumulators whose commitment reaches the public inputs transitively, so
+/// they have no direct `public_inputs[...]` binding block to find.
+///
+/// The merkle fold lives on the root rows: the transition rule hands the
+/// finished product to `COL_MERKLE_RESULT` (`nxt[COL_MERKLE_ACC] ==
+/// cu(COL_MERKLE_ACC) * nxt[COL_MERKLE_EQ]`, and the result column equals the
+/// fold when expansion ends), the result feeds the merkle opcode, and every
+/// accepted merkle path is checked against the initial/final state roots bound
+/// on the last row (`public_inputs[10..26]`). The hazard this gate exists for -
+/// a side-table fold still running when the CPU table halts - cannot apply
+/// here: the column is gated on the root-row conditions (`rootg`,
+/// `when_transition`), never on `is_halt`/`cpu_active`. The direct-binding
+/// check is skipped for these columns; every other check still runs.
+const BINDS_VIA_STATE_ROOT: &[&str] = &["COL_MERKLE_ACC"];
 
 /// Non-nested brace blocks that mention `column` and `public_inputs`,
 /// mirroring the shell regex `\{[^{}]*<column>[^{}]*\}`.
@@ -95,7 +111,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             continue;
         }
         let blocks = binding_blocks(&scrubbed, column);
-        if blocks.is_empty() {
+        if blocks.is_empty() && !BINDS_VIA_STATE_ROOT.contains(column) {
             problems.push(format!(
                 "{column} is never compared against a public input, so the \
                  accumulator is folded and then dropped. Either it binds \
@@ -153,7 +169,7 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ct")?;
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
 
-    let good = "pub const COL_MEM_INIT_ACC: usize = 731;\npub const COL_REG_INIT_ACC: usize = 736;\n        {\n            let acc_last: AB::Expr = cur[COL_MEM_INIT_ACC].into();\n            let expected = public_inputs[10].into();\n            builder.when_last_row().assert_eq(acc_last, expected);\n        }\n        {\n            let acc_last: AB::Expr = cur[COL_REG_INIT_ACC].into();\n            let expected = public_inputs[12].into();\n            builder.when_last_row().assert_eq(acc_last, expected);\n        }\n";
+    let good = "pub const COL_MEM_INIT_ACC: usize = 731;\npub const COL_REG_INIT_ACC: usize = 736;\npub const COL_MERKLE_ACC: usize = 913;\n        {\n            let acc_last: AB::Expr = cur[COL_MEM_INIT_ACC].into();\n            let expected = public_inputs[10].into();\n            builder.when_last_row().assert_eq(acc_last, expected);\n        }\n        {\n            let acc_last: AB::Expr = cur[COL_REG_INIT_ACC].into();\n            let expected = public_inputs[12].into();\n            builder.when_last_row().assert_eq(acc_last, expected);\n        }\n";
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), good)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {

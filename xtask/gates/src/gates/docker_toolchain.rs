@@ -101,7 +101,7 @@ fn workflow_versions(root: &Path) -> Result<Vec<String>, String> {
         //
         // Today the only legitimate example is `diverse-double-compiling.yml`: the whole
         // point of the job is to build the same source with a second compiler, so
-        // matching the pin would make the job pointless (see ARCHITECTURE.md §73).
+        // matching the pin would make the job pointless (see).
         //
         // The marker does not open a door, it demands a declaration: the divergence is
         // stands with a stated reason and cannot come about by accident.

@@ -18,7 +18,7 @@
 //! 5. The declaration path actually calls `check_content_may_be_public`.
 //! 6. Every RPC endpoint that publishes a shard id asks Pollen first.
 //! 7. The AI runtime cannot reach storage bytes except through Pollen.
-//! 8. The gateway asks Pollen before it serves or renders a name (P53-F12).
+//! 8. The gateway asks Pollen before it serves or renders a name.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -264,8 +264,8 @@ const GATEWAY_MIN_GUARD_CALLS: usize = 2;
 
 /// `grep -c 'check_content_may_be_public'` over the file with comments
 /// stripped; `0` when the file is absent.
-fn declaration_call_count(actor: &Path) -> usize {
-    let Ok(text) = std::fs::read_to_string(actor) else {
+fn declaration_call_count(door: &Path) -> usize {
+    let Ok(text) = std::fs::read_to_string(door) else {
         return 0;
     };
     let stripped = strip_line_comments(&text);
@@ -392,9 +392,10 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
 
-    // 5. The declaration path actually calls the refusal.
-    let actor = root.join("src/chain/chain_actor.rs");
-    if declaration_call_count(&actor) == 0 {
+    // 5. The declaration path actually calls the refusal. Registration is the
+    //    in-block `StorageTx::RegisterManifest` door.
+    let door = root.join("src/domain/storage_tx.rs");
+    if declaration_call_count(&door) == 0 {
         return Err(String::from(
             "FAIL: nothing calls check_content_may_be_public on the declaration \
              path: paid content can register as plaintext and be deduplicated, \
@@ -468,10 +469,10 @@ const C15: &str = "    async fn unknown_helper(&self, id: String) -> Result<Valu
 const AI_REACH: &str = "    let manifest = chain.get_storage_manifest(id).await;\n";
 const AI_MEDIATED: &str = "    let ok = pollen.authorize_content_read(&id, &who, grant, block)?;\n    let manifest = chain.get_storage_manifest(id).await;\n";
 const AI_CLEAN: &str = "    let out = model.infer(&request.input_ref);\n";
-const UNCALLED: &str = "ChainCommand::RegisterStorageManifest { manifest, response } => {\n    if let Err(e) = manifest.validate_untrusted() { continue; }\n    self.blockchain.state.storage_registry.register_manifest(&manifest);\n}\n";
+const UNCALLED: &str = "fn register_manifest(state: &mut AccountState, manifest: &ContentManifest) -> Result<(), E> {\n    manifest.validate_untrusted()?;\n    state.storage_registry.register_manifest_with_source(manifest)\n}\n";
 const GW_UNGUARDED: &str = "    async fn refuse_if_pollen_protected(&self) {}\n    // self.refuse_if_pollen_protected(&r).await?;\n    let m = self.chain.get_storage_manifest(cid).await;\n";
 const GW_GUARDED: &str = "    async fn refuse_if_pollen_protected(&self) {}\n    self.refuse_if_pollen_protected(&r).await?;\n    self.refuse_if_pollen_protected(&r).await?;\n";
-const CALLED: &str = "if matches!(manifest.encryption, ContentEncryption::Plaintext) {\n    if let Err(e) = self.blockchain.state.marketplace\n        .check_content_may_be_public(&manifest.manifest_id) { continue; }\n}\n";
+const CALLED: &str = "if matches!(manifest.encryption, ContentEncryption::Plaintext) {\n    state\n        .marketplace\n        .check_content_may_be_public(&manifest.manifest_id)\n        .map_err(StorageTxError::PaidContentAsPlaintext)?;\n}\n";
 
 /// Write `content` to a temp file under `sub` and return the directory.
 fn temp_file(sub: &str, name: &str, content: &str) -> Result<std::path::PathBuf, String> {

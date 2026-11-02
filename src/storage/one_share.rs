@@ -289,7 +289,7 @@ mod one_share_tests {
 
     #[test]
     fn shares_together_may_not_exceed_the_declared_capacity() {
-        // P27-F12: each share fit on its own, the sum did not.
+        // Each share fit on its own, the sum did not.
         let p = profile(1000);
         let mut reg = OneShareRegistry::new();
         reg.create(&p, ContentId([1; 32]), 600, addr(1)).unwrap();

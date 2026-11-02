@@ -213,7 +213,7 @@ fn guest_relu_uses_the_signed_field_threshold() {
     );
 }
 
-/// The Program CTL argument (BudL_SPEC §9) models a straight-line fetch, so
+/// The Program CTL argument models a straight-line fetch, so
 /// the guest builder must not emit control flow.
 #[test]
 fn guest_builder_emits_no_branches() {
@@ -228,8 +228,8 @@ fn guest_builder_emits_no_branches() {
     for branch in ["Opcode::Jnz", "Opcode::Jmp", "Opcode::Call", "Opcode::Ret"] {
         assert!(
             !body.contains(branch),
-            "matmul guest emits {branch}; the Program CTL wall in BudL_SPEC §9 \
-             does not model a skipped instruction"
+            "matmul guest emits {branch}; the Program CTL wall in the BudL \
+             specification does not model a skipped instruction"
         );
     }
 }

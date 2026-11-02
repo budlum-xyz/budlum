@@ -1,4 +1,5 @@
 use crate::core::hash::hash_fields_bytes;
+use crate::crypto::facts::CryptoFacts;
 use crate::domain::types::{ConsensusDomain, DomainId, DomainStatus, Hash32};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -50,13 +51,33 @@ pub const MAX_REGISTERED_DOMAINS: usize = 4096;
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConsensusDomainRegistry {
     domains: BTreeMap<DomainId, ConsensusDomain>,
+    /// The schemes each domain's adapter checked while finalizing its
+    /// commitments. Written only where a commitment advances a
+    /// domain, and folded into [`Self::progress_root`] once non-empty.
+    #[serde(default)]
+    observed: BTreeMap<DomainId, CryptoFacts>,
 }
 
 impl ConsensusDomainRegistry {
     pub fn new() -> Self {
         Self {
             domains: BTreeMap::new(),
+            observed: BTreeMap::new(),
         }
+    }
+
+    /// Adds what an adapter checked for a commitment of `id`.
+    pub fn record_observed(&mut self, id: DomainId, facts: &CryptoFacts) {
+        if facts.is_empty() || !self.domains.contains_key(&id) {
+            return;
+        }
+        self.observed.entry(id).or_default().merge(facts);
+    }
+
+    /// The schemes the adapter of `id` has checked so far, empty when none.
+    #[must_use]
+    pub fn observed(&self, id: DomainId) -> CryptoFacts {
+        self.observed.get(&id).cloned().unwrap_or_default()
     }
 
     /// Restore a domain loaded back from storage.
@@ -68,12 +89,23 @@ impl ConsensusDomainRegistry {
     /// across every restart. Every other registration shape check still
     /// runs: a malformed stored record is refused here exactly as a
     /// malformed fresh registration would be.
+    /// WIRING: domain surface - the producer/registry doors that read it land with their wiring.
     pub fn restore_persisted(&mut self, domain: ConsensusDomain) -> Result<(), String> {
         self.register_inner(domain, false)
     }
 
     pub fn register(&mut self, domain: ConsensusDomain) -> Result<(), String> {
         self.register_inner(domain, true)
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.domains.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.domains.is_empty()
     }
 
     fn register_inner(
@@ -107,7 +139,7 @@ impl ConsensusDomainRegistry {
         }
         // A new registration starts Active. Frozen and Retired are reached
         // only through `transition_status_checked`; registering straight into
-        // them would skip the lifecycle guard (P25-F10). Restoring persisted
+        // them would skip the lifecycle guard. Restoring persisted
         // state is the one caller exempt from this, by the argument on
         // `restore_persisted`.
         if require_active && domain.status != DomainStatus::Active {
@@ -166,7 +198,7 @@ impl ConsensusDomainRegistry {
             ));
         }
 
-        // (B.U.D. Storage ConsensusDomain, vision §8.1)
+        // (B.U.D. Storage ConsensusDomain, vision)
         // A `StorageAttestation` domain MUST use the dedicated
         // `STORAGE_ATTESTATION_ADAPTER` finality adapter, and the
         // Parameters must validate. This is the same fail-fast-at-the-edge
@@ -316,6 +348,34 @@ impl ConsensusDomainRegistry {
         Ok(())
     }
 
+    /// Freeze every active native domain whose class is classical (,
+    /// the quantum alarm at Isolate). The class is the observed one, or the
+    /// one the consensus kind implies when nothing was observed yet. Returns
+    /// the ids that moved, in id order.
+    pub fn freeze_classical_domains(&mut self) -> Vec<DomainId> {
+        use crate::crypto::facts::QuantumClass;
+        let mut frozen = Vec::new();
+        let ids: Vec<DomainId> = self.domains.keys().copied().collect();
+        for id in ids {
+            let Some(domain) = self.domains.get(&id) else {
+                continue;
+            };
+            if domain.status != DomainStatus::Active {
+                continue;
+            }
+            let class = self.observed(id).quantum_class().unwrap_or_else(|| {
+                crate::settlement::pq_anchor::domain_quantum_class(&domain.kind)
+            });
+            if class == QuantumClass::Classical {
+                if let Some(domain) = self.domains.get_mut(&id) {
+                    domain.status = DomainStatus::Frozen;
+                    frozen.push(id);
+                }
+            }
+        }
+        frozen
+    }
+
     pub fn active_domains(&self) -> impl Iterator<Item = &ConsensusDomain> {
         self.domains
             .values()
@@ -328,6 +388,39 @@ impl ConsensusDomainRegistry {
 
     pub fn root(&self) -> Hash32 {
         let leaves: Vec<Hash32> = self.domains.values().map(domain_leaf_hash).collect();
+        crate::settlement::commitment_tree::merkle_root(&leaves)
+    }
+
+    /// The committed progress of every domain: the height and hash of its
+    /// last commitment, in id order. The registry leaf binds a domain's
+    /// rules, not how far it has advanced; the settlement root binds this
+    /// digest, so two nodes that disagree on a domain's progress hold
+    /// different state roots.
+    #[must_use]
+    pub fn progress_root(&self) -> Hash32 {
+        let leaves: Vec<Hash32> = self
+            .domains
+            .values()
+            .map(|domain| {
+                let base = hash_fields_bytes(&[
+                    b"BDLM_DOMAIN_PROGRESS_LEAF_V1",
+                    &domain.id.to_le_bytes(),
+                    &domain.last_committed_height.to_le_bytes(),
+                    &domain.last_committed_hash,
+                ]);
+                // A domain that never reported a fact keeps its earlier leaf
+                // byte for byte.
+                match self.observed.get(&domain.id) {
+                    Some(facts) if !facts.is_empty() => match bincode::serialize(facts) {
+                        Ok(bytes) => {
+                            hash_fields_bytes(&[b"BDLM_DOMAIN_PROGRESS_LEAF_V2", &base, &bytes])
+                        }
+                        Err(_) => hash_fields_bytes(&[b"BDLM_DOMAIN_FACTS_UNENCODABLE_V1", &base]),
+                    },
+                    _ => base,
+                }
+            })
+            .collect();
         crate::settlement::commitment_tree::merkle_root(&leaves)
     }
 }
@@ -474,6 +567,40 @@ mod tests {
         assert_ne!(domain_leaf_hash(&listed), plain_leaf);
         assert_ne!(domain_leaf_hash(&pinned), plain_leaf);
         assert_ne!(domain_leaf_hash(&listed), domain_leaf_hash(&pinned));
+    }
+
+    /// what an adapter observed is consensus data. It reaches the
+    /// progress root, it never touches a domain that reported nothing, and an
+    /// unregistered id cannot park facts in the registry.
+    #[test]
+    fn observed_facts_reach_the_progress_root_only_once_reported() {
+        use crate::crypto::facts::{CryptoFacts, ObservedScheme};
+        use crate::crypto::scheme::SchemeId;
+        let mut registry = ConsensusDomainRegistry::new();
+        registry
+            .register(default_domain(2, ConsensusKind::PoS, 1338, "pos", 0))
+            .expect("register");
+        let before = registry.progress_root();
+
+        registry.record_observed(2, &CryptoFacts::new());
+        assert_eq!(registry.progress_root(), before, "no facts, no change");
+        let mut facts = CryptoFacts::new();
+        facts.record(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
+        registry.record_observed(9, &facts);
+        assert!(registry.observed(9).is_empty(), "unknown domain");
+        assert_eq!(registry.progress_root(), before);
+
+        registry.record_observed(2, &facts);
+        let after = registry.progress_root();
+        assert_ne!(after, before);
+        registry.record_observed(2, &facts);
+        assert_ne!(registry.progress_root(), after, "the count moves it too");
+        assert_eq!(
+            registry
+                .observed(2)
+                .count(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG)),
+            2
+        );
     }
 
     #[test]

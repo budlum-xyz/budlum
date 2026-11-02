@@ -152,7 +152,10 @@ pub use bud_format_markdown::{MarkdownSplit, MdSection, MD_MAGIC};
 pub use bud_format_model::{FloatKind, ModelFloatSplit, MODEL_MAGIC};
 pub use bud_format_multifile::{MultifileChunk, TenantMultifileStore, DEFAULT_CHUNK, MULTI_MAGIC};
 pub use bud_format_optical::{LogTemplate, LogTemplateMiner, OpticalGates, OpticalPrompt};
-pub use bud_format_pact::{PactMode, PactRecord, PACT_MAGIC};
+pub use bud_format_pact::{
+    PactMode, PactRecord, SignedPact, SignedRecordError, SuiteSigner, SuiteVerifier, PACT_MAGIC,
+    PACT_SUITE,
+};
 pub use bud_format_pipe::{
     chunk_count, detect, restore, restore_json_columnar, store, store_compressed,
     store_compressed_with_min, store_json_columnar, store_with_min, store_zstd,
@@ -167,7 +170,8 @@ pub use bud_format_real::{
     zstd_compress, zstd_decompress_safe, RealBench, RealCompressor, ZSTD_MAX_DECOMPRESSED,
 };
 pub use bud_format_regeneration::{
-    RegenerationChallenge, RegenerationOutcome, RegenerationRecord, REGEN_MAGIC,
+    select_challenges, RegenerationChallenge, RegenerationOutcome, RegenerationRecord,
+    ReputationLedger, SignedRegenerationResult, REGEN_MAGIC, RESULT_SUITE,
 };
 pub use bud_format_registry::{
     DictLoopDetector, MimeRegistry, RatioProof, RegistryGates, SecondPreimageResistantMerkle,
@@ -196,8 +200,8 @@ pub use price::{Expansion, PriceError, PriceModel};
 pub use provider::{Provider, ProviderClass, ProviderError};
 pub use quantum::{QuantumError, QuantumSuite};
 pub use quantum_chain::{
-    DualWallet, FiatShamirTranscript, HybridFinalityVote, HybridTx, MobileSelfProvider,
-    QuantumChainGates, Sha3Hasher, MAX_BLOCK_BYTES, PQ_SCHEME_ID_FINAL,
+    FiatShamirTranscript, HybridFinalityVote, MobileSelfProvider, QuantumChainGates, Sha3Hasher,
+    MAX_BLOCK_BYTES, PQ_SCHEME_ID_FINAL,
 };
 pub use ratio::{FormatClass, Pipe, RatioResult};
 #[cfg(feature = "bud3")]

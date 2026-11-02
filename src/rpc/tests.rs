@@ -68,7 +68,7 @@ mod rpc_tests {
             MethodKind, SlotDisclosure, VerificationMethod,
         };
         let poa = crate::domain::ConsensusKind::PoA;
-        // The receipt is signed by the subject's account key (BLG-0097), and
+        // The receipt is signed by the subject's account key, and
         // the V4 address IS that key, so the subject is derived from it.
         let subject_keys = crate::crypto::primitives::KeyPair::generate().expect("keypair");
         let subject = Address::from(subject_keys.public_key_bytes());
@@ -615,7 +615,6 @@ mod rpc_tests {
 
     #[tokio::test]
     async fn test_rpc_settlement_methods() {
-        let (server, chain) = setup().await;
         let domain = crate::domain::plugin::default_domain(
             1,
             crate::domain::ConsensusKind::PoW,
@@ -623,10 +622,13 @@ mod rpc_tests {
             "pow-header-chain-v1",
             1,
         );
-        chain
+        // a domain registers in block (`SettlementTx::RegisterDomain`);
+        // the fixture writes the registry before the actor starts.
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        blockchain
             .register_consensus_domain(domain.clone())
-            .await
             .unwrap();
+        let (server, chain) = setup_with_blockchain(blockchain).await;
 
         let mut block = crate::core::block::Block::new(1, "aa".repeat(32), vec![]);
         block.timestamp = 1234;
@@ -640,19 +642,26 @@ mod rpc_tests {
             .submit_domain_commitment(commitment.clone())
             .await
             .unwrap();
-        let sealed = chain.seal_global_header().await.unwrap();
+        // A commitment accepted through the test-only compatibility shim is
+        // not a checkpoint block. The preview is readable, but it must not be
+        // exposed as a committed global header or survive as one in the RPC.
+        let preview = chain.build_global_header(None).await.unwrap();
 
         let info = server.get_settlement_info().await.unwrap();
-        assert_eq!(info["globalHeight"], 1);
+        assert_eq!(info["globalHeight"], 0);
         assert_eq!(info["domainCommitmentCount"], 1);
-        assert!(info["latestGlobalHash"].as_str().unwrap().len() == 64);
+        assert_eq!(info["proofMarketActiveTasks"], 0);
+        assert_eq!(info["proofMarketPendingReceipts"], 0);
+        assert_eq!(info["proofMarketEscrowedCreators"], 0);
+        assert!(info["proofMarketRoot"].is_string());
+        assert!(info["latestGlobalHash"].is_null());
+        assert_eq!(
+            info["pendingGlobalHash"],
+            format!("0x{}", preview.calculate_hash())
+        );
 
         let header = server.get_global_header(0).await.unwrap();
-        assert_eq!(header["globalHeight"], "0x0");
-        assert_eq!(
-            header["hash"].as_str().unwrap(),
-            format!("0x{}", sealed.calculate_hash())
-        );
+        assert!(header.is_null(), "uncommitted previews must not be served");
 
         let missing = server.get_global_header(999).await.unwrap();
         assert!(missing.is_null());
@@ -677,16 +686,15 @@ mod rpc_tests {
             "poa-authority-quorum",
             0,
         );
-        let registration = server
-            .register_consensus_domain(poa_domain.clone())
+        let refused = server
+            .register_consensus_domain(poa_domain)
             .await
-            .unwrap();
-        assert_eq!(registration["domainId"], 2);
-        assert!(registration["domainRegistryRoot"]
-            .as_str()
-            .unwrap()
-            .starts_with("0x"));
-        assert!(server.register_consensus_domain(poa_domain).await.is_err());
+            .expect_err("out-of-block domain registration is refused");
+        assert!(
+            refused.message().contains("SettlementTx::RegisterDomain"),
+            "the refusal names the transaction door: {}",
+            refused.message()
+        );
         assert_eq!(
             server
                 .get_consensus_domains()
@@ -695,7 +703,7 @@ mod rpc_tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            1
         );
 
         let mut block2 = block.clone();
@@ -786,9 +794,13 @@ mod rpc_tests {
         assert_eq!(commitments3.as_array().unwrap().len(), 1);
 
         // The relayed submit path requires the sender to be an active relayer.
-        // Fund and register a relayer (staking == registration), then use it as
-        // The message sender.
-        // The message envelope is signed (BLG-0113): the V4 address IS the
+        // Bonding on this node alone would change the registry outside a
+        // block, so the RPC door refuses and names the transaction that does
+        // the work. The test bonds the relayer directly in the
+        // chain state it owns - the same row a signed RoleBond transaction
+        // would write inside block execution - and then uses it as the
+        // message sender.
+        // The message envelope is signed: the V4 address IS the
         // Ed25519 public key, so the relayer is derived from the key that
         // signs.
         let relayer_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
@@ -797,10 +809,17 @@ mod rpc_tests {
             .credit_development_account(&relayer, 5_000)
             .await
             .expect("devnet credit");
-        server
+        let bond_refusal = server
             .registry_bond_relayer(format!("0x{}", relayer.to_hex()), 2_000)
             .await
-            .unwrap();
+            .expect_err("out-of-block relayer bonding is refused");
+        assert!(
+            bond_refusal
+                .message()
+                .contains("signed RoleBond transaction with role 3"),
+            "the refusal names the transaction door: {}",
+            bond_refusal.message()
+        );
 
         let mut cross_domain_msg = crate::cross_domain::CrossDomainMessage::new(
             crate::cross_domain::message::CrossDomainMessageParams {
@@ -818,23 +837,27 @@ mod rpc_tests {
         );
         cross_domain_msg.sign_sender_ed25519(&relayer_keys);
 
-        // The relay is a transaction now, and a transaction is signed by the
-        // node's consensus signer. This chain runs PoW with no signer (by
-        // design), so the door must refuse with that reason rather than
-        // half-register anything.
+        // The relay is a transaction now: the RPC method registers nothing
+        // itself, so it refuses and names the transaction door that does the
+        // work. The door is out-of-block registration, refused for every
+        // caller - on this PoW chain without a signer just as on any other.
         let signerless = server
             .submit_cross_domain_message(cross_domain_msg.clone())
             .await
-            .expect_err("a node with no consensus signer cannot build a transaction");
+            .expect_err("out-of-block message registration is refused");
         assert!(
-            signerless.message().contains("No consensus signer"),
-            "the refusal names the missing signer: {}",
+            signerless
+                .message()
+                .contains("Out-of-block cross-domain message registration")
+                && signerless.message().contains("RelayCrossDomainMessage"),
+            "the refusal names the transaction door: {}",
             signerless.message()
         );
 
-        // The same call on a chain whose node holds a signer answers with the
-        // TRANSACTION hash, not the message id: `message_registry` is in the
-        // state root, so nothing is registered until a block carries it.
+        // The relay travels as a signed transaction: `message_registry` is
+        // in the state root, so nothing is registered until a block carries
+        // it. The chain below holds a signer, so the transaction can be
+        // built at all - but the door above stays shut either way.
         let node_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
         let node_addr = Address::from(node_keys.public_key_bytes());
         let node_signer = Arc::new(crate::crypto::signer::KeyPairSigner::new(node_keys));
@@ -854,57 +877,157 @@ mod rpc_tests {
             .bond_relayer(&relayer, 2_000)
             .expect("the relayer bonds");
         relay_bc.state.add_balance(&node_addr, 5_000);
+        relay_bc.state.add_balance(&relayer, 100_000_000);
         let (relay_server, relay_chain) = setup_with_blockchain(relay_bc).await;
-        let msg_result = relay_server
-            .submit_cross_domain_message(cross_domain_msg.clone())
+        // The relayed message is carried by a signed transaction whose
+        // signer is the message sender (the V4 address IS the
+        // Ed25519 public key) and an active relayer. The direct RPC door
+        // stays shut; the transaction path is the one that works.
+        let base_fee = relay_chain.get_base_fee().await;
+        let mut relay_tx = crate::core::transaction::Transaction::new_with_chain_id(
+            relayer,
+            Address::zero(),
+            0,
+            base_fee,
+            0,
+            Vec::new(),
+            relay_chain.get_chain_id().await,
+            crate::core::transaction::TransactionType::RelayCrossDomainMessage(
+                cross_domain_msg.clone(),
+            ),
+        );
+        relay_tx.sign(&relayer_keys);
+        relay_chain
+            .add_transaction(relay_tx)
             .await
-            .expect("a signed transaction is built and queued");
-        let hash_hex = msg_result
-            .strip_prefix("0x")
-            .expect("an RPC transaction hash is 0x-prefixed");
-        assert_eq!(
-            hex::decode(hash_hex).expect("valid hex").len(),
-            32,
-            "the answer is the 32-byte transaction hash: {msg_result}"
-        );
-        assert_ne!(
-            msg_result,
-            format!("0x{}", hex::encode(cross_domain_msg.message_id)),
-            "the message id is not a receipt: registration needs a block"
-        );
+            .expect("the relay is queued as a transaction");
         assert_eq!(
             relay_chain.get_mempool_size().await,
             1,
             "the relay is queued as a transaction"
         );
+        let queued = relay_server
+            .get_cross_domain_message(format!("0x{}", hex::encode(cross_domain_msg.message_id)))
+            .await
+            .expect("the read answers");
+        assert!(
+            queued.is_null(),
+            "registration needs a block: the queued relay is not in the state root: {queued}"
+        );
 
         let asset_id = crate::cross_domain::AssetId([42u8; 32]);
-        let bridge_registration = server.register_bridge_asset(asset_id, 1).await.unwrap();
-        assert_eq!(bridge_registration["status"], "registered");
+        let refused = server
+            .register_bridge_asset(asset_id, 1)
+            .await
+            .expect_err("out-of-block bridge asset registration is refused");
+        assert!(
+            refused.message().contains("BridgeTx::RegisterAsset"),
+            "the refusal names the transaction door: {}",
+            refused.message()
+        );
 
-        // (security audit §3) the bridge-lock → mint → burn → unlock
+        // (security audit) the bridge-lock → mint → burn → unlock
         // Happy path is exercised by `src/tests/bridge_lifecycle.rs` (an
-        // Integration test against the internal `Blockchain` API), not via
-        // RPC. The RPC `bud_lockBridgeTransfer` is REMOVED because it
-        // Allowed unauthenticated permanent DoS of any `asset_id`.
+        // integration test against the internal `Blockchain` API), not via
+        // RPC. The RPC `bud_lockBridgeTransfer` is removed because it
+        // allowed unauthenticated permanent DoS of any `asset_id`.
         //
         // What this RPC test still proves: domain registration, weak-proof
-        // Rejection, relayed submit path with active-relayer gate, and
-        // Global-header sealing - i.e. the full settlement surface minus
-        // The deprecated `lock_bridge_transfer` flow.
+        // rejection, the relayed submit path with its active-relayer gate,
+        // and the global-header refusal/read surface - the full settlement
+        // surface minus the deprecated `lock_bridge_transfer` flow.
         let _ = Address::from([11u8; 32]);
         let _ = Address::from([12u8; 32]);
 
-        // Re-seal the global header to confirm the RPC surface still
-        // Accepts new headers after the bridge-lock removal.
-        let rpc_sealed = server.seal_global_header().await.unwrap();
-        assert_eq!(rpc_sealed["globalHeight"], "0x1");
-        assert!(rpc_sealed["domainRegistryRoot"]
-            .as_str()
-            .unwrap()
-            .starts_with("0x"));
+        // /: the global header is built in block at every
+        // finality checkpoint. Sealing one from RPC is refused and names the
+        // read methods, and the read method answers.
+        let refused = server
+            .seal_global_header()
+            .await
+            .expect_err("sealing a global header out of block is refused");
+        assert!(
+            refused.message().contains("bud_getGlobalHeader"),
+            "the refusal names the read method: {}",
+            refused.message()
+        );
+        assert!(server.get_global_header(1).await.is_ok());
     }
 
+    /// /: the external-domain writes are `ExternalDomain`
+    /// transactions applied in block. Their operator RPCs refuse and name
+    /// the transaction; prover slashing is closed and says why. Nothing is
+    /// registered.
+    #[tokio::test]
+    async fn the_external_domain_write_rpcs_refuse_and_name_their_doors() {
+        let (server, _bc) = setup().await;
+        let key = format!("0x{}", "11".repeat(32));
+        let refusals = [
+            (
+                server
+                    .register_external_domain(serde_json::json!({}))
+                    .await
+                    .expect_err("registration is a transaction"),
+                "ExternalDomainTx::Register",
+            ),
+            (
+                server
+                    .submit_external_evidence(serde_json::json!({}))
+                    .await
+                    .expect_err("evidence is a transaction"),
+                "ExternalDomainTx::SubmitEvidence",
+            ),
+            (
+                server
+                    .readmit_external_domain(key.clone(), "recovered".to_string())
+                    .await
+                    .expect_err("readmission is a transaction"),
+                "ExternalDomainTx::Readmit",
+            ),
+            (
+                server
+                    .schedule_external_fork(key.clone(), 2, 3, 500, 10)
+                    .await
+                    .expect_err("a fork is a transaction"),
+                "ExternalDomainTx::ScheduleFork",
+            ),
+            (
+                server
+                    .bond_external_prover(serde_json::json!({}))
+                    .await
+                    .expect_err("a prover bond is a transaction"),
+                "ExternalDomainTx::BondProver",
+            ),
+            (
+                server
+                    .set_external_quorum_policy(serde_json::json!({}))
+                    .await
+                    .expect_err("a quorum policy is a transaction"),
+                "ExternalDomainTx::SetQuorumPolicy",
+            ),
+            (
+                server
+                    .slash_external_prover(serde_json::json!({}))
+                    .await
+                    .expect_err("prover slashing is closed"),
+                "no proof that an accepted attestation was false",
+            ),
+        ];
+        for (err, needle) in refusals {
+            assert!(
+                err.message().contains(needle),
+                "the refusal names {needle}: {}",
+                err.message()
+            );
+        }
+        let domains = server.get_external_domains().await.unwrap();
+        assert_eq!(domains["domains"], serde_json::json!([]));
+    }
+
+    /// the five storage writes are `StorageTx` transactions applied in
+    /// block (covered in `src/domain/storage_tx.rs`). Their operator RPCs
+    /// refuse every call, name the transaction door, and change nothing:
+    /// the manifest stays unregistered and no balance moves.
     #[tokio::test]
     async fn the_storage_write_rpcs_refuse_and_name_their_transaction_doors() {
         let (server, bc) = setup().await;
@@ -1053,18 +1176,17 @@ mod rpc_tests {
     /// Registered STORAGE_OPERATOR appears in RPC listing.
     #[tokio::test]
     async fn storage_active_operators_lists_registered() {
-        let (server, chain) = setup().await;
-
         let operator = Address::from_hex(&"0a".repeat(32)).unwrap();
         let min_stake = 1_000u64; // PermissionlessRegistry default floor
-        chain
-            .credit_development_account(&operator, min_stake * 2)
-            .await
-            .expect("devnet credit");
-        chain
-            .bond_storage_operator(operator, min_stake)
-            .await
+                                  // a bond is a `RoleBond` transaction applied in block; the
+                                  // fixture writes the registry before the actor starts.
+        let mut blockchain = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+        blockchain.state.add_balance(&operator, min_stake * 2);
+        blockchain
+            .state
+            .bond_storage_operator(&operator, min_stake)
             .expect("bond_storage_operator must succeed with sufficient balance");
+        let (server, _) = setup_with_blockchain(blockchain).await;
 
         let res = server.storage_active_operators().await.unwrap();
         assert_eq!(res["roleId"], serde_json::json!(5));

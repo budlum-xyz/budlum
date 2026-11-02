@@ -38,11 +38,15 @@ pub mod relayer;
 pub mod rpc;
 /// The Budlum project file schema (`budlum.toml`).
 pub mod sdk;
+pub mod security;
 pub mod settlement;
 pub mod sharding;
 pub mod socialfi;
 pub mod storage;
 pub mod tokenomics;
+// The V5 command-line wallet; its keys are ML-DSA-87.
+#[cfg(feature = "wallet-ml-dsa")]
+pub mod wallet;
 
 // The workspace denies `unwrap`/`expect` because a panic in production code
 // aborts the node. Inside tests the opposite holds: a failed unwrap is how a
@@ -60,7 +64,7 @@ pub use crate::core::transaction::Transaction;
 mod bls_keypair_integrity_test {
     use bls12_381::{G1Affine, G2Affine};
 
-    /// (security audit §5) confirm that the compressed
+    /// (security audit) confirm that the compressed
     /// Identity points are NOT accepted by `from_compressed` (so
     /// The BLS verifier is not vulnerable to a "zero public key"
     /// Trivial forgery). BLS12-381 uses a special encoding for the

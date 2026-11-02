@@ -1,20 +1,18 @@
-// License: Polyfield
+// SPDX-License-Identifier: LicenseRef-PolyForm-Shield-1.0.0
 pragma solidity ^0.8.24;
 
 /// @title BudlumFinalityVerifier
 /// @notice Verifies Budlum's hybrid finality proof (BLS12-381 aggregate +
 ///         post-quantum ML-DSA) on an EVM chain.
 ///
-/// @dev BLG-1074 (P60-F07, decision C now / A at deploy): NOT DEPLOYED AND
-///      NOT TRUSTED. CI compiles this file (solidity.yml is a syntax and
-///      codegen gate only); nothing deploys it and no Rust path encodes its
-///      digests. The F01-F06 defects (no trusted key fixed in the contract,
-///      the challenge-window fallback, the pairing probe gas floor, the
-///      signingRoot layout, the missing Rust encoder, the one-root-per-height
-///      gap) are open on purpose here - the contract is quarantined, not
-///      shipped. The A part (deployment) requires the F01-F06 fixes plus
-///      negative tests for each of them in CI. Until then the deployment
-///      path is closed.
+/// @dev: this source is deployment-ready code, but no
+///      Sepolia deployment is claimed by this repository. The verifier has no
+///      upgrade or owner path: its chain id, key hashes, fraud verifier and
+///      challenge policy are immutable constructor commitments. The Rust
+///      `EvmFinalityAttestation` encoder and the negative contract locks cover
+///      the cross-language signing root and the six refusal boundaries.
+///      An operator still needs an independent deployment ceremony and must
+///      publish the constructor key-hash manifest before relying on an address.
 ///
 /// @dev THE GAS QUESTION, ANSWERED WITH NUMBERS
 ///
@@ -178,7 +176,7 @@ contract BudlumFinalityVerifier {
     /// EIP-2537 pairing check costs 32600 * k + 37700 gas, so 70300 for the
     /// one-pair probe. The stipend leaves headroom. A smaller stipend makes
     /// the probe fail on a real chain.
-    uint256 internal constant GAS_BLS_PAIRING_PROBE = 100_000;
+    uint256 internal constant GAS_BLS_PAIRING_PROBE = 150_000;
 
     /// Challenge window for the optimistic fallback, in blocks. Long enough
     /// that a prover cannot finalise a lie and spend the proceeds before
@@ -208,6 +206,13 @@ contract BudlumFinalityVerifier {
     /// that is accepted or opens a window. A different root for the same
     /// height is refused until a fraud proof clears the claim.
     mapping(uint64 => bytes32) public rootAtHeight;
+
+    /// A pending optimistic claim reserves both the root and the attestation
+    /// digest for its height. This prevents two different roots (or two
+    /// independently challengeable digests for one root) from racing through
+    /// separate windows.
+    mapping(uint64 => bytes32) public pendingRootAtHeight;
+    mapping(uint64 => bytes32) public pendingAttestationAtHeight;
 
     /// Heights with an accepted digest. Their claim is never cleared.
     mapping(uint64 => bool) public heightFinal;
@@ -251,7 +256,9 @@ contract BudlumFinalityVerifier {
     error ChallengeResolved(bytes32 digest);
     error AlreadyFraudulent(bytes32 digest);
     error NoFraudProofVerifier();
+    error FraudProofVerifierNotContract(address verifier);
     error FraudProofRejected(bytes32 digest);
+    error PendingAttestation(uint64 height, bytes32 digest);
     error NoChallengeWindow();
     error SignatureInvalid(string what);
     error ConflictingRoot(uint64 height, bytes32 held, bytes32 got);
@@ -266,6 +273,16 @@ contract BudlumFinalityVerifier {
     ) {
         if (fraudProofVerifier_ == address(0)) {
             revert NoFraudProofVerifier();
+        }
+        if (fraudProofVerifier_.code.length == 0) {
+            revert FraudProofVerifierNotContract(fraudProofVerifier_);
+        }
+        if (committeePubkeyHash_ == bytes32(0)
+            || g2GeneratorHash_ == bytes32(0)
+            || mlDsaPubkeyHash_ == bytes32(0)) {
+            // The constructor is the only trust-anchor ceremony. A zero hash
+            // would make the "pinned" key an accidental empty-input policy.
+            revert UntrustedKey("constructor key hashes must be non-zero");
         }
         if (challengeWindow_ == 0) {
             revert NoChallengeWindow();
@@ -328,7 +345,9 @@ contract BudlumFinalityVerifier {
     ///      - BLS only: verifies the classical half cryptographically and opens
     ///        a challenge window for the post-quantum half. This is a weaker
     ///        guarantee and the event says so;
-    ///      - neither: optimistic, window open, event says so.
+    ///      - neither: refused (`NoVerificationPath`): nothing on this chain
+    ///        could check either half, so the attestation does not enter the
+    ///        window and no event claims otherwise.
     ///      A window opens only for a half whose precompile is missing. If a
     ///      precompile is present and its check fails, `verify` reverts.
     ///
@@ -367,13 +386,20 @@ contract BudlumFinalityVerifier {
             revert UntrustedKey("ML-DSA pubkey is not the pinned key");
         }
 
-        // Only a conflicting FINALIZED root bars new attestations at `a.height`.
-        // Allowing an unverified optimistic claim to lock `rootAtHeight` let
-        // any first caller squat every height and permanently censor honest
-        // attestations with `ConflictingRoot` (CWE-284).
+        // A finalized root and a pending optimistic root are both exclusive
+        // claims. The pending digest check closes the second window race: one
+        // height may not have two independently challengeable attestations.
         bytes32 held = rootAtHeight[a.height];
         if (held != bytes32(0) && held != a.stateRoot && heightFinal[a.height]) {
             revert ConflictingRoot(a.height, held, a.stateRoot);
+        }
+        bytes32 pendingDigest = pendingAttestationAtHeight[a.height];
+        if (pendingDigest != bytes32(0) && pendingDigest != digest) {
+            revert PendingAttestation(a.height, pendingDigest);
+        }
+        bytes32 pendingRoot = pendingRootAtHeight[a.height];
+        if (pendingRoot != bytes32(0) && pendingRoot != a.stateRoot) {
+            revert ConflictingRoot(a.height, pendingRoot, a.stateRoot);
         }
 
         bytes32 root = signingRoot(a);
@@ -406,13 +432,23 @@ contract BudlumFinalityVerifier {
             return digest;
         }
 
-        // Optimistic path, reached only when a precompile is missing. The
-        // attestation is NOT marked accepted here; it is
-        // marked accepted only when the window closes, via `settle`. A caller
-        // that treats an open window as accepted is reading the wrong function.
-        string memory reason = !hasBlsPrecompile && !hasMlDsaPrecompile
-            ? "no verification precompile on this chain"
-            : (blsOk ? "post-quantum half unverified" : "classical half unverified");
+        // Neither half verified: the chain carries no verification
+        // precompile for either half, so nothing about this attestation has
+        // been checked. Such an attestation must not enter the challenge
+        // window either - the window would accept it after silence, on a
+        // chain where neither half could ever have been verified, and the
+        // event would describe a check that never happened. Refuse: a
+        // deployment where no verification path runs must not be relied on.
+        if (!blsOk && !pqOk) {
+            revert NoVerificationPath();
+        }
+
+        // Optimistic path, reached only when exactly one half verified and
+        // the other half's precompile is missing. The attestation is NOT
+        // marked accepted here; it is marked accepted only when the window
+        // closes, via `settle`. A caller that treats an open window as
+        // accepted is reading the wrong function.
+        string memory reason = blsOk ? "post-quantum half unverified" : "classical half unverified";
         challenges[digest] = Challenge({
             attestationDigest: digest,
             challenger: address(0),
@@ -421,9 +457,8 @@ contract BudlumFinalityVerifier {
             height: a.height,
             stateRoot: a.stateRoot
         });
-        // Do NOT claim `rootAtHeight[a.height]` on an unverified optimistic
-        // submission: only `verify` (when both cryptographic halves pass) or
-        // `settle` (once the challenge window closes unrefuted) claims it.
+        pendingRootAtHeight[a.height] = a.stateRoot;
+        pendingAttestationAtHeight[a.height] = digest;
         emit AttestationOptimistic(digest, a.height, reason);
     }
 
@@ -458,8 +493,9 @@ contract BudlumFinalityVerifier {
         fraudulent[digest] = true;
         fraudulentRoot[c.height][c.stateRoot] = true;
         accepted[digest] = false;
-        if (!heightFinal[c.height] && rootAtHeight[c.height] == c.stateRoot) {
-            rootAtHeight[c.height] = bytes32(0);
+        if (pendingAttestationAtHeight[c.height] == digest) {
+            pendingAttestationAtHeight[c.height] = bytes32(0);
+            pendingRootAtHeight[c.height] = bytes32(0);
         }
         emit ChallengeOpened(digest, msg.sender);
         emit ChallengeProven(digest, msg.sender, true);
@@ -483,11 +519,18 @@ contract BudlumFinalityVerifier {
         if (elapsed < challengeWindow) {
             revert ChallengeWindowOpen(digest, challengeWindow - elapsed);
         }
-        // Reject settlement if another root already finalized this height.
+        // Reject settlement if another root already finalized this height or
+        // if this challenge is no longer the pending claim for its height.
         bytes32 held = rootAtHeight[c.height];
         if (held != bytes32(0) && held != c.stateRoot) {
             revert ConflictingRoot(c.height, held, c.stateRoot);
         }
+        if (pendingAttestationAtHeight[c.height] != digest
+            || pendingRootAtHeight[c.height] != c.stateRoot) {
+            revert PendingAttestation(c.height, pendingAttestationAtHeight[c.height]);
+        }
+        pendingAttestationAtHeight[c.height] = bytes32(0);
+        pendingRootAtHeight[c.height] = bytes32(0);
         c.resolved = true;
         accepted[digest] = true;
         rootAtHeight[c.height] = c.stateRoot;
@@ -532,6 +575,14 @@ contract BudlumFinalityVerifier {
         if (g1NegSignature.length != 128) {
             revert BadSignatureLength("negated signature must be an uncompressed G1 point (128 bytes)");
         }
+        // The point at infinity pairs to 1 against anything, so an all-zero
+        // key would "verify" every root with an all-zero signature. The
+        // sibling `BudlumBls` refuses these values and the Rust planner never
+        // produces them; a pinned zero key is a ceremony mistake that must
+        // fail loudly instead of accepting everything.
+        if (_isInfinity(g2Pubkey) || _isInfinity(g2Generator) || _isInfinity(g1NegSignature)) {
+            revert SignatureInvalid("BLS points at infinity cannot verify an attestation");
+        }
         // Pair layout: G1 (128) then G2 (256), twice.
         bytes memory input = abi.encodePacked(
             _hashToG1(root), g2Pubkey,
@@ -546,6 +597,21 @@ contract BudlumFinalityVerifier {
             result := mload(add(out, 32))
         }
         return result == 1;
+    }
+
+    /// Whether every byte of `point` is zero, which is how an uncompressed
+    /// EIP-2537 point encodes the point at infinity.
+    ///
+    /// Internal rather than inline so the three infeasible-value checks above
+    /// share one definition with each other; `BudlumBls._isInfinity` is the
+    /// same rule on the same encoding.
+    function _isInfinity(bytes calldata point) internal pure returns (bool) {
+        for (uint256 i = 0; i < point.length; i++) {
+            if (point[i] != 0) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /// @dev RFC 9380 hash_to_curve for BLS12381G1_XMD:SHA-256_SSWU_RO_ with

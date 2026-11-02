@@ -469,7 +469,7 @@ mod tests {
         );
     }
 
-    /// P26-F08: a candidate listed twice holds one place, not two.
+    /// A candidate listed twice holds one place, not two.
     #[test]
     fn a_duplicated_candidate_counts_once() {
         let mut c = candidates(2);
@@ -484,7 +484,7 @@ mod tests {
         );
     }
 
-    /// P26-F08: the smallest stake still gets a score that depends on the
+    /// The smallest stake still gets a score that depends on the
     /// draw. With integer flooring about half of the draws scored zero.
     #[test]
     fn a_small_stake_rarely_scores_zero() {

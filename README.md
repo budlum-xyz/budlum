@@ -2,17 +2,18 @@
 
 Budlum is the next layer of the internet, focused on data sovereignty and social flourishing.
 
-Budlum is a permissionless Universal Settlement Layer. It does not compete with other chains, it *settles* them.
+Budlum is the consensus of consensuses.
+
+Every network keeps its own rules. Budlum unifies their finality into a single proof.
+
 PoW, PoS, PoA, BFT and ZK domains each keep their own consensus; Budlum verifies their
 finality proofs and records cross-domain value transfer as a cryptographic fact on a single
-`GlobalBlockHeader`. Sovereignty over data, keys and computation stays with the participants.
-
-The Universal Settlement Layer is the common ground beneath heterogeneous networks: it does
-not ask which consensus produced a fact, only whether the finality proof for that fact holds,
-so value moves between domains without trusting an intermediary.
+`GlobalBlockHeader`. Sovereignty over data, keys and computation stays with the participants:
+the layer asks which finality proof holds for a fact, never which consensus produced it, so
+value moves between domains without trusting an intermediary.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-3863%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-4365%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -52,7 +53,7 @@ so value moves between domains without trusting an intermediary.
 | --- | --- |
 | **Fragmentation.** Thousands of isolated chains, each with its own finality, none of which the others can verify. | A settlement layer that verifies *any* domain's finality proof and records the result in one global header. |
 | **Bridge risk.** Custodial and multisig bridges have lost billions; the failures are almost always missing verification, not broken cryptography. | A `lock → mint → burn → unlock` lifecycle where every mint recomputes a bounded proof and re-derives the payload hash from `(asset_id, amount)` before crediting anything. |
-| **The quantum horizon.** Ed25519 and ECDSA are expected to be breakable within the lifetime of a chain launched today. | Hybrid finality: BLS12-381 aggregate signatures alongside a post-quantum scheme (ML-DSA-65 by default - FIPS 204 NIST final; legacy Dilithium5 available only for migration). |
+| **The quantum horizon.** Ed25519 and ECDSA are expected to be breakable within the lifetime of a chain launched today. | Hybrid finality: BLS12-381 aggregate signatures alongside a post-quantum scheme (ML-DSA-65 by default - FIPS 204 NIST final; legacy Dilithium5 available only for migration). <!-- claim:L-FINALITY-01 --> |
 | **Operator custody of user data.** "Decentralized" networks whose storage, RPC and inference all terminate at one company. | No admin key, no pause hook, no whitelist. Storage, RPC and AI endpoints run on any node; participation is stake-gated, not permission-gated. |
 | **Unverifiable off-chain compute.** AI output presented as fact with nothing behind it. | An in-tree zkVM (BudZero) that produces STARK proofs of execution. Inference proof *verification* is not yet enabled, the transaction path [fails closed](docs/AI_VERIFICATION_STATUS.md) rather than trusting an unverified result. |
 
@@ -186,7 +187,7 @@ dependencies, so the entire system builds, tests and ships as one tree.
 | **B.U.D.** | [`bud/`](bud) · [`src/storage/`](src/storage) | Broad Universal Database: `bud/` is the 1.0/2.0/3.0 implementation (tarif / QR / receipt / settlement modules, [bud README](bud/README.md)); `src/storage/` is the settlement layer's storage engine (content addressing, deals, challenge/response proofs) |
 | **AI inference layer** | [`src/ai_inference/`](src/ai_inference) | Closed-circuit AI layer: model registry, operator compute-bond, effort tiers, Pollen-gated data access, perception declarations (V3), SocialFi output bridge. Off-chain workspace: [`crates/ai-inference/`](crates/ai-inference) |
 | **Pollen** | [`src/pollen/`](src/pollen) | Consent-gated data marketplace, grants, encryption, and the gate the AI layer must pass |
-| **BNS** | [`src/bns/`](src/bns) | `.bud` naming: registration, subdomains, content and storage records |
+| **BNS** | [`src/bns/`](src/bns) | `.bud` naming: registration, renewal, transfer, subdomains, content and storage records |
 | **Wallet Core** | [`crates/wallet-core/`](crates/wallet-core), [README](crates/wallet-core/README.md) | BIP39 + SLIP-0010 Ed25519 derivation and transaction signing. A wallet, not a relayer |
 
 ### Supporting trees
@@ -259,7 +260,6 @@ cargo run --manifest-path xtask/tools/Cargo.toml -- pre-push   # fmt + clippy, p
 | Feature | Default | Effect |
 | --- | --- | --- |
 | `pq-ml-dsa` | OK | FIPS 204 ML-DSA (NIST final) - ML-DSA-65 validator signatures (`ml-dsa`). Scheme is written into genesis; a node whose build disagrees with the chain refuses to start |
-| `pq-dilithium` | - | Legacy Dilithium5 (round-3, pre-NIST-final) signatures (`pqcrypto-dilithium`). Retained only for migration; not the default |
 | `p2p-mdns` | - | Devnet-only local peer discovery. Deliberately excluded from release builds so mDNS advisories stay unreachable |
 
 `cargo build --all-features` is **expected to fail**: the PQ backends are mutually exclusive
@@ -295,6 +295,35 @@ Profiles live in [`config/`](config): [`devnet.toml`](config/devnet.toml),
 a fail-closed guard rejects them, so no one can accidentally start "mainnet" against a
 ceremony file.
 
+### Testnet
+
+Testnet is mainnet's rehearsal: the same code path, the same supply rules, the same validator
+ceremony. Only the profile, the genesis and the parameter values differ - chain id `45261`,
+network id `BDLT`.
+
+- **Wallet:** `bud wallet create --key-file ./secrets/wallet.json` (ML-DSA-87, 24 words).
+- **Get BUD:** the faucet grants 100 BUD per address per day. Ask it for a transfer like any
+  other: `curl -X POST https://faucet.<TESTNET_DOMAIN>/request -d '{"address":"0x<your address>"}'`.
+- **Become a validator:** at least 1,000 BUD of stake, then `bud validator join`; see
+  [docs/VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md).
+- **Delegate:** `bud delegate`, see [docs/DELEGATION.md](docs/DELEGATION.md).
+- **Run a node:** `budlum-core --config config/testnet.toml`.
+
+Every command that signs names its replay domain with `--signing-chain-id 45261` (`45260`
+mainnet, `45262` devnet). It has no default and the node's `bud_chainId` answer is only
+compared against it: a seed controls the same address on every network, so a node that chose
+the id would be choosing where your signature is valid.
+
+The **testnet readiness gate** - clean build and green CI, genesis/config/node start end to
+end, restart persistence with consistent counters, the network layer's size and rate limits,
+RPC auth and rate limiting, consensus and tokenomics, the panic bar, the operator docs and a
+secret-free history - is recorded row by row, with the code location and the test and the CI
+job that runs it, in
+[docs/audit/TESTNET_TRACEABILITY.md](docs/audit/TESTNET_TRACEABILITY.md). Endpoints,
+parameters and the local rehearsal are in [docs/TESTNET.md](docs/TESTNET.md); the gates that
+still stand between testnet and mainnet are in
+[docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
+
 ### Node roles
 
 `--role` selects the profile a node runs under: `validator`, `sentry`, `seed`, `rpc`,
@@ -305,7 +334,7 @@ public listener.
 
 > [!IMPORTANT]
 > **Mainnet validators must sign through PKCS#11.** Disk-backed `ValidatorKeys`, BLS and
-> post-quantum material sitting in a file, are rejected on the mainnet profile. This is not
+> ML-DSA key material sitting in a file, are rejected on the mainnet profile. This is not
 > advisory; the node refuses to start.
 
 ### Operating
@@ -336,20 +365,21 @@ The API covers chain and account state, blocks, transactions and receipts, the v
 and slashing history, domain commitments and settlement info, the bridge lifecycle, BNS
 resolution, the Pollen marketplace, the AI inference lifecycle, and node health. The full
 method list with auth requirements per listener is in
-[SPECIFICATION.md § 3.3](docs/SPECIFICATION.md).
+[SPECIFICATION.md](docs/SPECIFICATION.md).
 
 A minimal CLI client ships in the same tree:
 
 ```bash
 cargo run --bin bud -- query balance <address>
 cargo run --bin bud -- query block latest
-BUD_PRIV_KEY=<hex-seed> cargo run --bin bud -- tx send --to <address> --amount <n> --chain-id 45261   # or --priv-key-file <path>
+BUD_PRIV_KEY=<hex-seed> cargo run --bin bud -- --signing-chain-id 45261 tx send --to <address> --amount <n>   # or --priv-key-file <path>
 ```
 
-`--chain-id` is required and is the only source of the replay domain the signature
-carries: `45260` mainnet, `45261` testnet, `45262` devnet. The node's `bud_chainId`
-answer is compared against it and a mismatch is refused before anything is signed, so a
-node on another network cannot choose where a transfer you signed is valid.
+Every command that signs takes `--signing-chain-id` (`45260` mainnet, `45261` testnet,
+`45262` devnet). It is the only source of the replay domain the signature carries: the
+node's `bud_chainId` answer is compared against it and a mismatch is refused before a
+signature is spent, because a seed controls the same address on every network and a node
+that chose the id would be choosing where your transaction is valid.
 
 ---
 
@@ -435,18 +465,21 @@ claim is made anywhere in this repository.
 
 ## Project status
 
-**Implemented and tested:** Heterogeneous Consensus on the Universal Settlement Layer (PoW/PoS/PoA/BFT) · BLS + post-quantum hybrid
-finality · domain registry and finality adapters · cross-domain bridge lifecycle with forgery
+**Quantum security, current rung (I-0):** Budlum approaches the quantum threat with a complete plan. Every layer has a defined solution, a metric and a completion gate. The Budlum wallet core signs today with NIST FIPS 204 ML-DSA-87. <!-- claim:S-I0 -->
+The register of claims, the evidence behind each and the rung each one needs is [`docs/pq/CLAIMS.md`](docs/pq/CLAIMS.md); only the sentence of the rung that has been reached is used.
+
+**Implemented and tested:** Heterogeneous Consensus on the Universal Settlement Layer (PoW/PoS/PoA/BFT) · BLS + post-quantum hybrid finality <!-- claim:L-FINALITY-01 -->
+· domain registry and finality adapters · cross-domain bridge lifecycle with forgery
 gates · permissionless stake registry with slashing and unbonding · in-tree BudZKVM with
 STARK proving · B.U.D. storage with deal and challenge economy · BNS `.bud` names · Pollen
 data marketplace · SocialFi primitives · AI inference layer · EVM chain adapter
 (RLP + MPT + receipt verification) · `$BUD` tokenomics · validator governance · snapshot V2
-with chunk-session binding.
+with chunk-session binding · block-only relayer intents with escrowed solver fees,
+anchored receipt verification and expiry slashing.
 
 **Deliberately not enabled, and pinned by tests that break if that changes:** on-chain AI
 inference proof *verification* ([status](docs/AI_VERIFICATION_STATUS.md)) · BudZKVM
-`VerifyMerkle` at production depth · BNS renewal and transfer (no transaction type reaches
-them) · the solver-economics module.
+`VerifyMerkle` at production depth.
 
 **Not claimed:** TLA+ formal verification of the protocol · a complete ZK privacy layer ·
 full on-chain AI execution · vendor-native BLS/PQ HSM support beyond Ed25519 PKCS#11 ·

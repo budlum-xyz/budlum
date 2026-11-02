@@ -58,6 +58,16 @@ fuzz_target!(|data: &[u8]| {
     } else {
         None
     };
+    let witness_root = if flag & 16 == 16 {
+        Some(take_32(data, 337))
+    } else {
+        None
+    };
+    let producer_public_key = if flag & 32 == 32 {
+        data.get(369..).unwrap_or_default().to_vec()
+    } else {
+        Vec::new()
+    };
 
     let header = BlockHeader {
         index: take_u64(data, 1),
@@ -78,6 +88,8 @@ fuzz_target!(|data: &[u8]| {
         slashing_reports: None,
         storage_root,
         shards_root: None,
+        producer_public_key,
+        witness_root,
     };
 
     // Header encoding is deterministic and its hash survives a round trip.
@@ -110,6 +122,8 @@ fuzz_target!(|data: &[u8]| {
     block.vrf_proof = header.vrf_proof.clone();
     block.validator_set_hash = header.validator_set_hash.clone();
     block.storage_root = header.storage_root;
+    block.witness_root = header.witness_root;
+    block.producer_public_key = header.producer_public_key.clone();
     block.tx_root = block.calculate_tx_root();
 
     block.hash = header.hash.clone();

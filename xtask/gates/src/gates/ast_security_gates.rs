@@ -224,7 +224,7 @@ impl<'ast> Visit<'ast> for ZeroBlockCheck {
         for stmt in &node.stmts {
             if let Stmt::Expr(Expr::If(ifn), _) = stmt {
                 let cond = compact(&ifn.cond);
-                if !after_verify && !cond.starts_with('!') && cond.contains("tx.verify()") {
+                if !after_verify && !cond.starts_with('!') && cond.contains("tx.verify") {
                     let mut vs = VerifySuccess::default();
                     vs.visit_block(&ifn.then_branch);
                     self.guarded_success = vs.found;

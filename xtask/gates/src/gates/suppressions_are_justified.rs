@@ -254,31 +254,13 @@ const BUDGETS: &[Budget] = &[
         count: 1,
         reason: "a consensus or storage entry point whose arguments are all required and none of which groups into a meaningful struct; bundling them would hide which fields a caller must supply",
     },
-    Budget {
-        file: "src/bin/budlum-relayer.rs",
-        lint: "clippy::nursery",
-        count: 1,
-        reason: "nursery lints are unstable by definition and this file predates the crate-wide ratchet; listed so the exception is visible rather than assumed",
-    },
-    Budget {
-        file: "src/bin/budlum-relayer.rs",
-        lint: "clippy::pedantic",
-        count: 1,
-        reason: "pedantic is denied crate-wide; these files were exempted before the ratchet and each exemption is a debt, not a decision",
-    },
-    Budget {
+            Budget {
         file: "src/chain/blockchain.rs",
         lint: "clippy::too_many_arguments",
         count: 4,
-        reason: "consensus or storage entry points whose arguments are all required and none of which groups into a meaningful struct; the fourth is `accept_storage_reallocation_with_escrow`, whose ticket/operator/payer/epoch-window/economics/proof arguments each come from a different authority and bundling them would hide which fields a caller must supply",
+        reason: "the bridge lock, verified-mint and settlement evidence entry points, whose arguments are all required and none of which groups into a meaningful struct; the storage escrow wrappers that were here left when deal opening and repair acceptance became `StorageTx` transactions, and the evidence path arrived with the slashing work",
     },
-    Budget {
-        file: "src/chain/chain_actor.rs",
-        lint: "clippy::too_many_arguments",
-        count: 4,
-        reason: "actor-boundary mirrors of the bridge lock/mint entry points; each argument crosses the channel as part of one message and none groups into a meaningful struct, so bundling them would hide which fields a caller must supply",
-    },
-    Budget {
+        Budget {
         file: "src/cross_domain/bridge.rs",
         lint: "clippy::too_many_arguments",
         count: 1,
@@ -435,12 +417,6 @@ const BUDGETS: &[Budget] = &[
         reason: "`WalletKeyPair::address` derives from a generated ML-DSA-87 public key, and derivation only rejects malformed keys, so the panic path is unreachable; the expect beats the previous silent zero-address fallback, which would have let a malformed key spend as `[0u8; 32]`",
     },
     Budget {
-        file: "src/settlement/pq_anchor.rs",
-        lint: "clippy::too_many_arguments",
-        count: 1,
-        reason: "the node-local emission driver mirrors assemble_anchor's seven-argument shape and adds only the two knobs it uniquely owns (the log path and the mode gate); bundling them into a params struct would hide from the seam wiring which values the consensus caller must supply",
-    },
-    Budget {
         file: "crates/ai-inference/crates/ai-ops/src/logparse.rs",
         lint: "dead_code",
         count: 1,
@@ -463,6 +439,73 @@ const BUDGETS: &[Budget] = &[
         lint: "clippy::too_many_lines",
         count: 1,
         reason: "the patch-set check is one linear sequence of independent verdicts; splitting it would scatter the failure messages that read in order",
+    },
+
+    Budget {
+        file: "budzero/bud-proof/src/plonky3_prover.rs",
+        lint: "clippy::multiple_bound_locations",
+        count: 1,
+        reason: "plonky3 generic bounds split between the signature and a where clause, as in the prover proper; rewriting them changes nothing at runtime and makes the signature harder to read against the upstream trait",
+    },
+    Budget {
+        file: "budzero/bud-proof/src/plonky3_prover.rs",
+        lint: "clippy::type_repetition_in_bounds",
+        count: 1,
+        reason: "the upstream plonky3 opening type repeats a generic the trait already fixes; a local alias would have to be kept in step with the dependency",
+    },
+    Budget {
+        file: "src/crypto/pq_vector_tests.rs",
+        lint: "clippy::type_complexity",
+        count: 1,
+        reason: "the test matrix row is the vector set itself; naming the tuple would hide which vector failed",
+    },
+    Budget {
+        file: "src/crypto/scheme.rs",
+        lint: "clippy::type_complexity",
+        count: 1,
+        reason: "the scheme registry row (id, lengths, family) mirrors the table format; an alias would add a second name for the same wire shape",
+    },
+    Budget {
+        file: "src/domain/pq_canonical.rs",
+        lint: "clippy::expect_used",
+        count: 2,
+        reason: "canonical fixtures are fixed constants written at authoring time; every adversary-facing read in this module still returns Result, and a fixture that fails to parse is a repository bug the panic should name loudly",
+    },
+    Budget {
+        file: "src/settlement/anchor_ledger.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "the embedded anchor ledger parses at construction where there is no Result channel yet; the runtime entries all arrive through the verified emission path that returns errors",
+    },
+    Budget {
+        file: "src/settlement/anchor_production.rs",
+        lint: "clippy::type_complexity",
+        count: 1,
+        reason: "the production envelope tuple is fixed by the ceremony format; an alias would name the same shape twice and drift from the format table",
+    },
+    Budget {
+        file: "src/settlement/cold_quorum.rs",
+        lint: "clippy::type_complexity",
+        count: 1,
+        reason: "the cold-quorum roster shape (signers, keys, threshold) is fixed by the protocol table; a local alias would be a second definition",
+    },
+    Budget {
+        file: "src/settlement/reseal.rs",
+        lint: "clippy::expect_used",
+        count: 1,
+        reason: "the reseal fixture constants parse at authoring time; the adversarial path through this module returns Result",
+    },
+    Budget {
+        file: "src/settlement/reseal.rs",
+        lint: "clippy::type_complexity",
+        count: 1,
+        reason: "the reseal envelope tuple mirrors the wire format field for field",
+    },
+    Budget {
+        file: "src/storage/db.rs",
+        lint: "dead_code",
+        count: 1,
+        reason: "the cfg-gated reader exists for the on-disk format migration and no other cfg reaches it; removing it would strand rows written by the previous format",
     },
 ];
 

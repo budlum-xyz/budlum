@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(decoded.want_cid, req.want_cid);
     }
 
-    /// P41-F09: a request has one encoding and a small ceiling.
+    /// A request has one encoding and a small ceiling.
     #[test]
     fn a_request_with_trailing_bytes_or_over_the_ceiling_is_refused() {
         let req = BitswapRequest {

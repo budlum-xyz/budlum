@@ -48,7 +48,7 @@ impl std::fmt::Display for SeedError {
         match self {
             Self::InsufficientEntropy { given, required } => write!(
                 f,
-                "KQ-SEED-ENTROPY: the seed input is {given} bytes, at least {required} are required. \
+                "seed entropy: the seed input is {given} bytes, at least {required} are required. \
                  The derived seed claims to carry 256 bits; if it is derived from a shorter input \
                  that claim is false and the addresses can be precomputed. \
                  The input must come from the operating system randomness source - \
@@ -156,7 +156,7 @@ impl QuantumAccount {
     /// unit) under the model: 0.23342 per TB, divided by the 16.68 Duz
     /// ratio; device-only storage costs nothing.
     ///
-    /// BLG-0279 (P17-F13): this returned an `f64` behind a
+    /// This returned an `f64` behind a
     /// `cast_precision_loss` allow. Z8's rule is that money-shaped values
     /// do not travel as floats - a comparison or accumulation of this number
     /// anywhere downstream inherits float error and platform-dependent
@@ -166,7 +166,7 @@ impl QuantumAccount {
     #[must_use]
     ///
     /// WIRING: exposed for the quantum-account fee reporting edge; the
-    /// f64 form it replaced (BLG-0279) had no remaining production
+    /// f64 form it replaced had no remaining production
     /// caller, so the exact value waits for that edge to land.
     pub fn storage_cost_pico(&self) -> u64 {
         if self.storage_bytes == 0 {
@@ -189,13 +189,13 @@ impl QuantumAccount {
     /// Errors if the threshold is outside 1..=16 or the guardian list is empty or larger than 16.
     pub const fn verify_multisig_threshold(&self) -> Result<(), &'static str> {
         if self.guardians.is_empty() {
-            return Err("KQ-WALLET-MULTISIG-16: guardians empty");
+            return Err("wallet multisig: guardians empty");
         }
         if self.guardians.len() > MAX_MULTISIG_OWNERS {
-            return Err("KQ-WALLET-MULTISIG-16: exceeds 16");
+            return Err("wallet multisig: exceeds 16");
         }
         if self.multisig_threshold == 0 || self.multisig_threshold > self.guardians.len() {
-            return Err("KQ-WALLET-MULTISIG-16: threshold outside");
+            return Err("wallet multisig: threshold outside");
         }
         Ok(())
     }
@@ -205,13 +205,13 @@ impl QuantumAccount {
     /// Errors if the recovery threshold is outside 1..=16 or the guardian list is empty or larger than 16.
     pub const fn verify_recovery_policy(&self) -> Result<(), &'static str> {
         if self.guardians.is_empty() {
-            return Err("KQ-WALLET-RECOVERY-16: empty");
+            return Err("wallet recovery: empty");
         }
         if self.guardians.len() > MAX_MULTISIG_OWNERS {
-            return Err("KQ-WALLET-RECOVERY-16: exceeds 16");
+            return Err("wallet recovery: exceeds 16");
         }
         if self.recovery_threshold == 0 || self.recovery_threshold > self.guardians.len() {
-            return Err("KQ-WALLET-RECOVERY-16: threshold outside");
+            return Err("wallet recovery: threshold outside");
         }
         Ok(())
     }
@@ -222,12 +222,12 @@ impl QuantumAccount {
     pub fn verify_storage_bound(&self) -> Result<(), &'static str> {
         // storage_root zero but pact_root non-zero -> inconsistent
         if self.storage_root == [0u8; 32] && self.pact_root != [0u8; 32] {
-            return Err("KQ-STORAGE-BOUND: storage_root zero but pact_root non-zero");
+            return Err("storage bound: storage_root zero but pact_root non-zero");
         }
         Ok(())
     }
 
-    /// Calls all KQ-* guards from a single entry point.
+    /// Calls all guards from a single entry point.
     ///
     /// `verify_multisig_threshold`, `verify_recovery_policy` and `verify_storage_bound`.
     /// Because `verify_storage_bound` and friends are each `pub` separately, the gate cannot see
@@ -237,7 +237,7 @@ impl QuantumAccount {
     /// # Errors
     ///
     /// Returns the first error if any of the three checks refuses.
-    /// BLG-0276 (P17-F10): a guardian list that repeats a key is not a set -
+    /// A guardian list that repeats a key is not a set -
     /// [`guardian_root`](Self::guardian_root) dedups while the list length did
     /// not, so the state-tree root and the account's own view of its
     /// guardians could disagree, and a threshold chosen against the padded
@@ -249,7 +249,7 @@ impl QuantumAccount {
         // needs no allocation - a HashSet would be the slower "optimization".
         for (i, a) in self.guardians.iter().enumerate() {
             if self.guardians.iter().skip(i + 1).any(|b| b == a) {
-                return Err("KQ-WALLET-GUARDIAN-SET: duplicate guardian key");
+                return Err("wallet guardian set: duplicate guardian key");
             }
         }
         Ok(())
@@ -261,7 +261,7 @@ impl QuantumAccount {
         self.verify_recovery_policy()?;
         self.verify_storage_bound()?;
         if self.guardian_root != Self::guardian_root(&self.guardians) {
-            return Err("KQ-WALLET-GUARDIAN-SET: root does not match guardians");
+            return Err("wallet guardian set: root does not match guardians");
         }
         Ok(())
     }
@@ -275,7 +275,7 @@ pub struct RecoveryProposal {
     pub new_address: [u8; 32],
     pub created_block: u64,
     pub executable_after: u64,
-    /// BLG-0276 (P17-F10): the chain this recovery is bound to. Before this
+    /// The chain this recovery is bound to. Before this
     /// field the digest said nothing about chains, so guardian votes collected
     /// on a testnet (or any fork that reused the keys) carried over verbatim
     /// to mainnet - same keys, same proposal, same digest, valid forever.
@@ -297,11 +297,11 @@ impl RecoveryProposal {
         account_nonce: u64,
     ) -> Result<Self, &'static str> {
         if current_owner == new_owner {
-            return Err("KQ-WALLET-RECOVERY-16: new==current");
+            return Err("wallet recovery: new==current");
         }
         let executable_after = created
             .checked_add(timelock)
-            .ok_or("KQ-WALLET-RECOVERY-16: timelock overflow")?;
+            .ok_or("wallet recovery: timelock overflow")?;
         let current_address = QuantumAccount::address_from_public_key(&current_owner);
         let new_address = QuantumAccount::address_from_public_key(&new_owner);
         Ok(Self {
@@ -319,7 +319,7 @@ impl RecoveryProposal {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
-        // V3 (BLG-0276): domain, chain and current account nonce precede
+        // V3: domain, chain and current account nonce precede
         // the owner fields. V1/V2 approvals cannot authorize this format.
         h.update(RECOVERY_DOMAIN_V3);
         h.update(self.chain_id.to_be_bytes());
@@ -406,13 +406,35 @@ impl BftGuardianFinality {
         threshold: usize,
         proposal_digest: &[u8; 32],
     ) -> Result<Vec<GuardianVote>, &'static str> {
+        Self::finalize_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            votes,
+            guardians,
+            threshold,
+            proposal_digest,
+        )
+    }
+
+    /// [`Self::finalize`] under the scheme statuses of a chain.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::finalize`].
+    /// exposed for: public surface of this module - production readers land with the wiring change.
+    pub fn finalize_in(
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        votes: Vec<GuardianVote>,
+        guardians: &[[u8; ML_DSA_87_PUBLIC_KEY_LEN]],
+        threshold: usize,
+        proposal_digest: &[u8; 32],
+    ) -> Result<Vec<GuardianVote>, &'static str> {
         if guardians.is_empty() {
             return Err("K-BUD-BFT-GUARDIAN: no guardians");
         }
         if guardians.len() > MAX_MULTISIG_OWNERS {
             return Err("K-BUD-BFT-GUARDIAN: too many guardians");
         }
-        // BLG-0276: vote deduplication does not validate the guardian SET.
+        // Vote deduplication does not validate the guardian SET.
         // Reject a padded list before computing a quorum over its length.
         for (i, guardian) in guardians.iter().enumerate() {
             if guardians.iter().take(i).any(|g| g == guardian) {
@@ -434,7 +456,9 @@ impl BftGuardianFinality {
             if &vote.proposal_digest != proposal_digest {
                 return Err("K-BUD-BFT-GUARDIAN: vote names another proposal");
             }
-            crate::crypto::primitives::verify_ml_dsa_87_signature(
+            crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+                registry,
+                crate::crypto::ctx::GUARDIAN_V1,
                 &message,
                 &vote.signature,
                 &vote.guardian_id,
@@ -501,7 +525,7 @@ mod tests {
 
     #[test]
     fn guardian_list_and_recovery_digest_are_pinned() {
-        // BLG-0276 (P17-F10), half one: a duplicated guardian key is now a
+        //half one: a duplicated guardian key is now a
         // refused account, so the deduped `guardian_root` and the list the
         // threshold is chosen against can no longer disagree.
         let mut a = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
@@ -525,7 +549,7 @@ mod tests {
         let dup = account(vec![a, a, b]);
         assert_eq!(
             dup.verify_no_duplicate_guardians(),
-            Err("KQ-WALLET-GUARDIAN-SET: duplicate guardian key")
+            Err("wallet guardian set: duplicate guardian key")
         );
         assert!(
             dup.validate_all().is_err(),
@@ -537,7 +561,7 @@ mod tests {
         corrupt_root.guardian_root[0] ^= 1;
         assert_eq!(
             corrupt_root.validate_all(),
-            Err("KQ-WALLET-GUARDIAN-SET: root does not match guardians")
+            Err("wallet guardian set: root does not match guardians")
         );
         let padded = [a, a, b];
         let error = BftGuardianFinality::finalize(Vec::new(), &padded, 2, &[0; 32])
@@ -549,7 +573,7 @@ mod tests {
             "the root is order-insensitive, so order is not a second channel"
         );
 
-        // BLG-0276, half two: the recovery digest binds the chain. The same
+        // half two: the recovery digest binds the chain. The same
         // (owner, owner, block) proposal on two chains must not share a
         // digest, or one chain's guardian votes finalize the other's.
         let mut cur = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
@@ -759,7 +783,10 @@ mod tests {
         let vote = |k: &WalletKeyPair, digest: [u8; 32]| GuardianVote {
             guardian_id: k.public_key_bytes(),
             proposal_digest: digest,
-            signature: k.sign(&GuardianVote::signed_message(&digest)),
+            signature: k.sign(
+                crate::crypto::ctx::GUARDIAN_V1,
+                &GuardianVote::signed_message(&digest),
+            ),
         };
         let honest: Vec<GuardianVote> = keys.iter().map(|k| vote(k, proposal)).collect();
         assert!(

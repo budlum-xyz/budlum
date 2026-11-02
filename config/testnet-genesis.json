@@ -1,22 +1,9 @@
 {
   "chain_id": 45261,
   "pq_scheme": "ml-dsa-65",
-  "allocations": [
-    [
-      "3030303030303030303030303030303030303030303030303030303030303030",
-      1000000000
-    ],
-    [
-      "3131313131313131313131313131313131313131313131313131313131313131",
-      1000000000
-    ]
-  ],
-  "validators": [
-    "4040404040404040404040404040404040404040404040404040404040404040",
-    "4141414141414141414141414141414141414141414141414141414141414141",
-    "4242424242424242424242424242424242424242424242424242424242424242"
-  ],
-  "block_reward": 50,
+  "allocations": [],
+  "validators": [],
+  "block_reward": 0,
   "base_fee": 1,
   "gas_schedule": {
     "base_fee": 1,
@@ -28,5 +15,22 @@
     "contract_call_gas": 35000
   },
   "timestamp": 1735689600000,
-  "bud_tokenomics": null
+  "bud_tokenomics": {
+    "community": 10000000000000,
+    "liquidity": 10000000000000,
+    "ecosystem": 20000000000000,
+    "team": 20000000000000,
+    "burn_reserve": 40000000000000,
+    "epochs_per_year": 210240,
+    "annual_burn_ratio_fixed": 100000,
+    "team_cliff_epochs": 210240,
+    "team_vesting_epochs": 840960,
+    "tx_fee_burn_ratio_fixed": 10000,
+    "block_reward": 0,
+    "validator_annual_yield_ratio_fixed": 50000,
+    "slot_duration_secs": 3,
+    "epoch_length_slots": 50
+  },
+  "ceremony_status": "template_ready",
+  "ceremony_note": "Ceremony template. The launch file is written by `cargo run --manifest-path xtask/tools/Cargo.toml -- testnet-genesis` from the operators' public records (`bud validator init`). A node refuses this template: it has no validators."
 }

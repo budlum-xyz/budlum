@@ -40,12 +40,15 @@ fn code_lines(rel: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// Statements (split on `;`, whitespace removed) where `bincode::serialize` is
-/// followed by `unwrap_or_default`. Wrapped chains are caught as well.
+/// Statements (split on `;` or `}`, whitespace removed) where
+/// `bincode::serialize` is followed by `unwrap_or_default`. Splitting on the
+/// closing brace too keeps a following function's body - a struct-literal
+/// argument list has no semicolons - from gluing an honest `serialize` to a
+/// later, unrelated `unwrap_or_default` and reading as one swallow.
 fn swallowing_statements(code: &[(usize, String)]) -> Vec<String> {
     let text: Vec<&str> = code.iter().map(|(_, l)| l.as_str()).collect();
     text.join("\n")
-        .split(';')
+        .split([';', '}'])
         .map(|st| st.split_whitespace().collect::<String>())
         .filter(|st| {
             st.find("bincode::serialize")

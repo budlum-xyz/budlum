@@ -6,7 +6,13 @@ pub const INVALID_BLOCK_PENALTY: i32 = -10;
 pub const INVALID_TX_PENALTY: i32 = -5;
 pub const OVERSIZED_MESSAGE_PENALTY: i32 = -3;
 pub const RATE_LIMIT_PENALTY: i32 = -3;
-pub const TIMEOUT_PENALTY: i32 = -15;
+/// A request this node sent came back unanswered. Below the ban threshold by
+/// design: the ask was this node's own choice, so an unanswerable one costs
+/// the peer its place in the sync order, not an hour of silence.
+const UNANSWERED_REQUEST_PENALTY: i32 = -5;
+/// A batch that does not join this chain: a fork signal, priced like an
+/// unanswered request and, like it, floored above the ban threshold.
+const UNJOINED_BLOCK_PENALTY: i32 = -5;
 pub const SLOW_SYNC_PENALTY: i32 = -5;
 pub const INVALID_HANDSHAKE_PENALTY: i32 = -20;
 pub const GOOD_BEHAVIOR_REWARD: i32 = 1;
@@ -21,7 +27,7 @@ pub const BAN_DURATION: Duration = Duration::from_secs(3600);
 /// table forever and refuse every peer the node has never seen.
 const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
 /// After a prune that reclaimed nothing, the table is not scanned again for
-/// this long (P36-F09).
+/// this long.
 const EMPTY_PRUNE_BACKOFF: Duration = Duration::from_secs(1);
 pub const MAX_SCORE: i32 = 100;
 pub const MIN_SCORE: i32 = BAN_THRESHOLD;
@@ -141,7 +147,7 @@ pub struct PeerManager {
     outbound_peer_subnets: HashMap<PeerId, [u8; 3]>,
     /// When the last full-table prune found nothing to reclaim. While the
     /// table stays full of unprunable records, scanning it again on every
-    /// message from an unknown peer is a CPU amplifier (P36-F09).
+    /// message from an unknown peer is a CPU amplifier.
     last_empty_prune: Option<Instant>,
 }
 impl Default for PeerManager {
@@ -454,6 +460,15 @@ impl PeerManager {
         } else {
             score.score = (score.score - 1).max(MIN_SCORE);
             score.last_seen = Some(Instant::now());
+            // A penalty that only walks the score down to the threshold never
+            // removes the peer: `MIN_SCORE` is the floor, so a vote flood
+            // costs it tokens and nothing else. The ban is the whole point of
+            // the penalty, so it fires here as it does for every other
+            // bad-behaviour report.
+            let spent = score.score <= BAN_THRESHOLD;
+            if spent {
+                self.ban_peer(peer_id);
+            }
             false
         }
     }
@@ -469,6 +484,10 @@ impl PeerManager {
         } else {
             score.score = (score.score - 5).max(MIN_SCORE);
             score.last_seen = Some(Instant::now());
+            let spent = score.score <= BAN_THRESHOLD;
+            if spent {
+                self.ban_peer(peer_id);
+            }
             false
         }
     }
@@ -601,16 +620,6 @@ impl PeerManager {
             .map(|(id, _)| *id)
             .collect()
     }
-    pub fn report_timeout(&mut self, peer_id: &PeerId) {
-        let Some(score) = self.get_or_create(peer_id) else {
-            return;
-        };
-        score.score = (score.score + TIMEOUT_PENALTY).max(MIN_SCORE);
-        score.last_seen = Some(Instant::now());
-        if score.score <= BAN_THRESHOLD {
-            self.ban_peer(peer_id);
-        }
-    }
     pub fn report_slow_sync(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
@@ -620,6 +629,57 @@ impl PeerManager {
         if score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);
         }
+    }
+    /// A request this node sent came back unanswered.
+    ///
+    /// Asking a peer for a header batch or a block range is this node's own
+    /// decision, and the answer can fail for reasons that say nothing about
+    /// the peer: a connection that churned mid-flight, a peer busy importing
+    /// the blocks it already has, a request the transport dropped. The score
+    /// still moves - a peer that never answers sinks in `get_best_peers` and
+    /// stops being chosen as a sync source - but it does not reach the ban
+    /// threshold, because a ban is one hour of silence and a four-validator
+    /// mesh that bans one of its own on a dropped request can no longer reach
+    /// a finality quorum. Refusals that prove malice keep their own paths:
+    /// an invalid block, a forged vote, an oversized message.
+    pub fn report_unanswered_request(&mut self, peer_id: &PeerId) {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
+        score.score = score
+            .score
+            .saturating_add(UNANSWERED_REQUEST_PENALTY)
+            .max(MIN_SCORE.saturating_add(1));
+        score.last_seen = Some(Instant::now());
+    }
+    /// A block or a sync batch that does not continue this chain.
+    ///
+    /// `validate_and_add_block` answers `Previous hash mismatch` for two
+    /// situations that look alike on the wire and are not alike at all: our
+    /// own tip moved between the request and the answer (another arm of the
+    /// node imported a block first), or the peer is serving a fork that does
+    /// not contain our tip. Neither is a malformed block, and neither is proof
+    /// that the sender forged anything: on a mesh where a slot can have more
+    /// than one elected leader, a peer sitting on the winning branch is
+    /// expected to answer with a suffix that does not join the losing one.
+    /// Charging it as an invalid block let a four-validator devnet ban its own
+    /// validators over an ordinary fork and then fail to reach finality.
+    ///
+    /// The score still moves: a peer that answers every round with a batch
+    /// that cannot be joined sinks in `get_best_peers`, so the re-walk this
+    /// node performs asks someone else next time. The floor is one point above
+    /// [`BAN_THRESHOLD`], so this path can demote a peer but never silence it.
+    /// Refusals that do prove malice keep their own paths: a block whose own
+    /// hash does not match its contents, a forged vote, an oversized message.
+    pub fn report_unjoined_block(&mut self, peer_id: &PeerId) {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
+        score.score = score
+            .score
+            .saturating_add(UNJOINED_BLOCK_PENALTY)
+            .max(MIN_SCORE.saturating_add(1));
+        score.last_seen = Some(Instant::now());
     }
     pub fn report_invalid_handshake(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
@@ -769,6 +829,58 @@ mod tests {
         assert!(manager.is_banned(&peer));
         assert!(manager.get_score(&peer) <= BAN_THRESHOLD);
     }
+    /// A block that does not join this chain demotes the sender but never bans.
+    ///
+    /// This is the devnet failure in one test. A block or a sync answer refused
+    /// with `Previous hash mismatch` is what a peer on another branch of the
+    /// same slot says, and the receiving node used to charge it as an invalid
+    /// block:
+    /// ten such answers (a minute of ordinary fork traffic) banned a validator
+    /// for an hour, and the mesh lost the very node whose block it needed. The
+    /// peer is still demoted, because it must sink below a peer that answers
+    /// usefully, and the score must stop one point above the ban threshold
+    /// however long the fork lasts. Both callers (the gossip block arm and the
+    /// sync `Blocks` arm) use this one report.
+    #[test]
+    fn unjoined_blocks_demote_but_never_ban() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        let useful = test_peer_id();
+        manager.report_good_behavior(&useful);
+        for _ in 0..64 {
+            manager.report_unjoined_block(&peer);
+        }
+        assert!(
+            !manager.is_banned(&peer),
+            "a fork answer must not ban a peer"
+        );
+        let score = manager.get_score(&peer);
+        assert_eq!(
+            score,
+            MIN_SCORE + 1,
+            "the stale-batch score must floor one point above the ban threshold"
+        );
+        assert!(score < manager.get_score(&useful));
+        assert_eq!(
+            manager.get_best_peers(2).last().copied(),
+            Some(peer),
+            "a peer that keeps answering with an unjoinable batch must be asked last"
+        );
+    }
+
+    /// The canary for the test above: the same number of *invalid block*
+    /// reports still bans, so the floor is a property of this one path and not
+    /// of the score arithmetic in general.
+    #[test]
+    fn unjoined_block_floor_is_load_bearing() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        for _ in 0..64 {
+            manager.report_invalid_block(&peer);
+        }
+        assert!(manager.is_banned(&peer));
+    }
+
     #[test]
     fn test_unban_peer() {
         let mut manager = PeerManager::new();
@@ -897,7 +1009,7 @@ mod tests {
         assert!(spent.peers.contains_key(&overflow));
     }
 
-    /// P36-F09: a full table of unprunable records is scanned once, not on
+    /// A full table of unprunable records is scanned once, not on
     /// every message from an unknown peer; the back-off lifts when a scan can
     /// succeed again.
     #[test]
@@ -1162,7 +1274,7 @@ mod tests {
         );
     }
 
-    /// Reputation invariant (§3.4): score must stay within
+    /// Reputation invariant: score must stay within
     /// `[MIN_SCORE, MAX_SCORE]` under any penalty sequence. The
     /// Invalid-block / invalid-tx / oversized-message penalty paths clamp to
     /// `MIN_SCORE` (like `report_bad_behavior`) so `get_score` never
@@ -1264,7 +1376,10 @@ mod tests {
             }),
             ("report_bad_behavior", |m, p| m.report_bad_behavior(p)),
             ("report_good_behavior", |m, p| m.report_good_behavior(p)),
-            ("report_timeout", |m, p| m.report_timeout(p)),
+            ("report_unanswered_request", |m, p| {
+                m.report_unanswered_request(p)
+            }),
+            ("report_unjoined_block", |m, p| m.report_unjoined_block(p)),
             ("report_slow_sync", |m, p| m.report_slow_sync(p)),
             ("report_invalid_handshake", |m, p| {
                 m.report_invalid_handshake(p)

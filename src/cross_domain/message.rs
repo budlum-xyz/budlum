@@ -1,5 +1,6 @@
 use crate::core::address::Address;
 use crate::core::hash::hash_fields_bytes;
+use crate::crypto::facts::QuantumClass;
 use crate::domain::types::{DomainId, Hash32};
 use serde::{Deserialize, Serialize};
 
@@ -56,7 +57,7 @@ pub struct CrossDomainMessage {
     pub payload_hash: Hash32,
     pub kind: MessageKind,
     pub expiry_height: u64,
-    /// BLG-0113 (P05-F06): the sender's authentication over
+    /// The sender's authentication over
     /// [`CrossDomainMessage::message_id`]. Envelope, not payload - the id
     /// binds the fields above and nothing here, exactly like a
     /// transaction's signature over its signing hash. An empty envelope is
@@ -75,6 +76,48 @@ pub struct CrossDomainMessage {
     /// `sender_public_key` and the id instead.
     #[serde(default)]
     pub sender_signature: Vec<u8>,
+    /// The quantum class of the source domain when the message was relayed
+    /// the weakest class among the schemes its adapter has observed,
+    /// `None` while nothing is observed. A receiver reads it from the message
+    /// and does not have to look the source domain up.
+    ///
+    /// IDENTITY: included - the id commits to it (envelope version 3).
+    ///
+    /// SIGNING: included - the relay transaction's preimage carries it, and
+    /// the door refuses a class that differs from the one the chain derives
+    /// for the source domain.
+    #[serde(default)]
+    pub source_quantum_class: Option<QuantumClass>,
+}
+
+/// The envelope version: the tag the message id is hashed under. Version 3
+/// added `source_quantum_class`.
+/// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
+pub const MESSAGE_ENVELOPE_VERSION: u8 = 3;
+
+/// The byte a class takes in the id and in the signed relay preimage:
+/// `0` for no class, `1` classical, `2` lattice, `3` hash.
+#[must_use]
+pub const fn quantum_class_code(class: Option<QuantumClass>) -> u8 {
+    match class {
+        None => 0,
+        Some(QuantumClass::Classical) => 1,
+        Some(QuantumClass::Lattice) => 2,
+        Some(QuantumClass::Hash) => 3,
+    }
+}
+
+/// The inverse of [`quantum_class_code`]; `None` for a byte that names no
+/// class (the caller refuses it rather than reading it as "no class").
+#[must_use]
+pub const fn quantum_class_from_code(code: u8) -> Option<Option<QuantumClass>> {
+    match code {
+        0 => Some(None),
+        1 => Some(Some(QuantumClass::Classical)),
+        2 => Some(Some(QuantumClass::Lattice)),
+        3 => Some(Some(QuantumClass::Hash)),
+        _ => None,
+    }
 }
 
 impl CrossDomainMessage {
@@ -94,9 +137,20 @@ impl CrossDomainMessage {
             expiry_height: params.expiry_height,
             sender_public_key: Vec::new(),
             sender_signature: Vec::new(),
+            source_quantum_class: None,
         };
         message.message_id = message.calculate_message_id();
         message
+    }
+
+    /// The message with the source domain's quantum class set and the id
+    /// recomputed over it.
+    #[must_use]
+    /// WIRING: cross-domain surface - the relayer/bridge doors that read it land with their wiring.
+    pub fn with_source_quantum_class(mut self, class: Option<QuantumClass>) -> Self {
+        self.source_quantum_class = class;
+        self.message_id = self.calculate_message_id();
+        self
     }
 
     pub fn new_correlated(params: CrossDomainMessageParams, correlation_id: MessageId) -> Self {
@@ -107,7 +161,7 @@ impl CrossDomainMessage {
     }
 
     /// Signs [`CrossDomainMessage::message_id`] with the sender's Ed25519
-    /// account key (BLG-0113/P05-F06). The V4 derivation makes the key
+    /// account key. The V4 derivation makes the key
     /// bytes the address itself, so the envelope is self-identifying.
     ///
     /// WIRING: exposed for the sender side of the relayed-message door:
@@ -119,7 +173,7 @@ impl CrossDomainMessage {
         self.sender_signature = keypair.sign(&self.message_id).to_vec();
     }
 
-    /// Verifies the sender envelope (BLG-0113/P05-F06): the signature must
+    /// Verifies the sender envelope: the signature must
     /// open over [`CrossDomainMessage::message_id`] under a key that IS the
     /// declared sender - Ed25519 (the key bytes are the address) or
     /// ML-DSA-87 (the wallet address derives from the key). An empty
@@ -160,6 +214,7 @@ impl CrossDomainMessage {
             return Err("message signer is not the declared sender".into());
         }
         crate::crypto::primitives::verify_ml_dsa_87_signature(
+            crate::crypto::ctx::CROSS_DOMAIN_V1,
             &self.message_id,
             &self.sender_signature,
             &self.sender_public_key,
@@ -169,13 +224,13 @@ impl CrossDomainMessage {
 
     pub fn calculate_message_id(&self) -> MessageId {
         let kind = self.kind.as_bytes();
-        // BLG-0121 (P05-F14): presence is folded in through the shared
+        // Presence is folded in through the shared
         // `presence_tagged` helper - `None` and `Some([0; 32])` used to
         // hash identically (the zero-id collision class the header fix
         // closed in core/hash.rs:22).
         let correlation_id = crate::core::hash::presence_tagged(self.correlation_id);
         hash_fields_bytes(&[
-            b"BDLM_CROSS_DOMAIN_MESSAGE_V2",
+            b"BDLM_CROSS_DOMAIN_MESSAGE_V3",
             &correlation_id,
             &self.source_domain.to_le_bytes(),
             &self.target_domain.to_le_bytes(),
@@ -187,6 +242,7 @@ impl CrossDomainMessage {
             &self.payload_hash,
             &kind,
             &self.expiry_height.to_le_bytes(),
+            &[quantum_class_code(self.source_quantum_class)],
         ])
     }
 
@@ -273,7 +329,7 @@ pub fn register_relayed_on_state(
         .registry
         .ensure_active_relayer(&relayer)
         .map_err(|e| e.to_string())?;
-    // BLG-0113 (P05-F06): the sender must SIGN the message id. The
+    // The sender must SIGN the message id. The
     // self-declared field alone let anybody name an active relayer and
     // register arbitrary messages - or pre-register a predictable lock id out
     // from under the real one.
@@ -314,7 +370,62 @@ mod tests {
         assert!(!tampered.verify_id());
     }
 
-    /// BLG-0121 (P05-F14): a `None` correlation and a present one are
+    /// the class is part of the identity. Changing it, or removing
+    /// it, produces another id, so a relay cannot rewrite what the receiver
+    /// reads without the id check failing.
+    #[test]
+    fn the_source_quantum_class_is_part_of_the_message_id() {
+        let params = CrossDomainMessageParams {
+            source_domain: 1,
+            target_domain: 2,
+            source_height: 3,
+            event_index: 0,
+            nonce: 4,
+            sender: Address::from([1u8; 32]),
+            recipient: Address::from([2u8; 32]),
+            payload_hash: [7u8; 32],
+            kind: MessageKind::BridgeLock,
+            expiry_height: 500,
+        };
+        let plain = CrossDomainMessage::new(params);
+        assert_eq!(plain.source_quantum_class, None);
+        let mut ids = vec![plain.message_id];
+        for class in [
+            QuantumClass::Classical,
+            QuantumClass::Lattice,
+            QuantumClass::Hash,
+        ] {
+            let classed = plain.clone().with_source_quantum_class(Some(class));
+            assert_eq!(classed.source_quantum_class, Some(class));
+            assert!(classed.verify_id());
+            ids.push(classed.message_id);
+            let mut rewritten = classed.clone();
+            rewritten.source_quantum_class = None;
+            assert!(!rewritten.verify_id(), "dropping the class breaks the id");
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "every class names another message");
+    }
+
+    #[test]
+    fn class_codes_round_trip_and_refuse_unknown_bytes() {
+        for class in [
+            None,
+            Some(QuantumClass::Classical),
+            Some(QuantumClass::Lattice),
+            Some(QuantumClass::Hash),
+        ] {
+            assert_eq!(
+                quantum_class_from_code(quantum_class_code(class)),
+                Some(class)
+            );
+        }
+        assert_eq!(quantum_class_from_code(4), None);
+        assert_eq!(MESSAGE_ENVELOPE_VERSION, 3);
+    }
+
+    /// A `None` correlation and a present one are
     /// DIFFERENT identities - the id folds presence, not just bytes. A
     /// correlated id of all zeros must not collapse into "no correlation".
     #[test]

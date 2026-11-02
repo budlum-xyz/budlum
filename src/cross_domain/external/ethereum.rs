@@ -2,9 +2,10 @@
 //! Altair sync committee.
 //!
 //! WIRING: wired - this adapter goes live through an admission into the
-//! external-domain registry, now bound to consensus as
-//! `Blockchain::external_intake` (`AdapterSpec::EthereumSync` builds it, the
-//! node's `PairingBls` supplies the pairing check). The executor still
+//! external-domain registry, bound to consensus in
+//! `AccountState::settlement` and written by the `ExternalDomain`
+//! transaction door (`AdapterSpec::EthereumSync` builds it, the node's
+//! `PairingBls` supplies the pairing check). The executor still
 //! refuses generic Ethereum relay results (`relayer_evm_package_required`):
 //! relay execution and finality attestation are different powers, and this
 //! wiring grants only the second.
@@ -53,6 +54,8 @@ use crate::cross_domain::external::spec::{
     AdapterDescriptor, AdapterError, AdapterId, FinalityAttestation, FinalityKind, ProofSystem,
     RawConsensusEvidence, SecurityBacking, TimeUnit, TrustModel, VerificationPolicy,
 };
+use crate::crypto::facts::{CryptoObserver, NullObserver, ObservedScheme};
+use crate::crypto::scheme::SchemeId;
 use serde::{Deserialize, Serialize};
 
 /// `SYNC_COMMITTEE_SIZE` in the Altair preset: 2**9.
@@ -243,7 +246,7 @@ pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError>
     })
 }
 
-/// The sync committee the adapter is pinned to (BLG-0130/P06-F01).
+/// The sync committee the adapter is pinned to.
 ///
 /// The aggregate public key used to be a field of the submitted payload:
 /// whoever could submit evidence generated their own BLS key and signed with
@@ -259,7 +262,7 @@ pub struct PinnedCommittee {
     pub next_committee_root: [u8; 32],
 }
 
-/// The commitment a rotation must open (BLG-0130/P06-F01): the root of a
+/// The commitment a rotation must open: the root of a
 /// committee is the domain-separated hash of its aggregate key. Both the
 /// pinned `next_committee_root` and [`EthereumSyncAdapter::rotate_committee`]
 /// speak this one function, so a rotation cannot name a key the pin did not
@@ -269,7 +272,7 @@ pub fn committee_root(aggregate_pubkey: &[u8]) -> [u8; 32] {
     crate::core::hash::hash_fields_bytes(&[b"BDLM_ETHSYNC_COMMITTEE_ROOT_V1", aggregate_pubkey])
 }
 
-/// The signing root, derived (BLG-0131/P06-F02, evidence format v2).
+/// The signing root, derived (evidence format v2).
 ///
 /// The v1 adapter signed a constant held in `AdapterSpec` - the signature
 /// bound nothing about the update, so one signature replayed under any
@@ -298,7 +301,7 @@ pub struct EthereumSyncAdapter {
     /// attestations, because the signing root it holds belongs to the first.
     network: String,
     verifier: Option<Box<dyn BlsVerifier>>,
-    /// The pinned sync committee (BLG-0130/P06-F01). `None` is the closed
+    /// The pinned sync committee. `None` is the closed
     /// admission state (decision C, interim): the adapter refuses every
     /// update until a committee is pinned.
     committee: Option<PinnedCommittee>,
@@ -323,7 +326,7 @@ impl EthereumSyncAdapter {
             descriptor: AdapterDescriptor {
                 id,
                 name: format!("ethereum-sync-{network}"),
-                // BLG-0131 (P06-F02): evidence format v2 - the signature
+                // Evidence format v2 - the signature
                 // covers the update itself, not a stored constant.
                 adapter_version: 2,
                 accepted_evidence_versions: vec![2],
@@ -344,7 +347,7 @@ impl EthereumSyncAdapter {
         }
     }
 
-    /// Rotates the pinned committee (BLG-0130/P06-F01, decision B).
+    /// Rotates the pinned committee.
     ///
     /// The new key must open the pin's `next_committee_root` under
     /// [`committee_root`], and the new period must move forward. Anything
@@ -398,6 +401,15 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
         &self,
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
+    ) -> Result<FinalityAttestation, AdapterError> {
+        self.verify_observed(evidence, policy, &mut NullObserver)
+    }
+
+    fn verify_observed(
+        &self,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         if evidence.adapter != self.descriptor.id {
             return Err(AdapterError::WrongAdapter {
@@ -484,7 +496,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             });
         }
 
-        // BLG-0130 (P06-F01): the key the signature is checked against is
+        // The key the signature is checked against is
         // the PINNED committee's, never the payload's own claim. No pin is
         // the closed admission state (decision C, interim).
         let Some(committee) = self.committee.as_ref() else {
@@ -514,7 +526,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
                     .to_string(),
             });
         };
-        // BLG-0131 (P06-F02): the signed root is DERIVED from the update -
+        // The signed root is DERIVED from the update -
         // the signature binds the claimed state root and cannot be replayed
         // under another one.
         verifier
@@ -545,6 +557,10 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             }
         }
 
+        // Every check passed. The one scheme this adapter verified is the
+        // committee's BLS12-381 aggregate.
+        observer.observe(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
+
         Ok(FinalityAttestation {
             adapter: self.descriptor.id,
             domain: crate::cross_domain::external::spec::DomainKey::from_parts(
@@ -553,7 +569,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             ),
             height: update.finalized_slot,
             state_root: update.state_root,
-            // BLG-0133 (P06-F04): the signed header root IS the block hash
+            // The signed header root IS the block hash
             // this attestation covers.
             attested_block_hash: Some(update.finalized_root),
             attested_event_root: None,
@@ -561,6 +577,7 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             finalized_at: epoch_of_slot(update.finalized_slot),
             time_unit: TimeUnit::Epoch,
             security: SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
                 signers,
                 required: minimum_signers(),
                 total_weight: u128::from(SYNC_COMMITTEE_SIZE),
@@ -772,7 +789,7 @@ mod slashable_policy_tests {
         );
     }
 
-    /// BLG-0130 (P06-F01): the pin decides which key is trusted - a payload
+    /// The pin decides which key is trusted - a payload
     /// naming its own key is refused.
     #[test]
     fn a_payload_key_that_is_not_the_pinned_committee_is_refused() {
@@ -793,7 +810,7 @@ mod slashable_policy_tests {
         );
     }
 
-    /// BLG-0130 (P06-F01, decision B): rotation opens the committed root,
+    /// Rotation opens the committed root,
     /// and nothing else.
     #[test]
     fn rotation_must_open_the_committed_root() {
@@ -836,7 +853,7 @@ mod slashable_policy_tests {
         adapter.rotate_committee(good).expect("committed rotation");
     }
 
-    /// BLG-0131 (P06-F02): the signature binds the claimed state root -
+    /// The signature binds the claimed state root -
     /// the same signature cannot be replayed under another root.
     #[test]
     fn the_v2_signing_root_binds_the_claimed_state_root() {
@@ -857,7 +874,7 @@ mod slashable_policy_tests {
         );
     }
 
-    /// BLG-0130 (P06-F01, decision C interim): with no pinned committee the
+    /// With no pinned committee the
     /// adapter is closed - every update is refused.
     #[test]
     fn committee_less_admission_is_closed() {

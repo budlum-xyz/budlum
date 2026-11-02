@@ -1,3 +1,4 @@
+//! WIRING: unwired - verify_execution_proof_stark is blocked on the same MainnetActivation zkVM audit as its structural sibling; the audit moves the whole family at once.
 //! The STARK half of execution-proof verification.
 //!
 //! This sits beside [`verify_execution_proof_full`] rather than inside it on

@@ -8,8 +8,7 @@
 //!
 //! * [`content_id`] / [`manifest`] - the *B.U.D. on-chain content-addressing
 //!   Primitives* introduced. These are
-//!   Pure data shapes - no I/O, no admin hooks, no team-server dependency
-//!   (plan §0.5).
+//!   Pure data shapes - no I/O, no admin hooks, no team-server dependency.
 //!
 //! The domain-level deal / challenge accounting lives in
 //! `crate::domain::storage_deal::StorageRegistry` (kept under
@@ -26,6 +25,8 @@ pub mod emit;
 pub mod erasure;
 pub mod fixed_point;
 pub mod generated;
+/// Content-key delivery for view grants: HPKE package, hash as `key_id`.
+pub mod key_package;
 pub mod lifecycle;
 pub mod living_threshold;
 pub mod lrc;
@@ -68,6 +69,7 @@ pub mod three_visibility;
 pub mod traits;
 pub mod transformed;
 pub mod view_grant;
+pub mod witness_retention;
 
 pub use assignment::{
     assign_object, assign_shard, displaced_shards, AssignmentError, ShardCandidate,

@@ -17,11 +17,9 @@ use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams}
 use crate::cross_domain::MessageKind;
 use crate::execution::zkvm::{prove_bytecode, DEFAULT_CONTRACT_GAS_LIMIT};
 use crate::prover::{ProofAcceptance, ProofClaimKey, ZkProofSubmission};
-use crate::storage::db::Storage;
 use bud_isa::{Instruction, Opcode};
 use bud_proof::{ExecutionPublicInputs, ProofEnvelope};
 use std::sync::Arc;
-use tempfile::tempdir;
 
 fn addr(b: u8) -> Address {
     Address::from([b; 32])
@@ -48,7 +46,11 @@ fn register_domain_allowing(bc: &mut Blockchain, id: u32, program: &[u64]) {
     domain
         .zk_program_allowlist
         .push(crate::prover::zk_program_hash(program));
-    bc.domain_registry.register(domain).expect("register");
+    bc.state
+        .settlement
+        .domains
+        .register(domain)
+        .expect("register");
 }
 
 /// A tiny valid program: Load imm 7 -> reg1, Log reg1, Halt.
@@ -138,7 +140,7 @@ fn unregistered_account_valid_proof_accepted_but_not_rewarded() {
     );
     // Valid proof fee is burned under fee-only fixed-supply policy.
     assert_eq!(bc.state.get_balance(&sender), before - fee);
-    assert_eq!(bc.proof_claims.len(), 1);
+    assert_eq!(bc.state.settlement.proof_claims.len(), 1);
 }
 
 #[test]
@@ -189,7 +191,7 @@ fn invalid_proof_burns_fee_and_leaves_state_unchanged() {
     // Fee burned.
     assert_eq!(bc.state.get_balance(&sender), 0);
     // No claim recorded, no message stored.
-    assert_eq!(bc.proof_claims.len(), 0);
+    assert_eq!(bc.state.settlement.proof_claims.len(), 0);
     assert_eq!(bc.state.message_registry.len(), 0);
 }
 
@@ -203,7 +205,7 @@ fn insufficient_fee_rejected_without_verification() {
         .submit_zk_proof(submission(sender, 1, 10, &proof, &pi, &program))
         .unwrap_err();
     assert!(err.contains("insufficient balance"));
-    assert_eq!(bc.proof_claims.len(), 0);
+    assert_eq!(bc.state.settlement.proof_claims.len(), 0);
 }
 
 #[test]
@@ -276,7 +278,7 @@ fn idempotent_resubmission_same_claim() {
     assert_eq!(second, ProofAcceptance::Idempotent);
     assert_eq!(bc.state.get_balance(&prover), after_first - fee);
     // Still one claim.
-    assert_eq!(bc.proof_claims.len(), 1);
+    assert_eq!(bc.state.settlement.proof_claims.len(), 1);
 }
 
 #[test]
@@ -298,7 +300,9 @@ fn conflicting_claim_same_domain_height_rejected() {
         r[0] ^= 0xFF; // guaranteed different
         r
     };
-    bc.proof_claims
+    bc.state
+        .settlement
+        .proof_claims
         .record(AcceptedProofClaim {
             key,
             final_state_root: conflicting_root,
@@ -306,7 +310,7 @@ fn conflicting_claim_same_domain_height_rejected() {
             rewarded: false,
         })
         .expect("seed claim fits the registry");
-    assert_eq!(bc.proof_claims.len(), 1);
+    assert_eq!(bc.state.settlement.proof_claims.len(), 1);
 
     // A genuinely valid proof asserting a different root for the same
     // (domain, height) must be rejected as conflicting...
@@ -320,44 +324,31 @@ fn conflicting_claim_same_domain_height_rejected() {
     // ...and the honest prover's fee is refunded (protocol-level rejection).
     assert_eq!(bc.state.get_balance(&prover_b), before_b);
     // No new claim recorded.
-    assert_eq!(bc.proof_claims.len(), 1);
+    assert_eq!(bc.state.settlement.proof_claims.len(), 1);
 }
 
+/// the proof claim book is a settlement registry in the account state.
+/// An accepted claim changes the state root every node checks; a restart
+/// rebuilds it by replaying the block that carried the proof.
 #[test]
-fn proof_claim_registry_persists_across_restart() {
-    let dir = tempdir().unwrap();
-    let db_path = dir.path().join("prover.db");
-    let db_path = db_path.to_string_lossy().to_string();
-
-    let mut bc = Blockchain::new(
-        Arc::new(PoWEngine::new(0)),
-        Some(Storage::new(&db_path).unwrap()),
-        45262,
-        None,
-    );
+fn an_accepted_proof_claim_is_consensus_state() {
+    let mut bc = fresh_chain();
     let (proof, pi, program) = real_proof();
     register_domain_allowing(&mut bc, 1, &program);
     let prover = addr(0x0A);
     let fee = bc.state.registry.params().proof_submission_fee;
     bc.state.add_balance(&prover, fee);
+    let before = bc.state.calculate_state_root();
 
     bc.submit_zk_proof(submission(prover, 1, 10, &proof, &pi, &program))
         .unwrap();
-    assert_eq!(bc.proof_claims.len(), 1);
-    drop(bc);
-
-    let restarted = Blockchain::new(
-        Arc::new(PoWEngine::new(0)),
-        Some(Storage::new(&db_path).unwrap()),
-        45262,
-        None,
-    );
     let key = ProofClaimKey {
         domain_id: 1,
         target_height: 10,
     };
-    assert!(restarted.proof_claims.get(&key).is_some());
-    assert_eq!(restarted.proof_claims.len(), 1);
+    assert!(bc.state.settlement.proof_claims.get(&key).is_some());
+    assert_eq!(bc.state.settlement.proof_claims.len(), 1);
+    assert_ne!(bc.state.calculate_state_root(), before);
 }
 
 /// A proof produced for another chain must not be accepted here.
@@ -483,6 +474,8 @@ fn a_valid_proof_over_an_unauthorized_program_is_refused() {
 
     // And no claim must be recorded.
     assert!(bc
+        .state
+        .settlement
         .proof_claims
         .get(&ProofClaimKey {
             domain_id: 1,
@@ -512,7 +505,11 @@ fn a_domain_with_an_empty_allowlist_accepts_no_proof() {
         domain.zk_program_allowlist.is_empty(),
         "a domain must be born closed to zk proofs"
     );
-    bc.domain_registry.register(domain).expect("register");
+    bc.state
+        .settlement
+        .domains
+        .register(domain)
+        .expect("register");
 
     let sender = addr(0x22);
     let fee = bc.state.registry.params().proof_submission_fee;
@@ -574,7 +571,12 @@ fn acceptance_advances_the_domain_and_stale_claims_are_rejected() {
         .unwrap();
     assert!(matches!(out, ProofAcceptance::Accepted { .. }));
 
-    let d = bc.domain_registry.get(1).expect("the domain is registered");
+    let d = bc
+        .state
+        .settlement
+        .domains
+        .get(1)
+        .expect("the domain is registered");
     assert_eq!(
         d.last_committed_height, 10,
         "acceptance has to carry the domain forward"
@@ -671,13 +673,18 @@ fn a_final_root_that_is_not_the_proven_write_digest_is_refused() {
         before,
         "a shape refusal does not charge the fee"
     );
-    let d = bc.domain_registry.get(1).expect("the domain is registered");
+    let d = bc
+        .state
+        .settlement
+        .domains
+        .get(1)
+        .expect("the domain is registered");
     assert_ne!(
         d.last_committed_hash, forged.final_state_root,
         "the forged root must not become the domain's root"
     );
     assert!(
-        bc.proof_claims.is_empty(),
+        bc.state.settlement.proof_claims.is_empty(),
         "a refused submission must not leave a claim behind"
     );
 }

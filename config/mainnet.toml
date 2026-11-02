@@ -29,6 +29,10 @@ identity_file = "./secrets/mainnet-node-id.key"
 # peer id is worse than a placeholder: it fails to parse as base58 and breaks
 # profile loading instead of waiting for the ceremony.
 bootnodes = []
+# at least five distinct archive bootnodes, the peers a
+# regenerating node asks for the witnesses it pruned. Filled by the ceremony;
+# `mainnet_archive_bootnode_violation` refuses fewer at startup.
+archive_bootnodes = []
 # Kept in sync with MAINNET_DNS_SEEDS in chain_config.rs: the "placeholder"
 # marker is deliberate until the real TXT records are published (the
 # fail-closed guard is active).
@@ -84,10 +88,8 @@ backend = "pkcs11"
 # token_pin_env = "BUDLUM_PKCS11_TOKEN_PIN"
 
 [features]
-governance = false
-zkvm_contracts = false
 pruning = false
-# F-13 / F-06: VerifyMerkle and VerifyInference stay closed until the AIR
+# VerifyMerkle and VerifyInference stay closed until the AIR
 # can state an honest proof. A true value here must not open those opcodes.
 # The VM reads MainnetActivation::default(), not this flag.
 verify_merkle = false

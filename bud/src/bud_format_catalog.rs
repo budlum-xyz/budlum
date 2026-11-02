@@ -9,7 +9,7 @@
 //!   - the signature, its magic bytes,
 //!   - the recommended pipeline, either a B.U.D. transform or an external KF2
 //!     codec,
-//!   - the measured or documented ratio range, stated honestly, per K19.
+//!   - the measured or documented ratio range, stated honestly, per.
 //!
 //! The code is `#![forbid(unsafe_code)]`, deterministic and panic-free.
 
@@ -447,7 +447,7 @@ mod tests {
 
     #[test]
     fn ratios_are_honest_and_sane() {
-        // K19: every ratio is positive and every upper bound is realistic; there
+        // Every ratio is positive and every upper bound is realistic; there
         // is no zip-bomb claim.
         for e in CATALOG {
             assert!(e.ratio_min > 0.0, "{} has a positive ratio_min", e.name);

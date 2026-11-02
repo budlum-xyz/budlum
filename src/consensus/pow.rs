@@ -7,7 +7,7 @@ use std::sync::RwLock;
 use tracing::info;
 
 /// Nonces per mining chunk: the granularity at which the wall-clock budget
-/// and the staleness check run (P01-F16).
+/// and the staleness check run.
 const MINE_CHUNK: u64 = 10_000;
 
 /// A 256-bit unsigned integer, carrying exactly the three operations
@@ -104,7 +104,7 @@ pub struct PoWConfig {
     pub difficulty: usize,
     pub target_block_time: u64,
     pub adjustment_interval: u64,
-    /// Wall-clock budget for one mining attempt (P01-F16).
+    /// Wall-clock budget for one mining attempt.
     ///
     /// Mining runs synchronously inside the chain actor, so an unbounded
     /// search starves RPC, validation and sync for as long as a hard nonce
@@ -140,7 +140,7 @@ impl PoWEngine {
         }
     }
 
-    /// Test adapter over the production retarget (P01-F17).
+    /// Test adapter over the production retarget.
     ///
     /// The old copy reimplemented the expected-time product and called
     /// `retarget` directly, so the tests could stay green while
@@ -307,7 +307,7 @@ impl PoWEngine {
 
     /// Mine `block` until it meets `difficulty`, or give up.
     ///
-    /// Returns `true` when solved. The search is bounded (P01-F16): every
+    /// Returns `true` when solved. The search is bounded: every
     /// [`MINE_CHUNK`] nonces it checks the wall-clock budget and, in the
     /// chain-aware entry points, that the block is still built on the tip it
     /// was prepared for (P01-F16b). Stale or unsolved work is discarded and
@@ -409,7 +409,7 @@ impl PoWEngine {
         self.difficulty_for_next_block(chain)
     }
 
-    /// (security audit §3) difficulty-adjustment driver invoked
+    /// (security audit) difficulty-adjustment driver invoked
     /// From `blockchain.rs` after a block has been durably committed.
     /// Public so the blockchain can drive the adjustment with the full
     /// Post-commit chain in hand. The previous design mutated
@@ -510,7 +510,7 @@ impl ConsensusEngine for PoWEngine {
         _block: &Block,
         _storage: Option<&crate::storage::db::Storage>,
     ) -> Result<(), ConsensusError> {
-        // (security audit §3) the trait `record_block` hook is
+        // (security audit) the trait `record_block` hook is
         // Intentionally a no-op for PoW. The actual difficulty
         // Adjustment lives in `record_block_with_chain` (overridden
         // Below), which is called from `blockchain.rs` after a block
@@ -622,7 +622,7 @@ mod tests {
         assert!(block2.hash.starts_with("00"));
     }
 
-    /// (security audit §3) `validate_block` must be PURE, calling
+    /// (security audit) `validate_block` must be PURE, calling
     /// It twice on the same block must produce the same result AND
     /// Must not mutate the engine's `current_difficulty`. The
     /// Previous implementation mutated difficulty from inside
@@ -673,7 +673,7 @@ mod tests {
         );
     }
 
-    /// (security audit §3) difficulty adjustment must fire
+    /// (security audit) difficulty adjustment must fire
     /// From `record_block_with_chain`, NOT from `validate_block`.
     /// Here, an adjustment-boundary block is *validated* without a
     /// Prior `record_block_with_chain` call, and the difficulty
@@ -692,7 +692,7 @@ mod tests {
         // Build a synthetic chain of 4 blocks (adjustment boundary
         // At index 4, which is `is_multiple_of(4)`). Difficulty 1
         // Mining is fast - we don't need the chain to be long.
-        // P01-F17: the timestamps are stamped explicitly (1 s apart), so the
+        // The timestamps are stamped explicitly (1 s apart), so the
         // retarget below asserts the exact post-adjustment value instead of
         // only the `[1, 32]` clamp on whatever the wall clock happened to
         // produce.
@@ -729,7 +729,7 @@ mod tests {
         // Now drive the adjustment through the chain-aware record
         // Path. The chain here is the *post-commit* chain (boundary is
         // the last block). 4 blocks in 4 s against a 40 s target is 10x
-        // too fast: exactly one digit up (P01-F17: an exact value, not a
+        // too fast: exactly one digit up (an exact value, not a
         // range).
         engine.record_block_with_chain(boundary, &chain);
         let diff_after_record = engine.get_difficulty();
@@ -860,7 +860,7 @@ mod tests {
 
         // Without calibration (the default 10 second target) the same chain
         // counts as 10x too fast. The difficulty is a logarithm of the work,
-        // so it rises by one digit (16x work), not to 8 (BLG-0013).
+        // so it rises by one digit (16x work), not to 8.
         let uncalibrated = PoWEngine::new(2);
         let d2 = uncalibrated.adjusted_difficulty_for_test(2, 100);
         assert_eq!(
@@ -902,7 +902,7 @@ mod tests {
         );
     }
 
-    /// BLG-0013: the retarget adds `log16(ratio)` digits. It must not scale
+    /// The retarget adds `log16(ratio)` digits. It must not scale
     /// the digit count by the ratio.
     #[test]
     fn retarget_moves_difficulty_by_log16_of_the_ratio() {

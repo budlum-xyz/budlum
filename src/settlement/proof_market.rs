@@ -49,7 +49,97 @@ pub enum ProofTaskKind {
         deal_id: [u8; 32],
         challenge_epoch: u64,
     },
+    /// A PUL-Full aggregate over one finality window: one proof standing in
+    /// for every signature the window carried. The window is only worth
+    /// proving when the aggregate is smaller than half the raw witness an
+    /// archive would otherwise keep, so the task carries both sizes and
+    /// [`pul_proof_is_warranted`] decides at creation time.
+    PulAggregate {
+        window_start: u64,
+        window_end: u64,
+        archive_witness_bytes: u64,
+        pul_full_bytes: u64,
+    },
 }
+
+/// PUL-Full is produced only when the aggregate is smaller than this fraction
+/// of the archived witness. The rule is economic, not cryptographic: below it
+/// the proof costs more than the bytes it replaces.
+/// Read by [`pul_proof_is_warranted`], which `SettlementTx::ProofMarket` consults in
+/// the block transition (`settlement::domains::execute_settlement_tx`).
+const PUL_FULL_COST_NUMERATOR: u64 = 1;
+/// See `PUL_FULL_COST_NUMERATOR`.
+const PUL_FULL_COST_DENOMINATOR: u64 = 2;
+
+/// Whether one finality window is worth a PUL-Full proof: the aggregate must
+/// be smaller than half the witness it lets an archive drop. An empty window
+/// has nothing to aggregate and never warrants a proof.
+#[must_use]
+pub fn pul_proof_is_warranted(archive_witness_bytes: u64, pul_full_bytes: u64) -> bool {
+    if archive_witness_bytes == 0 {
+        return false;
+    }
+    u128::from(pul_full_bytes) * u128::from(PUL_FULL_COST_DENOMINATOR)
+        < u128::from(archive_witness_bytes) * u128::from(PUL_FULL_COST_NUMERATOR)
+}
+
+/// A signed proof-market operation carried by the settlement transaction door.
+///
+/// Funding, task creation, assignment, receipt payment and expiry refunds are
+/// consensus writes. ZK and non-ZK receipt operations run their state-rooted
+/// verifier before creating a receipt; a transaction carrying metadata that
+/// merely looks like a proof is not enough.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProofMarketTx {
+    /// Move existing BUD from the sender into its proof-market escrow.
+    FundEscrow { amount: u64 },
+    /// Open a funded proof task. `created_epoch` is taken from chain state.
+    CreateTask {
+        kind: ProofTaskKind,
+        deadline_epoch: u64,
+        reward: u64,
+        slash_condition_hash: Hash32,
+        min_prover_stake: u64,
+    },
+    /// Assign a pending task to the signed sender after checking its
+    /// state-rooted PROVER bond. The stake is never trusted from the payload.
+    AssignTask { task_id: [u8; 32] },
+    /// Submit and verify a ZK proof for an assigned ZK task. The full proof
+    /// payload is carried so every node runs the same verifier before a
+    /// receipt is created.
+    SubmitZkProof {
+        task_id: [u8; 32],
+        submission: Box<crate::prover::ZkProofSubmission>,
+    },
+    /// Submit a non-ZK proof for an assigned task. The domain commitment and
+    /// its finality proof are verified against the state-rooted domain adapter
+    /// before a receipt is created; metadata alone never earns a receipt.
+    SubmitReceipt {
+        task_id: [u8; 32],
+        proof: Box<crate::domain::VerifiedDomainCommitment>,
+    },
+    /// Release a verified receipt's escrowed reward to its assigned prover.
+    /// Anyone may trigger the deterministic payment; the recipient is rooted in
+    /// the receipt, never supplied by the payer.
+    PayReceipt { task_id: [u8; 32] },
+    /// Return an assigned or pending task's escrowed reward after its deadline.
+    /// The creator is rooted in the task, never supplied by the refund caller.
+    RefundExpired { task_id: [u8; 32] },
+}
+
+/// Equality by the serialized transaction payload. Some proof payloads carry
+/// verifier types that intentionally do not expose structural equality, while
+/// their deterministic wire form is the consensus identity.
+impl PartialEq for ProofMarketTx {
+    fn eq(&self, other: &Self) -> bool {
+        match (bincode::serialize(self), bincode::serialize(other)) {
+            (Ok(left), Ok(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for ProofMarketTx {}
 
 impl ProofTaskKind {
     pub fn validate(&self) -> Result<(), String> {
@@ -96,6 +186,27 @@ impl ProofTaskKind {
                     return Err("ProofTaskKind storage challenge_epoch cannot be zero".into());
                 }
             }
+            ProofTaskKind::PulAggregate {
+                window_start,
+                window_end,
+                archive_witness_bytes,
+                pul_full_bytes,
+            } => {
+                // The same two rules the creation door applies, repeated here
+                // because `validate` is the shape check every reader runs: a
+                // window that covers no block, or an aggregate that is not
+                // smaller than half the witness it replaces, is not a task.
+                if *window_end <= *window_start {
+                    return Err("ProofTaskKind PUL window must cover at least one block".into());
+                }
+                if !pul_proof_is_warranted(*archive_witness_bytes, *pul_full_bytes) {
+                    return Err(
+                        "ProofTaskKind PUL aggregate is not smaller than half the archived \
+                         witness"
+                            .into(),
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -106,10 +217,11 @@ impl ProofTaskKind {
             ProofTaskKind::ZkProof { .. } => 2,
             ProofTaskKind::SyncCommitteeSig { .. } => 3,
             ProofTaskKind::StorageAttestation { .. } => 4,
+            ProofTaskKind::PulAggregate { .. } => 5,
         }
     }
 
-    fn canonical_bytes(&self) -> Vec<u8> {
+    pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(self.tag());
         match self {
@@ -139,6 +251,21 @@ impl ProofTaskKind {
             } => {
                 out.extend_from_slice(deal_id);
                 out.extend_from_slice(&challenge_epoch.to_le_bytes());
+            }
+            ProofTaskKind::PulAggregate {
+                window_start,
+                window_end,
+                archive_witness_bytes,
+                pul_full_bytes,
+            } => {
+                // Declaration order, little endian: the window first, then
+                // the two sizes the warrant is decided from. A reader that
+                // recomputed the id from another order would disagree with
+                // the writer about the same task.
+                out.extend_from_slice(&window_start.to_le_bytes());
+                out.extend_from_slice(&window_end.to_le_bytes());
+                out.extend_from_slice(&archive_witness_bytes.to_le_bytes());
+                out.extend_from_slice(&pul_full_bytes.to_le_bytes());
             }
         }
         out
@@ -374,6 +501,10 @@ impl ProofTask {
             ProofTaskKind::ZkProof { .. } => 10_000_000,         // 10x
             ProofTaskKind::SyncCommitteeSig { .. } => 2_000_000, // 2x
             ProofTaskKind::StorageAttestation { .. } => 3_000_000, // 3x
+            // A PUL aggregate stands in for every signature in its window, so
+            // the work scales with the window and sits above a single storage
+            // attestation and below a circuit proof.
+            ProofTaskKind::PulAggregate { .. } => 4_000_000, // 4x
         }
     }
 
@@ -577,12 +708,12 @@ impl ProofReceipt {
         matches!(self.status, ReceiptStatus::Paid)
     }
 
-    /// BLG-0066: revoked receipts can never be paid and must be clearable.
+    /// Revoked receipts can never be paid and must be clearable.
     ///
-    /// WIRING: the pruning question for revoked receipts, exposed for
-    /// the epoch-close sweep that clears them once the proof market's
-    /// transaction door (see `fund_escrow`) lands.
-    pub fn is_revoked(&self) -> bool {
+    /// The epoch-close sweep clears revoked receipts after a verifier has
+    /// settled them; the receipt-submission and payment doors remain
+    /// deliberately separate from funding and assignment.
+    fn is_revoked(&self) -> bool {
         matches!(self.status, ReceiptStatus::Revoked { .. })
     }
 
@@ -603,13 +734,13 @@ pub struct ProofMarketState {
     pub total_rewards_paid: u64,
     /// Total number of completed tasks.
     pub total_tasks_completed: u64,
-    /// BLG-0062 (P03-F05): task IDs that have completed or expired. The
+    /// Task IDs that have completed or expired. The
     /// duplicate check must outlive the task's stay in `active_tasks` and its
     /// receipt's stay in `pending_receipts`, or the same fields open a second
     /// job and mint a second receipt once the first leaves the books.
     #[serde(default)]
     pub retired_task_ids: std::collections::BTreeSet<[u8; 32]>,
-    /// BLG-0064 (P03-F07): the escrow. A creator's reward is locked here at
+    /// The escrow. A creator's reward is locked here at
     /// `add_task`, released to the prover by `pay_receipt`, and refunded to
     /// the creator when the task expires. Without escrow the market promised
     /// rewards it never held and `pay_receipt` moved no money at all.
@@ -620,6 +751,43 @@ pub struct ProofMarketState {
 impl ProofMarketState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn active_task_count(&self) -> usize {
+        self.active_tasks.len()
+    }
+
+    #[must_use]
+    pub fn pending_receipt_count(&self) -> usize {
+        self.pending_receipts.len()
+    }
+
+    #[must_use]
+    pub fn escrow_account_count(&self) -> usize {
+        self.escrowed.len()
+    }
+
+    /// BUD the market holds for its creators and provers: unassigned escrow,
+    /// the rewards reserved by live tasks, and payable receipts. None of it
+    /// is in an account balance, so the supply cap has to count it here or a
+    /// funded market would read as burned supply and open mint headroom.
+    #[must_use]
+    pub fn total_locked_supply(&self) -> u128 {
+        let escrow = self.escrowed.values().fold(0u128, |total, amount| {
+            total.saturating_add(u128::from(*amount))
+        });
+        let tasks = self.active_tasks.iter().fold(0u128, |total, task| {
+            total.saturating_add(u128::from(task.reward))
+        });
+        let receipts = self
+            .pending_receipts
+            .iter()
+            .filter(|receipt| receipt.is_payable())
+            .fold(0u128, |total, receipt| {
+                total.saturating_add(u128::from(receipt.reward_claimed))
+            });
+        escrow.saturating_add(tasks).saturating_add(receipts)
     }
 
     /// Nothing has ever been recorded here.
@@ -636,13 +804,12 @@ impl ProofMarketState {
             && self.total_tasks_completed == 0
     }
 
-    /// BLG-0064: credit a creator's escrow. The caller debits the account
+    /// Credit a creator's escrow. The caller debits the account
     /// balance in the same transaction; the market only holds the claim.
     ///
-    /// WIRING: unwired - the proof market has no transaction door yet, so
-    /// no executor path debits a creator today. The door that opens the
-    /// market must credit escrow here in the same transaction as the
-    /// debit, before `add_task`, which refuses an unfunded reward.
+    /// The settlement transaction door debits the creator and credits escrow
+    /// here in the same state transition, before `add_task` refuses an
+    /// unfunded reward.
     pub fn fund_escrow(&mut self, creator: Address, amount: u64) -> Result<(), String> {
         let entry = self.escrowed.entry(creator).or_insert(0);
         *entry = entry
@@ -651,12 +818,11 @@ impl ProofMarketState {
         Ok(())
     }
 
-    /// BLG-0064: the escrow a creator holds.
-    #[must_use]
+    /// The escrow a creator holds.
     ///
-    /// WIRING: unwired, with the rest of the proof-market surface -
-    /// the transaction door that funds escrow (see `fund_escrow`) is
-    /// also the door that reads a creator's balance back.
+    /// WIRING: the read an operator surface will expose; the settlement tests
+    /// in `settlement::domains` are the only reader today.
+    #[must_use]
     pub fn escrow_balance(&self, creator: &Address) -> u64 {
         self.escrowed.get(creator).copied().unwrap_or(0)
     }
@@ -716,7 +882,7 @@ impl ProofMarketState {
         {
             return Err("ProofMarketState task already completed".into());
         }
-        // BLG-0062: the ID is retired forever once used, even after the
+        // The ID is retired forever once used, even after the
         // receipt is paid and pruned.
         if self.retired_task_ids.contains(&task.task_id) {
             return Err("ProofMarketState task already retired".into());
@@ -724,7 +890,7 @@ impl ProofMarketState {
         if self.retired_task_ids.len() >= MAX_PROOF_MARKET_PENDING_RECEIPTS {
             return Err("ProofMarketState retired task set full".into());
         }
-        // BLG-0064: the reward is escrowed before the job exists. A task
+        // The reward is escrowed before the job exists. A task
         // nobody paid for cannot promise a reward.
         let escrow = self.escrow_balance(&task.creator);
         if escrow < task.reward {
@@ -736,6 +902,22 @@ impl ProofMarketState {
         self.escrowed.insert(task.creator, escrow - task.reward);
         self.active_tasks.push(task);
         Ok(())
+    }
+
+    /// Assign a pending task through the consensus door.
+    pub fn assign_task(
+        &mut self,
+        task_id: [u8; 32],
+        prover: Address,
+        prover_stake: u64,
+        current_epoch: u64,
+    ) -> Result<(), String> {
+        let task = self
+            .active_tasks
+            .iter_mut()
+            .find(|task| task.task_id == task_id)
+            .ok_or("ProofMarketState task not found")?;
+        task.assign(prover, prover_stake, current_epoch)
     }
 
     /// On completion, produces a receipt and removes the task.
@@ -768,7 +950,7 @@ impl ProofMarketState {
         // vanished through a path that reported failure, and nothing rolls
         // back, since `apply_block_checked` propagates with `?`.
         if self.pending_receipts.len() >= MAX_PROOF_MARKET_PENDING_RECEIPTS {
-            // BLG-0066: settle what can be settled before refusing; the cap
+            // Settle what can be settled before refusing; the cap
             // must not jam forever behind paid or revoked receipts.
             self.prune_paid_receipts();
         }
@@ -809,9 +991,101 @@ impl ProofMarketState {
             .ok_or_else(|| "ProofMarketState total_rewards_paid overflow".to_string())?;
         receipt.mark_paid()?;
         self.total_rewards_paid = total_rewards_paid;
-        // BLG-0064: the return value is the escrowed reward released to the
+        // The return value is the escrowed reward released to the
         // prover; the caller credits the balance in the same transaction.
         Ok(reward)
+    }
+
+    /// Pays a receipt identified by its task rather than by a mutable vector
+    /// index, returning the rooted prover and amount to credit.
+    pub fn pay_receipt_for_task(&mut self, task_id: [u8; 32]) -> Result<(Address, u64), String> {
+        let index = self
+            .pending_receipts
+            .iter()
+            .position(|receipt| receipt.task_id == task_id)
+            .ok_or("ProofMarketState receipt not found")?;
+        let prover = self.pending_receipts[index].prover;
+        let reward = self.pay_receipt(index)?;
+        Ok((prover, reward))
+    }
+
+    /// Refunds a task whose deadline has passed. The reward was reserved when
+    /// the task was created and is handed back to the creator account by the
+    /// settlement door in the same state transition.
+    pub fn refund_expired(
+        &mut self,
+        task_id: [u8; 32],
+        current_epoch: u64,
+    ) -> Result<(Address, u64), String> {
+        let index = self
+            .active_tasks
+            .iter()
+            .position(|task| task.task_id == task_id)
+            .ok_or("ProofMarketState task not found")?;
+        let task = self.active_tasks[index].clone();
+        if !task.is_active() {
+            return Err("ProofMarketState task is not refundable in its current state".into());
+        }
+        if current_epoch <= task.deadline_epoch {
+            return Err("ProofMarketState task deadline has not passed".into());
+        }
+        // The task reward is already reserved outside `escrowed` by
+        // `add_task`; refunding it to the account must not also put it back in
+        // the market balance, or the same BUD would be counted twice.
+        if !self.escrowed.contains_key(&task.creator) {
+            return Err("ProofMarketState task escrow is missing".into());
+        }
+
+        self.active_tasks.remove(index);
+        self.retired_task_ids.insert(task_id);
+        Ok((task.creator, task.reward))
+    }
+
+    /// Fail an assigned task after the consensus verifier rejects its proof.
+    /// The reserved reward returns to the task creator; the prover's registry
+    /// bond remains available to the separate slashing path.
+    pub fn fail_task(
+        &mut self,
+        task_id: [u8; 32],
+        reason: String,
+    ) -> Result<(Address, u64), String> {
+        if reason.is_empty() || reason.len() > 256 {
+            return Err("ProofMarketState failure reason invalid".into());
+        }
+        let index = self
+            .active_tasks
+            .iter()
+            .position(|task| task.task_id == task_id)
+            .ok_or("ProofMarketState task not found")?;
+        let task = self.active_tasks[index].clone();
+        if !matches!(task.status, ProofTaskStatus::Assigned { .. }) {
+            return Err("ProofMarketState task is not assigned".into());
+        }
+        // The task reward is held by the task itself after `add_task`; do not
+        // also restore it to `escrowed` when returning it to the account.
+        if !self.escrowed.contains_key(&task.creator) {
+            return Err("ProofMarketState task escrow is missing".into());
+        }
+
+        self.active_tasks.remove(index);
+        self.retired_task_ids.insert(task_id);
+        Ok((task.creator, task.reward))
+    }
+
+    /// Refunds every active task whose deadline has passed, returning the
+    /// account credits for the caller. The block-level epoch transition uses
+    /// this instead of leaving an internal escrow balance stranded.
+    pub fn refund_expired_tasks(&mut self, current_epoch: u64) -> Vec<(Address, u64)> {
+        let expired_ids: Vec<[u8; 32]> = self
+            .active_tasks
+            .iter()
+            .filter(|task| task.is_active() && task.deadline_epoch < current_epoch)
+            .map(|task| task.task_id)
+            .collect();
+        expired_ids
+            .into_iter()
+            .filter_map(|task_id| self.refund_expired(task_id, current_epoch).ok())
+            .collect()
     }
 
     /// Clears out expired tasks.
@@ -825,8 +1099,8 @@ impl ProofMarketState {
             }
             keep
         });
-        // BLG-0062: an expired task's fields must not open a fresh task.
-        // BLG-0064: and its escrow goes back to the creator - the job never
+        // An expired task's fields must not open a fresh task.
+        // And its escrow goes back to the creator - the job never
         // happened, so the money must not stay locked in the market.
         for (id, creator, reward) in retired {
             self.retired_task_ids.insert(id);
@@ -839,7 +1113,7 @@ impl ProofMarketState {
 
     /// Prune settled receipts (paid **and** revoked) from `pending_receipts`.
     ///
-    /// BLG-0066: revoked receipts can never be paid, so keeping them jammed
+    /// Revoked receipts can never be paid, so keeping them jammed
     /// the market at MAX_PROOF_MARKET_PENDING_RECEIPTS for good. Only
     /// genuinely unpaid receipts may hold the queue.
     pub fn prune_paid_receipts(&mut self) -> usize {
@@ -936,7 +1210,7 @@ impl ProofMarketState {
             fields.push(receipt.prover.as_bytes().to_vec());
             fields.push(receipt.verification_hash.to_vec());
             fields.push(receipt.reward_claimed.to_le_bytes().to_vec());
-            // BLG-0067: the verification epoch is part of the receipt and
+            // The verification epoch is part of the receipt and
             // must be committed, or two views of one receipt can disagree.
             fields.push(receipt.verified_epoch.to_le_bytes().to_vec());
             fields.push(receipt.status.root_bytes());
@@ -952,6 +1226,20 @@ mod tests {
 
     fn test_address(byte: u8) -> Address {
         Address::from([byte; 32])
+    }
+
+    #[test]
+    fn a_window_below_the_threshold_produces_no_proof() {
+        // Half the witness is the break-even point: an aggregate that is not
+        // smaller than it is not worth producing.
+        assert!(pul_proof_is_warranted(10_000, 4_999));
+        assert!(!pul_proof_is_warranted(10_000, 5_000));
+        assert!(!pul_proof_is_warranted(10_000, 5_001));
+        assert!(!pul_proof_is_warranted(0, 0));
+        assert!(!pul_proof_is_warranted(1, 1));
+        // The comparison is done in u128, so a huge window cannot overflow it.
+        assert!(pul_proof_is_warranted(u64::MAX, 1));
+        assert!(!pul_proof_is_warranted(u64::MAX, u64::MAX));
     }
 
     /// A slash condition the task can be punished against.
@@ -1173,7 +1461,7 @@ mod tests {
         assert!(market.add_task(expired).is_err());
         assert!(market.is_empty());
         let pending = task_with(task_kind(), test_address(1), 10, 100, 5_000);
-        // BLG-0064: a task is escrowed before it can be listed.
+        // A task is escrowed before it can be listed.
         market.fund_escrow(test_address(1), 5_000).unwrap();
         market.add_task(pending).unwrap();
         assert_eq!(market.active_tasks.len(), 1);
@@ -1613,7 +1901,7 @@ mod tests {
              (before: {before})"
         );
     }
-    // ---- BLG-0062 / BLG-0066 (P03-F05, F09) ----
+    // ---- (F09) ----
 
     fn sample_task() -> ProofTask {
         ProofTask::new(
@@ -1665,7 +1953,7 @@ mod tests {
         assert_eq!(market.prune_paid_receipts(), 1);
         assert!(market.pending_receipts.is_empty());
     }
-    // ---- BLG-0064 (P03-F07) escrow ----
+    // ----escrow ----
 
     #[test]
     fn a_task_without_escrow_is_refused() {

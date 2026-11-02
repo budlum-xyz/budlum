@@ -40,6 +40,20 @@ pub trait BudlumApi {
     #[method(name = "bud_sendRawTransaction")]
     async fn send_raw_transaction(&self, tx: Transaction) -> Result<String, ErrorObjectOwned>;
 
+    /// Admit several transactions under one composite signature, all or none.
+    ///
+    /// A bundle carries up to [`crate::core::tx_bundle::MAX_BUNDLE_TXS`] V7
+    /// transactions of one sender, nonces rising by one, each signed by the
+    /// same key, and one witness over the root of the set. The node verifies
+    /// the witness and every member before it admits anything, so a bundle the
+    /// pool refuses leaves no member behind. Returns the hash of each member in
+    /// execution order.
+    #[method(name = "bud_sendTxBundle")]
+    async fn send_tx_bundle(
+        &self,
+        bundle: crate::core::tx_bundle::TxBundle,
+    ) -> Result<Vec<String>, ErrorObjectOwned>;
+
     #[method(name = "bud_getTransactionByHash")]
     async fn get_transaction_by_hash(
         &self,
@@ -76,8 +90,22 @@ pub trait BudlumApi {
     #[method(name = "bud_getSettlementInfo")]
     async fn get_settlement_info(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// The committed global header at a global height, or null.
     #[method(name = "bud_getGlobalHeader")]
     async fn get_global_header(&self, height: u64) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// One named root of the committed global header at global height `key`
+    ///, with what ties it to a finalized block: the checkpoint block
+    /// hash and state root, and the state root opening. A light client
+    /// checks `root_from_opening(stateRootBody, header.hash) == stateRoot`
+    /// against a block its finality certificate covers. Null when the header
+    /// is unknown.
+    #[method(name = "bud_getGlobalHeaderProof")]
+    async fn get_global_header_proof(
+        &self,
+        root: String,
+        key: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     #[method(name = "bud_getDomainCommitments")]
     async fn get_domain_commitments(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
@@ -85,19 +113,42 @@ pub trait BudlumApi {
     #[method(name = "bud_getConsensusDomains")]
     async fn get_consensus_domains(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Registers a permissionless external domain: adapter spec in, admission
-    /// self-test run, bond checked, and the domain becomes submittable.
-    /// Operator-only for the same reason `bud_registerConsensusDomain` is -
-    /// this build's economics move no signed stake yet, and an unsigned bond
-    /// number from an anonymous caller is not a bond.
+    /// Read one state-rooted Graft application by its canonical id. Writes
+    /// still travel as signed `SettlementTx::Graft` transactions.
+    #[method(name = "bud_getGraftApplication")]
+    async fn get_graft_application(
+        &self,
+        graft_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// The Mikoriza restaked validators: the bound Ethereum operator,
+    /// the allocated units, the source, the observed epoch, the status and
+    /// the capped weight in force this epoch. Facts only, no score.
+    #[method(name = "bud_getRestakedValidators")]
+    async fn get_restaked_validators(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prove a Graft payment against the latest checkpoint header whose
+    /// payment window holds it. An application checks the
+    /// result with `settlement::graft::verify_graft_payment` and a finalized
+    /// checkpoint it trusts. `null` when no recent header covers the payment.
+    #[method(name = "bud_graftPaymentProof")]
+    async fn graft_payment_proof(
+        &self,
+        payment_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Refused: registration is a signed `ExternalDomain`
+    /// transaction (`ExternalDomainTx::Register`) from the poster, which
+    /// runs admission and escrows the bond in block. Operator-only, kept so a
+    /// client is pointed at the transaction.
     #[method(name = "bud_registerExternalDomain")]
     async fn register_external_domain(
         &self,
         registration: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Submits external-finality evidence to a registered external domain.
-    /// Returns the accepted attestation, or the named refusal.
+    /// Refused: evidence is a signed `ExternalDomainTx::SubmitEvidence`
+    /// transaction from the submitter it names.
     #[method(name = "bud_submitExternalEvidence")]
     async fn submit_external_evidence(
         &self,
@@ -125,8 +176,8 @@ pub trait BudlumApi {
     #[method(name = "bud_getExternalIntakeDigest")]
     async fn get_external_intake_digest(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Re-runs admission for a faulted external domain against its stored
-    /// golden sample and probes. Operator-only.
+    /// Refused: readmission is a signed `ExternalDomainTx::Readmit`
+    /// transaction from the domain's registrant.
     #[method(name = "bud_readmitExternalDomain")]
     async fn readmit_external_domain(
         &self,
@@ -134,7 +185,8 @@ pub trait BudlumApi {
         reason: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Schedules an evidence-format fork for an external domain. Operator-only.
+    /// Refused: a fork is a signed `ExternalDomainTx::ScheduleFork`
+    /// transaction from the domain's registrant.
     #[method(name = "bud_scheduleExternalFork")]
     async fn schedule_external_fork(
         &self,
@@ -145,31 +197,28 @@ pub trait BudlumApi {
         grace_heights: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Slashes the prover that carried an accepted external attestation,
-    /// paying the challenger from the penalty. Operator-only in this build:
-    /// the challenge game's dispute transcript is not yet a signed
-    /// transaction type.
+    /// Closed: slashing an external prover needs a proof that an accepted
+    /// attestation was false, and no such proof format exists yet. The
+    /// method refuses every call and says so.
     #[method(name = "bud_slashExternalProver")]
     async fn slash_external_prover(
         &self,
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Bonds an additional prover to a registered external domain, so a
-    /// quorum policy has more than one slashable voice. Operator-only for
-    /// the same reason registration is: this build's economics move no
-    /// signed stake yet.
+    /// Refused: a prover bond is a signed
+    /// `ExternalDomainTx::BondProver` transaction from the prover.
     #[method(name = "bud_bondExternalProver")]
     async fn bond_external_prover(
         &self,
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Installs a multi-prover quorum policy for a registered external
-    /// domain. From then on submissions enter rounds keyed by external
-    /// height; nothing commits until enough bonded provers carry the same
-    /// claim, and a dispute freezes the domain for the challenge game.
-    /// Operator-only for the same reason registration is.
+    /// Refused: a quorum policy is a signed
+    /// `ExternalDomainTx::SetQuorumPolicy` transaction from the domain's
+    /// registrant. Once installed, submissions enter rounds keyed by
+    /// external height and nothing commits until enough bonded provers carry
+    /// the same claim.
     #[method(name = "bud_setExternalQuorumPolicy")]
     async fn set_external_quorum_policy(
         &self,
@@ -257,16 +306,27 @@ pub trait BudlumApi {
         request: serde_json::Value,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Refused: a domain registers through a signed `Settlement`
+    /// transaction (`SettlementTx::RegisterDomain`) from its operator.
     #[method(name = "bud_registerConsensusDomain")]
     async fn register_consensus_domain(
         &self,
         domain: crate::domain::ConsensusDomain,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Refused: a template registers through a signed `Settlement`
+    /// transaction (`SettlementTx::RegisterSovereignTemplate`).
     #[method(name = "bud_registerSovereignTemplate")]
     async fn register_sovereign_template(
         &self,
         template: crate::domain::SovereignDomainTemplate,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Read the state-rooted sovereign template for a consensus domain.
+    #[method(name = "bud_getSovereignTemplate")]
+    async fn get_sovereign_template(
+        &self,
+        domain_id: crate::domain::types::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     #[method(name = "bud_validateSovereignAuditExport")]
@@ -281,6 +341,9 @@ pub trait BudlumApi {
         commitment: crate::domain::DomainCommitment,
     ) -> Result<String, ErrorObjectOwned>;
 
+    /// Refused: a bonded RELAYER carries a commitment and its
+    /// finality proof in a signed `Settlement` transaction
+    /// (`SettlementTx::SubmitCommitment`).
     #[method(name = "bud_submitVerifiedDomainCommitment")]
     async fn submit_verified_domain_commitment(
         &self,
@@ -293,6 +356,41 @@ pub trait BudlumApi {
         msg: crate::cross_domain::CrossDomainMessage,
     ) -> Result<String, ErrorObjectOwned>;
 
+    /// Read a state-rooted cross-domain message by id. Registration remains a
+    /// signed `RelayCrossDomainMessage` transaction, not an RPC write.
+    #[method(name = "bud_getCrossDomainMessage")]
+    async fn get_cross_domain_message(
+        &self,
+        message_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Read the state-rooted bridge transfer associated with a message id.
+    /// Bridge lifecycle mutations remain signed transaction doors.
+    #[method(name = "bud_getBridgeTransfer")]
+    async fn get_bridge_transfer(
+        &self,
+        message_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Read the state-rooted relay queue and, when supplied, one relay record.
+    /// `null` returns the bounded summary; relay mutations remain transaction
+    /// doors.
+    #[method(name = "bud_getRelayerStatus")]
+    async fn get_relayer_status(
+        &self,
+        message_id_hex: Option<String>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Read one state-rooted outbound relayer intent, its bids, escrow, and
+    /// settlement row.
+    #[method(name = "bud_getRelayerIntent")]
+    async fn get_relayer_intent(
+        &self,
+        intent_id_hex: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Refused: the home domain's operator registers an asset with a
+    /// signed `Bridge` transaction (`BridgeTx::RegisterAsset`).
     #[method(name = "bud_registerBridgeAsset")]
     async fn register_bridge_asset(
         &self,
@@ -300,18 +398,13 @@ pub trait BudlumApi {
         domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    // === SECURITY FIX (security review section 3) ====================
-    // `bud_lockBridgeTransfer` was REMOVED from the RPC. New rule: under no
-    // circumstances can a bridge lock be created without authentication (that
-    // is, without a signature or a proof). Bridge locks now come only from:
-    //   1. Internal `Blockchain::lock_bridge_transfer` calls (the system path)
-    //      - this comment is the only remaining trace in the code base.
-    //   2. (planned) a `lock_bridge_transfer_with_proof` API (a mandatory
-    //      proof, like `verify_domain_event_proof`).
-    //
-    // The current implementation stays in `Blockchain::lock_bridge_transfer`
-    // because internal code paths (the bridge lock event handler) call it.
+    // Security review section 3: `bud_lockBridgeTransfer` was removed from
+    // the RPC because it created locks without authentication. A lock is a
+    // signed `Bridge` transaction from the owner it debits
+    //.
 
+    /// Refused: a bonded RELAYER mints with a signed `Bridge`
+    /// transaction (`BridgeTx::Mint`) carrying the verified lock event.
     #[method(name = "bud_mintBridgeTransfer")]
     async fn mint_bridge_transfer(
         &self,
@@ -324,6 +417,7 @@ pub trait BudlumApi {
         relayer: crate::core::address::Address,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Refused: raw burns are disabled.
     #[method(name = "bud_burnBridgeTransfer")]
     async fn burn_bridge_transfer(
         &self,
@@ -331,6 +425,22 @@ pub trait BudlumApi {
         domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Refused: the transfer's recipient burns with a signed `Bridge`
+    /// transaction (`BridgeTx::BurnWithEvent`).
+    #[method(name = "bud_burnBridgeTransferWithEvent")]
+    async fn burn_bridge_transfer_with_event(
+        &self,
+        message_id: crate::cross_domain::MessageId,
+        domain: crate::domain::DomainId,
+        domain_height: u64,
+        event_index: u32,
+        expiry_height: u64,
+        // The burner declares the Ethereum destination
+        // at burn time.
+        recipient_eth: [u8; 20],
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Refused: raw unlocks are disabled.
     #[method(name = "bud_unlockBridgeTransfer")]
     async fn unlock_bridge_transfer(
         &self,
@@ -338,6 +448,8 @@ pub trait BudlumApi {
         source_domain: crate::domain::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Refused: a bonded RELAYER unlocks with a signed `Bridge`
+    /// transaction (`BridgeTx::Unlock`) carrying the verified burn event.
     #[method(name = "bud_unlockBridgeTransferVerified")]
     async fn unlock_bridge_transfer_verified(
         &self,
@@ -349,7 +461,8 @@ pub trait BudlumApi {
         proof: crate::cross_domain::MerkleProof,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Submit a relay proof from a relayer.
+    /// Refused: a bonded RELAYER relays with a signed `Bridge`
+    /// transaction (`BridgeTx::RelayProof`).
     #[method(name = "bud_submitRelayProof")]
     async fn submit_relay_proof(
         &self,
@@ -359,6 +472,8 @@ pub trait BudlumApi {
         source_domain: crate::domain::types::DomainId,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Refused: headers are built in block at every finality
+    /// checkpoint.
     #[method(name = "bud_sealGlobalHeader")]
     async fn seal_global_header(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -376,8 +491,10 @@ pub trait BudlumApi {
         tx: Transaction,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Legacy operator helper for test/dev administration. Public participants
-    /// Must use a signed Stake transaction through `bud_registryRegister`.
+    /// Refused. This helper bonded an address
+    /// into the RELAYER role outside a block, without the address's
+    /// signature. A relayer bonds itself with a signed `RoleBond`
+    /// transaction (role 3) through `bud_sendRawTransaction`.
     #[method(name = "bud_registryBondRelayer")]
     async fn registry_bond_relayer(
         &self,
@@ -385,8 +502,8 @@ pub trait BudlumApi {
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Legacy operator helper for a prover bond. Proof submission remains
-    /// Permissionless; public stake registration uses a signed Stake tx.
+    /// Refused. A prover bonds itself with a signed
+    /// `RoleBond` transaction (role 4) through `bud_sendRawTransaction`.
     #[method(name = "bud_registryBondProver")]
     async fn registry_bond_prover(
         &self,
@@ -394,16 +511,9 @@ pub trait BudlumApi {
         amount: u64,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Begin unbonding a `RELAYER` (3), `PROVER` (4) or `STORAGE_OPERATOR` (5) bond.
-    ///
-    /// These three bonds debit the account balance when they are posted and had
-    /// No exit path: no command, no RPC, no transaction type. The bond was
-    /// Permanently unrecoverable. Returns the release epoch, which follows the
-    /// `unbonding_epochs` governance parameter.
-    ///
-    /// Operator-only, matching `bud_registryBondRelayer` - it is the same
-    /// Unsigned legacy administration surface, and the exit must not be easier
-    /// To reach than the entry.
+    /// Refused. Unbonding a role bond is a signed
+    /// `RoleUnbond` transaction from the bonded account, applied in block,
+    /// so every node starts the unbonding window at the same height.
     #[method(name = "bud_registryBeginRoleBondUnbonding")]
     async fn registry_begin_role_bond_unbonding(
         &self,
@@ -411,9 +521,9 @@ pub trait BudlumApi {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Withdraw a matured `RELAYER` / `PROVER` / `STORAGE_OPERATOR` bond back into the
-    /// Account balance. Fails while the bond is still inside its unbonding
-    /// Window, and the registration is removed so it cannot be withdrawn twice.
+    /// Refused. Withdrawing a matured role bond is
+    /// a signed `RoleWithdraw` transaction from the bonded account, applied
+    /// in block.
     #[method(name = "bud_registryWithdrawRoleBond")]
     async fn registry_withdraw_role_bond(
         &self,
@@ -421,9 +531,11 @@ pub trait BudlumApi {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Submit a ZK proof (chain ↔ BudZKVM bridge). Permissionless: anyone may
-    /// Submit; a valid proof is accepted regardless of registration. Registered
-    /// Provers additionally earn a reward. Invalid proofs burn the fee.
+    /// Refused: a ZK proof (chain ↔ BudZKVM bridge) rides a signed
+    /// `Settlement` transaction (`SettlementTx::SubmitZkProof`) from the
+    /// submitter the proof names. The door stays permissionless: a valid
+    /// proof is accepted regardless of registration, registered provers earn
+    /// a reward, and an invalid proof burns the fee.
     #[method(name = "bud_submitZkProof")]
     async fn submit_zk_proof(
         &self,
@@ -446,6 +558,27 @@ pub trait BudlumApi {
         role_id: u32,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// The facts the chain holds about one validator: bond, delegation,
+    /// commission, jail and slash record, missed checkpoints. No score.
+    #[method(name = "bud_validatorProfile")]
+    async fn validator_profile(
+        &self,
+        validator: crate::core::address::Address,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Every validator's profile, in address order (bounded list).
+    #[method(name = "bud_validatorList")]
+    async fn validator_list(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// List active delegation positions for a validator. Delegation state is
+    /// rooted and read-only; exits remain visible through their signed
+    /// transaction lifecycle rather than an operator-side mutation RPC.
+    #[method(name = "bud_getValidatorDelegations")]
+    async fn get_validator_delegations(
+        &self,
+        validator: crate::core::address::Address,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Submit a slashing evidence report. Permissionless: anyone may submit.
     /// The report is only actioned if structurally valid AND consensus-verified;
     /// Unverified reports are rejected without any state change.
@@ -455,9 +588,9 @@ pub trait BudlumApi {
         report: crate::registry::SlashingReport,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// (security audit §4) submit a QC fault proof.
+    /// (security audit) submit a QC fault proof.
     ///
-    /// Fail-closed (P01-F22): every reachable proof shape is refused with a
+    /// Fail-closed: every reachable proof shape is refused with a
     /// named reason. A proof naming a signature that verifies targets a
     /// valid attestation; one naming a signature that does not verify is not
     /// evidence against the named validator - garbage bytes naming anyone
@@ -496,19 +629,20 @@ pub trait BudlumApi {
     // === B.U.D. Storage RPC surface ============================
     // The 7 RPCs below are the public, permissionless query/mutation surface
     // For the storage domain. Per the data-sovereignty rule (plan
-    // §0.5) every endpoint is callable by any account on a standard node
+    //) every endpoint is callable by any account on a standard node
     // No team-gated "official indexer" or admin-only RPC exists.
     //
-    // IMPORTANT: `bud_storageAnswerChallenge` accepts a `range_hash` only;
+    // IMPORTANT: `StorageTx::AnswerChallenge` carries a `range_hash` only;
     // It does NOT carry shard bytes. The chain does not store the bytes
     // (only the ContentId/manifest commitments), and the retrieval
     // Challenge is *interim* (not full Proof-of-Storage
-    // §2.5 / vision §9.1). Off-chain verifiers must recompute the
+    // / vision). Off-chain verifiers must recompute the
     // Expected range hash from the public shard bytes.
 
-    /// Register a `ContentManifest` with the storage domain. Returns the
-    /// Deterministic `manifest_id` (ContentId) so the caller can address
-    /// Subsequent deal-open / query calls.
+    /// Refused: manifest registration is a signed
+    /// `StorageTx::RegisterManifest` transaction sent with
+    /// `bud_sendRawTransaction`. Operator-only, kept so a client is pointed
+    /// at the transaction.
     #[method(name = "bud_storageRegisterManifest")]
     async fn storage_register_manifest(
         &self,
@@ -668,7 +802,8 @@ pub trait BudlumApi {
         content_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Open a new `StorageDeal` for a specific shard of a registered manifest.
+    /// Refused: a deal is opened by a signed `StorageTx::OpenDeal`
+    /// transaction from the payer, carrying the operator's consent.
     #[method(name = "bud_storageOpenDeal")]
     async fn storage_open_deal(
         &self,
@@ -689,10 +824,10 @@ pub trait BudlumApi {
         operator_signature: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Accept a reallocation (repair) ticket: the replacement operator
-    /// opens the replacement deal for the ticket's slot, paying the same
-    /// escrow and bond shape as the original open. The placement (manifest,
-    /// shard, replica) is decided by the ticket, not the caller.
+    /// Refused: a repair ticket is filled by a signed
+    /// `StorageTx::AcceptReallocation` transaction from the payer, carrying
+    /// the replacement operator's consent. The placement (manifest, shard,
+    /// replica) is decided by the ticket, not the caller.
     #[method(name = "bud_storageAcceptReallocation")]
     async fn storage_accept_reallocation(
         &self,
@@ -736,19 +871,29 @@ pub trait BudlumApi {
         shard_id: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Open a `RetrievalChallenge` against an active deal. Anyone may call
-    /// This; the anti-spam mechanism is `opener_bond` (returned on
-    /// Success, burned on false positive). Permissionless.
+    /// The retrieval challenges recorded against one deal, in id order. A
+    /// deal's operator reads this to find the challenge it must answer with
+    /// a `StorageTx::AnswerChallenge` transaction. Permissionless read; shard
+    /// ids are not returned (the deal row carries them, behind Pollen).
+    #[method(name = "bud_storageGetChallenges")]
+    async fn storage_get_challenges(
+        &self,
+        deal_id: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Refused: a retrieval challenge is opened by a signed
+    /// `StorageTx::OpenChallenge` transaction. Anyone may send one; the
+    /// opener bond is the anti-spam mechanism and is refunded when the
+    /// challenge resolves. The block draws the byte range.
     #[method(name = "bud_storageOpenChallenge")]
     async fn storage_open_challenge(
         &self,
         request: crate::domain::storage_deal::RetrievalChallengeRequest,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    /// Operator answers an open challenge with a `range_hash`. The chain
-    /// Only verifies timing + operator identity + structural validity; the
-    /// Hash itself is recomputed by off-chain verifiers from the public
-    /// Shard bytes.
+    /// Refused: the deal's operator answers with a signed
+    /// `StorageTx::AnswerChallenge` transaction carrying the `range_hash`
+    /// and its proof.
     #[method(name = "bud_storageAnswerChallenge")]
     async fn storage_answer_challenge(
         &self,
@@ -850,6 +995,26 @@ pub trait BudlumApi {
         name: String,
         owner: String,
         cid: String,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed renewal transaction. The caller must be the current
+    /// owner; the executor rechecks ownership and liveness in the block.
+    #[method(name = "bud_bnsPrepareRenew")]
+    async fn bns_prepare_renew(
+        &self,
+        name: String,
+        owner: String,
+        duration: u64,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Prepare a signed transfer transaction. The caller must be the current
+    /// owner; the executor rechecks ownership and liveness in the block.
+    #[method(name = "bud_bnsPrepareTransfer")]
+    async fn bns_prepare_transfer(
+        &self,
+        name: String,
+        owner: String,
+        new_owner: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     // --- B.U.D. SocialFi ---
@@ -1017,6 +1182,10 @@ pub trait BudlumApi {
     #[method(name = "bud_hubGetApps")]
     async fn budlumxyz_get_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// List the Graft applications (apps on other chains usable with BUD).
+    #[method(name = "bud_hubGetGraftApps")]
+    async fn budlumxyz_get_graft_apps(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Prepare a dApp registration transaction.
     #[method(name = "bud_hubPrepareRegister")]
     async fn budlumxyz_prepare_register(
@@ -1046,6 +1215,15 @@ pub trait BudlumApi {
     #[method(name = "bud_pruneStatus")]
     async fn prune_status(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
+    /// Read and verify a persisted state snapshot by block height.
+    /// `null` selects the current chain height. Operator listener only: the
+    /// response is the whole state.
+    #[method(name = "bud_getStateSnapshot")]
+    async fn get_state_snapshot(
+        &self,
+        height: Option<u64>,
+    ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
     /// Manually trigger a pruning pass.
     #[method(name = "bud_requestPrune")]
     async fn request_prune(
@@ -1053,7 +1231,7 @@ pub trait BudlumApi {
         min_blocks_to_keep: Option<u64>,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    // --- (§1): AI Inference & Verifier Layer ---
+    // ---: AI Inference & Verifier Layer ---
 
     /// Query registered AI model specification by model_id hex.
     #[method(name = "bud_aiGetModel")]
@@ -1118,6 +1296,10 @@ pub trait BudlumApi {
         result_nonce: u64,
         signature_hex: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Open AI requests: no outcome yet, deadline not passed (at most 256).
+    #[method(name = "bud_aiOpenRequests")]
+    async fn ai_open_requests(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
     /// Query finalized AI inference outcome by request_id hex.
     #[method(name = "bud_aiGetOutcome")]
@@ -1249,15 +1431,21 @@ pub trait BudlumApi {
     #[method(name = "bud_getStatus")]
     async fn get_status(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    ///: Active validator set snapshot.
+    /// Active validator set snapshot.
     #[method(name = "bud_getValidatorSet")]
     async fn get_validator_set(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    ///: Domain info by ID.
+    /// Domain info by ID.
     #[method(name = "bud_getDomainInfo")]
     async fn get_domain_info(&self, domain_id: u32) -> Result<serde_json::Value, ErrorObjectOwned>;
 
-    ///: Slashing history (audit trail).
+    /// Quantum alarm: level, breaks, solved canaries, pending commits,
+    /// the rules the level sets, and the observed crypto facts and quantum
+    /// class of every native domain.
+    #[method(name = "bud_getQuantumAlarm")]
+    async fn get_quantum_alarm(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// Slashing history (audit trail).
     #[method(name = "bud_getSlashingHistory")]
     async fn get_slashing_history(&self) -> Result<serde_json::Value, ErrorObjectOwned>;
 
@@ -1296,4 +1484,14 @@ pub trait BudlumApi {
         requester: String,
         document: String,
     ) -> Result<serde_json::Value, ErrorObjectOwned>;
+
+    /// WebSocket subscriptions: `kind` is
+    /// `newHeads`, `finalizedHeads` or `logs`; `logs` takes an optional
+    /// address and yields the transactions that send to or from it.
+    #[subscription(name = "bud_subscribe" => "bud_subscription", unsubscribe = "bud_unsubscribe", item = serde_json::Value)]
+    async fn subscribe(
+        &self,
+        kind: String,
+        address: Option<String>,
+    ) -> jsonrpsee::core::SubscriptionResult;
 }

@@ -47,7 +47,7 @@ pub const WIRE_CONTRACT: &[WireField] = &[
         id: 0x01,
         policy: FieldPolicy::MustUnderstand,
         since_version: 1,
-    }, // content_id (K3)
+    }, // content_id
     WireField {
         id: 0x02,
         policy: FieldPolicy::MustUnderstand,

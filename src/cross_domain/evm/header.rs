@@ -1,3 +1,4 @@
+//! WIRING: unwired - verify_chain is reached in this tree only through adapter.rs and evm/verify.rs, both of which declare themselves unwired; the relayer path wires it.
 //! Minimal Ethereum block header decode + chain-link + N-confirmation finality.
 //!
 //! Sync-committee light-client finality = **F10.3** (PoS, BLS12-381 sync-aggregate).
@@ -41,7 +42,7 @@ pub enum HeaderError {
     InvalidHeader,
     /// The chain is broken (parent_hash -> child.hash / number+1 mismatch).
     ChainBroken,
-    /// The chain never touches the trusted checkpoint (BLG-0111).
+    /// The chain never touches the trusted checkpoint.
     CheckpointNotReached,
     /// The N-confirmation threshold was not met (too few confirmation
     /// headers).
@@ -171,7 +172,7 @@ pub fn verify_chain(
         prev_hash = hdr.hash;
         prev_number = hdr.number;
     }
-    // BLG-0111 (P05-F04, karar B with A interim): the chain must touch the
+    // (karar B with A interim): the chain must touch the
     // trusted checkpoint it claims to descend from. Links alone prove only
     // self-consistency - a relayer can build a perfectly linked fantasy.
     if !anchored {
@@ -335,7 +336,7 @@ mod tests {
         );
     }
 
-    /// BLG-0111 (P05-F04): a perfectly linked fantasy is refused - the
+    /// A perfectly linked fantasy is refused - the
     /// chain must touch the trusted checkpoint, and a relayer cannot build
     /// one that does not.
     #[test]

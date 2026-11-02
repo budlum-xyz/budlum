@@ -285,7 +285,15 @@ pub fn run(root: &Path) -> Result<String, String> {
         checked += 1;
     }
 
-    let body = body_of(&src, "root").ok_or_else(|| "no `fn root(` to inspect".to_string())?;
+    // Anchor on the registry's own impl: the file also has an economics
+    // ledger with a `fn root(` of its own, and folding that one instead
+    // reports every registry field as missing.
+    let impl_at = src
+        .find("impl StorageRegistry")
+        .ok_or_else(|| "no `impl StorageRegistry` to anchor on".to_string())?;
+    let registry_src = &src[impl_at..];
+    let body = body_of(registry_src, "root")
+        .ok_or_else(|| "no `fn root(` in the registry impl to inspect".to_string())?;
     let mut missing: Vec<String> = Vec::new();
     let mut excused = 0usize;
     // Comments and literals are blanked, so a field named in a comment above

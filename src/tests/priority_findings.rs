@@ -1,4 +1,4 @@
-//! Locks for the 20-priority source-code review (workspace, 13 Aug 2026).
+//! Locks for the twenty highest-priority source-code review findings.
 //!
 //! Several findings were already fail-closed. These tests pin the remaining
 //! holes closed here; names the findings that remain
@@ -278,7 +278,7 @@ fn a_model_hash_that_contradicts_its_dims_is_refused() {
             version: 1,
             active: true,
             // A proof is NOT required here: the point is to reach this gate
-            // without getting caught on the F-04 gate.
+            // without getting caught on the gate.
             require_execution_proof: false,
             // This hash is not the hash of the program the dimensions below produce.
             execution_program_hash: Some([4u8; 32]),

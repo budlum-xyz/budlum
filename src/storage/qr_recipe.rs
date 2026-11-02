@@ -1,4 +1,4 @@
-//! B.U.D. 3.0 content-QR recipe (plan §CH A5).
+//! B.U.D. 3.0 content-QR recipe.
 //!
 //! Binds the A1 payload commitment, A2 carousel parameters, and the A3
 //! optical stream id so a holder of the recipe (public or sealed) can

@@ -1,4 +1,4 @@
-//!: Domain edge-case test suite'leri.
+//! Domain edge-case test suite'leri.
 //!
 //! BFT view-change/leader election, PoS slashing triggers, PoW difficulty
 //! Separate edge-case tests for adjustment.

@@ -570,7 +570,7 @@ mod integration_tests {
                 sign_attestation(&pq_key, 1, 10, &checkpoint_hash, 0, pubkey.to_string()).unwrap(),
             ],
         );
-        blob.pq_signatures[0].dilithium_signature[0] ^= 0x5A;
+        blob.pq_signatures[0].pq_signature[0] ^= 0x5A;
         blob.merkle_root = QcBlob::compute_merkle_root(&blob.pq_signatures);
 
         let result = blockchain.import_qc_blob(blob);
@@ -741,7 +741,7 @@ mod integration_tests {
         );
 
         let mut invalid_blob = valid_blob.clone();
-        invalid_blob.pq_signatures[0].dilithium_signature[0] ^= 0x5A;
+        invalid_blob.pq_signatures[0].pq_signature[0] ^= 0x5A;
         invalid_blob.merkle_root = QcBlob::compute_merkle_root(&invalid_blob.pq_signatures);
         let proof = invalid_blob.detect_fault_proofs(&snapshot).pop().unwrap();
 
@@ -749,7 +749,7 @@ mod integration_tests {
             .verified_qc_blobs
             .insert(invalid_blob.checkpoint_height, invalid_blob);
 
-        // P01-F22: an unverifiable signature is not evidence against the
+        // An unverifiable signature is not evidence against the
         // named validator - garbage bytes naming anyone are free to produce,
         // so acting on them would make the permissionless challenge RPC a
         // frame-up rail. The challenge is refused and neither finality nor
@@ -796,7 +796,7 @@ mod integration_tests {
         let keypair = KeyPair::generate().unwrap();
         let validator_addr = Address::from(keypair.public_key_bytes());
 
-        //: votes now carry a real BLS signature verified at ingest,
+        // votes now carry a real BLS signature verified at ingest,
         // So the validator must have a registered BLS public key.
         let mut sk_bytes = [0u8; 64];
         sk_bytes[0] = 7;
@@ -855,6 +855,7 @@ mod integration_tests {
             voter_id: validator_addr,
             sig_bls: vec![],
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         vote2.sig_bls = sign_bls(&bls_sk, &vote2.signing_message());
         vote2.auth_sig = sign_bls(&bls_sk, &vote2.auth_signing_message());
@@ -1111,6 +1112,7 @@ mod integration_tests {
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
                 auth_sig: Vec::new(),
+                pq_sig: Vec::new(),
             };
             let msg = pc.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
@@ -1248,6 +1250,7 @@ mod integration_tests {
             voter_id: addr,
             sig_bls: vec![],
             auth_sig: Vec::new(),
+            pq_sig: Vec::new(),
         };
         let msg = pc.signing_message();
         let sig = sign_bls(&bls_key.secret_key, &msg);
@@ -1305,6 +1308,7 @@ mod integration_tests {
                 voter_id: addrs[i].0,
                 sig_bls: vec![],
                 auth_sig: Vec::new(),
+                pq_sig: Vec::new(),
             };
             let msg = pc.signing_message();
             let sig = sign_bls(&bls_keys[i].secret_key, &msg);
@@ -1636,7 +1640,7 @@ mod integration_tests {
         assert_eq!(operator_default.max_connections, Some(10));
         assert!(operator_default.max_request_body_size.is_some());
 
-        // (security audit §5) public/Default config is now
+        // (security audit) public/Default config is now
         // Auth-required out of the box. Operators that want an
         // Unauthenticated RPC must opt in via `operator_default` (which
         // Also emits a loud startup warning).

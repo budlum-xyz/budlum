@@ -120,17 +120,21 @@ pub struct Step {
     pub memory_val: Option<u64>,
     pub is_memory_write: bool,
     pub stack_pointer: usize,
-    /// (security audit) Merkle path expansion rows. The
-    /// Original step that triggers a `VerifyMerkle` has these set to
-    /// `None` and `merkle_is_expand = false`; the 64 follow-up
-    /// "expansion" rows (one per Poseidon round) carry the key, the
-    /// Current Poseidon accumulator, the sibling hash for that round,
-    /// And the round index. The AIR uses these to verify the path
-    /// Against the claimed root (`rs1_val`).
+    /// Merkle path expansion rows. The original step that triggers a
+    /// `VerifyMerkle` carries only `merkle_key`. It is followed by
+    /// [`MERKLE_ROUNDS`] expansion rows, one per word of the path window: four
+    /// leaf words, 64 levels of four sibling words, four root words. Every
+    /// expansion row reads one word, so every word reaches the memory argument.
+    ///
+    /// `merkle_current` is the 256-bit node the walk holds entering the row,
+    /// `merkle_sibling` the four-word buffer the AIR holds on the row (the words
+    /// of the current group read so far, older words carried), `merkle_word` the
+    /// word this row reads and `merkle_round` the row's index in the window.
     pub merkle_key: Option<u64>,
-    pub merkle_current: Option<u64>,
-    pub merkle_sibling: Option<u64>,
-    pub merkle_round: Option<u8>,
+    pub merkle_current: Option<[u64; 4]>,
+    pub merkle_sibling: Option<[u64; 4]>,
+    pub merkle_word: Option<u64>,
+    pub merkle_round: Option<u16>,
     pub merkle_is_expand: bool,
     /// Reserved inference columns. The VM never fills them (always None or
     /// false) because VerifyInference emits no expansion rows. The AIR forces
@@ -268,6 +272,62 @@ impl Vm {
             return Err(VmError::OutOfGas);
         }
         Ok(())
+    }
+
+    fn memory_word(&self, addr: usize) -> u64 {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&self.memory[addr..addr + 8]);
+        u64::from_le_bytes(bytes)
+    }
+
+    /// Walk the path window at `path_addr`, or `None` when the window does not fit
+    /// in memory. The window is `[key, leaf[4], 64 x sibling[4], root[4]]`.
+    ///
+    /// The rows are computed exactly as the AIR constrains them: each group of
+    /// four rows reads four words into a buffer, and at the end of a group the
+    /// held node becomes the leaf (group 0), the compression of the node and the
+    /// buffer ordered by the key bit (groups 1 to 64), or stays (the root group,
+    /// whose rows compare the held node with the root words).
+    fn merkle_walk(&self, path_addr: usize) -> Option<MerkleWalk> {
+        let end = path_addr.checked_add(8 * MERKLE_WINDOW_WORDS)?;
+        if end > self.memory.len() {
+            return None;
+        }
+        let key = self.memory_word(path_addr);
+        let mut rows = Vec::with_capacity(MERKLE_ROUNDS);
+        let mut current = [0u64; 4];
+        let mut buffer = [0u64; 4];
+        let mut matches = true;
+        for round in 0..MERKLE_ROUNDS {
+            let addr = path_addr + 8 + 8 * round;
+            let word = self.memory_word(addr);
+            let lane = round % 4;
+            let group = round / 4;
+            buffer[lane] = word;
+            rows.push(MerkleRow {
+                addr,
+                word,
+                round: round as u16,
+                current,
+                buffer,
+            });
+            if round >= MERKLE_ROOT_ROUND {
+                matches &= current[lane] == word;
+            }
+            if lane == 3 {
+                if group == 0 {
+                    current = buffer;
+                } else if group <= 64 {
+                    let bit = (key >> (group - 1)) & 1;
+                    current = if bit == 0 {
+                        merkle_node(current, buffer)
+                    } else {
+                        merkle_node(buffer, current)
+                    };
+                }
+            }
+        }
+        Some(MerkleWalk { key, rows, matches })
     }
 
     pub fn step(&mut self, program: &[u64]) -> Result<(), VmError> {
@@ -586,92 +646,29 @@ impl Vm {
                 (result, cur_pc + 1)
             }
             Opcode::VerifyMerkle => {
-                let root = src1_val;
-                let leaf = src2_val;
+                // The path window at `imm` is, in 8-byte words:
+                //   [key, leaf[4], 64 levels x sibling[4], root[4]]
+                // The operands `rs1` and `rs2` are not read: a 256-bit node does
+                // not fit a register, so the leaf and the root live in the window
+                // and every word of it is read by its own expansion row, which is
+                // what binds them to the memory argument. `rd` receives 1 when
+                // the walk from the leaf ends at the root.
                 let path_addr = inst.imm as usize;
-                // Memory layout: [key: u64, 64 × sibling: u64]
-                // Total: 520 bytes (65 × u64)
-                //
-                // (security audit) the original step
-                // Records `merkle_key` and `dst_val = 0` (the result is
-                // Not known yet - it will be set by the final expansion
-                // Round). 64 follow-up "expansion" rows are pushed
-                // Immediately, one per Poseidon round, so the AIR can
-                // Verify the path row-by-row.
-                // `wrapping_add` made this bound decide the opposite of what
-                // it reads like. `path_addr` is `inst.imm`, which the program
-                // supplies, so a value within 520 of `usize::MAX` wraps the
-                // sum to a small number, the comparison passes, and the slice
-                // below is indexed at the unwrapped address. The fuzzer
-                // reached it in about one second:
-                //
-                //   range start index 18446744073709551110 out of range for
-                //   slice of length 8192
-                //
-                // A panic here is not a contained error. The VM executes
-                // untrusted contract bytecode, `run_receipt` is the
-                // non-panicking entry point every caller relies on, and the
-                // release profile is `panic = "abort"`, so this is a remote
-                // halt of any node that executes the instruction rather than
-                // a rejected transaction.
-                //
-                // `checked_add` gives the bound its stated meaning: an
-                // address whose window does not fit is out of range, which is
-                // what the wrapped value was pretending to prove.
-                let result = if path_addr
-                    .checked_add(8 * 65)
-                    .is_some_and(|end| end <= self.memory.len())
-                {
-                    let mut bytes = [0u8; 8];
-                    bytes.copy_from_slice(&self.memory[path_addr..path_addr + 8]);
-                    let key = u64::from_le_bytes(bytes);
-                    // The key is read from memory like any other word, so it
-                    // belongs in the memory argument. Without this the AIR
-                    // constrains the key only for continuity across rows and
-                    // nothing ties it to `path_addr`, letting a prover pick
-                    // the direction bits' source out of thin air.
-                    memory_addr = Some(path_addr);
-                    memory_val = Some(key);
-                    // We keep the path's result computation for
-                    // Backward compatibility (so the dst register
-                    // Still gets the correct answer), but the
-                    // *sound* verification lives in the expansion
-                    // Rows the AIR checks. dst_val is set to the
-                    // Correct result here so the trace is faithful
-                    // To the VM semantics; the AIR will additionally
-                    // Constrain it via the expansion path.
-                    // Path hash must match AIR single-round.
-                    let mut current = leaf;
-                    for i in 0..64 {
-                        let sibling_addr = path_addr + 8 + i * 8;
-                        bytes.copy_from_slice(&self.memory[sibling_addr..sibling_addr + 8]);
-                        let sibling = u64::from_le_bytes(bytes);
-                        let bit = (key >> i) & 1;
-                        current = if bit == 0 {
-                            merkle_poseidon_round(current, sibling)
-                        } else {
-                            merkle_poseidon_round(sibling, current)
-                        };
+                // `checked_add`: `inst.imm` is program supplied, and an address
+                // within the window length of `usize::MAX` must be refused, not
+                // wrapped into a small number that passes the bound.
+                let walk = self.merkle_walk(path_addr);
+                let result = match &walk {
+                    Some(w) => {
+                        // The key is read from memory like any other word, so it
+                        // belongs in the memory argument.
+                        memory_addr = Some(path_addr);
+                        memory_val = Some(w.key);
+                        u64::from(w.matches)
                     }
-                    if current == root {
-                        1
-                    } else {
-                        0
-                    }
-                } else {
-                    0
+                    None => 0,
                 };
                 self.registers[dst_idx as usize] = result;
-                // Stash the path key on the VM so the expansion rows
-                // (pushed immediately below) can read it. We use a
-                // Local `Vec<(u64, u64, u8)>`-style scratch on `self`
-                // By reusing a private field - but to keep the
-                // Signature simple we just walk the path twice
-                // (once for `result`, once for the expansion rows
-                // Below). For depth 64 this is 2*64=128 hashes per
-                // VerifyMerkle, which is acceptable for an audit
-                // Milestone and is in any case dwarfed by the
-                // 64*8 single-round hash cost of the AIR.
                 self.pc += 1;
                 (result, cur_pc + 1)
             }
@@ -782,6 +779,7 @@ impl Vm {
             merkle_key: None,
             merkle_current: None,
             merkle_sibling: None,
+            merkle_word: None,
             merkle_round: None,
             merkle_is_expand: false,
             inference_model_commitment: None,
@@ -791,65 +789,24 @@ impl Vm {
             inference_is_expand: false,
         });
 
-        // (security audit) if the just-pushed step is a
-        // VerifyMerkle, immediately push 64 follow-up "expansion"
-        // Rows. Each row carries the current Poseidon accumulator,
-        // The sibling hash for that round, the round index, and the
-        // Key (the AIR uses these to verify the path). The original
-        // Step's `merkle_key` is also set here (post-push, in-place
-        // Via index) so the AIR knows the path's key.
-        //
-        // Only VerifyMerkle walks this path. VerifyInference is reserved and
-        // emits no expansion rows.
+        // A `VerifyMerkle` is followed by one expansion row per word of its path
+        // window. The rows share the original pc and keep `next_pc == pc` until the
+        // last one, which hands off to the next instruction (the AIR enforces
+        // `nxt_pc == next_pc` on every cpu row).
         if matches!(inst.opcode, Opcode::VerifyMerkle) {
             let path_addr = inst.imm as usize;
-            // The same wrapped bound as the execution path, and it has to
-            // stay identical to it. These two read the same window for two
-            // different purposes, the value the register receives and the key
-            // the trace records, and a bound that admitted an address in one
-            // place and refused it in the other would leave the trace
-            // describing a read that did not happen.
-            if path_addr
-                .checked_add(8 * 65)
-                .is_some_and(|end| end <= self.memory.len())
-            {
-                let mut bytes = [0u8; 8];
-                bytes.copy_from_slice(&self.memory[path_addr..path_addr + 8]);
-                let key = u64::from_le_bytes(bytes);
-                // Patch the just-pushed step to carry the key.
+            if let Some(walk) = self.merkle_walk(path_addr) {
                 if let Some(last) = self.trace.last_mut() {
-                    last.merkle_key = Some(key);
-                }
-                // Walk the path and push 64 expansion rows. The
-                // `current` accumulator is computed here (in the VM)
-                // For the trace's faithfulness, and the AIR
-                // Re-derives it independently.
-                // Expansion rows carry the *pre-round*
-                // Accumulator so AIR can check nxt = poseidon(cur, sibling).
-                // Expansion rows share the original PC and must
-                // Keep next_pc == pc until the final expansion, which hands
-                // Off to the real next instruction (pc+1). The AIR enforces
-                // `nxt_pc == next_pc` on every cpu row; setting next_pc=pc+1
-                // On intermediate expansions makes nxt_pc (still pc) fail.
-                // Also patch the original step's next_pc to stay on this pc
-                // So original → first expansion satisfies the same rule.
-                if let Some(last) = self.trace.last_mut() {
+                    last.merkle_key = Some(walk.key);
                     last.next_pc = cur_pc;
                 }
-                let mut current = src2_val; // leaf input to round 0
-                for i in 0..64u8 {
-                    let sibling_addr = path_addr + 8 + (i as usize) * 8;
-                    let mut sb = [0u8; 8];
-                    sb.copy_from_slice(&self.memory[sibling_addr..sibling_addr + 8]);
-                    let sibling = u64::from_le_bytes(sb);
-                    let bit = (key >> i) & 1;
-                    let input = current;
-                    current = if bit == 0 {
-                        merkle_poseidon_round(input, sibling)
+                let rows = walk.rows.len();
+                for (index, row) in walk.rows.iter().enumerate() {
+                    let expand_next_pc = if index + 1 == rows {
+                        cur_pc + 1
                     } else {
-                        merkle_poseidon_round(sibling, input)
+                        cur_pc
                     };
-                    let expand_next_pc = if i == 63 { cur_pc + 1 } else { cur_pc };
                     self.trace.push(Step {
                         pc: cur_pc,
                         next_pc: expand_next_pc,
@@ -858,13 +815,8 @@ impl Vm {
                             rd: 0,
                             rs1: 0,
                             rs2: 0,
-                            // Carry the path base address. The memory
-                            // argument derives each expansion row's address as
-                            // `imm + 8 + 8 * round`, so a zero here would make
-                            // every sibling read claim an address near zero
-                            // while the memory table supplies the real one,
-                            // measured as a 7-of-8 mismatch across the first
-                            // rows before this was set.
+                            // The path base address: the memory argument derives each
+                            // expansion row's address as `imm + 8 + 8 * round`.
                             imm: inst.imm,
                         },
                         src1_idx: 0,
@@ -874,22 +826,17 @@ impl Vm {
                         src2_val: 0,
                         dst_val: 0,
                         registers: self.registers,
-                        // Each expansion row carries the read that produced
-                        // its sibling. Without this the 64 words the path is
-                        // built from never reach the memory argument, so the
-                        // AIR sees a Poseidon chain over values that nothing
-                        // ties to the program's memory - a prover could supply
-                        // a path that was never there. Measured before the
-                        // fix: 64 expansion rows, 0 with `memory_addr`, and 0
-                        // of the 65 path words present in the argument.
-                        memory_addr: Some(sibling_addr),
-                        memory_val: Some(sibling),
+                        // Each expansion row carries the read of its word, so every
+                        // word of the window is in the memory argument.
+                        memory_addr: Some(row.addr),
+                        memory_val: Some(row.word),
                         is_memory_write: false,
                         stack_pointer: self.stack.len(),
-                        merkle_key: Some(key),
-                        merkle_current: Some(input), // pre-round
-                        merkle_sibling: Some(sibling),
-                        merkle_round: Some(i),
+                        merkle_key: Some(walk.key),
+                        merkle_current: Some(row.current),
+                        merkle_sibling: Some(row.buffer),
+                        merkle_word: Some(row.word),
+                        merkle_round: Some(row.round),
                         merkle_is_expand: true,
                         inference_model_commitment: None,
                         inference_input_commitment: None,
@@ -897,16 +844,6 @@ impl Vm {
                         inference_proof_round: None,
                         inference_is_expand: false,
                     });
-                }
-                //: patch the original step's
-                // Merkle_current to the 64th-round Poseidon
-                // Output. This bridges the 64 expansion rows to
-                // The original step, allowing the AIR to apply
-                // The final root check on the original step's
-                // Row (is_verify_merkle = 1, merkle_final_flag = 1).
-                let orig_idx = self.trace.len() - 1 - 64;
-                if orig_idx < self.trace.len() {
-                    self.trace[orig_idx].merkle_current = Some(current);
                 }
             }
         }
@@ -987,6 +924,7 @@ impl Vm {
                     merkle_key: None,
                     merkle_current: None,
                     merkle_sibling: None,
+                    merkle_word: None,
                     merkle_round: None,
                     merkle_is_expand: false,
                     inference_model_commitment: None,
@@ -1002,16 +940,14 @@ impl Vm {
         // STATE CHAIN over the executed (slot, val) pairs in EXECUTION ORDER
         // (matching the trace, which feeds the gadget on each SWrite row in
         // program order). 32 bytes = first 4 lanes of the final accumulator.
-        let mut acc = [0u64; 8];
+        let mut acc = [0u64; 4];
         for (slot, val) in &self.state_writes {
-            let mut st = [0u64; 8];
+            let mut st = [0u64; POSEIDON_WIDTH];
             st[0] = *slot;
             st[1] = *val;
-            st[2] = acc[0];
-            st[3] = acc[1];
-            st[4] = acc[2];
-            st[5] = acc[3];
-            acc = poseidon_full_state(st);
+            st[2..6].copy_from_slice(&acc);
+            let out = poseidon_full_state(st);
+            acc.copy_from_slice(&out[..4]);
         }
         let mut state_writes_digest = [0u8; 32];
         for k in 0..4 {
@@ -1068,629 +1004,140 @@ impl Vm {
     }
 }
 
-/// Single-round Poseidon used by `VerifyMerkle` path hashing.
-/// Must match `BudAir` Merkle expansion constraints (RC0 + MDS first row [7,1]).
-/// Distinct from `poseidon4_hash` (4 full rounds) used by the Poseidon opcode.
-pub fn merkle_poseidon_round(a: u64, b: u64) -> u64 {
-    const P: u64 = 0xFFFFFFFF00000001;
-    const RC0: [u64; 2] = [0xdd5743e7f2a5a5d9, 0xcb3a864e58ada44b];
-    let s0 = ((a as u128 + RC0[0] as u128) % P as u128) as u64;
-    let s1 = ((b as u128 + RC0[1] as u128) % P as u128) as u64;
-    let sbox = |x: u64| -> u64 {
-        let x2 = ((x as u128 * x as u128) % P as u128) as u64;
-        let x4 = ((x2 as u128 * x2 as u128) % P as u128) as u64;
-        (((x4 as u128 * x2 as u128) % P as u128 * x as u128) % P as u128) as u64
-    };
-    let out = (7u128 * sbox(s0) as u128 + sbox(s1) as u128) % P as u128;
-    out as u64
+/// Expansion rows of one `VerifyMerkle`: 4 leaf words, 64 levels of 4 sibling
+/// words, 4 root words.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
+pub const MERKLE_ROUNDS: usize = 4 + 64 * 4 + 4;
+
+/// Words in the path window: the key, then the expansion words.
+///
+/// WIRING: the size of the window a program lays out for `VerifyMerkle`; the VM bound
+/// check uses it and the compiler and wallet tooling read it to size memory.
+pub const MERKLE_WINDOW_WORDS: usize = 1 + MERKLE_ROUNDS;
+
+/// First expansion row that reads a root word.
+pub const MERKLE_ROOT_ROUND: usize = 4 + 64 * 4;
+
+/// One expansion row of a Merkle walk, as the AIR sees it.
+///
+/// WIRING: produced by the VM walk and consumed by the trace builder in `bud-proof`.
+#[derive(Debug, Clone)]
+pub struct MerkleRow {
+    /// Address of the word this row reads.
+    pub addr: usize,
+    /// The word.
+    pub word: u64,
+    /// Index of the row in the window.
+    pub round: u16,
+    /// The node the walk holds entering the row.
+    pub current: [u64; 4],
+    /// The four-word buffer on the row, this row's word included.
+    pub buffer: [u64; 4],
 }
 
-/// 4-round Poseidon hash over Goldilocks field (alpha=7, width=8, full rounds only).
-/// Used for both VM execution and prover trace generation.
+/// The whole walk of a `VerifyMerkle`.
 ///
-/// MDS circulant matrix first row: [7, 1, 3, 8, 8, 3, 4, 9]
+/// WIRING: produced by the VM and read by the trace builder in `bud-proof`.
+#[derive(Debug, Clone)]
+pub struct MerkleWalk {
+    /// The path key: bit `i` says which side level `i` sits on.
+    pub key: u64,
+    /// One entry per expansion row.
+    pub rows: Vec<MerkleRow>,
+    /// The walk from the leaf ended at the root.
+    pub matches: bool,
+}
+
 /// Domain separator for nullifier derivation.
 /// ASCII-ish constant "NULLIFER" as a field element. It is the second input
 /// of the nullifier hash, nothing more. It does NOT separate the domains:
 /// the Poseidon opcode, `PrivacyCommit` and the nullifier hash all run the
 /// same permutation with zero capacity and no tag, so `Poseidon(a, b)` equals
 /// `PrivacyCommit(a, b, 0)` and `nullifier(s)` equals `Poseidon(s, D)`
-/// (P16-F04). A real separation needs a capacity tag, which changes the AIR.
+/// A real separation needs a capacity tag, which changes the AIR.
 pub const DOMAIN_NULLIFIER: u64 = 0x4e55_4c4c_4946_4552; // "NULLIFER"
 
-/// MDS circulant matrix - must match BudAir / plonky3_prover.
-/// Module-level const so lock test can access.
-pub const POSEIDON_MDS: [[u64; 8]; 8] = [
-    [7, 1, 3, 8, 8, 3, 4, 9],
-    [9, 7, 1, 3, 8, 8, 3, 4],
-    [4, 9, 7, 1, 3, 8, 8, 3],
-    [3, 4, 9, 7, 1, 3, 8, 8],
-    [8, 3, 4, 9, 7, 1, 3, 8],
-    [8, 8, 3, 4, 9, 7, 1, 3],
-    [3, 8, 8, 3, 4, 9, 7, 1],
-    [1, 3, 8, 8, 3, 4, 9, 7],
-];
+// The in-VM hash is the Poseidon parameter set: Goldilocks, width 12,
+// 8 full and 22 partial rounds, `alpha = 7`, capacity 4, output 4 elements.
+// The definition lives in `budlum-note-packing` so the wallet, the VM and the
+// node read one copy; `budzero/bud-proof/tests/poseidon_parity.rs` checks it
+// against Plonky3's own permutation.
 
-/// Round constants: first 4 rounds from Plonky3 Poseidon1 Goldilocks width-8.
-/// Module-level const so lock test can access.
-/// Full Poseidon1 round constants for Goldilocks width 8 - the parameter set
-/// the weak 4-round permutation below is a truncation of.
-///
-/// Source: Plonky3 `goldilocks/src/poseidon1.rs`, `GOLDILOCKS_POSEIDON1_RC_8`.
-/// Verified: `POSEIDON_RC` (the 4-round set actually in use) is byte-identical
-/// to the first four rows here, which is what makes the truncation claim
-/// checkable rather than folklore - see `four_round_set_is_a_prefix_of_full`.
-///
-/// Round schedule for this instance:
-///
-/// ```text
-///   R_F = 8   full rounds    (4 leading + 4 trailing)
-///   R_P = 22  partial rounds (S-box on lane 0 only)
-///   total     30 rounds, 86 S-box evaluations
-/// ```
-///
-/// R_P is not a taste: it comes from the interpolation bound in the Poseidon
-/// paper (Eq. 3) for this field and S-box,
-///
-/// ```text
-///   R_interp >= ceil(min(k, n) / log2(alpha)) + ceil(log_alpha(t)) - 5
-///             = ceil(64 / log2(7)) + ceil(log_7(8)) - 5
-///             = 23 + 2 - 5 = 20
-/// ```
-///
-/// plus the paper's +7.5% margin: `ceil(1.075 * 20) = 22`.
-///
-/// # Why this constant exists but is not wired in
-///
-/// [`poseidon4_hash_state`] still runs four rounds, because the BudZero AIR
-/// constrains exactly four (`plonky3_air.rs`, `for r in 0..4`). Swapping the
-/// permutation without rebuilding those constraints would produce proofs that
-/// attest to a different function than the VM ran, a soundness break strictly
-/// worse than the weak hash. The parameters are derived and pinned here so the
-/// AIR work has something exact to target; the opcodes that depend on the hash
-/// stay disabled until it lands.
-pub const POSEIDON_RC_FULL: [[u64; 8]; 30] = [
-    // round  0 (full)
-    [
-        0xdd5743e7f2a5a5d9,
-        0xcb3a864e58ada44b,
-        0xffa2449ed32f8cdc,
-        0x42025f65d6bd13ee,
-        0x7889175e25506323,
-        0x34b98bb03d24b737,
-        0xbdcc535ecc4faa2a,
-        0x5b20ad869fc0d033,
-    ],
-    // round  1 (full)
-    [
-        0xf1dda5b9259dfcb4,
-        0x27515210be112d59,
-        0x4227d1718c766c3f,
-        0x26d333161a5bd794,
-        0x49b938957bf4b026,
-        0x4a56b5938b213669,
-        0x1120426b48c8353d,
-        0x6b323c3f10a56cad,
-    ],
-    // round  2 (full)
-    [
-        0xce57d6245ddca6b2,
-        0xb1fc8d402bba1eb1,
-        0xb5c5096ca959bd04,
-        0x6db55cd306d31f7f,
-        0xc49d293a81cb9641,
-        0x1ce55a4fe979719f,
-        0xa92e60a9d178a4d1,
-        0x002cc64973bcfd8c,
-    ],
-    // round  3 (full)
-    [
-        0xcea721cce82fb11b,
-        0xe5b55eb8098ece81,
-        0x4e30525c6f1ddd66,
-        0x43c6702827070987,
-        0xaca68430a7b5762a,
-        0x3674238634df9c93,
-        0x88cee1c825e33433,
-        0xde99ae8d74b57176,
-    ],
-    // round  4 (partial)
-    [
-        0x488897d85ff51f56,
-        0x1140737ccb162218,
-        0xa7eeb9215866ed35,
-        0x9bd2976fee49fcc9,
-        0xc0c8f0de580a3fcc,
-        0x4fb2dae6ee8fc793,
-        0x343a89f35f37395b,
-        0x223b525a77ca72c8,
-    ],
-    // round  5 (partial)
-    [
-        0x56ccb62574aaa918,
-        0xc4d507d8027af9ed,
-        0xa080673cf0b7e95c,
-        0xf0184884eb70dcf8,
-        0x044f10b0cb3d5c69,
-        0xe9e3f7993938f186,
-        0x1b761c80e772f459,
-        0x606cec607a1b5fac,
-    ],
-    // round  6 (partial)
-    [
-        0x14a0c2e1d45f03cd,
-        0x4eace8855398574f,
-        0xf905ca7103eff3e6,
-        0xf8c8f8d20862c059,
-        0xb524fe8bdd678e5a,
-        0xfbb7865901a1ec41,
-        0x014ef1197d341346,
-        0x9725e20825d07394,
-    ],
-    // round  7 (partial)
-    [
-        0xfdb25aef2c5bae3b,
-        0xbe5402dc598c971e,
-        0x93a5711f04cdca3d,
-        0xc45a9a5b2f8fb97b,
-        0xfe8946a924933545,
-        0x2af997a27369091c,
-        0xaa62c88e0b294011,
-        0x058eb9d810ce9f74,
-    ],
-    // round  8 (partial)
-    [
-        0xb3cb23eced349ae4,
-        0xa3648177a77b4a84,
-        0x43153d905992d95d,
-        0xf4e2a97cda44aa4b,
-        0x5baa2702b908682f,
-        0x082923bdf4f750d1,
-        0x98ae09a325893803,
-        0xf8a6475077968838,
-    ],
-    // round  9 (partial)
-    [
-        0xceb0735bf00b2c5f,
-        0x0a1a5d953888e072,
-        0x2fcb190489f94475,
-        0xb5be06270dec69fc,
-        0x739cb934b09acf8b,
-        0x537750b75ec7f25b,
-        0xe9dd318bae1f3961,
-        0xf7462137299efe1a,
-    ],
-    // round 10 (partial)
-    [
-        0xb1f6b8eee9adb940,
-        0xbdebcc8a809dfe6b,
-        0x40fc1f791b178113,
-        0x3ac1c3362d014864,
-        0x9a016184bdb8aeba,
-        0x95f2394459fbc25e,
-        0xe3f34a07a76a66c2,
-        0x8df25f9ad98b1b96,
-    ],
-    // round 11 (partial)
-    [
-        0x85ffc27171439d9d,
-        0xddcb9a2dcfd26910,
-        0x26b5ba4bf3afb94e,
-        0xffff9cc7c7651e2f,
-        0x8c88364698280b55,
-        0xebc114167b910501,
-        0x2d77b4d89ecfb516,
-        0x332e0828eba151f2,
-    ],
-    // round 12 (partial)
-    [
-        0x46fa6a6450dd4735,
-        0xd00db7dd92384a33,
-        0x5fd4fb751f3a5fc5,
-        0x496fb90c0bb65ea2,
-        0xf3baec0bb87cc5c7,
-        0x862a3c0a7d4c7713,
-        0xbf5f38336a3f47d8,
-        0x41ad9dbc1394a20c,
-    ],
-    // round 13 (partial)
-    [
-        0xcc535945b7dbf0f7,
-        0x82af2bc93685bcec,
-        0x8e4c8d0c8cebfccd,
-        0x17cb39417e84597e,
-        0xd4a965a8c749b232,
-        0xa2cab040f33f3ee5,
-        0xa98811a1fed4e3a6,
-        0x1cc48b54f377e2a1,
-    ],
-    // round 14 (partial)
-    [
-        0xe40cd4f6c5609a27,
-        0x11de79ebca97a4a4,
-        0x9177c73d8b7e929d,
-        0x2a6fe8085797e792,
-        0x3de6e93329f8d5ae,
-        0x3f7af9125da962ff,
-        0xd710682cfc77d3ac,
-        0x48faf05f3b053cf4,
-    ],
-    // round 15 (partial)
-    [
-        0x287db8630da89c8b,
-        0x4d0de32053cb30e9,
-        0x8b37a4f20c5ada7b,
-        0xe7cc6ebe78c84ecf,
-        0x240bdc0a66a2610d,
-        0x8299e7f02caa1650,
-        0x380a53fefb6e754e,
-        0x684a1d8cf8eb6810,
-    ],
-    // round 16 (partial)
-    [
-        0xe839452eb4b8a5e1,
-        0xb03fa62e90626af4,
-        0x11a688602fbc5efc,
-        0x30dda75c355a2d62,
-        0x0f712adcb73810de,
-        0xffdc1102187f1ae1,
-        0x40c34f398254b99c,
-        0xede021b9dc289a4a,
-    ],
-    // round 17 (partial)
-    [
-        0x8b7b05225c4e7dad,
-        0x3bc794346f9d9ff9,
-        0xfccb5a57f2ca86ff,
-        0xbb1502015a7da9d4,
-        0xd7e0a35d4352a015,
-        0x27af7a44f8160931,
-        0xc37442f6782f4615,
-        0xbdf392a9bd095dcb,
-    ],
-    // round 18 (partial)
-    [
-        0xc17f55037cf00de9,
-        0xbcffedd34c71a874,
-        0x5eb45d2a8133d1f2,
-        0xbabe251e1612ebdf,
-        0x3efeb9fbe438c536,
-        0x2d7cef97b4afe1cf,
-        0xe5de1b4660016c0b,
-        0xcdcc26c332f5657c,
-    ],
-    // round 19 (partial)
-    [
-        0xe01dd653daf15809,
-        0xb0a6bdd4b41094b5,
-        0x27eac858b0b03a05,
-        0x51d43b5e93adbdc0,
-        0x8b89a23b0fea5fc9,
-        0xdc8ac3b14f7f2fc1,
-        0xe793f82f1efec039,
-        0x9f6f2cf8969e7b80,
-    ],
-    // round 20 (partial)
-    [
-        0x49d45382e0f21d4a,
-        0x5f4ad1797cd72786,
-        0x4dc3dbebfd45f795,
-        0x03a3ef84dba6e1bc,
-        0x204bc9b3d3fc4c01,
-        0x9ad706081e89b9ba,
-        0x638bfb4d840e9f89,
-        0x5ef2938cd095ae35,
-    ],
-    // round 21 (partial)
-    [
-        0x42cca18ebeb265c8,
-        0xb7b2ec5c29aecbf8,
-        0x0d84f9535dc78f0f,
-        0x04e64ad942e77b8c,
-        0xb4880dffffc9da0b,
-        0x16db16d9c29adeb1,
-        0x09bbaf2a0590cd1e,
-        0x76460e74961fcf8d,
-    ],
-    // round 22 (partial)
-    [
-        0xed12a2276dfa1553,
-        0x0b5acec5de0436fd,
-        0x3c6cfea033a1f0a8,
-        0x2b5ecefe546cac15,
-        0x6e2d82884cd3bf6f,
-        0xc134878d1add7b83,
-        0x997963422eb7a280,
-        0x5e834537ac648cf6,
-    ],
-    // round 23 (partial)
-    [
-        0x89e779214737c0b7,
-        0x1a8c05e8581ad95b,
-        0x8d18b72796437cf7,
-        0xe7252c949e04b106,
-        0x53267c4fd174585a,
-        0xa16ef5d9c81dad47,
-        0xda65191937270a46,
-        0xcb2a5b55f2df664c,
-    ],
-    // round 24 (partial)
-    [
-        0x854aee2dc1924137,
-        0xf37013c9d479ece6,
-        0x0e163bc0630c4696,
-        0x384ee64955048f76,
-        0xf65d814e28ee4ec5,
-        0xe57bc564fd82f1b1,
-        0x4b338937b6876614,
-        0x66ee0b04ed43cd8d,
-    ],
-    // round 25 (partial)
-    [
-        0x49884bf25f4ef15d,
-        0xeb51fe28de1c6f54,
-        0x2cd64e84fce8dfcc,
-        0x29164a96a541a013,
-        0x173ce7558f4cacb8,
-        0xeb5b1ce5877c89e9,
-        0x5faff4b0f5217bf6,
-        0xac42d0b1c20f205e,
-    ],
-    // round 26 (full)
-    [
-        0xfb1d6bf0ca43221b,
-        0x97b0a1b01d6a2955,
-        0x08c60bd622952b30,
-        0x43f2be0f9e24147c,
-        0xfa7268b7d3730f5d,
-        0x43a6c419a23983bb,
-        0xcd77c1f7b29b113c,
-        0xcfa43c9db8eec29f,
-    ],
-    // round 27 (full)
-    [
-        0xcaaa95a6c7365dec,
-        0x0a91193f798f3be0,
-        0x1104497652735dc6,
-        0x35aecb93663b515e,
-        0x8dbc9916065aa858,
-        0xada8f7a0266579ed,
-        0x524dee7bec1ea789,
-        0xa93aee9dd5af9521,
-    ],
-    // round 28 (full)
-    [
-        0x9d1f1b54750d707e,
-        0x7c9feab87096d5dc,
-        0xa2e1fb19f9d4261b,
-        0xb714deb448de6346,
-        0x225d1f0d011c5403,
-        0x1549b7f1d28cedc0,
-        0xaef3e46f97d43942,
-        0x6dfc7ffe0b38bf08,
-    ],
-    // round 29 (full)
-    [
-        0x7de853fdc542b663,
-        0xa68ecc96610657b2,
-        0xe88bb5428af289b1,
-        0xd7cfa1504c5569f5,
-        0x78a9aad0d642d30a,
-        0xd68315f2353dce52,
-        0x46e56300f86fcfd5,
-        0x323d95332b145fd6,
-    ],
-];
+/// State width of the in-VM permutation.
+pub const POSEIDON_WIDTH: usize = budlum_note_packing::poseidon::WIDTH;
 
-/// Full rounds for the Goldilocks width-8 Poseidon1 instance (4 leading + 4
-/// trailing).
-///
-/// Convenience: pub with the round constants of the instance this VM
-/// executes, so the proving side reads the same split the VM runs.
-pub const POSEIDON_FULL_ROUNDS: usize = 8;
+/// MDS matrix - must match `BudAir`. Module-level const so lock tests can see it.
+pub const POSEIDON_MDS: [[u64; POSEIDON_WIDTH]; POSEIDON_WIDTH] =
+    budlum_note_packing::poseidon::MDS;
 
-/// Partial rounds for the same instance (see [`POSEIDON_RC_FULL`] for the
-/// derivation).
+/// All 30 rounds of round constants for the width-12 instance
+/// (4 leading full rounds, 22 partial rounds, 4 trailing full rounds).
 ///
-/// Convenience: pub with the round constants of the instance this VM
-/// executes, so the proving side reads the same split the VM runs.
-pub const POSEIDON_PARTIAL_ROUNDS: usize = 22;
+/// Source: Plonky3 `goldilocks/src/poseidon1.rs`, `GOLDILOCKS_POSEIDON1_RC_12`.
+pub const POSEIDON_RC_FULL: [[u64; 12]; 30] = budlum_note_packing::poseidon::RC;
+
+/// Full rounds (4 leading + 4 trailing).
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
+pub const POSEIDON_FULL_ROUNDS: usize = budlum_note_packing::poseidon::FULL_ROUNDS;
+
+/// Partial rounds: the S-box runs on lane 0 only. The count comes from the
+/// interpolation bound of the Poseidon paper (Eq. 3) for this field and
+/// S-box, `ceil(64 / log2(7)) + ceil(log_7(12)) - 5 = 20`, plus the paper's
+/// 7.5% margin: `ceil(1.075 * 20) = 22`.
+/// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
+pub const POSEIDON_PARTIAL_ROUNDS: usize = budlum_note_packing::poseidon::PARTIAL_ROUNDS;
 
 /// S-box exponent. `gcd(7, P - 1) = 1` over Goldilocks, so `x -> x^7` is a
 /// permutation of the field.
-pub const POSEIDON_ALPHA: u64 = 7;
+pub const POSEIDON_ALPHA: u64 = budlum_note_packing::poseidon::ALPHA;
 
-/// Rounds actually evaluated by [`poseidon4_hash_state`], and constrained by
-/// the AIR. It now equals the full schedule; the constant is kept because
+/// Rounds evaluated by [`poseidon_full_state`] and constrained by the AIR.
 /// `vm_hash_still_matches_the_air_round_count` asserts the VM and the AIR
-/// agree, and that check is the thing keeping them from drifting apart again.
+/// agree, and that check keeps them from drifting apart.
 pub const POSEIDON_ROUNDS_IN_USE: usize = POSEIDON_FULL_ROUNDS + POSEIDON_PARTIAL_ROUNDS;
 
-/// Reference implementation of the **full** 30-round permutation.
+/// The full 30-round permutation over the whole 12-lane state.
 ///
-/// Not used by the VM: the AIR constrains four rounds, and the VM must compute
-/// what the AIR checks. This exists so the target is executable, the AIR work
-/// can be validated against it, and
-/// `full_permutation_differs_from_truncated_one` proves the two really are
-/// different functions rather than the same one under another name.
-pub fn poseidon_full_hash_state(mut s: [u64; 8]) -> u64 {
-    const P: u64 = GOLDILOCKS_P;
-    let sbox = |x: u64| -> u64 {
-        let x2 = ((x as u128 * x as u128) % P as u128) as u64;
-        let x4 = ((x2 as u128 * x2 as u128) % P as u128) as u64;
-        (((x4 as u128 * x2 as u128) % P as u128 * x as u128) % P as u128) as u64
-    };
-    let half_full = POSEIDON_FULL_ROUNDS / 2;
-    for (round, rc) in POSEIDON_RC_FULL.iter().enumerate() {
-        for i in 0..8 {
-            s[i] = ((s[i] as u128 + rc[i] as u128) % P as u128) as u64;
-        }
-        // Full rounds apply the S-box to every lane; partial rounds only to
-        // lane 0. That asymmetry is the whole point of the partial rounds,
-        // they raise the algebraic degree cheaply.
-        let is_full = round < half_full || round >= POSEIDON_RC_FULL.len() - half_full;
-        if is_full {
-            for lane in s.iter_mut() {
-                *lane = sbox(*lane);
-            }
-        } else {
-            s[0] = sbox(s[0]);
-        }
-        let mut next = [0u64; 8];
-        for i in 0..8 {
-            let mut sum: u128 = 0;
-            for j in 0..8 {
-                sum = (sum + POSEIDON_MDS[i][j] as u128 * s[j] as u128) % P as u128;
-            }
-            next[i] = sum as u64;
-        }
-        s = next;
-    }
-    s[0]
+/// The state-write digest chains the first four lanes of this, the AIR
+/// gadget constrains every round, and the Merkle node function is its first
+/// four output lanes.
+pub fn poseidon_full_state(s: [u64; POSEIDON_WIDTH]) -> [u64; POSEIDON_WIDTH] {
+    budlum_note_packing::poseidon::permute(s)
 }
 
-/// Full 30-round Poseidon permutation returning the ENTIRE 8-lane state.
-///
-/// HIGH CWE-345 (2026-08-17): the state-write digest must be bound to
-/// executed `SWrite` effects inside the STARK. `poseidon_full_hash_state`
-/// collapses the state to lane 0; this variant returns all 8 lanes so the
-/// AIR can constrain a state chain (slot, val, prev_acc..) -> next_acc in
-/// full, matching the witness columns it already constrains.
-pub fn poseidon_full_state(mut s: [u64; 8]) -> [u64; 8] {
-    const P: u64 = GOLDILOCKS_P;
-    let sbox = |x: u64| -> u64 {
-        let x2 = ((x as u128 * x as u128) % P as u128) as u64;
-        let x4 = ((x2 as u128 * x2 as u128) % P as u128) as u64;
-        (((x4 as u128 * x2 as u128) % P as u128 * x as u128) % P as u128) as u64
-    };
-    let half_full = POSEIDON_FULL_ROUNDS / 2;
-    for (round, rc) in POSEIDON_RC_FULL.iter().enumerate() {
-        for i in 0..8 {
-            s[i] = ((s[i] as u128 + rc[i] as u128) % P as u128) as u64;
-        }
-        let is_full = round < half_full || round >= POSEIDON_RC_FULL.len() - half_full;
-        if is_full {
-            for lane in s.iter_mut() {
-                *lane = sbox(*lane);
-            }
-        } else {
-            s[0] = sbox(s[0]);
-        }
-        let mut next = [0u64; 8];
-        for i in 0..8 {
-            let mut sum: u128 = 0;
-            for j in 0..8 {
-                sum = (sum + POSEIDON_MDS[i][j] as u128 * s[j] as u128) % P as u128;
-            }
-            next[i] = sum as u64;
-        }
-        s = next;
-    }
-    s
+/// The permutation collapsed to lane 0, the value the `Poseidon` opcode writes.
+pub fn poseidon_full_hash_state(s: [u64; POSEIDON_WIDTH]) -> u64 {
+    poseidon_full_state(s)[0]
 }
 
-/// Round constants for the 4-round Poseidon permutation.
-///
-/// # Superseded - kept only as the AIR's historical prefix
-///
-/// `poseidon4_hash_state` no longer uses these. It runs the full 30-round
-/// permutation ([`POSEIDON_RC_FULL`]), which the AIR now constrains in full.
-/// The four-round set below is retained because
-/// `four_round_set_is_a_prefix_of_full` checks it against the full table, and
-/// because the security note is worth keeping next to the numbers it is about.
-///
-/// What was wrong with it:
-///
-/// Four full rounds with `alpha = 7` and no partial rounds leaves the whole
-/// permutation at algebraic degree `7^4 = 2401`. A system of that degree is
-/// invertible in practice by interpolation or a Gröbner-basis attack, and the
-/// function is cheap enough that a generic birthday collision search (~2^32
-/// evaluations) is hours of GPU time rather than a theoretical bound.
-///
-/// For `PrivacyCommit` that means an observer can recover
-/// `(amount, blinding, recipient_tag)` from a published commitment, hiding is
-/// gone, and can find a second opening for the same commitment or nullifier,
-/// binding is gone.
-///
-/// These are the *first four rounds* of Plonky3's Goldilocks width-8 Poseidon1
-/// instance. Real parameters for this width need roughly 8 full plus 22 partial
-/// rounds; this is a truncation of a safe set, not a design.
-///
-/// The AIR is not the problem: it constrains all four rounds faithfully, so the
-/// proof system honestly proves that this weak function was evaluated
-/// correctly.
-///
-/// The opcodes that depend on it are disabled by default in `MainnetActivation`
-/// and `bud-isa` carries a test that fails if that changes while the round
-/// count is still four. Fix the parameters before enabling them.
-pub const POSEIDON_RC: [[u64; 8]; 4] = [
-    [
-        0xdd5743e7f2a5a5d9,
-        0xcb3a864e58ada44b,
-        0xffa2449ed32f8cdc,
-        0x42025f65d6bd13ee,
-        0x7889175e25506323,
-        0x34b98bb03d24b737,
-        0xbdcc535ecc4faa2a,
-        0x5b20ad869fc0d033,
-    ],
-    [
-        0xf1dda5b9259dfcb4,
-        0x27515210be112d59,
-        0x4227d1718c766c3f,
-        0x26d333161a5bd794,
-        0x49b938957bf4b026,
-        0x4a56b5938b213669,
-        0x1120426b48c8353d,
-        0x6b323c3f10a56cad,
-    ],
-    [
-        0xce57d6245ddca6b2,
-        0xb1fc8d402bba1eb1,
-        0xb5c5096ca959bd04,
-        0x6db55cd306d31f7f,
-        0xc49d293a81cb9641,
-        0x1ce55a4fe979719f,
-        0xa92e60a9d178a4d1,
-        0x002cc64973bcfd8c,
-    ],
-    [
-        0xcea721cce82fb11b,
-        0xe5b55eb8098ece81,
-        0x4e30525c6f1ddd66,
-        0x43c6702827070987,
-        0xaca68430a7b5762a,
-        0x3674238634df9c93,
-        0x88cee1c825e33433,
-        0xde99ae8d74b57176,
-    ],
-];
-
-/// 4-round Poseidon over Goldilocks with an arbitrary 8-element initial state
-/// (alpha=7, width=8, full rounds only). Shared by `poseidon4_hash`,
-/// `poseidon4_hash3` and the AIR Poseidon gadget.
-pub fn poseidon4_hash_state(s: [u64; 8]) -> u64 {
-    // Kept under its historical name so call sites do not churn, but this is
-    // the full 30-round permutation now: `R_F = 8`, `R_P = 22`, `alpha = 7`.
-    // The AIR in `bud-proof` constrains exactly these rounds and the prover
-    // fills exactly these witness columns, so all three move together.
+/// Lane 0 of the permutation of an arbitrary 12-lane initial state. Shared by
+/// `poseidon4_hash`, `poseidon4_hash3` and the AIR Poseidon gadget.
+pub fn poseidon4_hash_state(s: [u64; POSEIDON_WIDTH]) -> u64 {
     poseidon_full_hash_state(s)
 }
 
-/// 4-round Poseidon over Goldilocks with 3 absorbed field elements
-/// (state = [a, b, c, 0, 0, 0, 0, 0]). Used by `PrivacyCommit`.
+/// Poseidon with 3 absorbed field elements (state = [a, b, c, 0, ...]).
 pub fn poseidon4_hash3(a: u64, b: u64, c: u64) -> u64 {
-    poseidon4_hash_state([a, b, c, 0, 0, 0, 0, 0])
+    let mut state = [0u64; POSEIDON_WIDTH];
+    state[0] = a;
+    state[1] = b;
+    state[2] = c;
+    poseidon4_hash_state(state)
 }
 
-/// 4-round Poseidon hash over Goldilocks field (alpha=7, width=8, full rounds only).
-///
-/// Rate-2 absorption: state = [a, b, 0, 0, 0, 0, 0, 0]. Used by the Poseidon
-/// Opcode and NullifierCheck (with DOMAIN_NULLIFIER as second input).
-///
-/// Round constants: first 4 rounds from Plonky3 Poseidon1 Goldilocks width-8
+/// Poseidon with 2 absorbed field elements (state = [a, b, 0, ...]). Used by
+/// the Poseidon opcode and by `NullifierCheck` (with `DOMAIN_NULLIFIER` as the
+/// second input).
 pub fn poseidon4_hash(a: u64, b: u64) -> u64 {
-    poseidon4_hash_state([a, b, 0, 0, 0, 0, 0, 0])
+    poseidon4_hash3(a, b, 0)
+}
+
+/// The Merkle node function: two 256-bit nodes into one.
+///
+/// WIRING: the VM walk uses it; `bud-proof` tests, the benchmark seeds and the zkVM
+/// adapter test build their expected roots with it.
+pub fn merkle_node(left: [u64; 4], right: [u64; 4]) -> [u64; 4] {
+    budlum_note_packing::poseidon::compress(left, right)
 }
 
 #[cfg(test)]
@@ -1767,7 +1214,7 @@ mod tests {
 
     /// The address whose window wraps must be refused, not indexed.
     ///
-    /// `VerifyMerkle` reads a 520-byte window at `inst.imm`. The bound used
+    /// `VerifyMerkle` reads a window of `8 * MERKLE_WINDOW_WORDS` bytes at `inst.imm`. The bound used
     /// `wrapping_add`, so an address near the top of the space wrapped to a
     /// small sum, compared as in range, and then indexed the slice at the
     /// unwrapped value. `vm_execute` found it in roughly a second of fuzzing.
@@ -1805,9 +1252,9 @@ mod tests {
     #[test]
     fn verify_merkle_refuses_a_window_that_runs_past_the_end() {
         let memory = 8192usize;
-        // The window is 520 bytes, so the last address that fits is
-        // memory - 520. One past that must not be read.
-        let too_far = i32::try_from(memory - 520 + 1).expect("fits in i32");
+        // The window is `8 * MERKLE_WINDOW_WORDS` bytes, so the last address that
+        // fits is memory minus that. One past it must not be read.
+        let too_far = i32::try_from(memory - 8 * MERKLE_WINDOW_WORDS + 1).expect("fits in i32");
         let program = vec![
             inst(Opcode::VerifyMerkle, 1, 2, 3, too_far),
             inst(Opcode::Halt, 0, 0, 0, 0),
@@ -1832,7 +1279,7 @@ mod tests {
     #[test]
     fn verify_merkle_still_reads_the_last_window_that_fits() {
         let memory = 8192usize;
-        let last_fitting = i32::try_from(memory - 520).expect("fits in i32");
+        let last_fitting = i32::try_from(memory - 8 * MERKLE_WINDOW_WORDS).expect("fits in i32");
         let program = vec![
             inst(Opcode::VerifyMerkle, 1, 2, 3, last_fitting),
             inst(Opcode::Halt, 0, 0, 0, 0),
@@ -1934,7 +1381,7 @@ mod tests {
         assert!(vm.stack.is_empty());
     }
 
-    /// P16-F19: the stack limit, an empty pop and a jump below zero all end
+    /// The stack limit, an empty pop and a jump below zero all end
     /// the run with a typed error. None of them is a panic.
     #[test]
     fn stack_limit_empty_pop_and_negative_jump_are_typed_errors() {
@@ -2225,64 +1672,101 @@ mod tests {
         );
     }
 
-    /// (security audit) `VerifyMerkle` must produce
-    /// 1 original step + 64 expansion rows (one per Poseidon round),
-    /// So the AIR can verify the path row-by-row. The original
-    /// Step carries `merkle_key`; each expansion row carries
-    /// `merkle_current`, `merkle_sibling`, and `merkle_round`.
+    /// `VerifyMerkle` pushes the original step and one expansion row per word of
+    /// its path window: four leaf words, 64 levels of four sibling words
+    /// and four root words, so that every word reaches the memory argument.
     #[test]
-    fn verify_merkle_emits_64_expansion_rows() {
-        // Build a simple program that runs VerifyMerkle and then Halt.
-        // Memory layout for the path: [key (8 bytes), 64×sibling (8 each)]
-        // → 520 bytes. We populate the first 64×8 bytes with a
-        // Deterministic pattern; the key is `key = 0` so every
-        // Round uses bit = 0 (i.e. current = poseidon(current, sibling)).
+    fn verify_merkle_emits_one_row_per_window_word() {
         let program = vec![
-            inst(Opcode::VerifyMerkle, 1, 2, 3, 256), // path_addr = 256
+            inst(Opcode::VerifyMerkle, 1, 2, 3, 256),
             inst(Opcode::Halt, 0, 0, 0, 0),
         ];
-        let mut vm = Vm::new(1024);
-        // Put a non-zero key and deterministic siblings.
+        let mut vm = Vm::new(4096);
         vm.memory[256..264].copy_from_slice(&7u64.to_le_bytes());
-        for i in 0..64 {
+        for i in 0..MERKLE_ROUNDS {
             let off = 264 + i * 8;
             vm.memory[off..off + 8].copy_from_slice(&(1000u64 + i as u64).to_le_bytes());
         }
-        // Leaf and root registers don't matter for the trace-length
-        // Assertion.
-        vm.registers[2] = 0xDEAD;
-        vm.registers[3] = 0xBEEF;
-
         let receipt = vm.run_receipt(&program);
         assert!(receipt.success);
-        // 1 VerifyMerkle + 64 expansion rows + 1 Halt = 66
         assert_eq!(
             vm.trace.len(),
-            66,
-            "expected 1 VerifyMerkle + 64 expansion + 1 Halt = 66, got {}",
-            vm.trace.len()
+            1 + MERKLE_ROUNDS + 1,
+            "the original row, one row per window word, Halt"
         );
-        // The original step must carry merkle_key = Some(7).
         let first = &vm.trace[0];
         assert_eq!(first.instruction.opcode, Opcode::VerifyMerkle);
         assert_eq!(first.merkle_key, Some(7));
         assert!(!first.merkle_is_expand);
-        // Each expansion row must carry merkle_round = Some(i).
-        for i in 0..64 {
+        for i in 0..MERKLE_ROUNDS {
             let row = &vm.trace[1 + i];
-            assert!(
-                row.merkle_is_expand,
-                "row {i} should be marked as expansion"
-            );
+            assert!(row.merkle_is_expand, "row {i} should be an expansion row");
             assert_eq!(row.merkle_key, Some(7));
-            assert_eq!(row.merkle_round, Some(i as u8));
-            assert!(row.merkle_current.is_some());
-            assert!(row.merkle_sibling.is_some());
+            assert_eq!(row.merkle_round, Some(i as u16));
+            assert_eq!(row.merkle_word, Some(1000 + i as u64));
+            assert_eq!(row.memory_addr, Some(264 + 8 * i));
+            assert!(row.merkle_current.is_some() && row.merkle_sibling.is_some());
         }
-        // The final Halt must NOT be an expansion row.
-        let last = &vm.trace[65];
+        let last = &vm.trace[MERKLE_ROUNDS + 1];
         assert_eq!(last.instruction.opcode, Opcode::Halt);
         assert!(!last.merkle_is_expand);
+        assert_eq!(
+            vm.registers[1], 0,
+            "an arbitrary window is not a path to its root"
+        );
+    }
+
+    /// A window built by walking a leaf up 64 levels verifies, and changing any
+    /// root word, any sibling word or the key makes it fail.
+    #[test]
+    fn verify_merkle_accepts_the_real_root_and_nothing_else() {
+        let leaf = [11u64, 12, 13, 14];
+        let key = 0x0123_4567_89ab_cdefu64;
+        let mut siblings = [[0u64; 4]; 64];
+        for (level, sibling) in siblings.iter_mut().enumerate() {
+            *sibling = [level as u64, 1 + level as u64, 2, 3];
+        }
+        let mut node = leaf;
+        for (level, sibling) in siblings.iter().enumerate() {
+            node = if (key >> level) & 1 == 0 {
+                merkle_node(node, *sibling)
+            } else {
+                merkle_node(*sibling, node)
+            };
+        }
+        let run = |tamper: &dyn Fn(&mut Vec<u64>)| {
+            let mut words = vec![key];
+            words.extend_from_slice(&leaf);
+            for sibling in &siblings {
+                words.extend_from_slice(sibling);
+            }
+            words.extend_from_slice(&node);
+            tamper(&mut words);
+            let program = vec![
+                inst(Opcode::VerifyMerkle, 1, 0, 0, 256),
+                inst(Opcode::Halt, 0, 0, 0, 0),
+            ];
+            let mut vm = Vm::new(4096);
+            for (i, w) in words.iter().enumerate() {
+                vm.memory[256 + 8 * i..264 + 8 * i].copy_from_slice(&w.to_le_bytes());
+            }
+            assert!(vm.run_receipt(&program).success);
+            vm.registers[1]
+        };
+        assert_eq!(run(&|_| {}), 1, "the honest window verifies");
+        assert_eq!(
+            run(&|w| w[MERKLE_WINDOW_WORDS - 1] ^= 1),
+            0,
+            "last root word"
+        );
+        assert_eq!(
+            run(&|w| w[MERKLE_WINDOW_WORDS - 4] ^= 1),
+            0,
+            "first root word"
+        );
+        assert_eq!(run(&|w| w[5 + 4 * 31 + 2] ^= 1), 0, "a sibling word");
+        assert_eq!(run(&|w| w[1] ^= 1), 0, "a leaf word");
+        assert_eq!(run(&|w| w[0] ^= 1), 0, "the key");
     }
 
     /// (security audit) when the program terminates on an
@@ -2357,52 +1841,40 @@ mod tests {
 
     /// Lock Poseidon MDS and RC constants.
     /// If someone changes these in bud-vm, this test fails.
-    /// Wallet-core has its own lock test - both must match.
     #[test]
     fn poseidon_mds_rc_lock() {
-        // MDS circulant matrix first row must be [7,1,3,8,8,3,4,9]
+        // MDS circulant matrix first row of the width-12 instance.
         assert_eq!(
             POSEIDON_MDS[0],
-            [7, 1, 3, 8, 8, 3, 4, 9],
+            [1, 1, 2, 1, 8, 9, 10, 7, 5, 9, 4, 10],
             "MDS row 0 mismatch"
         );
         assert_eq!(
-            POSEIDON_MDS[7],
-            [1, 3, 8, 8, 3, 4, 9, 7],
-            "MDS row 7 mismatch"
+            POSEIDON_MDS[11],
+            [1, 2, 1, 8, 9, 10, 7, 5, 9, 4, 10, 1],
+            "MDS row 11 mismatch"
         );
-        // RC round 0 first two elements must match Plonky3 Poseidon1 Goldilocks
-        assert_eq!(POSEIDON_RC[0][0], 0xdd5743e7f2a5a5d9, "RC[0][0] mismatch");
-        assert_eq!(POSEIDON_RC[0][1], 0xcb3a864e58ada44b, "RC[0][1] mismatch");
+        assert_eq!(
+            POSEIDON_RC_FULL[0][0], 0x13dc_f33a_ba21_4f46,
+            "RC[0][0] mismatch"
+        );
     }
 
     /// The whole table is bound to a single constant.
     ///
-    /// The lock above pinned **two** of the 240 round constants. The remaining 238
-    /// could be changed silently: changing a constant changes the permutation,
-    /// and changing the permutation changes what the commitments hide and what
-    /// they bind - and no test would see it.
-    ///
-    /// A spot check is exactly the kind of check that misses this class: a lock that
-    /// always passes (because it leaves everything outside the sample free) is worse
-    /// than no lock, because it reads as though a lock exists.
-    ///
-    /// The fingerprint is computed with FNV-1a 64. It is not a cryptographic digest and
-    /// does not need to be: what is defended here is not secrecy but
-    /// **sensitivity to change**. If a single bit of a constant changes the value shifts.
-    /// Adding a hash library would mean a new dependency living in the same tree as the
-    /// table it locks.
-    ///
+    /// A spot check misses every constant it does not sample, and a changed
+    /// constant is a changed permutation. The fingerprint is FNV-1a 64: it does
+    /// not have to be cryptographic, it has to move when a single bit moves.
     /// When the value changes the thing to do is not to update it but to find
-    /// out **what changed**.
+    /// out what changed.
     #[test]
     fn the_whole_constant_table_is_locked() {
-        const fn fnv1a64(vals: &[[u64; 8]]) -> u64 {
+        const fn fnv1a64(vals: &[[u64; 12]]) -> u64 {
             let mut h: u64 = 0xcbf2_9ce4_8422_2325;
             let mut r = 0;
             while r < vals.len() {
                 let mut c = 0;
-                while c < 8 {
+                while c < 12 {
                     let bytes = vals[r][c].to_le_bytes();
                     let mut b = 0;
                     while b < 8 {
@@ -2419,45 +1891,22 @@ mod tests {
 
         assert_eq!(
             fnv1a64(&POSEIDON_RC_FULL),
-            0x5abc_6908_02c0_0f4a,
-            "the 30-round constant table changed; 238 of these 240 values were \
-             previously unchecked. Find what moved before touching this number"
+            0xd3fc_7a39_5e21_481c,
+            "the 30-round constant table changed; find what moved before touching this number"
         );
         assert_eq!(
             fnv1a64(&POSEIDON_MDS),
-            0x7fb2_9bd1_52c1_ff25,
-            "the MDS matrix changed; row 0 and row 7 alone did not cover it"
+            0x99be_3c65_3797_0be5,
+            "the MDS matrix changed"
         );
-        // Two edges holding the ends: together with the fingerprint they hold both the
-        // length and the bound of the table.
-        assert_eq!(POSEIDON_RC_FULL[0][0], 0xdd57_43e7_f2a5_a5d9);
-        assert_eq!(POSEIDON_RC_FULL[29][7], 0x323d_9533_2b14_5fd6);
+        assert_eq!(POSEIDON_RC_FULL[0][0], 0x13dc_f33a_ba21_4f46);
+        assert_eq!(POSEIDON_RC_FULL[29][11], 0x23c7_426a_f725_a6a0);
     }
 }
 
 #[cfg(test)]
 mod poseidon_parameter_tests {
     use super::*;
-
-    /// The claim in `POSEIDON_RC` is that it is a *truncation* of a safe set,
-    /// not an ad-hoc design. That is only checkable if the safe set is here,
-    /// so check it.
-    #[test]
-    fn four_round_set_is_a_prefix_of_full() {
-        assert_eq!(
-            POSEIDON_RC.len(),
-            4,
-            "the historical prefix stays four rounds"
-        );
-        for (r, row) in POSEIDON_RC.iter().enumerate() {
-            assert_eq!(
-                row, &POSEIDON_RC_FULL[r],
-                "round {r} of the in-use constants diverges from the Plonky3 \
-                 Goldilocks width-8 set; the truncation claim in the docs is \
-                 no longer true"
-            );
-        }
-    }
 
     /// The round schedule must add up to the constants that are stored.
     #[test]
@@ -2472,16 +1921,16 @@ mod poseidon_parameter_tests {
             0,
             "R_F must be even (split in half)"
         );
+        assert_eq!(POSEIDON_WIDTH, 12);
     }
 
     /// The partial-round count is derived, not chosen. Recompute the bound.
     #[test]
     fn partial_round_count_matches_the_interpolation_bound() {
-        // R_interp >= ceil(64 / log2(7)) + ceil(log_7(8)) - 5
+        // R_interp >= ceil(64 / log2(7)) + ceil(log_7(12)) - 5
         let alpha = POSEIDON_ALPHA as f64;
-        let interp = (64.0 / alpha.log2()).ceil() + (8f64.ln() / alpha.ln()).ceil() - 5.0;
+        let interp = (64.0 / alpha.log2()).ceil() + (12f64.ln() / alpha.ln()).ceil() - 5.0;
         assert_eq!(interp as usize, 20, "interpolation bound should be 20");
-        // +7.5% security margin, rounded up.
         let with_margin = (interp * 1.075).ceil() as usize;
         assert_eq!(
             with_margin, POSEIDON_PARTIAL_ROUNDS,
@@ -2506,135 +1955,48 @@ mod poseidon_parameter_tests {
         );
     }
 
-    /// The VM's hash *is* the full permutation now.
-    ///
-    /// Pins that the 30-round reference and
-    /// the 4-round permutation the VM ran were different functions, so the
-    /// derived parameters could not quietly become decoration. They are the
-    /// same function today because the VM was moved onto them, and the AIR
-    /// moved with it.
-    ///
-    /// What it guards now is the reverse: if `poseidon4_hash_state` is ever
-    /// pointed back at a truncated schedule, this fails.
+    /// The VM's hash is the full permutation, lane 0 of it.
     #[test]
     fn vm_hash_is_the_full_permutation() {
         for a in [0u64, 1, 2, 12345, GOLDILOCKS_P - 1] {
             for b in [0u64, 7, 999, GOLDILOCKS_P - 2] {
-                let state = [a, b, 0, 0, 0, 0, 0, 0];
-                assert_eq!(
-                    poseidon4_hash_state(state),
-                    poseidon_full_hash_state(state),
-                    "the VM must compute the 30-round permutation the AIR \
-                     constrains; a mismatch means proofs attest to a different \
-                     function than the VM ran"
-                );
+                let mut state = [0u64; POSEIDON_WIDTH];
+                state[0] = a;
+                state[1] = b;
+                assert_eq!(poseidon4_hash_state(state), poseidon_full_state(state)[0]);
+                assert_eq!(poseidon4_hash(a, b), poseidon4_hash_state(state));
             }
         }
-    }
-
-    /// The truncated schedule is still a different function, which is what
-    /// made moving off it worth doing.
-    #[test]
-    fn truncated_schedule_differs_from_the_full_one() {
-        const P: u64 = GOLDILOCKS_P;
-        // Reproduce the old four-round behaviour locally rather than keeping a
-        // second implementation in the crate.
-        let truncated = |mut s: [u64; 8]| -> u64 {
-            let sbox = |x: u64| -> u64 {
-                let x2 = ((x as u128 * x as u128) % P as u128) as u64;
-                let x4 = ((x2 as u128 * x2 as u128) % P as u128) as u64;
-                (((x4 as u128 * x2 as u128) % P as u128 * x as u128) % P as u128) as u64
-            };
-            for rc in POSEIDON_RC.iter() {
-                for i in 0..8 {
-                    s[i] = ((s[i] as u128 + rc[i] as u128) % P as u128) as u64;
-                }
-                let sb: Vec<u64> = s.iter().map(|x| sbox(*x)).collect();
-                let mut next = [0u64; 8];
-                for i in 0..8 {
-                    let mut sum: u128 = 0;
-                    for j in 0..8 {
-                        sum = (sum + POSEIDON_MDS[i][j] as u128 * sb[j] as u128) % P as u128;
-                    }
-                    next[i] = sum as u64;
-                }
-                s = next;
-            }
-            s[0]
-        };
-
-        let mut differing = 0;
-        for a in [0u64, 1, 2, 12345, GOLDILOCKS_P - 1] {
-            for b in [0u64, 7, 999, GOLDILOCKS_P - 2] {
-                let state = [a, b, 0, 0, 0, 0, 0, 0];
-                if truncated(state) != poseidon_full_hash_state(state) {
-                    differing += 1;
-                }
-            }
-        }
-        assert_eq!(
-            differing, 20,
-            "every sampled input must separate the two schedules; if they \
-             agreed, lengthening the permutation would have changed nothing"
-        );
     }
 
     /// The full permutation must be deterministic and stay canonical.
     #[test]
     fn full_permutation_is_deterministic_and_canonical() {
-        let state = [1u64, 2, 3, 4, 5, 6, 7, 8];
+        let mut state = [0u64; POSEIDON_WIDTH];
+        for (i, lane) in state.iter_mut().enumerate().take(8) {
+            *lane = 1 + i as u64;
+        }
         let a = poseidon_full_hash_state(state);
-        let b = poseidon_full_hash_state(state);
-        assert_eq!(a, b);
+        assert_eq!(a, poseidon_full_hash_state(state));
         assert!(a < GOLDILOCKS_P);
-        // A one-bit change must not leave the output unchanged.
         let mut other = state;
         other[7] ^= 1;
         assert_ne!(a, poseidon_full_hash_state(other));
     }
 
-    /// The VM must keep computing what the AIR constrains. Four rounds is the
-    /// number the AIR enforces, so the VM's hash must stay at four until the
-    /// AIR is rebuilt - swapping only one side is a soundness break.
+    /// The VM must keep computing what the AIR constrains.
     #[test]
     fn vm_hash_still_matches_the_air_round_count() {
-        assert_eq!(
-            POSEIDON_ROUNDS_IN_USE,
-            POSEIDON_RC_FULL.len(),
-            "the in-use round count and the in-use constants must agree"
-        );
+        assert_eq!(POSEIDON_ROUNDS_IN_USE, POSEIDON_RC_FULL.len());
         assert_eq!(
             POSEIDON_ROUNDS_IN_USE,
             POSEIDON_FULL_ROUNDS + POSEIDON_PARTIAL_ROUNDS,
-            "the VM and the AIR both run the full 30-round schedule now; if \
-             one is cut back the other must be cut back in the same change, \
-             or the proof attests to a different function than the VM ran"
+            "the VM and the AIR both run the full 30-round schedule; if one is cut \
+             back the other must be cut back in the same change"
         );
     }
 
-    /// Degree is the reason the truncated version is unsound; keep the number
-    /// in the tree rather than only in prose.
-    #[test]
-    fn truncated_permutation_degree_is_far_below_the_field() {
-        // The truncated permutation's degree is what made it unsound; keep
-        // the number in the tree next to the schedule that replaced it.
-        let truncated = POSEIDON_ALPHA.pow(4);
-        assert_eq!(truncated, 2401);
-        assert!(
-            truncated < 1u64 << 32,
-            "2401 is far below the field size - interpolable in practice, \
-             which is why four rounds was not enough"
-        );
-        // Eight full rounds alone already exceed it by orders of magnitude,
-        // and the 22 partial rounds continue to raise it one lane at a time.
-        let full_only = POSEIDON_ALPHA.pow(POSEIDON_FULL_ROUNDS as u32);
-        assert!(
-            full_only > truncated * 1000,
-            "the full-round half alone must dwarf the truncated degree"
-        );
-    }
-
-    /// P16-F04: the three hash uses share one function with zero capacity.
+    /// The three hash uses share one function with zero capacity.
     /// This test records the overlap so nobody reads the nullifier constant
     /// as domain separation.
     #[test]
@@ -2648,44 +2010,17 @@ mod poseidon_parameter_tests {
         );
     }
 
-    /// P16-F02: the one-round Merkle node hash is invertible in its right
-    /// input (`x^7` is a bijection), so the last sibling of a walk can be
-    /// solved for any target root.
+    /// The node function is four lanes wide: a node does not collapse to one
+    /// element, and the two children are not interchangeable.
     #[test]
-    fn merkle_round_last_sibling_is_solvable() {
-        const P: u128 = 0xFFFF_FFFF_0000_0001;
-        const RC0: u128 = 0xdd57_43e7_f2a5_a5d9;
-        const RC1: u128 = 0xcb3a_864e_58ad_a44b;
-        // 7^-1 modulo P - 1 by the extended Euclid algorithm.
-        let m = (P - 1) as i128;
-        let (mut r0, mut r1) = (m, 7i128);
-        let (mut t0, mut t1) = (0i128, 1i128);
-        while r1 != 0 {
-            let q = r0 / r1;
-            (r0, r1) = (r1, r0 - q * r1);
-            (t0, t1) = (t1, t0 - q * t1);
-        }
-        assert_eq!(r0, 1);
-        let mut e = t0.rem_euclid(m) as u128;
-        let pow7 = |x: u128| -> u128 {
-            let x2 = x * x % P;
-            let x4 = x2 * x2 % P;
-            x4 * x2 % P * x % P
-        };
-        let leaf = 123_456_789u64;
-        let target = 42u128;
-        let left = 7 * pow7((leaf as u128 + RC0) % P) % P;
-        let want = (target + P - left) % P;
-        let mut root = 1u128;
-        let mut base = want;
-        while e > 0 {
-            if e & 1 == 1 {
-                root = root * base % P;
-            }
-            base = base * base % P;
-            e >>= 1;
-        }
-        let sibling = ((root + P - RC1) % P) as u64;
-        assert_eq!(merkle_poseidon_round(leaf, sibling), target as u64);
+    fn the_merkle_node_is_256_bits_and_ordered() {
+        let (a, b) = ([1u64, 2, 3, 4], [5u64, 6, 7, 8]);
+        let node = merkle_node(a, b);
+        assert_ne!(node, merkle_node(b, a));
+        let distinct = node.iter().collect::<std::collections::BTreeSet<_>>().len();
+        assert_eq!(
+            distinct, 4,
+            "the four lanes of a node are four different elements"
+        );
     }
 }

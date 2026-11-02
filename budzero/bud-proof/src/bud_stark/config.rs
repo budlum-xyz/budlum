@@ -58,10 +58,10 @@ pub trait StarkGenericConfig: Clone {
     /// public values. It does not carry the FRI parameters, and those are what
     /// decide how much the proof is worth: `num_queries` and `log_blowup` set
     /// the soundness error, and the proof-of-work bits set the grinding cost.
-    /// Measured on the current configuration, `log_blowup = 3`,
-    /// `num_queries = 100` and 16 grinding bits are roughly 316 bits of
-    /// security; `num_queries = 1`, `log_blowup = 1` and no grinding is one
-    /// bit, and produces a proof of the same shape.
+    /// `num_queries = 1`, `log_blowup = 1` and no grinding is one bit of security and
+    /// produces a proof of the same shape as the real configuration. What the
+    /// current set is worth is computed by `stark-soundness` and written to
+    /// `docs/pq/MEASUREMENTS.md`: at least 128 bits provable, without assumption.
     ///
     /// Least Authority's audit of Plonky3 found this exact class: a challenger
     /// that did not absorb the FRI config or the polynomial degree let a

@@ -170,6 +170,36 @@ impl AiRegistry {
         }
     }
 
+    #[must_use]
+    pub fn model_count(&self) -> usize {
+        self.models.len()
+    }
+
+    #[must_use]
+    pub fn request_count(&self) -> usize {
+        self.requests.len()
+    }
+
+    #[must_use]
+    pub fn result_count(&self) -> usize {
+        self.results.values().map(Vec::len).sum()
+    }
+
+    #[must_use]
+    pub fn outcome_count(&self) -> usize {
+        self.outcomes.len()
+    }
+
+    #[must_use]
+    pub fn verifier_stake_count(&self) -> usize {
+        self.verifier_stakes.len()
+    }
+
+    #[must_use]
+    pub fn callback_event_count(&self) -> usize {
+        self.callback_queue.values().map(Vec::len).sum()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.models.is_empty()
             && self.requests.is_empty()
@@ -192,7 +222,7 @@ impl AiRegistry {
 
     pub fn register_model(&mut self, spec: AiModelSpec) -> Result<AiModelId, String> {
         spec.validate()?;
-        // F-04 / F-07: a proof-required model cannot be satisfied while the
+        // A proof-required model cannot be satisfied while the
         // production verifier is not live. Refuse registration rather than
         // accept a model whose results will only ever fail-closed.
         if spec.require_execution_proof && !crate::ai::FULL_AI_STARK_VERIFICATION_LIVE {
@@ -1998,8 +2028,8 @@ impl AiRegistry {
     }
 
     /// The ranking in fixed-point permyriad scores (1/10_000 of a unit
-    /// trust), ordered as `agents_by_trust_score` orders. BLG-0201
-    /// (P10-F11): the actor and RPC boundary carries this, not the raw
+    /// trust), ordered as `agents_by_trust_score` orders.
+    /// The actor and RPC boundary carries this, not the raw
     /// `f64` - a float crossing process boundaries is the Z8 rule, and
     /// quantizing once, here, keeps every consumer's ordering identical
     /// without re-deriving a sort key from a float.

@@ -1,3 +1,4 @@
+//! WIRING: unwired - this verifier surface is reached through the prover pipeline tests; the production call sites land with the verifier wiring.
 //! See [`crate::prover`] for an overview of the protocol and a more detailed soundness analysis.
 //!
 //! WIRING: unwired - reached through the `verify` entry points re-exported by
@@ -279,7 +280,7 @@ where
 /// With an aux trace the local row must have the expected width. The next row
 /// must have it when the AIR reads next rows, and must be absent otherwise:
 /// `verify_constraints` feeds the next row to the AIR, so an opening the
-/// commitment round never asked for must not be accepted (P15-F05).
+/// commitment round never asked for must not be accepted.
 fn aux_openings_match<T>(
     has_aux_trace: bool,
     main_next: bool,
@@ -397,7 +398,7 @@ where
     }
 
     let has_aux_trace = commitments.aux_trace.is_some();
-    // P15-F01: the proof must not choose to run without the aux trace. An AIR
+    // The proof must not choose to run without the aux trace. An AIR
     // whose constraints depend on it (BudAir: register, memory and program
     // LogUps) is checked in full or not at all. Only a proof that already
     // lacks the aux commitment pays for the extra symbolic evaluation.
