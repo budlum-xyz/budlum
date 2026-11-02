@@ -45,6 +45,17 @@ const MAX_PAGE: usize = 100;
 const PUBLIC_NODE_CALLS_PER_MINUTE: usize = 120;
 const PUBLIC_NODE_CONCURRENCY: usize = 8;
 const CLIENT_REQUESTS_PER_MINUTE: usize = 60;
+/// A single client may spend at most this share of the shared node budget.
+///
+/// The shared budget alone bounded total node work without bounding any one
+/// caller's part of it: two client addresses at the documented ceiling of 60
+/// requests per minute each spent the whole 120-call budget, and every other
+/// caller got `429 public node budget exhausted` for as long as the two kept
+/// going - at the sanctioned rate, with no account, no privilege and no
+/// oversized request, against a service published on the open internet. An
+/// eighth of the budget per client leaves room for eight callers at their own
+/// ceiling, and the sum of their ceilings (8 x 15) is exactly the shared one.
+const CLIENT_NODE_CALLS_PER_MINUTE: usize = PUBLIC_NODE_CALLS_PER_MINUTE / 8;
 const MAX_CLIENTS: usize = 10_000;
 const RATE_WINDOW_SECS: u64 = 60;
 /// At most 300 follower RPCs/minute, independently of the public budget.
@@ -102,6 +113,8 @@ impl RateWindow {
 #[derive(Default)]
 struct ClientRates {
     clients: BTreeMap<IpAddr, RateWindow>,
+    /// One client's own share of the shared node budget.
+    node_calls: BTreeMap<IpAddr, RateWindow>,
 }
 
 impl ClientRates {
@@ -119,6 +132,28 @@ impl ClientRates {
             .entry(ip)
             .or_default()
             .take(now, CLIENT_REQUESTS_PER_MINUTE)
+    }
+
+    /// Charge one node-backed request to the caller's own share of the node
+    /// budget.
+    ///
+    /// The share is what keeps a caller inside the *shared* budget from being
+    /// able to spend all of it: the per-client request limit alone permitted
+    /// exactly two callers to consume every node call the service makes.
+    fn take_node(&mut self, ip: IpAddr, now: u64) -> bool {
+        if !self.node_calls.contains_key(&ip) && self.node_calls.len() >= MAX_CLIENTS {
+            self.node_calls.retain(|_, window| {
+                window.expire(now);
+                !window.requests.is_empty()
+            });
+            if self.node_calls.len() >= MAX_CLIENTS {
+                return false;
+            }
+        }
+        self.node_calls
+            .entry(ip)
+            .or_default()
+            .take(now, CLIENT_NODE_CALLS_PER_MINUTE)
     }
 }
 
@@ -472,7 +507,17 @@ fn public_error(error: PublicCallError) -> Response<Full<Bytes>> {
             StatusCode::SERVICE_UNAVAILABLE,
             "public node requests are busy".to_string(),
         ),
-        PublicCallError::Node(message) => (StatusCode::BAD_GATEWAY, message),
+        PublicCallError::Node(message) => {
+            // The upstream text carries the node's URL, host, port and its own
+            // diagnostics, and this body is served to anonymous callers under
+            // `Access-Control-Allow-Origin: *`. It goes to the service log; the
+            // caller gets the generic object the API document describes.
+            eprintln!("budlum-indexer: public node call failed: {message}");
+            (
+                StatusCode::BAD_GATEWAY,
+                "the node could not answer this request".to_string(),
+            )
+        }
     };
     json_response(status, &serde_json::json!({"error": message}))
 }
@@ -486,8 +531,46 @@ async fn from_node(node: &Node, method: &str, params: serde_json::Value) -> Resp
     }
 }
 
-async fn route(node: &Node, index: &Index, path: &str, query: &str) -> Response<Full<Bytes>> {
+/// Whether this path answers from the node rather than from the index, and so
+/// spends the shared node budget.
+fn node_backed(parts: &[&str]) -> bool {
+    matches!(
+        parts,
+        ["v1", "status"]
+            | ["v1", "domains"]
+            | ["v1", "domains", _]
+            | ["v1", "external-domains"]
+            | ["v1", "global-headers", _]
+            | ["v1", "bns", _]
+            | ["v1", "manifests", _]
+    )
+}
+
+async fn route(
+    node: &Node,
+    index: &Index,
+    clients: &PublicClients,
+    client: Option<IpAddr>,
+    path: &str,
+    query: &str,
+) -> Response<Full<Bytes>> {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    // Charged before the node is touched: a caller at its own share gets the
+    // same 429 the shared budget used to hand every other caller, and the
+    // index-backed routes (which cost the node nothing) keep answering.
+    if node_backed(parts.as_slice()) {
+        let allowed = match client {
+            Some(ip) => clients
+                .rates
+                .lock()
+                .map(|mut rates| rates.take_node(ip, clients.started.elapsed().as_secs()))
+                .unwrap_or(false),
+            None => false,
+        };
+        if !allowed {
+            return public_error(PublicCallError::Limited);
+        }
+    }
     match parts.as_slice() {
         ["health"] => json_response(StatusCode::OK, &serde_json::json!({"ok": true})),
         ["v1", "status"] => {
@@ -566,7 +649,11 @@ async fn handle(
     }
     let path = request.uri().path().to_string();
     let query = request.uri().query().unwrap_or("").to_string();
-    if path != "/health" {
+    // `/health` stays exempt from both limits: it is the liveness probe, and a
+    // probe that a busy caller can rate-limit is not a probe.
+    let client = if path == "/health" {
+        None
+    } else {
         let ip = match clients.identity.client_ip(peer.ip(), request.headers()) {
             Ok(ip) => ip,
             Err(message) => {
@@ -587,8 +674,9 @@ async fn handle(
                 &serde_json::json!({"error": "client rate limit reached"}),
             ));
         }
-    }
-    Ok(route(&node, &index, &path, &query).await)
+        Some(ip)
+    };
+    Ok(route(&node, &index, &clients, client, &path, &query).await)
 }
 
 async fn serve(cli: Cli) -> Result<(), String> {
@@ -684,6 +772,74 @@ mod tests {
             "producer": producer,
             "transactions": txs,
         })
+    }
+
+    /// One caller cannot spend the whole shared node budget.
+    ///
+    /// Two client addresses at their own request ceiling used to consume every
+    /// node call the service makes, and every other caller got a 429 for as
+    /// long as they kept going - at the sanctioned rate, anonymously, on a
+    /// service published to the internet.
+    #[test]
+    fn a_caller_cannot_spend_the_whole_shared_node_budget() {
+        assert_eq!(
+            CLIENT_NODE_CALLS_PER_MINUTE * 8,
+            PUBLIC_NODE_CALLS_PER_MINUTE,
+            "eight callers at their own ceiling fill the shared budget exactly"
+        );
+        let mut rates = ClientRates::default();
+        let first: IpAddr = "203.0.113.7".parse().expect("ip");
+        let second: IpAddr = "203.0.113.8".parse().expect("ip");
+        // Two callers at their request ceiling, all of it node-backed.
+        for _ in 0..CLIENT_REQUESTS_PER_MINUTE {
+            let _ = rates.take(first, 0);
+            let _ = rates.take(second, 0);
+        }
+        let spent: usize = (0..CLIENT_REQUESTS_PER_MINUTE)
+            .filter(|_| rates.take_node(first, 0))
+            .count()
+            + (0..CLIENT_REQUESTS_PER_MINUTE)
+                .filter(|_| rates.take_node(second, 0))
+                .count();
+        assert_eq!(spent, 2 * CLIENT_NODE_CALLS_PER_MINUTE);
+        assert!(
+            spent < PUBLIC_NODE_CALLS_PER_MINUTE,
+            "two callers cannot exhaust the shared budget"
+        );
+        // A third caller still reaches the node.
+        let third: IpAddr = "203.0.113.9".parse().expect("ip");
+        assert!(
+            rates.take_node(third, 0),
+            "the third caller's own share is intact"
+        );
+        // The window slides.
+        assert!(rates.take_node(first, RATE_WINDOW_SECS));
+    }
+
+    /// Only the paths that answer from the node spend the node budget.
+    #[test]
+    fn the_node_budget_is_charged_only_to_node_backed_paths() {
+        for parts in [
+            vec!["v1", "status"],
+            vec!["v1", "domains"],
+            vec!["v1", "domains", "7"],
+            vec!["v1", "external-domains"],
+            vec!["v1", "global-headers", "12"],
+            vec!["v1", "bns", "alice"],
+            vec!["v1", "manifests", "abc"],
+        ] {
+            assert!(node_backed(&parts), "{parts:?} answers from the node");
+        }
+        for parts in [
+            vec!["health"],
+            vec!["v1", "blocks"],
+            vec!["v1", "blocks", "12"],
+            vec!["v1", "txs", "abc"],
+            vec!["v1", "addresses", "aa", "txs"],
+            vec!["v1", "producers"],
+        ] {
+            assert!(!node_backed(&parts), "{parts:?} answers from the index");
+        }
     }
 
     #[test]
