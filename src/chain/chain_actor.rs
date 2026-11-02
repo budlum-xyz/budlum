@@ -57,6 +57,7 @@ pub enum ChainCommand {
         oneshot::Sender<Option<crate::storage::merkle_trie::AccountProofBundle>>,
     ),
     AddTransaction(Transaction, oneshot::Sender<Result<(), String>>),
+    AddTransactionBundle(Vec<Transaction>, oneshot::Sender<Result<(), String>>),
     /// Take a transaction back out of the pool; the bundle door rolls a
     /// partially admitted bundle back through this.
     RemoveTransaction(String, oneshot::Sender<Option<Transaction>>),
@@ -615,6 +616,23 @@ impl ChainHandle {
     pub async fn add_transaction(&self, tx: Transaction) -> Result<(), String> {
         let (res_tx, res_rx) = oneshot::channel();
         let _ = self.tx.send(ChainCommand::AddTransaction(tx, res_tx)).await;
+        res_rx
+            .await
+            .unwrap_or_else(|_| Err("Actor dropped".to_string()))
+    }
+
+    /// Admit a bundle's members all or none, in one actor turn.
+    ///
+    /// One turn, not one turn per member: a bundle that is admitted across
+    /// several turns can be interleaved with a block production that takes
+    /// half of it, and the all-or-none promise would then be made by the RPC
+    /// layer rather than by the pool.
+    pub async fn add_transaction_bundle(&self, txs: Vec<Transaction>) -> Result<(), String> {
+        let (res_tx, res_rx) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(ChainCommand::AddTransactionBundle(txs, res_tx))
+            .await;
         res_rx
             .await
             .unwrap_or_else(|_| Err("Actor dropped".to_string()))
@@ -2533,6 +2551,9 @@ impl ChainActor {
                             .add_transaction(tx_obj)
                             .map_err(|e| e.to_string()),
                     );
+                }
+                ChainCommand::AddTransactionBundle(txs, res_tx) => {
+                    let _ = res_tx.send(self.blockchain.add_transaction_bundle(txs));
                 }
                 ChainCommand::RemoveTransaction(tx_hash, res_tx) => {
                     let _ = res_tx.send(self.blockchain.remove_transaction(&tx_hash));

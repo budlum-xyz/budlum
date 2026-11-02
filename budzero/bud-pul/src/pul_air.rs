@@ -11,12 +11,14 @@
 //! * [`prove_batch`] / [`verify_batch`]: the chip proof of those
 //!   permutations together with the statements it was made for.
 //!
-//! What this does not yet do, and so what no claim may rest on: the
-//! chip AIR exposes no public inputs, so `verify_batch` recomputes the sponge
-//! inputs from the statements and checks the proof, but the proof itself is
-//! not bound to those inputs inside the AIR; and the ML-DSA verification
-//! is not part of the trace. Both are the remaining
-//! work.
+//! What this does not yet do, and so what no claim may rest on: the chip AIR
+//! exposes no public inputs, so nothing inside the proof binds the sponge
+//! inputs to the statements, and the ML-DSA verification is not part of the
+//! trace. Because a chip proof of one batch of permutations therefore verifies
+//! beside *any* statement list, [`verify_batch`] refuses every batch instead
+//! of accepting one it cannot bind - a verifier that says yes to whatever it is
+//! handed is worse than one that says nothing. Both gaps are the remaining
+//! work, and the refusal is lifted with the binding.
 //! WIRING: unwired - the AIR-shape helpers here are the proof-side surface a later caller wires up; no production module calls them yet (the prover paths consume the concrete columns directly until that wiring lands).
 
 use crate::keccak_chip::{prove_keccak_f, verify_keccak_f, KeccakChipError};
@@ -172,17 +174,30 @@ pub fn prove_batch(statements: Vec<PulStatement>) -> Result<PulBatchProof, Kecca
     Ok(PulBatchProof { statements, keccak })
 }
 
-/// Verify a batch proof (see the module note on what is not yet bound).
+/// Verify a batch proof.
 ///
 /// # Errors
 ///
-/// An empty batch or a chip proof that does not verify.
+/// An empty batch, a chip proof that does not verify, or - always, until the
+/// statement binding exists - the unbound-proof refusal.
+///
+/// # Why it refuses
+///
+/// The chip AIR exposes no public inputs and the trace is the whole proof, so
+/// the verification says only "some batch of permutations was run". It does not
+/// say which, and nothing in it is tied to `proof.statements`: a valid chip
+/// proof produced for unrelated inputs, or replayed from an earlier batch,
+/// verifies beside any statement list. The previous version verified the chip
+/// proof and returned `Ok`, which certified statements that were never proven -
+/// on a stamp-verification path that is exactly a forged PUL stamp. Fail-closed
+/// until the AIR binds the sponge inputs of the batch.
 /// exposed for: the proof/VM crate's test-and-tooling surface - production readers land with the prover wiring.
 pub fn verify_batch(proof: &PulBatchProof) -> Result<(), KeccakChipError> {
     if proof.statements.is_empty() {
         return Err(KeccakChipError::Empty);
     }
-    verify_keccak_f(&proof.keccak)
+    verify_keccak_f(&proof.keccak)?;
+    Err(KeccakChipError::UnboundProof)
 }
 
 #[cfg(test)]
@@ -198,19 +213,51 @@ mod tests {
         assert_eq!(ours, theirs);
     }
 
+    fn statement(seed: u8) -> PulStatement {
+        PulStatement {
+            txid: [seed; 32],
+            from_address: [seed.wrapping_add(1); 32],
+            suite_id: u16::from(seed),
+        }
+    }
+
+    /// The prover produces the chip proof of the batch's sponge; the verifier
+    /// refuses it, because nothing binds that proof to these statements.
+    ///
+    /// The previous test asserted `verify_batch(&proof).is_ok()` and so locked
+    /// the gap in: it is the only reason nothing caught a verifier that accepted
+    /// arbitrary statement lists.
     #[test]
-    fn a_batch_proves_and_verifies() {
-        let statement = PulStatement {
-            txid: [1; 32],
-            from_address: [2; 32],
-            suite_id: 1,
-        };
+    fn a_batch_proves_but_the_unbound_proof_is_refused() {
+        let statement = statement(1);
         assert_eq!(
             absorb_states(&encode_batch(std::slice::from_ref(&statement))).len(),
             1
         );
         let proof = prove_batch(vec![statement]).expect("proves");
-        assert!(verify_batch(&proof).is_ok());
+        assert_eq!(verify_batch(&proof), Err(KeccakChipError::UnboundProof));
         assert!(prove_batch(Vec::new()).is_err());
+    }
+
+    /// A chip proof is not a statement: the same proof verifies beside any
+    /// statement list, and it is refused beside every one of them.
+    #[test]
+    fn a_proof_from_another_batch_does_not_verify_these_statements() {
+        let honest = prove_batch(vec![statement(1)]).expect("proves");
+        let replayed = PulBatchProof {
+            statements: vec![statement(9)],
+            keccak: honest.keccak.clone(),
+        };
+        assert_eq!(verify_batch(&replayed), Err(KeccakChipError::UnboundProof));
+
+        let honest_again = PulBatchProof {
+            statements: vec![statement(1)],
+            keccak: honest.keccak,
+        };
+        assert_eq!(
+            verify_batch(&honest_again),
+            Err(KeccakChipError::UnboundProof),
+            "the honest batch is refused too: the refusal is not a statement check"
+        );
     }
 }
