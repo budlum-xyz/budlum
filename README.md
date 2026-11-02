@@ -343,8 +343,14 @@ A minimal CLI client ships in the same tree:
 ```bash
 cargo run --bin bud -- query balance <address>
 cargo run --bin bud -- query block latest
-BUD_PRIV_KEY=<hex-seed> cargo run --bin bud -- tx send --to <address> --amount <n>   # or --priv-key-file <path>
+BUD_PRIV_KEY=<hex-seed> cargo run --bin bud -- --signing-chain-id 45261 tx send --to <address> --amount <n>   # or --priv-key-file <path>
 ```
+
+Every command that signs takes `--signing-chain-id` (`45260` mainnet, `45261` testnet,
+`45262` devnet). It is the only source of the replay domain the signature carries: the
+node's `bud_chainId` answer is compared against it and a mismatch is refused before a
+signature is spent, because a seed controls the same address on every network and a node
+that chose the id would be choosing where your transaction is valid.
 
 ---
 
