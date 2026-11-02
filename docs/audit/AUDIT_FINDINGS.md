@@ -905,6 +905,58 @@ trusting the previous green: three of them were red, and each named a real loose
   `no-idle-code`, `dead-public-api-is-ratcheted` and `guards-are-reachable` re-run green over
   the tree.
 
+### AF-31 - three findings from the standing #110 review summary that no thread carried (`security`, `high`)
+
+The Strix summary on #110 lists five "to fix before merging" items. Two of them were inline
+threads and are closed by AF-23 and AF-27. The other three were written in the summary body
+only - no thread, no line anchor - so they were invisible to a thread-by-thread sweep. All
+three are read, fixed and pinned here.
+
+- **HIGH: permissionless domain registration let an attacker claim a canonical external chain
+  id and write a forged external state root (`src/settlement/domains.rs`).** `external_roots`
+  is the only trust anchor the bridge, the relayer and `verify_anchored_result` read for an
+  external chain, and the gate that protects it compared the registrant's own
+  `domain_chain_id` with the canonical id of the domain id it registered. Registration is
+  permissionless, so a registrant supplied both sides of that comparison: mainnet genesis
+  seeds only ids 1 to 4, so ids 5 (Polygon), 6 (Arbitrum) and 7 (Optimism) were open to any
+  funded account, which could declare the matching chain id, mine a one-header chain at its
+  own one-bit difficulty floor and have that root read as Polygon's finalized state.
+  **Fix:** `ANCHOR_RECOGNIZED_CHAINS` - the named chains this chain holds an anchor for are
+  the ones a genesis seeds a domain for, and the list is written in code because the registry
+  is permissionless. A domain at an unseeded canonical id is still registrable and still
+  advances; it anchors nothing. Adding a chain is a protocol decision that comes with a
+  genesis domain, and `a_bridge_enabled_genesis_domain_is_an_anchor_recognized_chain`
+  (`src/chain/genesis.rs`) pins the two to each other on all three networks.
+  **Regression test:** `a_chain_no_genesis_seeded_cannot_be_claimed_into_an_anchor` - the
+  attacker's best case (Polygon's id, Polygon's canonical chain id, `bridge_enabled`, one-bit
+  floor) advances the domain and writes no anchor.
+- **MEDIUM: a reorg replacing the block at the active finality checkpoint stopped this node
+  voting at that height (`src/network/node.rs`).** Read and confirmed, and the behaviour is
+  kept on purpose: signing a second, different hash at one height is equivocation, the one
+  fault a validator is slashed for. What was missing was any statement of that, so the two
+  doors are now one named predicate, `prevote_is_due` (the round is above the high-water mark,
+  or it is the *identical* round being retried), carrying the reasoning. Finality is not
+  starved by one silent validator: a quorum needs two thirds, and the validators that did not
+  sign the abandoned hash still can. Liveness resumes at the next checkpoint, because the
+  interval carries the height past the mark.
+  **Regression test:** `a_reorged_checkpoint_is_not_voted_twice_and_the_next_one_is` - the
+  same round retries, a different hash at a signed height is refused, and the next checkpoint
+  opens both the prevote and the precommit mark.
+- **LOW: the two-second reorg window let one peer commission a chain-wide reconstruction every
+  two seconds forever (`src/network/node.rs`).** The floor is what fork healing needs - the
+  devnet's slot time is the reason it is two seconds and not five minutes - so the fix is not
+  a higher floor but a backoff on top of it: every reconstruction that reaches
+  `try_reorg_suffix` and comes back an error doubles the window (2, 4, 8, 16, 32, 64 s), and
+  any other outcome resets it to the floor. A peer can then only spend work at the rate its
+  own failures have bought, while honest fork healing is untouched (the fork it presents is
+  either taken or known to be worse, and neither is an error).
+  **Regression test:** `a_failing_reconstruction_backs_off_and_a_success_clears_it`.
+
+- **Not a repo defect, recorded so it is not mistaken for one:** Strix's install on this
+  workspace is billing-blocked ("this workspace's trial has ended", `issues/97` comment
+  2026-10-26). Approval on the PR cannot be produced from inside the tree; the review request
+  is posted on the head that carries these fixes.
+
 ### AF-29 - the seven dependency-bump PRs are red because `main` is red (`ci`, `medium`)
 
 - **Where:** #113 to #119 (dependabot). Audit of all seven: their own diffs are

@@ -1718,6 +1718,39 @@ mod tests {
         assert!(params.validate(pow.min_confirmations).is_ok());
     }
 
+    /// The anchor-recognition list and the genesis domain set are one decision
+    /// written twice, so they are pinned to each other: a bridge-enabled
+    /// bootstrap domain whose id names an external chain has to be a chain the
+    /// settlement layer recognizes, or its own genesis domain could not anchor
+    /// the root the bridge reads for it. It is also the ratchet in the other
+    /// direction: adding Polygon to the list without shipping its genesis
+    /// domain, or shipping the domain without the list, fails here.
+    #[test]
+    fn a_bridge_enabled_genesis_domain_is_an_anchor_recognized_chain() {
+        for (label, config) in [
+            ("mainnet", mainnet_genesis()),
+            ("testnet", testnet_genesis()),
+            ("devnet", devnet_genesis()),
+        ] {
+            for domain in config
+                .bootstrap_consensus_domains()
+                .expect("bootstrap domains materialize")
+            {
+                let canonical =
+                    crate::core::transaction::ExternalChain::from_domain_id(domain.id).is_some();
+                if !canonical || !domain.bridge_enabled {
+                    continue;
+                }
+                assert!(
+                    crate::settlement::domains::anchor_recognized_chain(domain.id).is_some(),
+                    "{label} seeds bridge-enabled domain {} at a canonical external id that the \
+                     settlement layer refuses to anchor for",
+                    domain.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_mainnet_genesis_params() {
         // Permissionless validators + full $BUD tokenomics.
