@@ -61,7 +61,7 @@ jobs:
         # On nightly 'rustdoc' is NOT a separate component, it is part of the rustc
         # component (rustup: exit 1 with "did you mean 'rust-docs'?", 2026-07-21 CI evidence).
         run: rustup toolchain install nightly-2026-07-19 --profile minimal
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: budlum-core
           # In the two-checkout layout there is no Cargo.toml at the workspace root;
