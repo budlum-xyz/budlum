@@ -38,6 +38,7 @@ use std::process::ExitCode;
 use budlum_core::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use budlum_core::consensus::qc::QcBlob;
 use budlum_core::core::block::BlockHeader;
+use budlum_core::crypto::scheme::SchemeStatusRegistry;
 use budlum_core::light_client::{
     LightClient, LightClientError, TrustedCheckpoint, VerifiedCheckpoint,
 };
@@ -112,6 +113,19 @@ struct Cli {
     /// export, instead of skipping the global header step for it.
     #[arg(long)]
     require_global_headers: bool,
+
+    /// The scheme and suite statuses the chain publishes, so the verifier
+    /// judges a checkpoint by the policy the network actually runs under
+    /// rather than by the policy of a fresh genesis.
+    ///
+    /// JSON, the shape `SchemeStatusRegistry::entries` prints:
+    /// `{ "schemes": [[id, status], ...], "suites": [[id, status], ...] }`.
+    /// Omitted means genesis statuses, which is the right answer only for a
+    /// chain that has never moved a scheme out of its genesis state; a client
+    /// tracking a live chain pins it, exactly as it pins the trust anchor,
+    /// because the export being verified never carries its own policy.
+    #[arg(long)]
+    scheme_registry: Option<PathBuf>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -208,6 +222,34 @@ fn read_bounded(path: &std::path::Path, max: u64) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+/// The `JSON` shape of a pinned scheme-status registry.
+#[derive(Debug, serde::Deserialize)]
+struct SchemeRegistryFile {
+    schemes: Vec<(u16, u8)>,
+    suites: Vec<(u16, u8)>,
+}
+
+/// Parse a pinned registry file.
+///
+/// `SchemeStatusRegistry::from_entries` refuses anything that is not exactly
+/// the scheme and suite tables - a dropped row, an added one, or a status byte
+/// no status uses - so a typo here cannot silently downgrade the policy the
+/// client verifies under. An empty file is refused for the same reason
+/// `--checkpoint-interval 0` is: it would verify every checkpoint under no
+/// policy at all and look green.
+///
+/// # Errors
+///
+/// A message naming what the file is not.
+fn load_scheme_registry(json: &str) -> Result<SchemeStatusRegistry, String> {
+    let file: SchemeRegistryFile =
+        serde_json::from_str(json).map_err(|e| format!("scheme registry is not JSON: {e}"))?;
+    if file.schemes.is_empty() && file.suites.is_empty() {
+        return Err("scheme registry carries no statuses".to_string());
+    }
+    SchemeStatusRegistry::from_entries(&file.schemes, &file.suites)
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
@@ -266,6 +308,29 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The pinned policy is installed before a single checkpoint is judged: a
+    // family the chain disabled must not verify here merely because a fresh
+    // genesis would have allowed it.
+    if let Some(path) = &cli.scheme_registry {
+        let raw = match read_bounded(path, MAX_CHAIN_FILE_BYTES) {
+            Ok(raw) => raw,
+            Err(e) => {
+                eprintln!("cannot read {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        let registry = match std::str::from_utf8(&raw)
+            .map_err(|e| format!("scheme registry is not UTF-8: {e}"))
+            .and_then(load_scheme_registry)
+        {
+            Ok(registry) => registry,
+            Err(e) => {
+                eprintln!("cannot use {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        client = client.with_scheme_registry(registry);
+    }
 
     if let Err(e) = client.verify_header_chain(&export.headers) {
         eprintln!("header chain rejected: {e}");
@@ -371,7 +436,10 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_interval, decode_hash32, ensure_checkpoints_verified, read_bounded};
+    use super::{
+        check_interval, decode_hash32, ensure_checkpoints_verified, load_scheme_registry,
+        read_bounded,
+    };
 
     #[test]
     fn a_state_root_body_must_be_a_32_byte_digest() {
@@ -390,6 +458,41 @@ mod tests {
         assert!(ensure_checkpoints_verified(0, 5, 5).is_err());
         assert!(ensure_checkpoints_verified(0, 5, 9).is_err());
         assert!(ensure_checkpoints_verified(1, 5, 20).is_ok());
+    }
+
+    /// A pinned registry is the chain's policy, so a file that does not name
+    /// exactly the scheme and suite tables is refused instead of repaired.
+    #[test]
+    fn a_pinned_registry_must_be_the_whole_table() {
+        let genesis = budlum_core::crypto::scheme::SchemeStatusRegistry::genesis();
+        let (schemes, suites) = genesis.entries();
+        let as_json = |schemes: &[(u16, u8)], suites: &[(u16, u8)]| {
+            serde_json::json!({ "schemes": schemes, "suites": suites }).to_string()
+        };
+        let json = as_json(&schemes, &suites);
+        assert_eq!(
+            load_scheme_registry(&json).expect("the genesis table round-trips"),
+            genesis
+        );
+
+        let mut short = schemes.clone();
+        short.pop();
+        let json = as_json(&short, &suites);
+        assert!(
+            load_scheme_registry(&json).is_err(),
+            "a table missing a row is refused, not accepted as the policy"
+        );
+
+        let mut bad = schemes.clone();
+        bad[0] = (bad[0].0, 0xfe);
+        let json = as_json(&bad, &suites);
+        assert!(
+            load_scheme_registry(&json).is_err(),
+            "a status byte no status uses is refused"
+        );
+
+        assert!(load_scheme_registry("{\"schemes\":[],\"suites\":[]}").is_err());
+        assert!(load_scheme_registry("not json").is_err());
     }
 
     #[test]
