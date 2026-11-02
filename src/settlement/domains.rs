@@ -877,6 +877,37 @@ fn apply_pending_commitments(
 /// # Errors
 ///
 /// A zero state root, or any refusal of [`accept_commitment`].
+/// The canonical external chains this chain can hold a finalized-root anchor
+/// for: the ones its genesis seeds a consensus domain for.
+///
+/// The list is a protocol decision, and it is written here rather than read
+/// from the registry because the registry is permissionless. `external_roots`
+/// is the only trust anchor the bridge, the relayer and
+/// `verify_anchored_result` read for an external chain, so "which chain is
+/// this domain" may not be a claim a registrant makes: the wire contract
+/// reserves ids 1 to 7 for the named chains, and only the ones a genesis
+/// actually seeds have an owner. An id nobody seeded - Polygon 5, Arbitrum 6
+/// and Optimism 7 on every current network - can be registered by any funded
+/// account, and before this list it could then write that chain's anchor: the
+/// registrant declared the chain id it wanted, mined a header chain at its own
+/// one-bit difficulty floor, and the root the bridge gates read as Polygon's
+/// finalized state was its own. Adding a chain here goes with a genesis domain
+/// for it, which is a protocol upgrade; `a_bridge_enabled_genesis_domain_is_an_anchor_recognized_chain`
+/// keeps the two from drifting apart.
+pub const ANCHOR_RECOGNIZED_CHAINS: [crate::core::transaction::ExternalChain; 4] = [
+    crate::core::transaction::ExternalChain::Ethereum,
+    crate::core::transaction::ExternalChain::Solana,
+    crate::core::transaction::ExternalChain::Bitcoin,
+    crate::core::transaction::ExternalChain::Avalanche,
+];
+
+/// The named external chain `id` may hold an anchor for, if any.
+#[must_use]
+pub fn anchor_recognized_chain(id: u32) -> Option<crate::core::transaction::ExternalChain> {
+    let chain = crate::core::transaction::ExternalChain::from_domain_id(id)?;
+    ANCHOR_RECOGNIZED_CHAINS.contains(&chain).then_some(chain)
+}
+
 pub fn accept_verified_commitment(
     state: &mut AccountState,
     commitment: DomainCommitment,
@@ -908,12 +939,20 @@ pub fn accept_verified_commitment(
     // does not own, which is exactly the value the bridge and relayer gates read
     // as that chain's anchor. A domain may anchor under a claimed id only when
     // it is the domain of the chain that id names.
+    // Two conditions, and both are needed. The chain has to be one this chain
+    // recognizes at all (the list above: an id nobody seeded cannot be claimed
+    // into existence), and the domain that declares it has to declare the
+    // chain's canonical id. The second alone was not a gate: registration is
+    // permissionless, so a registrant supplied both sides of the comparison.
     let may_anchor = match crate::core::transaction::ExternalChain::from_domain_id(domain_id) {
-        Some(chain) => state
-            .settlement
-            .domains
-            .get(domain_id)
-            .is_some_and(|domain| domain.domain_chain_id == chain.canonical_chain_id()),
+        Some(chain) => {
+            anchor_recognized_chain(domain_id).is_some()
+                && state
+                    .settlement
+                    .domains
+                    .get(domain_id)
+                    .is_some_and(|domain| domain.domain_chain_id == chain.canonical_chain_id())
+        }
         None => true,
     };
     let outcome = accept_commitment(state, commitment)?;
@@ -2042,6 +2081,53 @@ mod tests {
             state.external_roots.get(&1).copied(),
             Some(expected),
             "the domain of chain 1 anchors under id 1"
+        );
+    }
+
+    /// Registration is permissionless, so an id the wire contract reserves for
+    /// a named external chain but no genesis seeds is open to anyone: Polygon
+    /// 5, Arbitrum 6, Optimism 7. Taking one of those ids used to be enough to
+    /// become that chain - declare its canonical chain id, mine a header chain
+    /// at the registrant's one-bit difficulty floor - and `external_roots[5]`
+    /// is the value the bridge, the relayer and `verify_anchored_result` read
+    /// as Polygon's finalized state. The domain still advances; it anchors
+    /// nothing.
+    #[test]
+    fn a_chain_no_genesis_seeded_cannot_be_claimed_into_an_anchor() {
+        use crate::core::transaction::ExternalChain;
+        assert!(
+            anchor_recognized_chain(ExternalChain::Polygon.domain_id()).is_none(),
+            "Polygon is not a chain any genesis seeds a domain for"
+        );
+        assert!(anchor_recognized_chain(ExternalChain::Ethereum.domain_id()).is_some());
+
+        let mut state = AccountState::new();
+        let mut impostor = pow(ExternalChain::Polygon.domain_id());
+        // Everything a registrant controls, chosen to satisfy the old check.
+        impostor.domain_chain_id = ExternalChain::Polygon.canonical_chain_id();
+        impostor.bridge_enabled = true;
+        if let Some(params) = impostor.pow_parameters.as_mut() {
+            params.min_difficulty_bits = 1;
+        }
+        state.add_balance(&operator(&impostor), MIN_DOMAIN_OPERATOR_BOND + FEE);
+        execute_settlement_tx(
+            &mut state,
+            &ctx(operator(&impostor)),
+            &SettlementTx::RegisterDomain(Box::new(impostor.clone())),
+        )
+        .expect("registering at an unseeded canonical id is still permissionless");
+
+        let block_one = block(1, &"00".repeat(32), 0x5a);
+        assert_eq!(
+            accept_verified_commitment(&mut state, commitment(&impostor, &block_one, 0))
+                .expect("the commitment still advances the domain"),
+            CommitmentOutcome::Advanced
+        );
+        assert!(
+            !state
+                .external_roots
+                .contains_key(&ExternalChain::Polygon.domain_id()),
+            "a claimed id must not become Polygon's bridge anchor"
         );
     }
 
