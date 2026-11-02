@@ -4941,6 +4941,35 @@ impl Blockchain {
         Ok(())
     }
 
+    /// Admit a bundle's members all or none.
+    ///
+    /// The chain-level refusals run first over every member, then the pool
+    /// admits them as a unit: a member the pool refuses takes the whole bundle
+    /// back out, including the pool evictions and replacements the earlier
+    /// members caused. Persisting the members is the last step, so a restart
+    /// never re-admits a member this node does not hold.
+    pub fn add_transaction_bundle(&mut self, transactions: Vec<Transaction>) -> Result<(), String> {
+        for (index, transaction) in transactions.iter().enumerate() {
+            self.validate_pool_transaction(transaction)
+                .map_err(|e| format!("Invalid transaction at member {index}: {e}"))?;
+        }
+        self.mempool
+            .sync_scheme_registry(&self.state.scheme_registry);
+        self.mempool
+            .add_transaction_bundle(transactions.clone())
+            .map_err(|refusal| format!("Mempool error: {refusal}"))?;
+        if let Some(ref store) = self.storage {
+            for transaction in &transactions {
+                if let Err(e) = store.save_mempool_tx(transaction) {
+                    tracing::error!(
+                        "save_mempool_tx failed (transaction will not survive restart): {e}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Take a transaction back out of the mempool and the pool file.
     ///
     /// A bundle is admitted all or none, and the pool has no batch door: the
