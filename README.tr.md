@@ -312,9 +312,19 @@ Zincir kimliği `45261`, ağ imzası `BDLT`. Özet:
 - Delegasyon: `bud delegate`, bkz. [docs/DELEGATION.md](docs/DELEGATION.md).
 - Düğüm: `budlum-core --config config/testnet.toml`.
 
-Uç noktalar, parametreler ve yerel prova için bkz.
-[docs/TESTNET.md](docs/TESTNET.md); ana ağ öncesi kapılar için
-[docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
+İmza atan her komut, tekrar alanını `--signing-chain-id 45261` ile adlandırır (`45260` ana
+ağ, `45262` devnet). Bu bayrağın varsayılanı yoktur ve düğümün `bud_chainId` yanıtı yalnızca
+onunla karşılaştırılır: bir tohum her ağda aynı adresi kontrol ettiği için zincir kimliğini
+düğüm seçseydi imzanızın hangi ağda geçerli olacağını da düğüm seçmiş olurdu.
+
+**Testnet hazırlık kapısı** - temiz derleme ve yeşil CI, genesis/yapılandırma/düğüm
+başlatmanın uçtan uca çalışması, sayaçları tutarlı yeniden başlatma kalıcılığı, ağ
+katmanının boyut ve hız sınırları, RPC kimlik doğrulaması ve hız sınırlama, uzlaşma ve
+tokenomi, panic çıtası, operatör belgeleri ve sırsız bir geçmiş - kod konumu, testi ve onu
+koşturan CI işiyle birlikte satır satır
+[docs/audit/TESTNET_TRACEABILITY.md](docs/audit/TESTNET_TRACEABILITY.md) dosyasındadır. Uç
+noktalar, parametreler ve yerel prova için [docs/TESTNET.md](docs/TESTNET.md); ana ağ öncesi
+kapılar için [docs/MAINNET_READINESS.md](docs/MAINNET_READINESS.md).
 
 ### Düğüm rolleri
 
