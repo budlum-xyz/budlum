@@ -56,6 +56,9 @@ repository), `external` (a third party has to deliver it).
 | On-chain governance scope documented (what a `Vote` can and cannot change) | `src/core/constitution.rs` plus a document section | agent | code |
 | Incident response runbook | `docs/OPERATIONS.md` | agent | code |
 | Finality votes travel point to point, not only by gossip relay | a vote exchange on the `/sync` protocol plus a devnet with no single hub (AF-18) | agent | open |
+| A light client verifies under the chain's scheme statuses, not genesis ones | `LightClient::with_scheme_registry`; whoever distributes a chain export must pin the registry it names (AF-22) | owner | open |
+| The PUL batch proof binds its statements inside the AIR | public-values constraint in the Keccak chip plus a soundness re-measurement; until then `verify_batch` refuses (AF-24) | agent | open |
+| The public explorer's per-caller node share is sized against real traffic | `CLIENT_NODE_CALLS_PER_MINUTE` = 15 of the shared 120; revisit with the first month of edge logs (AF-25) | owner | open |
 | Operating cost measured per validator profile (server and personal device) | the measurement tables written by `budlum-tools resource-sample` | agent | open |
 
 ## 5. Licence and provenance

@@ -639,7 +639,196 @@ item is `pass` only when a named job is green on that branch.
   durable fix is a point-to-point vote exchange over the `/sync` protocol, which is a
   protocol addition and is tracked in `docs/MAINNET_READINESS.md` rather than being
   half-landed here.
-- **Status:** fix pushed; the devnet has to confirm it.
+- **Status:** confirmed by CI. `Devnet Multi-Node Smoke` is green on `d95f66d`, the
+  tree that carries the fix, and has stayed green since: finality advances and the
+  height the run reported as stuck (8) finalizes. Closed.
+
+## Round 3 - 2026-11-02 (the Strix review threads of `d95f66d`)
+
+Round 3 works through the review threads the Strix Security Review opened on `d95f66d`
+(nine findings on #110, one on #97). Each finding was read in the code before it was
+touched; each fix carries a regression test that fails on the tree before it, and the
+thread is answered with the fixing commit. Nothing was closed as a false positive, and
+no test, gate or lint was weakened.
+
+### AF-19 - A bundle's rollback deleted transactions its own members evicted (`rpc`, `medium`)
+
+- **Where:** `RpcServer::send_tx_bundle` (`src/rpc/server.rs`). The witness and the
+  members were checked, then each member went into the pool one at a time; a member the
+  pool refused was answered by `remove_transaction` over the members already admitted.
+- **Observed:** admission is not side-effect free. A full pool evicts a cheaper
+  transaction to make room, and a replacement drops the transaction it replaces. The
+  rollback removed the admitted members and left those deletions behind, so a bundle
+  whose *last* member was refused cost its sender nothing and permanently removed the
+  cheaper transactions its earlier members had evicted - a free deletion primitive, and
+  a bundle could be built to aim it.
+- **Fix:** the pool admits a bundle as a unit. `Mempool::add_transaction_bundle`
+  journals every entry removal it performs while the bundle is being admitted
+  (`journal` is `None` outside bundle admission, so ordinary admission pays nothing),
+  and on a refusal takes the admitted members back out and restores the journal in
+  reverse order. `Blockchain::add_transaction_bundle` runs the chain-level refusals over
+  every member first, admits them in one chain-actor turn (`ChainCommand::
+  AddTransactionBundle`), and persists them last, so a restart never re-admits a member
+  the node does not hold. The RPC layer calls it and no longer rolls anything back
+  itself.
+- **Regression tests:** `a_bundle_refused_at_its_last_member_restores_the_evicted_victim`,
+  `a_bundle_refused_at_its_last_member_restores_the_replaced_transaction`,
+  `an_admissible_bundle_admits_every_member` (`src/mempool/pool.rs`).
+
+### AF-20 - `bud_subscribe` had no node-wide bound on subscription work (`rpc`, `medium`)
+
+- **Where:** `RpcServer::subscribe` (`src/rpc/server.rs`).
+- **Observed:** each accepted subscription spawns a feed that polls the chain actor once
+  a second and serializes a whole block, hex-encoding every ML-DSA signature in it, for
+  its own subscriber. Nothing bounded how many a client could start: the per-IP limiter
+  sees the HTTP upgrade and jsonrpsee's own cap is per connection.
+- **Fix:** a process-wide pool of 128 feed slots (`MAX_SUBSCRIPTION_FEEDS`). The slot is
+  taken with the subscription and released when the feed ends, so the ceiling is on live
+  feeds whatever the connection count; a client past it is refused with `-32005`
+  (`subscription limit reached; retry later`) instead of being given a task.
+- **Regression test:** `subscription_feeds_are_capped_node_wide` (`src/rpc/server.rs`)
+  exhausts the pool, asserts the refusal, and asserts a released slot is reusable.
+
+### AF-21 - A wrong-answer storage slash stranded the payer's prepaid fee (`storage`, `medium`)
+
+- **Where:** `answer_challenge` (`src/domain/storage_tx.rs`), `Mismatched` arm.
+- **Observed:** that arm started the operator cooldown and added the confiscated bond to
+  `burned_total`, and settled nothing else, while the missed-deadline arm routed the same
+  event through `apply_bond_slash`. The slash takes the deal out of `Active`, and
+  `total_storage_escrowed_supply` counts only the unserved part of a *live* deal's
+  prepaid fee, so the fee of the epochs the deal would never serve stopped being counted
+  by anything: not refunded, not burned, and the supply cap gained exactly that much
+  minting headroom while the payer lost it. Any operator could trigger it on its own deal
+  by answering with an empty proof.
+- **Fix:** both outcomes settle through `apply_bond_slash` - cooldown on the block clock,
+  the bond burned and recorded in the storage economics ledger, and the unserved fee
+  returned to the recorded payer with a `PayerRefund` event. One routine, so the paths
+  cannot diverge again.
+- **Regression test:** `a_wrong_answer_slash_returns_the_unserved_fee_to_the_payer`
+  (`src/domain/storage_tx.rs`): the payer's balance rises by exactly the unserved fee,
+  the ledger holds the refund, the bond is still burned, and the committed supply falls
+  by the bond alone.
+
+### AF-22 - The light client verified PQ signatures under genesis statuses (`light-client`, `medium`)
+
+- **Where:** `LightClient::verify_hybrid_checkpoint` and `verify_pq_checkpoint`
+  (`src/light_client/mod.rs`).
+- **Observed:** the hybrid path passed a fresh `SchemeStatusRegistry::genesis()` to
+  `verify_pq_quorum`, and the PQ-only path called `verify_against_snapshot`, which does
+  the same. Consensus state demotes a broken lattice family to `Disabled` when the Frost
+  Alarm accepts a proof, and every node then refuses signatures under it in that block;
+  a client verifying under genesis statuses kept accepting them, printed
+  `CHECKPOINT VERIFIED`, and advanced its trust anchor on a checkpoint the network
+  rejects.
+- **Fix:** the client holds the registry it verifies under (`registry`, genesis by
+  default, pinned with `with_scheme_registry`) and uses it on both paths. The registry is
+  not on the wire, so pinning it is out-of-band work like pinning the trust anchor, and
+  the field's documentation says so.
+- **Regression test:** `a_pinned_registry_decides_whether_the_pq_half_verifies` - the
+  same honest blob verifies under genesis statuses and is refused once the pinned
+  registry disables `ML_DSA_65`.
+- **Decision note:** the alternative - carrying the registry in the export - changes the
+  wire format and the checkpoint semantics of every existing client, and the client
+  already takes its anchor out of band; pinning is the conservative shape.
+
+### AF-23 - Mikoriza credited restaked weight to a key the validator never registered (`settlement`, `medium`)
+
+- **Where:** `apply_restaked_weights` (`src/settlement/shared_security.rs`).
+- **Observed:** the `Observe` door compares an allocation's BLS key with the validator's
+  registered key only when the validator already exists, and the Ethereum registrar lets
+  an operator bind any key to any validator address. An operator-set member could emit an
+  allocation naming an arbitrary validator with its own key before that validator
+  registered, and the row was stored live; the weight pass then credited the units to the
+  validator's voting weight with no second look. The operator gained restaked weight
+  towards a validator it does not run, and the ETH behind it was never slashable, because
+  the slasher checks double votes against the operator's bound key.
+- **Fix:** the weight pass requires the validator's registered key to equal the row's.
+  `Observe` keeps its early refusal for a validator that exists; this is the gate where
+  the registered key is known, and it covers the rows claimed before it was.
+- **Regression tests:** `restaked_weight_needs_the_validators_own_bls_key` (a validator
+  registered under another key is credited nothing) and
+  `a_move_retires_the_validator_the_operator_left`, whose fixture now registers the key
+  its allocation names instead of relying on the lax rule.
+
+### AF-24 - The PUL batch verifier accepted statements nothing had proven (`proof`, `low`)
+
+- **Where:** `verify_batch` (`budzero/bud-pul/src/pul_air.rs`), module note, tests.
+- **Observed:** the chip AIR exposes no public inputs and the trace is the whole proof, so
+  verification said only "some batch of permutations was run" and nothing tied it to
+  `proof.statements`: a proof of unrelated inputs, or a replayed one, verified beside any
+  statement list, and the module note claimed a recomputation that did not exist. On a
+  stamp-verification path that is a forged stamp.
+- **Fix:** `verify_batch` refuses every batch with `KeccakChipError::UnboundProof` after
+  the chip proof verifies. Fail-closed until the AIR binds the sponge inputs: a verifier
+  that says yes to whatever it is handed is worse than one that says nothing. The module
+  note and the doc comment now say exactly that, and the refusal is lifted with the
+  binding.
+- **Regression tests:** `a_batch_proves_but_the_unbound_proof_is_refused` and
+  `a_proof_from_another_batch_does_not_verify_these_statements` (the honest batch is
+  refused too, so the refusal is not a statement check).
+- **Decision note:** the real binding is a public-values constraint in the Keccak AIR.
+  That is a proof-system change: it needs its own soundness measurement and its own
+  round. Refusing is the conservative shape until then, and the crate is unwired, so
+  nothing that ships depends on the permissive answer.
+
+### AF-25 - Two explorer callers at the documented rate denied every current-state read (`explorer-api`, `low`)
+
+- **Where:** `ClientRates` and `route` (`src/bin/budlum-indexer.rs`).
+- **Observed:** every node-backed route spent one unit of a single shared budget of 120
+  node calls per minute, while each client address could make 60 requests per minute on
+  its own. Two addresses at their ceiling spent the whole budget and every other caller
+  got `429 public node budget exhausted` for as long as they kept going - anonymously, at
+  the sanctioned rate, against a service published on the internet.
+- **Fix:** each client has its own share of the node budget
+  (`CLIENT_NODE_CALLS_PER_MINUTE` = 120/8 = 15), charged before the node is touched and
+  only on the paths that answer from the node (`node_backed`). Eight callers at their own
+  ceiling fill the shared budget exactly; two no longer exhaust it. `/health` stays exempt
+  from both limits. Index-backed history routes keep answering throughout.
+- **Regression tests:** `a_caller_cannot_spend_the_whole_shared_node_budget` and
+  `the_node_budget_is_charged_only_to_node_backed_paths`.
+
+### AF-26 - The explorer and the faucet returned upstream diagnostics to anonymous callers (`explorer-api`, `low`)
+
+- **Where:** `public_error` (`src/bin/budlum-indexer.rs`) and the grant path
+  (`src/bin/budlum-faucet.rs`).
+- **Observed:** a 502 body was built from the node's raw failure text, which carries the
+  request URL - the operator's internal JSON-RPC endpoint, host and port - and the node's
+  own diagnostics; JSON-RPC error objects were echoed the same way, under
+  `Access-Control-Allow-Origin: *`. Anyone could poll a node-backed route during a
+  restart and read it, and the body did not match the documented error schema.
+- **Fix:** the detail goes to the service log and the caller gets the generic, documented
+  object ("the node could not answer this request"); the faucet's submission failure
+  message keeps its meaning ("the allowance is reserved") without the upstream text.
+- **Regression tests:** none - the change is a message construction with no branch to
+  assert beyond the existing handler tests, and inventing a test that asserts a string
+  constant would lock the wording rather than the property. The property (no upstream
+  text in a client body) is visible in the two functions and is why they exist.
+
+### AF-27 - Anyone could spend an awarded Graft solver's fulfilment slot (`contracts`, `medium`)
+
+- **Where:** `GraftExecutor.fulfilled` and `execute` (`contracts/graft/GraftExecutor.sol`).
+- **Observed:** `registerSolverKey` is permissionless and proves nothing, and the
+  per-intent guard was keyed on that claimable solver key. Any account could bind the
+  awarded solver's Budlum address, `execute` the intent with its own harmless target, and
+  spend that solver's slot; the awarded solver then reverted `AlreadyFulfilled` forever
+  and could never emit the event the settlement door requires, so the deadline arrived
+  and anyone collected the liveness slash of its bond. Permissionless, no bond, repeatable
+  for every intent.
+- **Fix:** the guard is keyed on `msg.sender` (`mapping(bytes32 => mapping(address =>
+  bool))`), so an account can only ever spend its own slot. Name-of-victim griefing buys
+  nothing, and two accounts of one solver still cannot collect twice because the
+  settlement door removes the intent on the first proven fulfilment.
+- **Regression tests:** `test_binding_another_solvers_key_cannot_burn_its_slot` (the
+  attacker's fulfilment does not block the awarded solver) plus the reworked
+  `test_an_intent_is_fulfilled_once`, `test_the_once_per_intent_guard_is_per_account` and
+  `test_the_payload_hash_commits_to_the_bound_solver`.
+
+### AF-19 to AF-27 status
+
+All nine are closed by code and tests in the same tree; CI on the head that carries them
+is the confirmation. No finding in this round was closed as a false positive or with a
+stub, and the one place where a conservative refusal stands in for the full fix (AF-24)
+says so in its own entry and in the module note.
 
 ## Panic bar: what was read, not just what the lints say
 
