@@ -96,12 +96,15 @@ tip (`blockNumber`) and the finalized height (`finalizedHeight`).
 2. Bond the stake and register the keys:
 
    ```
-   bud validator join --rpc-url http://127.0.0.1:18545 \
-     --key-file ./secrets/testnet-validator.key --stake-bud 1000
+   bud --rpc-url http://127.0.0.1:18545 --signing-chain-id 45261 \
+     validator join --key-file ./secrets/testnet-validator.key --stake-bud 1000
    ```
 
    This sends a `Stake` transaction and then a `RegisterConsensusKeys`
-   transaction, both signed with the validator's signing key. The keys are
+   transaction, both signed with the validator's signing key. The replay
+   domain is the one `--signing-chain-id` names (45261 on testnet); `bud`
+   refuses to sign without it and refuses to sign if the node answers with a
+   different chain id. The keys are
    checked in block, including the proof of possession for the node's chain
    id.
 3. The validator is active from the next epoch and starts producing and
