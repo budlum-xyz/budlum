@@ -176,6 +176,18 @@ pub struct LightClient {
     /// there, finality needs the BLS certificate and the ML-DSA-65 QC of the
     /// same signers.
     require_pq: bool,
+    /// The scheme statuses this client verifies post-quantum signatures under.
+    ///
+    /// Genesis statuses are the default, which is right for a client built
+    /// against a fresh chain and wrong for one following a live chain: the
+    /// Frost Alarm demotes a broken lattice family to `Disabled` in consensus
+    /// state, and every node then refuses signatures under it in the same
+    /// block. A client that kept judging by genesis statuses would verify a
+    /// checkpoint the network itself rejects and advance its trust anchor on
+    /// it. The wire carries no registry, so a client tracking a live chain pins
+    /// the chain's registry with [`Self::with_scheme_registry`], exactly as it
+    /// pins the trust anchor.
+    registry: crate::crypto::scheme::SchemeStatusRegistry,
 }
 
 /// What a light client's verified checkpoints rest on (Section 6.2 of the PQ
@@ -228,6 +240,7 @@ impl LightClient {
             trusted,
             linked: BTreeMap::new(),
             require_pq: false,
+            registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
         })
     }
 
@@ -245,6 +258,21 @@ impl LightClient {
                 .chain_id()
                 .value();
         Ok(client)
+    }
+
+    /// Pin the chain policy this client verifies under: the scheme statuses
+    /// the chain holds in consensus state.
+    ///
+    /// The registry is not on the wire, so the caller pins it out of band like
+    /// the trust anchor. Without it the client verifies under genesis statuses,
+    /// and a family the chain has disabled keeps verifying here.
+    #[must_use]
+    pub fn with_scheme_registry(
+        mut self,
+        registry: crate::crypto::scheme::SchemeStatusRegistry,
+    ) -> Self {
+        self.registry = registry;
+        self
     }
 
     /// The trust this client's checkpoints rest on: the validator committee.
@@ -276,13 +304,11 @@ impl LightClient {
         snapshot: &ValidatorSetSnapshot,
     ) -> Result<VerifiedCheckpoint, LightClientError> {
         let verified = self.verify_bls_half(header, cert, snapshot)?;
-        crate::domain::finality_adapter::verify_pq_quorum(
-            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
-            cert,
-            snapshot,
-            blob,
-        )
-        .map_err(LightClientError::VerificationFailed)?;
+        // The client's pinned registry, not a fresh genesis one: a family the
+        // chain has demoted to `Disabled` must stop verifying here in the same
+        // block it stops verifying on every node.
+        crate::domain::finality_adapter::verify_pq_quorum(&self.registry, cert, snapshot, blob)
+            .map_err(LightClientError::VerificationFailed)?;
         Ok(verified)
     }
 
@@ -445,7 +471,7 @@ impl LightClient {
         }
 
         let verified = blob
-            .verify_against_snapshot(snapshot, None, None)
+            .verify_against_snapshot_in(&self.registry, snapshot, None, None)
             .map_err(LightClientError::VerificationFailed)?;
 
         // Summed exactly, like the threshold: a saturated partial sum met a
@@ -1072,6 +1098,57 @@ mod tests {
 
         client.advance(&verified).expect("advance");
         assert_eq!(client.trusted().height, 10);
+    }
+
+    /// The client verifies PQ signatures under the registry it was pinned to,
+    /// not a fresh genesis registry.
+    ///
+    /// The Frost Alarm demotes a lattice family to `Disabled` in consensus
+    /// state and every node refuses signatures under it in the same block. A
+    /// client that verified under `SchemeStatusRegistry::genesis()` kept
+    /// accepting them, printed `CHECKPOINT VERIFIED`, and advanced its trust
+    /// anchor on a checkpoint the network itself rejects.
+    #[test]
+    fn a_pinned_registry_decides_whether_the_pq_half_verifies() {
+        use crate::crypto::scheme::{SchemeId, SchemeStatus, SchemeStatusRegistry};
+
+        let (snapshot, keys) = make_pq_snapshot(3, 1000);
+        let header = make_block_header_at(10, TEST_CHAIN_ID);
+        let blob = make_pq_blob(&snapshot, &keys, &header);
+        let trusted = TrustedCheckpoint {
+            height: 0,
+            block_hash: "0".repeat(64),
+            set_hash: snapshot.set_hash.clone(),
+        };
+        let mut linked = LightClient::new(trusted.clone()).expect("bootstrap");
+        linked.linked.insert(header.index, header.hash.clone());
+        linked
+            .verify_pq_checkpoint(&header, &blob, &snapshot)
+            .expect("the genesis statuses accept the blob");
+
+        // The same blob, judged by a chain that has disabled the family the
+        // validators signed with.
+        let (mut schemes, suites) = SchemeStatusRegistry::genesis().entries();
+        for (id, status) in &mut schemes {
+            if *id == SchemeId::ML_DSA_65.0 {
+                *status = SchemeStatus::Disabled.to_byte();
+            }
+        }
+        let disabled =
+            SchemeStatusRegistry::from_entries(&schemes, &suites).expect("a full registry");
+        assert!(!disabled.scheme_verifies(SchemeId::ML_DSA_65));
+
+        let mut pinned = LightClient::new(trusted)
+            .expect("bootstrap")
+            .with_scheme_registry(disabled);
+        pinned.linked.insert(header.index, header.hash.clone());
+        assert!(
+            matches!(
+                pinned.verify_pq_checkpoint(&header, &blob, &snapshot),
+                Err(LightClientError::VerificationFailed(_))
+            ),
+            "a family the chain disabled must not verify here"
+        );
     }
 
     #[test]

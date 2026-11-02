@@ -462,10 +462,21 @@ pub fn apply_restaked_weights(state: &mut AccountState, params: &SharedSecurityP
             if row.status != RestakeStatus::Active {
                 continue;
             }
-            let counts = state
-                .validators
-                .get(address)
-                .is_some_and(|v| v.is_eligible(epoch) && !v.slashed);
+            // The row must also name the key the validator registered. The
+            // `Observe` door can only compare keys when the validator exists
+            // already, so an allocation claimed before the validator registers
+            // - or while it is bonded without consensus keys - was stored with
+            // whatever key the claiming operator chose, and nothing looked at
+            // it again. The registry lets an Ethereum-side operator bind any
+            // key to any validator address, so that row credited the
+            // validator's voting weight to an operator that does not run it,
+            // and the ETH behind it was never slashable: the slasher checks
+            // double votes against the operator's bound key, not the
+            // validator's. The comparison lives here because this is where the
+            // registered key is known.
+            let counts = state.validators.get(address).is_some_and(|v| {
+                v.is_eligible(epoch) && !v.slashed && v.bls_public_key == row.bls_public_key
+            });
             if counts {
                 raw.insert(*address, params.weight_of_units(row.allocated_units));
             }
@@ -731,6 +742,10 @@ mod tests {
             let address = Address::from([tag; 32]);
             let mut validator = Validator::new(address, 1_000);
             validator.active = true;
+            // The consensus key the allocation names: weight is credited only
+            // to the validator that registered the key the row carries, so a
+            // fixture without keys would be testing the lax rule.
+            validator.bls_public_key = vec![0xB1; BLS_PUBLIC_KEY_BYTES];
             state.validators.insert(address, validator);
         }
         apply_restaked_weights(&mut state, &params);
@@ -822,6 +837,61 @@ mod tests {
         assert_eq!(
             state.validators[&Address::from([2u8; 32])].restaked_weight,
             0
+        );
+    }
+
+    /// Restaked weight needs the validator's own BLS key, not just an
+    /// allocation row naming it.
+    ///
+    /// The `Observe` door compares keys when the validator already exists. An
+    /// allocation claimed before the validator registers - or while it is
+    /// bonded without consensus keys - is therefore stored with whatever key
+    /// its claimant chose, and the Ethereum registrar lets an operator bind any
+    /// key to any validator address. Crediting that row handed the claiming
+    /// operator restaked weight towards a validator it does not run, and the
+    /// ETH behind the allocation was never slashable: the slasher checks double
+    /// votes against the operator's bound key, not the validator's.
+    #[test]
+    fn restaked_weight_needs_the_validators_own_bls_key() {
+        let params = SharedSecurityParams {
+            enabled: true,
+            max_restaked_share_ppm: 1_000_000,
+            units_to_weight_ppm: 1_000_000,
+        };
+        let mut state = AccountState::new();
+        let named_key = vec![0xB1; BLS_PUBLIC_KEY_BYTES];
+        let other_key = vec![0xC2; BLS_PUBLIC_KEY_BYTES];
+        for (tag, registered_key) in [(1u8, named_key.clone()), (2, other_key)] {
+            let address = Address::from([tag; 32]);
+            let mut validator = Validator::new(address, 1_000);
+            validator.active = true;
+            validator.bls_public_key = registered_key;
+            state.validators.insert(address, validator);
+            state.settlement.shared_security.validators.insert(
+                address,
+                RestakedValidator {
+                    budlum_validator: address,
+                    eth_operator: [tag; 20],
+                    allocated_units: 10_000,
+                    source: RestakeSource::EigenLayer,
+                    observed_epoch: 1,
+                    status: RestakeStatus::Active,
+                    bls_public_key: named_key.clone(),
+                },
+            );
+        }
+
+        apply_restaked_weights(&mut state, &params);
+
+        let matching = state.validators[&Address::from([1u8; 32])].restaked_weight;
+        let mismatched = state.validators[&Address::from([2u8; 32])].restaked_weight;
+        assert!(
+            matching > 0,
+            "the validator that registered the key is credited"
+        );
+        assert_eq!(
+            mismatched, 0,
+            "a validator registered under another key is not credited with weight it cannot be slashed for"
         );
     }
 
