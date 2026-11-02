@@ -50,6 +50,11 @@ use Class::{BlockPath, DevnetOnly, NodeLocal, Read, Sync};
 /// Every `Blockchain` method the chain actor's production code calls.
 const CALLS: &[(&str, Class)] = &[
     ("add_transaction", NodeLocal),
+    // Admitting a bundle touches the pool and its node-local persistence file,
+    // never `self.state`: the same class as `add_transaction`, one turn for the
+    // whole bundle so the all-or-none promise is the pool's and not the RPC
+    // layer's (AF-19).
+    ("add_transaction_bundle", NodeLocal),
     ("apply_state_snapshot", Sync),
     ("build_global_header", Read),
     ("consensus", Read),
@@ -75,11 +80,6 @@ const CALLS: &[(&str, Class)] = &[
     ("pq_sealed_heights", Read),
     ("pq_stage_observation", NodeLocal),
     ("quantum_view", Read),
-    // Taking a transaction back out of the pool: the mempool and its node-local
-    // persistence only. Nothing under `self.state` is touched, so a node that
-    // forgets an admitted transaction still holds the same state root as its
-    // peers - it either re-admits the transaction or never produces it.
-    ("remove_transaction", NodeLocal),
     ("storage_economics_events", Read),
     ("try_reorg_suffix", BlockPath),
     ("get_transaction_receipt", Read),

@@ -1668,11 +1668,14 @@ impl BudlumApiServer for RpcServer {
         // admitted members here, as this used to, left those deletions behind:
         // a bundle refused at its last member permanently deleted the cheaper
         // transactions its earlier members evicted, at no cost to the sender.
-        if let Err(e) = self.chain.add_transaction_bundle(members.clone()).await {
+        if let Err(refusal) = self.chain.add_transaction_bundle(members.clone()).await {
+            // The member index goes out as structured `data` as well as in the
+            // message: a client that machine-checks its own bundle needs to
+            // know which member to fix, not to parse English.
             return Err(ErrorObjectOwned::owned(
                 -32602,
-                format!("Bundle refused: {e}"),
-                None::<()>,
+                format!("Bundle refused: {refusal}"),
+                Some(serde_json::json!({ "member": refusal.index })),
             ));
         }
         for member in members {
