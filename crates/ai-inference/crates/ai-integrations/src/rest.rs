@@ -61,6 +61,9 @@ pub struct RetryPolicy {
 /// bounded and observable.
 pub const MAX_BACKOFF_SECS: u64 = 300;
 
+/// The absolute ceiling on attempts, whatever the policy asks for.
+pub const MAX_ATTEMPTS: u32 = 10;
+
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
@@ -76,20 +79,41 @@ impl RetryPolicy {
     /// but **capped** at [`MAX_BACKOFF_SECS`]: `min(base * 2^attempt, MAX)`.
     #[must_use]
     pub fn delay_for_attempt(&self, attempt: u32) -> u64 {
-        let shifted = self.base_delay_secs.saturating_mul(1u64 << attempt.min(10));
+        let base = self.base_delay_secs.max(1);
+        let shifted = base.saturating_mul(1u64 << attempt.min(10));
         shifted.min(MAX_BACKOFF_SECS)
     }
 
-    /// Does this status call for a retry?
+    /// Does this status call for a retry? A configured attempt count above
+    /// [`MAX_ATTEMPTS`] is treated as that ceiling.
     #[must_use]
     pub fn should_retry(&self, status: u16, attempt: u32) -> bool {
-        attempt + 1 < self.max_attempts && self.retry_on_status.contains(&status)
+        attempt.saturating_add(1) < self.max_attempts.min(MAX_ATTEMPTS)
+            && self.retry_on_status.contains(&status)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_retry_does_not_wrap_at_the_largest_attempt() {
+        let policy = RetryPolicy::default();
+        assert!(!policy.should_retry(503, u32::MAX));
+    }
+
+    #[test]
+    fn attempts_are_capped_and_zero_base_still_waits() {
+        let policy = RetryPolicy {
+            max_attempts: u32::MAX,
+            base_delay_secs: 0,
+            ..RetryPolicy::default()
+        };
+        assert!(policy.should_retry(503, MAX_ATTEMPTS - 2));
+        assert!(!policy.should_retry(503, MAX_ATTEMPTS - 1));
+        assert_eq!(policy.delay_for_attempt(0), 1);
+    }
 
     #[test]
     fn retry_policy_exponential() {

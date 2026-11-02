@@ -94,6 +94,22 @@ impl OneShareRegistry {
         if decide_custody(profile, size, false).mode == CustodyMode::NetworkHeld {
             return Err(ShareRefusal::WouldBeNetworkHeld);
         }
+        // The per share check above is not enough: the shares together are
+        // what the device holds. `admit_as_server` counts one footprint per
+        // content id, so the running total does the same and a share of
+        // content already served replaces its old size.
+        let mut held: u64 = 0;
+        for share in self.shares.values().filter(|s| s.content_id != content_id) {
+            held = held
+                .checked_add(share.size)
+                .ok_or(ShareRefusal::WouldBeNetworkHeld)?;
+        }
+        if held
+            .checked_add(size)
+            .is_none_or(|total| total > profile.max_storage_bytes)
+        {
+            return Err(ShareRefusal::WouldBeNetworkHeld);
+        }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         self.shares.insert(
@@ -269,6 +285,20 @@ mod one_share_tests {
             ShareRefusal::EndpointMissing
         );
         assert!(reg.shares.is_empty(), "refused shares must not be recorded");
+    }
+
+    #[test]
+    fn shares_together_may_not_exceed_the_declared_capacity() {
+        // P27-F12: each share fit on its own, the sum did not.
+        let p = profile(1000);
+        let mut reg = OneShareRegistry::new();
+        reg.create(&p, ContentId([1; 32]), 600, addr(1)).unwrap();
+        assert_eq!(
+            reg.create(&p, ContentId([2; 32]), 500, addr(2)),
+            Err(ShareRefusal::WouldBeNetworkHeld)
+        );
+        assert_eq!(reg.shares.len(), 1);
+        reg.create(&p, ContentId([2; 32]), 400, addr(2)).unwrap();
     }
 
     #[test]

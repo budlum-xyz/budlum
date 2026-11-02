@@ -11,6 +11,13 @@ use sha2::{Digest, Sha256};
 /// Prevents state/mempool/snapshot DoS vectors via oversize inference references.
 pub const MAX_INFERENCE_REF_BYTES: usize = 65_536;
 
+/// Highest whitelisted execution class id (1 = FixedPointMlpV1, 0 = none).
+const MAX_EXECUTION_CLASS: u8 = 1;
+
+/// Most verifiers a model may require for one request. A larger quorum could
+/// never be met and would keep every request pending until its deadline.
+const MAX_MODEL_VERIFIER_COUNT: u32 = 64;
+
 /// Domain-separated AI Model Identifier (`[u8; 32]`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
@@ -71,21 +78,21 @@ impl crate::core::map_keys::MapKey for AiRequestId {
     }
 }
 
-/// Canonical AI Inference Result Identifier (`[u8; 32]`).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
-)]
-pub struct AiResultId(pub [u8; 32]);
+/// Bounded byte wrapper verifying length bounds (`<= MAX_INFERENCE_REF_BYTES`).
+///
+/// Deserialization goes through `try_new`, so a serde path (snapshot JSON,
+/// RPC JSON, bincode) cannot build a value above the bound.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "Vec<u8>")]
+pub struct BoundedBytes(pub Vec<u8>);
 
-impl AiResultId {
-    pub fn new(id: [u8; 32]) -> Self {
-        Self(id)
+impl TryFrom<Vec<u8>> for BoundedBytes {
+    type Error = String;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        Self::try_new(bytes)
     }
 }
-
-/// Bounded byte wrapper verifying length bounds (`<= MAX_INFERENCE_REF_BYTES`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BoundedBytes(pub Vec<u8>);
 
 impl BoundedBytes {
     pub fn try_new(bytes: Vec<u8>) -> Result<Self, String> {
@@ -203,8 +210,22 @@ impl AiModelSpec {
         if self.min_verifier_count == 0 {
             return Err("min_verifier_count must be >= 1".into());
         }
+        if self.min_verifier_count > MAX_MODEL_VERIFIER_COUNT {
+            return Err(format!(
+                "min_verifier_count exceeds allowed maximum {MAX_MODEL_VERIFIER_COUNT}"
+            ));
+        }
         if self.agreement_threshold == 0 || self.agreement_threshold > self.min_verifier_count {
             return Err("agreement_threshold must be between 1 and min_verifier_count".into());
+        }
+        if self.max_input_ref_bytes == 0 || self.max_output_ref_bytes == 0 {
+            return Err("max_input_ref_bytes and max_output_ref_bytes must be >= 1".into());
+        }
+        if self.execution_class > MAX_EXECUTION_CLASS {
+            return Err(format!(
+                "execution_class {} is not a whitelisted class (max {MAX_EXECUTION_CLASS})",
+                self.execution_class
+            ));
         }
         if self.max_input_ref_bytes > MAX_INFERENCE_REF_BYTES as u64 {
             return Err(format!(
@@ -280,6 +301,20 @@ impl AiModelSpec {
             }
             None => hasher.update([0u8]),
         }
+        // P31-F02: execution_dims select the guest program a proof is checked
+        // against and modalities gate request admission. Both are behavior
+        // controlling spec fields, so the registry root must commit to them.
+        match &self.execution_dims {
+            Some(dims) => {
+                hasher.update([1u8]);
+                hasher.update((dims.len() as u64).to_le_bytes());
+                for d in dims {
+                    hasher.update(d.to_le_bytes());
+                }
+            }
+            None => hasher.update([0u8]),
+        }
+        hasher.update(self.modalities.bits().to_le_bytes());
         hasher.finalize().into()
     }
 }
@@ -339,6 +374,24 @@ pub fn canonical_input_commitment(input_ref: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"AI_INPUT_COMMIT_V1");
     hasher.update(input_ref);
+    hasher.finalize().into()
+}
+
+/// The canonical commitment over an output ref: `AI_OUTPUT_COMMIT_V1`
+/// domain tag + the ref bytes.
+///
+/// `AiRegistry::submit_result` verifies that a result's `output_commitment`
+/// equals this value, the same binding request admission applies to a
+/// request's `input_commitment`. Agreement, finalization and settlement all
+/// group on `output_commitment` while the artifact the chain serves and mints
+/// is the `output_ref` bytes, so without the check a verifier can agree on the
+/// honest commitment and ship different content - and no dispute path covers
+/// the mismatch, because equivocation is two commitments, not two payloads.
+#[must_use]
+pub fn canonical_output_commitment(output_ref: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"AI_OUTPUT_COMMIT_V1");
+    hasher.update(output_ref);
     hasher.finalize().into()
 }
 
@@ -660,13 +713,39 @@ impl AiExecutionProof {
     /// Calculate domain-separated hash of this proof for state root inclusion.
     pub fn calculate_leaf(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_AI_EXEC_PROOF_V1");
+        hasher.update(b"BDLM_AI_EXEC_PROOF_V2");
         hasher.update(self.model_id.0);
         hasher.update(self.input_commitment);
         hasher.update(self.output_commitment);
         hasher.update(self.program_hash);
         hasher.update(self.steps.to_le_bytes());
         hasher.update(self.gas_used.to_le_bytes());
+        match &self.weights_digest {
+            Some(digest) => {
+                hasher.update([1u8]);
+                hasher.update(digest);
+            }
+            None => hasher.update([0u8]),
+        }
+        match &self.public_inputs {
+            Some(pi) => {
+                hasher.update([1u8]);
+                hasher.update(pi.chain_id.to_le_bytes());
+                hasher.update(pi.program_hash);
+                hasher.update(pi.initial_state_root);
+                hasher.update(pi.final_state_root);
+                hasher.update(pi.sender.to_le_bytes());
+                hasher.update(pi.nonce.to_le_bytes());
+                hasher.update(pi.block_height.to_le_bytes());
+                hasher.update(pi.gas_limit.to_le_bytes());
+                hasher.update(pi.gas_used.to_le_bytes());
+                hasher.update(pi.exit_code.to_le_bytes());
+                hasher.update(pi.trace_len.to_le_bytes());
+                hasher.update(pi.event_digest);
+                hasher.update(pi.state_writes_digest);
+            }
+            None => hasher.update([0u8]),
+        }
         // Note: proof_bytes is NOT hashed (too large, and the
         // Program_hash + commitments already uniquely identify the proof).
         hasher.finalize().into()
@@ -719,9 +798,13 @@ impl AiVerifierQos {
         self.avg_response_blocks = if total == 0 {
             response_blocks
         } else {
-            (self.avg_response_blocks * total + response_blocks) / (total + 1)
+            // Widen to u128: the product can pass u64 range. The quotient is at
+            // most max(old_avg, new_value), so it always fits back into u64.
+            let sum = u128::from(self.avg_response_blocks) * u128::from(total)
+                + u128::from(response_blocks);
+            u64::try_from(sum / (u128::from(total) + 1)).unwrap_or(u64::MAX)
         };
-        self.total_results_submitted = total + 1;
+        self.total_results_submitted = total.saturating_add(1);
         self.last_active_block = current_block;
     }
 
@@ -736,6 +819,9 @@ impl AiVerifierQos {
     }
 
     /// Calculate a reliability score (0.0 - 1.0).
+    ///
+    /// Display only (Z8): uses f64. It must never feed consensus, verifier
+    /// selection or fees. The state root hashes the integer counters only.
     /// Higher is better. Factors in:
     /// - Finalization rate (successful / total)
     /// - Equivocation penalty
@@ -951,14 +1037,19 @@ impl AiAgentReputation {
     }
 
     /// Calculate the agent's trust score (0.0 - 1.0).
+    ///
+    /// Display only (Z8): uses f64. It must never feed consensus, verifier
+    /// selection or fees. The state root hashes the integer counters only.
     /// Factors in payment reliability, inference quality, and equivocation rate.
     pub fn trust_score(&self) -> f64 {
-        if self.payments_completed + self.payments_defaulted == 0 && self.results_submitted == 0 {
+        let total_payments = self
+            .payments_completed
+            .saturating_add(self.payments_defaulted);
+        if total_payments == 0 && self.results_submitted == 0 {
             return 0.0;
         }
 
         // Payment reliability (0.0 - 1.0)
-        let total_payments = self.payments_completed + self.payments_defaulted;
         let payment_reliability = if total_payments > 0 {
             self.payments_completed as f64 / total_payments as f64
         } else {
@@ -982,7 +1073,7 @@ impl AiAgentReputation {
     pub fn calculate_leaf(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
-        hasher.update(b"BDLM_AI_AGENT_REPUTATION_V1");
+        hasher.update(b"BDLM_AI_AGENT_REPUTATION_V2");
         hasher.update(self.agent.as_bytes());
         hasher.update(self.payments_completed.to_le_bytes());
         hasher.update(self.payments_defaulted.to_le_bytes());
@@ -991,6 +1082,8 @@ impl AiAgentReputation {
         hasher.update(self.results_finalized.to_le_bytes());
         hasher.update(self.equivocations.to_le_bytes());
         hasher.update(self.active_block_span.to_le_bytes());
+        hasher.update(self.first_active_block.to_le_bytes());
+        hasher.update(self.last_active_block.to_le_bytes());
         hasher.finalize().into()
     }
 }
@@ -1194,6 +1287,92 @@ fn request_commitment(payment_id: [u8; 32], request_id: AiRequestId) -> [u8; 32]
 mod tests {
     use super::*;
 
+    fn valid_spec() -> AiModelSpec {
+        AiModelSpec {
+            model_id: AiModelId([9u8; 32]),
+            model_hash: [8u8; 32],
+            owner: addr(1),
+            min_verifier_count: 2,
+            agreement_threshold: 2,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_weights_digest: None,
+            execution_dims: None,
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        }
+    }
+
+    #[test]
+    fn spec_validate_rejects_zero_ref_bytes_and_unknown_class() {
+        assert!(valid_spec().validate().is_ok());
+        let mut s = valid_spec();
+        s.max_input_ref_bytes = 0;
+        assert!(s.validate().is_err());
+        let mut s = valid_spec();
+        s.max_output_ref_bytes = 0;
+        assert!(s.validate().is_err());
+        let mut s = valid_spec();
+        s.execution_class = 2;
+        assert!(s.validate().is_err());
+        let mut s = valid_spec();
+        s.execution_class = 1;
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn spec_leaf_commits_to_execution_dims_and_modalities() {
+        let base = valid_spec().calculate_leaf();
+        let mut s = valid_spec();
+        s.execution_dims = Some(vec![2, 1]);
+        let with_dims = s.calculate_leaf();
+        assert_ne!(base, with_dims, "P31-F02: dims must change the leaf");
+        s.execution_dims = Some(vec![2, 2]);
+        assert_ne!(
+            with_dims,
+            s.calculate_leaf(),
+            "dims values must change the leaf"
+        );
+        let mut m = valid_spec();
+        m.modalities = crate::ai_inference::perception::ModalitySet::none();
+        assert_ne!(
+            base,
+            m.calculate_leaf(),
+            "P31-F02: modalities must change the leaf"
+        );
+    }
+
+    #[test]
+    fn bounded_bytes_deserialize_enforces_the_bound() {
+        let ok = serde_json::to_string(&vec![1u8; 10]).unwrap();
+        assert!(serde_json::from_str::<BoundedBytes>(&ok).is_ok());
+        let big = serde_json::to_string(&vec![1u8; MAX_INFERENCE_REF_BYTES + 1]).unwrap();
+        assert!(serde_json::from_str::<BoundedBytes>(&big).is_err());
+    }
+
+    #[test]
+    fn qos_average_and_trust_score_do_not_overflow() {
+        let mut q = AiVerifierQos::new(addr(1));
+        q.avg_response_blocks = u64::MAX;
+        q.total_results_submitted = 2;
+        q.record_result(0, 5);
+        let expected = u64::try_from(u128::from(u64::MAX) * 2 / 3).unwrap();
+        assert_eq!(q.avg_response_blocks, expected);
+        assert_eq!(q.total_results_submitted, 3);
+
+        let mut r = AiAgentReputation::new(addr(2));
+        r.payments_completed = u64::MAX;
+        r.payments_defaulted = 1;
+        let score = r.trust_score();
+        assert!((0.0..=1.0).contains(&score));
+    }
+
     fn addr(b: u8) -> Address {
         Address([b; 32])
     }
@@ -1261,5 +1440,57 @@ mod tests {
         assert!(no_request.request_commitment.is_none());
         assert!(zero_request.request_commitment.is_some());
         assert_ne!(no_request.receipt_id, zero_request.receipt_id);
+    }
+
+    #[test]
+    fn spec_rejects_unbounded_verifier_count() {
+        let mut spec = valid_spec();
+        spec.min_verifier_count = MAX_MODEL_VERIFIER_COUNT + 1;
+        spec.agreement_threshold = MAX_MODEL_VERIFIER_COUNT + 1;
+        assert!(spec.validate().is_err());
+        spec.min_verifier_count = MAX_MODEL_VERIFIER_COUNT;
+        spec.agreement_threshold = MAX_MODEL_VERIFIER_COUNT;
+        assert!(spec.validate().is_ok());
+    }
+
+    fn sample_proof() -> AiExecutionProof {
+        AiExecutionProof {
+            model_id: AiModelId([1u8; 32]),
+            input_commitment: [2u8; 32],
+            output_commitment: [3u8; 32],
+            program_hash: [4u8; 32],
+            proof_bytes: vec![1],
+            steps: 5,
+            gas_used: 6,
+            weights_digest: None,
+            public_inputs: None,
+        }
+    }
+
+    #[test]
+    fn exec_proof_leaf_binds_weights_digest_and_public_inputs() {
+        let base = sample_proof();
+        let mut with_weights = sample_proof();
+        with_weights.weights_digest = Some([7u8; 32]);
+        assert_ne!(base.calculate_leaf(), with_weights.calculate_leaf());
+
+        let mut with_inputs = sample_proof();
+        with_inputs.public_inputs = Some(AiExecutionPublicInputs::default());
+        assert_ne!(base.calculate_leaf(), with_inputs.calculate_leaf());
+
+        let mut other_inputs = with_inputs.clone();
+        if let Some(pi) = other_inputs.public_inputs.as_mut() {
+            pi.trace_len = 9;
+        }
+        assert_ne!(with_inputs.calculate_leaf(), other_inputs.calculate_leaf());
+    }
+
+    #[test]
+    fn reputation_leaf_binds_activity_window() {
+        let mut a = AiAgentReputation::new(addr(1));
+        a.record_request(10);
+        let mut b = AiAgentReputation::new(addr(1));
+        b.record_request(11);
+        assert_ne!(a.calculate_leaf(), b.calculate_leaf());
     }
 }

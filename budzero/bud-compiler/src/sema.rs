@@ -165,6 +165,23 @@ impl Default for SemanticAnalyzer {
     }
 }
 
+/// True when control cannot reach the end of `stmts` without a `return`.
+/// A loop may run zero times, so it never counts. An `if` counts when both
+/// branches return. A `match` always ends in a wildcard, so it counts when
+/// every arm returns.
+fn stmts_always_return(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::Return(_) => true,
+        Stmt::If(_, then_branch, Some(else_branch)) => {
+            stmts_always_return(then_branch) && stmts_always_return(else_branch)
+        }
+        Stmt::Match { arms, .. } => {
+            !arms.is_empty() && arms.iter().all(|arm| stmts_always_return(&arm.body))
+        }
+        _ => false,
+    })
+}
+
 impl SemanticAnalyzer {
     pub fn new() -> Self {
         Self {
@@ -178,14 +195,25 @@ impl SemanticAnalyzer {
     pub fn analyze(&mut self, contract: &Contract) -> Result<(), CompileError> {
         let mut errors = Vec::new();
 
-        // 1. Register structs
+        // 1. Register structs. A name declared twice is an error: the last
+        // definition used to win silently (P35-F22).
         for s in &contract.structs {
             let mut fields = HashMap::new();
             for f in &s.fields {
                 let ty = Type::from_str(&f.ty).map_err(CompileError::SemanticError)?;
-                fields.insert(f.name.clone(), ty);
+                if fields.insert(f.name.clone(), ty).is_some() {
+                    errors.push(CompileError::SemanticError(format!(
+                        "struct '{}' declares field '{}' twice",
+                        s.name, f.name
+                    )));
+                }
             }
-            self.structs.insert(s.name.clone(), fields);
+            if self.structs.insert(s.name.clone(), fields).is_some() {
+                errors.push(CompileError::SemanticError(format!(
+                    "struct '{}' is declared twice",
+                    s.name
+                )));
+            }
         }
 
         // 1a. Register storage fields. Their types are validated here once,
@@ -194,7 +222,12 @@ impl SemanticAnalyzer {
         for field in &contract.storage {
             match Type::from_str(&field.ty) {
                 Ok(ty) => {
-                    self.storage.insert(field.name.clone(), ty);
+                    if self.storage.insert(field.name.clone(), ty).is_some() {
+                        errors.push(CompileError::SemanticError(format!(
+                            "storage field '{}' is declared twice",
+                            field.name
+                        )));
+                    }
                 }
                 Err(e) => errors.push(CompileError::SemanticError(e)),
             }
@@ -246,7 +279,20 @@ impl SemanticAnalyzer {
         // 2. Register functions
         for f in &contract.functions {
             let mut params = Vec::new();
+            let mut seen_params = std::collections::HashSet::new();
+            if matches!(f.name.as_str(), "poseidon" | "verify_merkle_proof") {
+                errors.push(CompileError::SemanticError(format!(
+                    "function '{}' would be shadowed by the built-in of the same name",
+                    f.name
+                )));
+            }
             for p in &f.params {
+                if !seen_params.insert(p.name.as_str()) {
+                    errors.push(CompileError::SemanticError(format!(
+                        "function '{}' has two parameters named '{}'",
+                        f.name, p.name
+                    )));
+                }
                 // A rejected type name has to become an error here, not a
                 // silent `Unknown`. `Unknown` is treated as compatible with
                 // everything downstream, so swallowing it means `fn f(x: u32)`
@@ -288,7 +334,16 @@ impl SemanticAnalyzer {
             } else {
                 Type::Void
             };
-            self.functions.insert(f.name.clone(), (params, ret_ty));
+            if self
+                .functions
+                .insert(f.name.clone(), (params, ret_ty))
+                .is_some()
+            {
+                errors.push(CompileError::SemanticError(format!(
+                    "function '{}' is defined twice",
+                    f.name
+                )));
+            }
         }
 
         // 3. Builtins
@@ -369,6 +424,30 @@ impl SemanticAnalyzer {
         }
     }
 
+    /// The declared type of the plain (non mapping) storage field `name`, or
+    /// `Unknown` with an error recorded when the field is missing or is a
+    /// mapping. `storage::name` always runs one `SRead` or `SWrite`, so a
+    /// mapping needs an index.
+    fn scalar_storage_type(&self, name: &str, errors: &mut Vec<CompileError>) -> Type {
+        match self.storage.get(name) {
+            Some(Type::Map(..)) => {
+                errors.push(CompileError::SemanticError(format!(
+                    "storage field '{}' is a mapping, use an index",
+                    name
+                )));
+                Type::Unknown
+            }
+            Some(ty) => ty.clone(),
+            None => {
+                errors.push(CompileError::SemanticError(format!(
+                    "Undefined storage variable '{}'",
+                    name
+                )));
+                Type::Unknown
+            }
+        }
+    }
+
     /// Type-check one `name[key]` access and return the value type. The key
     /// is compared with the declared key type: `Map<K,V>` records both, and
     /// for a while only `V` was checked, so a `Map<u64,u64>` indexed with a
@@ -428,6 +507,24 @@ impl SemanticAnalyzer {
         for stmt in &func.body {
             self.analyze_stmt(stmt, &mut env, errors);
         }
+
+        // The epilogue of codegen pushes 0 when control reaches the end of the
+        // body. For a function that declares a result, that is a made-up
+        // value (a null pointer for a struct), so the end must be unreachable.
+        if !matches!(self.current_func_ret, Type::Void | Type::Unknown)
+            && !stmts_always_return(&func.body)
+        {
+            errors.push(CompileError::SemanticError(format!(
+                "function '{}' must return a value on every path",
+                func.name
+            )));
+        }
+        // The entry call pushes no argument, so `main` cannot take any.
+        if func.name == "main" && !func.params.is_empty() {
+            errors.push(CompileError::SemanticError(
+                "function 'main' cannot take parameters".to_string(),
+            ));
+        }
     }
 
     fn analyze_stmt(
@@ -462,8 +559,29 @@ impl SemanticAnalyzer {
                     self.analyze_expr(expr, env, errors);
                 }
             }
-            Stmt::StorageWrite(_, expr) => {
-                self.analyze_expr(expr, env, errors);
+            Stmt::StorageWrite(name, expr) => {
+                let ty = self.analyze_expr(expr, env, errors);
+                let declared = self.scalar_storage_type(name, errors);
+                if matches!(ty, Type::Struct(_) | Type::Void)
+                    || matches!(declared, Type::Struct(_) | Type::Void)
+                {
+                    errors.push(CompileError::SemanticError(format!(
+                        "storage field '{}' holds a scalar, not {}",
+                        name,
+                        if matches!(ty, Type::Struct(_) | Type::Void) {
+                            ty.name()
+                        } else {
+                            declared.name()
+                        }
+                    )));
+                } else if ty != declared && ty != Type::Unknown && declared != Type::Unknown {
+                    errors.push(CompileError::SemanticError(format!(
+                        "storage field '{}' is {}, got {}",
+                        name,
+                        declared.name(),
+                        ty.name()
+                    )));
+                }
             }
             Stmt::MappingWrite(name, key, val) => {
                 let val_ty = self.analyze_expr(val, env, errors);
@@ -480,20 +598,25 @@ impl SemanticAnalyzer {
             Stmt::If(cond, then_branch, else_branch) => {
                 let cond_ty = self.analyze_expr(cond, env, errors);
                 self.check_condition_type(&cond_ty, "if", errors);
+                // A branch has its own scope, like `for` and `match`: a name
+                // bound inside it is not visible after it.
+                let mut then_env = env.clone();
                 for s in then_branch {
-                    self.analyze_stmt(s, env, errors);
+                    self.analyze_stmt(s, &mut then_env, errors);
                 }
                 if let Some(eb) = else_branch {
+                    let mut else_env = env.clone();
                     for s in eb {
-                        self.analyze_stmt(s, env, errors);
+                        self.analyze_stmt(s, &mut else_env, errors);
                     }
                 }
             }
             Stmt::While(cond, body) => {
                 let cond_ty = self.analyze_expr(cond, env, errors);
                 self.check_condition_type(&cond_ty, "while", errors);
+                let mut body_env = env.clone();
                 for s in body {
-                    self.analyze_stmt(s, env, errors);
+                    self.analyze_stmt(s, &mut body_env, errors);
                 }
             }
             Stmt::For {
@@ -544,6 +667,39 @@ impl SemanticAnalyzer {
                         scrutinee_ty
                     )));
                 }
+                // The codegen chain has no fall-through when no arm hits, so
+                // the last arm must be the wildcard. A wildcard anywhere else
+                // makes the arms after it dead, and a repeated integer
+                // pattern can never run (the first one wins).
+                let last = arms.len().saturating_sub(1);
+                if !matches!(
+                    arms.last().map(|a| &a.pattern),
+                    Some(MatchPattern::Wildcard)
+                ) {
+                    errors.push(CompileError::SemanticError(
+                        "match must end with a wildcard `_` arm".to_string(),
+                    ));
+                }
+                let mut seen: Vec<u64> = Vec::new();
+                for (i, arm) in arms.iter().enumerate() {
+                    match &arm.pattern {
+                        MatchPattern::Wildcard if i != last => {
+                            errors.push(CompileError::SemanticError(
+                                "wildcard `_` arm must be the last arm of a match".to_string(),
+                            ));
+                        }
+                        MatchPattern::IntLit(v) => {
+                            if seen.contains(v) {
+                                errors.push(CompileError::SemanticError(format!(
+                                    "duplicate match pattern {}",
+                                    v
+                                )));
+                            }
+                            seen.push(*v);
+                        }
+                        MatchPattern::Wildcard => {}
+                    }
+                }
                 for arm in arms {
                     let mut arm_env = env.clone();
                     for s in &arm.body {
@@ -576,7 +732,7 @@ impl SemanticAnalyzer {
                     Type::Unknown
                 }
             }
-            Expr::StorageRead(_) => Type::U64,
+            Expr::StorageRead(name) => self.scalar_storage_type(name, errors),
             Expr::MappingRead(name, key) => self.mapping_access_type(name, key, env, errors),
             Expr::FieldAccess(base, field) => {
                 let base_ty = self.analyze_expr(base, env, errors);
@@ -625,7 +781,10 @@ impl SemanticAnalyzer {
                     // Every field (mirrors Rust's exhaustive struct
                     // Literals; a future `..default` could relax this
                     // Explicitly).
-                    for fname in sfields.keys() {
+                    // Sorted, so the first error is the same on every run.
+                    let mut declared: Vec<&String> = sfields.keys().collect();
+                    declared.sort();
+                    for fname in declared {
                         if !fields.iter().any(|(provided, _)| provided == fname) {
                             errors.push(CompileError::SemanticError(format!(
                                 "Struct {} literal is missing field {}",

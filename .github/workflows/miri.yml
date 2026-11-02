@@ -47,9 +47,9 @@ jobs:
     # timeout-minutes value can ever let this step finish. The step is bounded
     # below instead, and the remainder is reported rather than waited for.
     #
-    # 150 covers crypto (30 min) + bud-zero (12 min) + the bounded storage
-    # window (60 min) with headroom, and is no longer load-bearing.
-    timeout-minutes: 150
+    # 210 covers crypto (up to ~75 min on slow EPYC runners) + bud-zero (12 min)
+    # + the bounded storage window (60 min) with comfortable headroom.
+    timeout-minutes: 210
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -148,9 +148,14 @@ jobs:
           # layout can be silently wrong (the first attempt missed the extra
           # `::tests::` inline module on the storage_economics cases, so that
           # test was never skipped and the step aborted on it anyway). Each of
-          # the 20 names was checked to resolve to exactly one `fn` in src/.
+          # the 37 names was checked to resolve to exactly one `fn` in src/.
+          # The list grew on 2026-10-20: the PR run aborted at
+          # `a_failed_persist_propagates_out_of_the_accounting_paths` with the
+          # same `getrlimit` error, and scanning the filtered set for the same
+          # `Storage::new` shape found the rest before Miri could abort on
+          # them one run at a time.
           #
-          # Skipping the 20 FFI-bound tests lets the rest of the storage module
+          # Skipping the 37 FFI-bound tests lets the rest of the storage module
           # - the pure serialization, hashing and state-machine logic, which is
           # where UB would actually hide - be inspected for the first time. The
           # skipped behaviour is still covered by the normal (non-Miri) test
@@ -177,6 +182,23 @@ jobs:
             --skip storage_reload_skips_commitments_for_unknown_or_mismatched_domains \
             --skip storage_reload_skips_global_headers_with_broken_hash_chain \
             --skip bridge_state_roots_round_trip_through_storage_after_lock \
+            --skip a_failed_persist_propagates_out_of_the_accounting_paths \
+            --skip storage_registry_row_needs_its_version_tag \
+            --skip get_content_refuses_a_row_that_no_longer_hashes_to_its_key \
+            --skip snapshot_is_refused_while_a_commit_is_in_flight \
+            --skip corrupt_tx_index_row_is_an_error_not_a_miss \
+            --skip load_all_seen_blocks_skips_corrupt_records \
+            --skip repair_index_fails_on_gap \
+            --skip repair_index_ok_on_intact_chain \
+            --skip a_recommit_of_a_committed_height_needs_no_progress_marker \
+            --skip a_previous_hash_cycle_is_an_error_not_a_loop \
+            --skip a_record_under_the_wrong_hash_is_refused \
+            --skip delete_block_removes_its_tx_index_rows \
+            --skip check_integrity_accepts_a_pruned_prefix_but_not_a_gap \
+            --skip load_chain_reports_a_missing_indexed_parent \
+            --skip a_newer_schema_version_refuses_to_open \
+            --skip with_storage_refuses_unreadable_accounts \
+            --skip nft_burn_prunes_matching_storage_manifest_on_produce \
             2>&1 | tee /tmp/miri-storage.txt
           # BOUNDED WINDOW, and the bound is the point (see timeout-minutes).
           # At 148 s/test the 646-test suite needs ~26.5 h, which is over four
@@ -315,16 +337,15 @@ jobs:
     runs-on: ubuntu-latest
     # Measured on PR #79 head 3a97569: the canary passed and the ASan lib
     # suite reached 2956/3219 tests before the old 45 minute job timeout
-    # cancelled it mid-run. This is a real cancellation of a still-progressing
-    # sanitizer run, not a test failure; keep the gate blocking and give the
-    # full lib suite enough wall time to finish instead of losing the result.
-    timeout-minutes: 90
+    # cancelled it mid-run; at 3778 tests a full pass takes ~81 minutes on a
+    # hosted runner. Keep the gate blocking and leave real wall-time headroom.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust (nightly, tarih-pinli)
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: nightly-2026-07-19
           components: rust-src

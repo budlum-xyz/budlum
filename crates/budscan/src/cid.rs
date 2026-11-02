@@ -54,6 +54,10 @@ pub enum CidVerdict {
     UnsupportedMultiblock,
 }
 
+/// The longest CID string accepted. A real CID is far shorter, and the decoders
+/// are not linear in the input length.
+const MAX_CID_CHARS: usize = 256;
+
 /// Decodes base58btc.
 fn b58_decode(s: &str) -> Option<Vec<u8>> {
     let mut out: Vec<u8> = Vec::with_capacity(s.len());
@@ -126,6 +130,11 @@ fn read_varint(bytes: &[u8]) -> Option<(u64, usize)> {
 /// An unrecognised multibase, an unsupported version, codec or hash, or a
 /// malformed length.
 pub fn parse(s: &str) -> Result<Cid, String> {
+    if s.len() > MAX_CID_CHARS {
+        return Err(format!(
+            "the CID string is longer than {MAX_CID_CHARS} characters"
+        ));
+    }
     let bytes = if s.len() == 46 && s.starts_with("Qm") {
         b58_decode(s).ok_or_else(|| String::from("base58btc could not be decoded"))?
     } else if let Some(rest) = s.strip_prefix('b') {
@@ -227,6 +236,12 @@ pub fn verify(cid: &Cid, bytes: &[u8]) -> CidVerdict {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_overlong_cid_string_is_refused() {
+        let long = format!("z{}", "2".repeat(MAX_CID_CHARS));
+        assert!(parse(&long).is_err());
+    }
 
     #[test]
     fn cid_v1_raw_hello_from_the_spec() {

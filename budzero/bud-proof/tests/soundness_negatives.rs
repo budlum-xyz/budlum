@@ -147,6 +147,7 @@ fn a_tampered_public_input_is_refused() {
         ("sender", |p| p.sender ^= 1),
         ("nonce", |p| p.nonce ^= 1),
         ("block_height", |p| p.block_height ^= 1),
+        ("gas_limit", |p| p.gas_limit ^= 1),
         ("gas_used", |p| p.gas_used ^= 1),
         ("exit_code", |p| p.exit_code ^= 1),
         ("trace_len", |p| p.trace_len ^= 1),
@@ -212,7 +213,9 @@ fn a_wrong_state_writes_digest_baked_in_before_proving_is_refused() {
         chain_id: 1,
         program_hash,
         initial_state_root,
-        final_state_root: [0u8; 32],
+        // The AIR ties the final root to the storage-writes fold, so the
+        // honest final root for a writing program is its write digest.
+        final_state_root: receipt.state_writes_digest,
         sender: vm.context.sender,
         nonce: vm.context.nonce,
         block_height: vm.context.block_height,

@@ -62,10 +62,11 @@ mod tests {
     /// Multinode smoke script + workflow wired (structural).
     #[test]
     fn multinode_smoke_artifacts_present() {
-        assert!(Path::new("ops/scripts/devnet-multinode-smoke.sh").is_file());
+        assert!(Path::new("xtask/tools/src/multinode_smoke.rs").is_file());
         let wf = include_str!("../../.github/workflows/docker-smoke.yml");
         assert!(
-            wf.contains("devnet-multinode-smoke") && wf.contains("devnet-multinode-smoke.sh"),
+            wf.contains("devnet-multinode-smoke")
+                && wf.contains("xtask/tools/Cargo.toml -- devnet-multinode-smoke"),
             "docker-smoke must run 4-node multinode job"
         );
     }
@@ -142,7 +143,7 @@ mod tests {
     fn determinism_workflow_present() {
         let wf = include_str!("../../.github/workflows/determinism.yml");
         assert!(
-            wf.contains("Genesis") || wf.contains("genesis") || wf.contains("determinism"),
+            wf.contains("genesis-reproducibility:") && wf.contains("Genesis hash (run 1)"),
             "determinism workflow must exist for H6.1"
         );
         assert!(Path::new("config/mainnet-genesis.json").is_file());
@@ -161,7 +162,7 @@ mod tests {
             ".quality/deny.toml",
             ".quality/typos.toml",
             ".quality/grype.yaml",
-            ".quality/osv-scanner.toml",
+            "osv-scanner.toml",
             ".gitleaks.toml",
             ".github/coverage-baseline.txt",
         ] {
@@ -193,7 +194,7 @@ mod tests {
             ),
             (
                 include_str!("../../.github/workflows/osv-scanner.yml"),
-                ".quality/osv-scanner.toml",
+                "osv-scanner.toml",
             ),
         ] {
             assert!(
@@ -220,7 +221,8 @@ mod tests {
         let sec = include_str!("../../docs/SECURITY.md");
         let lower = sec.to_lowercase();
         assert!(
-            lower.contains("security@") || lower.contains("advisor") || lower.contains("report"),
+            lower.contains("## reporting a vulnerability")
+                && lower.contains("private security advisory"),
             "SECURITY.md must state how to report a vulnerability"
         );
     }

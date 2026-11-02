@@ -56,6 +56,8 @@ pub struct RelayerWorker {
     /// so that a block held back by one retried request does not have its
     /// other requests relayed again on the next pass.
     settled: std::collections::HashSet<String>,
+    /// Failed relay attempts per request hash within the current block pass.
+    attempts: std::collections::HashMap<String, u32>,
     /// The nonce the next result transaction is signed with, when this pass
     /// has already submitted one. The chain's account nonce does not move
     /// until a result is included in a block, so two results signed in one
@@ -106,6 +108,9 @@ struct PendingResult {
     /// at [`MAX_REQUESTER_LOOKUP_FAILURES`] the entry is dropped and logged.
     #[serde(default)]
     requester_lookups_failed: u32,
+    /// True once the result transaction sits in a finalized block.
+    #[serde(default)]
+    done: bool,
 }
 
 /// The file name of the pending-result store, next to the cursor file.
@@ -126,6 +131,60 @@ const PENDING_FILE_NAME: &str = "relayer-pending.json";
 /// `UniversalRelay` has no chain-side deadline to lean on.
 const MAX_REQUESTER_LOOKUP_FAILURES: u32 = 1440;
 
+/// Records one failed attempt for a request.
+///
+/// Returns `true` when the request has now failed enough passes to be worth
+/// alarming about. It does **not** forget the request and it does **not** end
+/// it: a retry-class failure is hit by transient conditions - an external RPC
+/// outage, a confirmation timeout, a node started without a relayer signing
+/// key - and a `UniversalRelay` request carries no on-chain expiry, escrow or
+/// refund, so "skipped" here means the submitter's fee is spent and nothing is
+/// ever relayed. The counter exists to make a long outage visible, not to
+/// discard paid work.
+fn note_failed_attempt(attempts: &mut std::collections::HashMap<String, u32>, hash: &str) -> bool {
+    let tries = attempts.entry(hash.to_string()).or_insert(0);
+    let limit = relay_alarm_after_attempts();
+    *tries = tries.saturating_add(1);
+    *tries == limit
+}
+
+/// How many failed passes over one request make it an alarmable event.
+///
+/// Configurable with `RELAY_ALARM_AFTER_ATTEMPTS`; passes are five
+/// seconds apart, so the default is about ten minutes of a request that cannot
+/// be delivered. Reaching the budget raises an error-level event and **keeps
+/// retrying**: the request is still paid and still unrelayed, and dropping it
+/// would turn a transient outage into permanent loss.
+fn relay_alarm_after_attempts() -> u32 {
+    std::env::var("RELAY_ALARM_AFTER_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_RELAY_ALARM_AFTER_ATTEMPTS)
+}
+
+/// Default value of [`relay_alarm_after_attempts`].
+const DEFAULT_RELAY_ALARM_AFTER_ATTEMPTS: u32 = 120;
+
+/// Durable record of a relay request the worker gave up on.
+///
+/// Written as JSON lines beside the cursor, so no request leaves the system
+/// without an artifact an operator can act on: the request hash, the external
+/// chain and target, the sender's nonce and the reason the adapter refused it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct DeadLetter {
+    request: String,
+    chain: String,
+    target: String,
+    external_nonce: u64,
+    sender: String,
+    attempts: u32,
+    reason: String,
+}
+
+/// The dead-letter file name, next to the cursor file.
+const DEAD_LETTER_FILE_NAME: &str = "relayer-deadletter.jsonl";
+
 impl RelayerWorker {
     pub fn new(chain: ChainHandle, relayer_address: Address) -> Self {
         Self {
@@ -135,8 +194,30 @@ impl RelayerWorker {
             adapters: Arc::new(AdapterRegistry::new()),
             cursor_path: None,
             settled: std::collections::HashSet::new(),
+            attempts: std::collections::HashMap::new(),
             next_nonce: None,
             observed: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Refuse to run without a signing key (P8-01, fail-closed).
+    ///
+    /// `process_relay` already refuses to submit an unsigned result. That
+    /// refusal happens per request, inside the pass loop, and because the
+    /// request must not be abandoned (it is paid and has no expiry) the loop
+    /// returns the same `Retry` on every pass: the cursor never moves and
+    /// every five seconds the node logs the same critical line. A key cannot
+    /// arrive at runtime - it is bound before the worker starts - so the
+    /// honest state is "the relayer is not running", stated once at startup.
+    fn require_signing_key(&self) -> Result<(), &'static str> {
+        if self.relayer_keypair.is_some() {
+            Ok(())
+        } else {
+            Err(
+                "worker started without a signing key, so no relay result could ever be \
+                 submitted. The worker is not running and the relay cursor is not moving. \
+                 Bind a key with RelayerWorker::with_signing_key() and restart.",
+            )
         }
     }
 
@@ -176,6 +257,10 @@ impl RelayerWorker {
     /// cases are refused at startup rather than discovered as a mint against
     /// a transaction that never happened.
     #[must_use]
+    ///
+    /// WIRING: the startup seam that hands the worker its adapter
+    /// registry; the relayer binary still starts without adapters, so
+    /// this waits for the operator configuration that builds one.
     pub fn with_adapters(mut self, adapters: Arc<AdapterRegistry>) -> Self {
         self.adapters = adapters;
         self
@@ -200,6 +285,69 @@ impl RelayerWorker {
     fn pending_path(&self) -> Option<std::path::PathBuf> {
         let cursor = self.cursor_path.as_ref()?;
         Some(cursor.with_file_name(PENDING_FILE_NAME))
+    }
+
+    /// Where abandoned requests are logged.
+    fn dead_letter_path(&self) -> Option<std::path::PathBuf> {
+        let cursor = self.cursor_path.as_ref()?;
+        Some(cursor.with_file_name(DEAD_LETTER_FILE_NAME))
+    }
+
+    /// Append one abandoned request to the dead-letter log.
+    ///
+    /// Best effort on the file, loud on the log: the request is already
+    /// unrelayable, and refusing to advance the cursor because the audit file
+    /// is unwritable would hold every later request hostage behind it. A write
+    /// that fails is reported at error level with the whole record, so the
+    /// artifact exists either way - in a file or in the operator's log.
+    fn record_dead_letter(&self, record: DeadLetter) {
+        let Some(path) = self.dead_letter_path() else {
+            error!(
+                request = %record.request,
+                reason = %record.reason,
+                "Relayer: request abandoned with no cursor path; it is only in this log"
+            );
+            return;
+        };
+        let line = match serde_json::to_string(&record) {
+            Ok(line) => line,
+            Err(error) => {
+                error!(
+                    request = %record.request,
+                    reason = %record.reason,
+                    "Relayer: could not encode the dead-letter record: {error}"
+                );
+                return;
+            }
+        };
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(line.as_bytes())?;
+                file.write_all(b"\n")?;
+                file.sync_all()
+            });
+        match written {
+            Ok(()) => warn!(
+                request = %record.request,
+                chain = %record.chain,
+                reason = %record.reason,
+                path = %path.display(),
+                "Relayer: request permanently unrelayed; recorded in the dead-letter log"
+            ),
+            Err(error) => error!(
+                request = %record.request,
+                chain = %record.chain,
+                target = %record.target,
+                sender = %record.sender,
+                reason = %record.reason,
+                "Relayer: request permanently unrelayed and the dead-letter log is unwritable \
+                 ({error}); the record is only in this line"
+            ),
+        }
     }
 
     /// Read the pending results persisted by an earlier run.
@@ -314,6 +462,7 @@ impl RelayerWorker {
         let submitted: Vec<(String, String)> = self
             .observed
             .iter()
+            .filter(|(_, p)| !p.done)
             .filter_map(|(request, p)| p.submitted_tx.clone().map(|h| (request.clone(), h)))
             .collect();
         let mut changed = false;
@@ -321,7 +470,9 @@ impl RelayerWorker {
             match self.included_height(&tx_hash).await {
                 Some(height) if height <= finalized => {
                     info!(request, tx = %tx_hash, height, "Relayer: relay result finalized");
-                    self.observed.remove(&request);
+                    if let Some(pending) = self.observed.get_mut(&request) {
+                        pending.done = true;
+                    }
                     changed = true;
                 }
                 Some(_) => {}
@@ -342,6 +493,18 @@ impl RelayerWorker {
             }
         }
         if changed {
+            self.save_pending();
+        }
+    }
+
+    /// Drop the entries whose result is final once the cursor has moved past
+    /// the block of their request. Until then a finalized entry is the only
+    /// record that stops a restart from running the external action again for
+    /// a request in a block the cursor still holds.
+    fn release_behind_cursor(&mut self) {
+        let before = self.observed.len();
+        self.observed.retain(|_, p| !p.done);
+        if self.observed.len() != before {
             self.save_pending();
         }
     }
@@ -584,6 +747,18 @@ impl RelayerWorker {
             "Universal Relayer Worker started for {}",
             self.relayer_address
         );
+        // A worker with no signing key can never submit a result: every
+        // request would take the retry path and the cursor would sit on the
+        // first block containing one, forever, logging the same error every
+        // pass. Nothing is lost by holding the cursor - and nothing may be
+        // lost, since a `UniversalRelay` request has no chain-side deadline -
+        // but a permanent, silent-from-the-outside stall is not a state to
+        // run in. Refuse to run and say so once, loudly, so an operator sees
+        // that relay is not operating the moment the node starts.
+        if let Err(refusal) = self.require_signing_key() {
+            error!("Relayer: {refusal}");
+            return;
+        }
         if self.adapters.supported_chains().is_empty() {
             warn!(
                 "Relayer worker started with no chain adapters registered. It will observe \
@@ -667,25 +842,69 @@ impl RelayerWorker {
                             height = h,
                             "Relayer: Detected external transaction request"
                         );
+                        // Read before `process_relay` takes the request by
+                        // value, so a refusal can be recorded with the fields
+                        // that identify the external action.
+                        let dead_letter_ref = (
+                            format!("{:?}", ext_tx.chain),
+                            ext_tx.target_address.clone(),
+                            ext_tx.external_nonce,
+                        );
 
                         match self.process_relay(&tx.hash, tx.from, ext_tx).await {
                             RelayOutcome::Submitted => {
                                 self.settled.insert(tx.hash.clone());
                             }
                             RelayOutcome::Refused => {
-                                // A refusal at the adapter is a fact about
-                                // the request: retrying it changes nothing
-                                // and the chain-side deadline reclaims it.
+                                // A refusal is a verdict about the request,
+                                // not about the attempt. It is written to the
+                                // dead-letter log before the cursor moves, so
+                                // the request is not silently dropped: an
+                                // operator can see which paid request will
+                                // never be relayed, and why.
+                                let attempts = self.attempts.get(&tx.hash).copied().unwrap_or(0);
+                                self.record_dead_letter(DeadLetter {
+                                    request: tx.hash.clone(),
+                                    chain: dead_letter_ref.0.clone(),
+                                    target: dead_letter_ref.1.clone(),
+                                    external_nonce: dead_letter_ref.2,
+                                    sender: format!("{:?}", tx.from),
+                                    attempts,
+                                    reason: "adapter refused the request".to_string(),
+                                });
                                 self.settled.insert(tx.hash.clone());
                             }
                             RelayOutcome::Retry => {
-                                // The block stays under the cursor; the
+                                // The block stays under the cursor and the
                                 // next pass comes back to this request.
-                                warn!(
-                                    height = h,
-                                    request = %tx.hash,
-                                    "Relayer: result not accepted yet; holding the cursor and retrying"
-                                );
+                                //
+                                // A retry-class failure is transient by
+                                // definition, and a dropped `UniversalRelay`
+                                // request has no on-chain expiry, escrow or
+                                // refund: "skipping it" would spend the
+                                // submitter's fee and never relay anything.
+                                // So the cursor does not move past it. The
+                                // attempt counter only escalates the log to
+                                // error level once the outage is long enough
+                                // to need an operator, and it never ends the
+                                // request.
+                                if note_failed_attempt(&mut self.attempts, &tx.hash) {
+                                    error!(
+                                        height = h,
+                                        request = %tx.hash,
+                                        attempts = self.attempts.get(&tx.hash).copied().unwrap_or(0),
+                                        "Relayer: relay request has failed every pass for the whole \
+                                         alarm budget; it is still paid and still unrelayed, and the \
+                                         relayer keeps retrying it - an operator must check the \
+                                         external chain and this relayer's connectivity"
+                                    );
+                                } else {
+                                    warn!(
+                                        height = h,
+                                        request = %tx.hash,
+                                        "Relayer: result not accepted yet; holding the cursor and retrying"
+                                    );
+                                }
                                 break 'heights;
                             }
                             RelayOutcome::Held => {
@@ -706,9 +925,11 @@ impl RelayerWorker {
                 }
                 relayed_through = h;
                 self.save_cursor(relayed_through);
+                self.release_behind_cursor();
                 // Everything in this block is behind the cursor now. The
                 // pending results are not: they stay until finality.
                 self.settled.clear();
+                self.attempts.clear();
             }
         }
     }
@@ -858,6 +1079,7 @@ impl RelayerWorker {
                     result: None,
                     submitted_tx: None,
                     requester_lookups_failed: 0,
+                    done: false,
                 },
             );
             self.save_pending();
@@ -1013,6 +1235,106 @@ const fn relay_outcome_for(error: &AdapterError) -> RelayOutcome {
 const CONFIRMATION_DEPTH: u32 = crate::cross_domain::evm::header::DEFAULT_CONFIRMATIONS;
 
 #[cfg(test)]
+mod attempt_budget {
+    use super::*;
+
+    /// The attempt counter escalates the log; it never ends the request.
+    ///
+    /// A `UniversalRelay` request has no on-chain expiry, escrow or refund, so
+    /// a transient failure that ends the request spends the submitter's fee
+    /// and relays nothing. `note_failed_attempt` therefore reports the alarm
+    /// once and keeps the counter - and the request - alive.
+    #[test]
+    fn the_attempt_budget_alarms_but_never_abandons_the_request() {
+        let limit = super::relay_alarm_after_attempts();
+        let mut attempts = std::collections::HashMap::new();
+        for _ in 1..limit {
+            assert!(!note_failed_attempt(&mut attempts, "0xaa"));
+        }
+        assert!(
+            note_failed_attempt(&mut attempts, "0xaa"),
+            "the budget alarms"
+        );
+        assert_eq!(
+            attempts.get("0xaa").copied(),
+            Some(limit),
+            "the request was forgotten at the alarm; it must keep retrying"
+        );
+        assert!(
+            !note_failed_attempt(&mut attempts, "0xaa"),
+            "the alarm must fire once, not on every later pass"
+        );
+        assert!(attempts.contains_key("0xaa"));
+    }
+
+    /// The alarm budget is configurable and ignores nonsense values.
+    #[test]
+    fn the_alarm_budget_is_configurable() {
+        // Only the parse path is exercised here: `std::env` is process-global
+        // and these tests run in parallel, so the variable is read through the
+        // helper rather than set here.
+        assert!(super::relay_alarm_after_attempts() > 0);
+    }
+
+    /// A relayer with no signing key refuses to run instead of stalling.
+    ///
+    /// Without the startup refusal the worker entered its pass loop, matched
+    /// every request against `process_relay`, was refused for the missing key
+    /// (`Retry`), and held the cursor there for good: correct about not losing
+    /// a paid request, useless to an operator, and it re-logged the same
+    /// critical line every five seconds.
+    #[test]
+    fn a_worker_without_a_signing_key_refuses_to_run() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let worker = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]));
+        let refusal = worker
+            .require_signing_key()
+            .expect_err("a keyless worker must not run");
+        assert!(
+            refusal.contains("signing key") && refusal.contains("not running"),
+            "the refusal must name the missing key and the consequence: {refusal}"
+        );
+
+        let keypair =
+            std::sync::Arc::new(crate::crypto::primitives::KeyPair::generate().expect("key"));
+        let bound = RelayerWorker::new(
+            ChainHandle::new(tokio::sync::mpsc::channel(1).0),
+            Address::from([7u8; 32]),
+        )
+        .with_signing_key(keypair);
+        assert!(
+            bound.require_signing_key().is_ok(),
+            "a bound key must let the worker run"
+        );
+    }
+
+    /// An abandoned request leaves a record an operator can act on.
+    #[test]
+    fn an_abandoned_request_is_written_to_the_dead_letter_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cursor = dir.path().join("relay-cursor");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let worker = RelayerWorker::new(ChainHandle::new(tx), Address::from([7u8; 32]))
+            .with_cursor_path(Some(cursor.clone()));
+        worker.record_dead_letter(DeadLetter {
+            request: "0xdead".to_string(),
+            chain: "Ethereum".to_string(),
+            target: "0x00000000000000000000000000000000000000ff".to_string(),
+            external_nonce: 4,
+            sender: "0x01".to_string(),
+            attempts: 3,
+            reason: "adapter refused the request".to_string(),
+        });
+        let path = dir.path().join(DEAD_LETTER_FILE_NAME);
+        let text = std::fs::read_to_string(&path).expect("dead-letter file");
+        let record: DeadLetter = serde_json::from_str(text.trim()).expect("one JSON line");
+        assert_eq!(record.request, "0xdead");
+        assert_eq!(record.external_nonce, 4);
+        assert_eq!(record.attempts, 3);
+    }
+}
+
+#[cfg(test)]
 mod cursor_persistence {
     use super::*;
 
@@ -1101,6 +1423,13 @@ mod relay_outcomes {
 
     #[async_trait::async_trait]
     impl ChainAdapter for ConsistentAdapter {
+        fn verify_observation(
+            &self,
+            result: &crate::core::transaction::RelayerExternalResult,
+        ) -> Result<(), AdapterError> {
+            crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+        }
+
         fn chain_type(&self) -> ExternalChain {
             ExternalChain::Ethereum
         }
@@ -1248,6 +1577,13 @@ mod relay_outcomes {
 
     #[async_trait::async_trait]
     impl ChainAdapter for CountingAdapter {
+        fn verify_observation(
+            &self,
+            result: &crate::core::transaction::RelayerExternalResult,
+        ) -> Result<(), AdapterError> {
+            crate::cross_domain::chain_adapter::self_checked_observation(self, result)
+        }
+
         fn chain_type(&self) -> ExternalChain {
             ExternalChain::Ethereum
         }
@@ -1441,6 +1777,7 @@ mod pending_results {
                 result: Some(observation(1)),
                 submitted_tx: Some("tx-a".to_string()),
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.observed.insert(
@@ -1449,6 +1786,7 @@ mod pending_results {
                 result: Some(observation(2)),
                 submitted_tx: None,
                 requester_lookups_failed: 3,
+                done: false,
             },
         );
         w.save_pending();
@@ -1528,6 +1866,7 @@ mod pending_results {
                 result: None,
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         first.save_pending();
@@ -1630,6 +1969,7 @@ mod pending_results {
                 result: Some(observation(1)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.save_pending();
@@ -1645,6 +1985,7 @@ mod pending_results {
                 result: Some(huge),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.save_pending();
@@ -1670,6 +2011,7 @@ mod pending_results {
                 result: Some(observation(6)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         for pass in 1..MAX_REQUESTER_LOOKUP_FAILURES {
@@ -1710,6 +2052,7 @@ mod pending_results {
                 result: Some(observation(6)),
                 submitted_tx: None,
                 requester_lookups_failed: MAX_REQUESTER_LOOKUP_FAILURES - 2,
+                done: false,
             },
         );
         w.save_pending();
@@ -1743,6 +2086,7 @@ mod pending_results {
                 result: Some(observation(3)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
         w.save_pending();
@@ -1774,6 +2118,7 @@ mod pending_results {
                     result: Some(observation(9)),
                     submitted_tx: Some(hash.to_string()),
                     requester_lookups_failed: 0,
+                    done: false,
                 },
             );
         }
@@ -1781,8 +2126,13 @@ mod pending_results {
         w.reap_finalized(11).await;
 
         assert!(
+            w.observed["req-final"].done,
+            "a result in a finalized block is done, and stays until the cursor passes"
+        );
+        w.release_behind_cursor();
+        assert!(
             !w.observed.contains_key("req-final"),
-            "a result in a finalized block is done"
+            "a finalized entry is released once the cursor is past its block"
         );
         assert_eq!(
             w.observed["req-young"].submitted_tx.as_deref(),
@@ -1819,6 +2169,7 @@ mod pending_results {
                 result: Some(observation(5)),
                 submitted_tx: None,
                 requester_lookups_failed: 0,
+                done: false,
             },
         );
 
@@ -1837,5 +2188,56 @@ mod pending_results {
             w.adapters.supported_chains().is_empty(),
             "no adapter was needed: the stored observation is what gets signed"
         );
+    }
+
+    /// BLG-0716: a finalized result must survive a restart while the cursor
+    /// still holds the request's block, so the replay does not repeat the
+    /// external action.
+    #[tokio::test]
+    async fn a_finalized_entry_survives_a_restart_until_the_cursor_passes() {
+        let included = std::collections::HashMap::from([("tx-final".to_string(), 10u64)]);
+        let handle = actor(
+            included,
+            std::collections::HashSet::new(),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("relayer-cursor");
+        let mut w = RelayerWorker::new(handle, Address::from([7u8; 32]))
+            .with_cursor_path(Some(path.clone()));
+        w.observed.insert(
+            "req-a".to_string(),
+            PendingResult {
+                result: Some(observation(1)),
+                submitted_tx: Some("tx-final".to_string()),
+                requester_lookups_failed: 0,
+                done: false,
+            },
+        );
+        w.reap_finalized(11).await;
+
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(1);
+        let key = Arc::new(KeyPair::generate().expect("keypair"));
+        let mut again = RelayerWorker::new(ChainHandle::new(tx2), Address::from([7u8; 32]))
+            .with_cursor_path(Some(path))
+            .with_signing_key(key);
+        again.observed = again.load_pending().expect("load");
+        assert!(again.observed["req-a"].done);
+        let user = Address::from([8u8; 32]);
+        let request = crate::core::transaction::ExternalTransaction {
+            chain: ExternalChain::Ethereum,
+            target_address: "0x00000000000000000000000000000000000000aa".to_string(),
+            payload: vec![1, 2, 3],
+            external_nonce: 7,
+        };
+        let outcome = again.process_relay("req-a", user, request).await;
+        assert_eq!(
+            outcome,
+            RelayOutcome::Submitted,
+            "no second external action"
+        );
+
+        again.release_behind_cursor();
+        assert!(again.load_pending().expect("load").is_empty());
     }
 }

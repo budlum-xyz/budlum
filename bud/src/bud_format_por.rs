@@ -16,8 +16,15 @@
 use sha3::{Digest, Sha3_256};
 
 /// The PoR key (the secret shared with the verifier). Private verifiability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PorKey(pub [u8; 32]);
+
+/// The key is a secret: the debug form never prints its bytes.
+impl std::fmt::Debug for PorKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PorKey(<redacted>)")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PorTag(pub [u8; 32]);
@@ -40,11 +47,14 @@ impl PorKey {
         PorKey(seed)
     }
 
-    /// The block tag: SHA3(domain || key || index || block).
-    pub fn tag(&self, block: &[u8], index: u64) -> PorTag {
+    /// The response tag: SHA3(domain || key || nonce || index || block). The challenge
+    /// nonce is inside, so a tag from an earlier challenge answers no later one and
+    /// the prover needs the block bytes for every challenge.
+    pub fn tag(&self, block: &[u8], index: u64, nonce: &[u8; 32]) -> PorTag {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
         h.update(self.0);
+        h.update(nonce);
         h.update(index.to_le_bytes());
         h.update(block);
         PorTag(h.finalize().into())
@@ -75,15 +85,15 @@ impl PorKey {
             if idx as usize >= blocks.len() {
                 return None; // an out-of-bounds index -> an invalid response
             }
-            tags.push(self.tag(&blocks[idx as usize], idx));
+            tags.push(self.tag(&blocks[idx as usize], idx, &challenge.nonce));
         }
         Some(PorResponse { tags })
     }
 
     /// Verify (the verifier side): every (index, block, tag) must match the
-    /// recomputed one. Nonce freshness: the challenge nonce should be bound to
-    /// the response; in this simple version verify expects the nonce in the
-    /// challenge record (replay is out of scope).
+    /// recomputed one. The challenge nonce is bound into every tag, so a replayed
+    /// or precomputed response fails under a fresh nonce. This private-key scheme
+    /// still needs the verifier to hold the blocks.
     pub fn verify(
         &self,
         blocks: &[Vec<u8>],
@@ -97,7 +107,7 @@ impl PorKey {
             if idx as usize >= blocks.len() {
                 return false;
             }
-            let expected = self.tag(&blocks[idx as usize], idx);
+            let expected = self.tag(&blocks[idx as usize], idx, &challenge.nonce);
             if expected != response.tags[i] {
                 return false; // the block or the tag was changed
             }
@@ -109,6 +119,13 @@ impl PorKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_debug_form_does_not_print_the_key() {
+        let key = PorKey::new([0xAB; 32]);
+        let shown = format!("{key:?}");
+        assert!(!shown.contains("171") && !shown.contains("ab"), "{shown}");
+    }
 
     fn blocks() -> Vec<Vec<u8>> {
         (0..8u64).map(|i| vec![i as u8; 16]).collect()
@@ -149,6 +166,25 @@ mod tests {
             .respond(&blk, &ch)
             .expect("an honest prover produces a response");
         assert!(!k2.verify(&blk, &ch, &resp), "a wrong key is REFUSED");
+    }
+
+    #[test]
+    fn response_is_bound_to_the_challenge_nonce() {
+        let key = PorKey::new([7u8; 32]);
+        let blk = blocks();
+        let ch = PorKey::challenge(8, 3, 42);
+        let resp = key.respond(&blk, &ch).expect("response");
+        // The same indices under a fresh nonce: the old tags must not verify.
+        let fresh = PorChallenge {
+            indices: ch.indices.clone(),
+            nonce: [9u8; 32],
+        };
+        assert!(
+            !key.verify(&blk, &fresh, &resp),
+            "a replayed response is REFUSED"
+        );
+        let again = key.respond(&blk, &fresh).expect("response");
+        assert!(key.verify(&blk, &fresh, &again));
     }
 
     #[test]

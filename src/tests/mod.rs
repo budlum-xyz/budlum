@@ -28,6 +28,9 @@ pub mod sharding_e2e;
 // + §4 acceptance criteria).
 #[cfg(test)]
 pub mod bud_e2e;
+// Restarts from its own store: the restart tests write through it (K4).
+#[cfg(test)]
+pub mod block_door_harness;
 #[cfg(test)]
 pub mod byzantine_settlement;
 #[cfg(test)]
@@ -92,8 +95,8 @@ pub mod prover;
 pub mod regeneration_recovery;
 #[cfg(test)]
 pub mod relayer_liveness;
-// L1 relayer proof kripto-doorulama + M5 budlumxyz fee + M4 BNS fee
-// Regresyon kapilari (Q-A, 2026-07-16).
+// chain relayer proof cryptographic verification + M5 budlumxyz fee + M4 BNS fee
+// Regression gates (Q-A, 2026-07-16).
 #[cfg(test)]
 pub mod relayer_gates;
 // A relayer may stay silent; it may not sign an external outcome it never
@@ -102,6 +105,8 @@ pub mod relayer_gates;
 pub mod relayer_worker_locks;
 #[cfg(test)]
 pub mod settlement_prod;
+#[cfg(test)]
+pub mod storage_tx_door;
 #[cfg(test)]
 pub mod tokenomics;
 pub mod tokenomics_proptest;
@@ -183,6 +188,8 @@ pub mod hardening_locks;
 pub mod mempool_dos_locks;
 pub mod network_hardening_locks;
 #[cfg(test)]
+pub mod p01_consensus_rounds;
+#[cfg(test)]
 pub mod regression_lock;
 pub mod slashing_matrix;
 // (2026-07-21) cross-platform consensus determinism digest'i.
@@ -206,4 +213,10 @@ pub mod consensus_bypass_locks;
 // The fixture is the single source: config/fixtures/real-chain.json, and the
 // xtask `fixture-integrity` gate verifies the same file.
 #[cfg(test)]
+pub mod block_clock;
+#[cfg(test)]
 pub mod real_chain_fixtures;
+// Effect-asserting locks for the slashing matrix and the overflow rule
+// (P49-F04, P49-F06).
+#[cfg(test)]
+pub mod audit_p49_locks;

@@ -16,6 +16,45 @@ use rand::Rng;
 use sha3::{Digest, Sha3_256};
 use std::io::{Read, Write};
 use std::path::Path;
+/// Write secret key bytes so that a crash never leaves a short or empty key file.
+///
+/// The bytes go to a new sibling file made with `create_new` and mode `0o600`, are
+/// flushed to disk, and then replace the target with an atomic rename. The mode of a
+/// file that already existed is therefore never kept: the new file always has `0o600`.
+fn write_key_file(path: &Path, bytes: &[u8]) -> Result<(), CryptoError> {
+    let io_err = |e: std::io::Error| CryptoError::Io(e.to_string());
+    let mut tmp_name = path
+        .file_name()
+        .ok_or_else(|| CryptoError::Io("key path has no file name".into()))?
+        .to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = path.with_file_name(tmp_name);
+    match std::fs::remove_file(&tmp_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_err(e)),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = options
+        .open(&tmp_path)
+        .map_err(io_err)
+        .and_then(|mut file| {
+            file.write_all(bytes).map_err(io_err)?;
+            file.sync_all().map_err(io_err)?;
+            std::fs::rename(&tmp_path, path).map_err(io_err)
+        });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyBackend {
     LocalFile,
@@ -37,16 +76,6 @@ pub struct ValidatorKeyPolicy {
 }
 
 impl ValidatorKeyPolicy {
-    pub fn mainnet_default() -> Self {
-        Self {
-            backend: KeyBackend::Hsm {
-                slot: "BUDLUM_MAINNET_VALIDATOR".to_string(),
-            },
-            rotation_interval_epochs: 90,
-            allow_export: false,
-        }
-    }
-
     pub fn devnet_default() -> Self {
         Self {
             backend: KeyBackend::LocalFile,
@@ -94,6 +123,13 @@ pub struct BlsKeypair {
     pub public_key: Vec<u8>,
 }
 
+/// F11: zero the secret scalar when the pair is dropped.
+impl Drop for BlsKeypair {
+    fn drop(&mut self) {
+        self.secret_key = Scalar::zero();
+    }
+}
+
 impl BlsKeypair {
     pub fn generate() -> Result<Self, CryptoError> {
         use rand::Rng;
@@ -125,14 +161,21 @@ impl BlsKeypair {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        // Validate G2 encoding AND that pk matches sk.
-        if bytes.len() < 32 + 96 {
+        // Validate G2 encoding AND that pk matches sk. F10: the length is
+        // exact - trailing garbage is not silently ignored - and the zero
+        // scalar is refused (its public key is the identity point).
+        if bytes.len() != 32 + 96 {
             return Err(CryptoError::InvalidKey(
                 "Invalid BLS keypair bytes length".into(),
             ));
         }
         let mut sk_bytes = [0u8; 32];
         sk_bytes.copy_from_slice(&bytes[0..32]);
+        if sk_bytes == [0u8; 32] {
+            return Err(CryptoError::InvalidKey(
+                "Refusing a zero BLS secret key".into(),
+            ));
+        }
         let sk_opt = Scalar::from_bytes(&sk_bytes);
         // `Option::from` consumes the `CtOption` once; the previous form
         // branched on `is_none()` and then called `unwrap()`, which reads the
@@ -281,18 +324,25 @@ impl PqKeyPair {
                 secret_key.len()
             )));
         }
-        Ok(Self {
+        let kp = Self {
             public_key: public_key.to_vec(),
             secret_key: secret_key.to_vec(),
-        })
+        };
+        // F10: the halves must pair. A public key that does not match the
+        // secret half would announce one identity and sign with another, so
+        // a fixed probe is signed and verified at parse time.
+        const PAIRING_PROBE: &[u8] = b"BUDLUM_KEYFILE_PAIRING_PROBE_V1";
+        let probe = kp
+            .sign(PAIRING_PROBE)
+            .map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        Self::verify(public_key, PAIRING_PROBE, &probe).map_err(|_| {
+            CryptoError::InvalidKey("PQ public and secret halves do not match".into())
+        })?;
+        Ok(kp)
     }
 
     pub fn public_key_bytes(&self) -> &[u8] {
         &self.public_key
-    }
-
-    pub fn secret_key_bytes(&self) -> &[u8] {
-        &self.secret_key
     }
 
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
@@ -352,18 +402,23 @@ impl PqKeyPair {
                 secret_key.len()
             )));
         }
-        Ok(Self {
+        let kp = Self {
             public_key: public_key.to_vec(),
             secret_key: secret_key.to_vec(),
-        })
+        };
+        // F10: the halves must pair; see the dilithium impl above.
+        const PAIRING_PROBE: &[u8] = b"BUDLUM_KEYFILE_PAIRING_PROBE_V1";
+        let probe = kp
+            .sign(PAIRING_PROBE)
+            .map_err(|e| CryptoError::InvalidKey(e.to_string()))?;
+        Self::verify(public_key, PAIRING_PROBE, &probe).map_err(|_| {
+            CryptoError::InvalidKey("PQ public and secret halves do not match".into())
+        })?;
+        Ok(kp)
     }
 
     pub fn public_key_bytes(&self) -> &[u8] {
         &self.public_key
-    }
-
-    pub fn secret_key_bytes(&self) -> &[u8] {
-        &self.secret_key
     }
 
     pub fn sign(&self, message: &[u8]) -> Result<Vec<u8>, CryptoError> {
@@ -435,10 +490,6 @@ impl PqKeyPair {
         &self.public_key
     }
 
-    pub fn secret_key_bytes(&self) -> &[u8] {
-        &self.secret_key
-    }
-
     pub fn sign(&self, _message: &[u8]) -> Result<Vec<u8>, CryptoError> {
         Err(CryptoError::Signing(
             "PQ signing not available: enable `pq-dilithium` or `pq-ml-dsa` feature".to_string(),
@@ -497,29 +548,9 @@ impl ValidatorKeys {
         if let Some(bls_key) = &self.bls_key {
             bytes.extend_from_slice(&bls_key.to_bytes());
         }
-        // (security audit §6) create with strict 0o600 from the
-        // Start. The previous `let _ = set_permissions` swallowed
-        // Permission-set errors on the most sensitive key on the node;
-        // Any failure is now propagated via `?` and surfaces to the
-        // Operator at save time.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path.as_ref())
-                .map_err(|e| CryptoError::Io(e.to_string()))?;
-            use std::io::Write;
-            file.write_all(&bytes)
-                .map_err(|e| CryptoError::Io(e.to_string()))?;
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::write(path.as_ref(), bytes).map_err(|e| CryptoError::Io(e.to_string()))?;
-        }
+        write_key_file(path.as_ref(), &bytes)?;
+        // F11: the plaintext key buffer does not outlive the write.
+        bytes.fill(0);
         Ok(())
     }
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, CryptoError> {
@@ -566,11 +597,17 @@ impl ValidatorKeys {
         #[cfg(not(any(feature = "pq-dilithium", feature = "pq-ml-dsa")))]
         let pq_key: Option<PqKeyPair> = None;
 
-        let bls_key = if bytes.len() >= cursor + 128 {
-            let bls = BlsKeypair::from_bytes(&bytes[cursor..cursor + 128])?;
-            Some(bls)
-        } else {
-            None
+        // F10: the tail after the optional PQ block is either absent or
+        // exactly one BLS keypair. A 1..127-byte tail used to be dropped
+        // silently, losing the BLS key; extra bytes were ignored.
+        let bls_key = match bytes.len().saturating_sub(cursor) {
+            0 => None,
+            128 => Some(BlsKeypair::from_bytes(&bytes[cursor..cursor + 128])?),
+            _ => {
+                return Err(CryptoError::InvalidKey(
+                    "Key file has a partial or trailing BLS tail".into(),
+                ))
+            }
         };
 
         Ok(ValidatorKeys {
@@ -589,41 +626,18 @@ impl ValidatorKeys {
     ///
     /// [`CryptoError::PlaintextDiskKeysForbiddenOnMainnet`] when mainnet keys
     /// carry BLS or post-quantum secrets in the clear.
+    /// F18: the engine enforces mainnet policy through
+    /// [`crate::crypto::mainnet_policy::check_mainnet_validator_key_policy`];
+    /// this hook exists for the test suite that proves the rule.
+    #[cfg(test)]
     pub fn validate_mainnet_disk_policy(&self, is_mainnet: bool) -> Result<(), CryptoError> {
         if is_mainnet && (self.pq_key.is_some() || self.bls_key.is_some()) {
             return Err(CryptoError::PlaintextDiskKeysForbiddenOnMainnet);
         }
         Ok(())
     }
-
-    /// Load keys from disk and apply the mainnet policy to what came back.
-    ///
-    /// [`ValidatorKeys::validate_mainnet_disk_policy`] existed, was tested,
-    /// and no production path ever called it. A rule nothing reaches is not a
-    /// weaker rule than one that fires, it is a comment: the callers in
-    /// `main.rs` each re-derived their own version of it, one of them left the
-    /// network out entirely, and the disagreement was invisible because there
-    /// was no single place the answer came from.
-    ///
-    /// This is that place. Callers say which network they are on and get keys
-    /// that are legal for it, or an error. Anyone who needs the raw bytes can
-    /// still call [`ValidatorKeys::load`], but they are now choosing to, in a
-    /// line that says so.
-    ///
-    /// # Errors
-    ///
-    /// Whatever [`ValidatorKeys::load`] returns, or
-    /// [`CryptoError::PlaintextDiskKeysForbiddenOnMainnet`] when the file is
-    /// legal to read and illegal to use on this network.
-    pub fn load_for_network<P: AsRef<Path>>(
-        path: P,
-        is_mainnet: bool,
-    ) -> Result<Self, CryptoError> {
-        let keys = Self::load(path)?;
-        keys.validate_mainnet_disk_policy(is_mainnet)?;
-        Ok(keys)
-    }
 }
+
 impl KeyPair {
     pub fn generate() -> Result<Self, CryptoError> {
         let mut seed = [0u8; SECRET_KEY_LENGTH];
@@ -670,30 +684,7 @@ impl KeyPair {
         Self::from_bytes(&bytes)
     }
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), CryptoError> {
-        // (security audit §6) create the file with strict 0o600
-        // Permissions from the start (no create-then-chmod window).
-        // On non-unix, the second branch falls back to a plain create
-        // (no umask to manipulate on those platforms).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(path.as_ref())
-                .map_err(|e| CryptoError::Io(e.to_string()))?;
-            file.write_all(self.signing_key.as_bytes())
-                .map_err(|e| CryptoError::Io(e.to_string()))?;
-        }
-        #[cfg(not(unix))]
-        {
-            let mut file =
-                std::fs::File::create(path.as_ref()).map_err(|e| CryptoError::Io(e.to_string()))?;
-            file.write_all(self.signing_key.as_bytes())
-                .map_err(|e| CryptoError::Io(e.to_string()))?;
-        }
+        write_key_file(path.as_ref(), self.signing_key.as_bytes())?;
         // (security audit §7) the file path of a
         // Freshly-saved keypair is a sensitive secret, an
         // Attacker reading process stdout learns exactly where
@@ -703,6 +694,9 @@ impl KeyPair {
         tracing::debug!("Keypair saved to {:?}", path.as_ref());
         Ok(())
     }
+    /// Test-only: production code must not read the raw ed25519 seed
+    /// (F18 keeps the surface minimal; tests use it for round-trips).
+    #[cfg(test)]
     pub fn private_key_bytes(&self) -> [u8; SECRET_KEY_LENGTH] {
         *self.signing_key.as_bytes()
     }
@@ -811,6 +805,7 @@ pub fn classify_pq_signature_len(len: usize) -> PqSignatureClass {
 /// `pq_signature_acceptability_agrees_with_classification` proves this never
 /// disagrees with [`classify_pq_signature_len`].
 #[must_use]
+#[cfg(test)]
 pub fn pq_signature_len_acceptable(len: usize, expected: PqSignatureClass) -> bool {
     match expected {
         PqSignatureClass::Dilithium5 => len == PQ_DILITHIUM5_SIGNATURE_LEN,
@@ -830,6 +825,14 @@ pub fn pq_signature_len_acceptable(len: usize, expected: PqSignatureClass) -> bo
 #[derive(Clone)]
 pub struct WalletKeyPair {
     signing_key: ml_dsa::SigningKey<ml_dsa::MlDsa87>,
+}
+
+/// F11: overwrite the wallet signing key when the pair is dropped.
+#[cfg(feature = "wallet-ml-dsa")]
+impl Drop for WalletKeyPair {
+    fn drop(&mut self) {
+        self.signing_key = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed((&[0u8; 32]).into());
+    }
 }
 
 #[cfg(feature = "wallet-ml-dsa")]
@@ -877,6 +880,13 @@ impl WalletKeyPair {
             .expanded_key()
             .sign_randomized(message, b"", &mut rand::rng())
             .unwrap_or_else(|_| {
+                // P02-F20: the deterministic fallback stays (a dead OS rng
+                // must not strand a transaction mid-flight), but it is no
+                // longer silent. Hedged signing is the FIPS 204 posture and
+                // losing it is an incident, not a quiet detail.
+                tracing::error!(
+                    "Wallet ML-DSA randomized signing failed (OS rng unavailable);                      fell back to deterministic signing"
+                );
                 use ml_dsa::signature::Signer as _;
                 self.signing_key.sign(message)
             });
@@ -978,6 +988,79 @@ pub fn verify_ml_dsa_87_signature(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- BLG-0046 (F10): key-file parsing is exact. ----
+
+    #[test]
+    fn bls_from_bytes_refuses_a_zero_scalar() {
+        let zeros = vec![0u8; 128];
+        assert!(BlsKeypair::from_bytes(&zeros).is_err());
+    }
+
+    #[test]
+    fn bls_from_bytes_demands_exact_length() {
+        let good = BlsKeypair::generate().unwrap().to_bytes();
+        assert_eq!(good.len(), 128);
+        assert!(BlsKeypair::from_bytes(&good).is_ok());
+        let mut long = good;
+        long.push(0);
+        assert!(BlsKeypair::from_bytes(&long).is_err());
+        let short = vec![0u8; 127];
+        assert!(BlsKeypair::from_bytes(&short).is_err());
+    }
+
+    #[test]
+    fn validator_key_file_partial_bls_tail_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vk.bin");
+        let keys = ValidatorKeys::generate().unwrap();
+        keys.save(&path).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.push(0x7f);
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(ValidatorKeys::load(&path).is_err());
+    }
+
+    #[cfg(any(feature = "pq-dilithium", feature = "pq-ml-dsa"))]
+    #[test]
+    fn pq_from_bytes_refuses_mismatched_halves() {
+        let a = PqKeyPair::generate();
+        let b = PqKeyPair::generate();
+        assert!(PqKeyPair::from_bytes(a.public_key_bytes(), &b.secret_key).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_over_a_wide_mode_file_resets_mode_and_leaves_no_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp.bin");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let kp = KeyPair::generate().unwrap();
+        kp.save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            KeyPair::load(&path).unwrap().private_key_bytes(),
+            kp.private_key_bytes()
+        );
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(names.len(), 1, "no temp file may remain");
+    }
+
+    #[test]
+    fn a_stale_temp_file_does_not_block_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kp.bin");
+        std::fs::write(dir.path().join("kp.bin.tmp"), b"stale").unwrap();
+        let kp = KeyPair::generate().unwrap();
+        kp.save(&path).unwrap();
+        assert_eq!(
+            KeyPair::load(&path).unwrap().private_key_bytes(),
+            kp.private_key_bytes()
+        );
+    }
     #[test]
     fn test_keypair_generation() {
         let kp = KeyPair::generate().unwrap();
@@ -1018,43 +1101,103 @@ mod tests {
     }
     #[test]
     fn test_save_and_load() {
+        // BLG-0053 (F17): a fixed /tmp path is shared between parallel test
+        // processes; every run gets its own tempdir now.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_budlum_key");
         let kp = KeyPair::generate().unwrap();
-        let path = "/tmp/test_budlum_key";
-        kp.save(path).unwrap();
-        let loaded = KeyPair::load(path).unwrap();
+        kp.save(&path).unwrap();
+        let loaded = KeyPair::load(&path).unwrap();
         assert_eq!(kp.public_key_bytes(), loaded.public_key_bytes());
         let msg = b"test";
         assert_eq!(kp.sign(msg), loaded.sign(msg));
-        std::fs::remove_file(path).ok();
     }
 }
 
-/// (security audit §7) the public-key hex must NOT
-/// Be printed to stdout by `KeyPair::generate`. We can't
-/// Directly observe `println!` from a unit test (it goes to
-/// The captured test stdout which cargo doesn't surface),
-/// But we can pin the contract that the function returns
-/// Silently and the public key is recoverable only through
-/// The public_key accessor - proving the API never needed
-/// The println. This is the regression guard for the
-/// Security-relevant side-channel removal.
+/// Does the captured stdout contain a run of 64 hex characters?
+#[cfg(test)]
+fn stdout_has_64_hex_run(stdout: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(stdout);
+    let bytes = text.as_bytes();
+    let is_hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b.to_ascii_lowercase());
+    let mut run = 0usize;
+    for &b in bytes {
+        if is_hex(b) {
+            run += 1;
+            if run >= 64 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+/// (security audit §7) the public-key hex must NOT be printed to stdout by
+/// `KeyPair::generate`.
+///
+/// BLG-0053 (F17): the old test claimed to capture stdout but never did. The
+/// check now runs `generate` inside a child process whose raw stdout is
+/// fully captured, so any printed 64-hex public key is observable. A canary
+/// test proves the detector itself works (red-green).
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "re-executes the test binary (process spawn) to capture stdout; Miri cannot spawn processes"
+)]
 fn keypair_generate_does_not_leak_public_key_via_println() {
-    // Capture stdout for the duration of `generate`. If
-    // Anything is printed that contains the public key hex
-    // (128 hex chars), the security boundary is broken.
-    let kp = KeyPair::generate().expect("KeyPair::generate must succeed");
-    // The public key is accessible via the typed accessor;
-    // The only way an attacker can recover it is by reading
-    // Process stdout. With `println!` removed (replaced by
-    // `tracing::debug!`), nothing is written to stdout by
-    // Default, so the public key stays in-process.
-    let pk_bytes = kp.public_key_bytes();
-    assert_eq!(pk_bytes.len(), 32, "ed25519 public key is 32 bytes");
-    // Round-trip: serialize and re-import - proves the API
-    // Is complete without the println.
-    let hex_pk = hex::encode(pk_bytes);
-    assert_eq!(hex_pk.len(), 64, "hex-encoded pubkey is 64 chars");
+    match std::env::var("BUDLUM_STDOUT_PROBE").as_deref() {
+        Ok("child") => {
+            let _kp = KeyPair::generate().expect("KeyPair::generate must succeed");
+        }
+        Ok("canary") => {
+            let canary = std::env::var("BUDLUM_STDOUT_CANARY").expect("canary hex");
+            println!("{canary}");
+        }
+        _ => {
+            // Test-only re-exec of this test binary to capture its stdout; no
+            // security decision depends on the path. The suppression carries
+            // the rule id alone: a trailing " - reason" after the id is not
+            // part of the recognised form in every semgrep version, and the
+            // alert this line exists to silence came back on the PR when it
+            // had one.
+            // nosemgrep: rust.lang.security.current-exe.current-exe
+            let exe = std::env::current_exe().expect("test binary path");
+            // `--exact` matches the full test path, which includes the module
+            // (without the crate name). A bare function name matches nothing,
+            // and a probe that runs nothing prints nothing - the red-green
+            // canary below is what notices that.
+            let test_path = format!(
+                "{}::keypair_generate_does_not_leak_public_key_via_println",
+                module_path!().split_once("::").map_or("", |(_, rest)| rest)
+            );
+            let run_probe = |mode: &str| {
+                std::process::Command::new(&exe)
+                    .args([test_path.as_str(), "--exact", "--nocapture"])
+                    .env("BUDLUM_STDOUT_PROBE", mode)
+                    .output()
+                    .expect("spawn probe")
+            };
+            let out = run_probe("child");
+            assert!(
+                !stdout_has_64_hex_run(&out.stdout),
+                "KeyPair::generate printed a public key to stdout"
+            );
+            // Canary: the same detector must see hex that IS printed.
+            let canary = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+            let out = std::process::Command::new(&exe)
+                .args([test_path.as_str(), "--exact", "--nocapture"])
+                .env("BUDLUM_STDOUT_PROBE", "canary")
+                .env("BUDLUM_STDOUT_CANARY", canary)
+                .output()
+                .expect("spawn canary");
+            assert!(
+                stdout_has_64_hex_run(&out.stdout),
+                "the stdout detector must see a printed public key (canary)"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1119,7 +1262,7 @@ fn test_bls_proof_of_possession() {
 
     let other = BlsKeypair::generate().expect("generate another key");
     let mut wrong_key = entry;
-    wrong_key.bls_public_key = other.public_key;
+    wrong_key.bls_public_key = other.public_key.clone();
     assert!(!crate::chain::finality::verify_pop(
         &wrong_key,
         DEFAULT_CHAIN_ID

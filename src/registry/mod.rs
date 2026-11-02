@@ -1,4 +1,4 @@
-//! Participation registries for Budlum's multi-consensus L1.
+//! Participation registries for Budlum's Universal Settlement Layer.
 //!
 //! This module encodes the master-context split between two deliberately
 //! Separate membership models:
@@ -33,15 +33,22 @@ pub mod quarantine_ledger;
 pub mod role;
 
 pub use identity::{
-    address_of_did, authorize_recovery, credential_id, credential_issue_digest,
-    credential_revoke_digest, did_of, disclosure_proof, execute_identity_tx, field_commitment,
-    merkle_root, recovery_digest, verify_disclosure, CredentialCommitment, DisclosureProof,
-    FieldCommitment, GuardianApproval, IdentityError, IdentityOp, IdentityRecord, IdentityRegistry,
-    IdentityTx, MethodKind, VerificationMethod, DID_METHOD_NAME,
+    address_of_did, authorize_recovery, credential_id, did_of, disclosure_proof,
+    execute_identity_tx, field_commitment, merkle_root, recovery_digest, verify_disclosure,
+    CredentialCommitment, DisclosureProof, FieldCommitment, GuardianApproval, IdentityError,
+    IdentityOp, IdentityRecord, IdentityRegistry, IdentityTx, MethodKind, VerificationMethod,
+    DID_METHOD_NAME,
 };
+// BLG-0104 (P04-F22): the signing-digest helpers and the wallet-side fill
+// API have no production caller in this tree - test-only until a wallet
+// binary consumes them (idle-code policy: test-only, not shipped).
+#[cfg(test)]
+pub use identity::{credential_issue_digest, credential_revoke_digest};
+#[cfg(test)]
+pub use identity_fill::{build_presentation, fill_template};
 pub use identity_fill::{
-    build_presentation, check_receipt, credential_proof, document_digest_of, fill_template,
-    template_slots, value_digest_of, FillError, PresentationReceipt, ReceiptEntry, SlotDisclosure,
+    check_receipt, credential_proof, document_digest_of, template_slots, value_digest_of,
+    FillError, PresentationReceipt, ReceiptEntry, SlotDisclosure,
 };
 pub use invalid_vote::InvalidVoteTracker;
 pub use liveness::LivenessTracker;

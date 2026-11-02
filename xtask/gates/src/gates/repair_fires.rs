@@ -14,11 +14,7 @@ fn code_of(root: &Path, rel: &str) -> Result<String, String> {
         return Err(format!("expected file missing: {}", f.display()));
     }
     let text = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
-    Ok(text
-        .lines()
-        .map(|l| l.split("//").next().unwrap_or("").to_string())
-        .collect::<Vec<_>>()
-        .join("\n"))
+    Ok(crate::gates::rust_literals::scrub(&text))
 }
 
 macro_rules! claim {
@@ -156,4 +152,24 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "repair-fires canary OK (clean PASSes, a broken trigger FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_comments_and_strings_are_not_code() {
+        let dir = crate::gates::rust_literals::exclusive_scratch_dir("repair-fires")
+            .expect("scratch dir");
+        std::fs::write(
+            dir.join("a.rs"),
+            "/* actor.objects_below_own_repair_margin() */\nlet u = \"http://x\"; real_call();\n",
+        )
+        .expect("fixture");
+        let code = code_of(&dir, "a.rs").expect("code");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!code.contains("objects_below_own_repair_margin"));
+        assert!(code.contains("real_call"));
+    }
 }

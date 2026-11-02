@@ -233,16 +233,6 @@ fn parse_nodes(line: &str) -> (Vec<(String, String)>, Vec<String>) {
     (decls, uses)
 }
 
-/// Does this line carry an arrow, making it an edge rather than a bare node?
-fn is_edge(line: &str) -> bool {
-    line.contains("-->")
-        || line.contains("---")
-        || line.contains("==>")
-        || line.contains("-.->")
-        || line.contains("->>")
-        || line.contains("--)")
-}
-
 fn check(block: &Block) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -308,8 +298,6 @@ fn check(block: &Block) -> Vec<Finding> {
                 undeclared.entry(id).or_insert(*line_no);
             }
         }
-
-        let _ = is_edge(line);
     }
 
     for (id, line) in undeclared {

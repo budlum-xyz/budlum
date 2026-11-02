@@ -48,28 +48,43 @@ pub fn epoch_secret_chains<H: BpqsHash, P: BpqsParams>(epoch_seed: &[u8; 32]) ->
     out
 }
 
-/// One step of a chain: hash the lane's meaningful prefix with the chain id.
-pub fn chain_step<H: BpqsHash, P: BpqsParams>(x: &[u8; 32], chain: u32) -> [u8; 32] {
+/// One step of a chain: hash the lane's meaningful prefix with the chain id
+/// and the step's absolute position (P02-F19).
+///
+/// The step index is bound so a digest computed for position `k` can never
+/// be replayed as position `j`: the chain is a position-indexed sequence,
+/// not a repeated application of one unlabelled compression.
+pub fn chain_step<H: BpqsHash, P: BpqsParams>(x: &[u8; 32], chain: u32, step: u32) -> [u8; 32] {
     let lane = lane::<P>(x);
     let wide = H::digest32(
         domains::WOTS_CHAIN_STEP,
-        &[&lane[..P::N], &chain.to_le_bytes()],
+        &[&lane[..P::N], &chain.to_le_bytes(), &step.to_le_bytes()],
     );
     let mut out = [0u8; 32];
     out[..P::N].copy_from_slice(&wide[..P::N]);
     out
 }
 
-fn chain_repeat<H: BpqsHash, P: BpqsParams>(x: &[u8; 32], steps: usize, chain: u32) -> [u8; 32] {
+fn chain_repeat<H: BpqsHash, P: BpqsParams>(
+    x: &[u8; 32],
+    steps: usize,
+    chain: u32,
+    start_step: u32,
+) -> [u8; 32] {
     let mut cur = lane::<P>(x);
-    for _ in 0..steps {
-        cur = chain_step::<H, P>(&cur, chain);
+    for k in 0..steps {
+        cur = chain_step::<H, P>(&cur, chain, start_step.saturating_add(k as u32));
     }
     cur
 }
 
-fn chain_walk<H: BpqsHash, P: BpqsParams>(x: &[u8; 32], steps: usize, chain: u32) -> [u8; 32] {
-    chain_repeat::<H, P>(x, steps, chain)
+fn chain_walk<H: BpqsHash, P: BpqsParams>(
+    x: &[u8; 32],
+    steps: usize,
+    chain: u32,
+    start_step: u32,
+) -> [u8; 32] {
+    chain_repeat::<H, P>(x, steps, chain, start_step)
 }
 
 /// Message digest -> digits (message nibbles + checksum nibbles).
@@ -110,7 +125,7 @@ pub fn vk_compress<H: BpqsHash, P: BpqsParams>(heads: &[[u8; 32]; 256]) -> [u8; 
 pub fn vk_of_chains<H: BpqsHash, P: BpqsParams>(chains: &[[u8; 32]; 256]) -> [u8; 32] {
     let mut heads = [[0u8; 32]; 256];
     for (i, head) in heads.iter_mut().take(P::LEN).enumerate() {
-        *head = chain_walk::<H, P>(&chains[i], P::WIN as usize - 1, i as u32);
+        *head = chain_walk::<H, P>(&chains[i], P::WIN as usize - 1, i as u32, 0);
     }
     vk_compress::<H, P>(&heads)
 }
@@ -124,7 +139,7 @@ pub fn sign_chains<H: BpqsHash, P: BpqsParams>(
     let digits = digits_of::<P>(msg_digest);
     let mut seg = [[0u8; 32]; 256];
     for (i, part) in seg.iter_mut().take(P::LEN).enumerate() {
-        *part = chain_walk::<H, P>(&chains[i], digits[i] as usize, i as u32);
+        *part = chain_walk::<H, P>(&chains[i], digits[i] as usize, i as u32, 0);
     }
     seg
 }
@@ -142,7 +157,7 @@ pub fn verify_chains<H: BpqsHash, P: BpqsParams>(
     let mut heads = [[0u8; 32]; 256];
     for (i, head) in heads.iter_mut().take(P::LEN).enumerate() {
         let remaining = (P::WIN as usize - 1) - digits[i] as usize;
-        *head = chain_walk::<H, P>(&sig_chains[i], remaining, i as u32);
+        *head = chain_walk::<H, P>(&sig_chains[i], remaining, i as u32, digits[i] as u32);
     }
     vk_compress::<H, P>(&heads)
 }
@@ -202,7 +217,7 @@ mod wots_tests {
     #[test]
     fn lanes_are_canonically_padded_after_every_walk() {
         let chains = test_chains();
-        let head = chain_walk::<Sha3_256Hash, P>(&chains[0], 3, 0);
+        let head = chain_walk::<Sha3_256Hash, P>(&chains[0], 3, 0, 0);
         assert!(head[P::N..].iter().all(|b| *b == 0));
     }
 }

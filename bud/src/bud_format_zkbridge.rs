@@ -35,13 +35,16 @@ pub fn engine_to_witness(res: &EngineResult) -> Vec<WitnessStep> {
     let mut prev = Sha3_256::new();
     prev.update(b"BDLM_ZK_INIT");
     prev.update(res.original_len.to_le_bytes());
+    // bind the container content: two containers of equal length must not share a root
+    prev.update(Sha3_256::digest(&res.container));
     let mut init: [u8; 32] = prev.finalize().into();
     let mut steps = Vec::new();
-    for s in &res.steps {
+    for (idx, s) in res.steps.iter().enumerate() {
         let mut out = Sha3_256::new();
         out.update(init);
         out.update([s.to_u8()]);
-        // the digest standing for the step output: the container size (a deterministic intermediate)
+        // the step position and the container size; the content is bound through `init`
+        out.update((idx as u64).to_le_bytes());
         out.update(res.container.len().to_le_bytes());
         let o: [u8; 32] = out.finalize().into();
         let arg: u64 = match s {
@@ -161,6 +164,21 @@ mod tests {
         );
         assert!(verify_witness(&w1, &witness_root(&w1)));
         assert!(!w1.is_empty());
+    }
+
+    #[test]
+    fn the_root_binds_the_container_content() {
+        let data = b"zk binding test data ".repeat(200);
+        let r1 = crate::bud_format_engine::engine_store(&data, false, 42).unwrap();
+        let mut r2 = r1.clone();
+        let last = r2.container.len() - 1;
+        r2.container[last] ^= 0xFF;
+        assert_eq!(r1.container.len(), r2.container.len());
+        assert_ne!(
+            witness_root(&engine_to_witness(&r1)),
+            witness_root(&engine_to_witness(&r2)),
+            "equal lengths with different content must give different roots"
+        );
     }
 
     #[test]

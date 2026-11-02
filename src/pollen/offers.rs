@@ -194,6 +194,22 @@ impl PollenPurchaseReceipt {
     }
 }
 
+/// Most offers the registry holds. Closed offers are pruned first when full.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_OFFERS: usize = 100_000;
+/// Most data assets the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_DATA_ASSETS: usize = 100_000;
+/// Most access grants the registry holds.
+///
+/// Convenience: pub so marketplace callers can refuse past the
+/// same bound the registry enforces in this module.
+pub const MAX_ACCESS_GRANTS: usize = 100_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MarketplaceRegistry {
     #[serde(default)]
@@ -282,6 +298,12 @@ impl MarketplaceRegistry {
         if price == 0 {
             return Err("Price must be greater than zero".into());
         }
+        if self.offers.len() >= MAX_OFFERS {
+            self.offers.retain(|_, o| o.active);
+            if self.offers.len() >= MAX_OFFERS {
+                return Err("offer registry is full".into());
+            }
+        }
         let id = self.next_offer_id;
         // Third instance of the same shape, after `NftRegistry::mint` and
         // `BudlumxyzRegistry::register_app`: `insert` overwrites, and the
@@ -329,6 +351,9 @@ impl MarketplaceRegistry {
         if self.data_assets.contains_key(&asset.asset_id) {
             return Err("DataAsset already registered".into());
         }
+        if self.data_assets.len() >= MAX_DATA_ASSETS {
+            return Err("data asset registry is full".into());
+        }
         let id = asset.asset_id;
         self.data_assets.insert(id, asset);
         Ok(id)
@@ -375,6 +400,9 @@ impl MarketplaceRegistry {
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
         }
+        if self.access_grants.len() >= MAX_ACCESS_GRANTS {
+            return Err("access grant registry is full".into());
+        }
         // DAO policy is applied here. Until now `encryption_policies` was a
         // record that was only written and read: `set_encryption_policy`
         // validated and stored it, `active_encryption_policies` listed it, and
@@ -420,12 +448,22 @@ impl MarketplaceRegistry {
         issued_at_block: u64,
         expires_at_block: u64,
     ) -> Result<(), String> {
-        if let Some(policy) = self
+        // A policy deprecated before this grant is issued no longer sets the
+        // ceiling while a current one exists. If every active policy is
+        // deprecated, the strictest one still refuses the grant.
+        let current = self
             .encryption_policies
             .values()
             .filter(|p| p.active)
-            .min_by_key(|p| p.max_grant_duration_blocks)
-        {
+            .filter(|p| !matches!(p.deprecated_after_block, Some(d) if issued_at_block >= d))
+            .min_by_key(|p| p.max_grant_duration_blocks);
+        let chosen = current.or_else(|| {
+            self.encryption_policies
+                .values()
+                .filter(|p| p.active)
+                .min_by_key(|p| p.max_grant_duration_blocks)
+        });
+        if let Some(policy) = chosen {
             policy.check_grant_duration(issued_at_block, expires_at_block)?;
         }
         Ok(())
@@ -600,6 +638,9 @@ impl MarketplaceRegistry {
         if self.access_grants.contains_key(&grant.grant_id) {
             return Err("AccessGrant already registered".into());
         }
+        if self.access_grants.len() >= MAX_ACCESS_GRANTS {
+            return Err("access grant registry is full".into());
+        }
         // The seller's authorization window is not a SECURITY ceiling: the
         // seller sets it. The DAO's ceiling is applied identically on both
         // paths, or a marketplace purchase would be a side door around it.
@@ -678,6 +719,38 @@ impl MarketplaceRegistry {
             );
         }
         Ok(Some(reference.grant_id))
+    }
+
+    /// A request that names an asset in its perception declaration without a
+    /// Pollen reference must not point at an asset another account owns.
+    /// Without a grant only the owner may name its own asset.
+    ///
+    /// # Errors
+    ///
+    /// The declared asset exists and belongs to another account.
+    pub fn validate_ai_declared_asset(
+        &self,
+        input_ref: &[u8],
+        declared_asset: &AssetId,
+        requester: &Address,
+    ) -> Result<(), String> {
+        if AiDataInputRef::decode(input_ref)?.is_some() {
+            return Ok(());
+        }
+        match self.data_assets.get(declared_asset) {
+            Some(asset) if asset.owner != *requester => Err(
+                "AI data read denied: declared asset belongs to another account and no grant was given"
+                    .into(),
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    /// Owner of the paid `DataAsset` bound to `manifest_id`, if any.
+    #[must_use]
+    pub fn bound_asset_owner(&self, manifest_id: &ContentId) -> Option<Address> {
+        let asset_id = self.protected_content.asset_for(manifest_id)?;
+        self.data_assets.get(&asset_id).map(|a| a.owner)
     }
 
     /// Put stored content behind an asset's paywall.
@@ -1032,6 +1105,32 @@ mod tests {
     }
 
     #[test]
+    fn offer_registry_is_capped_and_prunes_closed_offers() {
+        let mut registry = MarketplaceRegistry::new();
+        for i in 0..MAX_OFFERS as u64 {
+            registry.offers.insert(
+                i,
+                DataOffer {
+                    id: i,
+                    seller: addr(1),
+                    cid: ContentId::of(b"x"),
+                    price: 1,
+                    active: true,
+                },
+            );
+        }
+        registry.next_offer_id = MAX_OFFERS as u64;
+        assert!(registry
+            .create_offer(addr(2), ContentId::of(b"y"), 5)
+            .is_err());
+        registry.close_offer(0, &addr(1)).unwrap();
+        registry
+            .create_offer(addr(2), ContentId::of(b"y"), 5)
+            .unwrap();
+        assert_eq!(registry.offers.len(), MAX_OFFERS);
+    }
+
+    #[test]
     fn ai_read_ref_rejects_revoked_grant() {
         let mut registry = MarketplaceRegistry::new();
         let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
@@ -1371,6 +1470,100 @@ mod tests {
         let json = serde_json::to_string(&registry).unwrap();
         assert!(!json.contains("decrypt"));
         assert!(!json.contains("private_key"));
+    }
+
+    #[test]
+    fn a_deprecated_policy_does_not_set_the_ceiling_while_a_current_one_exists() {
+        let policy = |version: u32, max: u64, deprecated: Option<u64>| EncryptionPolicy {
+            version,
+            hpke_suite_id: 0x20,
+            min_public_key_bytes: 32,
+            max_grant_duration_blocks: max,
+            deprecated_after_block: deprecated,
+            active: true,
+        };
+        let mut registry = MarketplaceRegistry::new();
+        registry
+            .set_encryption_policy(policy(1, 10, Some(50)))
+            .unwrap();
+        registry
+            .set_encryption_policy(policy(2, 100, None))
+            .unwrap();
+        assert!(registry.check_dao_grant_duration_ceiling(60, 160).is_ok());
+        assert!(registry.check_dao_grant_duration_ceiling(60, 161).is_err());
+        assert!(registry.check_dao_grant_duration_ceiling(40, 60).is_err());
+    }
+
+    #[test]
+    fn binding_requires_the_asset_manifest_and_its_owner() {
+        let mut registry = MarketplaceRegistry::new();
+        let manifest = ContentId::of(b"asset");
+        let asset = DataAsset::new(addr(1), manifest, [1u8; 32], true);
+        let asset_id = registry.register_data_asset(asset).unwrap();
+        let other = ContentId::of(b"someone else's content");
+        assert!(registry
+            .bind_content_to_asset(other, asset_id, addr(1))
+            .is_err());
+        assert!(registry
+            .bind_content_to_asset(manifest, asset_id, addr(2))
+            .is_err());
+        assert!(registry
+            .bind_content_to_asset(manifest, asset_id, addr(1))
+            .is_ok());
+        assert!(registry.check_content_may_be_public(&manifest).is_err());
+        assert!(registry.check_content_may_be_public(&other).is_ok());
+    }
+
+    #[test]
+    fn bound_content_needs_a_live_grant_for_the_reader() {
+        let mut registry = MarketplaceRegistry::new();
+        let manifest = ContentId::of(b"asset");
+        let asset = DataAsset::new(addr(1), manifest, [1u8; 32], true);
+        let asset_id = registry.register_data_asset(asset.clone()).unwrap();
+        registry
+            .bind_content_to_asset(manifest, asset_id, addr(1))
+            .unwrap();
+        let grant_id = registry
+            .create_access_grant(signed_grant(&asset, addr(2), 1))
+            .unwrap();
+        let free = ContentId::of(b"free content");
+        assert!(registry
+            .authorize_content_read(&free, &addr(3), None, 15)
+            .is_ok());
+        assert!(registry
+            .authorize_content_read(&manifest, &addr(2), None, 15)
+            .is_err());
+        assert!(registry
+            .authorize_content_read(&manifest, &addr(2), Some(&grant_id), 15)
+            .is_ok());
+        assert!(registry
+            .authorize_content_read(&manifest, &addr(3), Some(&grant_id), 15)
+            .is_err());
+        assert!(registry
+            .authorize_content_read(&manifest, &addr(2), Some(&grant_id), 25)
+            .is_err());
+        registry.revoke_data_asset(&asset_id, &addr(1)).unwrap();
+        let err = registry
+            .authorize_content_read(&manifest, &addr(2), Some(&grant_id), 15)
+            .unwrap_err();
+        assert!(err.contains("revoked"), "{err}");
+    }
+
+    #[test]
+    fn declared_foreign_asset_without_reference_is_denied() {
+        let mut registry = MarketplaceRegistry::new();
+        let asset = DataAsset::new(addr(1), ContentId::of(b"asset"), [1u8; 32], true);
+        registry.register_data_asset(asset.clone()).unwrap();
+        let err = registry
+            .validate_ai_declared_asset(b"opaque", &asset.asset_id, &addr(2))
+            .unwrap_err();
+        assert!(err.contains("another account"), "{err}");
+        registry
+            .validate_ai_declared_asset(b"opaque", &asset.asset_id, &addr(1))
+            .unwrap();
+        registry
+            .validate_ai_declared_asset(b"opaque", &AssetId([9; 32]), &addr(2))
+            .unwrap();
     }
 
     #[test]

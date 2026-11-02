@@ -452,23 +452,24 @@ mod chaos_tests {
         let mut commitment =
             DomainCommitment::from_block(&pow, &block, tree.root(), [9u8; 32], 0).unwrap();
         commitment.event_root = tree.root();
+        let block_hash = commitment.domain_block_hash;
         blockchain.submit_domain_commitment(commitment).unwrap();
 
         let proof = tree.proof(0).unwrap();
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, event.clone(), &proof)
+            .verify_domain_event_proof(pow.id, 77, 0, block_hash, event.clone(), &proof)
             .is_ok());
 
         let mut foreign_domain = event.clone();
         foreign_domain.domain_id = 99;
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, foreign_domain, &proof)
+            .verify_domain_event_proof(pow.id, 77, 0, block_hash, foreign_domain, &proof)
             .is_err());
 
         let mut payload_tampered = event;
         payload_tampered.payload_hash = hash_fields_bytes(&[b"tampered"]);
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, payload_tampered, &proof,)
+            .verify_domain_event_proof(pow.id, 77, 0, block_hash, payload_tampered, &proof,)
             .is_err());
     }
 
@@ -500,14 +501,19 @@ mod chaos_tests {
             authorities: vec![],
             signatures: vec![],
         };
-        assert!(blockchain
+        let err = blockchain
             .submit_verified_domain_commitment(make_commitment(&pow, &wrong_for_pow), wrong_for_pow)
-            .is_err());
+            .unwrap_err();
+        assert!(
+            err.contains("Expected PoWHeaderChain finality proof"),
+            "{err}"
+        );
 
         let wrong_for_poa = FinalityProof::PoWHeaderChain { headers: vec![] };
-        assert!(blockchain
+        let err = blockchain
             .submit_verified_domain_commitment(make_commitment(&poa, &wrong_for_poa), wrong_for_poa)
-            .is_err());
+            .unwrap_err();
+        assert!(err.contains("Expected PoA finality proof"), "{err}");
     }
 
     #[test]
@@ -603,6 +609,7 @@ mod chaos_tests {
             use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
             let pos_proof = FinalityProof::PoS {
                 cert: FinalityCert {
+                    chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                     epoch: i,
                     checkpoint_height: i,
                     checkpoint_hash: format!("pos_hash_{i}"),
@@ -967,36 +974,49 @@ mod chaos_tests {
     /// conservation of funds.
     #[test]
     fn test_chaos_state_determinism_under_tx_reordering() {
-        let consensus = Arc::new(PoWEngine::new(0));
-        let mut chain_a = Blockchain::new(consensus.clone(), None, 45262, None);
-        let mut chain_b = Blockchain::new(consensus, None, 45262, None);
+        use crate::core::transaction::Transaction;
+        use crate::crypto::primitives::KeyPair;
+        use crate::execution::executor::Executor;
 
-        let alice = Address::from_hex(&"01".repeat(32)).unwrap();
-        let bob = Address::from_hex(&"02".repeat(32)).unwrap();
+        let alice_kp = KeyPair::generate().unwrap();
+        let bob_kp = KeyPair::generate().unwrap();
+        let alice = Address::from(alice_kp.public_key_bytes());
+        let bob = Address::from(bob_kp.public_key_bytes());
 
-        // Seed the initial accounts, giving a starting balance for the conservation check.
-        chain_a.state.add_balance(&alice, 1000);
-        chain_a.state.add_balance(&bob, 1000);
-        chain_b.state.add_balance(&alice, 1000);
-        chain_b.state.add_balance(&bob, 1000);
+        let mut to_bob = Transaction::new_with_fee(alice, bob, 100, 1, 0, vec![]);
+        to_bob.sign(&alice_kp);
+        let mut to_alice = Transaction::new_with_fee(bob, alice, 50, 1, 0, vec![]);
+        to_alice.sign(&bob_kp);
 
-        // Simulated balance transfer - direct state mutation (add/spend).
-        // Alice → Bob: 100
-        chain_a.state.add_balance(&bob, 100);
-        chain_a.state.add_balance(&alice, 0); // a no-op, for the conservation check
+        let seeded = || {
+            let mut state = crate::core::account::AccountState::new();
+            state.add_balance(&alice, 1000);
+            state.add_balance(&bob, 1000);
+            state
+        };
+        let mut forward = seeded();
+        let mut reverse = seeded();
+        let supply_before = forward.circulating_supply();
 
-        // Bob to Alice: 50, in the reverse order on chain_b.
-        chain_b.state.add_balance(&alice, 50);
+        Executor::apply_transaction(&mut forward, &to_bob).unwrap();
+        Executor::apply_transaction(&mut forward, &to_alice).unwrap();
+        Executor::apply_transaction(&mut reverse, &to_alice).unwrap();
+        Executor::apply_transaction(&mut reverse, &to_bob).unwrap();
 
-        // Conservation: the total supply has to be equal on both chains.
-        let total_a = chain_a.state.get_balance(&alice) + chain_a.state.get_balance(&bob);
-        let total_b = chain_b.state.get_balance(&alice) + chain_b.state.get_balance(&bob);
-        // We applied different operations but the starting seed is the same, so
-        // conservation holds. This test verifies that the state mutations are
-        // deterministic and that the accounts are independent, with no
-        // cross-contamination.
-        assert!(total_a > 0, "chain A must have non-zero total");
-        assert!(total_b > 0, "chain B must have non-zero total");
+        // The two senders are independent, so the order must not matter.
+        assert_eq!(forward.get_balance(&alice), reverse.get_balance(&alice));
+        assert_eq!(forward.get_balance(&bob), reverse.get_balance(&bob));
+        assert_eq!(
+            forward.calculate_state_root(),
+            reverse.calculate_state_root()
+        );
+        // Funds are conserved: whatever left the accounts is the fees only.
+        assert!(forward.circulating_supply() <= supply_before);
+        assert_eq!(
+            forward.get_balance(&alice) + forward.get_balance(&bob) + 2,
+            2000,
+            "two fees of 1 are the only difference"
+        );
     }
 
     /// **Genesis mismatch:** two chains with different genesis hashes cannot be
@@ -1066,5 +1086,37 @@ mod chaos_tests {
             chain_b.chain.last().unwrap().hash,
             "chain A's tip must match chain B's tip"
         );
+
+        // A transaction applied once on the adopted chain's state cannot be
+        // applied a second time: the nonce moved, so the replay is refused and
+        // the balances stay where the first application left them.
+        use crate::core::transaction::Transaction;
+        use crate::crypto::primitives::KeyPair;
+        use crate::execution::executor::Executor;
+
+        let alice_kp = KeyPair::generate().unwrap();
+        let bob_kp = KeyPair::generate().unwrap();
+        let alice = Address::from(alice_kp.public_key_bytes());
+        let bob = Address::from(bob_kp.public_key_bytes());
+        chain_a.state.add_balance(&alice, 1000);
+        let mut tx = Transaction::new_with_fee(alice, bob, 100, 1, 0, vec![]);
+        tx.sign(&alice_kp);
+
+        // The executor deliberately does not compare nonces (BLG-0296): the
+        // ingest gate owns that invariant and `validate_and_add_block` runs
+        // it before every application. A caller bypassing the gate owns the
+        // nonce, so the honest replay check goes through the same door block
+        // application uses: validate, then apply.
+        chain_a.state.validate_transaction(&tx).unwrap();
+        Executor::apply_transaction(&mut chain_a.state, &tx).unwrap();
+        let alice_after = chain_a.state.get_balance(&alice);
+        let bob_after = chain_a.state.get_balance(&bob);
+        assert_eq!(bob_after, 100);
+        assert!(
+            chain_a.state.validate_transaction(&tx).is_err(),
+            "replaying an applied transaction must be refused"
+        );
+        assert_eq!(chain_a.state.get_balance(&alice), alice_after);
+        assert_eq!(chain_a.state.get_balance(&bob), bob_after);
     }
 }

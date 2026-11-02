@@ -163,6 +163,7 @@ mod tests {
             tx_root: "tx_root".to_string(),
             nonce: 0,
             slashing_evidence: None,
+            slashing_reports: None,
             epoch: 0,
             slot: 0,
             vrf_output: Vec::new(),

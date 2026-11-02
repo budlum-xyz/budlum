@@ -18,6 +18,7 @@
 //! 5. The declaration path actually calls `check_content_may_be_public`.
 //! 6. Every RPC endpoint that publishes a shard id asks Pollen first.
 //! 7. The AI runtime cannot reach storage bytes except through Pollen.
+//! 8. The gateway asks Pollen before it serves or renders a name (P53-F12).
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -177,7 +178,10 @@ fn unguarded_endpoints(src: &str) -> Vec<String> {
                 }
                 inbody = false;
             }
-        } else if let Some(rest) = line.strip_prefix("    async fn ") {
+        } else if let Some(rest) = line
+            .strip_prefix("    async fn ")
+            .or_else(|| line.strip_prefix("    pub async fn "))
+        {
             name = rest.split('(').next().unwrap_or("").trim().to_string();
             inbody = true;
             emits = false;
@@ -230,7 +234,8 @@ fn ai_storage_reach(dir: &Path) -> Vec<String> {
         if !text.lines().any(line_reaches_storage) {
             continue;
         }
-        let lower = text.to_lowercase();
+        // A mention in a comment does not make the file go through Pollen.
+        let lower = strip_line_comments(&text).to_lowercase();
         let mentions_pollen = lower.contains("pollen") || lower.contains("authorize_content_read");
         if mentions_pollen {
             continue;
@@ -244,6 +249,19 @@ fn ai_storage_reach(dir: &Path) -> Vec<String> {
     out
 }
 
+/// Calls of the gateway Pollen guard in a source text, comments stripped.
+/// The definition line (`fn refuse_if_pollen_protected`) is not a call.
+fn gateway_guard_calls(text: &str) -> usize {
+    strip_line_comments(text)
+        .lines()
+        .filter(|l| l.contains("refuse_if_pollen_protected(") && !l.contains("fn "))
+        .count()
+}
+
+/// The gateway has two serving paths (raw fetch and render). Both must call
+/// the guard, and the guard must consult Pollen.
+const GATEWAY_MIN_GUARD_CALLS: usize = 2;
+
 /// `grep -c 'check_content_may_be_public'` over the file with comments
 /// stripped; `0` when the file is absent.
 fn declaration_call_count(actor: &Path) -> usize {
@@ -255,6 +273,54 @@ fn declaration_call_count(actor: &Path) -> usize {
         .lines()
         .filter(|l| l.contains("check_content_may_be_public"))
         .count()
+}
+
+/// A binding must never be removable.
+fn check_no_unbind(gate_src: &str) -> Result<(), String> {
+    let mut unbind = unbind_lines(gate_src);
+    // A call that rustfmt wrapped (`self.bindings\n    .remove(`) has no
+    // single-line match; the whitespace-free text still shows it.
+    let squeezed: String = gate_src.chars().filter(|c| !c.is_whitespace()).collect();
+    if unbind.is_empty()
+        && ["remove", "clear", "retain"]
+            .iter()
+            .any(|op| squeezed.contains(&format!("bindings.{op}(")))
+    {
+        unbind.push((0, String::from("a wrapped `bindings.<op>(` call")));
+    }
+    if !unbind.is_empty() {
+        let mut msg = String::new();
+        for (nr, line) in &unbind {
+            let _ = writeln!(msg, "{nr}:{line}");
+        }
+        msg.push_str(
+            "FAIL: a binding can be removed: an owner could take payment then free \
+             the bytes",
+        );
+        return Err(msg);
+    }
+    Ok(())
+}
+
+/// Every RPC endpoint that publishes a shard id asks Pollen first.
+fn check_rpc_endpoints(root: &Path) -> Result<(), String> {
+    // A moved file must not skip the step: the file is required.
+    let rpc = root.join("src/rpc/server.rs");
+    let rpc_src = std::fs::read_to_string(&rpc)
+        .map_err(|e| format!("FAIL: cannot read {}: {e}", rpc.display()))?;
+    let unguarded = unguarded_endpoints(&rpc_src);
+    if !unguarded.is_empty() {
+        let mut msg = String::new();
+        for u in &unguarded {
+            let _ = writeln!(msg, "{u}");
+        }
+        msg.push_str(
+            "FAIL: RPC endpoint(s) publish shard ids without asking Pollen: the \
+             handles for fetching paid bytes are served to anyone",
+        );
+        return Err(msg);
+    }
+    Ok(())
 }
 
 /// # Errors
@@ -272,8 +338,15 @@ pub fn run(root: &Path) -> Result<String, String> {
     if !offers.is_file() {
         return Err(format!("FAIL: missing {}", offers.display()));
     }
-    let gate_src = std::fs::read_to_string(&gate).unwrap_or_default();
-    let offers_src = std::fs::read_to_string(&offers).unwrap_or_default();
+    // Comments are stripped: a refusal named only in prose is no refusal.
+    let gate_src = strip_line_comments(
+        &std::fs::read_to_string(&gate)
+            .map_err(|e| format!("FAIL: cannot read {}: {e}", gate.display()))?,
+    );
+    let offers_src = strip_line_comments(
+        &std::fs::read_to_string(&offers)
+            .map_err(|e| format!("FAIL: cannot read {}: {e}", offers.display()))?,
+    );
 
     // 1. The authorisation path refuses when no grant is presented.
     if count_in_range(&gate_src, "fn authorize_read", "    }", "GrantRequired") == 0 {
@@ -298,18 +371,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     // 3. No unbind.
-    let unbind = unbind_lines(&gate_src);
-    if !unbind.is_empty() {
-        let mut msg = String::new();
-        for (nr, line) in &unbind {
-            let _ = writeln!(msg, "{nr}:{line}");
-        }
-        msg.push_str(
-            "FAIL: a binding can be removed: an owner could take payment then free \
-             the bytes",
-        );
-        return Err(msg);
-    }
+    check_no_unbind(&gate_src)?;
 
     // 4. The registry offers the read authorisation and hashes the binding
     //    map into its root.
@@ -341,21 +403,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     // 6. Every RPC endpoint that publishes a shard id asks Pollen first.
-    let rpc = root.join("src/rpc/server.rs");
-    if rpc.is_file() {
-        let unguarded = unguarded_endpoints(&std::fs::read_to_string(&rpc).unwrap_or_default());
-        if !unguarded.is_empty() {
-            let mut msg = String::new();
-            for u in &unguarded {
-                let _ = writeln!(msg, "{u}");
-            }
-            msg.push_str(
-                "FAIL: RPC endpoint(s) publish shard ids without asking Pollen: the \
-                 handles for fetching paid bytes are served to anyone",
-            );
-            return Err(msg);
-        }
-    }
+    check_rpc_endpoints(root)?;
 
     // 7. The AI runtime cannot reach storage bytes except through Pollen.
     let reach = ai_storage_reach(&root.join("src/ai"));
@@ -369,6 +417,23 @@ pub fn run(root: &Path) -> Result<String, String> {
              request with no Pollen prefix would read protected bytes",
         );
         return Err(msg);
+    }
+
+    // 8. The gateway serves names only after the Pollen guard.
+    let gateway = root.join("src/gateway/service.rs");
+    let gateway_src = std::fs::read_to_string(&gateway).map_err(|e| {
+        format!(
+            "FAIL: cannot read {}: {e}; the gateway read path is outside the gate",
+            gateway.display()
+        )
+    })?;
+    if gateway_guard_calls(&gateway_src) < GATEWAY_MIN_GUARD_CALLS
+        || !strip_line_comments(&gateway_src).contains("pollen_asset_for_content")
+    {
+        return Err(String::from(
+            "FAIL: the gateway serves or renders storage bytes without asking Pollen \
+             on every path: paid content is readable for free through a name",
+        ));
     }
 
     Ok(String::from(
@@ -404,6 +469,8 @@ const AI_REACH: &str = "    let manifest = chain.get_storage_manifest(id).await;
 const AI_MEDIATED: &str = "    let ok = pollen.authorize_content_read(&id, &who, grant, block)?;\n    let manifest = chain.get_storage_manifest(id).await;\n";
 const AI_CLEAN: &str = "    let out = model.infer(&request.input_ref);\n";
 const UNCALLED: &str = "ChainCommand::RegisterStorageManifest { manifest, response } => {\n    if let Err(e) = manifest.validate_untrusted() { continue; }\n    self.blockchain.state.storage_registry.register_manifest(&manifest);\n}\n";
+const GW_UNGUARDED: &str = "    async fn refuse_if_pollen_protected(&self) {}\n    // self.refuse_if_pollen_protected(&r).await?;\n    let m = self.chain.get_storage_manifest(cid).await;\n";
+const GW_GUARDED: &str = "    async fn refuse_if_pollen_protected(&self) {}\n    self.refuse_if_pollen_protected(&r).await?;\n    self.refuse_if_pollen_protected(&r).await?;\n";
 const CALLED: &str = "if matches!(manifest.encryption, ContentEncryption::Plaintext) {\n    if let Err(e) = self.blockchain.state.marketplace\n        .check_content_may_be_public(&manifest.manifest_id) { continue; }\n}\n";
 
 /// Write `content` to a temp file under `sub` and return the directory.
@@ -580,6 +647,20 @@ fn canaries_files(canaries: &mut usize) -> Result<(), String> {
         "a declaration path that does call the refusal was rejected",
         canaries,
     )?;
+
+    // 17. A gateway whose guard is only defined or commented out is caught.
+    expect_bool(
+        gateway_guard_calls(GW_UNGUARDED) < GATEWAY_MIN_GUARD_CALLS,
+        "a gateway with no live guard call was not detected",
+        canaries,
+    )?;
+
+    // 18. A gateway that guards both serving paths passes.
+    expect_bool(
+        gateway_guard_calls(GW_GUARDED) >= GATEWAY_MIN_GUARD_CALLS,
+        "a gateway guarding both paths was rejected",
+        canaries,
+    )?;
     Ok(())
 }
 
@@ -593,4 +674,25 @@ pub fn self_test() -> Result<String, String> {
     Ok(format!(
         "paid content gate self-test OK: {canaries} canaries"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pub_async_endpoints_are_scanned() {
+        let src = "impl X {\n    pub async fn leak(&self) -> V {\n        json!({\"shardId\": 1})\n    }\n}\n";
+        assert_eq!(unguarded_endpoints(src), vec![String::from("leak")]);
+    }
+
+    #[test]
+    fn a_comment_does_not_satisfy_a_range_count() {
+        let src =
+            strip_line_comments("fn authorize_read() {\n    // GrantRequired\n    ok\n    }\n");
+        assert_eq!(
+            count_in_range(&src, "fn authorize_read", "    }", "GrantRequired"),
+            0
+        );
+    }
 }

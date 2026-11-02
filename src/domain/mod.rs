@@ -1,4 +1,5 @@
 pub mod commitment_registry;
+pub mod deal_open;
 pub mod finality_adapter;
 pub mod fork_choice;
 pub mod plugin;
@@ -9,6 +10,7 @@ pub mod registry;
 pub mod sovereign;
 pub mod storage_deal;
 pub mod storage_params;
+pub mod storage_tx;
 pub mod types;
 
 pub use commitment_registry::DomainCommitmentRegistry;
@@ -40,6 +42,10 @@ pub use storage_deal::{
 };
 pub use storage_params::{
     storage_params_bytes, StorageDomainParams, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,
+};
+pub use storage_tx::{
+    execute_storage_tx, open_deal_consent_digest, StorageDealOpen, StorageTx, StorageTxContext,
+    StorageTxError,
 };
 pub use types::{
     normalize_hash32, validator_set_commitment, ConsensusDomain, ConsensusKind, DomainCommitment,

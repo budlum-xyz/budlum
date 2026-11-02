@@ -312,6 +312,23 @@ pub const CATALOG: &[FormatCatalogEntry] = &[
 
 /// Finds the format by signature; deterministic, taking the first match.
 pub fn catalog_detect(data: &[u8]) -> Option<&'static FormatCatalogEntry> {
+    // Two pairs share one signature. Tell them apart by the next field, so
+    // that neither entry is unreachable.
+    if data.starts_with(b"RIFF") && data.len() >= 12 {
+        match &data[8..12] {
+            b"WAVE" => return by_name("WAV"),
+            b"WEBP" => return by_name("WEBP"),
+            _ => {}
+        }
+    }
+    if data.starts_with(b"\x1A\x45\xDF\xA3") {
+        // The EBML header names its DocType near the start.
+        let head = &data[..data.len().min(64)];
+        if head.windows(4).any(|w| w == b"webm") {
+            return by_name("WebM");
+        }
+        return by_name("MKV");
+    }
     for e in CATALOG {
         if !e.signature.is_empty() && data.starts_with(e.signature) {
             return Some(e);
@@ -398,6 +415,34 @@ mod tests {
         );
         // An unknown input gives None.
         assert!(catalog_detect(&[]).is_none());
+    }
+
+    #[test]
+    fn shared_signatures_are_told_apart() {
+        assert_eq!(
+            catalog_detect(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+                .unwrap()
+                .name,
+            "WAV"
+        );
+        assert_eq!(
+            catalog_detect(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+                .unwrap()
+                .name,
+            "WEBP"
+        );
+        assert_eq!(
+            catalog_detect(b"\x1A\x45\xDF\xA3\x84\x42\x82\x84webm")
+                .unwrap()
+                .name,
+            "WebM"
+        );
+        assert_eq!(
+            catalog_detect(b"\x1A\x45\xDF\xA3\x8F\x42\x82\x88matroska")
+                .unwrap()
+                .name,
+            "MKV"
+        );
     }
 
     #[test]

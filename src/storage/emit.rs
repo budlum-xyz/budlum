@@ -48,13 +48,14 @@ use crate::storage::qr_frame::{
 };
 use crate::storage::qr_matrix::{QrMatrix, QrMatrixError, MAX_QR_PAYLOAD, THREE_QR_EC};
 use crate::storage::qr_payload::{
-    pack_payload, packed_is_zlib, unpack_payload, PayloadError, PayloadKind, MAX_PAYLOAD_CONTENT,
+    packed_is_zlib, unpack_payload, PayloadError, PayloadKind, MAX_PAYLOAD_CONTENT,
     THREE_PAYLOAD_HEADER_LEN, THREE_PAYLOAD_VERSION,
 };
 use crate::storage::qr_png::{frame_to_qr_png, matrix_to_png, QrPngError};
 use crate::storage::qr_receive::{ProgressiveReceiver, ReceiveError};
 use crate::storage::qr_recipe::{three_sealed_recipe_commitment, ThreeRecipe, ThreeRecipeSealed};
 use crate::storage::qr_reemit::{RecipeEmitter, ReemitError};
+use crate::storage::qr_verify::{verify_qr_video, ExpectedCommitments, VerifyError};
 use crate::storage::qr_video::{
     png_to_optical_frame, QrVideo, QrVideoError, DEFAULT_FPS, VIDEO_VERSION,
 };
@@ -64,8 +65,7 @@ use crate::storage::three_nft::{
     meta_tracks_public_recipe, MetadataVisibility, PreviewMode, ThreeNftMeta,
 };
 use crate::storage::three_pipe::{
-    concat_round_trip, decode_frames, decode_qr_video, encode_qr_video, recipe_commitment,
-    PipeError,
+    concat_round_trip, decode_frames, encode_qr_video, recipe_commitment, PipeError,
 };
 use crate::storage::three_recipe::{
     recipe_class, RecipeTransform, VideoFrameStream, VideoRecipe, VideoRecipeError,
@@ -77,6 +77,7 @@ use crate::storage::three_visibility::{
 };
 use crate::storage::transformed::{transform_content, CodecFlags, TransformError, TransformOpts};
 use crate::storage::{ContentId, ContentManifest, ShardRef};
+use std::time::Duration;
 
 /// Largest body this path will encode in one call.
 ///
@@ -92,7 +93,7 @@ pub const MAX_PREVIEW_CONTENT_BYTES: usize = 1 << 20;
 /// `ONESHOT_REPAIR_PERMILLAGE`, and a policy field that a stage ignores is a
 /// lie a caller would pay for. The margin the encode used is reported back in
 /// [`FeedPreview`] instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EmitPolicy {
     /// A2 source block length.
     pub block_len: u16,
@@ -106,6 +107,20 @@ pub struct EmitPolicy {
     pub seal_seed: Option<[u8; 32]>,
     /// Frames one burst may return. A burst is a screenful, not a download.
     pub max_burst_frames: u32,
+}
+
+/// The seal seed is the payload key, so Debug names whether one is set and
+/// never prints it.
+impl core::fmt::Debug for EmitPolicy {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("EmitPolicy")
+            .field("block_len", &self.block_len)
+            .field("fps", &self.fps)
+            .field("meter_budget", &self.meter_budget)
+            .field("seal_seed", &self.seal_seed.map(|_| "[redacted]"))
+            .field("max_burst_frames", &self.max_burst_frames)
+            .finish()
+    }
 }
 
 impl Default for EmitPolicy {
@@ -233,11 +248,12 @@ pub struct FeedPreview {
     pub rotate_key_on_delete: bool,
 }
 
+/// Time allowed for the check of the video this emit has just encoded.
+const VIDEO_VERIFY_DEADLINE: Duration = Duration::from_secs(60);
+
 /// Errors from the emit path.
 #[derive(Debug)]
 pub enum EmitError {
-    /// Empty body: nothing to encode, and an empty frame stream is not a feed.
-    Empty,
     /// Body over [`MAX_PREVIEW_CONTENT_BYTES`].
     TooLarge {
         /// Bytes offered.
@@ -363,6 +379,8 @@ pub enum EmitError {
     Payload(PayloadError),
     /// A stage refused.
     Pipe(PipeError),
+    /// The encoded video did not match the commitments of its own encode.
+    Verify(VerifyError),
     /// A stage refused.
     Receive(ReceiveError),
     /// A stage refused.
@@ -446,7 +464,6 @@ pub enum EmitError {
 impl std::fmt::Display for EmitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Empty => write!(f, "empty body"),
             Self::ZeroBlockLen => write!(f, "block_len must be at least 1"),
             Self::TooLarge { len, limit } => {
                 write!(f, "body of {len} bytes over emit cap {limit}")
@@ -509,6 +526,7 @@ impl std::fmt::Display for EmitError {
             Self::Carousel(e) => write!(f, "carousel: {e}"),
             Self::Payload(e) => write!(f, "payload: {e}"),
             Self::Pipe(e) => write!(f, "pipe: {e}"),
+            Self::Verify(e) => write!(f, "verify: {e}"),
             Self::Receive(e) => write!(f, "receive: {e}"),
             Self::Reemit(e) => write!(f, "reemit: {e}"),
             Self::Codec(e) => write!(f, "codec: {e}"),
@@ -573,6 +591,12 @@ impl From<CarouselError> for EmitError {
 impl From<PipeError> for EmitError {
     fn from(e: PipeError) -> Self {
         Self::Pipe(e)
+    }
+}
+
+impl From<VerifyError> for EmitError {
+    fn from(e: VerifyError) -> Self {
+        Self::Verify(e)
     }
 }
 
@@ -676,9 +700,15 @@ fn hex(bytes: [u8; 32]) -> String {
     out
 }
 
+/// Bytes a seal adds to the body: the sealed header (magic, version, nonce24)
+/// plus the 16 byte Poly1305 tag (`payload_crypt` `open_payload` reads the same
+/// `SEALED_HEADER_LEN + 16` minimum). A sealed body is never shorter than this.
+const SEAL_OVERHEAD: usize = SEALED_HEADER_LEN + 16;
+
 /// Everything the ceilings say about a body before a single drop is built.
 ///
-/// The bound is computed on `len + THREE_PAYLOAD_HEADER_LEN`, not on `len`:
+/// The bound is computed on `len + THREE_PAYLOAD_HEADER_LEN + SEAL_OVERHEAD`
+/// (the seal part only for a sealed feed), not on `len`:
 /// A1 may shrink the body but never grows it, so the packed container is the
 /// larger of the two and the carousel locks `k` over it. Charging the request
 /// on the smaller number would let a caller walk up to a ceiling and be told it
@@ -688,9 +718,6 @@ fn hex(bytes: [u8; 32]) -> String {
 ///
 /// [`EmitError`] naming the first ceiling the request crosses.
 fn plan(content: &[u8], policy: &EmitPolicy) -> Result<(u16, u32), EmitError> {
-    if content.is_empty() {
-        return Err(EmitError::Empty);
-    }
     let len = content.len();
     if len > MAX_PREVIEW_CONTENT_BYTES {
         return Err(EmitError::TooLarge {
@@ -743,7 +770,15 @@ fn plan(content: &[u8], policy: &EmitPolicy) -> Result<(u16, u32), EmitError> {
         return Err(EmitError::ZeroBlockLen);
     }
     let blok = usize::from(policy.block_len);
-    let bloklar = len.saturating_add(THREE_PAYLOAD_HEADER_LEN).div_ceil(blok);
+    let sealed_extra = if policy.seal_seed.is_some() {
+        SEAL_OVERHEAD
+    } else {
+        0
+    };
+    let bloklar = len
+        .saturating_add(THREE_PAYLOAD_HEADER_LEN)
+        .saturating_add(sealed_extra)
+        .div_ceil(blok);
     let k = u16::try_from(bloklar).map_err(|_| EmitError::TooManyBlocks {
         k: MAX_K,
         limit: MAX_K,
@@ -753,6 +788,47 @@ fn plan(content: &[u8], policy: &EmitPolicy) -> Result<(u16, u32), EmitError> {
     }
     let bound_drops = oneshot_drop_count(k, ONESHOT_REPAIR_PERMILLAGE);
     Ok((k, bound_drops))
+}
+
+/// Whether `content` is the body `manifest` describes: its data shards, in
+/// index order, partition the bytes and every shard id is the id of its slice,
+/// or a single shard is a whole copy of the bytes (replication).
+fn body_matches_manifest(manifest: &ContentManifest, content: &[u8]) -> bool {
+    use crate::storage::manifest::ShardKind;
+    if content.is_empty() {
+        return false;
+    }
+    if manifest.content_size != 0 && manifest.content_size != content.len() as u64 {
+        return false;
+    }
+    let whole = ContentId::of(content);
+    if manifest
+        .shards
+        .iter()
+        .any(|s| s.size as usize == content.len() && s.shard_id == whole)
+    {
+        return true;
+    }
+    let mut data: Vec<&ShardRef> = manifest
+        .shards
+        .iter()
+        .filter(|s| s.kind == ShardKind::Data)
+        .collect();
+    data.sort_by_key(|s| s.index);
+    let mut off = 0usize;
+    for shard in data {
+        let Some(end) = off.checked_add(shard.size as usize) else {
+            return false;
+        };
+        let Some(slice) = content.get(off..end) else {
+            return false;
+        };
+        if ContentId::of(slice) != shard.shard_id {
+            return false;
+        }
+        off = end;
+    }
+    off == content.len()
 }
 
 /// The recipe-shaped truth about an already-encoded feed: what a publish pins
@@ -779,7 +855,12 @@ pub fn qr_feed_preview(
     // produced (client-side encryption). That is the one clear-body case that
     // is still nobody's plaintext, and the visibility enforcement below reads
     // this rather than asking a client to seal the same bytes twice.
-    let declared_ciphertext = manifest.is_some_and(|m| m.encryption.is_encrypted());
+    //
+    // The claim alone is not enough (P28-F02): the supplied body has to be the
+    // bytes that manifest describes, or any caller could attach a client-side
+    // encryption claim to plaintext and have the guard below switched off.
+    let declared_ciphertext =
+        manifest.is_some_and(|m| m.encryption.is_encrypted() && body_matches_manifest(m, content));
     // The pipe writes the pacing it pins, not the pacing a caller asks for, so a
     // policy naming any other rate is refused here rather than reported wrongly
     // by the preview below.
@@ -789,34 +870,8 @@ pub fn qr_feed_preview(
             actual: u32::from(policy.fps),
         });
     }
-    let encoded = encode_qr_video(content, policy.block_len, key.as_ref())?;
-    let pipe = &encoded.pipe;
-    // A0 measured here on purpose: the pipe keeps the payload it built, and the
-    // preview reports the transform's own answer next to the container's. One
-    // pass serves both the report and the cross-check below, so the two cannot
-    // describe different encodes.
-    let a0 = transform_content(content, TransformOpts::default())?;
-    // The carousel locks `k` over the packed container, so that is what the
-    // plan is measured against here; `k` from the request is only ever a bound.
-    let params = CarouselParams::from_payload(&pipe.packed, policy.block_len)?;
-    let planned = oneshot_drop_count(params.k, ONESHOT_REPAIR_PERMILLAGE);
-    let ceiling = planned_drop_count(params.k, ONESHOT_REPAIR_PERMILLAGE);
-    let repair_margin = repair_margin_for(params.k, ONESHOT_REPAIR_PERMILLAGE, 0);
-    let actual = u32::try_from(pipe.frames.len()).map_err(|_| EmitError::PlanMismatch {
-        planned,
-        actual: u32::MAX,
-    })?;
-    meter.record_frames(actual.into())?;
-    if actual != planned || actual > ceiling || actual > drop_bound {
-        return Err(EmitError::PlanMismatch { planned, actual });
-    }
-    if params.k != pipe.pipe_recipe_k() {
-        return Err(EmitError::PlanMismatch {
-            planned: u32::from(params.k),
-            actual: u32::from(pipe.pipe_recipe_k()),
-        });
-    }
-
+    // The manifest checks, including the regeneration of a recipe body, run
+    // before the encode is paid for (P28-F04): a refusal there costs no encode.
     let mut regenerated_len = None;
     let mut seed_is_public = false;
     if let Some(manifest) = manifest {
@@ -870,6 +925,34 @@ pub fn qr_feed_preview(
         }
     }
 
+    let encoded = encode_qr_video(content, policy.block_len, key.as_ref())?;
+    let pipe = &encoded.pipe;
+    // A0 measured here on purpose: the pipe keeps the payload it built, and the
+    // preview reports the transform's own answer next to the container's. One
+    // pass serves both the report and the cross-check below, so the two cannot
+    // describe different encodes.
+    let a0 = transform_content(content, TransformOpts::default())?;
+    // The carousel locks `k` over the packed container, so that is what the
+    // plan is measured against here; `k` from the request is only ever a bound.
+    let params = CarouselParams::from_payload(&pipe.packed, policy.block_len)?;
+    let planned = oneshot_drop_count(params.k, ONESHOT_REPAIR_PERMILLAGE);
+    let ceiling = planned_drop_count(params.k, ONESHOT_REPAIR_PERMILLAGE);
+    let repair_margin = repair_margin_for(params.k, ONESHOT_REPAIR_PERMILLAGE, 0);
+    let actual = u32::try_from(pipe.frames.len()).map_err(|_| EmitError::PlanMismatch {
+        planned,
+        actual: u32::MAX,
+    })?;
+    meter.record_frames(actual.into())?;
+    if actual != planned || actual > ceiling || actual > drop_bound {
+        return Err(EmitError::PlanMismatch { planned, actual });
+    }
+    if params.k != pipe.pipe_recipe_k() {
+        return Err(EmitError::PlanMismatch {
+            planned: u32::from(params.k),
+            actual: u32::from(pipe.pipe_recipe_k()),
+        });
+    }
+
     // What a viewer holding every frame can rebuild, measured here rather than
     // assumed: the frames are pushed one at a time, exactly as a camera hands
     // them over.
@@ -906,14 +989,18 @@ pub fn qr_feed_preview(
     if kind2 != kind || body2 != body_len_bytes {
         return Err(EmitError::DecodePathMismatch);
     }
-    let (kind3, video_body, video3) = decode_qr_video(&encoded.video_blob)?;
+    // The expectations come from the encode step, not from the video. A sealed
+    // feed has a random nonce, so its expected body is the one the pipe packed.
+    let expected_body = if key.is_some() {
+        unpack_payload(&pipe.packed)?.1
+    } else {
+        content.to_vec()
+    };
+    let expected = ExpectedCommitments::from_encode(&expected_body, pipe);
+    let (kind3, video_body, video3, _record) =
+        verify_qr_video(&encoded.video_blob, &expected, VIDEO_VERIFY_DEADLINE)?;
     let video_frames = u32::try_from(video3.png_frames.len()).unwrap_or(u32::MAX);
     if kind3 != kind || video_body != body_len_bytes || video_frames != actual {
-        return Err(EmitError::DecodePathMismatch);
-    }
-    if video3.stream_commitment != pipe.stream_commitment
-        || video3.recipe_commitment != recipe_commitment(&pipe.recipe)
-    {
         return Err(EmitError::DecodePathMismatch);
     }
     let decoded_body_len = body_len_bytes.len();
@@ -1215,8 +1302,11 @@ pub fn qr_feed_preview(
         }
         (receipt.content_id, receipt.provider_commitment)
     } else {
-        let packed = pack_payload(PayloadKind::ContentBytes, content)?;
-        (ContentId::of(&packed), [0u8; 32])
+        // Without a manifest the object a publish stores is the container the
+        // carousel carries, so that is the id reported (P28-F03). A clear-body
+        // container of the caller's bytes is not what any publish of this feed
+        // produces, and for a sealed feed it would be a hash of the plaintext.
+        (ContentId::of(&pipe.packed), [0u8; 32])
     };
 
     let recipe = VideoRecipe::from_encoded(
@@ -1373,24 +1463,31 @@ pub fn qr_feed_frames_burst(
     seq_start: u32,
     count: u32,
 ) -> Result<(Vec<Vec<u8>>, [u8; 32]), EmitError> {
-    let (preflight_k, _) = plan(content, policy)?;
+    let (_, drop_bound) = plan(content, policy)?;
     if count == 0 || count > policy.max_burst_frames {
         return Err(EmitError::BurstTooWide {
             count,
             limit: policy.max_burst_frames,
         });
     }
+    // The A9 budget applies to a burst as it does to a preview (P28-F04): a
+    // burst re-encodes the whole body, so it is metered for the pack, the
+    // drops it plans and the seal before the encode is paid for.
+    let mut meter = ThreeMeter::with_budget(policy.meter_budget);
+    meter.record_pack()?;
+    meter.record_drops(drop_bound.into())?;
+    if policy.seal_seed.is_some() {
+        meter.record_seal()?;
+    }
     let key = policy.seal_seed.map(|seed| PayloadKey::derive(&seed));
     let encoded = encode_qr_video(content, policy.block_len, key.as_ref())?;
     let total = u32::try_from(encoded.pipe.frames.len()).unwrap_or(u32::MAX);
+    meter.record_frames(total.into())?;
     if seq_start.saturating_add(count) > total {
         return Err(EmitError::FrameOutOfRange {
             seq: seq_start,
             len: total,
         });
-    }
-    if u32::from(preflight_k) == 0 {
-        return Err(EmitError::Empty);
     }
     // The read path goes through the reveal session rather than opening an
     // emitter beside it: the session is what decides whether these bytes may be
@@ -1408,7 +1505,19 @@ pub fn qr_feed_frames_burst(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn debug_of_the_emit_policy_never_prints_the_seal_seed() {
+        let policy = EmitPolicy {
+            seal_seed: Some([0xAB; 32]),
+            ..EmitPolicy::default()
+        };
+        let text = format!("{policy:?}");
+        assert!(text.contains("[redacted]"), "{text}");
+        assert!(!text.to_lowercase().contains("ab, ab"), "{text}");
+    }
+
     use super::*;
+    use crate::storage::qr_payload::pack_payload;
 
     fn body(n: usize) -> Vec<u8> {
         (0..n)
@@ -1437,6 +1546,13 @@ mod tests {
     }
 
     #[test]
+    fn empty_body_passes_the_plan_ceilings() {
+        let (k, drops) = plan(&[], &EmitPolicy::default()).expect("empty plan");
+        assert_eq!(k, 1);
+        assert!(drops >= 1);
+    }
+
+    #[test]
     fn ceilings_refuse_before_anything_is_paid_for() {
         let big = body(MAX_PREVIEW_CONTENT_BYTES + 1);
         assert!(matches!(
@@ -1450,10 +1566,6 @@ mod tests {
         assert!(matches!(
             qr_feed_preview(&body(4096), &tiny_policy, None),
             Err(EmitError::QrOverflow { .. }) | Err(EmitError::WireTooLarge { .. })
-        ));
-        assert!(matches!(
-            qr_feed_preview(&[], &EmitPolicy::default(), None),
-            Err(EmitError::Empty)
         ));
         // A zero block length used to reach `div_ceil` and panic the
         // request; it is a caller error and is reported as one.
@@ -1523,6 +1635,142 @@ mod tests {
         // frames carry the uploader's ciphertext, not plaintext.
         assert!(!p.publicly_reemitable);
         assert!(p.a4_agreement);
+    }
+
+    /// P28-F02: a client-side encryption claim over a body that is not the
+    /// manifest's bytes does not switch the unsealed-gated guard off.
+    #[test]
+    fn a_ciphertext_claim_over_a_foreign_body_is_still_unsealed_gated() {
+        let data = body(2048);
+        let manifest = crate::storage::ContentManifest::from_bytes_sliced(&data, 256)
+            .unwrap()
+            .with_encryption(crate::storage::ContentEncryption::ClientSide(
+                crate::storage::ContentCipher::XChaCha20Poly1305,
+            ));
+        let other = body(2049);
+        assert!(matches!(
+            qr_feed_preview(&other, &EmitPolicy::default(), Some(&manifest)),
+            Err(EmitError::UnsealedGated)
+        ));
+        let mut tampered = data.clone();
+        tampered[0] ^= 1;
+        assert!(matches!(
+            qr_feed_preview(&tampered, &EmitPolicy::default(), Some(&manifest)),
+            Err(EmitError::UnsealedGated)
+        ));
+    }
+
+    /// P28-F03: without a manifest the reported id is the id of the container
+    /// the feed carries.
+    #[test]
+    fn a_manifestless_preview_reports_the_id_of_the_carried_container() {
+        let policy = EmitPolicy {
+            seal_seed: Some([5u8; 32]),
+            ..EmitPolicy::default()
+        };
+        let data = body(300);
+        let p = qr_feed_preview(&data, &policy, None).expect("sealed preview");
+        let plain_container = pack_payload(PayloadKind::ContentBytes, &data).unwrap();
+        assert_ne!(p.content_id, ContentId::of(&plain_container));
+    }
+
+    /// P28-F04: a burst is metered like a preview, so a budget too small for
+    /// the planned drops refuses it before the encode.
+    #[test]
+    fn a_burst_is_metered() {
+        let content = body(6000);
+        let starved = EmitPolicy {
+            meter_budget: Some(1),
+            ..EmitPolicy::default()
+        };
+        assert!(matches!(
+            qr_feed_frames_burst(&content, &starved, 0, 1),
+            Err(EmitError::Meter(_))
+        ));
+        let unlimited = EmitPolicy {
+            meter_budget: None,
+            ..EmitPolicy::default()
+        };
+        qr_feed_frames_burst(&content, &unlimited, 0, 1).expect("lab policy is unmetered");
+    }
+
+    #[test]
+    fn empty_body_with_a_seal_previews_as_a_gated_feed() {
+        let policy = EmitPolicy {
+            seal_seed: Some([5u8; 32]),
+            ..EmitPolicy::default()
+        };
+        let p = qr_feed_preview(&[], &policy, None).expect("sealed empty preview");
+        assert!(!p.publicly_reemitable);
+    }
+
+    #[test]
+    fn empty_body_burst_is_ok_sealed_and_plain() {
+        let sealed = EmitPolicy {
+            seal_seed: Some([5u8; 32]),
+            ..EmitPolicy::default()
+        };
+        qr_feed_frames_burst(&[], &sealed, 0, 1).expect("sealed empty burst");
+        qr_feed_frames_burst(&[], &EmitPolicy::default(), 0, 1).expect("plain empty burst");
+    }
+
+    fn sealed_policy(block_len: u16) -> EmitPolicy {
+        EmitPolicy {
+            block_len,
+            seal_seed: Some([5u8; 32]),
+            ..EmitPolicy::default()
+        }
+    }
+
+    #[test]
+    fn sealed_preview_is_ok_for_small_block_lens() {
+        for bl in [64u16, 128, 200] {
+            for n in [0usize, 1, 10, 100, 1000] {
+                let p = qr_feed_preview(&body(n), &sealed_policy(bl), None)
+                    .unwrap_or_else(|e| panic!("sealed preview n={n} bl={bl}: {e:?}"));
+                assert!(p.planned_drops <= p.drop_bound);
+                assert!(p.k >= p.preflight_k);
+            }
+        }
+    }
+
+    #[test]
+    fn sealed_burst_is_ok_for_small_block_len() {
+        for n in [0usize, 10] {
+            qr_feed_frames_burst(&body(n), &sealed_policy(64), 0, 1)
+                .unwrap_or_else(|e| panic!("sealed burst n={n} bl=64: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn sealed_overhead_matches_a_real_seal() {
+        let key = PayloadKey::derive(&[5u8; 32]);
+        let sealed = crate::storage::payload_crypt::seal_payload_csprng(&key, &[]).unwrap();
+        assert_eq!(sealed.len(), SEAL_OVERHEAD);
+    }
+
+    #[test]
+    fn unsealed_plan_is_unchanged_by_the_seal_overhead() {
+        for bl in [64u16, 128, 200, 1024] {
+            for n in [0usize, 1, 10, 100, 1000, 5000] {
+                let policy = EmitPolicy {
+                    block_len: bl,
+                    ..EmitPolicy::default()
+                };
+                let (k, drops) = plan(&body(n), &policy).expect("plain plan");
+                let want_k = (n + THREE_PAYLOAD_HEADER_LEN).div_ceil(usize::from(bl));
+                assert_eq!(usize::from(k), want_k, "n={n} bl={bl}");
+                assert_eq!(drops, oneshot_drop_count(k, ONESHOT_REPAIR_PERMILLAGE));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_body_without_seal_or_manifest_stays_gated() {
+        assert!(matches!(
+            qr_feed_preview(&[], &EmitPolicy::default(), None),
+            Err(EmitError::UnsealedGated)
+        ));
     }
 
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {

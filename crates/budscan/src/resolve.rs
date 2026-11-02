@@ -13,6 +13,8 @@ use crate::bns_proof::{self, BnsInclusionProof, ResolvedName};
 use crate::content_id::ContentId;
 use crate::ens::{self, ContentHash};
 use crate::evidence::{Claim, Evidence, Strength};
+#[cfg(test)]
+use crate::fetch::BudManifest;
 use crate::fetch::{self, Fetched, Target, Transport};
 use crate::name_rule;
 use crate::query::{self, Query};
@@ -30,6 +32,10 @@ pub trait NameResolver {
     fn resolve_bud(&self, name: &str) -> Result<(ResolvedName, BnsInclusionProof), String>;
     /// The `bns_v1` value written into the state root for `.bud`, when known.
     fn bns_root(&self) -> Option<[u8; 32]>;
+    /// The chain epoch the `bns_v1` root belongs to. It has to come from the
+    /// same verified header as the root, because name expiry is judged
+    /// against it and not against the resolver's own `is_expired` flag.
+    fn current_epoch(&self) -> u64;
     /// An `.eth` name: the raw ENS `contenthash` bytes, and whether the MPT
     /// proof was verified.
     ///
@@ -191,7 +197,12 @@ fn plan<R: NameResolver>(resolver: &R, raw: &str) -> Result<Plan, String> {
 /// looked for.
 fn plan_bud<R: NameResolver>(resolver: &R, raw: &str, name: &str) -> Result<Plan, String> {
     let (record, proof) = resolver.resolve_bud(name)?;
-    let evidence = bns_proof::evaluate(&record, &proof, resolver.bns_root());
+    let evidence = bns_proof::evaluate(
+        &record,
+        &proof,
+        resolver.bns_root(),
+        resolver.current_epoch(),
+    );
     if !evidence.is_displayable() {
         return Ok(Plan::stop(Page {
             input: raw.to_string(),
@@ -303,9 +314,13 @@ mod tests {
         bud: Option<(ResolvedName, BnsInclusionProof)>,
         root: Option<[u8; 32]>,
         eth: Option<(Vec<u8>, bool)>,
+        epoch: u64,
     }
 
     impl NameResolver for Resolver {
+        fn current_epoch(&self) -> u64 {
+            self.epoch
+        }
         fn resolve_bud(&self, _name: &str) -> Result<(ResolvedName, BnsInclusionProof), String> {
             self.bud.clone().ok_or_else(|| String::from("no such name"))
         }
@@ -317,33 +332,59 @@ mod tests {
         }
     }
 
-    struct Table(HashMap<String, Vec<u8>>);
+    struct Table {
+        bytes: HashMap<String, Vec<u8>>,
+        manifests: HashMap<String, BudManifest>,
+    }
 
     impl Transport for Table {
-        fn fetch(&self, target: &Target) -> Result<Vec<u8>, String> {
+        fn fetch(&self, target: &Target, _max_bytes: usize) -> Result<Vec<u8>, String> {
             let key = match target {
                 Target::Bud(id) => id.to_string(),
                 Target::Ipfs(s) | Target::Https(s) => s.clone(),
                 Target::Arweave(r) => hex::encode(r),
             };
-            self.0
+            self.bytes
                 .get(&key)
                 .cloned()
                 .ok_or_else(|| format!("{key} not found"))
         }
+
+        fn fetch_bud_manifest(&self, id: &ContentId) -> Result<BudManifest, String> {
+            self.manifests
+                .get(&id.to_string())
+                .cloned()
+                .ok_or_else(|| format!("manifest {id} not found"))
+        }
     }
 
     fn table(pairs: &[(&str, &[u8])]) -> Table {
-        Table(
-            pairs
+        Table {
+            bytes: pairs
                 .iter()
                 .map(|(k, v)| ((*k).to_string(), (*v).to_vec()))
                 .collect(),
-        )
+            manifests: HashMap::new(),
+        }
+    }
+
+    /// The manifest id of an unsharded upload of `bytes`.
+    fn bud_id(bytes: &[u8]) -> ContentId {
+        BudManifest::single_shard(bytes).manifest_id()
+    }
+
+    /// A transport holding the manifest of `honest` and serving `served` under
+    /// its id.
+    fn bud_table(honest: &[u8], served: &[u8]) -> Table {
+        let manifest = BudManifest::single_shard(honest);
+        let key = manifest.manifest_id().to_string();
+        let mut t = table(&[(&key, served)]);
+        t.manifests.insert(key, manifest);
+        t
     }
 
     fn bud_resolver(bytes: &[u8], proven: bool) -> Resolver {
-        let id = ContentId::of(bytes);
+        let id = bud_id(bytes);
         let resolved = ResolvedName {
             name: String::from("ayaz.bud"),
             owner: [1u8; 32],
@@ -357,6 +398,7 @@ mod tests {
                 owner: [1u8; 32],
                 expires_at: 100,
                 content_id: Some(id),
+                storage_root: None,
             }];
             let root = bns_proof::partial_registry_root(100, &entries);
             Resolver {
@@ -369,12 +411,14 @@ mod tests {
                 )),
                 root: Some(root),
                 eth: None,
+                epoch: 0,
             }
         } else {
             Resolver {
                 bud: Some((resolved, BnsInclusionProof::None)),
                 root: None,
                 eth: None,
+                epoch: 0,
             }
         }
     }
@@ -383,7 +427,7 @@ mod tests {
     fn a_proven_name_with_matching_bytes_renders_as_verified() {
         let bytes = b"<html>ayaz</html>";
         let r = bud_resolver(bytes, true);
-        let t = table(&[(&ContentId::of(bytes).to_string(), bytes)]);
+        let t = bud_table(bytes, bytes);
         let page = open(&r, &t, "ayaz.bud").unwrap();
         assert!(page.is_renderable());
         assert_eq!(page.evidence.weakest(), Strength::Verified);
@@ -397,7 +441,7 @@ mod tests {
         // for.
         let bytes = b"<html>ayaz</html>";
         let r = bud_resolver(bytes, false);
-        let t = table(&[(&ContentId::of(bytes).to_string(), bytes)]);
+        let t = bud_table(bytes, bytes);
         let page = open(&r, &t, "ayaz.bud").unwrap();
         assert!(page.is_renderable());
         assert_eq!(page.evidence.weakest(), Strength::RpcClaimOnly);
@@ -407,7 +451,7 @@ mod tests {
     #[test]
     fn bytes_that_do_not_hash_are_not_rendered_at_all() {
         let r = bud_resolver(b"expected", true);
-        let t = table(&[(&ContentId::of(b"expected").to_string(), b"other")]);
+        let t = bud_table(b"expected", b"other");
         let page = open(&r, &t, "ayaz.bud").unwrap();
         assert!(!page.is_renderable());
         assert!(
@@ -464,6 +508,7 @@ mod tests {
             bud: None,
             root: None,
             eth: Some((ch.clone(), false)),
+            epoch: 0,
         };
         let page = open(&unproven, &t, "x1.eth").unwrap();
         assert_eq!(page.evidence.weakest(), Strength::RpcClaimOnly);
@@ -473,6 +518,7 @@ mod tests {
             bud: None,
             root: None,
             eth: Some((ch, true)),
+            epoch: 0,
         };
         let page = open(&proven, &t, "x1.eth").unwrap();
         assert_eq!(page.evidence.weakest(), Strength::Verified);
@@ -487,6 +533,7 @@ mod tests {
             bud: None,
             root: None,
             eth: Some((ch, true)),
+            epoch: 0,
         };
         let page = open(&r, &table(&[]), "x1.eth").unwrap();
         assert!(!page.is_renderable());
@@ -501,6 +548,7 @@ mod tests {
             bud: None,
             root: None,
             eth: None,
+            epoch: 0,
         };
         let page = open(&r, &t, url).unwrap();
         assert!(page.is_renderable());
@@ -520,6 +568,7 @@ mod tests {
             bud: Some((resolved, BnsInclusionProof::None)),
             root: None,
             eth: None,
+            epoch: 0,
         };
         // The transport is empty: had the fetcher been reached, it would have
         // returned an error.

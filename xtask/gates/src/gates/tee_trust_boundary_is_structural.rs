@@ -231,43 +231,48 @@ fn check_live_verifier_call(src: &str, problems: &mut Vec<String>) {
     // require the attestation RESULT to be used, so an
     // inert `verify_quote` call that does not drive the decision is rejected.
     let clean = strip_rust_noise(src);
-    let sign_with_privacy_block = clean.find("impl Wallet {").and_then(|impl_start| {
-        let impl_src = &clean[impl_start..];
-        let impl_open = impl_src.find('{')?;
-        let mut impl_depth = 0usize;
-        let mut impl_end = None;
-        for (idx, ch) in impl_src[impl_open..].char_indices() {
-            match ch {
-                '{' => impl_depth += 1,
-                '}' => {
-                    impl_depth = impl_depth.saturating_sub(1);
-                    if impl_depth == 0 {
-                        impl_end = Some(impl_open + idx);
-                        break;
+    // A wallet may carry several `impl Wallet { .. }` blocks: take the first
+    // one that holds the method.
+    let sign_with_privacy_block =
+        clean
+            .match_indices("impl Wallet {")
+            .find_map(|(impl_start, _)| {
+                let impl_src = &clean[impl_start..];
+                let impl_open = impl_src.find('{')?;
+                let mut impl_depth = 0usize;
+                let mut impl_end = None;
+                for (idx, ch) in impl_src[impl_open..].char_indices() {
+                    match ch {
+                        '{' => impl_depth += 1,
+                        '}' => {
+                            impl_depth = impl_depth.saturating_sub(1);
+                            if impl_depth == 0 {
+                                impl_end = Some(impl_open + idx);
+                                break;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
-            }
-        }
-        let wallet_impl = &impl_src[..=impl_end?];
-        let method_start = wallet_impl.find("pub fn sign_with_privacy(")?;
-        let body = &wallet_impl[method_start..];
-        let open = body.find('{')?;
-        let mut depth = 0usize;
-        for (idx, ch) in body[open..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return Some(&body[..=open + idx]);
+                let wallet_impl = &impl_src[..=impl_end?];
+                let method_start = wallet_impl.find("pub fn sign_with_privacy(")?;
+                let body = &wallet_impl[method_start..];
+                let open = body.find('{')?;
+                let mut depth = 0usize;
+                for (idx, ch) in body[open..].char_indices() {
+                    match ch {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                return Some(&body[..=open + idx]);
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
-            }
-        }
-        None
-    });
+                None
+            });
     let live_verifier_call = match sign_with_privacy_block {
         Some(body) => {
             // Each attestation predicate must appear in a fail-closed guard
@@ -298,9 +303,10 @@ fn check_live_verifier_call(src: &str, problems: &mut Vec<String>) {
 
 fn judge(src: &str) -> Vec<String> {
     let mut problems = Vec::new();
+    let live = strip_rust_noise(src);
 
     // 1. The runtime side must be a quote source, not an attestation source.
-    if !src.contains("trait TeeQuoter: TeeRuntime") {
+    if !live.contains("trait TeeQuoter: TeeRuntime") {
         problems.push(String::from(
             "wallet-core no longer has a `TeeQuoter` trait. The runtime must produce only \\
              a raw quote; letting it produce parsed attestation fields reopens the \\
@@ -383,13 +389,13 @@ fn judge(src: &str) -> Vec<String> {
     }
 
     // 2. The verifier side must be wallet-owned and fail closed.
-    if !src.contains("trait TeeQuoteVerifier") {
+    if !live.contains("trait TeeQuoteVerifier") {
         problems.push(String::from(
             "wallet-core no longer has a `TeeQuoteVerifier` trait. Without a wallet-owned \\
              verifier, the runtime is the only source of attestation and can self-attest.",
         ));
     }
-    if !src.contains("UnavailableTeeQuoteVerifier") {
+    if !live.contains("UnavailableTeeQuoteVerifier") {
         problems.push(String::from(
             "wallet-core no longer fails closed when no hardware root is linked. \\
              `UnavailableTeeQuoteVerifier` must reject every quote.",
@@ -527,4 +533,17 @@ pub fn sign_with_privacy(&self, message: &[u8], runtime: &dyn TeeAttester) -> Re
         "TEE trust-boundary gate self-test OK: the split passes, the runtime-attestation \\
          regression fails.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_trait_named_only_in_a_comment_is_missing() {
+        let src = "// trait TeeQuoter: TeeRuntime\n// trait TeeQuoteVerifier\n// UnavailableTeeQuoteVerifier\n";
+        let problems = judge(src);
+        assert!(problems.iter().any(|p| p.contains("TeeQuoter")));
+        assert!(problems.iter().any(|p| p.contains("TeeQuoteVerifier")));
+    }
 }

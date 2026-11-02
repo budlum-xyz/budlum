@@ -47,7 +47,7 @@ use crate::cross_domain::external::spec::{
     TimeUnit, TrustModel, VerificationPolicy,
 };
 use bud_proof::adapter::VerifyError;
-use bud_proof::{ExecutionPublicInputs, ProofEnvelope, ProverAdapter};
+use bud_proof::{ExecutionPublicInputs, ProofEnvelope};
 use serde::{Deserialize, Serialize};
 
 /// The evidence version this adapter reads.
@@ -93,10 +93,21 @@ impl ZkFinalityEvidence {
                 ),
             });
         }
-        let decoded: Self = bincode::deserialize(payload).map_err(|e| AdapterError::Malformed {
-            offset: 0,
-            reason: format!("payload does not decode: {e}"),
-        })?;
+        // BLG-0143 (P06-F14): trailing bytes decode to the same value under a
+        // different evidence digest, so one proof could be re-wrapped into
+        // many distinct commitments. They are refused, and the decode is
+        // bounded by the payload cap. Same wire encoding as
+        // `bincode::serialize`.
+        use bincode::Options;
+        let decoded: Self = bincode::options()
+            .with_fixint_encoding()
+            .with_limit(MAX_PAYLOAD_BYTES as u64)
+            .reject_trailing_bytes()
+            .deserialize(payload)
+            .map_err(|e| AdapterError::Malformed {
+                offset: 0,
+                reason: format!("payload does not decode: {e}"),
+            })?;
         decoded
             .envelope
             .validate_shape()
@@ -128,16 +139,26 @@ pub struct ZkVmFinalityAdapter {
     /// verifying a proof under the wrong network is not a weaker guarantee, it
     /// is a statement about a different chain.
     network: String,
+    /// The pinned program (BLG-0134/P06-F05, decision A): a proof of ANY
+    /// canonical-set program is not a proof of THIS domain's program. Pinned
+    /// at admission; `None` is the closed state and every verification is
+    /// refused.
+    program_hash: Option<[u8; 32]>,
+    /// The pinned chain id (BLG-0134/P06-F05, decision A): a proof under
+    /// another chain's id attests another chain's state.
+    chain_id: Option<u64>,
     golden: Option<RawConsensusEvidence>,
 }
 
 impl ZkVmFinalityAdapter {
     /// Builds an adapter for one network.
     #[must_use]
-    pub fn new(network: &str) -> Self {
+    pub fn new(network: &str, program_hash: Option<[u8; 32]>, chain_id: Option<u64>) -> Self {
         let id = AdapterId::from_name(&format!("budzkvm-{network}"));
         Self {
             network: network.to_string(),
+            program_hash,
+            chain_id,
             descriptor: AdapterDescriptor {
                 id,
                 name: format!("budzkvm-{network}"),
@@ -238,19 +259,55 @@ impl ExternalFinalityAdapter for ZkVmFinalityAdapter {
         }
 
         // The verification itself. All three parts go in; the verifier is the
-        // chain's own STARK verifier, not a reimplementation.
-        <bud_proof::DefaultAdapter as ProverAdapter>::verify(
+        // chain's own STARK verifier, not a reimplementation. It runs under
+        // the default activation state and then requires the proven program
+        // to be in the canonical set. The proof and the opcode gate come
+        // first, so a staged opcode is refused as "not activated" even when
+        // its program is canonical.
+        bud_proof::DefaultAdapter::verify_canonical_program(
             &decoded.envelope,
             &decoded.inputs,
             &decoded.program,
         )
         .map_err(|e| AdapterError::Crypto { what: describe(&e) })?;
 
+        // BLG-0134 (P06-F05, decision A): the proof must be of THIS domain's
+        // pinned program and chain. Canonical-set membership alone let any
+        // canonical program attest anything its inputs named.
+        let Some(program_hash) = self.program_hash else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "no program hash pinned; ZkVm admission is closed".to_string(),
+            });
+        };
+        if decoded.inputs.program_hash != program_hash {
+            return Err(AdapterError::ConsensusRule {
+                rule: "the proved program is not the pinned program".to_string(),
+            });
+        }
+        let Some(chain_id) = self.chain_id else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "no chain id pinned; ZkVm admission is closed".to_string(),
+            });
+        };
+        if decoded.inputs.chain_id != chain_id {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "the proof's chain id {} is not the pinned chain id {chain_id}",
+                    decoded.inputs.chain_id
+                ),
+            });
+        }
+
         Ok(FinalityAttestation {
             adapter: self.descriptor.id,
             domain: DomainKey::from_parts(&self.descriptor.id, &evidence.network),
             height: decoded.inputs.block_height,
             state_root: decoded.inputs.final_state_root,
+            // BLG-0133 (P06-F04): the program's event digest is the event
+            // root this attestation covers.
+            attested_block_hash: None,
+            attested_event_root: Some(decoded.inputs.event_digest),
+            attested_tx_root: None,
             finalized_at: decoded.inputs.block_height,
             time_unit: TimeUnit::Height,
             security: SecurityBacking::Zk {
@@ -349,6 +406,7 @@ fn hex32(bytes: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bud_proof::ProverAdapter;
 
     #[test]
     fn the_adapter_declares_itself_trustless_and_proven() {
@@ -356,7 +414,7 @@ mod tests {
         // no committee whose honesty is assumed. If this ever changes, the
         // profile a user sees changes with it, and this test is where that
         // shows up first.
-        let d = ZkVmFinalityAdapter::new("testnet").descriptor();
+        let d = ZkVmFinalityAdapter::new("testnet", None, None).descriptor();
         assert_eq!(d.trust_model, TrustModel::Trustless);
         assert_eq!(d.finality_kind, FinalityKind::Proven);
         assert_eq!(d.required_depth, 0, "a proof has no depth");
@@ -381,7 +439,7 @@ mod tests {
 
     #[test]
     fn the_version_gate_refuses_before_any_decoding() {
-        let adapter = ZkVmFinalityAdapter::new("testnet");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, None);
         let evidence = RawConsensusEvidence {
             adapter: adapter.descriptor().id,
             evidence_version: 2,
@@ -404,7 +462,7 @@ mod tests {
     fn the_wrong_network_is_refused_before_the_proof_is_read() {
         // The signing context is per network; verifying a proof under the
         // wrong one is not a smaller guarantee, it is a different statement.
-        let adapter = ZkVmFinalityAdapter::new("testnet");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, None);
         let evidence = RawConsensusEvidence {
             adapter: adapter.descriptor().id,
             evidence_version: EVIDENCE_VERSION,
@@ -424,7 +482,7 @@ mod tests {
     fn a_caller_asking_for_depth_is_told_a_proof_has_none() {
         // Silently ignoring min_depth would let a caller believe they had
         // confirmation depth that a proof does not provide.
-        let adapter = ZkVmFinalityAdapter::new("testnet");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, None);
         let mut policy = VerificationPolicy::proven(10);
         policy.min_depth = 6;
         // The proof cannot be reached because decoding fails first, so this
@@ -446,9 +504,239 @@ mod tests {
         );
     }
 
+    /// A valid proof of a `VerifyMerkle` program is refused here.
+    ///
+    /// The opcode is closed until it is activated, and this adapter verifies
+    /// under the default activation state, so an honest, verifying proof of a
+    /// program that uses it is still not attestable. The same proof verifies
+    /// under full activation, which is what shows the refusal is the opcode
+    /// gate and not a bad proof. The program is in the canonical set, so this
+    /// also pins the order: the opcode gate answers before canonicality does.
+    #[test]
+    fn a_proof_of_a_verify_merkle_program_is_refused() {
+        use bud_isa::{Instruction, Opcode};
+
+        let program = vec![
+            Instruction {
+                opcode: Opcode::VerifyMerkle,
+                rd: 1,
+                rs1: 2,
+                rs2: 3,
+                imm: 256,
+            }
+            .encode(),
+            Instruction {
+                opcode: Opcode::Halt,
+                rd: 0,
+                rs1: 0,
+                rs2: 0,
+                imm: 0,
+            }
+            .encode(),
+        ];
+        // A path of 64 zero siblings under key 0, so the memory image is the
+        // all-zero default and the root is the chain from the leaf.
+        let leaf = 0xBEEFu64;
+        let root = (0..64).fold(leaf, |cur, _| bud_vm::merkle_poseidon_round(cur, 0));
+        let mut vm = bud_vm::Vm::new(1024);
+        vm.registers[2] = root;
+        vm.registers[3] = leaf;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success);
+
+        let inputs = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: bud_proof::canonical_set::program_hash_of(&program),
+            initial_state_root: bud_proof::initial_state_root_of(
+                bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
+                    &vm.trace,
+                )),
+                bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0; 32],
+            sender: 0,
+            nonce: 0,
+            block_height: 1,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: [0; 32],
+            state_writes_digest: [0; 32],
+        };
+        let envelope =
+            bud_proof::DefaultAdapter::prove(&vm.trace, &inputs, &program).expect("honest proof");
+        bud_proof::Plonky3Adapter::verify_with_activation(
+            &envelope,
+            &inputs,
+            &program,
+            bud_isa::MainnetActivation::full(),
+        )
+        .expect("the proof is valid under full activation");
+
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, None);
+        let payload = ZkFinalityEvidence {
+            envelope,
+            inputs,
+            program,
+        }
+        .encode()
+        .expect("encodes");
+        let evidence = RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: "testnet".to_string(),
+            payload,
+            declared_height: 1,
+            declared_root: [0; 32],
+            submitter: crate::core::address::Address([1; 32]),
+        };
+        let err = adapter
+            .verify(&evidence, &VerificationPolicy::proven(10))
+            .unwrap_err();
+        match err {
+            AdapterError::Crypto { what } => assert!(
+                what.contains("VerifyMerkle") && what.contains("not activated"),
+                "the refusal names the opcode gate: {what}"
+            ),
+            other => panic!("a VerifyMerkle proof must be refused as invalid, got {other:?}"),
+        }
+    }
+
+    /// Runs `program` on a fresh VM, proves it honestly and wraps the result
+    /// as evidence for `adapter`. Programs here log at most, so the event
+    /// digest is the only public input beyond the trace shape.
+    fn honest_evidence(adapter: &ZkVmFinalityAdapter, program: Vec<u64>) -> RawConsensusEvidence {
+        let mut vm = bud_vm::Vm::new(1024);
+        vm.context.block_height = 1;
+        let receipt = vm.run_receipt(&program);
+        assert!(receipt.success, "the test program must halt cleanly");
+        let inputs = ExecutionPublicInputs {
+            chain_id: 1,
+            program_hash: bud_proof::canonical_set::program_hash_of(&program),
+            initial_state_root: bud_proof::initial_state_root_of(
+                bud_proof::memory_image_commitment_of_reads(&bud_proof::initial_memory_reads(
+                    &vm.trace,
+                )),
+                bud_proof::register_image_commitment_of_reads(&bud_proof::initial_register_reads(
+                    &vm.trace,
+                )),
+            ),
+            final_state_root: [0; 32],
+            sender: vm.context.sender,
+            nonce: vm.context.nonce,
+            block_height: vm.context.block_height,
+            gas_limit: vm.gas_limit,
+            gas_used: vm.gas_used,
+            exit_code: 0,
+            trace_len: vm.trace.len() as u64,
+            event_digest: bud_proof::event_digest_from_events(&receipt.events),
+            state_writes_digest: [0; 32],
+        };
+        let envelope =
+            bud_proof::DefaultAdapter::prove(&vm.trace, &inputs, &program).expect("honest proof");
+        let payload = ZkFinalityEvidence {
+            envelope,
+            inputs,
+            program,
+        }
+        .encode()
+        .expect("encodes");
+        RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: EVIDENCE_VERSION,
+            network: "testnet".to_string(),
+            payload,
+            declared_height: 1,
+            declared_root: [0; 32],
+            submitter: crate::core::address::Address([1; 32]),
+        }
+    }
+
+    /// The canonical set is checked at this boundary, after the proof and the
+    /// opcode activation gate. Each row proves a program honestly, so the
+    /// only thing that can differ between the rows is canonicality.
+    #[test]
+    fn only_a_program_in_the_canonical_set_is_attested() {
+        use bud_isa::{Instruction, Opcode};
+
+        let inst = |opcode, rd, rs1, imm| {
+            Instruction {
+                opcode,
+                rd,
+                rs1,
+                rs2: 0,
+                imm,
+            }
+            .encode()
+        };
+        let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        // BLG-0134 (P06-F05): the success row needs the pin; the outside row
+        // is refused at the canonical-set gate before the pin is read.
+        let pinned_hash = bud_proof::canonical_set::program_hash_of(&canonical);
+        let adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1));
+        let outside = vec![
+            inst(Opcode::Load, 1, 0, 7),
+            inst(Opcode::Log, 0, 1, 0),
+            inst(Opcode::Halt, 0, 0, 0),
+        ];
+        // (name, program, whether the canonical set holds it)
+        let rows: [(&str, Vec<u64>, bool); 2] = [
+            (
+                "a valid proof of a canonical program is attested",
+                canonical,
+                true,
+            ),
+            (
+                "a valid proof of a program outside the canonical set is refused",
+                outside,
+                false,
+            ),
+        ];
+        for (name, program, canonical) in rows {
+            let hash = bud_proof::canonical_set::program_hash_of(&program);
+            assert_eq!(
+                bud_proof::canonical_set::is_canonical_program_hash(&hash),
+                canonical,
+                "row `{name}` is mislabeled"
+            );
+            let evidence = honest_evidence(&adapter, program);
+            let got = adapter.verify(&evidence, &VerificationPolicy::proven(10));
+            if canonical {
+                let attestation = got.unwrap_or_else(|e| panic!("row `{name}`: {e:?}"));
+                assert_eq!(attestation.height, 1, "row `{name}`");
+            } else {
+                match got {
+                    Err(AdapterError::Crypto { what }) => assert!(
+                        what.contains("not in the canonical set") && what.contains(&hex32(&hash)),
+                        "row `{name}`: the refusal names the canonical set: {what}"
+                    ),
+                    other => panic!("row `{name}`: wanted a canonical refusal, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// BLG-0143 (P06-F14): trailing bytes decoded to the same value under a
+    /// different evidence digest.
+    #[test]
+    fn trailing_bytes_after_the_evidence_are_refused() {
+        let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, None);
+        let mut evidence = honest_evidence(&adapter, canonical);
+        assert!(ZkFinalityEvidence::decode(&evidence.payload).is_ok());
+        evidence.payload.push(0);
+        let err = ZkFinalityEvidence::decode(&evidence.payload).unwrap_err();
+        assert!(matches!(err, AdapterError::Malformed { .. }), "got {err:?}");
+    }
+
     #[test]
     fn the_probe_set_is_offset_independent_and_covers_every_edge() {
-        let probes = ZkVmFinalityAdapter::new("testnet").fault_probes();
+        let probes = ZkVmFinalityAdapter::new("testnet", None, None).fault_probes();
         assert!(!probes.is_empty());
         // Every probe must be applicable to a payload of any size, which is why
         // none of them uses a fixed interior offset beyond the first 16 bytes.
@@ -484,6 +772,53 @@ mod tests {
                 .iter()
                 .any(|n| n.contains("corrupting the leading bytes")),
             "no probe attacks the envelope itself"
+        );
+    }
+
+    /// BLG-0134 (P06-F05, decision A): an unpinned adapter is closed - a
+    /// canonical-set proof attests nothing without the domain's pins.
+    #[test]
+    fn unpinned_zkvm_admission_is_closed() {
+        let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let adapter = ZkVmFinalityAdapter::new("testnet", None, Some(1));
+        let evidence = honest_evidence(&adapter, canonical);
+        let err = adapter
+            .verify(&evidence, &VerificationPolicy::proven(0))
+            .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// BLG-0134 (P06-F05, decision A): a proof of a DIFFERENT canonical
+    /// program than the pinned one is refused, and so is a proof under
+    /// another chain id.
+    #[test]
+    fn the_pinned_program_and_chain_decide() {
+        let canonical = bud_vm::syscall_context::build_syscall_context_check_program()
+            .expect("canonical build");
+        let pinned_hash = bud_proof::canonical_set::program_hash_of(&canonical);
+        let adapter = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(1));
+        // Wrong chain id.
+        let wrong_chain = ZkVmFinalityAdapter::new("testnet", Some(pinned_hash), Some(2));
+        let evidence = honest_evidence(&adapter, canonical.clone());
+        let err = wrong_chain
+            .verify(&evidence, &VerificationPolicy::proven(0))
+            .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "got: {err:?}"
+        );
+        // Wrong program pin: another hash than the proved program's.
+        let wrong_program = ZkVmFinalityAdapter::new("testnet", Some([0xEE; 32]), Some(1));
+        let err = wrong_program
+            .verify(&evidence, &VerificationPolicy::proven(0))
+            .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "got: {err:?}"
         );
     }
 }

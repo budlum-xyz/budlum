@@ -5,6 +5,13 @@ use std::collections::BTreeMap;
 
 pub const MIN_DOMAIN_OPERATOR_BOND: u64 = 10_000;
 
+/// Most zk programs one domain may allow at the same time. Each entry is hashed into the
+/// registry leaf and checked on proof submission.
+///
+/// Convenience: pub so a domain operator can refuse past the same
+/// allowlist bound the registry enforces in this module.
+pub const MAX_ZK_PROGRAMS_PER_DOMAIN: usize = 64;
+
 /// The maximum number of domains that may be kept registered.
 ///
 /// # Why a ceiling is needed
@@ -52,7 +59,28 @@ impl ConsensusDomainRegistry {
         }
     }
 
+    /// Restore a domain loaded back from storage.
+    ///
+    /// Persistence is not registration: a domain that was frozen before a
+    /// restart must come back frozen. Routing the load through `register`
+    /// dropped it at the register-as-Active rule and genesis bootstrap then
+    /// re-registered the same id as Active, so a freeze silently evaporated
+    /// across every restart. Every other registration shape check still
+    /// runs: a malformed stored record is refused here exactly as a
+    /// malformed fresh registration would be.
+    pub fn restore_persisted(&mut self, domain: ConsensusDomain) -> Result<(), String> {
+        self.register_inner(domain, false)
+    }
+
     pub fn register(&mut self, domain: ConsensusDomain) -> Result<(), String> {
+        self.register_inner(domain, true)
+    }
+
+    fn register_inner(
+        &mut self,
+        domain: ConsensusDomain,
+        require_active: bool,
+    ) -> Result<(), String> {
         if self.domains.contains_key(&domain.id) {
             return Err(format!("Domain {} is already registered", domain.id));
         }
@@ -76,6 +104,17 @@ impl ConsensusDomainRegistry {
         }
         if domain.operator == Some(crate::core::address::Address::zero()) {
             return Err(format!("Domain {} has invalid zero operator", domain.id));
+        }
+        // A new registration starts Active. Frozen and Retired are reached
+        // only through `transition_status_checked`; registering straight into
+        // them would skip the lifecycle guard (P25-F10). Restoring persisted
+        // state is the one caller exempt from this, by the argument on
+        // `restore_persisted`.
+        if require_active && domain.status != DomainStatus::Active {
+            return Err(format!(
+                "Domain {} must register as Active, not {:?}",
+                domain.id, domain.status
+            ));
         }
 
         if domain.finality_adapter == crate::domain::types::POW_HEADER_CHAIN_ADAPTER {
@@ -233,6 +272,11 @@ impl ConsensusDomainRegistry {
                 hex::encode(program)
             ));
         }
+        if domain.zk_program_allowlist.len() >= MAX_ZK_PROGRAMS_PER_DOMAIN {
+            return Err(format!(
+                "Domain {id} already allows {MAX_ZK_PROGRAMS_PER_DOMAIN} zk programs; revoke one first"
+            ));
+        }
         domain.zk_program_allowlist.push(program);
         Ok(())
     }
@@ -288,7 +332,32 @@ impl ConsensusDomainRegistry {
     }
 }
 
+/// A domain with a zk program allowlist or a committed plugin code hash gets a V4 leaf that
+/// mixes both in. Other domains keep their earlier leaf byte for byte.
 pub fn domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
+    let base = base_domain_leaf_hash(domain);
+    if domain.zk_program_allowlist.is_empty() && domain.plugin_code_hash.is_none() {
+        return base;
+    }
+    let mut allowlist = domain.zk_program_allowlist.clone();
+    allowlist.sort();
+    allowlist.dedup();
+    let mut allowlist_bytes = Vec::new();
+    for program in &allowlist {
+        allowlist_bytes.extend_from_slice(program);
+    }
+    let plugin = domain.plugin_code_hash.unwrap_or_default();
+    hash_fields_bytes(&[
+        b"BDLM_DOMAIN_REGISTRY_LEAF_V4",
+        &base,
+        &(allowlist.len() as u64).to_le_bytes(),
+        &allowlist_bytes,
+        &[u8::from(domain.plugin_code_hash.is_some())],
+        &plugin,
+    ])
+}
+
+fn base_domain_leaf_hash(domain: &ConsensusDomain) -> Hash32 {
     let kind = domain.kind.as_bytes();
     let status = match domain.status {
         DomainStatus::Active => b"active".as_slice(),
@@ -379,6 +448,44 @@ mod tests {
     use super::*;
     use crate::domain::plugin::default_domain;
     use crate::domain::types::ConsensusKind;
+
+    #[test]
+    fn the_zk_allowlist_is_capped() {
+        let mut registry = ConsensusDomainRegistry::new();
+        let domain = default_domain(2, ConsensusKind::PoS, 1338, "pos", 0);
+        registry.register(domain).expect("register");
+        for n in 0..MAX_ZK_PROGRAMS_PER_DOMAIN {
+            registry
+                .allow_zk_program(2, [u8::try_from(n).unwrap_or(0); 32])
+                .expect("under the cap");
+        }
+        assert!(registry.allow_zk_program(2, [200u8; 32]).is_err());
+    }
+
+    #[test]
+    fn the_leaf_commits_to_the_zk_allowlist_and_plugin_hash() {
+        let plain = default_domain(2, ConsensusKind::PoS, 1338, "pos", 0);
+        let mut listed = plain.clone();
+        listed.zk_program_allowlist = vec![[7u8; 32]];
+        let mut pinned = plain.clone();
+        pinned.plugin_code_hash = Some([9u8; 32]);
+        let plain_leaf = domain_leaf_hash(&plain);
+        assert_eq!(plain_leaf, base_domain_leaf_hash(&plain));
+        assert_ne!(domain_leaf_hash(&listed), plain_leaf);
+        assert_ne!(domain_leaf_hash(&pinned), plain_leaf);
+        assert_ne!(domain_leaf_hash(&listed), domain_leaf_hash(&pinned));
+    }
+
+    #[test]
+    fn a_domain_cannot_register_as_frozen_or_retired() {
+        for status in [DomainStatus::Frozen, DomainStatus::Retired] {
+            let mut domain = default_domain(2, ConsensusKind::PoS, 1338, "pos", 0);
+            domain.status = status;
+            let mut registry = ConsensusDomainRegistry::new();
+            let err = registry.register(domain).unwrap_err();
+            assert!(err.contains("must register as Active"), "{err}");
+        }
+    }
 
     #[test]
     fn registry_root_is_order_independent_by_domain_id() {

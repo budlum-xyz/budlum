@@ -2,9 +2,10 @@
 
 //! Consensus state transition / reorg safety.
 //!
-//! Oracle: panic/abort freedom. Random block production sequences and
-//! Candidate reorg chains must not crash the L1 state machine. Deep reorgs
-//! Past `MAX_REORG_DEPTH` / finality must be rejected (Err), not panic.
+//! Oracle: panic freedom, plus the reorg safety rules. A reorg that is
+//! accepted must keep genesis, stay within `MAX_REORG_DEPTH`, fork above the
+//! finalized height and install the candidate. A refused reorg must leave the
+//! chain unchanged.
 
 use budlum_core::chain::blockchain::{Blockchain, MAX_REORG_DEPTH};
 use budlum_core::consensus::pow::PoWEngine;
@@ -34,7 +35,17 @@ fuzz_target!(|data: &[u8]| {
     let consensus = Arc::new(PoWEngine::new(0));
     let mut chain = Blockchain::new(consensus, None, 1337, None);
 
-    let produce_n = (take_u8(data, &mut i) as usize % (MAX_PRODUCE + 1)).min(MAX_PRODUCE);
+    // One input in 256 builds a chain longer than MAX_REORG_DEPTH. Without it
+    // the local chain stays at 13 blocks and the depth rule is unreachable.
+    let deep_chain = data.first() == Some(&0xFF);
+    let produce_n = if deep_chain {
+        MAX_REORG_DEPTH + 2
+    } else {
+        (take_u8(data, &mut i) as usize % (MAX_PRODUCE + 1)).min(MAX_PRODUCE)
+    };
+    if deep_chain {
+        i = 1;
+    }
     let mut produced = Vec::with_capacity(produce_n);
     for _ in 0..produce_n {
         let who = producer_from(take_u8(data, &mut i));
@@ -43,9 +54,6 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Property: chain length is genesis + successfully produced blocks.
-    let _height = chain.chain.len();
-    let _root = chain.chain.last().map(|b| b.hash.clone());
 
     // Build a candidate chain from fuzz bytes (possibly invalid / deep).
     let mode = take_u8(data, &mut i);
@@ -108,8 +116,42 @@ fuzz_target!(|data: &[u8]| {
         candidate.truncate(MAX_CANDIDATE + 4);
     }
 
-    // Try_reorg must not panic - Ok(false)/Err are both acceptable.
-    let _ = chain.try_reorg(candidate);
+    // Sometimes pin a finalized checkpoint on the local chain, so the fork
+    // point and checkpoint hash rules are reachable too.
+    if take_u8(data, &mut i) & 1 == 1 {
+        let at = take_u8(data, &mut i) as usize % chain.chain.len();
+        chain.finalized_height = at as u64;
+        chain.finalized_hash = chain.chain[at].hash.clone();
+    }
+
+    // Oracle: a reorg is accepted only inside the safety rules. A refusal
+    // leaves the chain untouched; an acceptance installs the candidate.
+    let before: Vec<String> = chain.chain.iter().map(|b| b.hash.clone()).collect();
+    let fork_point = chain.find_fork_point(&candidate);
+    let finalized_height = chain.finalized_height;
+    let candidate_hashes: Vec<String> = candidate.iter().map(|b| b.hash.clone()).collect();
+    match chain.try_reorg(candidate) {
+        Ok(true) => {
+            let Some(fork_point) = fork_point else {
+                panic!("reorg accepted without a fork point");
+            };
+            assert!(fork_point > 0, "reorg replaced genesis");
+            assert!(
+                before.len().saturating_sub(fork_point) <= MAX_REORG_DEPTH,
+                "reorg deeper than MAX_REORG_DEPTH was accepted"
+            );
+            assert!(
+                fork_point as u64 > finalized_height,
+                "reorg at or below the finalized height was accepted"
+            );
+            let after: Vec<String> = chain.chain.iter().map(|b| b.hash.clone()).collect();
+            assert_eq!(after, candidate_hashes, "accepted reorg did not install the candidate");
+        }
+        Ok(false) | Err(_) => {
+            let after: Vec<String> = chain.chain.iter().map(|b| b.hash.clone()).collect();
+            assert_eq!(after, before, "a refused reorg changed the chain");
+        }
+    }
 
     // State root query must not panic at arbitrary heights.
     let h = take_u8(data, &mut i) as u64;

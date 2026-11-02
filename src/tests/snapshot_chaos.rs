@@ -110,7 +110,7 @@ mod tests {
     // and the fields added with Task-0.08+ (bns/nft/registry/bridge_state/…)
     // are out of scope. The consequence: forgery in those fields PASSES verify.
     #[test]
-    fn test_snapshot_v2_unhashed_field_forgery_gap() {
+    fn test_snapshot_v2_bns_registry_forgery_rejected() {
         let dir = tempdir().expect("tempdir");
         let snaps = snap_dir_of(&dir);
         let _pm = PruningManager::new(10, 10, snaps);
@@ -195,7 +195,7 @@ mod tests {
         if s.schema_version >= 4 {
             macro_rules! hash_ser {
                 ($field:expr) => {
-                    h.update(bincode::serialize($field).unwrap_or_default());
+                    h.update(bincode::serialize($field).expect("serialize field"));
                 };
             }
             hash_ser!(&s.tokenomics);
@@ -212,7 +212,8 @@ mod tests {
             hash_ser!(&s.bridge_state);
             hash_ser!(&s.message_registry);
             hash_ser!(&s.external_roots);
-            let fc_bytes = bincode::serialize(&s.finality_certificates).unwrap_or_default();
+            let fc_bytes =
+                bincode::serialize(&s.finality_certificates).expect("serialize certificates");
             h.update((fc_bytes.len() as u64).to_le_bytes());
             h.update(&fc_bytes);
             h.update(s.created_at.to_le_bytes());
@@ -222,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_v2_rehash_forgery_no_authenticity_gap() {
+    fn test_snapshot_v2_legacy_rehash_forgery_rejected() {
         let dir = tempdir().expect("tempdir");
         let snaps = snap_dir_of(&dir);
         let _pm = PruningManager::new(10, 10, snaps);

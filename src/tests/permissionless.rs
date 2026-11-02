@@ -171,7 +171,7 @@ fn adding_new_role_type_is_non_breaking() {
 use crate::core::account::AccountState;
 use crate::core::transaction::{Transaction, TransactionType};
 use crate::execution::executor::Executor;
-use crate::registry::evidence::{ProofProvenance, SlashingProof, SlashingReport};
+use crate::registry::evidence::{SlashingProof, SlashingReport};
 
 fn funded_state(account: Address, balance: u64) -> AccountState {
     let mut state = AccountState::new();
@@ -251,11 +251,15 @@ fn actionable_report_slashes_registered_validator() {
 
     let report = SlashingReport::consensus_double_sign(
         offender,
-        7,
-        "aa".into(),
-        "bb".into(),
-        vec![1],
-        vec![2],
+        SlashingProof::DoubleSign {
+            height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: "aa".into(),
+            block_hash_2: "bb".into(),
+            signature_1: vec![1],
+            signature_2: vec![2],
+        },
         None,
     );
     let outcome = state.registry.slash_from_report(&report).unwrap().unwrap();
@@ -278,12 +282,13 @@ fn unverified_report_does_not_slash() {
         roles::VALIDATOR,
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "aa".into(),
             block_hash_2: "bb".into(),
             signature_1: vec![1],
             signature_2: vec![2],
         },
-        ProofProvenance::Unverified,
         Some(addr(0x99)),
     );
     // Registry refuses to act.
@@ -299,11 +304,15 @@ fn report_against_unregistered_is_noop() {
     let mut state = AccountState::new();
     let report = SlashingReport::consensus_double_sign(
         addr(0x33),
-        7,
-        "aa".into(),
-        "bb".into(),
-        vec![1],
-        vec![2],
+        SlashingProof::DoubleSign {
+            height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: "aa".into(),
+            block_hash_2: "bb".into(),
+            signature_1: vec![1],
+            signature_2: vec![2],
+        },
         None,
     );
     assert_eq!(state.registry.slash_from_report(&report).unwrap(), None);
@@ -723,10 +732,48 @@ fn a_role_with_no_independent_bond_is_rejected() {
     let account = addr(0x68);
     let mut state = funded_state(account, 10_000);
     let err = state
-        .withdraw_role_bond(&account, roles::ATTESTER)
-        .expect_err("ATTESTER has no independently debited bond");
+        .withdraw_role_bond(&account, RoleId(42))
+        .expect_err("RoleId(42) has no independently debited bond");
     assert!(err.contains("no independently debited bond"), "got: {err}");
     assert_eq!(state.get_balance(&account), 10_000);
+}
+
+#[test]
+fn verifier_family_role_bonds_unbond_and_withdraw_cleanly() {
+    for (idx, role) in [
+        roles::VERIFIER,
+        roles::AI_VERIFIER,
+        roles::ATTESTER,
+        roles::CONTENT_VALIDATOR,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let who = addr(0x70 + idx as u8);
+        let mut state = funded_state(who, 1_000_000);
+        let bond = 10_000;
+        let tx = crate::core::transaction::Transaction::new_with_chain_id(
+            who,
+            Address::zero(),
+            bond,
+            0,
+            0,
+            Vec::new(),
+            45262,
+            crate::core::transaction::TransactionType::RoleBond { role: role.0 },
+        );
+        Executor::apply_transaction(&mut state, &tx).expect("RoleBond succeeds");
+        assert_eq!(state.get_balance(&who), 1_000_000 - bond);
+        let release = state
+            .begin_role_bond_unbonding(&who, role)
+            .expect("begin_role_bond_unbonding succeeds for verifier-family role");
+        state.epoch_index = release;
+        let returned = state
+            .withdraw_role_bond(&who, role)
+            .expect("withdraw_role_bond refunds principal");
+        assert_eq!(returned, bond);
+        assert_eq!(state.get_balance(&who), 1_000_000);
+    }
 }
 
 /// Supply conservation across the full bond lifecycle.
@@ -1005,8 +1052,10 @@ fn onboarding_rejects_below_floor_as_active() {
         bc.chain_id,
         fee,
     );
-    // May enter mempool and apply; economic floor means not Active in registry.
-    let _ = bc.add_transaction(tx);
+    // The transaction is well formed, so it enters the mempool; the economic
+    // floor decides whether the registration becomes Active.
+    bc.add_transaction(tx)
+        .expect("a well formed below-floor stake transaction is admitted");
     let _ = bc.produce_block(staker);
 
     assert!(

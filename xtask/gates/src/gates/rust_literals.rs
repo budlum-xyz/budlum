@@ -126,6 +126,16 @@ pub fn strip_block_comments(text: &str) -> String {
     let mut i = 0usize;
     let mut depth = 0usize;
     while i < n {
+        // A line comment outside a block comment is copied as it is: a `/*`
+        // inside it (a glob such as `config/*-genesis.json`) does not open a
+        // block comment. The line pass removes it afterwards.
+        if depth == 0 && i + 1 < n && chars[i] == '/' && chars[i + 1] == '/' {
+            while i < n && chars[i] != '\n' {
+                out.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
         if i + 1 < n && chars[i] == '/' && chars[i + 1] == '*' {
             depth += 1;
             out.push_str("  ");
@@ -174,6 +184,41 @@ pub fn scrub(text: &str) -> String {
     let after_literals = strip_rust_literals(text);
     let after_blocks = strip_block_comments(&after_literals);
     strip_line_comments(&after_blocks)
+}
+
+/// Does `src` define `fn name(` as a live test? Comments and strings are
+/// ignored. The attributes right above the function must include `#[test]`
+/// (or a `tokio::test`) and none may mention `ignore` or `cfg`.
+pub fn has_live_test(src: &str, name: &str) -> bool {
+    let code = scrub(src);
+    let needle = format!("fn {name}(");
+    let lines: Vec<&str> = code.lines().collect();
+    lines.iter().enumerate().any(|(i, line)| {
+        let Some(at) = line.find(&needle) else {
+            return false;
+        };
+        let before = line[..at].chars().next_back();
+        if before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return false;
+        }
+        let mut is_test = false;
+        for above in lines[..i].iter().rev() {
+            let t = above.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if !t.starts_with("#[") {
+                break;
+            }
+            if t.contains("ignore") || t.contains("cfg") {
+                return false;
+            }
+            if t.starts_with("#[test]") || t.starts_with("#[tokio::test") {
+                is_test = true;
+            }
+        }
+        is_test
+    })
 }
 
 /// A fresh, exclusively created scratch directory under the system
@@ -239,6 +284,16 @@ mod tests {
     }
 
     #[test]
+    fn a_block_opener_inside_a_line_comment_does_not_swallow_code() {
+        let text = "/// the files config/*-genesis.json\nfn kept() {}\n";
+        assert!(scrub(text).contains("fn kept()"));
+        // A real block comment after a line comment still goes.
+        let text = "// note\n/* gone */ fn kept() {}\n";
+        let out = scrub(text);
+        assert!(out.contains("fn kept()") && !out.contains("gone"));
+    }
+
+    #[test]
     fn nested_block_comments() {
         let out = strip_block_comments("/* outer /* inner */ still comment */ let a = 1;");
         assert!(out.contains("let a = 1;"));
@@ -255,5 +310,21 @@ mod tests {
         assert!(out.contains("let c = 3;"));
         assert!(!out.contains("line"));
         assert!(!out.contains("fake"));
+    }
+}
+
+#[cfg(test)]
+mod live_test_tests {
+    use super::has_live_test;
+
+    #[test]
+    fn only_an_enabled_test_function_counts() {
+        assert!(has_live_test("#[test]\nfn a() {}\n", "a"));
+        assert!(has_live_test("#[test]\n/// doc\nfn a() {}\n", "a"));
+        assert!(!has_live_test("fn a() {}\n", "a"));
+        assert!(!has_live_test("#[test]\n#[ignore]\nfn a() {}\n", "a"));
+        assert!(!has_live_test("#[cfg(any())]\n#[test]\nfn a() {}\n", "a"));
+        assert!(!has_live_test("// fn a() {}\n", "a"));
+        assert!(!has_live_test("#[test]\nfn ab() {}\n", "a"));
     }
 }

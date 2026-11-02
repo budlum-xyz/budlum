@@ -33,6 +33,11 @@ pub enum BpqsError {
     BadAuthPath,
     /// The Winternitz chain heads do not rebuild the verification digest.
     BadChain,
+    /// A signer built from the root seed alone tried to mint before its
+    /// durable per-epoch quota state was supplied. Minting is refused rather
+    /// than assuming an empty quota: a restarted device that assumed zero
+    /// would draw one-time Winternitz keys it has already published.
+    QuotaStateUnknown,
     /// Input shape violation (wrong buffer length, truncated signature).
     Malformed(&'static str),
 }
@@ -56,6 +61,11 @@ impl fmt::Display for BpqsError {
             }
             BpqsError::BadAuthPath => write!(f, "merkle authentication path refused"),
             BpqsError::BadChain => write!(f, "winternitz chain verification refused"),
+            BpqsError::QuotaStateUnknown => write!(
+                f,
+                "signing refused: the durable per-epoch quota state has not been supplied \
+                 (use `resume` for a device that has minted, or `fresh_device` for one that has not)"
+            ),
             BpqsError::Malformed(what) => write!(f, "malformed input: {what}"),
         }
     }

@@ -190,7 +190,9 @@ pub enum NetworkPrivacyError {
     /// Target string was empty.
     EmptyTarget,
     /// Route id was empty, path-like, URL-like, or otherwise non-deterministic.
-    InvalidRouteId(String),
+    ///
+    /// The id is not stored: a mistyped proxy URL may hold a user name and password.
+    InvalidRouteId,
     /// Policy requires proxy/overlay egress but the caller selected direct.
     DirectEgressDenied {
         purpose: EgressPurpose,
@@ -208,9 +210,7 @@ impl fmt::Display for NetworkPrivacyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyTarget => f.write_str("network egress target must not be empty"),
-            Self::InvalidRouteId(route_id) => {
-                write!(f, "invalid network privacy route id: {route_id}")
-            }
+            Self::InvalidRouteId => f.write_str("invalid network privacy route id"),
             Self::DirectEgressDenied {
                 purpose,
                 target_kind,
@@ -231,7 +231,32 @@ impl fmt::Display for NetworkPrivacyError {
 
 impl std::error::Error for NetworkPrivacyError {}
 
+/// The host part of a URL-style or `host:port` target: scheme, user info, path,
+/// query, port and the brackets of an IPv6 literal are removed. Multiaddr
+/// style targets (leading `/`) have no host in this sense.
+fn host_part(lower: &str) -> Option<&str> {
+    if lower.starts_with('/') {
+        return None;
+    }
+    let rest = lower.split_once("://").map_or(lower, |(_, r)| r);
+    let rest = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+    if let Some(inner) = rest.strip_prefix('[') {
+        return inner.split_once(']').map(|(h, _)| h);
+    }
+    // A bare IPv6 literal has several colons and no port to strip.
+    if rest.matches(':').count() > 1 {
+        return Some(rest);
+    }
+    Some(rest.rsplit_once(':').map_or(rest, |(h, _)| h))
+}
+
 /// Classify a target without resolving it or parsing mutable external state.
+///
+/// Bracketed IPv6 literals and URL-style targets are classified by their host
+/// (P36-F10), so they cannot slip past a no-direct-DNS or no-direct-IP policy
+/// as `Opaque`. A bare dotless name stays `Opaque` on purpose: it is an
+/// adapter target the chosen proxy interprets, except `localhost`.
 #[must_use]
 pub fn classify_target(target: &str) -> TargetKind {
     let lower = target.to_ascii_lowercase();
@@ -248,6 +273,16 @@ pub fn classify_target(target: &str) -> TargetKind {
         TargetKind::IpAddress
     } else if lower.contains("mdns") || lower.contains("multicast") || lower.contains("/udp/5353") {
         TargetKind::LocalDiscovery
+    } else if let Some(host) = host_part(&lower) {
+        if host.parse::<std::net::IpAddr>().is_ok() {
+            TargetKind::IpAddress
+        } else if host == "localhost"
+            || (!host.is_empty() && (lower.contains("://") || has_numeric_port(&lower)))
+        {
+            TargetKind::DnsName
+        } else {
+            TargetKind::Opaque
+        }
     } else {
         TargetKind::Opaque
     }
@@ -315,6 +350,13 @@ pub fn check_egress(
     })
 }
 
+/// `name:port` with a non-empty name and an all-digit port.
+fn has_numeric_port(lower: &str) -> bool {
+    lower.rsplit_once(':').is_some_and(|(host, port)| {
+        !host.is_empty() && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
 fn looks_like_hostname(lower: &str) -> bool {
     if lower.starts_with('/') || lower.parse::<std::net::IpAddr>().is_ok() {
         return false;
@@ -335,7 +377,7 @@ fn validate_route_id(route_id: &str) -> Result<(), NetworkPrivacyError> {
     if valid {
         Ok(())
     } else {
-        Err(NetworkPrivacyError::InvalidRouteId(route_id.to_string()))
+        Err(NetworkPrivacyError::InvalidRouteId)
     }
 }
 
@@ -357,6 +399,20 @@ mod tests {
         assert_eq!(classify_target("seed.example:4001"), TargetKind::DnsName);
         assert_eq!(classify_target("mdns://lan"), TargetKind::LocalDiscovery);
         assert_eq!(classify_target("adapter-target-1"), TargetKind::Opaque);
+        // P36-F10: shapes that used to fall through to Opaque.
+        assert_eq!(classify_target("[2001:db8::1]:4001"), TargetKind::IpAddress);
+        assert_eq!(
+            classify_target("http://seed.example/x"),
+            TargetKind::DnsName
+        );
+        assert_eq!(
+            classify_target("https://[::1]:8545/"),
+            TargetKind::IpAddress
+        );
+        assert_eq!(classify_target("localhost:4001"), TargetKind::DnsName);
+        // A dotless host in a URL or with a port is still a name to resolve.
+        assert_eq!(classify_target("http://intranet/x"), TargetKind::DnsName);
+        assert_eq!(classify_target("intranet:4001"), TargetKind::DnsName);
     }
 
     #[test]
@@ -437,9 +493,16 @@ mod tests {
             let request = EgressRequest::new(EgressPurpose::PeerDial, "adapter-target-1", route);
             assert!(matches!(
                 check_egress(&policy, &request),
-                Err(NetworkPrivacyError::InvalidRouteId(_))
+                Err(NetworkPrivacyError::InvalidRouteId)
             ));
         }
+
+        let leaky = EgressRoute::Proxy {
+            route_id: "https://user:secret@proxy.example".into(),
+        };
+        let request = EgressRequest::new(EgressPurpose::PeerDial, "adapter-target-1", leaky);
+        let error = check_egress(&policy, &request).expect_err("a URL route id is refused");
+        assert!(!format!("{error} {error:?}").contains("secret"));
 
         let request = EgressRequest::new(
             EgressPurpose::PeerDial,

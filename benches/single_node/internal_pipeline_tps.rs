@@ -16,6 +16,13 @@ use std::time::Instant;
 
 #[tokio::main]
 async fn main() {
+    // Block production refusal reasons are `tracing` warnings in the node;
+    // without a subscriber the harness would report a silent empty run
+    // instead of the reason production stopped.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(std::io::stderr)
+        .try_init();
     println!("\nBUDLUM SINGLE-NODE INTERNAL PIPELINE BENCHMARK");
     println!("--------------------------------------------------");
 
@@ -25,11 +32,52 @@ async fn main() {
     let concurrency = 64;
 
     // 1. Setup
-    let pos_config = PoSConfig::default();
+    // The devnet chain id: the faucet, genesis and network parameters this
+    // harness relies on are defined for known networks, and every passing
+    // PoS produce test in the suite runs on this chain. The previous 1337
+    // is not a network the codebase knows, so its parameter lookups fell
+    // back to defaults that match no genesis.
+    let chain_id = budlum_core::core::transaction::DEFAULT_CHAIN_ID;
+    // The chain layer derives epoch boundaries from the chain id, the engine
+    // from this config; they must agree or every block after the first epoch
+    // boundary fails validation (C-12).
+    let pos_config = PoSConfig {
+        epoch_length: budlum_core::core::chain_config::epoch_len_for_chain_id(chain_id),
+        ..Default::default()
+    };
     let validator_keys = ValidatorKeys::generate().unwrap();
     let consensus = Arc::new(PoSEngine::new(pos_config, Some(validator_keys.clone())));
 
-    let blockchain = Blockchain::new(consensus, None, 1337, None);
+    let mut blockchain = Blockchain::new(consensus, None, chain_id, None);
+    // PoS fails closed with an empty validator set: keys living only inside
+    // the engine produce nothing. Register the benchmark validator the way
+    // the passing produce tests do - genesis-seeded entries cleared, then
+    // one funded, staked, fully keyed (VRF + BLS + PoP + PQ) and active
+    // validator - or `produce_block` returns `None` for the whole run and
+    // the harness measures an empty chain.
+    let producer_addr = Address::from(validator_keys.sig_key.public_key_bytes());
+    blockchain
+        .fund_development_account(&producer_addr)
+        .expect("benchmark runs on a devnet chain");
+    blockchain.state.validators.clear();
+    {
+        let bls = validator_keys
+            .bls_key
+            .as_ref()
+            .expect("validator keys carry BLS");
+        let mut validator = budlum_core::core::account::Validator::new(producer_addr, 2_000);
+        validator.vrf_public_key = validator_keys.vrf_key.public.to_bytes().to_vec();
+        validator.bls_public_key = bls.public_key.clone();
+        validator.pop_signature = bls.generate_pop(chain_id, &producer_addr);
+        validator.pq_public_key = validator_keys
+            .pq_key
+            .as_ref()
+            .expect("validator keys carry PQ")
+            .public_key_bytes()
+            .to_vec();
+        validator.active = true;
+        blockchain.state.validators.insert(producer_addr, validator);
+    }
     let (chain_actor, chain) = ChainActor::new(blockchain);
 
     tokio::spawn(async move {
@@ -56,12 +104,13 @@ async fn main() {
             let sender_idx = i % sender_count;
             let mut tx = Transaction::new_with_fee(
                 Address::from(keypairs[sender_idx].public_key_bytes()),
-                Address::zero(),
+                Address::from(keypairs[(sender_idx + 1) % sender_count].public_key_bytes()),
                 1,
                 1,
                 (i / sender_count) as u64,
                 vec![],
             );
+            tx.chain_id = chain_id;
             tx.sign(&keypairs[sender_idx]);
             tx
         })
@@ -85,10 +134,16 @@ async fn main() {
 
     let mut ingested = 0;
     let mut ingest_failed = 0;
+    let mut first_refusal = String::new();
     while let Some(res) = futures.next().await {
         match res {
             Ok(_) => ingested += 1,
-            Err(_) => ingest_failed += 1,
+            Err(e) => {
+                ingest_failed += 1;
+                if first_refusal.is_empty() {
+                    first_refusal = e;
+                }
+            }
         }
 
         if let Some(tx) = tx_iter.next() {
@@ -97,6 +152,10 @@ async fn main() {
         }
     }
     let ingest_duration = start_ingest.elapsed();
+    assert!(
+        ingested > 0,
+        "no transaction was ingested ({ingest_failed} refused, first reason: {first_refusal}); the numbers would mean nothing"
+    );
     let ingest_tps = ingested as f64 / ingest_duration.as_secs_f64();
 
     // 4. Measure EXECUTION/COMMIT TPS
@@ -121,6 +180,9 @@ async fn main() {
     }
     println!("\nExecution completed.");
     let exec_duration = start_exec.elapsed();
+    if processed < ingested {
+        eprintln!("WARNING: only {processed} of {ingested} ingested transactions were produced");
+    }
     let exec_tps = processed as f64 / exec_duration.as_secs_f64();
 
     // 5. Results
@@ -133,7 +195,10 @@ async fn main() {
     println!("INGEST TPS (Int):   {ingest_tps:.2} tx/s");
     println!("EXECUTION TPS:      {exec_tps:.2} tx/s");
     if blocks > 0 {
-        println!("Avg Block Build:   {:?}", exec_duration / blocks as u32);
+        // The CI vacuity gate (BLG-1049) keys on an `Avg per` metric line:
+        // it is printed only when blocks were actually produced, so an
+        // empty run still has no metric to hide behind.
+        println!("Avg per Block:     {:?}", exec_duration / blocks as u32);
     } else {
         println!("Avg Block Build:   N/A");
     }

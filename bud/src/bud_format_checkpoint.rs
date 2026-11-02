@@ -89,6 +89,9 @@ impl Checkpoint {
                 if cp.prev_hash != prev.hash {
                     return false; // the chain is broken
                 }
+                if cp.epoch <= prev.epoch {
+                    return false; // epochs must strictly increase
+                }
             }
         }
         true
@@ -167,6 +170,34 @@ mod tests {
             !Checkpoint::verify_chain(&[c1, c2]),
             "a chain whose prev hash does not match is REFUSED"
         );
+    }
+
+    #[test]
+    fn epochs_must_increase() {
+        let c1 = Checkpoint::new(
+            5,
+            FormatCodec::Json,
+            "json-expert",
+            "zstd19",
+            7.83,
+            root(1),
+            [0u8; 32],
+        );
+        for epoch in [5u64, 4, 0] {
+            let c2 = Checkpoint::new(
+                epoch,
+                FormatCodec::Log,
+                "log-expert",
+                "zstd19",
+                6.17,
+                root(2),
+                c1.hash,
+            );
+            assert!(
+                !Checkpoint::verify_chain(&[c1.clone(), c2]),
+                "epoch {epoch} after 5 is REFUSED"
+            );
+        }
     }
 
     #[test]

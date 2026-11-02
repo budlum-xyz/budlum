@@ -85,7 +85,9 @@ impl Provider for MobileSelfProvider {
         ProviderClass::DeviceClosed
     }
     fn fetch(&self, _cid: &str) -> Result<Vec<u8>, ProviderError> {
-        Ok(vec![])
+        // This provider holds no content store: it fails closed instead of
+        // returning an empty object that no hash check ever sees.
+        Err(ProviderError::NotFound)
     }
     fn cost_usd_per_tb_month(&self) -> f64 {
         0.0
@@ -120,7 +122,9 @@ impl Provider for NetworkFullProvider {
         ProviderClass::NetworkFull
     }
     fn fetch(&self, _cid: &str) -> Result<Vec<u8>, ProviderError> {
-        Ok(vec![])
+        // This provider holds no content store: it fails closed instead of
+        // returning an empty object that no hash check ever sees.
+        Err(ProviderError::NotFound)
     }
     fn cost_usd_per_tb_month(&self) -> f64 {
         0.23342 // 60ay amorti external_bench 0.002 dahil
@@ -143,6 +147,14 @@ impl MediaDeviceOnlyPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_providers_fail_closed_without_a_store() {
+        let m = MobileSelfProvider::new_owner("d".into());
+        assert_eq!(m.fetch("not-a-hash"), Err(ProviderError::NotFound));
+        let n = NetworkFullProvider { n: 21 };
+        assert_eq!(n.fetch("not-a-hash"), Err(ProviderError::NotFound));
+    }
+
     #[test]
     fn social_cost_zero_but_disabled() {
         let p = SocialMediaProvider {

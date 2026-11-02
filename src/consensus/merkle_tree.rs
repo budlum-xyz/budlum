@@ -5,8 +5,8 @@
 //! caller supplies a binary `combine` for paired nodes and a unary
 //! `promote` for an unpaired tail.
 //!
-//! An unpaired tail is **promoted under its own domain tag, never paired
-//! with itself**. The self-pairing made the tail contribute exactly what a
+//! An unpaired tail is promoted under its own domain tag, never paired
+//! with itself. The self-pairing made the tail contribute exactly what a
 //! duplicated leaf would, so the root of `[a, b, c]` equalled the root of
 //! `[a, b, c, c]`: two different commitments, one digest (the F-6 shape,
 //! in every tree that used this module's duplicate-tail rule). A promoted
@@ -27,12 +27,14 @@ use sha3::{Digest, Sha3_256};
 
 /// SHA3-256 node combine, the production hash for QC blob Merkle trees.
 ///
-/// Mirrors the internal-node hash of `QcBlob::merkle_layers` exactly: the two
-/// child digests concatenated into one SHA3-256 call, no domain prefix (the
-/// tree is already domain-separated by its position in the block).
+/// Mirrors the internal-node hash of `QcBlob::merkle_layers` exactly. The
+/// domain prefix (P01-F27) keeps an inner node out of the leaf preimage set:
+/// without it, a leaf and a pair of children that concatenated to the same
+/// bytes produced one digest serving both roles.
 #[must_use]
 pub fn combine_sha3(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
+    hasher.update(b"BDLM_QC_NODE_V2");
     hasher.update(left);
     hasher.update(right);
     let result = hasher.finalize();
@@ -68,6 +70,10 @@ pub fn promote_sha3(node: &[u8; 32]) -> [u8; 32] {
 /// ever yields it as a real sibling; a forged sentinel in a paired position
 /// only produces a root that does not match the committed one.
 #[must_use]
+///
+/// Convenience: pub so a verifier walking the same sibling lists
+/// outside this module recognises the promoted-step marker without
+/// restating its derivation.
 pub fn odd_promotion_sentinel() -> [u8; 32] {
     static SENTINEL: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
     *SENTINEL.get_or_init(|| hash_fields_bytes(&[b"BDLM_MERKLE_ODD_SENTINEL_V1"]))
@@ -243,7 +249,7 @@ pub fn merkle_root_from_proof(
     siblings: &[[u8; 32]],
     combine: fn(&[u8; 32], &[u8; 32]) -> [u8; 32],
     promote: fn(&[u8; 32]) -> [u8; 32],
-) -> [u8; 32] {
+) -> Option<[u8; 32]> {
     let mut cur = *leaf;
     let mut idx = index;
     for sibling in siblings {
@@ -259,7 +265,14 @@ pub fn merkle_root_from_proof(
         };
         idx /= 2;
     }
-    cur
+    // BLG-0129 (P05-F22): the index must fit its path. Bits above the walk
+    // used to be ignored, so ONE proof verified under many index values and
+    // the recorded proof_hash depended on which variant a node happened to
+    // get. A leftover index is refused instead of silently narrowed.
+    if idx != 0 {
+        return None;
+    }
+    Some(cur)
 }
 
 #[cfg(test)]
@@ -353,7 +366,8 @@ mod tests {
                 let proof = merkle_proof(&leaves, i, combine_sha3, promote_sha3)
                     .unwrap_or_else(|| panic!("leaf {i} of {len}"));
                 assert_eq!(
-                    merkle_root_from_proof(&leaves[i], i, &proof, combine_sha3, promote_sha3),
+                    merkle_root_from_proof(&leaves[i], i, &proof, combine_sha3, promote_sha3)
+                        .unwrap(),
                     root,
                     "leaf {i} of {len}"
                 );

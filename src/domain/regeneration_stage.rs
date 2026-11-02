@@ -2,10 +2,10 @@
 //!
 //! WIRING: the reversion ledger is driven by the node-health layer at
 //! [`super::regen_health`], which decides *when* a node reverts against the
-//! canonical commitment source. The remaining door is the node runtime's
-//! health tick, which will call `assess` per block and then execute the
-//! verdict here. Rules stay pinned by this module's tests and by
-//! `regen_health`'s.
+//! canonical commitment source. The node runtime's health tick,
+//! `crate::network::regen_health_tick`, calls `assess` once per finality beat
+//! and executes the verdict here. Rules stay pinned by this module's tests and
+//! by `regen_health`'s.
 //!
 //! # The biological model, and why it is not decoration
 //!
@@ -406,11 +406,17 @@ impl RegenerationLedger {
         }
         // 1. Ordering. Re-growth is not reversion and must not be smuggled in
         //    through this call.
-        let Some(wanted) = self.stage.reversions_to(target.stage) else {
-            return Err(ReversionError::TargetNotEarlier {
-                from: self.stage,
-                to: target.stage,
-            });
+        //    A same-stage target is not a reversion either: it would record
+        //    an event with `from == to`, which `validate` rejects, so one
+        //    accepted call would brick the ledger (P24-F01).
+        let wanted = match self.stage.reversions_to(target.stage) {
+            Some(steps) if steps > 0 => steps,
+            _ => {
+                return Err(ReversionError::TargetNotEarlier {
+                    from: self.stage,
+                    to: target.stage,
+                });
+            }
         };
         if target.height > self.height {
             return Err(ReversionError::TargetAhead {
@@ -533,6 +539,7 @@ impl RegenerationLedger {
         &mut self,
         target: &StageSnapshot,
         stress: Stress,
+        policy: &ReversionPolicy,
         canonical: &dyn Fn(Stage, u64) -> Option<[u8; 32]>,
     ) -> Result<Reversion, ReversionError> {
         if self.validate().is_ok() {
@@ -540,6 +547,13 @@ impl RegenerationLedger {
         }
         if target.stage != Stage::Polyp {
             return Err(ReversionError::ForgedTrailTargetNotPolyp { to: target.stage });
+        }
+        // The only legal target here is Polyp, so this is always a full
+        // reversion. The policy switch applies to this door like any other
+        // (P24-F02). The lifetime budget is not checked: the counters of a
+        // forged trail carry no meaning.
+        if !policy.allow_full_reversion {
+            return Err(ReversionError::FullReversionForbidden);
         }
         if canonical(target.stage, target.height) != Some(target.commitment) {
             return Err(ReversionError::TargetNotCanonical {
@@ -583,7 +597,9 @@ impl RegenerationLedger {
         if let Err(rule) = self.validate() {
             return Err(ReversionError::InvalidLedger { rule });
         }
-        if snapshot.stage != self.stage.later().unwrap_or(self.stage) {
+        // At the last stage there is nothing to grow into. `unwrap_or(self)`
+        // used to make Medusa to Medusa the "next" stage (P24-F07).
+        if self.stage.later() != Some(snapshot.stage) {
             return Err(ReversionError::GrowthNotNext {
                 from: self.stage,
                 to: snapshot.stage,
@@ -614,14 +630,16 @@ impl RegenerationLedger {
     /// nobody asked for and anything deeper leaves the damage in place.
     #[must_use]
     /// WIRING: wired through [`super::regen_health::assess`], which calls
-    /// this with the caller's snapshot table; the node runtime's health tick
-    /// is the remaining door. The selection rule is pinned here by tests.
+    /// this with the caller's snapshot table, and the node runtime's health
+    /// tick calls `assess`. The selection rule is pinned here by tests.
     pub fn cheapest_target(
         &self,
         damaged_below: u64,
         stage_height: &dyn Fn(Stage) -> Option<u64>,
     ) -> Option<Stage> {
-        let mut candidate = Some(self.stage);
+        // A reversion goes strictly earlier: the current stage holds the
+        // damaged view, and `revert` refuses a same-stage target (P24-F01).
+        let mut candidate = self.stage.earlier();
         while let Some(stage) = candidate {
             if stage_height(stage).is_some_and(|height| height <= damaged_below) {
                 return Some(stage);
@@ -668,7 +686,7 @@ fn saturating_event_count(len: usize) -> u32 {
 /// up.
 #[must_use]
 /// WIRING: wired through [`super::regen_health::assess`], which prices the
-/// converged decision; the node runtime's health tick is the remaining door.
+/// converged decision, and the node runtime's health tick calls `assess`.
 /// The economics are pinned here by tests.
 pub fn reversion_beats_repair(
     repair_cost: u64,
@@ -705,6 +723,35 @@ mod tests {
             commitment: canonical(Stage::Medusa, height).unwrap_or([0; 32]),
             carried: Transdifferentiated::default(),
         }
+    }
+
+    /// P24-F01: a same-stage target used to be accepted, recorded an event
+    /// with `from == to`, and the next `validate` rejected the whole ledger.
+    #[test]
+    fn a_same_stage_target_is_refused_and_leaves_the_ledger_valid() {
+        let mut ledger =
+            RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
+        let err = ledger
+            .revert(
+                &snapshot(Stage::Medusa, 80),
+                Stress::Divergence,
+                &ReversionPolicy::default(),
+                &canonical,
+            )
+            .unwrap_err();
+        assert!(matches!(err, ReversionError::TargetNotEarlier { .. }));
+        assert!(ledger.reversion_events.is_empty());
+        assert!(ledger.validate().is_ok());
+        // The ledger still reverts to a strictly earlier stage afterwards.
+        ledger
+            .revert(
+                &snapshot(Stage::Ephyra, 60),
+                Stress::Divergence,
+                &ReversionPolicy::default(),
+                &canonical,
+            )
+            .expect("an earlier stage is still accepted");
+        assert!(ledger.validate().is_ok());
     }
 
     #[test]
@@ -956,6 +1003,18 @@ mod tests {
     }
 
     #[test]
+    fn growth_from_the_last_stage_is_refused() {
+        let mut ledger =
+            RegenerationLedger::at(10, canonical(Stage::Medusa, 10).unwrap_or([0; 32]));
+        ledger.stage = Stage::Medusa;
+        let err = ledger
+            .grow(&snapshot(Stage::Medusa, 100), &canonical)
+            .unwrap_err();
+        assert!(matches!(err, ReversionError::GrowthNotNext { .. }));
+        assert_eq!(ledger.height, 10);
+    }
+
+    #[test]
     fn growth_cannot_skip_a_stage_or_move_height_backwards() {
         let mut ledger =
             RegenerationLedger::at(10, canonical(Stage::Medusa, 10).unwrap_or([0; 32]));
@@ -1167,8 +1226,8 @@ mod tests {
     #[test]
     fn the_cheapest_target_is_the_shallowest_one_that_clears_the_damage() {
         let ledger = RegenerationLedger::at(100, canonical(Stage::Medusa, 100).unwrap_or([0; 32]));
-        // Damage at or below the current height means the current stage already
-        // clears it - no reversion needed.
+        // The current stage is never a target: a reversion goes strictly
+        // earlier, and `revert` refuses a same-stage target (P24-F01).
         let stage_height = |stage| match stage {
             Stage::Medusa => Some(100),
             Stage::Ephyra => Some(60),
@@ -1176,11 +1235,11 @@ mod tests {
         };
         assert_eq!(
             ledger.cheapest_target(100, &stage_height),
-            Some(Stage::Medusa)
+            Some(Stage::Ephyra)
         );
         assert_eq!(
             ledger.cheapest_target(101, &stage_height),
-            Some(Stage::Medusa)
+            Some(Stage::Ephyra)
         );
         assert_eq!(
             ledger.cheapest_target(70, &stage_height),
@@ -1250,10 +1309,35 @@ mod tests {
                         carried: Default::default(),
                     },
                     Stress::RepairFailed,
+                    &ReversionPolicy::default(),
                     &canonical,
                 )
                 .unwrap_err();
             assert_eq!(err, ReversionError::LedgerIsValid);
+        }
+
+        #[test]
+        fn the_forgery_door_obeys_the_full_reversion_policy() {
+            let mut ledger = with_forged_trail();
+            let policy = ReversionPolicy {
+                allow_full_reversion: false,
+                ..ReversionPolicy::default()
+            };
+            let err = ledger
+                .revert_after_forgery(
+                    &StageSnapshot {
+                        stage: Stage::Polyp,
+                        height: 0,
+                        commitment: [0x11; 32],
+                        carried: Default::default(),
+                    },
+                    Stress::RepairFailed,
+                    &policy,
+                    &canonical,
+                )
+                .unwrap_err();
+            assert_eq!(err, ReversionError::FullReversionForbidden);
+            assert_eq!(ledger.stage, Stage::Ephyra);
         }
 
         #[test]
@@ -1268,6 +1352,7 @@ mod tests {
                         carried: Default::default(),
                     },
                     Stress::RepairFailed,
+                    &ReversionPolicy::default(),
                     &canonical,
                 )
                 .unwrap_err();
@@ -1289,6 +1374,7 @@ mod tests {
                         carried: Default::default(),
                     },
                     Stress::RepairFailed,
+                    &ReversionPolicy::default(),
                     &canonical,
                 )
                 .unwrap_err();
@@ -1307,6 +1393,7 @@ mod tests {
                         carried: Default::default(),
                     },
                     Stress::RepairFailed,
+                    &ReversionPolicy::default(),
                     &canonical,
                 )
                 .expect("forgery recovery succeeds");

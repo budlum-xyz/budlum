@@ -37,16 +37,18 @@ pub enum LossyKind {
 /// The lossiness decision: visual media by crf, scientific data by relative
 /// error.
 pub fn classify_lossy(kind: &str, crf: Option<u32>, rel_error: Option<f64>) -> LossyKind {
-    match kind {
+    // The gate fails closed. A lossy transform that arrives without its
+    // measurement is Unbounded, not lossless, and a negative or NaN error is
+    // not a measurement.
+    let kind = kind.to_ascii_lowercase();
+    match kind.as_str() {
         "avif" | "jxl" | "webp" | "jpeg" => match crf {
             Some(c) if c <= AVIF_CRF_VISUALLY_LOSSLESS => LossyKind::VisuallyLossless,
-            Some(_) => LossyKind::Unbounded,
-            None => LossyKind::None,
+            _ => LossyKind::Unbounded,
         },
         "zfp" | "sz" => match rel_error {
-            Some(e) if e <= ZFP_REL_ERROR_BOUND => LossyKind::ErrorBounded,
-            Some(_) => LossyKind::Unbounded,
-            None => LossyKind::None,
+            Some(e) if (0.0..=ZFP_REL_ERROR_BOUND).contains(&e) => LossyKind::ErrorBounded,
+            _ => LossyKind::Unbounded,
         },
         _ => LossyKind::None,
     }
@@ -86,6 +88,18 @@ mod tests {
     fn the_error_bounded_class_is_admitted() {
         assert!(gate_allows(classify_lossy("zfp", None, Some(1e-4))));
         assert!(!gate_allows(classify_lossy("sz", None, Some(0.01))));
+    }
+
+    /// BLG-0612: a missing measurement, a negative or NaN error and a
+    /// different spelling of the kind must not read as lossless.
+    #[test]
+    fn the_gate_fails_closed_on_missing_or_odd_measurements() {
+        assert!(!gate_allows(classify_lossy("avif", None, None)));
+        assert!(!gate_allows(classify_lossy("AVIF", Some(40), None)));
+        assert!(gate_allows(classify_lossy("AVIF", Some(30), None)));
+        assert!(!gate_allows(classify_lossy("zfp", None, None)));
+        assert!(!gate_allows(classify_lossy("sz", None, Some(-5.0))));
+        assert!(!gate_allows(classify_lossy("zfp", None, Some(f64::NAN))));
     }
 
     #[test]

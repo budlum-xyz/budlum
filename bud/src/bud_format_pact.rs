@@ -148,12 +148,21 @@ impl PactRecord {
     /// Class-lie check (I6): residual_len 0 with mode RecipePlusResidual is inconsistent.
     pub fn verify(&self) -> bool {
         match self.mode {
-            PactMode::PureProduction => self.residual_len == 0,
+            // One logical record has one byte form: the unused fields are fixed.
+            PactMode::PureProduction => {
+                self.residual_len == 0
+                    && self.residual_commitment == Self::EMPTY_RESIDUAL
+                    && self.byte_budget == 0
+            }
             PactMode::RecipePlusResidual => {
                 self.residual_len > 0 && self.residual_commitment != Self::EMPTY_RESIDUAL
             }
+            // An empty original is a valid lossless record: its length is zero.
             PactMode::ResidualOnly => {
-                self.residual_len > 0 && self.residual_commitment == self.commitment
+                self.residual_commitment == self.commitment
+                    && self.byte_budget == self.residual_len
+                    && self.producer_id == [0u8; 32]
+                    && self.seed == [0u8; 32]
             }
         }
     }
@@ -245,6 +254,21 @@ impl PactRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_original_and_loose_fields_have_one_blob_form() {
+        // An empty original makes a record that survives its own blob.
+        let empty = PactRecord::residual_only(b"", 5);
+        assert!(PactRecord::from_blob(&empty.to_blob()).is_some());
+        // A pure record with a stray byte budget is not accepted.
+        let mut loose = PactRecord::pure([1u8; 32], [2u8; 32], b"x", 5);
+        loose.byte_budget = 9;
+        assert!(PactRecord::from_blob(&loose.to_blob()).is_none());
+        // A residual-only record with a producer id is not accepted.
+        let mut odd = PactRecord::residual_only(b"data", 5);
+        odd.producer_id = [3u8; 32];
+        assert!(PactRecord::from_blob(&odd.to_blob()).is_none());
+    }
 
     #[test]
     fn pure_production_roundtrip_and_verify() {

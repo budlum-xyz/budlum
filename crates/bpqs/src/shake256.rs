@@ -68,6 +68,10 @@ fn xor_block(st: &mut [u64; 25], block: &[u8]) {
 /// 0x1F suffix. Distinct function from [`super::hash::Sha3_256Hash`] (their
 /// domain suffixes differ by construction); both stay in the tree as the
 /// audit cross-checks of the canonical Poseidon2 backend.
+///
+/// WIRING: exposed for the differential audit battery and for whoever
+/// instantiates the scheme behind the `BpqsHash` seam; the canonical
+/// in-tree backend is Poseidon2 and this stays as its cross-check.
 pub struct Shake256Hash;
 
 impl BpqsHash for Shake256Hash {

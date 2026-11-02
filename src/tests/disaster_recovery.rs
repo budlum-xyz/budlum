@@ -384,7 +384,20 @@ async fn test_chaos_v2_chain_halt_full_silence_and_resume() {
     // 2) CHAIN-HALT: complete silence, with no produce_block call at all. An
     //    epoch only closes through block production, so during the silence
     //    neither the liveness counters nor the state may move. There is NO call
-    //    here, just the seal:
+    //    here, only wall-clock time passing. The counter, the height and the
+    //    state root are compared against values read before the silence.
+    let root_before_halt = bc.state.calculate_state_root();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(
+        bc.chain.len() as u64,
+        height_before_halt,
+        "no block may appear during a halt"
+    );
+    assert_eq!(
+        bc.state.calculate_state_root(),
+        root_before_halt,
+        "the state must not move during a halt"
+    );
     assert_eq!(
         bc.state.liveness.missed_count(&silent),
         missed_before,

@@ -110,12 +110,7 @@ impl JpegAnalysis {
         let header_bytes = scan_start as u64;
         let scan_data_bytes = data.len().saturating_sub(scan_start) as u64;
         let total = data.len() as u64;
-        let header_ratio = if total > 0 {
-            header_bytes as f64 / total as f64
-        } else {
-            0.0
-        };
-        let recompress_savings_pct = 15.0 + header_ratio * 20.0;
+        let recompress_savings_pct = Self::savings_pct(header_bytes, total);
         Some(JpegAnalysis {
             width,
             height,
@@ -125,6 +120,17 @@ impl JpegAnalysis {
             header_bytes,
             recompress_savings_pct,
         })
+    }
+
+    /// The estimate, a formula of the header share. `from_blob` recomputes it,
+    /// so a stored value cannot be anything else.
+    fn savings_pct(header_bytes: u64, total: u64) -> f64 {
+        let header_ratio = if total > 0 {
+            header_bytes as f64 / total as f64
+        } else {
+            0.0
+        };
+        15.0 + header_ratio * 20.0
     }
 
     pub fn recommends_jxl(&self) -> bool {
@@ -169,6 +175,11 @@ impl JpegAnalysis {
         let header_bytes = u64::from_le_bytes(bytes[30..38].try_into().ok()?);
         let recompress_savings_pct = f64::from_le_bytes(bytes[38..46].try_into().ok()?);
         if bytes.len() != HDR + 32 {
+            return None;
+        }
+        // NaN, infinity or any value the formula does not give is refused.
+        let total = header_bytes.checked_add(scan_data_bytes)?;
+        if recompress_savings_pct.to_bits() != Self::savings_pct(header_bytes, total).to_bits() {
             return None;
         }
         Some(JpegAnalysis {
@@ -226,6 +237,18 @@ mod tests {
         assert!(a.header_bytes > 0);
         assert!(a.recommends_jxl(), "recompression is recommended");
         assert!(a.recompress_savings_pct >= 15.0);
+    }
+
+    #[test]
+    fn a_blob_with_a_stored_saving_the_formula_does_not_give_is_refused() {
+        let j = synthetic_jpeg();
+        let a = JpegAnalysis::analyze(&j).unwrap();
+        for bad in [f64::NAN, f64::INFINITY, 99.0] {
+            let mut forged = a.clone();
+            forged.recompress_savings_pct = bad;
+            assert!(JpegAnalysis::from_blob(&forged.to_blob()).is_none());
+        }
+        assert!(JpegAnalysis::from_blob(&a.to_blob()).is_some());
     }
 
     #[test]

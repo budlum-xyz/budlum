@@ -18,7 +18,7 @@ pub const MAX_MLP_LAYERS: usize = 4;
 /// so a spec can be within this constant and still be rejected.
 pub const MAX_MLP_PARAMS: usize = 4096;
 
-/// Which guest programs may be proven on L1 (whitelist).
+/// Which guest programs may be proven on the chain (whitelist).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum AiExecutionModelClass {

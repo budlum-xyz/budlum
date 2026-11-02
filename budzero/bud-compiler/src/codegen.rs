@@ -22,10 +22,11 @@ struct VarInfo {
     struct_type: Option<String>,
 }
 
-#[allow(dead_code)]
 pub struct Codegen {
     instructions: Vec<u64>,
     next_reg: u8,
+    /// Read only by the experimental opcode gate in `emit`.
+    #[cfg(feature = "experimental")]
     profile: IsaProfile,
     error: Option<CompileError>,
     unpatched_calls: Vec<(usize, String)>,
@@ -50,6 +51,7 @@ impl Codegen {
         Self {
             instructions: Vec::new(),
             next_reg: 1,
+            #[cfg(feature = "experimental")]
             profile: IsaProfile::Production,
             error: None,
             unpatched_calls: Vec::new(),
@@ -60,9 +62,12 @@ impl Codegen {
     }
 
     pub fn new_with_profile(profile: IsaProfile) -> Self {
+        #[cfg(not(feature = "experimental"))]
+        let _ = profile;
         Self {
             instructions: Vec::new(),
             next_reg: 1,
+            #[cfg(feature = "experimental")]
             profile,
             error: None,
             unpatched_calls: Vec::new(),
@@ -213,7 +218,15 @@ impl Codegen {
                 // Own type; for an `Ident` it is the aliased variable's
                 // Recorded type; otherwise it is `None`.
                 let struct_type = self.expr_struct_type(expr, scope);
-                let reg = self.generate_expr(expr, scope, storage);
+                let mut reg = self.generate_expr(expr, scope, storage);
+                // A register below `saved_reg` belongs to another variable
+                // (`let b = a;`). Binding `b` to it would alias the two, so a
+                // later `b = ..` would also change `a`. Copy the value.
+                if reg < saved_reg {
+                    let copy = self.alloc_reg();
+                    self.emit(Opcode::Add, copy, reg, 0, 0);
+                    reg = copy;
+                }
                 scope.insert(name.clone(), VarInfo { reg, struct_type });
                 if reg >= saved_reg {
                     self.next_reg = reg + 1;
@@ -291,17 +304,21 @@ impl Codegen {
                 self.emit(Opcode::Jnz, 0, cond_reg, 0, 0);
                 self.next_reg = saved_reg;
 
+                // Each branch gets a child scope, as sema checks: a `let` in a
+                // branch must not replace an outer variable.
                 if let Some(eb) = else_branch {
+                    let mut else_scope = scope.clone();
                     for s in eb {
-                        self.generate_stmt(s, scope, storage);
+                        self.generate_stmt(s, &mut else_scope, storage);
                     }
                 }
                 let jump_to_end_idx = self.instructions.len();
                 self.emit(Opcode::Jmp, 0, 0, 0, 0);
 
                 let then_start_idx = self.instructions.len();
+                let mut then_scope = scope.clone();
                 for s in then_branch {
-                    self.generate_stmt(s, scope, storage);
+                    self.generate_stmt(s, &mut then_scope, storage);
                 }
                 let end_idx = self.instructions.len();
 
@@ -323,8 +340,9 @@ impl Codegen {
                 self.emit(Opcode::Jmp, 0, 0, 0, 0);
 
                 let body_start_idx = self.instructions.len();
+                let mut body_scope = scope.clone();
                 for s in body {
-                    self.generate_stmt(s, scope, storage);
+                    self.generate_stmt(s, &mut body_scope, storage);
                 }
 
                 let current_idx = self.instructions.len();
@@ -365,7 +383,15 @@ impl Codegen {
                 // Wildcard (otherwise the chain has no fall-through
                 // Termination, which is undefined).
                 let scrutinee_reg = self.generate_expr(scrutinee, scope, storage);
-                self.next_reg = saved_reg;
+                // A temporary scrutinee register (storage read, call result,
+                // arithmetic) sits at or above `saved_reg`. Keep it reserved
+                // for the whole chain, or the pattern Load would overwrite it.
+                let arm_base = if scrutinee_reg >= saved_reg {
+                    scrutinee_reg + 1
+                } else {
+                    saved_reg
+                };
+                self.next_reg = arm_base;
 
                 // Placeholder jumps to the per-arm body, patched once we
                 // Know where the body starts. Using `Option<usize>`
@@ -387,15 +413,17 @@ impl Codegen {
                     }
                     match &arm.pattern {
                         MatchPattern::IntLit(val) => {
-                            let pat_reg = self.alloc_reg();
-                            self.emit(Opcode::Load, pat_reg, 0, 0, *val as i32);
+                            // Build the pattern like any integer literal: it is
+                            // range checked against the field modulus and wide
+                            // values are split, not cut to an i32 immediate.
+                            let pat_reg = self.generate_expr(&Expr::Int(*val), scope, storage);
                             let diff_reg = self.alloc_reg();
                             self.emit(Opcode::Sub, diff_reg, scrutinee_reg, pat_reg, 0);
                             let placeholder = self.instructions.len();
                             self.emit(Opcode::Jnz, 0, diff_reg, 0, 0);
                             // The target is not known yet (the next arm's test).
                             pending_skip = Some(placeholder);
-                            self.next_reg = saved_reg;
+                            self.next_reg = arm_base;
                         }
                         MatchPattern::Wildcard => {
                             // No test: if the previous arms did not hold, control falls
@@ -405,14 +433,17 @@ impl Codegen {
                     }
 
                     // Body of this arm.
+                    // Sema scopes an arm's bindings to the arm. Use a child
+                    // scope so an arm `let` cannot replace an outer variable.
+                    let mut arm_scope = scope.clone();
                     for s in &arm.body {
-                        self.generate_stmt(s, scope, storage);
+                        self.generate_stmt(s, &mut arm_scope, storage);
                     }
                     // After the body, jump to the end of the match.
                     let end_jump = self.instructions.len();
                     self.emit(Opcode::Jmp, 0, 0, 0, 0);
                     end_jump_indices.push(end_jump);
-                    self.next_reg = saved_reg;
+                    self.next_reg = arm_base;
                 }
                 // The last arm's failure jump also goes to the end of the match.
                 if let Some(last) = pending_skip.take() {
@@ -427,6 +458,7 @@ impl Codegen {
                 for idx in end_jump_indices {
                     self.patch_jump(idx, (end_idx as i32) - (idx as i32));
                 }
+                self.next_reg = saved_reg;
             }
             Stmt::For {
                 var,
@@ -435,7 +467,15 @@ impl Codegen {
                 body,
             } => {
                 let start_reg = self.generate_expr(start, scope, storage);
-                let end_reg = self.generate_expr(end, scope, storage);
+                let mut end_reg = self.generate_expr(end, scope, storage);
+                // Snapshot the bound when it is a variable's own register, so
+                // an assignment in the body cannot move it (the IR lowering
+                // also evaluates the bound once).
+                if end_reg < saved_reg {
+                    let copy = self.alloc_reg();
+                    self.emit(Opcode::Add, copy, end_reg, 0, 0);
+                    end_reg = copy;
+                }
                 let loop_reg = self.alloc_reg();
                 self.emit(Opcode::Add, loop_reg, start_reg, 0, 0);
                 self.next_reg = loop_reg + 1; // loop var is kept!
@@ -714,6 +754,21 @@ impl Codegen {
                 // Calls below.
                 let layout: Option<Vec<String>> = self.struct_layouts.get(name).cloned();
 
+                // Reserve the block *before* the field values are evaluated.
+                // A field value can allocate too (a nested literal or a call
+                // That builds a struct); bumping the heap pointer afterwards
+                // Placed the inner object at the outer object's address.
+                // Allocate the full *declared* struct size (not the
+                // Literal's field count) so the block is correctly sized
+                // Regardless of the order the literal lists its fields.
+                // Falls back to the literal count when the layout is
+                // Unknown.
+                let size_words = layout.as_ref().map_or(fields.len(), |fs| fs.len());
+                let size_reg = self.alloc_reg();
+                self.emit(Opcode::Load, size_reg, 0, 0, (size_words * 8) as i32);
+                self.emit(Opcode::Add, 31, 31, size_reg, 0); // bump heap pointer
+                self.next_reg = ptr_reg + 1;
+
                 let mut field_vals: Vec<(usize, u8)> = Vec::new();
                 for (fname, val) in fields {
                     let val_reg = self.generate_expr(val, scope, storage);
@@ -742,16 +797,6 @@ impl Codegen {
                 for (offset, val_reg) in field_vals {
                     self.emit(Opcode::Store, 0, ptr_reg, val_reg, offset as i32);
                 }
-
-                // Allocate the full *declared* struct size (not the
-                // Literal's field count) so the block is correctly sized
-                // Regardless of the order the literal lists its fields.
-                // Falls back to the literal count when the layout is
-                // Unknown.
-                let size_words = layout.as_ref().map_or(fields.len(), |fs| fs.len());
-                let size_reg = self.alloc_reg();
-                self.emit(Opcode::Load, size_reg, 0, 0, (size_words * 8) as i32);
-                self.emit(Opcode::Add, 31, 31, size_reg, 0); // bump heap pointer
 
                 self.next_reg = saved_next_reg;
                 let res_reg = self.alloc_reg();
@@ -912,6 +957,11 @@ impl Codegen {
                         return 0;
                     }
 
+                    if Opcode::VerifyMerkle.requires_mainnet_activation() {
+                        tracing::warn!(
+                            "verify_merkle_proof emits VerifyMerkle, which is not active on mainnet; the program is refused there until the opcode is activated"
+                        );
+                    }
                     let res = self.alloc_reg();
                     self.emit(Opcode::VerifyMerkle, res, r_root, r_leaf, path_addr as i32);
                     res

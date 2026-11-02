@@ -42,6 +42,8 @@ pub enum RevealRpcError {
     Forbidden,
     /// A sealed recipe was presented without the public opening that unpacks it.
     NeedFullRecipe,
+    /// The public opening was sent but it does not open the sealed recipe.
+    WrongOpening,
     /// The read metering budget tripped.
     Meter(MeterError),
     /// The underlying re-emit failed.
@@ -56,6 +58,10 @@ impl std::fmt::Display for RevealRpcError {
                 f,
                 "three reveal rpc: sealed recipe needs a full public opening"
             ),
+            Self::WrongOpening => write!(
+                f,
+                "three reveal rpc: the opening does not open the sealed recipe"
+            ),
             Self::Meter(e) => write!(f, "three reveal rpc: meter: {e}"),
             Self::Reemit(e) => write!(f, "three reveal rpc: reemit: {e}"),
         }
@@ -69,6 +75,7 @@ impl From<RevealError> for RevealRpcError {
         match e {
             RevealError::Forbidden => Self::Forbidden,
             RevealError::NeedFullRecipe => Self::NeedFullRecipe,
+            RevealError::WrongOpening => Self::WrongOpening,
             RevealError::Reemit(e) => Self::Reemit(e),
         }
     }
@@ -104,7 +111,19 @@ pub struct RevealRequest {
 /// A granted, metered reveal session, guarded by the RPC layer.
 #[derive(Debug, Clone)]
 pub struct RevealHandle {
-    session: RevealSession,
+    /// Behind an `Arc` so a server that keeps its sessions in a table can take
+    /// the session OUT of the table's critical section and do the one piece of
+    /// work that is proportional to the stream (the stream-pin check) without
+    /// holding the table lock. See `RevealGateway::session_handle`.
+    session: std::sync::Arc<RevealSession>,
+    /// The session's stream commitment, cached in the handle.
+    ///
+    /// `stream_commitment` is a `const fn` on the published API. Reading it
+    /// through the `Arc` would demote it to a plain method, which
+    /// `cargo-semver-checks` reports as `inherent_method_const_removed` - a
+    /// public API break. The commitment is fixed for the session's lifetime,
+    /// so a copy costs 32 bytes and keeps the signature.
+    stream_commitment: [u8; 32],
     meter: ThreeMeter,
 }
 
@@ -112,7 +131,18 @@ impl RevealHandle {
     /// Stream commitment for the receivers of this session.
     #[must_use]
     pub const fn stream_commitment(&self) -> [u8; 32] {
-        self.session.stream_commitment()
+        self.stream_commitment
+    }
+
+    /// The session itself, cloned out of the handle.
+    ///
+    /// Exists so the stream-pin check can run outside a session table's lock:
+    /// the check may build a whole one-shot carousel pass, and doing that under
+    /// a table every other viewer needs turns one request into a stall for all
+    /// of them (CWE-407).
+    #[must_use]
+    pub fn session_handle(&self) -> std::sync::Arc<RevealSession> {
+        std::sync::Arc::clone(&self.session)
     }
 
     /// Emit a range of frames under this session's gate and budget.
@@ -188,7 +218,11 @@ pub fn open_reveal_session_prechecked(
         grant_allows,
     )?;
     let meter = ThreeMeter::with_budget(req.meter_budget);
-    Ok(RevealHandle { session, meter })
+    Ok(RevealHandle {
+        stream_commitment: session.stream_commitment(),
+        session: std::sync::Arc::new(session),
+        meter,
+    })
 }
 
 #[cfg(test)]

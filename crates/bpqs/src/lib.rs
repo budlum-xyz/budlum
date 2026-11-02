@@ -87,7 +87,7 @@ pub use hash::{BpqsHash, Sha3_256Hash};
 pub use params::{BpqsParams, ParamsL3, ParamsL5};
 pub use poseidon2::Poseidon2GoldilocksHash;
 pub use shake256::Shake256Hash;
-pub use sign::{keygen_root, sign_at_height, verify_at_height, BpqsSignature};
+pub use sign::{keygen_root, verify_at_height, BpqsSignature};
 
 #[cfg(test)]
 mod tests;

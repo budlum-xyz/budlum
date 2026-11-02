@@ -19,9 +19,12 @@ mod tests {
         any::<[u8; 32]>().prop_map(Address::from)
     }
 
-    /// The balance generator - between 0 and 10M.
+    /// The balance generator. The ceiling is the fixed supply divided by the
+    /// largest entry count, so 49 entries at the ceiling reach the supply cap
+    /// and the cap check below can fail. A ceiling of 10M base units could
+    /// never come near the 10^14 cap.
     fn arb_balance() -> impl Strategy<Value = u64> {
-        0..10_000_000u64
+        0..=(BUD_TOTAL_SUPPLY / 49)
     }
 
     proptest! {
@@ -78,17 +81,20 @@ mod tests {
             let mut state = AccountState::new();
             let addr = Address::from([0xAA; 32]);
             state.add_balance(&addr, initial_balance);
+            let supply_before = state.circulating_supply();
 
-            // The burn operation.
-            let _ = state.burn_from(&addr, burn_amount);
+            let burned = state.burn_from(&addr, burn_amount);
 
-            // The balance must not fall below 0.
-            let final_balance = state.get_balance(&addr);
-            assert!(
-                final_balance <= initial_balance,
-                "Balance should not increase after burn"
+            // The burn takes exactly what the balance can pay and nothing
+            // else, the balance never grows, and the supply falls by the
+            // burned amount.
+            let expected = burn_amount.min(initial_balance);
+            assert_eq!(burned, expected);
+            assert_eq!(state.get_balance(&addr), initial_balance - expected);
+            assert_eq!(
+                state.circulating_supply(),
+                supply_before - u128::from(burned)
             );
-            // Because saturating_sub is used, it cannot fall below 0.
         }
 
         /// INVARIANT 3: burn and mint consistency.
@@ -191,6 +197,52 @@ mod tests {
                 paid <= annual_yield,
                 "a year of epoch rewards ({paid}) exceeds the annual yield ({annual_yield})"
             );
+        }
+    }
+
+    proptest! {
+        /// BLG-0080 (P03-F23) + BLG-0077 (P03-F20): parameter sweep the old
+        /// tests never did. The burn can never exceed the money it comes
+        /// from, whatever ratio a hand-built parameter set carries - the
+        /// ratios are capped inside the formula, not only at genesis.
+        #[test]
+        fn metabolic_burn_never_exceeds_the_fee(
+            fee in 0u64..=4_000_000_000_000_000u64,
+            ratio in 0u64..=u64::MAX,
+        ) {
+            let params = TokenomicsParams {
+                tx_fee_burn_ratio_fixed: ratio,
+                ..TokenomicsParams::default()
+            };
+            assert!(params.metabolic_burn(fee) <= fee);
+        }
+
+        #[test]
+        fn annual_burn_never_exceeds_the_reserve(
+            reserve in 0u64..=4_000_000_000_000_000u64,
+            ratio in 0u64..=u64::MAX,
+        ) {
+            let params = TokenomicsParams {
+                burn_reserve: reserve,
+                annual_burn_ratio_fixed: ratio,
+                ..TokenomicsParams::default()
+            };
+            assert!(params.annual_burn_amount() <= reserve);
+        }
+
+        /// The epoch reward can never exceed the stake it is paid on.
+        #[test]
+        fn epoch_reward_never_exceeds_the_stake(
+            stake in 0u64..=4_000_000_000_000_000u64,
+            ratio in 0u64..=u64::MAX,
+            epochs in 0u64..=1_000_000u64,
+        ) {
+            let params = TokenomicsParams {
+                validator_annual_yield_ratio_fixed: ratio,
+                epochs_per_year: epochs,
+                ..TokenomicsParams::default()
+            };
+            assert!(params.calculate_epoch_reward(stake) <= stake);
         }
     }
 }

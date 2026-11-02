@@ -78,6 +78,33 @@ pub fn compile(source: &str, profile: IsaProfile) -> Result<Vec<u64>, CompileErr
 mod tests {
     use super::*;
 
+    /// P35-F21: a CRLF source compiles like its LF twin.
+    #[test]
+    fn crlf_line_ends_are_whitespace() {
+        let lf = "contract C {\n    pub fn main() {\n        let x = 1;\n    }\n}\n";
+        let crlf = lf.replace('\n', "\r\n");
+        assert_eq!(
+            compile(lf, IsaProfile::Production).unwrap(),
+            compile(&crlf, IsaProfile::Production).unwrap()
+        );
+    }
+
+    /// P35-F22: duplicate names are errors, not "the last one wins".
+    #[test]
+    fn duplicate_functions_structs_storage_and_params_are_refused() {
+        let cases = [
+            "contract C { pub fn main() { } pub fn main() { constrain(0); } }",
+            "contract C { pub fn f(a: u64, a: u64) { } pub fn main() { } }",
+            "contract C { pub fn poseidon(a: u64) -> u64 { return a; } pub fn main() { } }",
+        ];
+        for src in cases {
+            assert!(
+                compile(src, IsaProfile::Production).is_err(),
+                "must be refused: {src}"
+            );
+        }
+    }
+
     #[test]
     #[cfg(feature = "experimental")]
     fn compiles_for_loop_to_executable_bytecode() {
@@ -779,6 +806,69 @@ mod tests {
         assert_eq!(vm.events, vec![100]);
     }
 
+    fn run_events(source: &str) -> Vec<u64> {
+        let bytecode = compile(source, IsaProfile::Production).expect("source must compile");
+        let mut vm = bud_vm::Vm::new(MIN_VM_MEMORY_BYTES);
+        vm.run(&bytecode).expect("VM should run");
+        vm.events.clone()
+    }
+
+    /// P35-F01: a non-identifier scrutinee lives in a temporary register;
+    /// the pattern Load must not reuse it.
+    #[test]
+    fn match_on_expression_scrutinee_picks_the_right_arm() {
+        let source = r#"
+            contract M {
+                pub fn main() {
+                    let a = 1;
+                    let b = 1;
+                    match (a + b) {
+                        0 => { emit R(100); },
+                        1 => { emit R(200); },
+                        2 => { emit R(300); },
+                        _ => { emit R(999); },
+                    };
+                }
+            }
+        "#;
+        assert_eq!(run_events(source), vec![300]);
+    }
+
+    /// P35-F02: `let b = a;` must copy, not alias.
+    #[test]
+    fn let_binding_does_not_alias_its_source() {
+        let source = r#"
+            contract A {
+                pub fn main() {
+                    let a = 5;
+                    let b = a;
+                    a = a + 1;
+                    emit R(b);
+                    emit R(a);
+                }
+            }
+        "#;
+        assert_eq!(run_events(source), vec![5, 6]);
+    }
+
+    /// P35-F03: a struct literal nested inside another literal must get its
+    /// own heap block.
+    #[test]
+    fn nested_struct_literal_does_not_overlap_outer_block() {
+        let source = r#"
+            contract N {
+                struct Inner { pad: u64, y: u64, }
+                struct Outer { inner: Inner, }
+                pub fn main() {
+                    let o = Outer { inner: Inner { pad: 1, y: 42 } };
+                    emit E(o.inner.pad);
+                    emit E(o.inner.y);
+                }
+            }
+        "#;
+        assert_eq!(run_events(source), vec![1, 42]);
+    }
+
     /// `match` arms can have a *block* body (multiple statements).
     /// Verifies that the body of an arm runs to completion before the
     /// Post-match control flow continues.
@@ -808,6 +898,355 @@ mod tests {
         vm.run(&bytecode).expect("VM should run");
         // 0 → 10 + 20 = 30
         assert_eq!(vm.events, vec![30]);
+    }
+
+    /// P35-F23: storage reads and writes are checked against the declared
+    /// field type, and a mapping needs an index.
+    #[test]
+    fn storage_access_is_checked_against_the_field() {
+        let cases = [
+            (
+                "storage { m: Map<u64,u64>, } pub fn main() { storage::m = 1; }",
+                "storage field 'm'",
+            ),
+            (
+                "storage { m: Map<u64,u64>, } pub fn main() { let x = storage::m; }",
+                "storage field 'm'",
+            ),
+            (
+                "storage { flag: bool, } pub fn main() { storage::flag = 7; }",
+                "storage field 'flag'",
+            ),
+            (
+                "storage { n: u64, } pub fn main() { storage::missing = 1; }",
+                "Undefined storage variable",
+            ),
+            (
+                "storage { n: u64, } pub fn main() { let x = storage::missing; }",
+                "Undefined storage variable",
+            ),
+        ];
+        for (body, expected) in cases {
+            let source = format!("contract C {{ {body} }}");
+            match compile(&source, IsaProfile::Production) {
+                Err(CompileError::SemanticError(msg)) => {
+                    assert!(msg.contains(expected), "`{body}` gave: {msg}")
+                }
+                other => panic!("`{body}` must be a semantic error, got {other:?}"),
+            }
+        }
+
+        compile(
+            "contract C { storage { n: u64, flag: bool, } pub fn main() { storage::n = storage::n + 1; storage::flag = 1 == 1; } }",
+            IsaProfile::Production,
+        )
+        .expect("matching storage access compiles");
+    }
+
+    /// P35-F24: with two fields missing, the error names the same one on
+    /// every run (the first in name order).
+    #[test]
+    fn missing_field_error_is_deterministic() {
+        let source = r#"
+            contract M {
+                struct S { delta: u64, alpha: u64, gamma: u64, beta: u64 }
+                pub fn main() {
+                    let s = S { gamma: 1 };
+                    emit E(s.gamma);
+                }
+            }
+        "#;
+        for _ in 0..8 {
+            match compile(source, IsaProfile::Production) {
+                Err(CompileError::SemanticError(msg)) => {
+                    assert!(msg.ends_with("missing field alpha"), "got: {msg}")
+                }
+                other => panic!("a partial literal must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    /// P35-F16: a function with a result must return on every path, and
+    /// `main` cannot take parameters.
+    #[test]
+    fn missing_return_and_main_parameters_are_refused() {
+        for body in [
+            "let x = 1;",
+            "if (c) { return 1; }",
+            "while (c) { return 1; }",
+            "if (c) { return 1; } else { let y = 2; }",
+        ] {
+            let source = format!(
+                r#"
+                contract R {{
+                    fn f(c: u64) -> u64 {{
+                        {body}
+                    }}
+
+                    pub fn main() {{
+                        emit E(1);
+                    }}
+                }}
+            "#
+            );
+            match compile(&source, IsaProfile::Production) {
+                Err(CompileError::SemanticError(msg)) => {
+                    assert!(msg.contains("every path"), "unexpected message: {msg}")
+                }
+                other => panic!("`{body}` must be refused, got {other:?}"),
+            }
+        }
+
+        let ok = r#"
+            contract R {
+                fn f(c: u64) -> u64 {
+                    if (c) { return 1; } else { return 2; }
+                }
+
+                pub fn main() {
+                    emit E(f(1));
+                }
+            }
+        "#;
+        compile(ok, IsaProfile::Production).expect("both branches return");
+
+        let with_param = r#"
+            contract R {
+                pub fn main(x: u64) {
+                    emit E(x);
+                }
+            }
+        "#;
+        match compile(with_param, IsaProfile::Production) {
+            Err(CompileError::SemanticError(msg)) => assert!(msg.contains("main")),
+            other => panic!("main with a parameter must be refused, got {other:?}"),
+        }
+    }
+
+    /// P35-F17: a name bound inside an `if` or `while` body is not visible
+    /// after it, and a `let` there does not replace an outer variable.
+    #[test]
+    fn branch_bindings_stay_in_the_branch() {
+        for body in [
+            "if (c) { let t = 1; }",
+            "if (c) { emit E(0); } else { let t = 1; }",
+            "while (n < 1) { let t = 1; n = n + 1; }",
+        ] {
+            let source = format!(
+                r#"
+                contract Scope {{
+                    pub fn main() {{
+                        let c = 1;
+                        let n = 0;
+                        {body}
+                        emit E(t);
+                    }}
+                }}
+            "#
+            );
+            assert!(
+                matches!(
+                    compile(&source, IsaProfile::Production),
+                    Err(CompileError::SemanticError(_))
+                ),
+                "`t` leaked out of: {body}"
+            );
+        }
+
+        let source = r#"
+            contract Shadow {
+                pub fn main() {
+                    let x = 1;
+                    let c = 1;
+                    if (c) {
+                        let x = 2;
+                        emit E(x);
+                    }
+                    emit E(x);
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("shadow program compiles");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![2, 1]);
+    }
+
+    /// P35-F01: a scrutinee that is not a plain identifier lives in a
+    /// temporary register. The pattern Load must not overwrite it.
+    #[test]
+    fn test_match_on_expression_scrutinee_keeps_its_register() {
+        let source = r#"
+            contract MatchExpr {
+                pub fn main() {
+                    let x = 1;
+                    match (x + 1) {
+                        0 => { emit Result(100); },
+                        2 => { emit Result(200); },
+                        _ => { emit Result(999); },
+                    };
+                    match (x + 5) {
+                        0 => { emit Result(100); },
+                        2 => { emit Result(200); },
+                        _ => { emit Result(999); },
+                    };
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("match compiles");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![200, 999]);
+    }
+
+    /// P35-F02: `let b = a;` copies the value. A later write to `a` must not
+    /// change `b`, and a write to the loop bound must not move the bound.
+    #[test]
+    fn test_let_copies_value_and_loop_bound_is_snapshotted() {
+        let source = r#"
+            contract Alias {
+                fn f(a: u64) -> u64 {
+                    let b = a;
+                    a = a + 1;
+                    return b;
+                }
+
+                pub fn main() {
+                    let r = f(5);
+                    emit Result(r);
+                    let n = 3;
+                    let count = 0;
+                    for i in 0..(n) {
+                        n = n - 1;
+                        count = count + 1;
+                    }
+                    emit Result(count);
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("alias source compiles");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![5, 3]);
+    }
+
+    /// P35-F03: a struct literal nested in another literal must get its own
+    /// heap block. Before, both objects started at the same address.
+    #[test]
+    fn test_nested_struct_literal_gets_its_own_heap_block() {
+        let source = r#"
+            contract Nested {
+                struct Inner { pad: u64, y: u64, }
+                struct Outer { inner: Inner, tag: u64, }
+                pub fn main() {
+                    let o = Outer { inner: Inner { pad: 1, y: 42 }, tag: 7 };
+                    emit E(o.inner.pad);
+                    emit E(o.inner.y);
+                    emit E(o.tag);
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("nested literal compiles");
+        let mut vm = bud_vm::Vm::new(MIN_VM_MEMORY_BYTES);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![1, 42, 7]);
+    }
+
+    /// P35-F05: a wide integer pattern must compare as the full value. Before,
+    /// the Load immediate was cut with `as i32`, so 4294967296 matched 0.
+    #[test]
+    fn test_match_wide_integer_pattern_is_not_truncated() {
+        let source = r#"
+            contract WidePattern {
+                fn probe(x: u64) -> u64 {
+                    match (x) {
+                        4294967296 => { emit Result(1); },
+                        3000000000 => { emit Result(2); },
+                        _ => { emit Result(0); },
+                    };
+                    return 0;
+                }
+                pub fn main() {
+                    let a = probe(0);
+                    let b = probe(4294967296);
+                    let c = probe(3000000000);
+                    let d = probe(7);
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("wide pattern compiles");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![0, 1, 2, 0]);
+    }
+
+    /// P35-F05: a pattern at or above the field modulus is refused, like an
+    /// expression literal.
+    #[test]
+    fn test_match_pattern_above_field_modulus_is_refused() {
+        let source = r#"
+            contract BigPattern {
+                pub fn main() {
+                    let x = 0;
+                    match (x) {
+                        18446744073709551615 => { emit Result(1); },
+                        _ => { emit Result(0); },
+                    };
+                }
+            }
+        "#;
+        let res = compile(source, IsaProfile::Production);
+        assert!(matches!(res, Err(CompileError::CodegenError(_))), "{res:?}");
+    }
+
+    /// P35-F06: a `let` inside a match arm is scoped to the arm. It must not
+    /// replace an outer variable of the same name.
+    #[test]
+    fn test_match_arm_let_does_not_shadow_outer_variable() {
+        let source = r#"
+            contract ArmScope {
+                pub fn main() {
+                    let x = 1;
+                    let y = 0;
+                    match (y) {
+                        0 => { let x = 5; emit Result(x); },
+                        _ => { },
+                    };
+                    emit Result(x);
+                }
+            }
+        "#;
+        let bytecode = compile(source, IsaProfile::Production).expect("arm scope compiles");
+        let mut vm = bud_vm::Vm::new(8192);
+        vm.run(&bytecode).expect("VM should run");
+        assert_eq!(vm.events, vec![5, 1]);
+    }
+
+    /// P35-F07: sema enforces what codegen assumes: the last arm is the
+    /// wildcard, a wildcard is never in the middle, patterns are unique.
+    #[test]
+    fn test_match_shape_is_checked_by_sema() {
+        for (arms, needle) in [
+            ("0 => { emit Result(1); },", "must end with a wildcard"),
+            (
+                "1 => { emit Result(1); }, _ => { emit Result(0); }, _ => { emit Result(2); },",
+                "must be the last arm",
+            ),
+            (
+                "1 => { emit Result(1); }, 1 => { emit Result(2); }, _ => { emit Result(0); },",
+                "duplicate match pattern 1",
+            ),
+        ] {
+            let source =
+                format!("contract M {{ pub fn main() {{ let x = 0; match (x) {{ {arms} }}; }} }}");
+            match compile(&source, IsaProfile::Production) {
+                Ok(_) => panic!("malformed match compiled: {arms}"),
+                Err(CompileError::SemanticError(msg)) => {
+                    assert!(msg.contains(needle), "wrong reason for {arms}: {msg}")
+                }
+                Err(other) => panic!("expected a SemanticError for {arms}, got {other:?}"),
+            }
+        }
     }
 
     /// The wildcard arm (`_`) is required for exhaustive matching

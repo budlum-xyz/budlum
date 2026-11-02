@@ -5,6 +5,14 @@ use sha3::{Digest, Keccak256};
 
 pub const DEFAULT_CONTRACT_GAS_LIMIT: u64 = 1_000_000;
 
+/// Memory size in bytes of the VM that runs and proves contract bytecode.
+const CONTRACT_VM_MEMORY_BYTES: usize = 8192;
+
+const _: () = assert!(
+    CONTRACT_VM_MEMORY_BYTES as u64 <= bud_vm::MAX_MEMORY_BYTES,
+    "CONTRACT_VM_MEMORY_BYTES must not exceed bud_vm::MAX_MEMORY_BYTES"
+);
+
 /// Contract gas one block may carry, summed over its `ContractCall`
 /// transactions at [`DEFAULT_CONTRACT_GAS_LIMIT`] each.
 ///
@@ -119,7 +127,7 @@ impl ZkVmExecutor {
         }
 
         let program = decode_program(bytecode)?;
-        let mut vm = Vm::with_mainnet_mode(8192, gas_limit, mainnet);
+        let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet);
         vm.context.sender = ctx.sender;
         vm.context.nonce = ctx.nonce;
         vm.context.block_height = ctx.block_height;
@@ -168,7 +176,7 @@ impl ZkVmExecutor {
 /// Produce a real STARK proof for a BudZKVM bytecode program, returning the
 /// Proof envelope, its public inputs and the decoded program.
 ///
-/// This is the proving counterpart used by the L1 ↔ BudZKVM proof bridge (and
+/// This is the proving counterpart used by the chain ↔ BudZKVM proof bridge (and
 /// By tests): it runs the VM, derives the canonical public inputs and generates
 /// A `ProofEnvelope` that `budlum-core` can verify natively.
 pub fn prove_bytecode(
@@ -198,6 +206,9 @@ pub fn prove_bytecode_mainnet(
 /// that it was this one. Callers must bind the image out of band, for AI
 /// execution that is `weights_digest` plus `input_commitment` on the
 /// transaction, see `docs/AI_VERIFICATION_STATUS.md`.
+///
+/// The staged-rollout opcode gate applies here as on the ContractCall path
+/// (P16-F03).
 pub fn prove_bytecode_with_memory<F>(
     bytecode: &[u8],
     gas_limit: u64,
@@ -206,7 +217,7 @@ pub fn prove_bytecode_with_memory<F>(
 where
     F: FnOnce(&mut [u8]) -> Result<(), String>,
 {
-    prove_bytecode_inner_with_memory(bytecode, gas_limit, false, Some(Box::new(setup)))
+    prove_bytecode_inner_with_memory(bytecode, gas_limit, true, Some(Box::new(setup)))
 }
 
 fn prove_bytecode_inner(
@@ -232,7 +243,7 @@ fn prove_bytecode_inner_with_memory(
         return Err("BudZKVM bytecode length must be a multiple of 8 bytes".into());
     }
     let program = decode_program(bytecode)?;
-    let mut vm = Vm::with_mainnet_mode(8192, gas_limit, mainnet);
+    let mut vm = Vm::with_mainnet_mode(CONTRACT_VM_MEMORY_BYTES, gas_limit, mainnet);
     if let Some(setup) = setup {
         setup(&mut vm.memory)?;
     }
@@ -459,6 +470,40 @@ mod tests {
             assert!(
                 proving_err.contains("activation") || proving_err.contains("Activation"),
                 "{opcode:?} was refused by the prover for the wrong reason: {proving_err}"
+            );
+        }
+    }
+
+    /// P16-F03: the memory-image prover must apply the same staged-rollout
+    /// gate as the ContractCall path. It used to hard code `mainnet = false`,
+    /// so the closed opcodes decoded there.
+    #[test]
+    fn memory_image_prover_cannot_reach_a_gated_opcode() {
+        for opcode in [Opcode::VerifyMerkle, Opcode::VerifyInference] {
+            let program = vec![
+                Instruction {
+                    opcode,
+                    rd: 1,
+                    rs1: 2,
+                    rs2: 3,
+                    imm: 0,
+                }
+                .encode(),
+                Instruction {
+                    opcode: Opcode::Halt,
+                    rd: 0,
+                    rs1: 0,
+                    rs2: 0,
+                    imm: 0,
+                }
+                .encode(),
+            ];
+            let bytecode: Vec<u8> = program.into_iter().flat_map(u64::to_le_bytes).collect();
+            let err = prove_bytecode_with_memory(&bytecode, DEFAULT_CONTRACT_GAS_LIMIT, |_| Ok(()))
+                .expect_err(&format!("{opcode:?} decoded on the memory-image prover"));
+            assert!(
+                err.contains("activation") || err.contains("Activation"),
+                "{opcode:?} was refused for the wrong reason: {err}"
             );
         }
     }

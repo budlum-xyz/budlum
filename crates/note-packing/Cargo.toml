@@ -10,3 +10,6 @@ description = "The single definition of how a privacy note's field element is pa
 # dependency here would have to be resolvable in all three, and the rule this
 # crate carries is eight bytes of little-endian packing: it does not need one.
 [dependencies]
+
+[profile.release]
+overflow-checks = true

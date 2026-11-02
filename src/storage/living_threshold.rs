@@ -299,10 +299,36 @@ impl AccessEstimate {
         self.scaled >> halvings
     }
 
+    /// The anchor epoch after bringing the estimate up to `epoch`.
+    ///
+    /// The anchor moves forward by whole half-lives only. The part of the
+    /// elapsed time that is shorter than one half-life stays pending, so a
+    /// steady stream of reads that are closer together than one half-life
+    /// still decays. Moving the anchor to `epoch` would drop that part and
+    /// the estimate would never decay. An empty estimate has nothing pending.
+    const fn anchor_at(self, epoch: u64) -> u64 {
+        if self.scaled == 0 {
+            // Nothing is pending, so the anchor starts at the new epoch.
+            return if epoch > self.last_epoch {
+                epoch
+            } else {
+                self.last_epoch
+            };
+        }
+        let elapsed = epoch.saturating_sub(self.last_epoch);
+        let halvings = elapsed / ACCESS_HALF_LIFE_EPOCHS;
+        if halvings >= 64 {
+            // The value is zero by now, so the anchor can jump.
+            return epoch;
+        }
+        self.last_epoch + halvings * ACCESS_HALF_LIFE_EPOCHS
+    }
+
     /// Record a read at `epoch`.
     pub fn record_read(&mut self, epoch: u64) {
+        let anchor = self.anchor_at(epoch);
         self.scaled = self.decayed_to(epoch).saturating_add(ACCESS_SCALE);
-        self.last_epoch = epoch;
+        self.last_epoch = anchor;
     }
 
     /// Estimated reads per half-life at `epoch`, scaled by [`ACCESS_SCALE`].
@@ -338,36 +364,39 @@ impl AccessEstimate {
     /// node that has the same events, because the decay is integer halving,
     /// not a floating exponential.
     ///
-    /// Events must be sorted by epoch ascending. Out-of-order or
-    /// future-dated events are refused rather than silently misread, because
-    /// a signal derived from a different ordering is a signal two nodes
-    /// disagree on.
+    /// Events should be sorted by epoch ascending. Input that is not sorted
+    /// is read in one fixed way, so two nodes with the same events still
+    /// derive the same estimate: an event dated after `current_epoch` is
+    /// skipped (it has not happened yet at `current_epoch`), and an event
+    /// dated before the one that came ahead of it is counted at that earlier
+    /// event's epoch, like `record_proven_read` folds a late event into the
+    /// newest one. No valid event after a bad one is dropped.
     #[must_use]
     pub fn from_events(events: &[AccessEvent], current_epoch: u64) -> Self {
-        let mut estimate = Self::new(current_epoch);
+        // Start at epoch 0: an empty estimate takes the epoch of its first event.
+        let mut estimate = Self::new(0);
         let mut last_epoch = 0u64;
         for event in events {
-            if event.epoch < last_epoch || event.epoch > current_epoch {
-                // Refuse silently-misreadable input: decay with a wrong
-                // ordering would give two nodes two estimates from the same
-                // events. Saturate to the estimate as of the last valid
-                // prefix instead of panicking, so a hostile event list cannot
-                // crash a reader.
-                break;
+            if event.epoch > current_epoch {
+                continue;
             }
-            last_epoch = event.epoch;
+            // A late event is counted at the epoch already reached.
+            let at = event.epoch.max(last_epoch);
+            last_epoch = at;
             // Each read is one unit at ACCESS_SCALE, decayed from the event
             // epoch to the next event's epoch, then carried forward.
             let scaled_count = event.count.saturating_mul(ACCESS_SCALE);
             // Fold this event into the running estimate: decay both to the
             // event's epoch, add, and let the running estimate's epoch follow.
-            let decayed_running = estimate.decayed_to(event.epoch);
+            let decayed_running = estimate.decayed_to(at);
+            let anchor = estimate.anchor_at(at);
             estimate.scaled = decayed_running.saturating_add(scaled_count);
-            estimate.last_epoch = event.epoch;
+            estimate.last_epoch = anchor;
         }
         // Bring the estimate up to the current epoch.
+        let anchor = estimate.anchor_at(current_epoch);
         estimate.scaled = estimate.decayed_to(current_epoch);
-        estimate.last_epoch = current_epoch;
+        estimate.last_epoch = anchor;
         estimate
     }
 }
@@ -1243,8 +1272,7 @@ mod tests {
         let a = AccessEstimate::from_events(&events, 2000);
         let b = AccessEstimate::from_events(&events, 2000);
         assert_eq!(a, b);
-        // A future-dated event is refused: the estimate stops at the last
-        // valid prefix, so the future event contributes nothing but the
+        // A future-dated event is skipped: it contributes nothing but the
         // earlier valid events still count. 5 reads at epoch 0, two
         // half-lives later (2000/720 = 2) -> 5 >> 2 = 1.25M scaled.
         let bad = [
@@ -1274,5 +1302,49 @@ mod tests {
         assert_eq!(far.rate_scaled(64 * 720), 0);
         let near = AccessEstimate::from_events(&events, 720);
         assert_eq!(near.rate_scaled(720), 50 * ACCESS_SCALE);
+    }
+
+    /// P27-F01: reads closer together than one half-life must still decay.
+    #[test]
+    fn steady_reads_inside_one_half_life_still_decay() {
+        let mut a = AccessEstimate::new(0);
+        // One read every 100 epochs for 10 half-lives.
+        let mut epoch = 0;
+        while epoch <= 10 * ACCESS_HALF_LIFE_EPOCHS {
+            a.record_read(epoch);
+            epoch += 100;
+        }
+        // Without decay the sum would be 73 reads. With decay it stays near
+        // 10 reads per half-life.
+        let reads = a.rate_scaled(epoch) / ACCESS_SCALE;
+        assert!(reads < 30, "estimate must not grow without bound: {reads}");
+
+        let events: Vec<AccessEvent> = (0..=72)
+            .map(|i| AccessEvent {
+                epoch: i * 100,
+                count: 1,
+            })
+            .collect();
+        let derived = AccessEstimate::from_events(&events, 7_200);
+        assert!(derived.rate_scaled(7_200) / ACCESS_SCALE < 30);
+    }
+
+    /// P27-F02: a bad event must not drop the valid events after it.
+    #[test]
+    fn a_bad_event_does_not_truncate_later_valid_events() {
+        let events = [
+            AccessEvent { epoch: 0, count: 4 },
+            AccessEvent {
+                epoch: 5_000,
+                count: 1,
+            },
+            AccessEvent {
+                epoch: 10,
+                count: 4,
+            },
+        ];
+        let derived = AccessEstimate::from_events(&events, 100);
+        // The future event is skipped, the late one counts at epoch 10.
+        assert_eq!(derived.rate_scaled(100), 8 * ACCESS_SCALE);
     }
 }

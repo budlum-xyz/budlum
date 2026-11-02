@@ -36,9 +36,12 @@
 //! `backup_restore_drill.sh`. Converting these cannot break CI, because CI
 //! does not call them anyway.
 //!
-//! To be moved in the second round: the five scripts called from workflows
+//! Moved in the second round: the five scripts called from workflows
 //! (`audit-deps`, `generate-sbom`, `smoke_rpc`, `docker-smoke-mainnet`,
-//! `devnet-multinode-smoke`), each together with its own workflow change.
+//! `devnet-multinode-smoke`), each together with its own workflow change. Their
+//! modules are `audit_deps`, `sbom`, `smoke_rpc`, `docker_smoke` and
+//! `multinode_smoke`; `rpc` and `json` are the std-only HTTP and JSON helpers
+//! they share.
 //! `coverage-report.sh` was not called and parsed `cargo llvm-cov` output; its
 //! counterpart is the `module-coverage` gate in `xtask/gates`, and the script
 //! is gone.
@@ -46,10 +49,23 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+pub mod audit_deps;
+pub mod audit_guard;
 pub mod backup_drill;
+pub mod clippy_extra_report;
 pub mod devnet;
+pub mod docker_smoke;
+pub mod fsf_fit;
+pub mod json;
+pub mod multinode_smoke;
 pub mod prepush;
+pub mod report;
+pub mod rpc;
+pub mod sbom;
 pub mod seed_corpus;
+pub mod smoke_rpc;
+pub mod step_reachability;
+pub mod support;
 
 /// Find the repository root.
 ///
@@ -85,6 +101,25 @@ pub fn repo_root() -> PathBuf {
             .filter(|root| is_repo_root(root))
             .map_or(cwd, Path::to_path_buf)
     })
+}
+
+/// [`repo_root`], refused when the result is not a Budlum checkout. A tool
+/// that started outside the repository must fail rather than act in the
+/// working directory.
+///
+/// # Errors
+///
+/// When neither the working directory nor the build path is a checkout.
+pub fn checked_repo_root() -> Result<PathBuf, String> {
+    let root = repo_root();
+    if is_repo_root(&root) {
+        Ok(root)
+    } else {
+        Err(format!(
+            "{} is not a Budlum checkout; run the tool inside the repository",
+            root.display()
+        ))
+    }
 }
 
 /// The nearest repository root at or above `start`, if there is one.
@@ -161,6 +196,12 @@ pub fn has_program(program: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_directory_outside_the_repository_is_not_a_root() {
+        assert!(!is_repo_root(&std::env::temp_dir()));
+        assert!(checked_repo_root().is_ok());
+    }
 
     #[test]
     fn repo_root_has_a_manifest_and_a_source_tree() {

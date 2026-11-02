@@ -68,6 +68,9 @@ fn execution_path_verifies_the_stark_for_proof_required_models() {
         // just as `program_hash` is, or a proof valid on another chain passes
         // here too.
         "ai_exec_chain_id",
+        // The envelope and the proof struct are two claims about one run:
+        // disagreeing `gas_used` means they describe different executions.
+        "ai_exec_gas_mismatch",
         "ai_exec_stark",
     ] {
         assert!(
@@ -122,36 +125,28 @@ fn stark_verification_helpers_have_no_production_callers() {
     );
 }
 
-/// The opcode's only path to a non-zero answer is the Poseidon binding, and
-/// every shape outside that binding fails closed.
+/// The opcode is reserved: the VM arm answers a constant zero and reads no
+/// memory, so no shape of operands can reach a non-zero answer.
 ///
-/// The old lock pinned a hard-coded zero while the opcode was a stub. The
-/// commitment binding is now real code in `budzero/bud-vm/src/lib.rs`, so the
-/// lock pins the binding itself: 1 is reachable exactly through
-/// `output_c == poseidon4_hash(model_c, input_c)`, the read-window guard
-/// stays, and no constant answer may return. The status document moves with
-/// this file, which is what the old failure message asked for.
+/// The earlier lock pinned a Poseidon commitment binding. That binding is
+/// removed (see the zkVM opcode section of docs/AI_VERIFICATION_STATUS.md), so
+/// the lock now pins the reserved behavior instead. The status document moves
+/// with this file.
 #[test]
-fn verify_inference_opcode_is_the_fail_closed_binding() {
+fn verify_inference_opcode_is_reserved_and_answers_zero() {
     let src = read("budzero/bud-vm/src/lib.rs");
     let head = "Opcode::VerifyInference => {";
     let at = src.find(head).expect("VerifyInference arm must exist");
     let arm = squash(block_after(&src[at + head.len()..]));
     assert!(
-        arm.contains("if output_c == poseidon4_hash(model_c, input_c)"),
-        "VerifyInference's only non-zero path must be the Poseidon binding of \
-         (model_c, input_c) against output_c; if the binding changed, update \
-         docs/AI_VERIFICATION_STATUS.md in the same change"
+        arm.contains("let result = 0;"),
+        "VerifyInference must answer a constant zero; if it gains a real \
+         answer, update docs/AI_VERIFICATION_STATUS.md in the same change"
     );
     assert!(
-        !arm.contains("let result = 0u64;") && !arm.contains("let result = 1u64;"),
-        "VerifyInference carries a hard-coded answer again; the result must \
-         come from the binding check, not from a constant"
-    );
-    assert!(
-        arm.contains("checked_add(8 * 4)"),
-        "the read-window guard is gone: a proof window that runs past memory \
-         must answer 0, never panic"
+        !arm.contains("poseidon4_hash") && !arm.contains("self.memory"),
+        "the reserved VerifyInference arm must not read memory or hash a \
+         window; the AIR refuses any proof of this opcode"
     );
 }
 

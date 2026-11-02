@@ -25,15 +25,13 @@
 #     2024-25 supply-chain incidents were all single-publisher trust
 #     failures; the number is a report, not a verdict.
 #
-# WHY SCHEDULED, NOT PER-PUSH: the remaining inspections are expensive (drift
-# builds against a moving toolchain, the publisher report downloads a
-# database), and per-push Rust coverage already lives in ci.yml (fmt, clippy,
-# tests, feature matrix, rustdoc, cargo-deny). This workflow adds the weekly
-# depth, not the daily breadth.
+# These checks run for listed PR bases and weekly, not on every push.
 
 name: Rust Quality
 
 on:
+  pull_request:
+    branches: [main, fix/architecture-tip-adlari]
   schedule:
     - cron: "0 6 * * 2" # weekly, Tuesday 06:00 UTC (Monday 05:30 is security-hardening)
   workflow_dispatch:
@@ -54,8 +52,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # DELIBERATE-TOOLCHAIN-DIVERGENCE
+      # This job checks the tree against the newest stable compiler on purpose, so the pin is not used.
       - name: Install Rust (latest stable, NOT the pin)
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: stable
           components: clippy
@@ -81,7 +81,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2

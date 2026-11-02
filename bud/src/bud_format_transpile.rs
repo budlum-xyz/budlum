@@ -17,8 +17,12 @@ pub struct BashTranspile {
 
 impl BashTranspile {
     pub fn transpile(code: &str) -> Self {
-        // Simple: code -> bash script that echoes code
-        let script = format!("#!/bin/bash\necho '{}'", code.replace("'", "'\\''"));
+        // Simple: code -> bash script that prints code. `printf` is used, not
+        // `echo`: echo takes a leading -n or -e in the code as an option.
+        let script = format!(
+            "#!/bin/bash\nprintf '%s\\n' '{}'",
+            code.replace("'", "'\\''")
+        );
         Self {
             script,
             original_size: code.len(),
@@ -34,7 +38,21 @@ impl BashTranspile {
 
     pub fn is_deterministic(&self) -> bool {
         // bash script deterministic if no $RANDOM, date, etc
-        !self.script.contains("$RANDOM") && !self.script.contains("date")
+        // Whole words only: "update" is not "date". The words that make a
+        // script differ from run to run are the clock, the random sources and
+        // the shell's own counters.
+        const NONDETERMINISTIC: [&str; 6] = [
+            "RANDOM",
+            "SRANDOM",
+            "SECONDS",
+            "EPOCHSECONDS",
+            "urandom",
+            "date",
+        ];
+        !self
+            .script
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| NONDETERMINISTIC.contains(&word))
     }
 }
 
@@ -49,7 +67,10 @@ impl AstTransform {
         // stub: AST = {"type":"File","body":[...]}
         // K38: UTF-8 safe truncation - a byte slice must NOT split a multi-byte character, so no panic.
         let snippet: String = code.chars().take(100).collect();
-        let ast = format!("{{\"type\":\"File\",\"body\":[\"{}\"]}}", snippet);
+        // The snippet is JSON-escaped, so quotes and backslashes in the code
+        // still give valid JSON.
+        let quoted = serde_json::to_string(&snippet).unwrap_or_else(|_| "\"\"".to_string());
+        let ast = format!("{{\"type\":\"File\",\"body\":[{quoted}]}}");
         Self {
             ast_json: ast,
             original_size: code.len(),
@@ -93,6 +114,24 @@ mod tests {
         // false, and the gate has to REFUSE it - this is the canary.
         assert!(t.ratio() < 1.0);
         assert!(TranspileGates::k_bud_transpile(&t).is_err());
+    }
+    #[test]
+    fn determinism_looks_at_words_not_substrings() {
+        assert!(BashTranspile::transpile("let update = 1;").is_deterministic());
+        assert!(!BashTranspile::transpile("echo $RANDOM").is_deterministic());
+        assert!(!BashTranspile::transpile("echo $SECONDS").is_deterministic());
+        assert!(!BashTranspile::transpile("$(date)").is_deterministic());
+    }
+    #[test]
+    fn the_script_does_not_use_echo_options() {
+        let t = BashTranspile::transpile("-n x");
+        assert!(t.script.contains("printf '%s\\n' '-n x'"), "{}", t.script);
+    }
+    #[test]
+    fn ast_json_is_valid_for_quotes_and_backslashes() {
+        let a = AstTransform::transform("let s = \"a\\b\";");
+        let v: serde_json::Value = serde_json::from_str(&a.ast_json).expect("valid json");
+        assert!(v.is_object());
     }
     #[test]
     fn ast() {

@@ -35,6 +35,16 @@ fn strip_block_comments(text: &str) -> String {
     out
 }
 
+/// Does the `'` at `i` open a char literal? A lifetime (`<'a>`) does not.
+fn is_char_literal(b: &[u8], i: usize) -> bool {
+    match b.get(i + 1) {
+        Some(b'\\') => true,
+        Some(c) if *c >= 0x80 => b[i + 2..].iter().take(4).any(|x| *x == b'\''),
+        Some(_) => b.get(i + 2) == Some(&b'\''),
+        None => false,
+    }
+}
+
 fn strip_non_code(text: &str) -> String {
     let mut out = String::new();
     for l in text.lines() {
@@ -48,7 +58,7 @@ fn strip_non_code(text: &str) -> String {
     let b = out.as_bytes();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'"' || b[i] == b'\'' {
+        if b[i] == b'"' || (b[i] == b'\'' && is_char_literal(b, i)) {
             let q = b[i];
             out2.push(if q == b'"' { '"' } else { '\'' });
             i += 1;
@@ -116,28 +126,83 @@ fn parse_selectors(air_src: &str) -> Vec<String> {
     selectors
 }
 
-/// Binding sum: `is_<op>.clone() * (opcode_here.clone() - op(0xNN))`.
-fn parse_binding_sum(air_src: &str) -> std::collections::HashMap<String, u32> {
-    let mut bound: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    let mut rest = air_src;
-    while let Some(pos) = rest.find("opcode_here.clone() - op(0x") {
+/// The parsed selector to opcode binding statement.
+struct BindingSum {
+    /// Upper-cased selector name -> opcode value, from the terms
+    /// `is_<op>.clone() * (opcode_here.clone() - op(0xNN))` of ONE `let`
+    /// statement.
+    bound: std::collections::HashMap<String, u32>,
+    /// Selectors that appear in the sum more than once with different values.
+    conflicts: Vec<String>,
+    /// True when `assert_zero(<the let's variable>)` follows the statement.
+    /// A sum that is computed and never asserted constrains nothing.
+    asserted: bool,
+}
+
+/// Binding sum: one `let <var> = is_<op>.clone() * (opcode_here.clone() -
+/// op(0xNN)) + ...;` statement, followed by `builder.assert_zero(<var>)`.
+///
+/// The selector of a term is the identifier directly before
+/// `.clone() * (opcode_here`, so a term written with another variable name is
+/// not credited to the nearest `is_` that happens to precede it. Terms outside
+/// the statement are not read, and the sum must be asserted.
+fn parse_binding_sum(air_src: &str) -> BindingSum {
+    const TERM: &str = ".clone() * (opcode_here.clone() - op(0x";
+    let mut out = BindingSum {
+        bound: std::collections::HashMap::new(),
+        conflicts: Vec::new(),
+        asserted: false,
+    };
+    let Some(first) = air_src.find(TERM) else {
+        return out;
+    };
+    let Some(let_pos) = air_src[..first].rfind("let ") else {
+        return out;
+    };
+    let after_let = &air_src[let_pos + "let ".len()..];
+    let after_let = after_let.strip_prefix("mut ").unwrap_or(after_let);
+    let var_end = after_let
+        .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .unwrap_or(after_let.len());
+    let var = &after_let[..var_end];
+    let stmt_end = air_src[first..]
+        .find(';')
+        .map_or(air_src.len(), |e| first + e);
+    let stmt = &air_src[let_pos..stmt_end];
+
+    let mut rest = stmt;
+    while let Some(pos) = rest.find(TERM) {
         let before = &rest[..pos];
-        let sel_start = before.rfind("is_").map_or(0, |s| s + 3);
-        let sel_end = before[sel_start..]
-            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .map_or(before.len(), |e| sel_start + e);
-        let sel = before[sel_start..sel_end].to_string();
-        let after = &rest[pos + "opcode_here.clone() - op(0x".len()..];
+        let sel_start = before
+            .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .map_or(0, |i| i + 1);
+        let ident = &before[sel_start..];
+        let after = &rest[pos + TERM.len()..];
         let hex_end = after
             .find(|c: char| !c.is_ascii_hexdigit())
             .unwrap_or(after.len());
-        let v = u32::from_str_radix(&after[..hex_end], 16).ok();
-        if let Some(v) = v {
-            bound.insert(sel.to_uppercase(), v);
+        if let (Some(sel), Ok(v)) = (
+            ident.strip_prefix("is_"),
+            u32::from_str_radix(&after[..hex_end], 16),
+        ) {
+            let key = sel.to_uppercase();
+            if let Some(old) = out.bound.insert(key.clone(), v) {
+                if old != v {
+                    out.conflicts.push(key);
+                }
+            }
         }
         rest = &after[hex_end..];
     }
-    bound
+
+    if !var.is_empty() {
+        let tail: String = air_src[stmt_end..]
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        out.asserted = tail.contains(&format!("assert_zero({var})"));
+    }
+    out
 }
 
 /// `COL_IS_<X>` -> ISA name by removing underscores, case-insensitive.
@@ -147,6 +212,43 @@ fn isa_name_for(selector: &str, opcodes: &[(String, u32)]) -> Option<String> {
         .iter()
         .find(|(n, _)| n.to_lowercase() == flat)
         .map(|(n, _)| n.clone())
+}
+
+fn check_selectors(
+    selectors: &[String],
+    opcodes: &[(String, u32)],
+    bound: &std::collections::HashMap<String, u32>,
+    problems: &mut Vec<String>,
+) {
+    let mut selectors_sorted = selectors.to_vec();
+    selectors_sorted.sort();
+    for sel in &selectors_sorted {
+        let Some(isa_name) = isa_name_for(sel, opcodes) else {
+            problems.push(format!(
+                "selector COL_IS_{sel} matches no opcode in the ISA - either the \
+                 opcode was removed and the column is dead, or it is misspelled"
+            ));
+            continue;
+        };
+        let opcode_val = opcodes
+            .iter()
+            .find(|(n, _)| n == &isa_name)
+            .map_or(0, |(_, v)| *v);
+        if !bound.contains_key(sel) {
+            problems.push(format!(
+                "selector COL_IS_{sel} (opcode {isa_name} = 0x{opcode_val:02X}) is not in \
+                 the binding sum - a row carrying any other opcode could set it"
+            ));
+            continue;
+        }
+        if bound[sel] != opcode_val {
+            problems.push(format!(
+                "selector COL_IS_{sel} is bound to 0x{:02X} but \
+                 {isa_name} encodes to 0x{opcode_val:02X}",
+                bound[sel]
+            ));
+        }
+    }
 }
 
 /// # Errors
@@ -178,7 +280,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
 
-    let bound = parse_binding_sum(&air_src);
+    let sum = parse_binding_sum(&air_src);
+    let bound = &sum.bound;
     if bound.is_empty() {
         return Err(String::from(
             "the selector to opcode binding sum was not found in the AIR.\n      \
@@ -189,35 +292,19 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
 
     let mut problems: Vec<String> = Vec::new();
-    let mut selectors_sorted = selectors.clone();
-    selectors_sorted.sort();
-    for sel in &selectors_sorted {
-        let Some(isa_name) = isa_name_for(sel, &opcodes) else {
-            problems.push(format!(
-                "selector COL_IS_{sel} matches no opcode in the ISA - either the \
-                 opcode was removed and the column is dead, or it is misspelled"
-            ));
-            continue;
-        };
-        let opcode_val = opcodes
-            .iter()
-            .find(|(n, _)| n == &isa_name)
-            .map_or(0, |(_, v)| *v);
-        if !bound.contains_key(sel) {
-            problems.push(format!(
-                "selector COL_IS_{sel} (opcode {isa_name} = 0x{opcode_val:02X}) is not in \
-                 the binding sum - a row carrying any other opcode could set it"
-            ));
-            continue;
-        }
-        if bound[sel] != opcode_val {
-            problems.push(format!(
-                "selector COL_IS_{sel} is bound to 0x{:02X} but \
-                 {isa_name} encodes to 0x{opcode_val:02X}",
-                bound[sel]
-            ));
-        }
+    if !sum.asserted {
+        problems.push(String::from(
+            "the selector to opcode binding sum is never passed to \
+             `assert_zero(..)` - a sum that is computed and not asserted \
+             constrains nothing",
+        ));
     }
+    for sel in &sum.conflicts {
+        problems.push(format!(
+            "selector COL_IS_{sel} appears in the binding sum with two different opcodes"
+        ));
+    }
+    check_selectors(&selectors, &opcodes, bound, &mut problems);
 
     // Direction 2: every opcode must have a selector.
     let selector_isa_names: Vec<String> = selectors
@@ -262,7 +349,7 @@ pub fn self_test() -> Result<String, String> {
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-isa/src"));
 
     let isa = "pub enum Opcode {\n    HALT = 0x00,\n    ADD = 0x01,\n}\n";
-    let air = "pub const COL_IS_HALT: usize = 1;\npub const COL_IS_ADD: usize = 2;\nlet z = is_HALT.clone() * (opcode_here.clone() - op(0x00));\nlet z2 = is_ADD.clone() * (opcode_here.clone() - op(0x01));\n";
+    let air = "pub const COL_IS_HALT: usize = 1;\npub const COL_IS_ADD: usize = 2;\nlet z = is_halt.clone() * (opcode_here.clone() - op(0x00))\n + is_add.clone() * (opcode_here.clone() - op(0x01));\nbuilder.assert_zero(z);\n";
     std::fs::write(dir.join("budzero/bud-isa/src/lib.rs"), isa).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), air)
         .map_err(|e| e.to_string())?;
@@ -278,8 +365,42 @@ pub fn self_test() -> Result<String, String> {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(String::from("canary: a wrong binding passed"));
     }
+    // The sum is computed and never asserted (the assert_zero call deleted).
+    let unasserted = air.replace("builder.assert_zero(z);", "");
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), unasserted)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: a sum that is never asserted passed"));
+    }
+    // The assert_zero call survives only inside a block comment.
+    let commented = air.replace("builder.assert_zero(z);", "/* builder.assert_zero(z); */");
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), commented)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: a commented-out assert_zero passed"));
+    }
+    // A term written with a selector name the AIR does not declare must not
+    // be credited to the nearest preceding `is_`.
+    let misnamed = air.replace("is_add.clone()", "other_add.clone()");
+    std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), misnamed)
+        .map_err(|e| e.to_string())?;
+    if run(&dir).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(String::from("canary: a misnamed binding term passed"));
+    }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(String::from(
-        "air-selectors canary OK (correct PASSes, a wrong binding FAILs).",
+        "air-selectors canary OK (correct PASSes; a wrong, unasserted, \
+         commented-out or misnamed binding FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn self_test_passes() {
+        super::self_test().expect("air-selectors self-test");
+    }
 }

@@ -53,7 +53,17 @@ pub fn lock_payment(buyer: [u8; 32], pact_id: [u8; 32], amount: u64) -> PollenGr
 
 /// Y7: if the production verification passes, the grant becomes `Active` and
 /// reading opens.
-pub fn activate_after_production(grant: &mut PollenGrant, produced_ok: bool) {
+///
+/// `verified_pact` is the PACT the production check ran on. A result for another
+/// PACT says nothing about this grant and leaves it unchanged.
+pub fn activate_after_production(
+    grant: &mut PollenGrant,
+    verified_pact: &[u8; 32],
+    produced_ok: bool,
+) {
+    if *verified_pact != grant.pact_id {
+        return;
+    }
     match (grant.state, produced_ok) {
         (GrantState::Locked, true) => grant.state = GrantState::Active,
         (GrantState::Locked, false) => grant.state = GrantState::Refunded,
@@ -151,16 +161,25 @@ mod tests {
     fn y7_grant_state_machine() {
         let mut g = lock_payment([1u8; 32], [2u8; 32], 1000);
         assert!(!can_read(&g), "reading is refused while locked");
-        activate_after_production(&mut g, true);
+        activate_after_production(&mut g, &[2u8; 32], true);
         assert!(can_read(&g), "production was verified, so it is Active");
         let mut g2 = lock_payment([1u8; 32], [2u8; 32], 1000);
-        activate_after_production(&mut g2, false);
+        activate_after_production(&mut g2, &[2u8; 32], false);
         assert_eq!(
             g2.state,
             GrantState::Refunded,
             "production failed, so it is refunded"
         );
         assert!(!can_read(&g2));
+    }
+
+    #[test]
+    fn a_production_result_for_another_pact_changes_nothing() {
+        let mut g = lock_payment([1u8; 32], [2u8; 32], 1000);
+        activate_after_production(&mut g, &[3u8; 32], true);
+        assert_eq!(g.state, GrantState::Locked);
+        activate_after_production(&mut g, &[3u8; 32], false);
+        assert_eq!(g.state, GrantState::Locked);
     }
 
     #[test]

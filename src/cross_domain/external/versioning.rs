@@ -141,9 +141,19 @@ impl VersionPolicy {
         new_version: u32,
         fork_height: u64,
         grace_heights: u64,
+        accepted_evidence_versions: &[u32],
     ) -> Result<(), ForkError> {
         if old_version == new_version {
             return Err(ForkError::SameVersion {
+                version: new_version,
+            });
+        }
+        // BLG-0161 (P07-F16): a fork may only land on a version the adapter
+        // actually accepts. Without this, an operator could schedule a
+        // version the adapter refuses and sunset the one it does, leaving
+        // the domain with no usable version.
+        if !accepted_evidence_versions.contains(&new_version) {
+            return Err(ForkError::VersionNotAccepted {
                 version: new_version,
             });
         }
@@ -242,13 +252,15 @@ impl VersionPolicy {
     }
 
     /// Whether this policy is in a state that can serve at all: at least one
-    /// open window, and no two windows for the same version.
+    /// open-ended window (no sunset), no two windows for the same version, and
+    /// no window that sunsets before it starts.
     #[must_use]
     pub fn is_consistent(&self) -> bool {
         if self.windows.is_empty() {
             return false;
         }
         let mut seen: Vec<u32> = Vec::with_capacity(self.windows.len());
+        let mut any_open = false;
         for window in &self.windows {
             if seen.contains(&window.version) {
                 return false;
@@ -259,9 +271,12 @@ impl VersionPolicy {
             {
                 return false;
             }
+            if window.sunset_height.is_none() {
+                any_open = true;
+            }
             seen.push(window.version);
         }
-        true
+        any_open
     }
 }
 
@@ -272,6 +287,8 @@ pub enum ForkError {
     SameVersion { version: u32 },
     #[error("version {version} is already scheduled")]
     VersionAlreadyScheduled { version: u32 },
+    #[error("version {version} is not in the adapter's accepted evidence versions")]
+    VersionNotAccepted { version: u32 },
     #[error("the outgoing version {version} was never scheduled")]
     UnknownOldVersion { version: u32 },
     #[error("the outgoing version {version} has already sunset and cannot be reused")]
@@ -305,7 +322,7 @@ mod tests {
     fn fork_height_overflow_is_a_refusal_not_a_saturated_window() {
         let mut policy = policy();
         let err = policy
-            .schedule_fork(1, 2, u64::MAX, 1)
+            .schedule_fork(1, 2, u64::MAX, 1, &[1, 2])
             .expect_err("overflow must not create a never-sunset window");
         assert_eq!(
             err,
@@ -324,9 +341,11 @@ mod tests {
     #[test]
     fn a_sunset_version_cannot_be_resurrected_by_a_second_fork() {
         let mut policy = policy();
-        policy.schedule_fork(1, 2, 100, 2).expect("first fork");
+        policy
+            .schedule_fork(1, 2, 100, 2, &[1, 2])
+            .expect("first fork");
         let err = policy
-            .schedule_fork(1, 3, 200, 2)
+            .schedule_fork(1, 3, 200, 2, &[1, 3])
             .expect_err("a published sunset cannot be rewritten");
         assert_eq!(err, ForkError::OldVersionAlreadySunset { version: 1 });
         assert_eq!(
@@ -334,6 +353,14 @@ mod tests {
             Some(102)
         );
         assert!(policy.window(3).is_none());
+    }
+
+    #[test]
+    fn a_policy_whose_only_window_is_sunset_is_not_consistent() {
+        let mut policy = policy();
+        assert!(policy.is_consistent());
+        policy.windows[0].sunset_height = Some(policy.windows[0].valid_from_height + 5);
+        assert!(!policy.is_consistent());
     }
 
     #[test]

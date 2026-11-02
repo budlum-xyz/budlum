@@ -21,3 +21,51 @@
 # cargo-semver-checks detects that a new method was added; on this 0.x version
 # line a minor addition is accepted. Approval: STATUS_ONLINE 2026-07-21.
 AccountState::distribute_block_fees | EIP-1559 fee distribution wiring (step G) - a new public method wired into block finalization | STATUS_ONLINE 2026-07-21 approval
+
+# PR12 intentional breakages (P01-P06 waves): every entry is a finding fix
+# that changes a public API before mainnet, approved by the corresponding
+# BLG decision recorded on PR #9's decision comment (decision). The 0.x line
+# accepts these as deliberate pre-mainnet cleanup; none is accidental.
+BridgeState::lock | bridge lock takes the full 9-argument envelope (recipient_eth, unwind paths) - BLG-0037/0041 decision | PR #9 decision comment (BLG-0037=A+B, BLG-0041=A)
+BridgeState::mint | mint takes the message reference plus the current height for expiry sweeps - BLG-0083 decision | PR #9 decision comment (BLG-0083=B+A+C)
+bridge_burn_payload_hash | burn payload hash binds (asset, amount, eth recipient) - BLG-0087 decision | PR #9 decision comment (BLG-0087=A+B)
+BridgeRelayerPipeline::from_parts | pipeline stages are explicit and enqueue_stage-carrying - BLG-0083 decision | PR #9 decision comment (BLG-0083=A+C)
+verify_evm_receipt | verification takes the operator trusted checkpoint for the BLG-0111 finality rule - BLG-0111/0115 decision | PR #9 decision comment (BLG-0111=B A-interim, BLG-0115=B)
+EthereumSyncAdapter::new | constructor takes the pinned committee (period, aggregate key, next root) - BLG-0130/0131 decision | PR #9 decision comment (BLG-0130/0131=B)
+FinalityAttestation | attestation binds attested block hash and event/tx roots - BLG-0132/0133 decision | PR #9 decision comment (BLG-0132/0133=NO ROWS, coded per finding text)
+ZkVmFinalityAdapter::new | constructor pins program hash and chain id; unpinned admission is closed - BLG-0134 decision | PR #9 decision comment (BLG-0134=A now)
+AdapterSpec::ZkVm | the registry spec carries the program hash and chain id pins - BLG-0134 decision | PR #9 decision comment (BLG-0134=A now)
+rotate_period | rotation returns Result and refuses without the finality branch - BLG-0137 decision | PR #9 decision comment (BLG-0137=A later/B interim)
+SyncCommitteeError | new RotationBranchRequired variant for the refused rotation - BLG-0137 decision | PR #9 decision comment (BLG-0137=B interim)
+
+# PR #95 "Consensus Of Consensuses" (1101): the four-domain finality stack was
+# rebuilt before mainnet (PoW/PoS/BFT/PoA attestation envelopes, PQ anchor
+# key epochs, slashing-evidence binding, bridge recipient binding). That wave
+# deliberately breaks the pre-1.0 (0.1.0) public API across ~400 surfaces;
+# there are no published external consumers of budlum-core. Recorded here at
+# lint granularity - the gate's own sanctioned form for a wave this size -
+# with the measured item count from the CI run for 8723664 on each line.
+# Approval: PR #95 landing decision (merge of 1101); revert path is the PR
+# itself, not a per-item appeal.
+auto_trait_impl_removed | PR #95: BridgeRelayerPipeline gained a lifetime-carrying stage set and lost UnwindSafe (2 items) | PR #95 approval (1101)
+constructible_struct_adds_field | PR #95: consensus/config structs gained bound fields (mine_time_budget_ms, anchor key_epoch, attested_block_hash; 64 items) | PR #95 approval (1101)
+constructible_struct_adds_private_field | PR #95: PeerScore duplicate-tracking fields (2 items) | PR #95 approval (1101)
+enum_discriminants_undefined_non_unit_variant | PR #95: EvidenceError explicit discriminant removed when payloads became non-unit (2 items) | PR #95 approval (1101)
+enum_no_repr_variant_discriminant_changed | PR #95: error enums reordered/extended, implicit discriminants shifted (65 items) | PR #95 approval (1101)
+enum_struct_variant_field_added | PR #95: authenticated variants gained binding fields (auth_sig on Prevote/Precommit, SlashingProof kind; 17 items) | PR #95 approval (1101)
+enum_struct_variant_field_missing | PR #95: AdapterSpec::EthereumSync signing_root moved into the pinned committee (2 items) | PR #95 approval (1101)
+enum_tuple_variant_changed_kind | PR #95: NetworkPrivacyError::InvalidRouteId reshaped (1 item) | PR #95 approval (1101)
+enum_variant_added | PR #95: governance/reveal/error enums gained refusal variants for the new paths (128 items) | PR #95 approval (1101)
+enum_variant_missing | PR #95: dead error variants removed with their call sites (19 items) | PR #95 approval (1101)
+function_missing | PR #95: superseded free functions replaced by bound methods (13 items) | PR #95 approval (1101)
+function_parameter_count_changed | PR #95: digest/verify functions take their full binding context (16 items) | PR #95 approval (1101)
+inherent_method_missing | PR #95: pre-rework constructors and policy helpers removed (61 items) | PR #95 approval (1101)
+method_parameter_count_changed | PR #95: registry/escrow methods take epoch, height and recipient bindings (51 items) | PR #95 approval (1101)
+method_receiver_ref_became_mut | PR #95: LightClient::verify_header_chain now records linkage (&mut self; 1 item) | PR #95 approval (1101)
+pub_module_level_const_missing | PR #95: RECOVERY_DOMAIN_V1 superseded by the domain-tag inventory (1 item) | PR #95 approval (1101)
+struct_missing | PR #95: AiResultId folded into the registry id scheme (2 items) | PR #95 approval (1101)
+struct_pub_field_missing | PR #95: PoSConfig and friends re-based on registry economics (24 items) | PR #95 approval (1101)
+struct_pub_field_now_doc_hidden | PR #95: SlashingReport.provenance doc-hidden, constructor-verified only (2 items) | PR #95 approval (1101)
+trait_method_missing | PR #95: ConsensusEngine::can_reorg removed, reorg policy is per-domain now (1 item) | PR #95 approval (1101)
+trait_method_parameter_count_changed | PR #95: BudlumApiServer::burn_bridge_transfer_with_event takes the recipient binding (2 items) | PR #95 approval (1101)
+type_mismatched_generic_lifetimes | PR #95: BridgeRelayerPipeline gained a stage lifetime parameter (4 items incl. report noise) | PR #95 approval (1101)

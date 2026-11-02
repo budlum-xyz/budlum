@@ -206,9 +206,8 @@ fn a_refused_recovery_changes_nothing_through_the_arm() {
         live.live_method(&[9u8; 32], state.epoch_index).is_none(),
         "the proposed key did not arrive either"
     );
-    // The failed recovery still spent its nonce and paid its fee: refusal
-    // is not refund, and the door must not let retries of one nonce
-    // double-write.
+    // The failed recovery spent neither its nonce nor its fee: a refused
+    // transaction leaves the account untouched.
     assert_eq!(state.get_nonce(&subject), 1, "only the register moved it");
     assert_eq!(state.get_balance(&subject), 999, "only the register paid");
 }

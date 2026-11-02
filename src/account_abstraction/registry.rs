@@ -438,12 +438,14 @@ mod tests {
         let commitment: [u8; 32] = h.finalize().into();
 
         let mut pacts = PactRegistry::new();
-        pacts.add_pact(
-            Pact::new(
-                [1u8; 32], [0u8; 32], [0u8; 32], commitment, [0u8; 32], 10, 0,
+        pacts
+            .add_pact(
+                Pact::new(
+                    [1u8; 32], [0u8; 32], [0u8; 32], commitment, [0u8; 32], 10, 0,
+                )
+                .expect("valid pact"),
             )
-            .expect("valid pact"),
-        );
+            .expect("pact accepted");
 
         let mut account = account_with(2, 3);
         account.storage_root = [9u8; 32];
@@ -485,10 +487,12 @@ mod tests {
         use crate::storage::pact_binding::Pact;
 
         let mut pacts = PactRegistry::new();
-        pacts.add_pact(
-            Pact::new([1u8; 32], [0u8; 32], [0u8; 32], [2u8; 32], [0u8; 32], 10, 0)
-                .expect("valid pact"),
-        );
+        pacts
+            .add_pact(
+                Pact::new([1u8; 32], [0u8; 32], [0u8; 32], [2u8; 32], [0u8; 32], 10, 0)
+                    .expect("valid pact"),
+            )
+            .expect("pact accepted");
         // The root is corrupted by hand: it cannot be recomputed from the pacts inside.
         // Zero is not used - zero is the valid root of the empty set.
         pacts.root = [0xAA; 32];

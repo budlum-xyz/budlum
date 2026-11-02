@@ -78,7 +78,9 @@ fn public_inputs_with_writes(
         chain_id: 1,
         program_hash: keccak256(&bytecode_bytes),
         initial_state_root,
-        final_state_root: [0u8; 32],
+        // The AIR ties the final root to the storage-writes fold, so the
+        // honest final root is the write digest passed in.
+        final_state_root: state_writes_digest,
         sender: vm.context.sender,
         nonce: vm.context.nonce,
         block_height: vm.context.block_height,
@@ -179,7 +181,7 @@ fn checked_in_state_file_matches_the_account_schema() {
 /// own tests sized theirs at 8192, so every struct contract failed only through
 /// the CLI. This test runs the real host memory size.
 #[test]
-fn a_struct_using_contract_runs_and_proves() {
+fn a_struct_using_contract_runs() {
     let source = "contract S {\n\
                   \x20   struct P {\n\
                   \x20       a: u64,\n\
@@ -208,7 +210,6 @@ fn a_struct_using_contract_runs_and_proves() {
     // (bud-proof has no Store test at all). Whether such a program proves is
     // tracked separately; this test's job is to prove that the *host memory
     // floor* is right, which is what the execution assertions above establish.
-    let _ = public_inputs_for(&vm, &bytecode, &receipt.events);
 }
 
 /// The host memory floor must stay above the heap base, otherwise struct
@@ -269,7 +270,7 @@ fn a_declared_storage_field_can_be_read_and_written() {
 
     let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
     let receipt = vm.run_receipt(&bytecode);
-    assert!(receipt.success, "kosum basarisiz: {:?}", receipt.error);
+    assert!(receipt.success, "run failed: {:?}", receipt.error);
     assert_ne!(
         receipt.state_writes_digest, [0u8; 32],
         "a run that writes storage has to produce a non-empty write digest"
@@ -296,7 +297,7 @@ fn a_storage_writing_program_proves_and_verifies() {
 
     let mut vm = Vm::new(bud_compiler::MIN_VM_MEMORY_BYTES);
     let receipt = vm.run_receipt(&bytecode);
-    assert!(receipt.success, "kosum basarisiz: {:?}", receipt.error);
+    assert!(receipt.success, "run failed: {:?}", receipt.error);
 
     let pi =
         public_inputs_with_writes(&vm, &bytecode, &receipt.events, receipt.state_writes_digest);
@@ -348,4 +349,59 @@ fn a_storage_field_with_an_unknown_type_is_refused() {
                   }\n\
               }\n";
     bud_compiler::compile(ok, IsaProfile::Production).expect("u64 is a valid storage type");
+}
+
+/// Runs the real `bud-cli` binary: a valid program must exit zero and print
+/// its events as JSON, a program that does not compile must exit non-zero.
+#[test]
+fn the_cli_binary_runs_a_program_and_refuses_a_broken_one() {
+    let root = workspace_root();
+    let dir = std::env::temp_dir().join(format!("bud_cli_e2e_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let state = dir.join("state.json");
+    std::fs::copy(root.join("state.json"), &state).expect("copy state file");
+    let bin = env!("CARGO_BIN_EXE_bud-cli");
+
+    let good = std::process::Command::new(bin)
+        .current_dir(&root)
+        .args(["run", "--program", "example.bud", "--json", "--state-in"])
+        .arg(&state)
+        .arg("--state-out")
+        .arg(dir.join("state_out.json"))
+        .output()
+        .expect("run bud-cli");
+    let stdout = String::from_utf8_lossy(&good.stdout);
+    assert!(
+        good.status.success(),
+        "run must succeed: {stdout} {}",
+        String::from_utf8_lossy(&good.stderr)
+    );
+    let start = stdout.find('{').expect("json object in the output");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout[start..]).expect("the output carries valid json");
+    assert_eq!(json["success"], serde_json::Value::Bool(true));
+    assert_eq!(
+        json["events"],
+        serde_json::json!([137, 63, 3700, 0, 1]),
+        "example.bud emits sum, diff, product, is_eq, is_gt"
+    );
+
+    let broken = dir.join("broken.bud");
+    std::fs::write(&broken, "contract Broken { pub fn main( {").expect("write broken program");
+    let bad = std::process::Command::new(bin)
+        .current_dir(&root)
+        .args(["run", "--program"])
+        .arg(&broken)
+        .arg("--state-in")
+        .arg(&state)
+        .arg("--state-out")
+        .arg(dir.join("state_bad.json"))
+        .output()
+        .expect("run bud-cli on a broken program");
+    assert!(
+        !bad.status.success(),
+        "a program that does not compile must exit non-zero"
+    );
+
+    std::fs::remove_dir_all(&dir).expect("remove temp dir");
 }

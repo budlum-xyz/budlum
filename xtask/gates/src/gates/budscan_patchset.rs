@@ -52,7 +52,12 @@ fn forbidden_brand_tokens() -> Vec<String> {
         .collect()
 }
 
-/// Yama listesini oku.
+/// Is the file below a permitted tree, with no `..` segment that leaves it?
+fn path_is_allowed(file: &str, roots: &[&str]) -> bool {
+    roots.iter().any(|r| file.starts_with(r)) && !file.split('/').any(|seg| seg == "..")
+}
+
+/// Read the patch list.
 fn parse_list(text: &str) -> Result<Vec<(String, bool)>, String> {
     let mut out = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -66,11 +71,11 @@ fn parse_list(text: &str) -> Result<Vec<(String, bool)>, String> {
             None => (true, line),
         };
         if path.is_empty() {
-            return Err(format!("patches.txt:{}: yol bos", lineno + 1));
+            return Err(format!("patches.txt:{}: the path is empty", lineno + 1));
         }
         if !seen.insert(path.to_string()) {
             return Err(format!(
-                "patches.txt:{}: {path} listede iki kez var",
+                "patches.txt:{}: {path} is listed twice",
                 lineno + 1
             ));
         }
@@ -256,7 +261,7 @@ pub fn run(root: &Path) -> Result<String, String> {
         }
         problems.extend(hunk_count_errors(rel, &diff));
         for file in &touched {
-            if !allowed_roots.iter().any(|r| file.starts_with(r)) {
+            if !path_is_allowed(file, &allowed_roots) {
                 problems.push(format!(
                     "{rel}: {file} is outside the permitted trees ({})",
                     allowed_roots.join(", ")
@@ -398,6 +403,21 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
 
+    // Canary 4d: the path check has to refuse a traversal and an outside tree.
+    if path_is_allowed("browser/../../etc/x", &["browser/"]) {
+        problems.push(String::from(
+            "VACUOUS: a path that climbs out of the allowed tree passed",
+        ));
+    }
+    if path_is_allowed("other/x", &["browser/"]) {
+        problems.push(String::from(
+            "VACUOUS: a path outside every allowed tree passed",
+        ));
+    }
+    if !path_is_allowed("browser/app/x.cpp", &["browser/"]) {
+        problems.push(String::from("a path inside the allowed tree was refused"));
+    }
+
     // Canary 5: the brand list must not be empty, otherwise the scan searches for nothing.
     // The same outcome arises if the syllables do not join; the joined form is what is measured.
     if forbidden_brand_tokens().iter().any(|t| t.len() < 5) {
@@ -425,4 +445,30 @@ pub fn self_test() -> Result<String, String> {
          the 'b/' prefix is stripped, a miscounted hunk is refused, the brand list is populated \
          and the gate does not pass on a tree it cannot read",
     ))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn traversal_out_of_a_permitted_tree_is_refused() {
+        let roots = ["browser/", "dom/"];
+        assert!(path_is_allowed("browser/app/x.cpp", &roots));
+        assert!(!path_is_allowed("browser/../../etc/x", &roots));
+        assert!(!path_is_allowed("other/x", &roots));
+    }
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::*;
+
+    #[test]
+    fn list_errors_are_in_english() {
+        let dup = parse_list("patches/a.patch\npatches/a.patch\n").unwrap_err();
+        assert!(dup.contains("listed twice"), "{dup}");
+        let empty = parse_list("!\n").unwrap_err();
+        assert!(empty.contains("empty"), "{empty}");
+    }
 }

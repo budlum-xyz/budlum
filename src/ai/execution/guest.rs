@@ -23,20 +23,27 @@ pub struct FixedPointMlpSpec {
     pub biases: Vec<i32>,
 }
 
+/// Checks the layer count and layer widths. Reads only `dims` and allocates
+/// nothing, so it can run before any buffer sized from `dims` is created.
+fn check_dims_shape(dims: &[u16]) -> Result<(), String> {
+    if dims.len() < 2 || dims.len() > MAX_MLP_LAYERS + 1 {
+        return Err(format!(
+            "dims length must be 2..={} (got {})",
+            MAX_MLP_LAYERS + 1,
+            dims.len()
+        ));
+    }
+    for &d in dims {
+        if d == 0 || d as usize > MAX_MLP_WIDTH {
+            return Err(format!("layer dim {d} out of 1..={MAX_MLP_WIDTH}"));
+        }
+    }
+    Ok(())
+}
+
 impl FixedPointMlpSpec {
     pub fn validate(&self) -> Result<(), String> {
-        if self.dims.len() < 2 || self.dims.len() > MAX_MLP_LAYERS + 1 {
-            return Err(format!(
-                "dims length must be 2..={} (got {})",
-                MAX_MLP_LAYERS + 1,
-                self.dims.len()
-            ));
-        }
-        for &d in &self.dims {
-            if d == 0 || d as usize > MAX_MLP_WIDTH {
-                return Err(format!("layer dim {d} out of 1..={MAX_MLP_WIDTH}"));
-            }
-        }
+        check_dims_shape(&self.dims)?;
         let mut expected_w = 0usize;
         let mut expected_b = 0usize;
         for w in self.dims.windows(2) {
@@ -484,9 +491,9 @@ mod tests {
 
 // ── (2026-07-23): Production gas metering for AI execution proofs ──
 //
-// Dynamic gas model for L1 verification of AI execution proofs.
+// Dynamic gas model for the chain verification of AI execution proofs.
 // The VM opcode gas (flat 10) covers the instruction execution; this
-// Covers the L1 structural + STARK verification cost which scales with
+// Covers the chain structural + STARK verification cost which scales with
 // Model complexity and proof size.
 
 /// Base gas cost for structural verification (commitment checks, model binding).
@@ -549,8 +556,8 @@ pub fn estimate_full_gas(spec: &FixedPointMlpSpec, proof_bytes_len: usize) -> u6
 /// constants to the test fixtures rather than to any measurement of work.
 ///
 /// Pricing verification is real work and belongs in a change that introduces
-/// a gas price. Until then, the caller passes `u64::MAX`, which is visible at
-/// the call site and cannot be mistaken for a budget that was checked.
+/// a gas price. Until then there is no ceiling to pass at all - the fee
+/// unit and the gas unit do not compare, so the API takes none.
 ///
 /// # Errors
 ///
@@ -558,21 +565,18 @@ pub fn estimate_full_gas(spec: &FixedPointMlpSpec, proof_bytes_len: usize) -> u6
 pub fn validate_gas_budget(
     spec: &FixedPointMlpSpec,
     proof_bytes_len: usize,
-    max_fee_same_unit_as_gas: u64,
 ) -> Result<u64, String> {
+    // BLG-0099 (P04-F17): no ceiling parameter. `max_fee` is an escrowed
+    // balance in fee units and the estimate is in gas units - the two do
+    // not compare, and the API that accepted both was the mistake. The
+    // size bound is the only gate here; the gas estimate is returned so a
+    // caller that grows a real ceiling can compare in its own units.
     if proof_bytes_len > MAX_PROOF_BYTES {
         return Err(format!(
             "proof_bytes {proof_bytes_len} exceeds MAX_PROOF_BYTES {MAX_PROOF_BYTES}"
         ));
     }
-    let gas = estimate_full_gas(spec, proof_bytes_len);
-    if gas > max_fee_same_unit_as_gas {
-        return Err(format!(
-            "estimated gas {gas} exceeds the supplied ceiling \
-             {max_fee_same_unit_as_gas}"
-        ));
-    }
-    Ok(gas)
+    Ok(estimate_full_gas(spec, proof_bytes_len))
 }
 
 #[cfg(test)]
@@ -615,38 +619,16 @@ mod gas_tests {
         );
 
         // And the wired half still refuses what it is meant to refuse.
-        let err = validate_gas_budget(&spec, MAX_PROOF_BYTES + 1, u64::MAX)
+        let err = validate_gas_budget(&spec, MAX_PROOF_BYTES + 1)
             .expect_err("an oversized proof must be refused whatever the ceiling");
         assert!(err.contains("MAX_PROOF_BYTES"), "got: {err}");
 
         // A proof within bounds passes when no ceiling is asserted.
-        validate_gas_budget(&spec, 1024, u64::MAX)
+        validate_gas_budget(&spec, 1024)
             .expect("a well-sized proof must pass when no gas ceiling is claimed");
     }
 
     /// The executor asks for the size bound and asserts no gas ceiling.
-    ///
-    /// Pinned at the source, because passing the real `max_fee` here is the
-    /// mistake this decision exists to prevent and it would look correct.
-    #[test]
-    fn the_execution_path_does_not_compare_gas_against_the_escrowed_fee() {
-        let executor_src = include_str!("../../execution/executor.rs");
-        let production = executor_src
-            .split_once("#[cfg(test)]")
-            .map_or(executor_src, |(before, _)| before);
-
-        let at = production
-            .find("validate_gas_budget(")
-            .expect("the executor must ask for the size bound");
-        let call = &production[at..(at + 200).min(production.len())];
-
-        assert!(
-            call.contains("u64::MAX"),
-            "the executor is supplying a real ceiling to a gas estimate. \
-             `max_fee` is an escrowed balance and the estimate is in gas \
-             units; there is no conversion between them in this tree"
-        );
-    }
 
     #[test]
     fn gas_scales_with_model_size() {
@@ -684,29 +666,21 @@ mod gas_tests {
             weights: vec![1, 2],
             biases: vec![0],
         };
-        assert!(validate_gas_budget(&spec, MAX_PROOF_BYTES + 1, u64::MAX).is_err());
+        assert!(validate_gas_budget(&spec, MAX_PROOF_BYTES + 1).is_err());
     }
 
+    /// BLG-0099 (P04-F17): the fee ceiling is gone with its parameter (fee
+    /// units and gas units never compared) - what remains is the size gate
+    /// and the estimate it hands back.
     #[test]
-    fn gas_budget_rejects_insufficient_fee() {
+    fn gas_budget_returns_the_estimate_for_an_in_size_proof() {
         let spec = FixedPointMlpSpec {
             dims: vec![2, 1],
             weights: vec![1, 2],
             biases: vec![0],
         };
-        assert!(validate_gas_budget(&spec, 10_000, 1).is_err());
-    }
-
-    #[test]
-    fn gas_budget_accepts_sufficient_fee() {
-        let spec = FixedPointMlpSpec {
-            dims: vec![2, 1],
-            weights: vec![1, 2],
-            biases: vec![0],
-        };
-        let gas = validate_gas_budget(&spec, 10_000, 1_000_000);
-        assert!(gas.is_ok());
-        assert!(gas.unwrap() > 0);
+        let gas = validate_gas_budget(&spec, 10_000).unwrap();
+        assert!(gas > 0);
     }
 }
 
@@ -763,6 +737,11 @@ pub const WORD_BYTES: usize = 8;
 /// Guest memory size in bytes, matching `Vm::with_gas_limit(8192, ..)` used by
 /// `crate::execution::zkvm::prove_bytecode`.
 pub const GUEST_MEMORY_BYTES: usize = 8192;
+
+const _: () = assert!(
+    GUEST_MEMORY_BYTES as u64 <= bud_vm::MAX_MEMORY_BYTES,
+    "GUEST_MEMORY_BYTES must not exceed bud_vm::MAX_MEMORY_BYTES, the proof address space"
+);
 
 /// Goldilocks modulus used by the VM's field arithmetic.
 pub const GOLDILOCKS_P: u64 = 18_446_744_069_414_584_321;
@@ -1110,6 +1089,7 @@ pub fn guest_program_for_model(model: &crate::ai::types::AiModelSpec) -> Result<
         .execution_dims
         .as_ref()
         .ok_or("model does not register execution_dims; cannot rebuild its guest program")?;
+    check_dims_shape(dims)?;
     let spec = FixedPointMlpSpec {
         dims: dims.clone(),
         // Sized to match the architecture so `validate` passes. The values are
@@ -1165,6 +1145,34 @@ pub fn run_matmul_guest(
 #[cfg(test)]
 mod matmul_tests {
     use super::*;
+
+    #[test]
+    fn guest_program_for_model_refuses_oversize_dims_without_allocating() {
+        let owner = crate::core::address::Address::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+        let model = crate::ai::types::AiModelSpec {
+            model_id: crate::ai::types::AiModelId::of(&owner, &[1u8; 32], 1),
+            model_hash: [1u8; 32],
+            owner,
+            min_verifier_count: 1,
+            agreement_threshold: 1,
+            max_input_ref_bytes: 1024,
+            max_output_ref_bytes: 1024,
+            request_deadline_blocks: 10,
+            result_deadline_blocks: 10,
+            version: 1,
+            active: true,
+            require_execution_proof: false,
+            execution_program_hash: None,
+            execution_class: 0,
+            execution_weights_digest: None,
+            execution_dims: Some(vec![u16::MAX; 5]),
+            modalities: crate::ai_inference::perception::ModalitySet::text_only(),
+        };
+        assert!(guest_program_for_model(&model).is_err());
+    }
 
     /// The whole point of the guest: what the VM computes must equal what the
     /// host evaluator computes, for the same weights and the same input.

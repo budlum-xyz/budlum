@@ -1,14 +1,14 @@
-//!: Slashing test matrisi.
+//! Slashing test matrix.
 //!
 //! Separate test scenarios: double-sign, downtime and liveness, and an invalid
 //! attestation. On top of the verifier registry, for each slashing condition
-//! Pozitif (slash tetiklenir) ve negatif (honest validator slash'lanmaz).
+//! Positive (slash fires) and negative (an honest validator is not slashed).
 
 #[cfg(test)]
 mod tests {
     use crate::core::address::Address;
 
-    use crate::registry::evidence::{ProofProvenance, SlashingProof, SlashingReport};
+    use crate::registry::evidence::{SlashingProof, SlashingReport};
     use crate::registry::params::RegistryParams;
     use crate::registry::permissionless::PermissionlessRegistry;
     use crate::registry::roles;
@@ -33,11 +33,15 @@ mod tests {
 
         let report = SlashingReport::consensus_double_sign(
             val,
-            100, // height
-            "hash_aaa".to_string(),
-            "hash_bbb".to_string(), // different → equivocation
-            vec![0xAA; 64],
-            vec![0xBB; 64],
+            SlashingProof::DoubleSign {
+                height: 100,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "hash_aaa".to_string(),
+                block_hash_2: "hash_bbb".to_string(), // different → equivocation
+                signature_1: vec![0xAA; 64],
+                signature_2: vec![0xBB; 64],
+            },
             Some(addr(0x01)), // reporter
         );
 
@@ -87,7 +91,7 @@ mod tests {
         reg.register(val, roles::VALIDATOR, 10_000, 0)
             .expect("register must succeed");
 
-        let report = SlashingReport::new(
+        let report = SlashingReport::new_verified(
             val,
             roles::VALIDATOR,
             SlashingProof::Liveness {
@@ -96,7 +100,6 @@ mod tests {
                 missed: 50,
                 expected: 100,
             },
-            ProofProvenance::ConsensusVerified,
             Some(addr(0x01)),
         );
 
@@ -114,15 +117,15 @@ mod tests {
         reg.register(val, roles::VALIDATOR, 10_000, 0)
             .expect("register must succeed");
 
-        let report = SlashingReport::new(
+        let report = SlashingReport::new_verified(
             val,
             roles::VALIDATOR,
             SlashingProof::InvalidSignatureSpam {
                 epoch: 42,
                 count: 25,
                 threshold: 20,
+                samples: Vec::new(),
             },
-            ProofProvenance::ConsensusVerified,
             Some(addr(0x01)),
         );
 
@@ -145,12 +148,13 @@ mod tests {
             roles::VALIDATOR,
             SlashingProof::DoubleSign {
                 height: 100,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
                 block_hash_1: "aaa".to_string(),
                 block_hash_2: "bbb".to_string(),
                 signature_1: vec![0xAA; 64],
                 signature_2: vec![0xBB; 64],
             },
-            ProofProvenance::Unverified,
             Some(addr(0x01)),
         );
 
@@ -178,22 +182,30 @@ mod tests {
 
         let r1 = SlashingReport::consensus_double_sign(
             val1,
-            100,
-            "aaa".to_string(),
-            "bbb".to_string(),
-            vec![0xAA; 64],
-            vec![0xBB; 64],
+            SlashingProof::DoubleSign {
+                height: 100,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "aaa".to_string(),
+                block_hash_2: "bbb".to_string(),
+                signature_1: vec![0xAA; 64],
+                signature_2: vec![0xBB; 64],
+            },
             Some(addr(0x01)),
         );
         let _ = reg.slash_from_report(&r1);
 
         let r2 = SlashingReport::consensus_double_sign(
             val2,
-            200,
-            "ccc".to_string(),
-            "ddd".to_string(),
-            vec![0xCC; 64],
-            vec![0xDD; 64],
+            SlashingProof::DoubleSign {
+                height: 200,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "ccc".to_string(),
+                block_hash_2: "ddd".to_string(),
+                signature_1: vec![0xCC; 64],
+                signature_2: vec![0xDD; 64],
+            },
             Some(addr(0x01)),
         );
         let _ = reg.slash_from_report(&r2);
@@ -214,11 +226,15 @@ mod tests {
 
         let report = SlashingReport::consensus_double_sign(
             val,
-            100,
-            "aaa".to_string(),
-            "bbb".to_string(),
-            vec![0xAA; 64],
-            vec![0xBB; 64],
+            SlashingProof::DoubleSign {
+                height: 100,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "aaa".to_string(),
+                block_hash_2: "bbb".to_string(),
+                signature_1: vec![0xAA; 64],
+                signature_2: vec![0xBB; 64],
+            },
             Some(addr(0x01)),
         );
         let _ = reg.slash_from_report(&report);
@@ -242,11 +258,15 @@ mod tests {
 
         let report = SlashingReport::consensus_double_sign(
             val,
-            100,
-            "aaa".to_string(),
-            "bbb".to_string(),
-            vec![0xAA; 64],
-            vec![0xBB; 64],
+            SlashingProof::DoubleSign {
+                height: 100,
+                kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+                epoch: None,
+                block_hash_1: "aaa".to_string(),
+                block_hash_2: "bbb".to_string(),
+                signature_1: vec![0xAA; 64],
+                signature_2: vec![0xBB; 64],
+            },
             Some(addr(0x01)),
         );
 

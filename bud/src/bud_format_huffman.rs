@@ -187,10 +187,29 @@ impl HuffmanCoder {
         Some(out)
     }
 
+    /// Code lengths limited to `MAX_CODE_LEN`: when the plain tree is deeper,
+    /// the counts are halved (never below one) and the tree is built again,
+    /// so `decompress` accepts every table `compress` writes. The counts reach
+    /// all ones in at most 64 rounds, and 256 equal leaves need 8 bits.
+    fn lengths_by_freq(freq: &[u64; 256]) -> [u8; 256] {
+        let mut scaled = *freq;
+        loop {
+            let lens = Self::lengths_unbounded(&scaled);
+            if lens.iter().all(|&l| usize::from(l) <= MAX_CODE_LEN) {
+                return lens;
+            }
+            for f in scaled.iter_mut() {
+                if *f > 1 {
+                    *f /= 2;
+                }
+            }
+        }
+    }
+
     /// Code lengths: at every step the two smallest nodes (by freq, then by
     /// index) are merged; a DFS from the root gives leaf depths = code lengths.
     /// Deterministic.
-    fn lengths_by_freq(freq: &[u64; 256]) -> [u8; 256] {
+    fn lengths_unbounded(freq: &[u64; 256]) -> [u8; 256] {
         let mut fs: Vec<(u64, Option<usize>, Option<usize>, Option<usize>)> = Vec::new();
         let mut used: Vec<bool> = Vec::new();
         for (sym, &f) in freq.iter().enumerate() {
@@ -297,6 +316,26 @@ impl HuffmanCoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BLG-0609: counts that follow the Fibonacci numbers give a plain
+    /// Huffman tree of depth 33; the limited tree must still round trip.
+    #[test]
+    fn fibonacci_counts_round_trip_within_the_code_length_limit() {
+        let mut data = Vec::new();
+        let (mut a, mut b) = (1usize, 1usize);
+        for sym in 0..34u8 {
+            data.resize(data.len() + a, sym);
+            (a, b) = (b, a + b);
+        }
+        let packed = HuffmanCoder::compress(&data);
+        assert_eq!(HuffmanCoder::decompress(&packed).expect("round trip"), data);
+        let mut freq = [0u64; 256];
+        for &x in &data {
+            freq[x as usize] += 1;
+        }
+        let lens = HuffmanCoder::lengths_by_freq(&freq);
+        assert!(lens.iter().all(|&l| usize::from(l) <= MAX_CODE_LEN));
+    }
 
     #[test]
     fn roundtrip_basic() {

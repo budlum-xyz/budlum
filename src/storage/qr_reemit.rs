@@ -1,10 +1,10 @@
 //! B.U.D. 3.0 recipe → stream re-emit (plan §CH A6, K-QR-GERIDONUS).
 //!
 //! The stream pin is verified on the reveal path: the reveal session in
-//! `crate::storage::three_reveal` calls [`RecipeEmitter::verify_stream_id`]
-//! with a fold recomputed from the emitted frames, so a recipe that pins a
-//! different stream cannot open a session. That path is not yet reachable
-//! from a binary, so the guard still counts as unwired.
+//! `crate::storage::three_reveal` builds the one-shot pass once at open and
+//! calls [`RecipeEmitter::verify_stream_id`] with its fold, so a recipe that
+//! pins a different stream cannot open a session. The session is reached
+//! from the `bud_storageOpenReveal` RPC.
 //!
 //! Given a [`ThreeRecipePublic`] and the packed A1 bytes whose commitment the
 //! recipe pins, regenerate carousel drops and optical frames **bit-equal** to
@@ -37,7 +37,14 @@ pub enum ReemitError {
     Frame(FrameError),
     /// Nested payload error (if caller asked us to pack - not used on re-emit path).
     Payload(PayloadError),
+    /// One call asked for more frames than any pass or burst needs.
+    TooManyFrames { count: u32, max: u32 },
 }
+
+/// Most frames one `emit_frames` call may build: two full source passes at
+/// the largest `k`, which is the floor of a carousel plan. A larger count is
+/// a bug in the caller, and the two vectors below are sized from it.
+const MAX_EMIT_FRAMES: u32 = 2 * crate::storage::qr_carousel::MAX_K as u32;
 
 impl std::fmt::Display for ReemitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -50,6 +57,9 @@ impl std::fmt::Display for ReemitError {
             Self::Carousel(e) => write!(f, "re-emit carousel: {e}"),
             Self::Frame(e) => write!(f, "re-emit frame: {e}"),
             Self::Payload(e) => write!(f, "re-emit payload: {e}"),
+            Self::TooManyFrames { count, max } => {
+                write!(f, "re-emit asked for {count} frames, the limit is {max}")
+            }
         }
     }
 }
@@ -154,6 +164,12 @@ impl RecipeEmitter {
         if count == 0 {
             return Err(ReemitError::Frame(FrameError::Truncated));
         }
+        if count > MAX_EMIT_FRAMES {
+            return Err(ReemitError::TooManyFrames {
+                count,
+                max: MAX_EMIT_FRAMES,
+            });
+        }
         let mut frames = Vec::with_capacity(count as usize);
         let mut digests = Vec::with_capacity(count as usize);
         for i in 0..count {
@@ -165,6 +181,17 @@ impl RecipeEmitter {
         }
         let fold = fold_frame_digests(&digests)?;
         Ok((frames, fold))
+    }
+
+    /// The stream id the recipe pins, as carried by the emitter.
+    ///
+    /// [`Self::verify_stream_id`] accepts either the A2 `stream_commitment` or
+    /// a folded frame-digest id, and a caller has to know which before it can
+    /// decide whether a full frame pass is needed to answer.
+    /// [`Self::stream_commitment`] is the A2 value; this is the pinned one.
+    #[must_use]
+    pub const fn pinned_stream_id(&self) -> [u8; 32] {
+        self.recipe.stream_id
     }
 
     /// If the recipe pinned a frame-fold stream id, check it equals a fresh fold.
@@ -231,6 +258,21 @@ mod tests {
             RecipeEmitter::open(recipe, &other).unwrap_err(),
             ReemitError::PayloadCommitmentMismatch
         );
+    }
+
+    #[test]
+    fn emit_frames_refuses_a_count_beyond_two_full_passes() {
+        let packed = packed_plain(b"a6-count-cap");
+        let commit = payload_commitment(&packed);
+        let enc = CarouselEncoder::new(&packed, DEFAULT_BLOCK_LEN).unwrap();
+        let stream = enc.params().stream_commitment(&commit);
+        let recipe = ThreeRecipePublic::new(commit, enc.params(), stream);
+        let emitter = RecipeEmitter::open(recipe, &packed).unwrap();
+        assert!(matches!(
+            emitter.emit_frames(0, u32::MAX),
+            Err(ReemitError::TooManyFrames { .. })
+        ));
+        assert!(emitter.emit_frames(0, 1).is_ok());
     }
 
     #[test]

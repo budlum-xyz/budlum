@@ -215,9 +215,36 @@ pub struct DictionaryEntry {
 /// would produce better dictionaries and would also mean asking permission
 /// to save space, which is not the trade this project makes.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "DictionaryRegistryWire")]
 pub struct DictionaryRegistry {
     #[serde(with = "crate::core::map_keys")]
     entries: BTreeMap<ContentId, DictionaryEntry>,
+}
+
+/// The stored shape of [`DictionaryRegistry`]. Loaded rows pass through
+/// [`TryFrom`] so a corrupt row is refused, not trusted.
+#[derive(serde::Deserialize)]
+struct DictionaryRegistryWire {
+    #[serde(with = "crate::core::map_keys")]
+    entries: BTreeMap<ContentId, DictionaryEntry>,
+}
+
+impl TryFrom<DictionaryRegistryWire> for DictionaryRegistry {
+    type Error = &'static str;
+
+    fn try_from(wire: DictionaryRegistryWire) -> Result<Self, Self::Error> {
+        for entry in wire.entries.values() {
+            if entry.size == 0 || entry.size > MAX_DICTIONARY_BYTES {
+                return Err("dictionary entry size is outside the allowed range");
+            }
+            if entry.refs > 0 && entry.deletable_at_epoch.is_some() {
+                return Err("dictionary entry is referenced and also marked deletable");
+            }
+        }
+        Ok(Self {
+            entries: wire.entries,
+        })
+    }
 }
 
 impl DictionaryRegistry {
@@ -440,6 +467,26 @@ mod tests {
 
     fn did(b: u8) -> ContentId {
         ContentId([b; 32])
+    }
+
+    #[test]
+    fn a_corrupt_dictionary_row_is_refused_on_load() {
+        // P27-F11: Deserialize used to accept any entry.
+        let entry = |size, refs, deletable_at_epoch| DictionaryEntry {
+            size,
+            refs,
+            deletable_at_epoch,
+        };
+        let build = |e: DictionaryEntry| {
+            let mut r = DictionaryRegistry::empty_registry();
+            r.entries.insert(did(1), e);
+            bincode::serialize(&r).expect("serialises")
+        };
+        let load = |bytes: &[u8]| bincode::deserialize::<DictionaryRegistry>(bytes);
+        assert!(load(&build(entry(4096, 1, None))).is_ok());
+        assert!(load(&build(entry(0, 0, None))).is_err());
+        assert!(load(&build(entry(MAX_DICTIONARY_BYTES + 1, 0, None))).is_err());
+        assert!(load(&build(entry(4096, 2, Some(10)))).is_err());
     }
 
     #[test]

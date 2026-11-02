@@ -1,4 +1,4 @@
-![Budlum](assets/budlum-banner-tr.png)
+![Budlum](assets/budlum-konsensuslerin-konsensusu.png)
 
 Budlum veri egemenliğine ve toplumsal yeşermeye odaklanmış internetin bir sonraki katmanıdır.
 
@@ -13,7 +13,7 @@ hangi konsensüsün ürettiğini sormaz, yalnızca o olgunun kesinlik kanıtın�
 olmadığını sorar. Böylece değer, bir aracıya güvenmeden alanlar arasında hareket eder.
 
 [![CI](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
-[![Tests](https://img.shields.io/badge/tests-3229%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![Tests](https://img.shields.io/badge/tests-3863%20lib-blue)](https://github.com/budlum-xyz/budlum/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![Rust](https://img.shields.io/badge/rust-1.97.1-orange?logo=rust)](rust-toolchain.toml)
 [![License](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE.md)
 
@@ -348,8 +348,13 @@ Aynı ağaçta asgari bir CLI istemcisi de bulunur:
 ```bash
 cargo run --bin bud -- query balance <adres>
 cargo run --bin bud -- query block latest
-cargo run --bin bud -- tx send --to <adres> --amount <n> --priv-key <hex-tohum>
+cargo run --bin bud -- tx send --to <adres> --amount <n> --priv-key <hex-tohum> --chain-id 45261
 ```
+
+`--chain-id` zorunludur ve imzanin tasidigi tekrar-oynatma alaninin tek kaynagidir:
+`45260` mainnet, `45261` testnet, `45262` devnet. Dugumun `bud_chainId` yaniti bu degerle
+karsilastirilir ve uyusmazlik imzalamadan once reddedilir; boylece baska bir agdaki bir
+dugum, imzaladiginiz transferin nerede gecerli olacagini secemez.
 
 ---
 

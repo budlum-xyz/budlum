@@ -238,10 +238,25 @@ impl RegistryParams {
     /// 100, an unbonding window of zero or above 100,000 epochs, a slash
     /// ratio above `FIXED_POINT_SCALE`, a fee rate at or above 100% (which
     /// credits the recipient nothing while debiting the sender everything),
-    /// or an invalid-vote threshold above 100,000, which no epoch can reach.
+    /// or an invalid-vote threshold that cannot fit in a verifiable report.
     pub fn validate(&self) -> Result<(), String> {
         if self.min_stake < 100 {
             return Err("min_stake must be at least 100".into());
+        }
+        // BLG-0101 (P04-F19): ceilings on the amount fields a proposal can
+        // set. 10^18 is orders of magnitude past any honest value in base
+        // units and still refuses u64::MAX - a governance proposal must not
+        // be able to price every account out of existence or mint a fee
+        // nobody can pay.
+        const MAX_PARAM_AMOUNT: u64 = 1_000_000_000_000_000_000;
+        if self.min_stake > MAX_PARAM_AMOUNT {
+            return Err("min_stake exceeds the maximum parameter amount".into());
+        }
+        if self.bridge_relayer_min_fee > MAX_PARAM_AMOUNT {
+            return Err("bridge_relayer_min_fee exceeds the maximum parameter amount".into());
+        }
+        if self.ai_model_register_fee > MAX_PARAM_AMOUNT {
+            return Err("ai_model_register_fee exceeds the maximum parameter amount".into());
         }
         if self.unbonding_epochs == 0 || self.unbonding_epochs > 100_000 {
             return Err("unbonding_epochs must be between 1 and 100,000".into());
@@ -274,14 +289,13 @@ impl RegistryParams {
                 return Err(format!("{name} must be below 100%"));
             }
         }
-        // Zero is a documented off-switch ("set to 0 to disable
-        // invalid-vote-spam slashing entirely"), so the floor is not 1. The
-        // ceiling is: a threshold above one epoch's worth of votes can never
-        // be reached, which disables the fault while looking like it is
-        // configured. `max_votes_per_msg` is 128 per network, so 100_000 is
-        // orders of magnitude past any honest value and still refuses u64::MAX.
-        if self.max_invalid_votes_per_epoch > 100_000 {
-            return Err("max_invalid_votes_per_epoch must be at most 100,000".into());
+        // A report must independently prove the entire threshold, and must
+        // fit the block's encoded-report limit. Zero remains the off-switch.
+        let max_samples = crate::registry::invalid_vote::MAX_SPAM_REPORT_SAMPLES as u64;
+        if self.max_invalid_votes_per_epoch > max_samples {
+            return Err(format!(
+                "max_invalid_votes_per_epoch must be at most {max_samples}"
+            ));
         }
         Ok(())
     }
@@ -300,7 +314,7 @@ impl Default for RegistryParams {
             // Targeting a multi-day window on mainnet should raise this via
             // Governance rather than editing code.
             unbonding_epochs: crate::core::account::UNBONDING_EPOCHS,
-            // 50% - matches `PoSConfig::double_sign_penalty`.
+            // 50% - double-sign burns half the bond.
             double_sign_slash_ratio_fixed: FIXED_POINT_SCALE / 2,
             // 1% - downtime is a light offence.
             liveness_slash_ratio_fixed: FIXED_POINT_SCALE / 100,
@@ -368,7 +382,8 @@ mod tests {
     fn registry_params_serialized_shape_is_pinned() {
         let encoded =
             bincode::serialize(&RegistryParams::default()).expect("RegistryParams is serializable");
-        // 15 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        // 16 u64 fields + 1 bool. bincode writes u64 as 8 bytes, bool as 1.
+        // (BLG-0102/P04-F20: the comment said 15; the pin has counted 16.)
         //
         // The count moved from 12 when the three proportional rates were
         // added: a state-format change the `# Adding a field` note describes,
@@ -500,13 +515,16 @@ mod tests {
         assert!(p.validate().is_ok(), "0 is the documented off-switch");
 
         let p = RegistryParams {
-            max_invalid_votes_per_epoch: 100_000,
+            max_invalid_votes_per_epoch: crate::registry::invalid_vote::MAX_SPAM_REPORT_SAMPLES
+                as u64,
             ..Default::default()
         };
         assert!(p.validate().is_ok(), "the ceiling itself is allowed");
 
         let p = RegistryParams {
-            max_invalid_votes_per_epoch: 100_001,
+            max_invalid_votes_per_epoch: crate::registry::invalid_vote::MAX_SPAM_REPORT_SAMPLES
+                as u64
+                + 1,
             ..Default::default()
         };
         let err = p.validate().expect_err("above the ceiling must be refused");
@@ -735,5 +753,29 @@ mod tests {
     #[test]
     fn liveness_slashing_defaults_to_observe_only() {
         assert!(!RegistryParams::default().liveness_slashing_enabled);
+    }
+
+    /// BLG-0101 (P04-F19): the amount fields a proposal can set are
+    /// bounded above - governance must not be able to price every account
+    /// out of existence.
+    #[test]
+    fn amount_parameters_have_upper_bounds() {
+        let p = RegistryParams {
+            min_stake: u64::MAX,
+            ..RegistryParams::default()
+        };
+        assert!(p.validate().is_err(), "min_stake at u64::MAX must refuse");
+        let p = RegistryParams {
+            bridge_relayer_min_fee: u64::MAX,
+            ..RegistryParams::default()
+        };
+        assert!(p.validate().is_err());
+        let p = RegistryParams {
+            ai_model_register_fee: u64::MAX,
+            ..RegistryParams::default()
+        };
+        assert!(p.validate().is_err());
+        // The documented defaults still validate.
+        assert!(RegistryParams::default().validate().is_ok());
     }
 }

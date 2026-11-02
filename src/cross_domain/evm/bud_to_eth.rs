@@ -1,19 +1,17 @@
-#![allow(clippy::pedantic, clippy::nursery)]
-
 //! F10.5, the Bud-to-Ethereum direction: a Budlum burn event plus a finality
 //! proof turned into an Ethereum claim.
 //!
 //! There are two sides:
 //!
-//! 1. **The Budlum side, this module:** the relayer packages the Budlum burn
+//! 1. The Budlum side, this module: the relayer packages the Budlum burn
 //!    event together with the Budlum finality proof, a BLS aggregate or a
 //!    quorum certificate, and produces the transaction payload to be sent to
 //!    Ethereum.
-//! 2. **The Ethereum side, in Solidity:** a Budlum light client contract
+//! 2. The Ethereum side, in Solidity: a Budlum light client contract
 //!    verifies Budlum finality inside the EVM and unlocks the bridge. That is a
 //!    large separate piece of work, under its own repository and audit.
 //!
-//! **Security:** in the Bud-to-Ethereum direction, Budlum finality has to be
+//! Security: in the Bud-to-Ethereum direction, Budlum finality has to be
 //! verified inside the EVM, which needs the BLS12-381 precompile and a Solidity
 //! sync committee implementation. Ethereum verifies that proof independently and
 //! DOES NOT trust Budlum.
@@ -30,7 +28,8 @@ pub struct BudToEthClaim {
     pub message_id: MessageId,
     /// The burned asset, to be unlocked on Ethereum.
     pub asset_id: [u8; 32],
-    /// The unlock amount, minted or released on Ethereum.
+    /// The unlock amount: the net units the burn destroyed (`burned_amount`),
+    /// never the transfer's gross size.
     pub amount: u64,
     /// The recipient Ethereum address, 20 bytes.
     pub recipient_eth: [u8; 20],
@@ -60,6 +59,8 @@ pub enum BudToEthError {
     /// The amount is above the bridge cap. An ERC-20 `uint256` would hold it, but
     /// the bridge sets its own limit.
     AmountExceedsCap,
+    /// The burn recorded no net debit, so there is no amount to unlock.
+    BurnDebitNotRecorded,
 }
 
 impl std::fmt::Display for BudToEthError {
@@ -72,6 +73,9 @@ impl std::fmt::Display for BudToEthError {
             }
             BudToEthError::FinalityProofMissing => write!(f, "bud-to-eth: finality proof missing"),
             BudToEthError::AmountExceedsCap => write!(f, "bud-to-eth: amount exceeds bridge cap"),
+            BudToEthError::BurnDebitNotRecorded => {
+                write!(f, "bud-to-eth: the burn recorded no net debit")
+            }
         }
     }
 }
@@ -88,7 +92,6 @@ pub const DEFAULT_BRIDGE_CAP: u128 = 1_000_000_000_000; // 1T $BUD (6 decimals)
 /// from a Budlum node and produces a `BudToEthClaim`, the calldata to be sent to
 /// the Ethereum bridge contract. The Ethereum contract verifies Budlum finality
 /// and unlocks.
-#[allow(clippy::too_many_arguments)]
 pub fn build_bud_to_eth_claim(
     bridge: &BridgeState,
     message_id: &MessageId,
@@ -96,7 +99,6 @@ pub fn build_bud_to_eth_claim(
     finalized_header_hash: Hash32,
     finality_proof: Vec<u8>,
     burn_event_proof: Vec<u8>,
-    recipient_eth: [u8; 20],
     bridge_cap: u128,
 ) -> Result<BudToEthClaim, BudToEthError> {
     // 1. Check that the transfer exists and is in the Burned status.
@@ -112,8 +114,16 @@ pub fn build_bud_to_eth_claim(
         return Err(BudToEthError::FinalityProofMissing);
     }
 
-    // 3. Check the amount against the cap, in a single lookup.
-    let amount = transfer.amount.get();
+    // 3. The amount is the net the burn destroyed, and the cap is applied to
+    // it. The gross `amount` is the transfer's full size; the burn debited
+    // `burned_amount`, which is what left Budlum and what Ethereum may
+    // release. Asserting the gross unlocked the relayer fee a second time out
+    // of destination escrow - the fee was never burned, so it was never owed
+    // on the other side.
+    let amount = transfer.burned_amount;
+    if amount == 0 {
+        return Err(BudToEthError::BurnDebitNotRecorded);
+    }
     if u128::from(amount) > bridge_cap {
         return Err(BudToEthError::AmountExceedsCap);
     }
@@ -123,6 +133,12 @@ pub fn build_bud_to_eth_claim(
     let mut asset_id = [0u8; 32];
     let len = bytes.len().min(32);
     asset_id[..len].copy_from_slice(&bytes[..len]);
+
+    // BLG-0116 (P05-F09): the recipient is the one the burn committed,
+    // not a free parameter the caller picks here.
+    let recipient_eth = transfer
+        .recipient_eth
+        .ok_or(BudToEthError::InvalidRecipient)?;
 
     Ok(BudToEthClaim {
         message_id: *message_id,
@@ -151,7 +167,6 @@ mod tests {
             [0u8; 32],
             vec![], // an empty finality proof
             vec![],
-            [0u8; 20],
             DEFAULT_BRIDGE_CAP,
         )
         .unwrap_err();
@@ -182,8 +197,70 @@ mod tests {
             [0u8; 32],
             vec![0xFF; 100],
             vec![0xAA; 50],
-            [0xBB; 20],
             DEFAULT_BRIDGE_CAP,
         );
+    }
+
+    /// BLG-0126 (P05-F19): every named refusal is EXERCISED, not just
+    /// declared.
+    #[test]
+    fn claim_refusals_are_exercised() {
+        use crate::core::address::Address;
+        use crate::core::hash::hash_fields_bytes;
+        use crate::cross_domain::bridge::AssetId;
+
+        // A live (Locked) transfer: the claim must say NotBurned.
+        let mut bridge = BridgeState::new();
+        let a = AssetId(hash_fields_bytes(&[b"bte-neg"]));
+        bridge.register_asset(a, 1).unwrap();
+        let owner = Address::from([1u8; 32]);
+        let recipient = Address::from([2u8; 32]);
+        let (transfer, event) = bridge
+            .lock(1, 2, 10, 0, a, owner, recipient, 100, 500)
+            .unwrap();
+        let id = transfer.message_id;
+        let lock_message = event.message.unwrap();
+        let err = build_bud_to_eth_claim(
+            &bridge,
+            &id,
+            100,
+            [0u8; 32],
+            vec![1],
+            vec![],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap_err();
+        assert_eq!(err, BudToEthError::NotBurned);
+
+        // Burned (a burn needs the mint first), but the finality proof is
+        // empty: FinalityProofMissing.
+        bridge.mint(&lock_message, 11).unwrap();
+        bridge
+            .burn_with_event(id, 2, 20, 0, 500, [9u8; 20])
+            .unwrap();
+        let err = build_bud_to_eth_claim(
+            &bridge,
+            &id,
+            100,
+            [0u8; 32],
+            vec![],
+            vec![],
+            DEFAULT_BRIDGE_CAP,
+        )
+        .unwrap_err();
+        assert_eq!(err, BudToEthError::FinalityProofMissing);
+
+        // Burned with finality, but over the cap: AmountExceedsCap.
+        let err = build_bud_to_eth_claim(
+            &bridge,
+            &id,
+            100,
+            [0u8; 32],
+            vec![1],
+            vec![],
+            50, // below the burned amount (100)
+        )
+        .unwrap_err();
+        assert_eq!(err, BudToEthError::AmountExceedsCap);
     }
 }
