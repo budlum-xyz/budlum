@@ -58,13 +58,21 @@ Each client IP is rate limited (600 requests per minute).
    you run (or reach over an SSH tunnel):
 
    ```
-   bud --rpc-url http://127.0.0.1:28545 tx send \
+   bud --rpc-url http://127.0.0.1:28545 --signing-chain-id 45261 tx send \
      --key-file ./secrets/wallet.json --to 0x<recipient> --amount 1000000 --fee 1000
    ```
 
    Amounts are in base units: 1 BUD = 1,000,000 units. `bud stake`,
    `bud unstake`, `bud bns register`, `bud bns renew` and `bud bns transfer`
    sign the same way.
+
+   `--signing-chain-id` is required on every signing command (`tx send`,
+   `stake`, `delegate`, `bns ...`, `validator join`): it names the replay
+   domain the signature is valid on. It has no default, because the node's
+   `bud_chainId` answer is untrusted input - a signature carrying a chain id
+   the node chose is a signature for the node's network, not yours. The ids
+   are 45260 mainnet, 45261 testnet and 45262 devnet; the client compares the
+   flag with the node's answer and refuses to sign on a mismatch.
 4. **See it.** `GET https://explorer-api.<TESTNET_DOMAIN>/v1/txs/<hash>`
    once its block is finalized, or `/v1/addresses/<address>/txs` for the
    history. On the RPC: `bud_getTransactionByHash`, `bud query balance`.

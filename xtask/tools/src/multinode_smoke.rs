@@ -54,6 +54,12 @@ const COMPOSE_FILES: [&str; 4] = [
     "ops/docker-compose.ci.yml",
 ];
 
+/// The devnet's chain id (`ops/docker-compose.yml` inits every validator with
+/// it). `bud` refuses to sign without being told the replay domain by name:
+/// the node's own answer is untrusted input, so the one thing the client may
+/// not do is take the chain id from the peer it happens to be talking to.
+const CHAIN_ID: &str = "45262";
+
 const PAUSE: Duration = Duration::from_secs(2);
 
 fn pause(d: Duration) {
@@ -582,6 +588,28 @@ pub fn same_address(producer: &str, address: &str) -> bool {
     clean(producer) == clean(address)
 }
 
+/// The `docker compose` arguments that run the joining node's `bud validator
+/// join` inside node1, against node1's own public listener.
+#[must_use]
+fn join_args() -> [&'static str; 14] {
+    [
+        "exec",
+        "-T",
+        "node1",
+        "bud",
+        "--rpc-url",
+        "http://127.0.0.1:8545",
+        "--signing-chain-id",
+        CHAIN_ID,
+        "validator",
+        "join",
+        "--key-file",
+        "/home/budlum/ceremony/node5.key",
+        "--stake-bud",
+        "1",
+    ]
+}
+
 fn step9_join(root: &Path) -> Result<(), String> {
     println!(
         "== [9/10] join: node5 bonds stake and registers its keys, then produces a block (max 240 s) =="
@@ -596,23 +624,7 @@ fn step9_join(root: &Path) -> Result<(), String> {
     let mut joined = None;
     let mut last_error = String::new();
     for attempt in 0..5 {
-        match compose_result(
-            root,
-            &[
-                "exec",
-                "-T",
-                "node1",
-                "bud",
-                "--rpc-url",
-                "http://127.0.0.1:8545",
-                "validator",
-                "join",
-                "--key-file",
-                "/home/budlum/ceremony/node5.key",
-                "--stake-bud",
-                "1",
-            ],
-        ) {
+        match compose_result(root, &join_args()) {
             Ok(output) => {
                 joined = Some(output);
                 break;
@@ -784,5 +796,31 @@ mod tests {
         assert!(!is_synced(0, 0), "node1 at genesis proves nothing");
         assert!(!is_synced(10, -1));
         assert!(is_synced(1, 0));
+    }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::{join_args, CHAIN_ID};
+
+    /// The join is a signing path: it may not run without the chain id named,
+    /// and the id has to be the devnet the compose file stands up.
+    #[test]
+    fn the_join_names_the_chain_it_signs_for() {
+        let args = join_args();
+        let flag = args
+            .iter()
+            .position(|a| *a == "--signing-chain-id")
+            .expect("the join must pass --signing-chain-id");
+        assert_eq!(args[flag + 1], CHAIN_ID, "the flag carries the devnet id");
+        assert_eq!(CHAIN_ID, "45262", "the compose devnet runs chain 45262");
+        let subcommand = args
+            .iter()
+            .position(|a| *a == "validator")
+            .expect("the join names the validator subcommand");
+        assert!(
+            flag < subcommand,
+            "--signing-chain-id is a global flag: it precedes the subcommand"
+        );
     }
 }
