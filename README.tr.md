@@ -348,8 +348,13 @@ Aynı ağaçta asgari bir CLI istemcisi de bulunur:
 ```bash
 cargo run --bin bud -- query balance <adres>
 cargo run --bin bud -- query block latest
-cargo run --bin bud -- tx send --to <adres> --amount <n> --priv-key <hex-tohum>
+cargo run --bin bud -- tx send --to <adres> --amount <n> --priv-key <hex-tohum> --chain-id 45261
 ```
+
+`--chain-id` zorunludur ve imzanin tasidigi tekrar-oynatma alaninin tek kaynagidir:
+`45260` mainnet, `45261` testnet, `45262` devnet. Dugumun `bud_chainId` yaniti bu degerle
+karsilastirilir ve uyusmazlik imzalamadan once reddedilir; boylece baska bir agdaki bir
+dugum, imzaladiginiz transferin nerede gecerli olacagini secemez.
 
 ---
 

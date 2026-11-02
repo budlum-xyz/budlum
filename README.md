@@ -343,8 +343,13 @@ A minimal CLI client ships in the same tree:
 ```bash
 cargo run --bin bud -- query balance <address>
 cargo run --bin bud -- query block latest
-BUD_PRIV_KEY=<hex-seed> cargo run --bin bud -- tx send --to <address> --amount <n>   # or --priv-key-file <path>
+BUD_PRIV_KEY=<hex-seed> cargo run --bin bud -- tx send --to <address> --amount <n> --chain-id 45261   # or --priv-key-file <path>
 ```
+
+`--chain-id` is required and is the only source of the replay domain the signature
+carries: `45260` mainnet, `45261` testnet, `45262` devnet. The node's `bud_chainId`
+answer is compared against it and a mismatch is refused before anything is signed, so a
+node on another network cannot choose where a transfer you signed is valid.
 
 ---
 
