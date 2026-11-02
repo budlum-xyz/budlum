@@ -659,11 +659,25 @@ fn answer_challenge(
         )
         .map_err(|e| StorageTxError::ChallengeAnswerRefused(e.to_string()))?;
     if result.outcome == ChallengeOutcome::Mismatched {
-        let now_unix_secs = state.current_block_unix_secs;
-        state
-            .storage_registry
-            .begin_operator_cooldown(ctx.sender, now_unix_secs);
-        state.burned_total = state.burned_total.saturating_add(result.slashed_bond);
+        // The missed-deadline path settles a slash through `apply_bond_slash`:
+        // the cooldown starts on the block clock, the confiscated bond is
+        // counted as burned and recorded in the economics ledger, and the part
+        // of the deal's prepaid fee covering the epochs it will never serve
+        // goes back to the payer. Doing only the first two here left that fee
+        // counted by nothing: the deal has left `Active`, so
+        // `total_storage_escrowed_supply` stops counting the escrow, and the
+        // supply cap gained exactly that much minting headroom while the payer
+        // lost the fee it had prepaid. One routine for both outcomes, so they
+        // cannot diverge again.
+        crate::chain::storage_maintenance::apply_bond_slash(
+            state,
+            epoch,
+            result.deal_id,
+            ctx.sender,
+            result.slashed_bond,
+            "mismatched challenge answer",
+        )
+        .map_err(StorageTxError::ChallengeAnswerRefused)?;
     }
     if refund {
         // The bond `open_challenge` debited from this opener comes back. The
@@ -1838,6 +1852,136 @@ mod tests {
             state.get_balance(&opener),
             OPENER_FUNDS,
             "the opener called correctly and gets the bond back"
+        );
+    }
+
+    /// A wrong answer returns the payer the fee of the epochs the deal will
+    /// never serve.
+    ///
+    /// The slash takes the deal out of `Active`, and
+    /// `total_storage_escrowed_supply` only counts the unserved part of a live
+    /// deal's prepaid fee. Settling the wrong-answer path with the cooldown and
+    /// the burned bond alone therefore dropped the payer's remaining prepaid
+    /// fee out of the supply accounting entirely: it was not refunded, not
+    /// burned, and the supply cap gained exactly that much minting headroom,
+    /// while any operator could trigger it on its own deal by answering with an
+    /// empty proof. The missed-deadline path always refunded it; both outcomes
+    /// settle through the same routine now.
+    #[test]
+    fn a_wrong_answer_slash_returns_the_unserved_fee_to_the_payer() {
+        let mut state = AccountState::new();
+        let m = registered(&mut state);
+        let payer = owner();
+        let op = Address::from([20u8; 32]);
+        state.add_balance(&payer, 100_000_000);
+        state.add_balance(&op, 10_000_000);
+        state.epoch_index = 100;
+        state.current_block_unix_secs = 1_000_000;
+        crate::domain::deal_open::open_deal_escrowed(
+            &mut state,
+            &DealOpenTerms {
+                domain_id: 42,
+                manifest: &m,
+                shard_id: m.shards[0].shard_id,
+                operator: op,
+                replica_index: 0,
+                start_epoch: 100,
+                end_epoch: 200,
+                economics: crate::domain::storage_deal::StorageEconomicsParams {
+                    operator_bond: 5_000_000,
+                    // A rate high enough that the fee of half a (4,6) object's
+                    // shard over 50 epochs is more than rounding noise: at
+                    // `FEE_RATE_SCALE` = 1e9 a rate of 100 prices this deal at
+                    // one base unit per half, and `unearned` would be zero for
+                    // reasons that have nothing to do with the refund.
+                    fee_per_byte_epoch: 10_000_000,
+                },
+                merkle_proof: Some(proof()),
+                storage_root: Some([0x42u8; 32]),
+            },
+            payer,
+            100,
+            STORAGE_MIN_OPERATOR_BOND,
+            0,
+        )
+        .expect("the escrowed deal opens");
+        let deal_id = state
+            .storage_registry
+            .deals_iter()
+            .next()
+            .expect("the deal is open")
+            .deal_id;
+        let deal = state
+            .storage_registry
+            .get_deal(deal_id)
+            .expect("the deal is stored")
+            .clone();
+        assert_eq!(deal.payer, Some(payer), "the deal records its payer");
+        assert!(
+            state.total_bud_committed() > 0,
+            "the prepaid fee and the bond are escrowed"
+        );
+
+        // Half the deal is served by the time the challenge is answered.
+        state.epoch_index = 150;
+        let opener = Address::from([21u8; 32]);
+        state.add_balance(&opener, OPENER_FUNDS);
+        execute_storage_tx(&mut state, &ctx(opener), &open_challenge_tx(deal_id))
+            .expect("the challenge opens");
+        let id = only_challenge_id(&state);
+        let payer_before = state.get_balance(&payer);
+        let burned_before = state.burned_total;
+        let committed_before = state.total_bud_committed();
+
+        execute_storage_tx(
+            &mut state,
+            &ctx(op),
+            &StorageTx::AnswerChallenge {
+                challenge_id: id,
+                range_hash: ContentId([0xAA; 32]),
+                proof: Vec::new(),
+            },
+        )
+        .expect("a wrong answer is an accepted transaction");
+
+        let result = state.storage_registry.get_result(id).expect("resolved");
+        assert_eq!(result.outcome, ChallengeOutcome::Mismatched);
+        let duration = deal.duration_epochs();
+        let served = 150u64.saturating_sub(deal.deal_start_epoch).min(duration);
+        let unearned = deal
+            .total_fee(duration)
+            .saturating_sub(deal.total_fee(served));
+        assert!(unearned > 0, "the fixture leaves epochs unserved");
+        assert_eq!(
+            state.get_balance(&payer),
+            payer_before + unearned,
+            "the unserved fee returns to the payer instead of vanishing"
+        );
+        assert!(
+            state.burned_total >= burned_before + result.slashed_bond,
+            "the confiscated bond is still burned"
+        );
+        assert!(
+            state
+                .storage_registry
+                .economics
+                .events
+                .iter()
+                .any(|e| e.kind
+                    == crate::domain::storage_deal::StorageEconomicsEventKind::PayerRefund
+                    && e.deal_id == deal_id),
+            "the refund is in the storage economics ledger"
+        );
+        // The finding's measurable consequence: the slash takes the deal out of
+        // the escrow total, so the committed supply fell by the bond *and* the
+        // unserved fee. With the refund the fall is the bond alone (the fee
+        // returns to the payer's balance, which is committed supply too).
+        let committed_after = state.total_bud_committed();
+        assert!(
+            committed_before.saturating_sub(committed_after) <= u128::from(result.slashed_bond),
+            "the unserved fee left the committed total with the slash: before {committed_before}, \
+             after {committed_after}, bond {}",
+            result.slashed_bond
         );
     }
 

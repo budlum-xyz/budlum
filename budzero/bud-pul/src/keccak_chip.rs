@@ -39,6 +39,11 @@ pub enum KeccakChipError {
     TooMany(usize),
     /// The proof did not verify.
     Rejected(String),
+    /// The proof verified, but it is not bound to what the caller asked it to
+    /// prove: the chip AIR exposes no public inputs, so a proof of any batch of
+    /// permutations stands beside any statement list. Refusing is the only
+    /// honest answer until the binding exists.
+    UnboundProof,
 }
 
 /// Builds the trace of the given permutation inputs (state words in the standard

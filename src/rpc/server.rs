@@ -1071,6 +1071,24 @@ fn preflight_response(origin: &str) -> HttpResponse {
 /// Upper bound for one `social_get_feed` page, whatever limit the caller asks for.
 const MAX_SOCIAL_FEED_LIMIT: usize = 200;
 
+/// Subscription feeds one node will run at once.
+///
+/// A feed is a task that polls the chain actor every second and serializes a
+/// whole block for its own subscriber, so the ceiling is on real work, not on
+/// bookkeeping. A legitimate client needs a handful; a node serving a public
+/// dashboard needs a few dozen. 128 leaves room for both while keeping the
+/// chain actor's poll rate bounded no matter how many connections are opened.
+const MAX_SUBSCRIPTION_FEEDS: usize = 128;
+
+/// Take one of the node's subscription feed slots, or `None` when full.
+fn feed_slot() -> Option<tokio::sync::OwnedSemaphorePermit> {
+    static FEED_SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let slots = FEED_SLOTS
+        .get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_SUBSCRIPTION_FEEDS)));
+    slots.clone().try_acquire_owned().ok()
+}
+
 fn clamp_feed_limit(limit: usize) -> usize {
     limit.min(MAX_SOCIAL_FEED_LIMIT)
 }
@@ -1639,24 +1657,25 @@ impl BudlumApiServer for RpcServer {
             }
         }
 
-        let mut admitted: Vec<Transaction> = Vec::new();
-        let mut hashes: Vec<String> = Vec::new();
-        for member in bundle.into_members() {
-            let hash = member.hash.clone();
-            if let Err(e) = self.chain.add_transaction(member.clone()).await {
-                for taken in &admitted {
-                    let _ = self.chain.remove_transaction(&taken.hash).await;
-                }
-                return Err(ErrorObjectOwned::owned(
-                    -32602,
-                    format!("Bundle refused at member {}: {e}", admitted.len()),
-                    None::<()>,
-                ));
-            }
-            admitted.push(member);
-            hashes.push(Self::to_0x_hash(hash));
+        let members = bundle.into_members();
+        let hashes: Vec<String> = members
+            .iter()
+            .map(|member| Self::to_0x_hash(member.hash.clone()))
+            .collect();
+        // One call, one turn of the chain actor. The pool admits the members as
+        // a unit and its own rollback puts back everything the earlier members
+        // removed - pool evictions and replacements included. Removing the
+        // admitted members here, as this used to, left those deletions behind:
+        // a bundle refused at its last member permanently deleted the cheaper
+        // transactions its earlier members evicted, at no cost to the sender.
+        if let Err(e) = self.chain.add_transaction_bundle(members.clone()).await {
+            return Err(ErrorObjectOwned::owned(
+                -32602,
+                format!("Bundle refused: {e}"),
+                None::<()>,
+            ));
         }
-        for member in admitted {
+        for member in members {
             self.node.broadcast_tx_sync(member);
         }
         Ok(hashes)
@@ -4623,6 +4642,13 @@ impl BudlumApiServer for RpcServer {
         kind: String,
         address: Option<String>,
     ) -> jsonrpsee::core::SubscriptionResult {
+        // Each feed polls the chain actor once a second and rebuilds the whole
+        // block for its own subscriber, hex-encoding every ML-DSA signature in
+        // it. Nothing bounded how many of those one client could start: the
+        // per-IP limiter only sees the HTTP upgrade, and jsonrpsee's own cap
+        // is per connection, so 1024 subscriptions on each of 500 connections
+        // were free. This pool is the node-wide ceiling on subscription-driven
+        // work, whatever the connection count.
         let feed = match crate::rpc::subscriptions::Feed::parse(&kind, address.as_deref()) {
             Ok(feed) => feed,
             Err(message) => {
@@ -4632,9 +4658,27 @@ impl BudlumApiServer for RpcServer {
                 return Ok(());
             }
         };
+        let slot = match feed_slot() {
+            Some(slot) => slot,
+            None => {
+                pending
+                    .reject(ErrorObjectOwned::owned(
+                        -32005,
+                        "subscription limit reached; retry later",
+                        None::<()>,
+                    ))
+                    .await;
+                return Ok(());
+            }
+        };
         let sink = pending.accept().await?;
         let chain = self.chain.clone();
-        tokio::spawn(feed.run(chain, sink, Self::block_to_json));
+        tokio::spawn(async move {
+            // The permit lives as long as the feed: closing the subscription
+            // (or the feed ending on its own) returns the slot.
+            let _slot = slot;
+            feed.run(chain, sink, Self::block_to_json).await;
+        });
         Ok(())
     }
 
@@ -7344,6 +7388,33 @@ mod tests {
     fn feed_limit_is_clamped() {
         assert_eq!(clamp_feed_limit(usize::MAX), MAX_SOCIAL_FEED_LIMIT);
         assert_eq!(clamp_feed_limit(5), 5);
+    }
+
+    /// Subscription feeds are bounded node-wide, not per connection.
+    ///
+    /// Each feed polls the chain actor every second and serializes a whole
+    /// block for its own subscriber, so an unbounded fan-out let one client
+    /// multiply that work by opening connections: the per-IP limiter sees the
+    /// upgrade, and jsonrpsee's own cap is per connection. The pool of slots is
+    /// what makes the ceiling hold across connections.
+    #[test]
+    fn subscription_feeds_are_capped_node_wide() {
+        let mut held = Vec::new();
+        while let Some(slot) = feed_slot() {
+            held.push(slot);
+        }
+        assert_eq!(
+            held.len(),
+            MAX_SUBSCRIPTION_FEEDS,
+            "the pool hands out exactly its capacity"
+        );
+        assert!(feed_slot().is_none(), "a full pool refuses the next feed");
+
+        // Closing a subscription releases its slot.
+        held.pop();
+        let slot = feed_slot().expect("a released slot is reusable");
+        drop(slot);
+        drop(held);
     }
 
     #[test]

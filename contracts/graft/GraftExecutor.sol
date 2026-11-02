@@ -38,19 +38,23 @@ import {BudlumOutboundEmitter} from "../lib/BudlumOutbound.sol";
 contract GraftExecutor is BudlumOutboundEmitter {
     bytes internal constant FULFILLED_KIND = "budlum/graft/fulfilled/v1";
 
-    /// One fulfilment per intent *per solver*: a second call for the same
-    /// intent by the same solver would be a second event it could try to
+    /// One fulfilment per intent *per executing account*: a second call for the
+    /// same intent by the same account would be a second event it could try to
     /// collect on.
     ///
-    /// Scoped by the bound solver key rather than by `msg.sender` because this
-    /// contract is permissionless. A global flag made the id first-come-first-
-    /// served, so any account could burn an intent id with an empty call to a
-    /// benign target and leave the real solver unable to fulfil - a griefing
-    /// attack that costs the attacker one transaction. A slot per (intent,
-    /// solver) means one solver can only ever use up its own, and operational
-    /// key rotation inside one solver cannot mint a second collectable event
-    /// for an intent that solver already fulfilled.
-    mapping(bytes32 => mapping(bytes32 => bool)) public fulfilled;
+    /// Scoped by `msg.sender`, never by the bound solver key. A global flag made
+    /// the id first-come-first-served, so any account could burn an intent id
+    /// with a cheap call and leave the real solver unable to fulfil. Keying the
+    /// slot by the solver key only moved that attack: [`registerSolverKey`] is
+    /// permissionless and proves nothing, so any account could bind the awarded
+    /// solver's Budlum address, `execute` the intent with its own harmless
+    /// target, and spend that solver's slot - the awarded solver then reverts
+    /// `AlreadyFulfilled` forever and cannot emit the event the settlement door
+    /// requires, so the deadline arrives and anyone may collect the liveness
+    /// slash of its bond. An account can only ever use up its own slot, and the
+    /// settlement door removes the intent on the first proven fulfilment, so
+    /// two accounts of one solver still cannot collect twice.
+    mapping(bytes32 => mapping(address => bool)) public fulfilled;
 
     /// The Budlum address an origin-chain account authors fulfilments for.
     ///
@@ -113,7 +117,7 @@ contract GraftExecutor is BudlumOutboundEmitter {
         if (budlumSolver == bytes32(0)) {
             revert SolverKeyNotBound(msg.sender);
         }
-        if (fulfilled[intentId][budlumSolver]) {
+        if (fulfilled[intentId][msg.sender]) {
             revert AlreadyFulfilled(intentId);
         }
         if (msg.value > type(uint64).max) {
@@ -124,7 +128,7 @@ contract GraftExecutor is BudlumOutboundEmitter {
         if (target.code.length == 0) {
             revert CallFailed(intentId, "target has no code");
         }
-        fulfilled[intentId][budlumSolver] = true;
+        fulfilled[intentId][msg.sender] = true;
         bool ok;
         (ok, result) = target.call{value: msg.value}(data);
         if (!ok) {

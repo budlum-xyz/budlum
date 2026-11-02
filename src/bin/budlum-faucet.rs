@@ -344,7 +344,7 @@ impl Faucet {
             .call("bud_getNonce", serde_json::json!([self.address.to_hex()]))
             .await
             .and_then(|v| rpc_u64(&v, "bud_getNonce"))
-            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+            .map_err(|e| upstream_failure("bud_getNonce", &e))?;
         let nonce = chain_nonce.max(*next_nonce);
         let mut tx = Transaction::new_with_chain_id(
             self.address,
@@ -361,7 +361,7 @@ impl Faucet {
             .call("bud_estimateGas", serde_json::json!([tx]))
             .await
             .and_then(|v| rpc_u64(&v, "bud_estimateGas"))
-            .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+            .map_err(|e| upstream_failure("bud_estimateGas", &e))?;
         tx.fee = fee;
         tx.max_fee = fee;
         tx.sign_v5(&self.key);
@@ -375,9 +375,13 @@ impl Faucet {
             .call("bud_sendRawTransaction", serde_json::json!([tx]))
             .await
             .map_err(|e| {
+                // The upstream text can carry the node's URL and diagnostics,
+                // and this body is served to anonymous callers.
+                eprintln!("budlum-faucet: bud_sendRawTransaction failed: {e}");
                 (
                     StatusCode::BAD_GATEWAY,
-                    format!("submission failed or reply was lost; allowance reserved: {e}"),
+                    "submission failed or its reply was lost; the allowance is reserved"
+                        .to_string(),
                 )
             })?;
 
@@ -413,6 +417,19 @@ fn json_response(status: StatusCode, body: &serde_json::Value) -> Response<Full<
             .insert(hyper::header::CONTENT_TYPE, value);
     }
     response
+}
+
+/// A caller-facing refusal for a failed node call: the detail is logged, the
+/// body is the generic one the faucet's contract documents.
+///
+/// The upstream text is not a public interface. It carries the node's URL,
+/// host and port and its own diagnostics, and anyone can read the response.
+fn upstream_failure(method: &str, error: &str) -> (StatusCode, String) {
+    eprintln!("budlum-faucet: {method} failed: {error}");
+    (
+        StatusCode::BAD_GATEWAY,
+        "the node could not answer this request".to_string(),
+    )
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
