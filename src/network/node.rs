@@ -11,7 +11,7 @@ use libp2p::{
 };
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
@@ -266,6 +266,30 @@ fn vote_retry_due(
         }
         None => false,
     }
+}
+
+/// May this node sign a prevote at `checkpoint_height`?
+///
+/// Two ways in. The round is above every height this node has already voted,
+/// or it is the *identical* round being retried because it has no quorum yet.
+///
+/// # Why a reorged checkpoint is not voted a second time
+///
+/// A reorg can replace the block at the active finality checkpoint. The
+/// aggregator then holds a new hash at a height this node has already signed,
+/// so neither door opens and the node stays silent: signing a second, different
+/// hash at one height is equivocation, and it is the one fault a validator is
+/// slashed for. That silence is the safe half of the trade - it costs this
+/// node's vote at that height, not the network's finality, because a quorum
+/// needs two thirds and the honest validators that did not sign the abandoned
+/// hash still can.
+///
+/// Liveness resumes by itself at the next checkpoint: the interval moves the
+/// height past the high-water mark, so the first door opens again. What must
+/// not happen is the reverse - a node that re-signs to "catch up" and equivocates.
+#[must_use]
+fn prevote_is_due(checkpoint_height: u64, last_prevote_height: u64, retry: bool) -> bool {
+    checkpoint_height > last_prevote_height || retry
 }
 
 /// Whether a refused vote was refused for belonging to another round rather
@@ -837,6 +861,9 @@ pub struct Node {
     /// never doubled up by the next one starting while its cost is still
     /// being paid.
     reorg_last_completed_at: Arc<AtomicU64>,
+    /// Consecutive reconstructions that ended in an error; see
+    /// [`REORG_MAX_BACKOFF_SECS`].
+    reorg_strikes: Arc<AtomicU32>,
 }
 
 /// RAII token releasing [`Node::reorg_in_flight`] when the active reorg task exits.
@@ -865,19 +892,41 @@ impl Drop for ReorgFlightGuard {
 /// finality stays at zero. The window started at five minutes, which the
 /// multi-node smoke cannot outrun.
 ///
-/// What still bounds the work is not this number but the way it is reached:
+/// What bounds the work over time is not this number but the way it is
+/// reached, and the backoff [`REORG_MAX_BACKOFF_SECS`] puts on top of it:
 /// single-flight means one reconstruction at a time, the fork depth is capped
 /// by `MAX_REORG_DEPTH`, the candidate has to beat this chain in fork choice,
 /// and the batch only exists as the answer to a sync request this node made
 /// itself. The interval only decides how often those attempts may repeat.
 const REORG_MIN_INTERVAL_SECS: u64 = 2;
 
-/// Has the minimum interval passed since the last reconstruction finished?
+/// Ceiling of the backoff a repeatedly failing reconstruction earns.
+///
+/// The floor above is what fork healing needs; the ceiling is what one peer
+/// cannot push past. Each reconstruction that reaches `try_reorg_suffix` and
+/// comes back an error doubles the window - 2, 4, 8, 16, 32, 64 - and any
+/// outcome that is not an error (a switch, or "not a better chain") resets it
+/// to the floor. A peer cannot do work forever at two-second intervals: it can
+/// only do it at the interval its own failure rate has bought. Honest fork
+/// healing is unaffected, because the fork it presents is either taken or
+/// known to be worse, and neither is an error.
+const REORG_MAX_BACKOFF_SECS: u64 = 64;
+
+/// The interval in force after `strikes` consecutive failing reconstructions.
+#[must_use]
+fn reorg_interval_secs(strikes: u32) -> u64 {
+    REORG_MIN_INTERVAL_SECS
+        .saturating_mul(1u64 << strikes.min(5))
+        .min(REORG_MAX_BACKOFF_SECS)
+}
+
+/// Has the current interval passed since the last reconstruction finished?
 ///
 /// `>=` on the boundary, and `saturating_sub` so a clock that steps backwards
 /// reads as "no time has passed" rather than as an enormous elapsed interval.
-fn reorg_interval_elapsed(last_completed: &AtomicU64, now: u64) -> bool {
-    now.saturating_sub(last_completed.load(Ordering::Acquire)) >= REORG_MIN_INTERVAL_SECS
+fn reorg_interval_elapsed(last_completed: &AtomicU64, strikes: &AtomicU32, now: u64) -> bool {
+    now.saturating_sub(last_completed.load(Ordering::Acquire))
+        >= reorg_interval_secs(strikes.load(Ordering::Acquire))
 }
 
 /// One attempted reconstruction: releases the single-flight flag and stamps
@@ -1498,6 +1547,7 @@ impl Node {
         peer: PeerId,
         flight_guard: ReorgFlightGuard,
         last_completed: Arc<AtomicU64>,
+        strikes: Arc<AtomicU32>,
     ) {
         // Peer-independent throttle (CWE-407). A batch is cheap to send and
         // proportional to the node's own chain to act on, so an attacker who
@@ -1515,9 +1565,11 @@ impl Node {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if !reorg_interval_elapsed(&last_completed, now) {
+        if !reorg_interval_elapsed(&last_completed, &strikes, now) {
             warn!(
-                "Reorg from {peer} ignored: the previous reconstruction finished less than {REORG_MIN_INTERVAL_SECS}s ago"
+                "Reorg from {peer} ignored: the previous reconstruction finished less than {}s ago ({} consecutive failures)",
+                reorg_interval_secs(strikes.load(Ordering::Acquire)),
+                strikes.load(Ordering::Acquire)
             );
             return;
         }
@@ -1583,9 +1635,24 @@ impl Node {
         // chain and joins the suffix before copying anything, refusing a batch
         // that cannot make the chain longer for two integer comparisons.
         match chain.try_reorg_suffix(suffix).await {
-            Ok(true) => info!("Reorg to the chain of {peer} done"),
-            Ok(false) => info!("Reorg to the chain of {peer} not needed: not a better chain"),
-            Err(error) => warn!("Reorg to the chain of {peer} failed: {error}"),
+            Ok(true) => {
+                strikes.store(0, Ordering::Release);
+                info!("Reorg to the chain of {peer} done");
+            }
+            Ok(false) => {
+                strikes.store(0, Ordering::Release);
+                info!("Reorg to the chain of {peer} not needed: not a better chain");
+            }
+            Err(error) => {
+                // A reconstruction that errored did the work and bought this
+                // node nothing. The next window is twice as long, up to
+                // `REORG_MAX_BACKOFF_SECS`.
+                let earned = strikes.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+                warn!(
+                    "Reorg to the chain of {peer} failed: {error} (window now {}s)",
+                    reorg_interval_secs(earned)
+                );
+            }
         }
     }
 
@@ -2097,6 +2164,7 @@ impl Node {
             witness_requests: HashMap::new(),
             reorg_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reorg_last_completed_at: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reorg_strikes: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
     }
 
@@ -2846,8 +2914,11 @@ impl Node {
                         );
                     if agg_state.active
                         && agg_state.checkpoint_height > 0
-                        && (agg_state.checkpoint_height > self.last_prevote_height
-                            || prevote_retry)
+                        && prevote_is_due(
+                            agg_state.checkpoint_height,
+                            self.last_prevote_height,
+                            prevote_retry,
+                        )
                     {
                         if prevote_retry {
                             info!(
@@ -4782,8 +4853,9 @@ impl Node {
                                                                     let reorg_chain = self.chain.clone();
                                                                     let reorg_peer = peer;
                                                                     let last_completed = Arc::clone(&self.reorg_last_completed_at);
+                                                                    let strikes = Arc::clone(&self.reorg_strikes);
                                                                     tokio::spawn(async move {
-                                                                        Self::reorg_to_peer_suffix(reorg_chain, blocks, reorg_peer, flight_guard, last_completed).await;
+                                                                        Self::reorg_to_peer_suffix(reorg_chain, blocks, reorg_peer, flight_guard, last_completed, strikes).await;
                                                                     });
                                                                 } else {
                                                                     warn!("Sync reorg from {peer} ignored: another reorg attempt is already in flight");
@@ -5733,6 +5805,111 @@ mod sync_handler_order_tests {
         );
     }
 
+    /// A reconstruction that keeps failing buys its peer a longer window, and
+    /// an honest outcome puts it back to the floor. This is what stops one peer
+    /// from commissioning chain-wide work every two seconds: the interval grows
+    /// with its own failure rate, and a single successful - or singly
+    /// unnecessary - attempt clears it.
+    #[test]
+    fn a_failing_reconstruction_backs_off_and_a_success_clears_it() {
+        assert_eq!(
+            super::reorg_interval_secs(0),
+            super::REORG_MIN_INTERVAL_SECS
+        );
+        assert_eq!(super::reorg_interval_secs(1), 4);
+        assert_eq!(super::reorg_interval_secs(2), 8);
+        assert_eq!(super::reorg_interval_secs(3), 16);
+        assert_eq!(super::reorg_interval_secs(5), super::REORG_MAX_BACKOFF_SECS);
+        assert_eq!(
+            super::reorg_interval_secs(9),
+            super::REORG_MAX_BACKOFF_SECS,
+            "the shift saturates at the ceiling instead of overflowing"
+        );
+
+        let completed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let strikes = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let now = 1_000u64;
+        completed.store(now.saturating_sub(2), std::sync::atomic::Ordering::Release);
+        assert!(
+            super::reorg_interval_elapsed(&completed, &strikes, now),
+            "the floor lets the next attempt through after two seconds"
+        );
+        strikes.store(3, std::sync::atomic::Ordering::Release);
+        assert!(
+            !super::reorg_interval_elapsed(&completed, &strikes, now),
+            "after three failures the same two seconds are inside the window"
+        );
+        completed.store(now.saturating_sub(16), std::sync::atomic::Ordering::Release);
+        assert!(
+            super::reorg_interval_elapsed(&completed, &strikes, now),
+            "the window expires once the earned interval has passed"
+        );
+        strikes.store(0, std::sync::atomic::Ordering::Release);
+        assert!(
+            super::reorg_interval_elapsed(&completed, &strikes, now),
+            "a success returns the window to the floor"
+        );
+    }
+
+    /// A reorg that replaces the block at the active checkpoint leaves this
+    /// node silent at that height - re-signing a different hash there is
+    /// equivocation - and it votes again at the next checkpoint.
+    #[test]
+    fn a_reorged_checkpoint_is_not_voted_twice_and_the_next_one_is() {
+        // The identical round may be retried; a different hash at the same
+        // height may not, which is the whole reason the retry door exists.
+        let published = super::PublishedVote {
+            epoch: 1,
+            checkpoint_height: 10,
+            checkpoint_hash: "aa".repeat(32),
+            at: std::time::Instant::now()
+                - (super::FINALITY_VOTE_RETRY + std::time::Duration::from_secs(1)),
+        };
+        let now = std::time::Instant::now();
+        let same = super::vote_retry_due(
+            Some(&published),
+            published.epoch,
+            published.checkpoint_height,
+            &published.checkpoint_hash,
+            now,
+        );
+        let other_hash = super::vote_retry_due(
+            Some(&published),
+            published.epoch,
+            published.checkpoint_height,
+            &"bb".repeat(32),
+            now,
+        );
+        assert!(same, "the identical round is retried while it lacks quorum");
+        assert!(
+            !other_hash,
+            "a different hash at a signed height is refused"
+        );
+        assert!(
+            !super::prevote_is_due(
+                published.checkpoint_height,
+                published.checkpoint_height,
+                other_hash
+            ),
+            "so the node signs nothing at the reorged checkpoint height"
+        );
+        assert!(
+            super::prevote_is_due(
+                published.checkpoint_height + 10,
+                published.checkpoint_height,
+                false
+            ),
+            "and it votes again as soon as the interval clears the high-water mark"
+        );
+        assert!(
+            super::precommit_height_is_new(
+                published.checkpoint_height + 10,
+                published.checkpoint_height
+            ),
+            "the precommit high-water mark opens the same way"
+        );
+    }
+
     /// A peer-triggered reconstruction is throttled from completion, and an
     /// unsolicited gossip batch no longer triggers one at all.
     ///
@@ -5745,6 +5922,7 @@ mod sync_handler_order_tests {
     #[test]
     fn peer_triggered_reorgs_are_throttled_and_never_started_from_gossip() {
         let completed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let strikes = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -5752,7 +5930,7 @@ mod sync_handler_order_tests {
         // Within the window: refused.
         completed.store(now, std::sync::atomic::Ordering::Release);
         assert!(
-            !super::reorg_interval_elapsed(&completed, now),
+            !super::reorg_interval_elapsed(&completed, &strikes, now),
             "a second attempt inside the interval must be refused"
         );
         // Past the window: allowed again.
@@ -5761,7 +5939,7 @@ mod sync_handler_order_tests {
             std::sync::atomic::Ordering::Release,
         );
         assert!(
-            super::reorg_interval_elapsed(&completed, now),
+            super::reorg_interval_elapsed(&completed, &strikes, now),
             "the interval must expire measured from completion"
         );
 
