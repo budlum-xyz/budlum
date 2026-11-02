@@ -4948,16 +4948,22 @@ impl Blockchain {
     /// back out, including the pool evictions and replacements the earlier
     /// members caused. Persisting the members is the last step, so a restart
     /// never re-admits a member this node does not hold.
-    pub fn add_transaction_bundle(&mut self, transactions: Vec<Transaction>) -> Result<(), String> {
+    pub fn add_transaction_bundle(
+        &mut self,
+        transactions: Vec<Transaction>,
+    ) -> Result<(), crate::mempool::pool::BundleRefusal> {
+        use crate::mempool::pool::{BundleRefusal, MempoolError};
         for (index, transaction) in transactions.iter().enumerate() {
-            self.validate_pool_transaction(transaction)
-                .map_err(|e| format!("Invalid transaction at member {index}: {e}"))?;
+            if let Err(e) = self.validate_pool_transaction(transaction) {
+                return Err(BundleRefusal {
+                    index,
+                    cause: MempoolError::InvalidTransaction(e),
+                });
+            }
         }
         self.mempool
             .sync_scheme_registry(&self.state.scheme_registry);
-        self.mempool
-            .add_transaction_bundle(transactions.clone())
-            .map_err(|refusal| format!("Mempool error: {refusal}"))?;
+        self.mempool.add_transaction_bundle(transactions.clone())?;
         if let Some(ref store) = self.storage {
             for transaction in &transactions {
                 if let Err(e) = store.save_mempool_tx(transaction) {
@@ -4968,28 +4974,6 @@ impl Blockchain {
             }
         }
         Ok(())
-    }
-
-    /// Take a transaction back out of the mempool and the pool file.
-    ///
-    /// A bundle is admitted all or none, and the pool has no batch door: the
-    /// members go in one at a time, so a member the pool refuses has to be
-    /// able to take the ones already in back out. The pool is drained first
-    /// and the file second, so a crash between the two can only lose the
-    /// persisted copy of a transaction this node no longer holds - never the
-    /// other way round, which would have a restart re-admit it.
-    pub fn remove_transaction(&mut self, tx_hash: &str) -> Option<Transaction> {
-        let removed = self.mempool.remove_transaction(tx_hash);
-        if removed.is_some() {
-            if let Some(ref store) = self.storage {
-                if let Err(e) = store.remove_mempool_tx(tx_hash) {
-                    tracing::error!(
-                        "remove_mempool_tx failed (the transaction comes back on restart): {e}"
-                    );
-                }
-            }
-        }
-        removed
     }
 
     /// Top an account up to [`GENESIS_BALANCE`] on a development chain.
