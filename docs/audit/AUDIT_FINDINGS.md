@@ -843,6 +843,14 @@ no test, gate or lint was weakened.
   subcommand flag, because that tree has the one signing path).
 - **Regression tests:** `a_node_on_another_network_cannot_choose_the_replay_domain` and
   `the_chain_to_sign_for_is_a_global_flag` (`src/bin/bud.rs`).
+- **Follow-through, same finding (the harnesses and the docs are signing clients too):**
+  making the flag required broke every in-repo caller that had relied on the node's answer,
+  which is exactly what the check is for. `xtask/tools/src/multinode_smoke.rs` now names the
+  devnet id (45262) in `join_args`, `xtask/tools/src/testnet_rehearsal.rs` names the testnet
+  id (45261) once in `bud_args` for every scenario command, and `docs/TESTNET.md`,
+  `docs/VALIDATOR_GUIDE.md` and `docs/DELEGATION.md` show the flag on every signing example
+  plus the reason it has no default. Two tests hold the harnesses to it:
+  `the_join_names_the_chain_it_signs_for` and `every_bud_call_names_the_chain_it_signs_for`.
 - **Decision note:** a process-wide cell set once from `argv` rather than a parameter
   threaded through fourteen `send_v5` call sites. The property being defended is that no
   signing path can skip the check, and the cell makes the check the only way to obtain the
