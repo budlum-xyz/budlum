@@ -107,3 +107,31 @@ fn audit_lane_c_blg_043_unproven_mint_creates_no_supply() {
     assert_eq!(bc.state.get_balance(&lane_c_addr(99)), 0);
     assert_eq!(bc.state.total_bud_committed(), supply_before);
 }
+
+/// BLG-057: expired and replayed messages cannot be minted; the fee split cannot overflow.
+#[test]
+fn audit_lane_c_blg_057_mint_refuses_expired_and_replayed_messages() {
+    use crate::cross_domain::BridgeState;
+    let mut bs = BridgeState::new();
+    let a = AssetId([3u8; 32]);
+    bs.register_asset(a, 1).expect("asset");
+    let (owner, recipient) = (lane_c_addr(5), lane_c_addr(6));
+    let (_, event) = bs
+        .lock(1, 2, 20, 0, a, owner, recipient, 100, 1_000)
+        .expect("lock");
+    let message = event.message.expect("message");
+    assert!(bs.mint(&message, 1_001).is_err(), "expired mint refused");
+    bs.mint(&message, 1_000)
+        .expect("the expiry block itself is live");
+    assert!(bs.mint(&message, 1_000).is_err(), "replay refused");
+    let (held, fee) = crate::cross_domain::bridge::split_bridge_fee(
+        crate::core::money::Bud::new(u64::MAX),
+        10_000,
+        10,
+    )
+    .expect("the top of the range splits without overflow");
+    assert_eq!(
+        u128::from(held.get()) + u128::from(fee.get()),
+        u128::from(u64::MAX)
+    );
+}
