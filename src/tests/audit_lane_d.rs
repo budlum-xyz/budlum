@@ -232,3 +232,23 @@ fn audit_lane_d_blg_014_backup_drill_checks_the_exit_status() {
     assert!(prod.contains("!check.status.success()"));
     assert!(prod.contains("!status.success()"));
 }
+
+/// BLG-015: every standalone Rust package has its unit tests run by CI.
+#[test]
+fn audit_lane_d_blg_015_ci_runs_every_standalone_package_test_suite() {
+    let ci = read_repo(".github/workflows/ci.yml");
+    for pkg in [
+        "crates/ai-inference",
+        "crates/bpqs",
+        "crates/budscan",
+        "crates/note-packing",
+        "crates/wallet-core",
+        "xtask/tools",
+    ] {
+        assert!(
+            ci.contains(&format!("cargo test --manifest-path {pkg}/Cargo.toml"))
+                || ci.contains(&format!("cargo test --release --manifest-path {pkg}/Cargo.toml")),
+            "CI does not run the unit tests of {pkg}"
+        );
+    }
+}
