@@ -456,3 +456,26 @@ fn audit_lane_a_blg_006_reward_pool_is_paid_from_the_epoch_transition() {
     let pool = production_part(include_str!("../tokenomics/reward_pool.rs"));
     assert!(pool.contains("state.get_balance(&pool)"));
 }
+
+/// BLG-094: the archive profile carries the testnet chain id (not 42), the
+/// shipped compose file runs PoS as it claims, and the Dockerfile is English.
+#[test]
+fn audit_lane_a_blg_094_archive_profile_compose_and_dockerfile_are_consistent() {
+    let archive = include_str!("../../config/archive.toml");
+    assert!(archive.contains("chain_id = 45261"));
+    assert!(!archive.contains("chain_id = 42"));
+    let testnet = include_str!("../../config/testnet.toml");
+    assert!(testnet.contains("chain_id = 45261"));
+
+    let compose = include_str!("../../ops/docker-compose.yml");
+    assert!(compose.contains("--consensus=pos"));
+    assert!(!compose.contains("--consensus=pow"));
+    assert!(!compose.contains("--difficulty=0"));
+
+    let dockerfile = include_str!("../../ops/Dockerfile");
+    let turkish = ['\u{e7}', '\u{11f}', '\u{131}', '\u{f6}', '\u{15f}', '\u{fc}', '\u{130}', '\u{15e}', '\u{11e}', '\u{c7}', '\u{d6}', '\u{dc}'];
+    assert!(
+        !dockerfile.chars().any(|c| turkish.contains(&c)),
+        "ops/Dockerfile must be English"
+    );
+}
