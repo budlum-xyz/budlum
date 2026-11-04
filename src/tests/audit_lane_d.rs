@@ -408,3 +408,24 @@ fn audit_lane_d_blg_009_pq_verify_requires_context_and_explicit_scheme() {
         Err(PqError::PublicKeyLength { .. })
     ));
 }
+
+/// BLG-022: the light client's next-checkpoint query is a closed form, so a
+/// huge interval or a `u64::MAX` bound neither loops nor overflows.
+#[test]
+fn audit_lane_d_blg_022_next_checkpoint_height_terminates_at_the_u64_edge() {
+    use crate::light_client::{LightClient, TrustedCheckpoint};
+    let anchor = |height: u64| {
+        LightClient::new(TrustedCheckpoint {
+            height,
+            block_hash: "0".repeat(64),
+            set_hash: "0".repeat(64),
+        })
+        .unwrap()
+    };
+    assert_eq!(anchor(0).next_checkpoint_height(10, 50), Some(10));
+    assert_eq!(anchor(0).next_checkpoint_height(u64::MAX, u64::MAX), Some(u64::MAX));
+    assert_eq!(anchor(u64::MAX - 1).next_checkpoint_height(u64::MAX, u64::MAX), Some(u64::MAX));
+    assert_eq!(anchor(u64::MAX).next_checkpoint_height(10, u64::MAX), None);
+    assert_eq!(anchor(5).next_checkpoint_height(0, 100), None);
+    assert_eq!(anchor(20).next_checkpoint_height(10, 25), None);
+}
