@@ -369,3 +369,17 @@ fn audit_lane_b_blg_137_stream_commitment_is_full_width() {
     assert!(decode_frames(&wrong, frames).is_err());
 }
 
+/// BLG-070: source lock. The cache and the task memory redact every stored
+/// value and `redact_key_value` handles several pairs per line. The code lives
+/// in a standalone workspace the main crate cannot link, so this reads the
+/// source; behavioural tests are inside `crates/ai-inference`.
+#[test]
+fn audit_lane_b_blg_070_redaction_source_lock() {
+    let cache = include_str!("../../crates/ai-inference/crates/ai-knowledge/src/cache.rs");
+    let memory = include_str!("../../crates/ai-inference/crates/ai-knowledge/src/memory.rs");
+    let redact = include_str!("../../crates/ai-inference/crates/ai-knowledge/src/redact.rs");
+    assert!(cache.contains("redact_model_strings(&parsed)"));
+    assert!(memory.contains("redact_model_strings(&value)"));
+    assert!(redact.contains("A line may hold several pairs"));
+    assert!(redact.contains("pub fn redact_model_strings"));
+}
