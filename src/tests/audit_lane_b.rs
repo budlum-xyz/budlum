@@ -166,3 +166,37 @@ fn audit_lane_b_blg_059_execution_proof_binds_commitments_and_weights() {
     assert!(!check(&proof).program_hash_matches_model);
 }
 
+/// BLG-060: `AiFeeReclaim` checks the requester before marking the fee
+/// reclaimed, so a stranger cannot lock the real requester out.
+#[test]
+fn audit_lane_b_blg_060_fee_reclaim_by_stranger_leaves_no_mark() {
+    let mut state = AccountState::new();
+    let requester = Address::from([0x60; 32]);
+    let stranger = Address::from([0x61; 32]);
+    let spec = lane_b_model(requester);
+    let request = lane_b_request(requester, spec.model_id);
+    state.ai_registry.register_model(spec).expect("model");
+    state.ai_registry.submit_request(request.clone(), 0).expect("request");
+    state.current_block_height = 10_000;
+    state.add_balance(&stranger, 10);
+    state.add_balance(&requester, 10);
+    let reclaim = |from: Address| {
+        Transaction::new_with_chain_id(
+            from,
+            Address::zero(),
+            0,
+            1,
+            0,
+            vec![],
+            DEFAULT_CHAIN_ID,
+            TransactionType::AiFeeReclaim(request.request_id),
+        )
+    };
+    let err = Executor::apply_transaction_checked(&mut state, &reclaim(stranger))
+        .expect_err("a stranger must not reclaim");
+    assert_eq!(err.code(), "ai_fee_reclaim_unauthorized");
+    assert!(!state.ai_registry.reclaimed_fees.contains(&request.request_id));
+    Executor::apply_transaction_checked(&mut state, &reclaim(requester)).expect("requester");
+    assert!(state.ai_registry.reclaimed_fees.contains(&request.request_id));
+}
+
