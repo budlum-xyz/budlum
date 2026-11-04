@@ -12,3 +12,4 @@ Status vocabulary: see `baseline.md`. Conventions used below:
 
 | ID | Live status | Test name | Evidence (file + function) | Closing package | Severity suggestion | English title | Notes |
 |---|---|---|---|---|---|---|---|
+| BLG-045 | Closes by removal | - | src/domain/storage_deal.rs::StorageRegistry::open_challenge and answer_challenge (file is "Sil" in directive 5.2) | IP-07 | Kritik | StorageRegistry::open_challenge permanent 1-atom challenge immunity and unverified challenge proof | Code present on live. Partly mitigated: open_challenge now scales the opener bond with the range (required_opener_bond, OpenerBondBelowRangeCost). answer_challenge still trusts the off-chain range hash (doc comment: full hash verification deferred). Moot once the registry is deleted. |
