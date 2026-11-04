@@ -252,3 +252,17 @@ fn audit_lane_d_blg_015_ci_runs_every_standalone_package_test_suite() {
         );
     }
 }
+
+/// BLG-026 (fixed parts): no empty `assert!(true)` gate test remains in the
+/// wallet crate, and the V3 wallet uses a 24-word phrase and an
+/// NFKD-normalised password.
+#[test]
+fn audit_lane_d_blg_026_no_vacuous_gate_test_and_v3_wallet_is_24_words() {
+    for rel in ["crates/wallet-core/src/lib.rs", "crates/wallet-core/src/wallet_v3.rs"] {
+        assert!(!read_repo(rel).contains("assert!(true"));
+    }
+    let v3 = read_repo("crates/wallet-core/src/wallet_v3.rs");
+    assert!(v3.contains("24 words (256 bits of entropy)"));
+    assert!(v3.contains("InvalidEntropy"));
+    assert!(read_repo("crates/wallet-core/Cargo.toml").contains("NFKD normalized"));
+}
