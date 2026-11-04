@@ -135,3 +135,34 @@ fn audit_lane_c_blg_057_mint_refuses_expired_and_replayed_messages() {
         u128::from(u64::MAX)
     );
 }
+
+/// BLG-194: a refused relay keeps its pending entry, and the supply ceiling refuses a mint.
+#[test]
+fn audit_lane_c_blg_194_refused_relay_keeps_pending_entry_and_ceiling_holds() {
+    let mut bc = lane_c_bridge_chain();
+    let (owner, recipient) = (lane_c_addr(77), lane_c_addr(12));
+    bc.state.add_balance(&owner, 1_000);
+    let (_, lock_event) = bc
+        .lock_bridge_transfer(1, 2, 20, 0, lane_c_asset(), owner, recipient, 400, 1_000)
+        .expect("lock");
+    let message_id = lock_event.message.expect("message").message_id;
+    assert_eq!(bc.pending_relay_count(), 1);
+    let refused = crate::cross_domain::bridge_tx::submit_relay_proof(
+        &mut bc.state,
+        message_id,
+        lane_c_addr(99),
+        &crate::cross_domain::MerkleProof {
+            leaf: [0u8; 32],
+            index: 0,
+            siblings: vec![],
+        },
+        1,
+        30,
+    );
+    assert!(refused.is_err());
+    assert_eq!(bc.pending_relay_count(), 1);
+    assert!(!bc.state.settlement.relayer.is_relayed(&message_id));
+    let mut full = crate::core::account::AccountState::new();
+    full.add_balance(&lane_c_addr(1), crate::tokenomics::BUD_TOTAL_SUPPLY);
+    assert!(full.ensure_mint_headroom(1).is_err());
+}
