@@ -220,3 +220,27 @@ fn audit_lane_c_blg_130_quorum_early_decision_and_rotation_branch() {
     );
     assert_eq!(state.current_period, 0);
 }
+
+/// BLG-058: the domain registry leaf commits to the allowlist and the plugin code hash.
+#[test]
+fn audit_lane_c_blg_058_domain_leaf_commits_allowlist_and_plugin_hash() {
+    use crate::domain::registry::domain_leaf_hash;
+    let base = default_domain(7, ConsensusKind::Zk, 45262, "zk-adapter", 1);
+    let mut with_program = base.clone();
+    with_program.zk_program_allowlist.push([5u8; 32]);
+    let mut with_other = base.clone();
+    with_other.zk_program_allowlist.push([6u8; 32]);
+    let mut with_plugin = base.clone();
+    with_plugin.plugin_code_hash = Some([9u8; 32]);
+    let leaves = [
+        domain_leaf_hash(&base),
+        domain_leaf_hash(&with_program),
+        domain_leaf_hash(&with_other),
+        domain_leaf_hash(&with_plugin),
+    ];
+    for i in 0..leaves.len() {
+        for j in (i + 1)..leaves.len() {
+            assert_ne!(leaves[i], leaves[j], "leaves {i} and {j} share a digest");
+        }
+    }
+}
