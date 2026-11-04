@@ -231,3 +231,16 @@ fn audit_lane_b_blg_060_attach_after_cancel_is_refused() {
     assert!(err.contains("cancelled"), "{err}");
 }
 
+/// BLG-110 (fixed part): `BnsRegistry::default()` has the same non-zero base
+/// cost as `new()`, and an expiry overflow is an error, not an abort.
+#[test]
+fn audit_lane_b_blg_110_bns_default_cost_and_expiry_overflow_are_safe() {
+    use crate::bns::registry::BnsRegistry;
+    let default_registry = BnsRegistry::default();
+    assert_eq!(default_registry.base_cost, BnsRegistry::new().base_cost);
+    assert_ne!(default_registry.base_cost, 0);
+    let mut registry = BnsRegistry::new();
+    let owner = Address::from([0x10; 32]);
+    assert!(registry.register("alice".into(), owner, 1, u64::MAX).is_err());
+}
+
