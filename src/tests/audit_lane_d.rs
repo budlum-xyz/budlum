@@ -70,3 +70,61 @@ fn audit_lane_d_blg_012_coverage_gate_reads_the_total_and_refuses_nan() {
     assert!(prod.contains("is_finite()"));
     assert!(src.contains("fn the_total_is_read_not_the_first_file"));
 }
+
+/// BLG-016: no lock file pins a crate below the patched version of the
+/// advisories seen on 2026-11-04 (rustls, quinn-proto, rustls-webpki,
+/// webpki-roots, ctutils). Versions are compared numerically.
+#[test]
+fn audit_lane_d_blg_016_lockfiles_do_not_pin_known_vulnerable_versions() {
+    fn ver(s: &str) -> Vec<u64> {
+        s.split('.').map(|p| p.parse().unwrap_or(0)).collect()
+    }
+    let floors: &[(&str, &str)] = &[
+        ("rustls", "0.23.46"),
+        ("quinn-proto", "0.11.18"),
+        ("rustls-webpki", "0.103.16"),
+        ("webpki-roots", "1.0.10"),
+        ("ctutils", "0.4.4"),
+    ];
+    fn find(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if name != "target" && name != ".git" && name != "node_modules" {
+                    find(&p, out);
+                }
+            } else if name == "Cargo.lock" {
+                out.push(p);
+            }
+        }
+    }
+    let mut locks = Vec::new();
+    find(&repo_root(), &mut locks);
+    assert!(locks.len() >= 12, "expected the 12 tracked lock files");
+    for lock in locks {
+        let text = std::fs::read_to_string(&lock).unwrap();
+        let mut lines = text.lines();
+        while let Some(line) = lines.next() {
+            let Some(name) = line.strip_prefix("name = \"").and_then(|r| r.strip_suffix('"')) else {
+                continue;
+            };
+            let Some(version) = lines
+                .next()
+                .and_then(|l| l.strip_prefix("version = \""))
+                .and_then(|r| r.strip_suffix('"'))
+            else {
+                continue;
+            };
+            for (krate, floor) in floors {
+                if name == *krate && ver(version)[..2] == ver(floor)[..2] {
+                    assert!(
+                        ver(version) >= ver(floor),
+                        "{}: {krate} {version} is below the patched {floor}",
+                        lock.display()
+                    );
+                }
+            }
+        }
+    }
+}
