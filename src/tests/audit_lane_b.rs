@@ -356,3 +356,16 @@ fn audit_lane_b_blg_048_recipe_reemits_entropy_class_body_bit_equal() {
     assert_eq!(again.video_blob, produced.video_blob);
 }
 
+/// BLG-137: the stream check uses the full 32-byte commitment.
+#[test]
+fn audit_lane_b_blg_137_stream_commitment_is_full_width() {
+    use crate::storage::three_pipe::{decode_frames, encode_qr_video};
+    let enc = encode_qr_video(b"lane-b-stream-commitment".repeat(8).as_slice(), 64, None)
+        .expect("video");
+    let frames = &enc.pipe.frames;
+    assert!(decode_frames(&enc.pipe.stream_commitment, frames).is_ok());
+    let mut wrong = enc.pipe.stream_commitment;
+    wrong[31] ^= 1;
+    assert!(decode_frames(&wrong, frames).is_err());
+}
+
