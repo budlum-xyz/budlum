@@ -374,3 +374,85 @@ fn audit_lane_a_blg_183_missed_challenge_settles_through_one_slash_path() {
         assert!(!file.contains("BUD_OPEN_DEAL_V1"));
     }
 }
+
+/// BLG-018 (round selection and vote depth): every node derives the same
+/// finality round from the finalized height alone (the lowest unfinalized
+/// checkpoint), and a node votes only once the checkpoint has
+/// `FINALITY_VOTE_DEPTH` (4) blocks on top of it. Taking the round from the tip
+/// made nodes one block apart vote at different checkpoints and no quorum ever
+/// formed. This does not replace a four-node run, which was not possible in
+/// the lane environment (see the lane file).
+#[test]
+fn audit_lane_a_blg_018_finality_round_is_the_lowest_unfinalized_checkpoint_after_vote_depth() {
+    let producer = Address::from([0x18; 32]);
+    let mut bc = Blockchain::new(Arc::new(PoWEngine::new(0)), None, 45262, None);
+    let interval = crate::core::chain_config::finality_checkpoint_interval_for_chain_id(45262);
+    assert!(interval > 0);
+
+    // Tip three blocks above the first checkpoint: too shallow to vote.
+    for _ in 0..(interval + 3) {
+        bc.produce_block(producer).expect("block");
+    }
+    bc.start_pending_finality_round();
+    assert!(
+        bc.finality_aggregator.is_none(),
+        "a checkpoint with fewer than 4 blocks on top must not start a round"
+    );
+
+    // One more block: the round starts, at the first checkpoint, not at the tip.
+    bc.produce_block(producer).expect("block");
+    bc.start_pending_finality_round();
+    let round = bc.finality_aggregator.as_ref().expect("round started");
+    assert_eq!(round.checkpoint_height, interval);
+
+    // After that checkpoint finalizes the next round is exactly one interval up.
+    bc.finalized_height = interval;
+    for _ in 0..interval {
+        bc.produce_block(producer).expect("block");
+    }
+    bc.start_pending_finality_round();
+    let next = bc.finality_aggregator.as_ref().expect("next round");
+    assert_eq!(next.checkpoint_height, interval * 2);
+}
+
+/// BLG-003: genesis supply is checked as one total. Plain allocations,
+/// the tokenomics distribution and bootstrap validator stake together may not
+/// exceed `BUD_TOTAL_SUPPLY`; each part was once checked alone.
+#[test]
+fn audit_lane_a_blg_003_genesis_issuance_is_checked_as_one_total() {
+    let mut config = crate::chain::genesis::mainnet_genesis();
+    config
+        .validate_total_issuance()
+        .expect("the pinned mainnet distribution is exactly the fixed supply");
+    config.allocations.push((Address::from([0x77; 32]), 1));
+    let error = config
+        .validate_total_issuance()
+        .expect_err("one base unit over the fixed supply must be refused");
+    assert!(error.contains("above the fixed supply"), "{error}");
+}
+
+/// BLG-005: the default secret and data directories that every profile writes
+/// to are excluded from Git (closed in the ledger; this keeps it closed).
+#[test]
+fn audit_lane_a_blg_005_default_secret_and_data_dirs_are_git_ignored() {
+    let ignore = include_str!("../../.gitignore");
+    let lines: Vec<&str> = ignore.lines().map(str::trim).collect();
+    assert!(lines.contains(&"/secrets/"), "/secrets/ must stay ignored");
+    assert!(lines.contains(&"/data/"), "/data/ must stay ignored");
+}
+
+/// BLG-006: the verification reward pool is paid by the production epoch
+/// transition, not only by tests. Source lock: the epoch-close routine in
+/// `Blockchain` calls `reward_pool::pay_epoch` with the closed epoch.
+#[test]
+fn audit_lane_a_blg_006_reward_pool_is_paid_from_the_epoch_transition() {
+    let src = production_part(include_str!("../chain/blockchain.rs"));
+    let at = src
+        .find("crate::tokenomics::reward_pool::pay_epoch(state, &schedule, closed_epoch)")
+        .expect("pay_epoch must be called from the production epoch transition");
+    let before = &src[at.saturating_sub(2500)..at];
+    assert!(before.contains("closed_epoch"));
+    // The pool pays only what it holds: the budget is capped by its balance.
+    let pool = production_part(include_str!("../tokenomics/reward_pool.rs"));
+    assert!(pool.contains("state.get_balance(&pool)"));
+}
