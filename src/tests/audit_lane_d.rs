@@ -346,3 +346,20 @@ fn audit_lane_d_blg_098_secure_rpc_defaults_survive_clap_skip() {
     let load = between(&src, "pub fn load_with_file(&mut self) {", "if let Some(path)");
     assert!(load.contains("self.apply_secure_rpc_defaults();"));
 }
+
+/// BLG-099: the API-key comparison walks the expected value in full; equal keys
+/// match, any difference or length mismatch refuses.
+#[test]
+fn audit_lane_d_blg_099_constant_time_compare_has_no_self_comparison() {
+    use crate::rpc::server::constant_time_eq_str as eq;
+    assert!(eq("secret-key", "secret-key"));
+    assert!(!eq("secret-kex", "secret-key"));
+    assert!(!eq("secret", "secret-key"));
+    assert!(!eq("secret-key-and-more", "secret-key"));
+    assert!(!eq("", "secret-key"));
+    assert!(eq("", ""));
+    let src = read_repo("src/rpc/server.rs");
+    let body = between(&src, "pub fn constant_time_eq_str", "\n}\n");
+    assert!(!body.contains("a_b.ct_eq(a_b)"));
+    assert!(!body.contains("b_b.ct_eq(b_b)"));
+}
