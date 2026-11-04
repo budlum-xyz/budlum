@@ -185,3 +185,14 @@ fn audit_lane_d_blg_010_pkcs11_label_is_applied_before_the_key_is_bound() {
     assert!(src.contains("fn require_single_key"));
     assert!(src.contains("refusing to guess, set an explicit key label"));
 }
+
+/// BLG-011: the shipped systemd unit supplies the RPC key variable and closes
+/// core dumps instead of opening them.
+#[test]
+fn audit_lane_d_blg_011_service_unit_sets_rpc_key_and_closes_core_dumps() {
+    let unit = read_repo("ops/budlum-core.service");
+    assert!(unit.contains("LimitCORE=0"));
+    assert!(!unit.contains("LimitCORE=infinity"));
+    assert!(unit.contains("Environment=BUDLUM_RPC_API_KEY_ENV=BUDLUM_RPC_API_KEY"));
+    assert!(unit.contains("EnvironmentFile=/etc/budlum/rpc.env"));
+}
