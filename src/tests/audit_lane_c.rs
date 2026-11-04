@@ -187,3 +187,13 @@ fn audit_lane_c_blg_052_compliance_freeze_can_be_lifted() {
         .freeze_suspicious(domain, Address::zero(), subject, [7u8; 32], 12)
         .is_err());
 }
+
+/// BLG-054 and BLG-134: non-canonical RLP and hex-prefix paths are refused.
+#[test]
+fn audit_lane_c_blg_054_non_canonical_rlp_and_hp_are_refused() {
+    use crate::cross_domain::evm::{mpt, rlp};
+    assert!(rlp::decode(&[0x81, 0x05]).is_err());
+    assert!(rlp::decode(&[0x05]).is_ok());
+    assert!(mpt::hp_decode(&[0x0f, 0x12]).is_err());
+    assert!(mpt::hp_decode(&[0x00, 0x12]).is_ok());
+}
