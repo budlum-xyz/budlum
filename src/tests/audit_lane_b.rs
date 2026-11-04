@@ -121,3 +121,48 @@ fn audit_lane_b_blg_062_registry_leaves_commit_spec_fields_and_qos_is_overflow_s
     assert_eq!(qos.avg_response_blocks, u64::MAX);
 }
 
+/// BLG-059: a proof is bound to request/result commitments, the registered
+/// program hash and the registered weights digest.
+#[test]
+fn audit_lane_b_blg_059_execution_proof_binds_commitments_and_weights() {
+    let owner = Address::from([0x59; 32]);
+    let mut spec = lane_b_model(owner);
+    spec.execution_program_hash = Some([5u8; 32]);
+    spec.execution_weights_digest = Some([7u8; 32]);
+    let request = lane_b_request(owner, spec.model_id);
+    let result = lane_b_result(&request, owner);
+    let mut proof = AiExecutionProof {
+        model_id: spec.model_id,
+        input_commitment: request.input_commitment,
+        output_commitment: result.output_commitment,
+        program_hash: [5u8; 32],
+        proof_bytes: vec![1, 2, 3],
+        steps: 1,
+        gas_used: 1,
+        weights_digest: Some([7u8; 32]),
+        public_inputs: None,
+    };
+    let check = |p: &AiExecutionProof| {
+        crate::ai::execution::verify_execution_proof_structural_with_model(
+            p,
+            &request,
+            &result,
+            Some(&spec),
+        )
+    };
+    assert!(check(&proof).is_structurally_valid());
+
+    proof.weights_digest = Some([8u8; 32]);
+    let wrong_weights = check(&proof);
+    assert!(!wrong_weights.weights_bound && !wrong_weights.is_structurally_valid());
+
+    proof.weights_digest = Some([7u8; 32]);
+    proof.output_commitment = [0xEE; 32];
+    let wrong_output = check(&proof);
+    assert!(!wrong_output.commitments_ok && !wrong_output.is_structurally_valid());
+
+    proof.output_commitment = result.output_commitment;
+    proof.program_hash = [6u8; 32];
+    assert!(!check(&proof).program_hash_matches_model);
+}
+
