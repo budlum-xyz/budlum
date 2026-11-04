@@ -168,3 +168,20 @@ fn audit_lane_d_blg_121_budscan_arweave_expiry_and_patch_paths() {
     let patch = read_repo("crates/budscan/src/patchset.rs");
     assert!(patch.contains("segment == \"..\""));
 }
+
+/// BLG-010: the PKCS#11 key label is part of the key search at connect time,
+/// and several keys are never guessed between.
+#[test]
+fn audit_lane_d_blg_010_pkcs11_label_is_applied_before_the_key_is_bound() {
+    let src = read_repo("src/crypto/pkcs11.rs");
+    let connect = between(&src, "fn connect(", "fn extract_ed25519_public_key");
+    let extract = connect
+        .find("extract_ed25519_public_key(&session, key_label.as_deref())")
+        .expect("connect must search the public key with the label");
+    let binding = connect
+        .find("verify_key_binding(&session, key_label.as_deref()")
+        .expect("connect must prove the key binding with the label");
+    assert!(extract < binding);
+    assert!(src.contains("fn require_single_key"));
+    assert!(src.contains("refusing to guess, set an explicit key label"));
+}
