@@ -59,3 +59,14 @@ fn audit_lane_d_blg_150_vote_signatures_are_domain_separated_from_block() {
     assert!(src.contains("b\"BDLM_PREVOTE_ED25519_V1\""));
     assert!(src.contains("b\"BDLM_PRECOMMIT_ED25519_V1\""));
 }
+
+/// BLG-012: the coverage ratchet reads `totals.lines.percent`, not the first
+/// file's percentage, and refuses a non-finite baseline.
+#[test]
+fn audit_lane_d_blg_012_coverage_gate_reads_the_total_and_refuses_nan() {
+    let src = read_repo("xtask/gates/src/gates/coverage.rs");
+    let prod = production_of(&src);
+    assert!(prod.contains(".get(\"totals\")"));
+    assert!(prod.contains("is_finite()"));
+    assert!(src.contains("fn the_total_is_read_not_the_first_file"));
+}
