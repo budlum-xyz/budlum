@@ -221,3 +221,14 @@ fn audit_lane_d_blg_013_all_features_is_a_buildable_composition() {
     assert!(ci.contains("Feature canary - --all-features MUST BUILD"));
     assert!(ci.contains("cargo check --all-features"));
 }
+
+/// BLG-014: the backup drill fails on a non-zero `--check-db` exit code, not
+/// only on output text.
+#[test]
+fn audit_lane_d_blg_014_backup_drill_checks_the_exit_status() {
+    let src = read_repo("xtask/tools/src/backup_drill.rs");
+    let prod = production_of(&src);
+    assert!(prod.contains("\"--check-db\""));
+    assert!(prod.contains("!check.status.success()"));
+    assert!(prod.contains("!status.success()"));
+}
