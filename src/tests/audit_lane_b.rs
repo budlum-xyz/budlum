@@ -333,3 +333,26 @@ fn audit_lane_b_blg_215_qr_video_decodes_back_to_the_object() {
     assert_eq!(raw, content);
 }
 
+/// BLG-048: a recipe over an entropy-class body re-emits the exact video.
+#[test]
+fn audit_lane_b_blg_048_recipe_reemits_entropy_class_body_bit_equal() {
+    use crate::storage::qr_video::DEFAULT_FPS;
+    use crate::storage::three_pipe::{encode_qr_video, PIPE_DEFAULT_BLOCK_LEN};
+    use crate::storage::three_recipe::{RecipeTransform, VideoRecipe};
+    use crate::storage::transformed::TransformOpts;
+    let mut content = vec![0xff, 0xd8, 0xff, 0xe0];
+    content.extend_from_slice(&[0xabu8; 4096]);
+    let produced = encode_qr_video(&content, PIPE_DEFAULT_BLOCK_LEN, None).expect("video");
+    let recipe = VideoRecipe::from_encoded(
+        &content,
+        RecipeTransform::pin_from(TransformOpts::default(), &content),
+        1,
+        PIPE_DEFAULT_BLOCK_LEN,
+        crate::storage::qr_carousel::ONESHOT_REPAIR_PERMILLAGE,
+        DEFAULT_FPS,
+        &produced,
+    );
+    let again = recipe.reemit(&content).expect("re-emit");
+    assert_eq!(again.video_blob, produced.video_blob);
+}
+
