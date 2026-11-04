@@ -196,3 +196,28 @@ fn audit_lane_d_blg_011_service_unit_sets_rpc_key_and_closes_core_dumps() {
     assert!(unit.contains("Environment=BUDLUM_RPC_API_KEY_ENV=BUDLUM_RPC_API_KEY"));
     assert!(unit.contains("EnvironmentFile=/etc/budlum/rpc.env"));
 }
+
+/// BLG-013: `--all-features` is a valid composition (no `compile_error!`) and
+/// CI holds it with a must-build canary.
+#[test]
+fn audit_lane_d_blg_013_all_features_is_a_buildable_composition() {
+    fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                walk(&p, hits);
+            } else if p.extension().is_some_and(|e| e == "rs") {
+                let text = std::fs::read_to_string(&p).unwrap_or_default();
+                if text.contains(concat!("compile", "_error!")) {
+                    hits.push(p.display().to_string());
+                }
+            }
+        }
+    }
+    let mut hits = Vec::new();
+    walk(&repo_root().join("src"), &mut hits);
+    assert!(hits.is_empty(), "feature-exclusion macros found: {hits:?}");
+    let ci = read_repo(".github/workflows/ci.yml");
+    assert!(ci.contains("Feature canary - --all-features MUST BUILD"));
+    assert!(ci.contains("cargo check --all-features"));
+}
