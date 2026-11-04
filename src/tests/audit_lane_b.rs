@@ -87,3 +87,37 @@ fn audit_lane_b_blg_106_oversize_execution_dims_refused_without_allocating() {
     assert!(spec.validate().is_err());
 }
 
+/// BLG-062: registry leaves commit to behaviour-controlling spec fields and
+/// the QoS running average cannot overflow.
+#[test]
+fn audit_lane_b_blg_062_registry_leaves_commit_spec_fields_and_qos_is_overflow_safe() {
+    let owner = Address::from([0x62; 32]);
+    let base = lane_b_model(owner);
+    let base_leaf = base.calculate_leaf();
+
+    let mut dims = base.clone();
+    dims.execution_dims = Some(vec![2, 1]);
+    assert_ne!(base_leaf, dims.calculate_leaf(), "execution_dims must be committed");
+    let mut dims_longer = dims.clone();
+    dims_longer.execution_dims = Some(vec![2, 1, 1]);
+    assert_ne!(dims.calculate_leaf(), dims_longer.calculate_leaf());
+
+    let mut modalities = base.clone();
+    modalities.modalities = crate::ai_inference::perception::ModalitySet::text_only()
+        .with_modality(crate::ai_inference::perception::PerceptionKind::Image);
+    assert_ne!(base_leaf, modalities.calculate_leaf(), "modalities must be committed");
+
+    let mut weights_a = base.clone();
+    weights_a.execution_weights_digest = Some([1u8; 32]);
+    let mut weights_b = base.clone();
+    weights_b.execution_weights_digest = Some([2u8; 32]);
+    assert_ne!(base_leaf, weights_a.calculate_leaf());
+    assert_ne!(weights_a.calculate_leaf(), weights_b.calculate_leaf());
+
+    let mut qos = AiVerifierQos::new(owner);
+    qos.avg_response_blocks = u64::MAX;
+    qos.total_results_submitted = u64::MAX - 1;
+    qos.record_result(u64::MAX, 7);
+    assert_eq!(qos.avg_response_blocks, u64::MAX);
+}
+
