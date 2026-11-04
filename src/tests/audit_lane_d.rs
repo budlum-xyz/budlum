@@ -389,3 +389,22 @@ fn audit_lane_d_blg_004_key_save_narrows_existing_wide_permissions() {
     assert_eq!(mode, 0o600, "a rewritten key file must be owner-only");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+
+/// BLG-009: the PQ verification facade names the scheme explicitly and refuses
+/// an empty FIPS 204 context before looking at any key or signature.
+#[test]
+fn audit_lane_d_blg_009_pq_verify_requires_context_and_explicit_scheme() {
+    use crate::crypto::pq::{verify, PqError};
+    use crate::crypto::scheme::SchemeId;
+    let err = verify(SchemeId::ML_DSA_65, &[0u8; 1952], b"m", b"", &[0u8; 3309]).unwrap_err();
+    assert_eq!(err, PqError::EmptyContext);
+    let long = vec![7u8; 256];
+    assert!(matches!(
+        verify(SchemeId::ML_DSA_65, &[0u8; 1952], b"m", &long, &[0u8; 3309]),
+        Err(PqError::ContextTooLong(256))
+    ));
+    assert!(matches!(
+        verify(SchemeId::ML_DSA_65, &[0u8; 10], b"m", crate::crypto::ctx::TX_V7, &[0u8; 3309]),
+        Err(PqError::PublicKeyLength { .. })
+    ));
+}
