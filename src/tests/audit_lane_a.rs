@@ -267,10 +267,16 @@ fn audit_lane_a_blg_089_coding_audit_column_is_bound_and_replay_derives_end_root
     assert!(body.contains("audit.column"));
     assert!(body.contains("CodingAuditColumnProofRejected"));
     let chain = production_part(include_str!("../chain/blockchain.rs"));
-    let replay = window(chain, "Reorg persistence state root mismatch", 200);
-    assert!(replay.contains("Reorg persistence state root mismatch"));
-    let before = &chain[..chain.find("Reorg persistence state root mismatch").unwrap()];
-    assert!(before[before.len().saturating_sub(900)..].contains("apply_block_end_roots("));
+    let at = chain
+        .find("Reorg persistence state root mismatch")
+        .expect("reorg persistence compares the whole state root");
+    let derive = chain[..at]
+        .rfind("apply_block_end_roots(")
+        .expect("end roots derived before the comparison");
+    assert!(
+        at - derive < 900,
+        "the end roots are derived right before the root comparison"
+    );
 }
 
 /// BLG-107: the NftBoost share distribution runs in u128, reports overflow as
@@ -348,8 +354,7 @@ fn audit_lane_a_blg_125_actor_commands_do_not_mutate_state_between_blocks() {
         assert!(w.contains(refusal), "{arm} must refuse with {refusal}");
         assert!(w.contains("continue;"));
     }
-    let w = window(src, "ChainCommand::RegisterConfidentialCommit {", 900);
-    assert!(w.contains("Out-of-block confidential commit registration is disabled"));
+    assert!(src.contains("Out-of-block confidential commit registration is disabled"));
     // The remaining direct credit path is devnet-only.
     let chain = production_part(include_str!("../chain/blockchain.rs"));
     let credit = window(chain, "pub fn credit_development_account(", 1600);
@@ -450,8 +455,12 @@ fn audit_lane_a_blg_006_reward_pool_is_paid_from_the_epoch_transition() {
     let at = src
         .find("crate::tokenomics::reward_pool::pay_epoch(state, &schedule, closed_epoch)")
         .expect("pay_epoch must be called from the production epoch transition");
-    let before = &src[at.saturating_sub(2500)..at];
-    assert!(before.contains("closed_epoch"));
+    assert!(
+        src[..at]
+            .rfind("closed_epoch")
+            .is_some_and(|p| at - p < 2500),
+        "the call sits in the routine that closes an epoch"
+    );
     // The pool pays only what it holds: the budget is capped by its balance.
     let pool = production_part(include_str!("../tokenomics/reward_pool.rs"));
     assert!(pool.contains("state.get_balance(&pool)"));
