@@ -145,3 +145,18 @@ fn audit_lane_c_blg_186_non_canonical_public_scalars_are_refused() {
         );
     }
 }
+
+/// BLG-142: one proof has one encoding; bytes appended after a valid proof are refused.
+#[test]
+fn audit_lane_c_blg_142_trailing_bytes_after_a_valid_proof_are_refused() {
+    let (program, vm, events) = logging_run();
+    let pi = honest_inputs(&vm, &program, &events);
+    let envelope = Prover::prove(&vm.trace, &pi, &program).expect("honest proof");
+    Prover::verify(&envelope, &pi, &program).expect("control: the clean proof verifies");
+    let mut padded = envelope.clone();
+    padded.proof_bytes.push(0);
+    assert!(
+        Prover::verify(&padded, &pi, &program).is_err(),
+        "a proof with a trailing byte must be refused"
+    );
+}
