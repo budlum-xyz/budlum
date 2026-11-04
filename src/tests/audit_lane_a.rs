@@ -107,3 +107,57 @@ fn audit_lane_a_blg_019_state_update_is_retired_for_every_sender() {
     assert_eq!(err.code(), "state_update_retired");
     assert_eq!(node.state.get_nonce(&victim), 0, "victim nonce untouched");
 }
+
+/// BLG-020: the block producer executes every candidate transaction against a
+/// disposable copy and publishes it only on success, so a transaction that
+/// fails halfway cannot leave partial writes in the selection prefix.
+/// Source-level lock (the failing-halfway fixture needs a bespoke executor
+/// arm); the residual `Executor` has no nonce or signature check of its own is
+/// recorded in the lane file.
+#[test]
+fn audit_lane_a_blg_020_producer_executes_on_a_disposable_candidate_state() {
+    let src = production_part(include_str!("../chain/blockchain.rs"));
+    let start = src
+        .find("fn collect_block_transactions(")
+        .expect("collect_block_transactions exists");
+    let body = &src[start..start + 9000.min(src.len() - start)];
+    let clone_at = body
+        .find("let mut candidate_state = temp_state.clone();")
+        .expect("candidate copy");
+    let apply_at = body
+        .find("Executor::apply_transaction_checked(&mut candidate_state, tx)")
+        .expect("apply on the candidate, not on temp_state");
+    let publish_at = body
+        .find("temp_state = candidate_state;")
+        .expect("publish only after success");
+    assert!(clone_at < apply_at && apply_at < publish_at);
+    assert!(
+        !body.contains("Executor::apply_transaction_checked(&mut temp_state"),
+        "the producer must never execute straight on the selection prefix"
+    );
+}
+
+/// BLG-021: a bond adds to an existing role stake (no override), and the
+/// out-of-block RPC doors that wrote the registry on one node are refused.
+#[test]
+fn audit_lane_a_blg_021_role_bond_is_additive_and_rpc_doors_are_refused() {
+    use crate::core::account::AccountState;
+    use crate::registry::role::roles;
+    let mut state = AccountState::new();
+    let who = Address::from([0x21; 32]);
+    state.add_balance(&who, 10_000_000);
+    let min = state.registry.params().min_stake;
+    state.bond_relayer(&who, min).unwrap();
+    state.bond_relayer(&who, 7).unwrap();
+    assert_eq!(
+        state.registry.get(&who, roles::RELAYER).unwrap().stake,
+        min + 7,
+        "a second bond must add to the stake, not replace it"
+    );
+    assert_eq!(state.get_balance(&who), 10_000_000 - min - 7);
+
+    let rpc = production_part(include_str!("../rpc/server.rs"));
+    assert!(rpc.contains("Out-of-block relayer bonding is refused"));
+    assert!(rpc.contains("Out-of-block prover bonding is refused"));
+    assert!(rpc.contains("Out-of-block role unbonding is refused"));
+}
