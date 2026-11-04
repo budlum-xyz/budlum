@@ -197,3 +197,26 @@ fn audit_lane_c_blg_054_non_canonical_rlp_and_hp_are_refused() {
     assert!(mpt::hp_decode(&[0x0f, 0x12]).is_err());
     assert!(mpt::hp_decode(&[0x00, 0x12]).is_ok());
 }
+
+/// BLG-130: the quorum short-circuit counts participants still out; rotation needs its branch.
+#[test]
+fn audit_lane_c_blg_130_quorum_early_decision_and_rotation_branch() {
+    use crate::cross_domain::evm::sync_committee::{
+        rotate_period, SyncCommitteeError, SyncCommitteeState, BLS_PUBKEY_LEN, SYNC_COMMITTEE_SIZE,
+    };
+    use crate::cross_domain::external::{lead_is_unassailable, Answer, QuorumPolicy};
+    let claim = Answer::Claim([1u8; 32]);
+    let policy = QuorumPolicy::strict(2, 16);
+    assert!(!lead_is_unassailable(&[claim, claim], &policy, 3));
+    assert!(lead_is_unassailable(&[claim, claim], &policy, 0));
+    let mut state = SyncCommitteeState {
+        current_period: 0,
+        current_sync_committee: [[0u8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+        next_sync_committee: [[0xAAu8; BLS_PUBKEY_LEN]; SYNC_COMMITTEE_SIZE],
+    };
+    assert_eq!(
+        rotate_period(&mut state),
+        Err(SyncCommitteeError::RotationBranchRequired)
+    );
+    assert_eq!(state.current_period, 0);
+}
