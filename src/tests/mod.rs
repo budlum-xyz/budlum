@@ -232,3 +232,13 @@ pub mod real_chain_fixtures;
 //.
 #[cfg(test)]
 pub mod refusal_locks;
+
+// WP-01..04 live-verification regression tests, one module per lane.
+#[cfg(test)]
+pub mod audit_lane_a;
+#[cfg(test)]
+pub mod audit_lane_b;
+#[cfg(test)]
+pub mod audit_lane_c;
+#[cfg(test)]
+pub mod audit_lane_d;

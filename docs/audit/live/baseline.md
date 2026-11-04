@@ -32,3 +32,23 @@ Latest run per workflow (queried with `gh run list --branch main`). Most recent 
 | B | `docs/audit/live/lane-b.md` | `src/tests/audit_lane_b.rs` |
 | C | `docs/audit/live/lane-c.md` | `src/tests/audit_lane_c.rs`, `budzero/tests/audit_lane_c.rs` |
 | D | `docs/audit/live/lane-d.md` | `src/tests/audit_lane_d.rs` |
+
+## New finding ID blocks
+
+Directive section 14.1 rule 9 says new findings take `BLG-268` and later. Four lanes write in parallel, so each lane owns a fixed block to avoid ID collisions. IDs are never reused or changed.
+
+| Lane | Block |
+|---|---|
+| A | BLG-268 to BLG-299 |
+| B | BLG-300 to BLG-331 |
+| C | BLG-332 to BLG-363 |
+| D | BLG-364 to BLG-395 |
+
+## Status vocabulary
+
+- `Verified`: open, with a repro test that was observed red (branch `audit/repro-<lane>`, commit SHA, output in the lane file).
+- `Verified (static)`: open, evidence is code reading only (file and function). A repro test is still owed.
+- `Previously fixed`: fixed on live `main`, with a green regression test that stays in `src/tests/audit_lane_<lane>.rs`.
+- `Invalid`: condition no longer exists. Evidence required.
+- `Closes by removal`: the code is deleted by WP-07 or another removal.
+- `Unresolved`: could not be decided. State what is missing.
