@@ -363,3 +363,13 @@ fn audit_lane_d_blg_099_constant_time_compare_has_no_self_comparison() {
     assert!(!body.contains("a_b.ct_eq(a_b)"));
     assert!(!body.contains("b_b.ct_eq(b_b)"));
 }
+
+/// BLG-200 (fixed part): `BlsKeypair::from_bytes` refuses the zero secret and a
+/// malformed encoding, and finality refuses an identity public key.
+#[test]
+fn audit_lane_d_blg_200_bls_from_bytes_refuses_zero_secret() {
+    assert!(crate::crypto::primitives::BlsKeypair::from_bytes(&[0u8; 32 + 96]).is_err());
+    assert!(crate::crypto::primitives::BlsKeypair::from_bytes(&[1u8; 5]).is_err());
+    let finality = read_repo("src/chain/finality.rs");
+    assert!(finality.contains("BLS public key is identity or not in the prime-order subgroup"));
+}
