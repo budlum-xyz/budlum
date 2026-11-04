@@ -166,3 +166,24 @@ fn audit_lane_c_blg_194_refused_relay_keeps_pending_entry_and_ceiling_holds() {
     full.add_balance(&lane_c_addr(1), crate::tokenomics::BUD_TOTAL_SUPPLY);
     assert!(full.ensure_mint_headroom(1).is_err());
 }
+
+/// BLG-052: a compliance freeze has an unfreeze.
+#[test]
+fn audit_lane_c_blg_052_compliance_freeze_can_be_lifted() {
+    use crate::registry::poa_compliance::{ComplianceDomainKind, PoaComplianceRegistry};
+    let mut registry = PoaComplianceRegistry::new();
+    let (admin, subject) = (lane_c_addr(1), lane_c_addr(2));
+    let domain = ComplianceDomainKind::PoA;
+    registry
+        .freeze_suspicious(domain, admin, subject, [7u8; 32], 10)
+        .expect("freeze");
+    assert!(registry.is_frozen(domain, &subject));
+    registry
+        .unfreeze(domain, admin, subject, [8u8; 32], 11)
+        .expect("unfreeze");
+    assert!(!registry.is_frozen(domain, &subject));
+    assert_eq!(registry.frozen_count(), 0);
+    assert!(registry
+        .freeze_suspicious(domain, Address::zero(), subject, [7u8; 32], 12)
+        .is_err());
+}
