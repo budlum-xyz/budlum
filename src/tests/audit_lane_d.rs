@@ -50,3 +50,12 @@ fn audit_lane_d_blg_117_poseidon_tag_and_recovery_digest_are_fixed() {
     assert!(digest.contains("hasher.update(self.chain_id.to_be_bytes());"));
     assert!(digest.contains("hasher.update(self.account_nonce.to_be_bytes());"));
 }
+
+/// BLG-150 (fixed part): the default prevote and precommit signatures are
+/// domain-separated from the block signature.
+#[test]
+fn audit_lane_d_blg_150_vote_signatures_are_domain_separated_from_block() {
+    let src = read_repo("src/crypto/signer.rs");
+    assert!(src.contains("b\"BDLM_PREVOTE_ED25519_V1\""));
+    assert!(src.contains("b\"BDLM_PRECOMMIT_ED25519_V1\""));
+}
