@@ -139,3 +139,17 @@ fn audit_lane_d_blg_029_forwarded_for_uses_the_rightmost_entry() {
     assert!(!body.contains(".split(',').next()"));
     assert!(body.contains("request_came_from_trusted_proxy(config, req)"));
 }
+
+/// BLG-068: budscan refuses a resolver-supplied `storage_root` the registry
+/// does not hold, requires the explicit `bud://` mark for a content id, and
+/// refuses bidi-override and path-traversal spellings.
+#[test]
+fn audit_lane_d_blg_068_budscan_does_not_badge_unproven_roots() {
+    let bns = read_repo("crates/budscan/src/bns_proof.rs");
+    assert!(bns.contains("fn a_storage_root_the_registry_does_not_hold_is_refused"));
+    assert!(bns.contains("e.storage_root == resolved.storage_root"));
+    let query = read_repo("crates/budscan/src/query.rs");
+    assert!(query.contains("fn explicit_prefixes_remove_the_ambiguity"));
+    assert!(query.contains("fn a_bidi_override_is_refused_not_displayed"));
+    assert!(query.contains("fn path_traversal_never_becomes_a_name"));
+}
