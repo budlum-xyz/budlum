@@ -153,3 +153,18 @@ fn audit_lane_d_blg_068_budscan_does_not_badge_unproven_roots() {
     assert!(query.contains("fn a_bidi_override_is_refused_not_displayed"));
     assert!(query.contains("fn path_traversal_never_becomes_a_name"));
 }
+
+/// BLG-121: budscan checks the 48-byte Arweave data root, refuses a truncated
+/// root, treats an expired name as bound to nothing, and keeps patch paths
+/// inside their tree.
+#[test]
+fn audit_lane_d_blg_121_budscan_arweave_expiry_and_patch_paths() {
+    let arweave = read_repo("crates/budscan/src/arweave.rs");
+    assert!(arweave.contains("pub fn data_root(data: &[u8]) -> [u8; 48]"));
+    assert!(arweave.contains("fn a_truncated_expected_root_is_rejected_not_verified"));
+    let bns = read_repo("crates/budscan/src/bns_proof.rs");
+    assert!(bns.contains("if entry.expires_at <= current_epoch"));
+    assert!(bns.contains("an expired name binds to no content"));
+    let patch = read_repo("crates/budscan/src/patchset.rs");
+    assert!(patch.contains("segment == \"..\""));
+}
