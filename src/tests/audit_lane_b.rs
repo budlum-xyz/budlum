@@ -319,3 +319,17 @@ fn audit_lane_b_blg_025_registry_refuses_duplicate_guardians_and_bad_root() {
     registry.register(build(vec![pq, other])).expect("a clean account registers");
 }
 
+/// BLG-215: a QR video decodes back to the object (the old ledger said there
+/// was no extraction path).
+#[test]
+fn audit_lane_b_blg_215_qr_video_decodes_back_to_the_object() {
+    use crate::storage::qr_payload::PayloadKind;
+    let content = b"lane-b-round-trip-object".repeat(10);
+    let enc = crate::storage::three_pipe::encode_qr_video(&content, 64, None).expect("encode");
+    assert!(enc.video_blob.starts_with(b"BDLV"));
+    let (kind, raw, _video) =
+        crate::storage::three_pipe::decode_qr_video(&enc.video_blob).expect("decode");
+    assert_eq!(kind, PayloadKind::ContentBytes);
+    assert_eq!(raw, content);
+}
+
