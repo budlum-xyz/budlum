@@ -128,3 +128,14 @@ fn audit_lane_d_blg_016_lockfiles_do_not_pin_known_vulnerable_versions() {
         }
     }
 }
+
+/// BLG-029: the forwarded client address is the rightmost `X-Forwarded-For`
+/// entry, honoured only from a trusted proxy.
+#[test]
+fn audit_lane_d_blg_029_forwarded_for_uses_the_rightmost_entry() {
+    let src = read_repo("src/rpc/server.rs");
+    let body = between(&src, "fn extract_client_ip<B>", "\n}\n");
+    assert!(body.contains(".split(',').next_back()"));
+    assert!(!body.contains(".split(',').next()"));
+    assert!(body.contains("request_came_from_trusted_proxy(config, req)"));
+}
