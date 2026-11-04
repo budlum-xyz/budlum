@@ -244,3 +244,38 @@ fn audit_lane_b_blg_110_bns_default_cost_and_expiry_overflow_are_safe() {
     assert!(registry.register("alice".into(), owner, 1, u64::MAX).is_err());
 }
 
+/// BLG-126 (fixed part): admission refuses a request without a perception
+/// declaration and one whose declaration names another asset than the Pollen
+/// reference; a result must commit canonically to its output bytes.
+#[test]
+fn audit_lane_b_blg_126_admission_requires_matching_perception() {
+    let mut registry = crate::ai::AiRegistry::new();
+    let owner = Address::from([0x26; 32]);
+    let spec = lane_b_model(owner);
+    registry.register_model(spec.clone()).expect("model");
+
+    let mut without = lane_b_request(owner, spec.model_id);
+    without.perception = None;
+    assert!(crate::ai_inference::admit_inference_request(&registry, &without).is_err());
+
+    let reference = crate::pollen::AiDataInputRef {
+        asset_id: crate::pollen::AssetId([0x01; 32]),
+        grant_id: crate::pollen::GrantId::from([0x02; 32]),
+    }
+    .encode();
+    let mut mismatched = lane_b_request(owner, spec.model_id);
+    mismatched.input_commitment = crate::ai::types::canonical_input_commitment(&reference);
+    mismatched.input_ref = BoundedBytes::try_new(reference).expect("bounded");
+    assert!(crate::ai_inference::admit_inference_request(&registry, &mismatched).is_err());
+
+    let request = lane_b_request(owner, spec.model_id);
+    registry
+        .lock_verifier_stake(&owner, crate::ai::registry::MIN_VERIFIER_STAKE)
+        .expect("stake");
+    registry.submit_request(request.clone(), 0).expect("request");
+    let mut bad = lane_b_result(&request, owner);
+    bad.output_ref = BoundedBytes::try_new(b"real bytes".to_vec()).expect("bounded");
+    let err = registry.submit_result(bad, 0).expect_err("non-canonical commitment");
+    assert!(err.contains("does not commit to output_ref"), "{err}");
+}
+
