@@ -279,3 +279,43 @@ fn audit_lane_b_blg_126_admission_requires_matching_perception() {
     assert!(err.contains("does not commit to output_ref"), "{err}");
 }
 
+/// BLG-025: the quantum-account registry refuses duplicate guardian keys and a
+/// `guardian_root` that does not match the guardian list.
+#[test]
+fn audit_lane_b_blg_025_registry_refuses_duplicate_guardians_and_bad_root() {
+    use crate::account_abstraction::quantum_account::QuantumAccount;
+    use crate::account_abstraction::{QuantumAccountRegistry, QuantumAccountRegistryError};
+    use crate::crypto::primitives::ML_DSA_87_PUBLIC_KEY_LEN;
+
+    let mut pq = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
+    pq[0] = 1;
+    let mut other = [0u8; ML_DSA_87_PUBLIC_KEY_LEN];
+    other[0] = 2;
+    let build = |guardians: Vec<[u8; ML_DSA_87_PUBLIC_KEY_LEN]>| QuantumAccount {
+        address: QuantumAccount::address_from_public_key(&pq),
+        pq_public_key: pq,
+        storage_root: [0u8; 32],
+        pact_root: [0u8; 32],
+        guardian_root: QuantumAccount::guardian_root(&guardians),
+        guardians,
+        multisig_threshold: 2,
+        recovery_threshold: 2,
+        timelock_blocks: 0,
+        nonce: 0,
+        balance: 0,
+        storage_bytes: 0,
+    };
+    let mut registry = QuantumAccountRegistry::new();
+    assert!(matches!(
+        registry.register(build(vec![pq, pq, other])),
+        Err(QuantumAccountRegistryError::InvalidAccount { .. })
+    ));
+    let mut bad_root = build(vec![pq, other]);
+    bad_root.guardian_root[0] ^= 0xFF;
+    assert!(matches!(
+        registry.register(bad_root),
+        Err(QuantumAccountRegistryError::InvalidAccount { .. })
+    ));
+    registry.register(build(vec![pq, other])).expect("a clean account registers");
+}
+
