@@ -373,3 +373,19 @@ fn audit_lane_d_blg_200_bls_from_bytes_refuses_zero_secret() {
     let finality = read_repo("src/chain/finality.rs");
     assert!(finality.contains("BLS public key is identity or not in the prime-order subgroup"));
 }
+
+/// BLG-004: saving a key over an existing wide-mode file narrows it to 0600.
+#[cfg(unix)]
+#[test]
+fn audit_lane_d_blg_004_key_save_narrows_existing_wide_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("kp.bin");
+    std::fs::write(&path, b"old").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let kp = crate::crypto::primitives::KeyPair::generate().unwrap();
+    kp.save(&path).unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "a rewritten key file must be owner-only");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}
