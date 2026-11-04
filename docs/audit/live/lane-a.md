@@ -11,3 +11,4 @@ Rows are written in severity order (Critical, High, Medium, Low). Special audits
 
 | ID | Live status | Test name | Evidence (file + function) | Closing package | Severity suggestion | English title | Notes |
 |---|---|---|---|---|---|---|---|
+| BLG-001 | Previously fixed | audit_lane_a_blg_001_leader_round_rerolls_seed_and_ladder_is_capped | src/consensus/pos.rs::PoSEngine::calculate_seed_with_chain (round in seed), src/consensus/mod.rs::affordable_leader_round, MAX_LEADER_ROUNDS=16, PoSEngine::validate_block round cap | WP-12 | Critical | PoS leader election cannot skip an empty height, permanent production lock | Matches ledger snapshot note (fix trace present). Round re-rolls the VRF seed (threshold is deliberately round independent). Residual: round pricing reads the verifier wall clock, see BULGU-001. Also covered by src/tests/consensus_rounds.rs and p01_consensus_rounds.rs. |
