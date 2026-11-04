@@ -200,3 +200,34 @@ fn audit_lane_b_blg_060_fee_reclaim_by_stranger_leaves_no_mark() {
     assert!(state.ai_registry.reclaimed_fees.contains(&request.request_id));
 }
 
+/// BLG-060: a proof attached after cancellation cannot reopen the request.
+#[test]
+fn audit_lane_b_blg_060_attach_after_cancel_is_refused() {
+    let mut state = AccountState::new();
+    let requester = Address::from([0x62; 32]);
+    let spec = lane_b_model(requester);
+    let request = lane_b_request(requester, spec.model_id);
+    state.ai_registry.register_model(spec.clone()).expect("model");
+    state.ai_registry.submit_request(request.clone(), 0).expect("request");
+    state
+        .ai_registry
+        .cancel_request(&request.request_id, &requester, 0)
+        .expect("cancel");
+    let proof = AiExecutionProof {
+        model_id: spec.model_id,
+        input_commitment: request.input_commitment,
+        output_commitment: [0u8; 32],
+        program_hash: [5u8; 32],
+        proof_bytes: vec![1],
+        steps: 1,
+        gas_used: 1,
+        weights_digest: None,
+        public_inputs: None,
+    };
+    let err = state
+        .ai_registry
+        .attach_execution_proof(&request.request_id, &requester, proof, false)
+        .expect_err("attach after cancel");
+    assert!(err.contains("cancelled"), "{err}");
+}
+
