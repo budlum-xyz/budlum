@@ -266,3 +266,16 @@ fn audit_lane_d_blg_026_no_vacuous_gate_test_and_v3_wallet_is_24_words() {
     assert!(v3.contains("InvalidEntropy"));
     assert!(read_repo("crates/wallet-core/Cargo.toml").contains("NFKD normalized"));
 }
+
+/// BULGU-011: the CORS layer never reflects request headers; allowed headers
+/// are a fixed list, an empty origin list emits nothing, and credentials are
+/// never allowed.
+#[test]
+fn audit_lane_d_bulgu_011_cors_does_not_reflect_request_headers() {
+    let src = read_repo("src/rpc/server.rs");
+    let prod = production_of(&src);
+    assert!(!prod.contains("access-control-request-headers"));
+    assert!(!prod.contains("access-control-allow-credentials"));
+    assert!(prod.contains("HeaderValue::from_static(\"content-type, x-api-key, authorization\")"));
+    assert!(prod.contains("if config.cors_origins.is_empty() {\n        return CorsOutcome::NotApplicable;"));
+}
