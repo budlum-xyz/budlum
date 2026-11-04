@@ -197,8 +197,8 @@ fn audit_lane_d_blg_011_service_unit_sets_rpc_key_and_closes_core_dumps() {
     assert!(unit.contains("EnvironmentFile=/etc/budlum/rpc.env"));
 }
 
-/// BLG-013: `--all-features` is a valid composition (no `compile_error!`) and
-/// CI holds it with a must-build canary.
+/// BLG-013: `--all-features` is a valid composition (no feature-exclusion
+/// macro anywhere in src/) and CI holds it with a must-build canary.
 #[test]
 fn audit_lane_d_blg_013_all_features_is_a_buildable_composition() {
     fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
