@@ -473,9 +473,108 @@ fn audit_lane_a_blg_094_archive_profile_compose_and_dockerfile_are_consistent() 
     assert!(!compose.contains("--difficulty=0"));
 
     let dockerfile = include_str!("../../ops/Dockerfile");
-    let turkish = ['\u{e7}', '\u{11f}', '\u{131}', '\u{f6}', '\u{15f}', '\u{fc}', '\u{130}', '\u{15e}', '\u{11e}', '\u{c7}', '\u{d6}', '\u{dc}'];
+    let turkish = [
+        '\u{e7}', '\u{11f}', '\u{131}', '\u{f6}', '\u{15f}', '\u{fc}', '\u{130}', '\u{15e}',
+        '\u{11e}', '\u{c7}', '\u{d6}', '\u{dc}',
+    ];
     assert!(
         !dockerfile.chars().any(|c| turkish.contains(&c)),
         "ops/Dockerfile must be English"
     );
+}
+
+/// BLG-044: finality certificates are verified with stake weight and a signer
+/// count (not a bare head count), and the account-proof trie cache is keyed by
+/// the exact account list it was built from, so it cannot serve a stale trie
+/// at the same chain height.
+#[test]
+fn audit_lane_a_blg_044_qc_import_is_weighted_and_proof_cache_is_content_keyed() {
+    let chain = production_part(include_str!("../chain/blockchain.rs"));
+    assert!(chain.contains(
+        "if stake < snapshot.quorum_stake() || verified_signers.len() < snapshot.quorum_count()"
+    ));
+    let actor = production_part(include_str!("../chain/chain_actor.rs"));
+    let cache = window(actor, "fn account_proof(&mut self", 1200);
+    assert!(cache.contains("cached.leaves.len() == accounts.len()"));
+    assert!(cache.contains("l.1 == acct.balance && l.2 == acct.nonce"));
+}
+
+/// BULGU-006: an interrupted-commit marker that cannot be read or rolled back
+/// stops the open instead of being swallowed.
+#[test]
+fn audit_lane_a_bulgu_006_interrupted_commit_recovery_errors_propagate() {
+    let db = production_part(include_str!("../storage/db.rs"));
+    assert!(
+        db.matches("recover_interrupted_commit()?;").count() >= 2,
+        "both open paths must propagate a recovery error"
+    );
+    let body = window(db, "pub fn recover_interrupted_commit(", 900);
+    assert!(
+        body.contains("IN_PROGRESS_HEIGHT holds"),
+        "a corrupt marker is an error, not height 0"
+    );
+}
+
+/// BULGU-008: replay slices the chain by `block.index`; the loader only
+/// returns a chain whose indices step by one from a verified walk, so the
+/// slice cannot go out of bounds.
+#[test]
+fn audit_lane_a_bulgu_008_stored_chain_is_walk_checked_before_replay_slices_it() {
+    let db = production_part(include_str!("../storage/db.rs"));
+    let load = window(db, "pub fn load_chain(", 2600);
+    assert!(load.contains("Self::check_walk_step("));
+}
+
+/// BULGU-013: the executor holds no lock of its own, so there is no lock error
+/// left to swallow there (the finding is invalid on live).
+#[test]
+fn audit_lane_a_bulgu_013_executor_takes_no_locks() {
+    let exec = production_part(include_str!("../execution/executor.rs"));
+    for needle in [
+        ".lock()",
+        ".read()",
+        ".write()",
+        ".try_lock()",
+        ".try_read()",
+        ".try_write()",
+    ] {
+        assert!(!exec.contains(needle), "executor.rs now calls `{needle}`");
+    }
+}
+
+/// BULGU-022: every transaction type has an apply arm. Every variant of
+/// `TransactionType` is named inside `apply_transaction_checked`.
+#[test]
+fn audit_lane_a_bulgu_022_every_transaction_type_has_an_apply_arm() {
+    let tx_src = include_str!("../core/transaction.rs");
+    let enum_start = tx_src.find("pub enum TransactionType {").expect("enum");
+    let body = &tx_src[enum_start..];
+    let body = &body[..body.find("\n}\n").expect("end of enum")];
+    let variants: Vec<&str> = body
+        .lines()
+        .skip(1)
+        .filter(|l| {
+            l.starts_with("    ") && !l.starts_with("     ") && !l.trim_start().starts_with("//")
+        })
+        .filter_map(|l| {
+            let name: &str = l.trim().split(|c: char| !c.is_alphanumeric()).next()?;
+            name.chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+                .then_some(name)
+        })
+        .collect();
+    assert!(
+        variants.len() >= 60,
+        "parsed only {} variants",
+        variants.len()
+    );
+    let exec = production_part(include_str!("../execution/executor.rs"));
+    let apply = window(exec, "pub fn apply_transaction_checked(", 400_000);
+    for v in &variants {
+        assert!(
+            apply.contains(&format!("TransactionType::{v}")),
+            "no apply arm names TransactionType::{v}"
+        );
+    }
 }
