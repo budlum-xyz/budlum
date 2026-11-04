@@ -334,3 +334,15 @@ fn audit_lane_d_blg_030_testnet_development_credit_is_refused() {
         );
     }
 }
+
+/// BLG-098 (fixed part): the clap-skipped RPC fields are restored to the secure
+/// defaults before any file or environment overlay.
+#[test]
+fn audit_lane_d_blg_098_secure_rpc_defaults_survive_clap_skip() {
+    let cfg = crate::cli::commands::NodeConfig::default();
+    assert!(cfg.rpc_auth_required);
+    assert_eq!(cfg.rpc_allowed_ips, vec!["127.0.0.1".to_string(), "::1".to_string()]);
+    let src = read_repo("src/cli/commands.rs");
+    let load = between(&src, "pub fn load_with_file(&mut self) {", "if let Some(path)");
+    assert!(load.contains("self.apply_secure_rpc_defaults();"));
+}
