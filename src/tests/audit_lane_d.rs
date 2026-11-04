@@ -279,3 +279,21 @@ fn audit_lane_d_bulgu_011_cors_does_not_reflect_request_headers() {
     assert!(prod.contains("HeaderValue::from_static(\"content-type, x-api-key, authorization\")"));
     assert!(prod.contains("if config.cors_origins.is_empty() {\n        return CorsOutcome::NotApplicable;"));
 }
+
+/// TEST-GAP-02: Kani carries a harness family for each of the four targets
+/// SECURITY.md names.
+#[test]
+fn audit_lane_d_test_gap_02_kani_covers_the_four_security_md_targets() {
+    let kani = read_repo("kani/src/lib.rs");
+    for harness in [
+        "fn penalty_never_exceeds_stake",
+        "fn merkle_sibling_index_is_in_bounds",
+        "fn classify_pq_signature_len",
+        "fn bitmap_cannot_vote_more_stake_than_the_set_holds",
+    ] {
+        assert!(kani.contains(harness), "missing {harness}");
+    }
+    assert!(read_repo("docs/SECURITY.md").contains(
+        "bond arithmetic, QC Merkle paths, PQ signature length classification, finality bitmap accounting"
+    ));
+}
