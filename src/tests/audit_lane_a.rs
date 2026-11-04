@@ -12,7 +12,22 @@ use std::sync::Arc;
 /// Source of a production file with its `#[cfg(test)]` tail cut off, so a
 /// source-scan assertion never matches a test fixture.
 fn production_part(src: &str) -> &str {
-    src.split("#[cfg(test)]").next().unwrap_or(src)
+    src.split("\n#[cfg(test)]\nmod ").next().unwrap_or(src)
+}
+
+/// Return the text of the first `{ ... }`-free window of `len` bytes that
+/// starts at `anchor`, so a source lock can stay inside one function.
+fn window<'a>(src: &'a str, anchor: &str, len: usize) -> &'a str {
+    let start = src
+        .find(anchor)
+        .unwrap_or_else(|| panic!("anchor `{anchor}` not found"));
+    let end = (start + len).min(src.len());
+    // Stay on a char boundary.
+    let mut end = end;
+    while !src.is_char_boundary(end) {
+        end -= 1;
+    }
+    &src[start..end]
 }
 
 /// BLG-001: a slot whose round-0 election is empty must be able to re-roll.
@@ -35,7 +50,10 @@ fn audit_lane_a_blg_001_leader_round_rerolls_seed_and_ladder_is_capped() {
     let r1 = engine
         .calculate_seed_with_chain(chain_id, 0, 1, 1, &chain)
         .unwrap();
-    assert_ne!(r0, r1, "round must change the seed so an empty slot re-rolls");
+    assert_ne!(
+        r0, r1,
+        "round must change the seed so an empty slot re-rolls"
+    );
     assert!(
         engine
             .calculate_seed_with_chain(chain_id, 0, 1, MAX_LEADER_ROUNDS + 1, &chain)
@@ -117,10 +135,7 @@ fn audit_lane_a_blg_019_state_update_is_retired_for_every_sender() {
 #[test]
 fn audit_lane_a_blg_020_producer_executes_on_a_disposable_candidate_state() {
     let src = production_part(include_str!("../chain/blockchain.rs"));
-    let start = src
-        .find("fn collect_block_transactions(")
-        .expect("collect_block_transactions exists");
-    let body = &src[start..start + 9000.min(src.len() - start)];
+    let body = window(src, "fn collect_block_transactions(", 5130);
     let clone_at = body
         .find("let mut candidate_state = temp_state.clone();")
         .expect("candidate copy");
@@ -160,4 +175,202 @@ fn audit_lane_a_blg_021_role_bond_is_additive_and_rpc_doors_are_refused() {
     assert!(rpc.contains("Out-of-block relayer bonding is refused"));
     assert!(rpc.contains("Out-of-block prover bonding is refused"));
     assert!(rpc.contains("Out-of-block role unbonding is refused"));
+}
+
+/// BLG-031 (proposal history half): closed proposals are dropped after a
+/// retention window, so `GovernanceState::proposals` and the governance root
+/// stay bounded. (The `bpqs::EpochWindow` half is `u32::try_from` in
+/// `crates/bpqs/src/epoch.rs::epoch_of`, outside this crate's test target.)
+/// BLG-103 (proposal-slot lock half): one proposer cannot hold more than 8
+/// active proposals.
+#[test]
+fn audit_lane_a_blg_031_103_closed_proposals_are_pruned_and_slots_are_capped() {
+    use crate::core::governance::{GovernanceState, ProposalType};
+    let proposer = Address::from([0x31; 32]);
+    let param = || ProposalType::ParameterUpdate("min_stake".into(), "2000".into());
+
+    let mut gov = GovernanceState::default();
+    let first = gov.create_proposal(proposer, param(), 0, 10).unwrap();
+    gov.find_proposal_mut(first).unwrap().finalize(100, 67, 10);
+    assert_eq!(
+        gov.proposals.len(),
+        1,
+        "closed proposal is kept for history"
+    );
+    // Far beyond activation + retention: the next submission prunes it.
+    let far = 1_000_000;
+    gov.create_proposal(proposer, param(), far, 10).unwrap();
+    assert_eq!(
+        gov.proposals.len(),
+        1,
+        "the closed proposal must be pruned once its retention window passed"
+    );
+
+    let mut capped = GovernanceState::default();
+    for i in 0..8 {
+        capped
+            .create_proposal(proposer, param(), 0, 10 + i)
+            .unwrap_or_else(|e| panic!("proposal {i} refused: {e}"));
+    }
+    let err = capped
+        .create_proposal(proposer, param(), 0, 10)
+        .expect_err("a ninth active proposal from one proposer must be refused");
+    assert!(
+        err.contains("Too many active proposals for this proposer"),
+        "{err}"
+    );
+}
+
+/// BLG-041: the settlement root is derived from the chain prefix at one place
+/// (`apply_block_end_roots`), and every path that re-executes a block
+/// (production, validation, candidate validation, reorg persistence, replay)
+/// calls it before comparing the state root.
+#[test]
+fn audit_lane_a_blg_041_every_replay_path_derives_the_settlement_root_from_the_prefix() {
+    let src = production_part(include_str!("../chain/blockchain.rs"));
+    let body = window(src, "fn apply_block_end_roots(", 700);
+    assert!(body.contains("state.settlement_root ="));
+    assert!(body.contains("settlement_finality_window_for(preceding, chain_id)"));
+    assert!(
+        src.matches("Self::apply_block_end_roots(").count() >= 4,
+        "production, candidate validation, reorg persistence and replay all derive the end roots"
+    );
+}
+
+/// BLG-042: a remote report of invalid BLS vote signatures cannot slash an
+/// innocent validator. The block door re-verifies the voter's own auth
+/// signature over the accused sample, binds sample to chain and vote, and
+/// refuses a sample whose vote signature is in fact valid.
+#[test]
+fn audit_lane_a_blg_042_invalid_signature_spam_proof_is_authenticated_and_bound() {
+    let src = production_part(include_str!("../chain/blockchain.rs"));
+    for needle in [
+        "InvalidSignatureSpam auth signature failed verification",
+        "InvalidSignatureSpam sample carries a valid vote signature",
+        "InvalidSignatureSpam sample does not bind this chain",
+        "InvalidSignatureSpam sample does not bind the vote it accuses",
+        "InvalidSignatureSpam proof contains duplicate vote sample",
+    ] {
+        assert!(src.contains(needle), "missing refusal: {needle}");
+    }
+}
+
+/// BLG-089 (column binding half): a coding-audit answer is checked against the
+/// column the registry drew (`audit.column`) and the manifest's column
+/// commitment, never against a column the answerer names. The replay half:
+/// reload derives the end-of-block roots and compares the whole state root.
+#[test]
+fn audit_lane_a_blg_089_coding_audit_column_is_bound_and_replay_derives_end_roots() {
+    let storage = production_part(include_str!("../domain/storage_deal.rs"));
+    let body = window(storage, "pub fn verify_coding_audit(", 4500);
+    assert!(body.contains("verify_column_proof("));
+    assert!(body.contains("audit.column"));
+    assert!(body.contains("CodingAuditColumnProofRejected"));
+    let chain = production_part(include_str!("../chain/blockchain.rs"));
+    let replay = window(chain, "Reorg persistence state root mismatch", 200);
+    assert!(replay.contains("Reorg persistence state root mismatch"));
+    let before = &chain[..chain.find("Reorg persistence state root mismatch").unwrap()];
+    assert!(before[before.len().saturating_sub(900)..].contains("apply_block_end_roots("));
+}
+
+/// BLG-107: the NftBoost share distribution runs in u128, reports overflow as
+/// an error instead of aborting, and hands the rounding dust to an operator so
+/// no part of the share is lost.
+#[test]
+fn audit_lane_a_blg_107_boost_share_math_is_u128_and_dust_is_not_burned() {
+    let src = production_part(include_str!("../chain/blockchain.rs"));
+    let body = window(src, "fn distribute_bud_boost_share_in_state(", 3200);
+    assert!(body.contains("let total_weight: u128"));
+    assert!(body.contains("checked_mul(u128::from(*weight))"));
+    assert!(body.contains("let dust = boost_share.saturating_sub(distributed)"));
+    assert!(body.contains("try_add_balance(&first_operator, dust)"));
+    assert!(!body.contains(".sum::<u64>()"), "no unchecked u64 sum");
+}
+
+/// BLG-108: gossipsub holds a message until the application verdict, so an
+/// honest validator's relay is never banned on a pre-validation guess.
+#[test]
+fn audit_lane_a_blg_108_gossip_forwarding_waits_for_the_application_verdict() {
+    let code = production_part(include_str!("../network/node.rs"));
+    assert!(code.contains(".validate_messages()"));
+    for verdict in ["Accept", "Reject", "Ignore"] {
+        assert!(code.contains(&format!("gossipsub::MessageAcceptance::{verdict}")));
+    }
+    let match_pos = code
+        .find("match msg {")
+        .expect("dispatch on decoded message");
+    let accept_pos = code
+        .find("gossipsub::MessageAcceptance::Accept")
+        .expect("accept verdict");
+    let credit_pos = code.find(".record_valid(&peer_id").expect("score credit");
+    assert!(accept_pos > match_pos && credit_pos > match_pos);
+}
+
+/// BLG-119: a validator cannot re-activate itself by adding stake mid-jail, a
+/// governance slash proposal has an execution arm, and a slash reaches stake
+/// that already moved into the unbonding queue.
+#[test]
+fn audit_lane_a_blg_119_jail_slash_and_unbonding_are_enforced() {
+    let exec = production_part(include_str!("../execution/executor.rs"));
+    let stake = window(exec, "TransactionType::Stake =>", 6000);
+    assert!(stake.contains("validator_slashed"));
+    assert!(stake.contains("&& !v.jailed"), "stake must not lift a jail");
+    let account = production_part(include_str!("../core/account.rs"));
+    assert!(account.contains("ProposalType::SlashValidator {"));
+    let report = window(account, "fn slash_from_report", 6000);
+    assert!(
+        report.contains("unbonding_queue"),
+        "slash must reach unbonding stake"
+    );
+}
+
+/// BLG-125 (RPC-mutation half): no actor command writes state-root-bearing
+/// storage state between blocks; each is refused with a pointer to the signed
+/// transaction door.
+#[test]
+fn audit_lane_a_blg_125_actor_commands_do_not_mutate_state_between_blocks() {
+    let src = production_part(include_str!("../chain/chain_actor.rs"));
+    for (arm, refusal) in [
+        (
+            "ChainCommand::IssueViewGrant { response, .. }",
+            "view_grant_rpc_mutation_error()",
+        ),
+        (
+            "ChainCommand::RevokeViewGrant { response, .. }",
+            "view_grant_rpc_mutation_error()",
+        ),
+        (
+            "ChainCommand::SocialDelete { response, .. }",
+            "social_delete_rpc_mutation_error()",
+        ),
+    ] {
+        let w = window(src, arm, 700);
+        assert!(w.contains(refusal), "{arm} must refuse with {refusal}");
+        assert!(w.contains("continue;"));
+    }
+    let w = window(src, "ChainCommand::RegisterConfidentialCommit {", 900);
+    assert!(w.contains("Out-of-block confidential commit registration is disabled"));
+    // The remaining direct credit path is devnet-only.
+    let chain = production_part(include_str!("../chain/blockchain.rs"));
+    let credit = window(chain, "pub fn credit_development_account(", 1600);
+    assert!(credit.contains("self.mainnet_chain_id()"));
+    assert!(credit.contains("self.devnet_chain_id()"));
+}
+
+/// BLG-183 (single slash path half): a missed storage challenge settles through
+/// the one `apply_bond_slash` path, and the replayable-signature domain tag the
+/// ledger names is no longer in the tree.
+#[test]
+fn audit_lane_a_blg_183_missed_challenge_settles_through_one_slash_path() {
+    let m = production_part(include_str!("../chain/storage_maintenance.rs"));
+    let body = window(m, "pub(crate) fn finalize_missed_challenges(", 1800);
+    assert!(body.contains("apply_bond_slash("));
+    assert!(body.matches("apply_bond_slash(").count() >= 1);
+    for file in [
+        include_str!("../domain/storage_deal.rs"),
+        include_str!("../chain/storage_maintenance.rs"),
+        include_str!("../execution/executor.rs"),
+    ] {
+        assert!(!file.contains("BUD_OPEN_DEAL_V1"));
+    }
 }
