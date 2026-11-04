@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-fn code_of(root: &Path) -> Result<String, String> {
+fn raw_of(root: &Path) -> Result<String, String> {
     let f = root.join("src/storage/generated.rs");
     if !f.is_file() {
         return Err(format!(
@@ -17,6 +17,28 @@ fn code_of(root: &Path) -> Result<String, String> {
         ));
     }
     std::fs::read_to_string(&f).map_err(|e| e.to_string())
+}
+
+fn code_of(root: &Path) -> Result<String, String> {
+    let text = raw_of(root)?;
+    // Comments and string literals are blanked: `meter.charge` or `IdMismatch`
+    // in prose must not satisfy a check.
+    Ok(super::rust_literals::scrub(&text))
+}
+
+/// The edition commitment tag is a byte-string literal, so it cannot be
+/// looked for in the scrubbed view (`scrub` blanks every literal, which made
+/// this check unsatisfiable: even the canary's clean module was refused).
+/// Look in the raw source instead, with comments removed so that naming the
+/// tag in prose still does not count as binding it.
+fn has_commitment_tag(raw: &str) -> bool {
+    let no_block = super::rust_literals::strip_block_comments(raw);
+    no_block.lines().any(|line| {
+        line.split("//")
+            .next()
+            .unwrap_or("")
+            .contains("b\"BUD_EDITION_3\"")
+    })
 }
 
 /// A float is `f32`/`f64` (types, `as` casts) or a `N.Nf` literal, with
@@ -51,8 +73,26 @@ fn has_id_check(text: &str) -> bool {
         return false;
     };
     let rest = &text[start..];
-    let end = rest.find("}\n").map_or(rest.len(), |e| e + 2);
-    let body = &rest[..end.min(rest.len())];
+    // The whole function body, brace-matched: the first `}\n` is usually an
+    // inner block.
+    let body = rest.find('{').map_or(rest, |open| {
+        let mut depth = 0i32;
+        let mut end = rest.len();
+        for (i, c) in rest[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &rest[..end]
+    });
     body.contains("ContentId::of") || body.contains("IdMismatch")
 }
 
@@ -137,7 +177,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             "BudStorageEdition::admits_body / check_source missing.\n               edition Three must refuse Stored/Hybrid/Derived at the type boundary.",
         ));
     }
-    if !code.contains("BUD_EDITION_3") {
+    if !has_commitment_tag(&raw_of(root)?) {
         return Err(String::from(
             "Three edition commitment tag BUD_EDITION_3 missing.\n               Without a bound tag, edition can be rewritten under a stable id.",
         ));
@@ -188,4 +228,28 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "generated-content canary OK (clean PASSes, float/metreless/no-edition FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_commitment_tag_is_the_byte_literal_not_a_mention() {
+        assert!(has_commitment_tag(
+            "fn t() -> Vec<u8> { b\"BUD_EDITION_3\".to_vec() }\n"
+        ));
+        assert!(!has_commitment_tag("// b\"BUD_EDITION_3\"\nfn t() {}\n"));
+        assert!(!has_commitment_tag("/* b\"BUD_EDITION_3\" */\nfn t() {}\n"));
+        assert!(!has_commitment_tag("fn t() {}\n"));
+    }
+
+    #[test]
+    fn id_check_may_sit_after_an_inner_block() {
+        let src = "fn generate_and_verify() {\n    if x {\n        y();\n    }\n    if id != want { return Err(IdMismatch); }\n}\n";
+        assert!(has_id_check(src));
+        assert!(!has_id_check(
+            "fn generate_and_verify() {\n    y();\n}\nfn other() { IdMismatch }\n"
+        ));
+    }
 }

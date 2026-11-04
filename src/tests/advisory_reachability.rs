@@ -244,14 +244,24 @@ mod tests {
     /// hide a regression if the graph ever slid back.
     #[test]
     fn patched_advisories_are_not_ignored_anywhere() {
-        let configs: [(&str, &str); 3] = [
+        let configs: [(&str, &str); 5] = [
             (
                 ".quality/deny.toml",
                 include_str!("../../.quality/deny.toml"),
             ),
+            ("osv-scanner.toml", include_str!("../../osv-scanner.toml")),
+            // BudZero and fuzz are separate workspaces with their own lockfiles
+            // and their own osv config beside them. BudZero's used to carry the
+            // yamux and hickory records, and the fuzz tree had no config at all;
+            // both were outside this test, so the drift was invisible until
+            // 2026-10-25.
             (
-                ".quality/osv-scanner.toml",
-                include_str!("../../.quality/osv-scanner.toml"),
+                "budzero/osv-scanner.toml",
+                include_str!("../../budzero/osv-scanner.toml"),
+            ),
+            (
+                "fuzz/osv-scanner.toml",
+                include_str!("../../fuzz/osv-scanner.toml"),
             ),
             (
                 ".quality/grype.yaml",
@@ -300,7 +310,7 @@ mod tests {
     }
 
     /// RUSTSEC-2026-0253 (lru `pop()` use-after-free) is waived in
-    /// `.quality/osv-scanner.toml` on one argument: the only `LruCache` in the
+    /// `osv-scanner.toml` on one argument: the only `LruCache` in the
     /// graph is rqrr's `LruCache<u8, ColoredRegion>`, and a `u8` key has no
     /// `Drop` that could panic mid-pop. The waiver is scoped to the locked
     /// version and dated; this test is what invalidates it early. It fails
@@ -340,7 +350,7 @@ mod tests {
              argument (or the rqrr upgrade that drops lru 0.16)"
         );
 
-        let osv = include_str!("../../.quality/osv-scanner.toml");
+        let osv = include_str!("../../osv-scanner.toml");
         let at = osv
             .find("name = \"lru\"")
             .expect("the lru waiver is a PackageOverrides entry, not a bare IgnoredVulns id");
@@ -350,9 +360,37 @@ mod tests {
             "the lru waiver names a version other than the locked {locked}; \
              re-read the advisory against the new version before re-scoping it"
         );
+        let until = entry
+            .split("effectiveUntil = ")
+            .nth(1)
+            .expect("the lru waiver must carry an expiry");
+        let mut parts = until
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|p| !p.is_empty())
+            .take(3)
+            .map(|p| p.parse::<i64>().expect("date part"));
+        let year = parts.next().expect("year");
+        let month = parts.next().expect("month");
+        let day = parts.next().expect("day");
+        // Days since 1970-01-01 for a proleptic Gregorian date.
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let mp = (month + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let expiry_days = era * 146_097 + doe - 719_468;
+        let now_days = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_secs()
+                / 86_400,
+        )
+        .expect("days fit");
         assert!(
-            entry.contains("effectiveUntil = "),
-            "the lru waiver must carry an expiry"
+            now_days < expiry_days,
+            "the lru waiver has expired; re-read the advisory before renewing it"
         );
         assert!(
             !osv.lines().any(|l| {

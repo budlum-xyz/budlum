@@ -49,6 +49,26 @@ fn generator_variants(code: &str) -> Vec<String> {
 /// that assumption true.
 const FROZEN_TEST_FN: &str = "fn generated_bytes_match_their_frozen_vectors";
 
+/// Quoted hex literals of eight or more digits.
+fn hex_literals(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    let bytes = s.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            let end = s[i + 1..].find('"').map_or(s.len(), |p| i + 1 + p);
+            let lit = &s[i + 1..end];
+            if lit.chars().all(|c| c.is_ascii_hexdigit()) && lit.len() >= 8 {
+                out.push(lit.to_string());
+            }
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// # Errors
 ///
 /// Returns a finding when a generator is under-pinned or the digests are not
@@ -70,31 +90,18 @@ pub fn run(root: &Path) -> Result<String, String> {
              alters every generated object would pass CI silently",
         ));
     };
+    if !crate::gates::rust_literals::has_live_test(&code, FROZEN_TEST_FN.trim_start_matches("fn "))
+    {
+        return Err(String::from(
+            "the frozen-vector function is not an enabled test: the bytes are pinned to nothing",
+        ));
+    }
     // The test body from the fn to the first closing brace at depth 1.
     let rest = &code[start..];
     let table_end = rest.find("\n    }").unwrap_or(rest.len());
     let table = &rest[..table_end];
 
-    let hex_re = |s: &str| -> Vec<String> {
-        let mut out = Vec::new();
-        let mut i = 0;
-        let bytes = s.as_bytes();
-        while i < bytes.len() {
-            if bytes[i] == b'"' {
-                let end = s[i + 1..].find('"').map_or(s.len(), |p| i + 1 + p);
-                let lit = &s[i + 1..end];
-                if lit.chars().all(|c| c.is_ascii_hexdigit()) && lit.len() >= 8 {
-                    out.push(lit.to_string());
-                }
-                i = end + 1;
-            } else {
-                i += 1;
-            }
-        }
-        out
-    };
-
-    let digests = hex_re(table);
+    let digests = hex_literals(table);
     let short: Vec<&String> = digests.iter().filter(|d| d.len() != 64).collect();
     if !short.is_empty() {
         let mut msg = String::from("these frozen digests are not 64 hex characters:\n");
@@ -105,6 +112,14 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     if digests.is_empty() {
         return Err(String::from("the frozen-vector test contains no digests"));
+    }
+    let mut distinct = digests.clone();
+    distinct.sort();
+    distinct.dedup();
+    if distinct.len() != digests.len() {
+        return Err(String::from(
+            "the frozen-vector table repeats a digest; every vector must pin its own output",
+        ));
     }
 
     for g in &generators {
@@ -179,17 +194,28 @@ pub fn self_test() -> Result<String, String> {
     let c = "c".repeat(64);
     let d = "d".repeat(64);
     let good = format!(
-        "pub enum GeneratorId {{\n    Gradient,\n    Plasma,\n}}\nfn generated_bytes_match_their_frozen_vectors() {{\n    let _: &[(GeneratorId, u8, u32, &str)] = &[\n        (\n            GeneratorId::Gradient,\n            7,\n            3072,\n            \"{a}\",\n        ),\n        (\n            GeneratorId::Gradient,\n            1,\n            192,\n            \"{b}\",\n        ),\n        (\n            GeneratorId::Plasma,\n            7,\n            3072,\n            \"{c}\",\n        ),\n        (\n            GeneratorId::Plasma,\n            1,\n            192,\n            \"{d}\",\n        ),\n    ];\n}}\n"
+        "pub enum GeneratorId {{\n    Gradient,\n    Plasma,\n}}\n#[test]\nfn generated_bytes_match_their_frozen_vectors() {{\n    let _: &[(GeneratorId, u8, u32, &str)] = &[\n        (\n            GeneratorId::Gradient,\n            7,\n            3072,\n            \"{a}\",\n        ),\n        (\n            GeneratorId::Gradient,\n            1,\n            192,\n            \"{b}\",\n        ),\n        (\n            GeneratorId::Plasma,\n            7,\n            3072,\n            \"{c}\",\n        ),\n        (\n            GeneratorId::Plasma,\n            1,\n            192,\n            \"{d}\",\n        ),\n    ];\n}}\n"
     );
-    std::fs::write(dir.join("src/storage/generated.rs"), good).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("src/storage/generated.rs"), &good).map_err(|e| e.to_string())?;
     let good_ok = run(&dir).is_ok();
 
     // Bad: only one length per generator.
     let bad = format!(
-        "pub enum GeneratorId {{\n    Gradient,\n}}\nfn generated_bytes_match_their_frozen_vectors() {{\n    let _: &[(GeneratorId, u8, u32, &str)] = &[\n        (\n            GeneratorId::Gradient,\n            7,\n            3072,\n            \"{a}\",\n        ),\n        (\n            GeneratorId::Gradient,\n            1,\n            3072,\n            \"{b}\",\n        ),\n    ];\n}}\n"
+        "pub enum GeneratorId {{\n    Gradient,\n}}\n#[test]\nfn generated_bytes_match_their_frozen_vectors() {{\n    let _: &[(GeneratorId, u8, u32, &str)] = &[\n        (\n            GeneratorId::Gradient,\n            7,\n            3072,\n            \"{a}\",\n        ),\n        (\n            GeneratorId::Gradient,\n            1,\n            3072,\n            \"{b}\",\n        ),\n    ];\n}}\n"
     );
     std::fs::write(dir.join("src/storage/generated.rs"), bad).map_err(|e| e.to_string())?;
     let bad_fails = run(&dir).is_err();
+
+    // Bad: a repeated digest, and a table that is not an enabled test.
+    std::fs::write(dir.join("src/storage/generated.rs"), good.replace(&d, &a))
+        .map_err(|e| e.to_string())?;
+    let repeat_fails = run(&dir).is_err();
+    std::fs::write(
+        dir.join("src/storage/generated.rs"),
+        good.replace("#[test]\n", ""),
+    )
+    .map_err(|e| e.to_string())?;
+    let no_test_fails = run(&dir).is_err();
 
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -198,6 +224,14 @@ pub fn self_test() -> Result<String, String> {
     }
     if !bad_fails {
         return Err(String::from("canary: a single-length pin passed"));
+    }
+    if !repeat_fails {
+        return Err(String::from("canary: a repeated digest passed"));
+    }
+    if !no_test_fails {
+        return Err(String::from(
+            "canary: a table without a test attribute passed",
+        ));
     }
     Ok(String::from(
         "zero-storage canary OK (good PASSes, single-length FAILs).",

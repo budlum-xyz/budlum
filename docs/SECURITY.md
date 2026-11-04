@@ -1,6 +1,6 @@
 # Security Policy
 
-Budlum Core is experimental Layer-1 blockchain infrastructure. Security reports are taken seriously, especially issues affecting consensus safety, deterministic execution, networking, storage integrity, cryptography, privacy, or validator operation.
+Budlum Core is experimental consensus-of-consensuses infrastructure. Security reports are taken seriously, especially issues affecting consensus safety, deterministic execution, networking, storage integrity, cryptography, privacy, or validator operation.
 
 Please do not disclose serious vulnerabilities publicly until they have been reviewed and patched.
 
@@ -26,10 +26,21 @@ If you believe you found a vulnerability, please report it privately.
 
 Preferred process:
 
-1. Open a private security advisory on GitHub if available.
-2. If private advisories are not available, contact the project maintainer directly.
+1. Open a private security advisory through GitHub:
+   https://github.com/budlum-xyz/budlum/security/advisories/new - the report,
+   the discussion and the fix stay private until an advisory is published.
+   GitHub's own description of the channel is at
+   https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability
+2. If the advisory form is unavailable to you, contact the project maintainer
+   directly instead of opening a public issue.
 3. Include enough detail to reproduce the issue.
 4. Do not publish exploit code or public issue details before coordination.
+
+The two links above are the reporting surface this policy commits to. They are
+here as addresses a reader can follow, not as decoration: the OpenSSF Scorecard
+security-policy check (the `SecurityPolicy` alert in the Security tab) reads a
+policy containing no reachable address as "no linked content found", so an
+unlinked policy scores as a weaker one than it is.
 
 Useful report details:
 
@@ -241,12 +252,9 @@ prescribed:
   every non-empty tree terminates with a single root, and every leaf's proof
   path rebuilds the root. `qc_merkle_matches_the_kani_mirror` pins the bounded
   model to the production tree.
-* Signature verification: the bounded logic around PQ attestations is the
-  length-admissibility check (`crypto::primitives::classify_pq_signature_len`).
-  The harnesses prove classification is total and round-trips, acceptability
-  never disagrees with classification, and the three accepted signature
-  lengths are pairwise distinct. `pq_signature_classification_matches_the_
-  kani_mirror` pins the constants. The finality bitmap accounting
+* Signature verification: a scheme is named by the caller and never inferred
+  from a length (`crypto::scheme`, INV-03), and the ML-DSA check runs through
+  the dual-verifier facade `crypto::pq`. The finality bitmap accounting
   (`bitmap_cannot_vote_more_stake_than_the_set_holds`) proves a certificate
   can never vote more stake than its set holds.
 

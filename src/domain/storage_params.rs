@@ -1,8 +1,7 @@
-//! B.U.D. (Broad Universal Database) - Storage ConsensusDomain parameters
-//!.
+//! B.U.D. (Broad Universal Database) - Storage ConsensusDomain parameters.
 //!
 //! Vision reference: the B.U.D. decentralised storage vision,
-//! §8.1. The vision proposes `ConsensusKind::StorageAttestation(StorageDomainParams)`
+//! The vision proposes `ConsensusKind::StorageAttestation(StorageDomainParams)`
 //! As a NEW enum variant (not a `Custom("...")` string) so the type system
 //! Forces every consumer to handle the storage parameters explicitly.
 //!
@@ -20,7 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Default chunk size, per vision §8.2 (256 KiB). Kept as a constant, the
+/// Default chunk size, per vision (256 KiB). Kept as a constant, the
 /// Per-domain `chunk_size` parameter can override it on registration.
 pub const DEFAULT_CHUNK_SIZE: u32 = 262_144;
 
@@ -33,9 +32,18 @@ pub const MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024; // 16 MiB
 /// Hard lower bound to prevent nonsense "1 byte" domains.
 pub const MIN_CHUNK_SIZE: u32 = 1024; // 1 KiB
 
+/// Minimum operator bond for a storage deal opened in a block.
+///
+/// A block carries no domain parameters, so the in-block path uses this
+/// protocol constant. It equals the default `min_operator_bond`.
+///
+/// WIRING: the in-block deal-open executor passes this as the bond floor to
+/// `deal_open::open_deal_escrowed`; that step follows this one.
+pub const STORAGE_MIN_OPERATOR_BOND: u64 = 1_000_000;
+
 /// Per-domain parameters for a `StorageAttestation` domain.
 ///
-/// The vision document calls these `StorageDomainParams` in §8.1. We follow
+/// The vision document calls these `StorageDomainParams` in We follow
 /// The same name. All numeric fields are bounded to prevent resource
 /// Exhaustion (an operator cannot register a domain with `challenge_interval`
 /// = 0 and force the chain to issue a challenge every block).
@@ -98,7 +106,7 @@ impl Default for StorageDomainParams {
 /// Used to (a) feed the domain's `config_hash` so two registrations with the
 /// Same parameters produce the same `config_hash` (so node operators can
 /// Cross-check), and (b) embed in `GlobalBlockHeader.StorageRoot` aggregation
-/// (vision §8.4).
+/// (vision).
 ///
 /// Field order is fixed and domain-tagged so it is unambiguous in the
 /// Presence of a future enum-variant addition.
@@ -115,6 +123,14 @@ pub fn storage_params_bytes(params: &StorageDomainParams) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_in_block_min_bond_equals_the_default_domain_min_bond() {
+        assert_eq!(
+            STORAGE_MIN_OPERATOR_BOND,
+            StorageDomainParams::default().min_operator_bond
+        );
+    }
 
     fn good_params() -> StorageDomainParams {
         StorageDomainParams {

@@ -209,6 +209,26 @@ fn signed_sale_authorization(asset: &DataAsset) -> crate::pollen::SaleAuthorizat
     authorization
 }
 
+/// Register a plaintext manifest owned by `owner` and return its content id.
+///
+/// `PollenRegisterDataAsset` requires positive ownership: the content id must
+/// already be registered to the sender. Without that precondition any funded
+/// account could bind - and permanently paywall - an id it does not own, so
+/// every test that lists a paid asset registers its content first.
+fn registered_plaintext_content(state: &mut AccountState, owner: Address, seed: u8) -> ContentId {
+    let bytes: Vec<u8> = (0..4096u32)
+        .map(|i| ((i % 251) as u8).wrapping_add(seed))
+        .collect();
+    let encoded =
+        crate::storage::encode_object(&bytes, crate::storage::ErasureScheme { k: 4, n: 6 })
+            .expect("encode");
+    let mut manifest = encoded.to_manifest().expect("manifest");
+    manifest.owner = owner;
+    let content_id = manifest.manifest_id;
+    state.storage_registry.register_manifest(&manifest);
+    content_id
+}
+
 fn pollen_tx(from: Address, tx_type: TransactionType, nonce: u64) -> Transaction {
     Transaction::new_with_chain_id(
         from,
@@ -234,7 +254,8 @@ fn tx_backed_pollen_asset_and_grant_unlock_ai_read() {
     let model_id = spec.model_id;
     state.ai_registry.register_model(spec).unwrap();
 
-    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x44; 32], true);
+    let content_id = registered_plaintext_content(&mut state, owner, 0x44);
+    let asset = DataAsset::new(owner, content_id, [0x44; 32], true);
     let asset_id = asset.asset_id;
     Executor::apply_transaction_checked(
         &mut state,
@@ -342,4 +363,103 @@ fn tx_backed_pollen_sale_authorization_registers_and_roundtrips_proto() {
         .marketplace
         .get_sale_authorization(&authorization.authorization_id)
         .is_some());
+}
+
+#[test]
+fn ai_request_by_a_requester_who_is_not_the_grantee_is_refused() {
+    let owner = addr(1);
+    let grantee = addr(2);
+    let stranger = addr(3);
+    let model_owner = addr(9);
+    let mut state = AccountState::new();
+    state.add_balance(&stranger, 100);
+    let spec = model_spec(model_owner);
+    let model_id = spec.model_id;
+    state.ai_registry.register_model(spec).unwrap();
+
+    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x77; 32], true);
+    let asset_id = state
+        .marketplace
+        .register_data_asset(asset.clone())
+        .unwrap();
+    let grant_id = state
+        .marketplace
+        .create_access_grant(signed_grant(&asset, grantee, 3))
+        .unwrap();
+
+    let input = AiDataInputRef { asset_id, grant_id }.encode();
+    let req = request(stranger, model_id, input, 1);
+    let outcome = Executor::apply_transaction_checked(&mut state, &ai_request_tx(stranger, req, 0));
+    assert!(outcome.is_err(), "a grant belongs to its grantee only");
+    assert_eq!(
+        state
+            .marketplace
+            .access_grants
+            .get(&grant_id)
+            .unwrap()
+            .reads_used,
+        0
+    );
+}
+
+#[test]
+fn ai_request_after_the_asset_is_revoked_is_refused_by_the_executor() {
+    let owner = addr(1);
+    let requester = addr(2);
+    let model_owner = addr(9);
+    let mut state = AccountState::new();
+    state.add_balance(&owner, 100);
+    state.add_balance(&requester, 100);
+    let spec = model_spec(model_owner);
+    let model_id = spec.model_id;
+    state.ai_registry.register_model(spec).unwrap();
+
+    let asset = DataAsset::new(owner, ContentId::of(b"private data"), [0x88; 32], true);
+    let asset_id = state
+        .marketplace
+        .register_data_asset(asset.clone())
+        .unwrap();
+    let grant_id = state
+        .marketplace
+        .create_access_grant(signed_grant(&asset, requester, 3))
+        .unwrap();
+    Executor::apply_transaction_checked(
+        &mut state,
+        &pollen_tx(owner, TransactionType::PollenRevokeDataAsset(asset_id), 0),
+    )
+    .unwrap();
+
+    let input = AiDataInputRef { asset_id, grant_id }.encode();
+    let req = request(requester, model_id, input, 1);
+    let outcome =
+        Executor::apply_transaction_checked(&mut state, &ai_request_tx(requester, req, 0));
+    assert!(outcome.is_err(), "a revoked asset cannot be read");
+}
+
+#[test]
+fn tx_backed_pollen_rejects_a_backdated_or_expired_grant() {
+    let owner = addr(1);
+    let requester = addr(2);
+    let mut state = AccountState::new();
+    state.add_balance(&owner, 100);
+    let content_id = registered_plaintext_content(&mut state, owner, 0x66);
+    let asset = DataAsset::new(owner, content_id, [0x66; 32], true);
+    Executor::apply_transaction_checked(
+        &mut state,
+        &pollen_tx(
+            owner,
+            TransactionType::PollenRegisterDataAsset(asset.clone()),
+            0,
+        ),
+    )
+    .unwrap();
+    state.current_block_height = 1_000;
+
+    let grant = signed_grant(&asset, requester, 1);
+    let err = Executor::apply_transaction_checked(
+        &mut state,
+        &pollen_tx(owner, TransactionType::PollenGrantAccess(grant), 1),
+    )
+    .unwrap_err();
+    assert_eq!(err.code(), "pollen_grant_window");
 }

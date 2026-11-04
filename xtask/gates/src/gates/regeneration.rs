@@ -59,24 +59,33 @@
 use std::fs;
 use std::path::Path;
 
-/// Canonical producer sources, embedded into the gate at compile time.
+/// Keccak-256 pins of the canonical producer sources, as committed constants.
 ///
-/// Embedding them means two things:
+/// The gate used to compare the working tree against an `include_str!` copy
+/// of the same files. Both sides come from the same checkout, so the
+/// comparison could only differ when the gate binary was built from another
+/// commit than the tree it checked: editing a producer updated the
+/// "canonical" copy in the same build and nothing turned red. A pinned hash
+/// is a constant somebody has to edit on purpose, in a gate file that the
+/// diverse-double-compiling job and review both watch, so a producer cannot
+/// change without the pin changing in the same diff.
 ///
-/// 1. If a part is **deleted** from the tree, the gate still holds its
-///    canonical content and writes it back (`run` repairs the file from
-///    this embedded copy and reports the repair).
-/// 2. If a part is **modified** (an outside attack, or an uncoordinated
-///    drift), `run` compares the on-disk content against this embedded
-///    copy and turns red with the exact path and expected hash.
+/// A missing file is a failure. The gate no longer writes the file back: it
+/// must not modify the tree it is judging, because a restored file hides a
+/// deletion in the CI workspace.
 ///
-/// An attacker who can rewrite the gate's own source can rewrite these
-/// embeddings too - that is why the gate is compiled from source in CI by
-/// two independent compilers (diverse-double-compiling) and why the
-/// `canonical-set` token is compared across them.
-const EMBEDDED_PRIVATE_TRANSFER_SRC: &str =
+/// To re-pin after an intended change, run the gate: its failure message
+/// prints the new hash of the changed file in full.
+const PINNED_PRIVATE_TRANSFER_SRC_KECCAK: &str =
+    "1f7169ee0f2a60b87b1f452d56fb4118f90c75931a0b49803e3b715b66b1d6c0";
+const PINNED_SYSCALL_CONTEXT_SRC_KECCAK: &str =
+    "040812f925e1a49c6f94b8458798a76ac9cefe65fee50dd9133be0d87341313d";
+
+/// The producer sources as they were when the pins above were taken. Used
+/// only to build fixture trees for the self-test; `run` never reads them.
+const FIXTURE_PRIVATE_TRANSFER_SRC: &str =
     include_str!("../../../../budzero/bud-vm/src/private_transfer.rs");
-const EMBEDDED_SYSCALL_CONTEXT_SRC: &str =
+const FIXTURE_SYSCALL_CONTEXT_SRC: &str =
     include_str!("../../../../budzero/bud-vm/src/syscall_context.rs");
 
 /// Decode a lowercase hex string into bytes. Only used for the canonical-set
@@ -663,7 +672,9 @@ struct Producer {
 /// These files are out of scan: the gate itself and the canary fixtures.
 fn is_scannable(path: &Path) -> bool {
     let s = path.to_string_lossy();
-    s.ends_with(".rs") && !s.contains("/target/") && !s.contains("regeneration.rs")
+    s.ends_with(".rs")
+        && !s.contains("/target/")
+        && path.file_name().is_none_or(|n| n != "regeneration.rs")
 }
 
 /// Walks the source tree and **discovers** EVERY point producing a program hash.
@@ -677,7 +688,7 @@ fn is_scannable(path: &Path) -> bool {
 /// The gate now says "find whatever is there and inspect it" rather than "inspect what I know about".
 fn discover_producers(root: &Path) -> Vec<Producer> {
     let mut out = Vec::new();
-    for base in ["src", "budzero", "wallet-core"] {
+    for base in ["src", "budzero", "crates"] {
         walk(&root.join(base), root, &mut out);
     }
     out.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
@@ -746,63 +757,69 @@ fn scan_file(path: &Path, root: &Path, text: &str, out: &mut Vec<Producer>) {
     }
 }
 
-/// A canonical part: the path of a producer source in the tree plus its
-/// canonical content embedded in this gate.
+/// A canonical producer source and the Keccak-256 pin of its bytes.
 struct CanonicalPart {
     rel_path: &'static str,
-    embedded: &'static str,
+    pinned_keccak: &'static str,
 }
 
-/// The canonical parts the gate defends. `run` checks each one; a deleted
-/// part is repaired from its embedding, a modified part turns the gate red.
+/// The canonical parts the gate defends. `run` checks each one: a missing or
+/// modified part turns the gate red.
 fn canonical_parts() -> [CanonicalPart; 2] {
     [
         CanonicalPart {
             rel_path: "budzero/bud-vm/src/private_transfer.rs",
-            embedded: EMBEDDED_PRIVATE_TRANSFER_SRC,
+            pinned_keccak: PINNED_PRIVATE_TRANSFER_SRC_KECCAK,
         },
         CanonicalPart {
             rel_path: "budzero/bud-vm/src/syscall_context.rs",
-            embedded: EMBEDDED_SYSCALL_CONTEXT_SRC,
+            pinned_keccak: PINNED_SYSCALL_CONTEXT_SRC_KECCAK,
         },
     ]
 }
 
-/// Verify the canonical parts: each producer source must be present and
-/// byte-identical to the embedded canonical content. A **deleted** part is
-/// written back from the embedding (self-repair) and reported; a
-/// **modified** part is an integrity breach and turns the gate red.
-fn verify_canonical_parts(root: &Path) -> Result<Vec<String>, String> {
-    let mut repairs: Vec<String> = Vec::new();
+/// Verify the canonical parts: each producer source must be present and its
+/// Keccak-256 must equal the committed pin. Nothing is written to the tree.
+fn verify_canonical_parts(root: &Path) -> Result<(), String> {
     for part in canonical_parts() {
         let path = root.join(part.rel_path);
-        let on_disk = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Deleted: repair from the embedded canonical content. The
-                // write itself is the recovery; the gate then re-checks.
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
-                fs::write(&path, part.embedded).map_err(|e| e.to_string())?;
-                repairs.push(part.rel_path.to_string());
-                continue;
-            }
-            Err(e) => return Err(format!("cannot read {}: {e}", part.rel_path)),
-        };
-        if on_disk != part.embedded {
+        let on_disk = fs::read(&path).map_err(|e| {
+            format!(
+                "regeneration: canonical part {} cannot be read ({e}). A deleted part is \
+                 a failure; the gate does not restore it.",
+                part.rel_path
+            )
+        })?;
+        let got = hex32(&keccak256(&on_disk));
+        if got != part.pinned_keccak {
             return Err(format!(
-                "regeneration: canonical part {} was MODIFIED. The on-disk content no \
-                 longer matches the content this gate was compiled with. If this is an \
-                 intentional change, rebuild and re-pin; if not, an outside attacker \
-                 changed a canonical producer. expected hash {}, got {}",
-                part.rel_path,
-                &hex32(&keccak256(part.embedded.as_bytes()))[..16],
-                &hex32(&keccak256(on_disk.as_bytes()))[..16],
+                "regeneration: canonical part {} does not match its pin. If this is an \
+                 intentional change, update the pin in this gate in the same commit; if \
+                 not, a canonical producer was changed. pinned {}, got {got}",
+                part.rel_path, part.pinned_keccak,
             ));
         }
     }
-    Ok(repairs)
+    Ok(())
+}
+
+/// Source text with block and line comments removed, so a pin or an
+/// instruction field that only appears in a comment does not count.
+fn without_comments(text: &str) -> String {
+    let blocks = crate::gates::rust_literals::strip_block_comments(text);
+    let mut out = String::with_capacity(blocks.len());
+    for line in blocks.split_inclusive('\n') {
+        match line.find("//") {
+            Some(pos) => {
+                out.push_str(&line[..pos]);
+                if line.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
 }
 
 /// Verify the ZKVM-side canonical table (`budzero/bud-proof/src/canonical_set.rs`)
@@ -813,6 +830,7 @@ fn verify_proof_side_canonical_set(root: &Path) -> Result<(), String> {
     let path = root.join("budzero/bud-proof/src/canonical_set.rs");
     let text = fs::read_to_string(&path)
         .map_err(|e| format!("cannot read the proof-side canonical set: {e}"))?;
+    let text = without_comments(&text);
     for (i, pin) in canonical_program_hash_pins().iter().enumerate() {
         if !text.contains(pin) {
             return Err(format!(
@@ -834,19 +852,29 @@ fn verify_proof_side_canonical_set(root: &Path) -> Result<(), String> {
 pub fn run(root: &Path) -> Result<String, String> {
     verify_own_keccak()?;
     let first = verify_convergence()?;
-    let repairs = verify_canonical_parts(root)?;
+    verify_canonical_parts(root)?;
     verify_proof_side_canonical_set(root)?;
 
     // Reproduce the storage challenge program from the ISA rule and compare it
     //    with what is written in the tree.
     let deal_path = root.join("src/domain/storage_deal.rs");
-    if let Ok(text) = fs::read_to_string(&deal_path) {
-        if text.contains("Opcode::VerifyMerkle") {
+    {
+        let text = fs::read_to_string(&deal_path).map_err(|e| {
+            format!("regeneration: cannot read src/domain/storage_deal.rs for the storage challenge program: {e}")
+        })?;
+        let text = without_comments(&text);
+        if !text.contains("Opcode::VerifyMerkle") {
+            return Err(String::from(
+                "regeneration: src/domain/storage_deal.rs no longer builds the VerifyMerkle \
+                 storage challenge program this gate reproduces from the ISA rule.",
+            ));
+        }
+        {
             let regenerated_hash = keccak256(&canonical_program_bytes(&first));
             // The program in the tree consists of these two instructions; the imm
             // and register fields are written in the source. On drift the hash will not match.
             let expects_imm_256 = text.contains("imm: 256");
-            let expects_regs = text.contains("rd: 1") && text.contains("rs1: 2");
+            let expects_regs = text.contains("rd: 1,") && text.contains("rs1: 2,");
             if !(expects_imm_256 && expects_regs) {
                 return Err(format!(
                     "regeneration: the storage challenge program has drifted. \
@@ -959,27 +987,16 @@ pub fn run(root: &Path) -> Result<String, String> {
     )))[..16]
         .to_string();
     let set_token = &hex32(&canonical_set_digest()?)[..16].to_string();
-    let repair_note = if repairs.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " repaired {} part(s): {}",
-            repairs.len(),
-            repairs.join(", ")
-        )
-    };
-
     Ok(format!(
         "regeneration OK: program-hash {} reproduced, \
          convergence (idempotence + repair) was verified, and all {checked} \
          production points found by discovery are canonical (verified with an \
          independent Keccak-256 and an independent ISA encoding). matmul-hash {} \
-         syscall-hash {} canonical-set {}{}",
+         syscall-hash {} canonical-set {}",
         &hex32(&regenerated)[..16],
         matmul_token,
         syscall_token,
         set_token,
-        repair_note,
     ))
 }
 
@@ -1068,18 +1085,18 @@ fn write_good(tmp: &Path) -> Result<(), String> {
             "let mut hasher = Keccak256::new();\nfor word in program { hasher.update(word.to_le_bytes()); }\n",
         )
         .map_err(|e| e.to_string())?;
-    // The canonical parts (the gate's embedded copies of the canonical
-    // producers) and the proof-side canonical table, so the good tree passes
-    // without triggering a repair.
+    // The canonical parts (fixture copies of the canonical producers, whose
+    // hashes are the gate's pins) and the proof-side canonical table, so the
+    // good tree passes.
     fs::create_dir_all(tmp.join("budzero/bud-vm/src")).map_err(|e| e.to_string())?;
     fs::write(
         tmp.join("budzero/bud-vm/src/private_transfer.rs"),
-        EMBEDDED_PRIVATE_TRANSFER_SRC,
+        FIXTURE_PRIVATE_TRANSFER_SRC,
     )
     .map_err(|e| e.to_string())?;
     fs::write(
         tmp.join("budzero/bud-vm/src/syscall_context.rs"),
-        EMBEDDED_SYSCALL_CONTEXT_SRC,
+        FIXTURE_SYSCALL_CONTEXT_SRC,
     )
     .map_err(|e| e.to_string())?;
     fs::write(
@@ -1158,16 +1175,15 @@ fn canonical_set_source_fixture() -> String {
     s
 }
 
-/// The canonical-part canaries: a modification is caught, a deletion
-/// self-repairs from the embedding, and the proof-side set keeps agreeing
+/// The canonical-part canaries: a modification and a deletion are both
+/// caught, nothing is written back, and the proof-side set keeps agreeing
 /// with the gate's pins.
 ///
 /// Split out of [`run_drift_canaries`] for the same reason the other helpers
 /// were split: fewer lines, no `#[allow]`.
 fn run_part_drift_canaries(tmp: &Path) -> Result<(), String> {
     // Drift 4b: a canonical part is MODIFIED - the outside-attack vector the
-    // embedded parts defend against. The gate must turn red and must NOT
-    // silently repair a modification (only deletions are repaired).
+    // pins defend against. The gate must turn red.
     write_good(tmp)?;
     let pt_path = tmp.join("budzero/bud-vm/src/private_transfer.rs");
     let mut tampered = fs::read_to_string(&pt_path).map_err(|e| e.to_string())?;
@@ -1180,25 +1196,21 @@ fn run_part_drift_canaries(tmp: &Path) -> Result<(), String> {
         ));
     }
 
-    // Drift 4c: a canonical part is DELETED - the self-repair vector. The gate
-    // must restore the file from its embedding and pass, reporting the repair.
+    // Drift 4c: a canonical part is DELETED. The gate must turn red and must
+    // NOT write the file back: a restored file would hide the deletion.
     write_good(tmp)?;
     let sc_path = tmp.join("budzero/bud-vm/src/syscall_context.rs");
     fs::remove_file(&sc_path).map_err(|e| e.to_string())?;
-    let out = run(tmp).map_err(|e| {
-        let _ = fs::remove_dir_all(tmp);
-        format!("self-test: a DELETED canonical part should have been repaired: {e}")
-    })?;
-    if fs::read_to_string(&sc_path).map_err(|e| e.to_string())? != EMBEDDED_SYSCALL_CONTEXT_SRC {
+    if run(tmp).is_ok() {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
-            "self-test: the repaired part differs from the embedded canonical content",
+            "self-test: a DELETED canonical part was not caught",
         ));
     }
-    if !out.contains("repaired") {
+    if sc_path.exists() {
         let _ = fs::remove_dir_all(tmp);
         return Err(String::from(
-            "self-test: the repair was not reported in the gate output",
+            "self-test: the gate wrote a deleted canonical part back into the tree",
         ));
     }
 
@@ -1311,6 +1323,15 @@ fn run_drift_canaries(tmp: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_gate_file_itself_is_out_of_scan() {
+        assert!(!is_scannable(Path::new(
+            "xtask/gates/src/gates/regeneration.rs"
+        )));
+        assert!(is_scannable(Path::new("src/domain/regeneration_stage.rs")));
+        assert!(is_scannable(Path::new("src/regeneration.rs.bak.rs")));
+    }
 
     /// The success message must keep the token the DDC workflow greps for.
     ///

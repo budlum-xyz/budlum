@@ -1,7 +1,7 @@
 //! B.U.D. 2.0 - the model and neural network file transform, in the BF16 weight
 //! splitting pattern, 2026-08-16.
 //!
-//! F1068 and K96: special-purpose compression for neural network weights. In
+//! F1068 and: special-purpose compression for neural network weights. In
 //! BF16 models, splitting out the exponent bytes and compressing them with
 //! Huffman shrinks the model, because the narrow exponent distribution makes
 //! visible a repetition that general-purpose compression cannot catch.
@@ -211,6 +211,16 @@ impl ModelFloatSplit {
         if count == 0 || count > MAX_VALUES {
             return None;
         }
+        // Exact stream sizes: one valid blob per content, and a wrong count
+        // is refused here and not only at decode time.
+        let rest_bits_per_value = match kind {
+            FloatKind::Bf16 => 8usize,
+            FloatKind::Fp32 => 24usize,
+        };
+        let rest_len = count.checked_mul(rest_bits_per_value)?.div_ceil(8);
+        if exponents.len() != count || rest_bits.len() != rest_len {
+            return None;
+        }
         Some(ModelFloatSplit {
             kind,
             count,
@@ -266,8 +276,23 @@ mod tests {
     }
 
     #[test]
+    fn a_blob_with_extra_or_missing_stream_bytes_is_refused() {
+        let raw = gen_bf16_model(64);
+        let split = ModelFloatSplit::encode(&raw, FloatKind::Bf16).unwrap();
+        assert!(ModelFloatSplit::from_blob(&split.to_blob()).is_some());
+        // One extra remainder byte, sealed with a valid digest.
+        let mut longer = split.clone();
+        longer.rest_bits.push(0);
+        assert!(ModelFloatSplit::from_blob(&longer.to_blob()).is_none());
+        // A count that disagrees with the streams.
+        let mut wrong = split.clone();
+        wrong.count += 1;
+        assert!(ModelFloatSplit::from_blob(&wrong.to_blob()).is_none());
+    }
+
+    #[test]
     fn bf16_roundtrip_lossless() {
-        // K38: encode then decode gives back the original, losslessly.
+        // Encode then decode gives back the original, losslessly.
         for n in [10, 1000, 5000] {
             let model = gen_bf16_model(n);
             let split = ModelFloatSplit::encode(&model, FloatKind::Bf16).expect("encode");

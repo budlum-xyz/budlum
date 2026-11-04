@@ -5,7 +5,9 @@
 //! # The failure this closes
 //!
 //! Two entry points accept a `ContentManifest` an untrusted caller built.
-//! `RegisterStorageManifest` called `validate_untrusted`. `open_deal` called
+//! Registration (once the `RegisterStorageManifest` actor command, now the
+//! in-block `StorageTx::RegisterManifest` door) called `validate_untrusted`.
+//! `open_deal` called
 //! `verify_id` and stopped there, and `open_deal` is the path that also takes
 //! the payer's money. `verify_id` proves the id was derived from the fields
 //! present, not that they agree: `manifest_id` covers `k` and `n`, so a
@@ -17,8 +19,8 @@
 //! 1. `validate_untrusted` still ties `k` and `n` to the shards actually
 //!    present.
 //! 2. Every door that accepts a caller-supplied manifest calls it: `open_deal`
-//!    and the `RegisterStorageManifest` match arm (not the `send` site that
-//!    shares the name).
+//!    and `register_manifest` in `src/domain/storage_tx.rs`, the function the
+//!    executor applies `StorageTx::RegisterManifest` through.
 //! 3. No such path settles for `verify_id` alone, with string literals and
 //!    comments stripped so inert text cannot satisfy the gate.
 //! 4. The named regressions exist as real `#[test]` functions.
@@ -262,64 +264,36 @@ fn has_manifest_call(region: &str, method: &str) -> bool {
     false
 }
 
-/// The `ChainCommand::RegisterStorageManifest { ... } =>` match arm, plus the
-/// 2000 characters after its start.
-fn register_handler_region(actor_code: &str) -> Option<String> {
-    let needle = "ChainCommand::RegisterStorageManifest";
+/// Brace-matched body of the private or public `fn NAME(` in `src`: the
+/// in-block registration door is a private function of `storage_tx.rs`.
+fn fn_body_of<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let header = format!("fn {name}");
     let mut from = 0usize;
-    while let Some(pos) = actor_code[from..].find(needle) {
+    while let Some(pos) = src[from..].find(&header) {
         let abs = from + pos;
-        let rest = skip_py_ws(&actor_code[abs + needle.len()..]);
-        let Some(rest) = rest.strip_prefix('{') else {
+        let after = &src[abs + header.len()..];
+        if word_before(src, abs) || !skip_py_ws(after).starts_with('(') {
             from = abs + 1;
             continue;
-        };
-        // `[^}]*` then `}` then `\s*=>`.
-        let Some(close) = rest.find('}') else {
-            from = abs + 1;
-            continue;
-        };
-        if skip_py_ws(&rest[close + 1..]).starts_with("=>") {
-            let region: String = actor_code[abs..].chars().take(2000).collect();
-            return Some(region);
         }
-        from = abs + 1;
+        let open_rel = after.find('{')?;
+        let i = abs + header.len() + open_rel;
+        let mut depth = 0usize;
+        for (off, c) in src[i..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&src[i..i + off + c.len_utf8()]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
     }
     None
-}
-
-/// `#[test]\s*(?:#\[[^\]]*\]\s*)*fn\s+TEST\s*\(` in the raw source.
-fn has_test_fn(src: &str, test: &str) -> bool {
-    let mut from = 0usize;
-    while let Some(pos) = src[from..].find("#[test]") {
-        let abs = from + pos;
-        let mut rest = &src[abs + "#[test]".len()..];
-        rest = skip_py_ws(rest);
-        while rest.starts_with("#[") {
-            let Some(close) = rest.find(']') else {
-                break;
-            };
-            rest = skip_py_ws(&rest[close + 1..]);
-        }
-        let Some(after_fn) = rest.strip_prefix("fn") else {
-            from = abs + 1;
-            continue;
-        };
-        if after_fn.len() == skip_py_ws(after_fn).len() {
-            from = abs + 1;
-            continue; // `\s+` after `fn` is required
-        }
-        let after_fn = skip_py_ws(after_fn);
-        let Some(tail) = after_fn.strip_prefix(test) else {
-            from = abs + 1;
-            continue;
-        };
-        if skip_py_ws(tail).starts_with('(') {
-            return true;
-        }
-        from = abs + 1;
-    }
-    false
 }
 
 fn check_strong(vu: Option<&str>, problems: &mut Vec<String>, checked: &mut usize) {
@@ -379,7 +353,7 @@ fn check_regressions(deal_src: &str, problems: &mut Vec<String>, checked: &mut u
     // The regressions must exist as real tests.
     *checked += 1;
     for test in REGRESSION_TESTS {
-        if !has_test_fn(deal_src, test) {
+        if !crate::gates::rust_literals::has_live_test(deal_src, test) {
             problems.push(format!(
                 "required regression test `{test}` is missing or is not a `#[test]`."
             ));
@@ -394,9 +368,9 @@ fn check_regressions(deal_src: &str, problems: &mut Vec<String>, checked: &mut u
 pub fn run(root: &Path) -> Result<String, String> {
     let manifest = root.join("src/storage/manifest.rs");
     let deal = root.join("src/domain/storage_deal.rs");
-    let actor = root.join("src/chain/chain_actor.rs");
+    let door = root.join("src/domain/storage_tx.rs");
 
-    for path in [&manifest, &deal, &actor] {
+    for path in [&manifest, &deal, &door] {
         if !path.is_file() {
             return Err(format!(
                 "FAIL: expected source file missing: {}",
@@ -408,7 +382,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     let manifest_code = strip_comments(&std::fs::read_to_string(&manifest).unwrap_or_default());
     let deal_src = std::fs::read_to_string(&deal).unwrap_or_default();
     let deal_code = strip_comments(&deal_src);
-    let actor_code = strip_comments(&std::fs::read_to_string(&actor).unwrap_or_default());
+    let door_code = strip_comments(&std::fs::read_to_string(&door).unwrap_or_default());
 
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
@@ -425,8 +399,8 @@ pub fn run(root: &Path) -> Result<String, String> {
         &mut checked,
     );
     check_door(
-        "RegisterStorageManifest handler",
-        register_handler_region(&actor_code).as_deref(),
+        "register_manifest (StorageTx::RegisterManifest)",
+        fn_body_of(&door_code, "register_manifest"),
         &mut problems,
         &mut checked,
     );
@@ -477,15 +451,21 @@ const LIT_DEAL: &str = "    pub fn open_deal(&mut self) -> Result<(), String> {\
     fn a_deal_open_refuses_a_manifest_claiming_parity_it_does_not_have() {}\n\
     #[test]\n\
     fn a_deal_open_still_accepts_a_coherent_manifest() {}\n";
-const CHAIN_ACTOR: &str = "pub async fn register_storage_manifest(&self) {\n\
-    self.tx.send(ChainCommand::RegisterStorageManifest {\n\
-        manifest,\n\
-        response: tx,\n\
-    }).await;\n\
+const STORAGE_TX: &str = "pub fn execute_storage_tx(tx: &StorageTx) {\n\
+    match tx { StorageTx::RegisterManifest { manifest } => register_manifest(state, sender, manifest) }\n\
 }\n\
-ChainCommand::RegisterStorageManifest { manifest, response } => {\n\
-    if let Err(e) = manifest.validate_untrusted() { return; }\n\
+fn register_manifest(state: &mut AccountState, manifest: &ContentManifest) -> Result<(), E> {\n\
+    manifest.validate_untrusted()?;\n\
+    Ok(())\n\
 }\n";
+const WEAK_STORAGE_TX: &str = "pub fn execute_storage_tx(tx: &StorageTx) {\n\
+    match tx { StorageTx::RegisterManifest { manifest } => register_manifest(state, sender, manifest) }\n\
+}\n\
+fn register_manifest(state: &mut AccountState, manifest: &ContentManifest) -> Result<(), E> {\n\
+    manifest.verify_id()?;\n\
+    Ok(())\n\
+}\n\
+fn other(m: &ContentManifest) { m.validate_untrusted(); }\n";
 
 /// Write a fixture tree and check the gate's verdict.
 fn check_fixture(
@@ -493,11 +473,12 @@ fn check_fixture(
     deal_mode: &str,
     tests_mode: &str,
     lit: bool,
-    expect_ok: bool,
-    label: &str,
+    weak_door: bool,
+    expect: (bool, &str),
 ) -> Result<(), String> {
+    let (expect_ok, label) = expect;
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-manifest")?;
-    for sub in ["src/storage", "src/domain", "src/chain"] {
+    for sub in ["src/storage", "src/domain"] {
         let _ = std::fs::create_dir_all(dir.join(sub));
     }
 
@@ -517,12 +498,17 @@ fn check_fixture(
             "manifest.verify_id()?;"
         };
         let mut tests = String::new();
-        if tests_mode == "present" {
+        if tests_mode == "present" || tests_mode == "ignored" {
+            let attr = if tests_mode == "ignored" {
+                format!("#[test]\n#[{}]", "ignore")
+            } else {
+                String::from("#[test]")
+            };
             for name in [
                 "a_deal_open_refuses_a_manifest_claiming_parity_it_does_not_have",
                 "a_deal_open_still_accepts_a_coherent_manifest",
             ] {
-                let _ = writeln!(tests, "#[test]\nfn {name}() {{}}");
+                let _ = writeln!(tests, "{attr}\nfn {name}() {{}}");
             }
         }
         (
@@ -538,7 +524,12 @@ fn check_fixture(
     )
     .map_err(|e| e.to_string())?;
 
-    std::fs::write(dir.join("src/chain/chain_actor.rs"), CHAIN_ACTOR).map_err(|e| e.to_string())?;
+    let door = if weak_door {
+        WEAK_STORAGE_TX
+    } else {
+        STORAGE_TX
+    };
+    std::fs::write(dir.join("src/domain/storage_tx.rs"), door).map_err(|e| e.to_string())?;
 
     let result = run(&dir);
     let _ = std::fs::remove_dir_all(&dir);
@@ -562,8 +553,8 @@ pub fn self_test() -> Result<String, String> {
         "strong",
         "present",
         false,
-        true,
-        "the corrected tree was rejected",
+        false,
+        (true, "the corrected tree was rejected"),
     )?;
 
     // 2. The original bug: the deal door settles for `verify_id`.
@@ -573,7 +564,7 @@ pub fn self_test() -> Result<String, String> {
         "present",
         false,
         false,
-        "a deal-open that only calls verify_id",
+        (false, "a deal-open that only calls verify_id"),
     )?;
 
     // 3. The check itself is hollowed out while both call sites still call it.
@@ -583,7 +574,7 @@ pub fn self_test() -> Result<String, String> {
         "present",
         false,
         false,
-        "a validate_untrusted that checks no scheme",
+        (false, "a validate_untrusted that checks no scheme"),
     )?;
 
     // 4. The check disappears entirely.
@@ -593,7 +584,7 @@ pub fn self_test() -> Result<String, String> {
         "present",
         false,
         false,
-        "a missing validate_untrusted",
+        (false, "a missing validate_untrusted"),
     )?;
 
     // 5. A regression test is dropped.
@@ -603,19 +594,19 @@ pub fn self_test() -> Result<String, String> {
         "absent",
         false,
         false,
-        "a missing regression test",
+        (false, "a missing regression test"),
     )?;
 
-    // 6. The guarded handler must still pass when the same command name also
-    //    appears at the `send` site. Every fixture above already carries both
-    //    spellings, so this asserts the distinction directly.
+    // 6. The registration door settles for `verify_id` while another
+    //    function in the same file still calls `validate_untrusted`: the
+    //    gate reads the door's own body, not the file.
     check_fixture(
         "strong",
         "strong",
         "present",
         false,
         true,
-        "the `send` site was mistaken for the handler",
+        (false, "a registration door that only calls verify_id"),
     )?;
 
     // 7. A door whose only `validate_untrusted` evidence lives inside a string
@@ -626,10 +617,39 @@ pub fn self_test() -> Result<String, String> {
         "present",
         true,
         false,
-        "a door whose only validate_untrusted evidence is inside a string or comment",
+        (
+            false,
+            "a door whose only validate_untrusted evidence is inside a string or comment",
+        ),
+    )?;
+
+    // 8. An ignored regression test is not a regression test.
+    check_fixture(
+        "strong",
+        "strong",
+        "ignored",
+        false,
+        false,
+        (false, "a regression test marked ignored"),
     )?;
 
     Ok(String::from(
-        "untrusted manifest gate self-test OK: 7 canaries",
+        "untrusted manifest gate self-test OK: 8 canaries",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_door_body_is_the_private_function_and_stops_at_its_end() {
+        let code = "fn register_manifest_helper() { manifest.validate_untrusted(); }\nfn register_manifest(m: &M) -> R {\n    store(manifest);\n}\nfn other() {\n    manifest.validate_untrusted();\n}\n";
+        let body = fn_body_of(code, "register_manifest").expect("door found");
+        assert!(!body.contains("validate_untrusted"));
+        assert!(body.contains("store(manifest)"));
+        let call =
+            "    StorageTx::RegisterManifest { manifest } => register_manifest(state, manifest),\n";
+        assert!(fn_body_of(call, "register_manifest").is_none());
+    }
 }

@@ -21,23 +21,30 @@ impl MimeRegistry {
         entries.insert("image/jpeg".into(), 11);
         entries.insert("image/png".into(), 12);
         entries.insert("video/mp4".into(), 10);
-        // K38: the pin has to be DETERMINISTIC. HashMap iteration order changes
+        // The pin has to be DETERMINISTIC. HashMap iteration order changes
         // from run to run (RandomState), so the same registry would produce a
         // DIFFERENT pin in two runs. The fix: the keys are processed in SORTED
         // order when computing the pin (no BTreeMap is needed, sorting is
         // enough).
+        let hash = Self::compute_pin(&entries);
+        Self { entries, hash }
+    }
+
+    /// The pin of a set of entries: the keys are hashed in sorted order.
+    fn compute_pin(entries: &HashMap<String, u16>) -> [u8; 32] {
         let mut keys: Vec<&String> = entries.keys().collect();
         keys.sort();
         let mut h = Sha3_256::new();
         for k in keys {
             h.update(k.as_bytes());
-            h.update(entries[k].to_le_bytes());
+            if let Some(class) = entries.get(k) {
+                h.update(class.to_le_bytes());
+            }
         }
-        let hash: [u8; 32] = h.finalize().into();
-        Self { entries, hash }
+        h.finalize().into()
     }
 
-    /// The determinism proof: the same content gives the same pin (the K38
+    /// The determinism proof: the same content gives the same pin (the
     /// property).
     pub fn pin_matches(&self, other: &Self) -> bool {
         self.hash == other.hash && self.entries.len() == other.entries.len()
@@ -48,7 +55,9 @@ impl MimeRegistry {
     }
 
     pub fn verify_pin(&self, expected_hash: &[u8; 32]) -> bool {
-        &self.hash == expected_hash
+        // The entries are public, so the stored hash alone proves nothing:
+        // the pin is recomputed from the entries as they are now.
+        &self.hash == expected_hash && Self::compute_pin(&self.entries) == self.hash
     }
 }
 
@@ -95,7 +104,11 @@ impl RatioProof {
             let r: [u8; 32] = h.finalize().into();
             r
         };
-        ph == self.payload_hash && oh == self.original_hash
+        // The ratio is checked against the sizes, not trusted.
+        let ratio_ok = !payload.is_empty()
+            && self.ratio.is_finite()
+            && self.ratio == original.len() as f64 / payload.len() as f64;
+        ph == self.payload_hash && oh == self.original_hash && ratio_ok
     }
 }
 
@@ -236,8 +249,15 @@ mod tests {
         assert!(RegistryGates::k_bud_registry_pin(&reg, &[0u8; 32]).is_err());
     }
     #[test]
+    fn an_edited_registry_fails_its_own_pin() {
+        let mut reg = MimeRegistry::default_registry();
+        let hash = reg.hash;
+        reg.entries.insert("application/x-evil".into(), 99);
+        assert!(!reg.verify_pin(&hash));
+    }
+    #[test]
     fn registry_pin_deterministic() {
-        // K38: two separate default_registry values have to produce the SAME
+        // Two separate default_registry values have to produce the SAME
         // pin, independently of HashMap order.
         let a = MimeRegistry::default_registry();
         let b = MimeRegistry::default_registry();
@@ -252,8 +272,11 @@ mod tests {
     fn ratio_proof() {
         let payload = b"hello compressed";
         let original = b"hello original longer text";
-        let proof = RatioProof::prove(payload, original, 1.5);
+        let ratio = original.len() as f64 / payload.len() as f64;
+        let proof = RatioProof::prove(payload, original, ratio);
         assert!(RegistryGates::k_bud_proof(&proof, payload, original).is_ok());
+        let lie = RatioProof::prove(payload, original, ratio * 2.0);
+        assert!(RegistryGates::k_bud_proof(&lie, payload, original).is_err());
         assert!(RegistryGates::k_bud_proof(&proof, b"other", original).is_err());
     }
     #[test]

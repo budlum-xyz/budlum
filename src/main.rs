@@ -11,7 +11,7 @@ use budlum_core::core::transaction::Transaction;
 use budlum_core::crypto::primitives::{KeyPair, ValidatorKeys};
 use budlum_core::crypto::signer::ConsensusSigner;
 use budlum_core::domain::{
-    BftDomainPlugin, ConsensusKind, DomainStatus, PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin,
+    BftDomainPlugin, ConsensusKind, PoADomainPlugin, PoSDomainPlugin, PoWDomainPlugin,
 };
 use budlum_core::network::node::Node;
 use budlum_core::network::protocol::NetworkMessage;
@@ -24,11 +24,82 @@ use std::sync::Arc;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
+fn try_load_signing_key(path: &str) -> Result<KeyPair, String> {
+    match ValidatorKeys::load(path) {
+        Ok(keys) => Ok(keys.sig_key),
+        Err(keys_error) => KeyPair::load(path).map_err(|pair_error| {
+            format!("cannot load key file {path}: as validator keys: {keys_error}; as key pair: {pair_error}")
+        }),
+    }
+}
+
+/// Loads the signing key and tells the operator why a load failed.
 fn load_signing_key(path: &str) -> Option<KeyPair> {
-    ValidatorKeys::load(path)
-        .map(|keys| keys.sig_key)
-        .or_else(|_| KeyPair::load(path))
-        .ok()
+    match try_load_signing_key(path) {
+        Ok(key) => Some(key),
+        Err(reason) => {
+            eprintln!("Warning: {reason}");
+            None
+        }
+    }
+}
+
+/// Claims `path` for a new secret key file. It fails when the path already exists, so key
+/// generation never overwrites an operator key. The file is created with mode 0600.
+fn claim_new_key_file(path: &str) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).map(|_| ())
+}
+
+/// Claims `path`, or prints the refusal and exits. On a later write failure the caller
+/// removes the empty claim again with `release_key_file`.
+fn claim_new_key_file_or_exit(path: &str) {
+    if let Err(e) = claim_new_key_file(path) {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            eprintln!("Error: key file {path} already exists; refusing to overwrite it.");
+            eprintln!("Move or delete the existing key file first if you mean to replace it.");
+        } else {
+            eprintln!("Error: cannot create key file {path}: {e}");
+        }
+        std::process::exit(1);
+    }
+}
+
+/// Longest a sync round may hold the daemon producer off.
+///
+/// The round is opened from an unverified claim - a handshake `best_height`, a
+/// `NewTip`, a gossiped block above the tip - so it must never be able to stop
+/// a validator from producing. Thirty seconds is ten slot intervals of the
+/// default ladder: long enough for an honest catch-up of the whole devnet, and
+/// short enough that a peer which claims a taller chain and then withholds it
+/// costs this node a handful of slots rather than the block times it would
+/// have led.
+const PRODUCER_SYNC_HOLD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The daemon block-production loop runs for every engine that produces from this process.
+/// PoA is included: the engine signs only when this node is the elected leader, and
+/// `produce_block` returns `None` for the other slots.
+fn daemon_producer_loop_runs(consensus_type: ConsensusType) -> bool {
+    matches!(
+        consensus_type,
+        ConsensusType::PoS | ConsensusType::PoW | ConsensusType::PoA
+    )
+}
+
+/// The producer address for the interactive `mine` command. A node without a configured
+/// producer address refuses the command, so a block never pays its reward to the zero address.
+fn console_producer(configured: Option<Address>) -> Result<Address, &'static str> {
+    configured.ok_or("mine needs a configured producer address (--validator-address)")
+}
+
+fn release_key_file(path: &str) {
+    let _ = std::fs::remove_file(path);
 }
 
 fn write_database_backup(
@@ -284,6 +355,12 @@ async fn main() {
             // and rejecting every peer's validator registration.
             pq_scheme: network_defaults.pq_scheme.clone(),
             bootstrap_domains: network_defaults.bootstrap_domains.clone(),
+            poa_authorities: Vec::new(),
+            anchor_ledger: network_defaults.anchor_ledger.clone(),
+            // The generated file states the flag instead of inheriting it from
+            // the template, so what the chain pays is readable in the file it
+            // was launched from (testnet item 8).
+            reward_pool: network_defaults.reward_pool,
         };
 
         let data = match serde_json::to_string_pretty(&genesis_config) {
@@ -359,7 +436,9 @@ async fn main() {
                 std::process::exit(1);
             }
         };
+        claim_new_key_file_or_exit(&output);
         keypair.save(&output).unwrap_or_else(|e| {
+            release_key_file(&output);
             eprintln!("Error: cannot write secret key to {output}: {e:?}");
             std::process::exit(1);
         });
@@ -456,7 +535,9 @@ async fn main() {
     if let Some(ref path) = config.gen_key {
         match budlum_core::crypto::primitives::ValidatorKeys::generate() {
             Ok(keys) => {
+                claim_new_key_file_or_exit(path);
                 if let Err(e) = keys.save(path) {
+                    release_key_file(path);
                     eprintln!("Error: could not save validator key to {path}: {e}");
                     std::process::exit(1);
                 }
@@ -466,7 +547,10 @@ async fn main() {
                     Address::from(keys.sig_key.public_key_bytes())
                 );
             }
-            Err(e) => eprintln!("Error generating key: {e}"),
+            Err(e) => {
+                eprintln!("Error generating key: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }
@@ -547,9 +631,28 @@ async fn main() {
     let port = config.port.unwrap_or(network.default_port());
     let chain_id = config.chain_id.unwrap_or(network.chain_id().value());
     let network_params = network.consensus_params();
-    if config.min_stake == 1000 {
-        config.min_stake = network_params.min_stake;
+    if let Err(e) = budlum_core::core::chain_config::check_epoch_len_matches_chain_id(
+        chain_id,
+        network_params.epoch_len,
+    ) {
+        eprintln!("ERROR: {e}");
+        std::process::exit(1);
     }
+    // Min-stake is a consensus rule. A node started with a
+    // divergent `--min-stake` would validate leaders and validators against a
+    // parameter the rest of the network does not share and split off - while
+    // the staking executor kept enforcing the network parameter, so the two
+    // paths disagreed on the same node. The CLI value is now only accepted
+    // when it matches the network parameter; anything else is a hard error.
+    if config.min_stake != 1000 && config.min_stake != network_params.min_stake {
+        eprintln!(
+            "ERROR: --min-stake {} conflicts with the network consensus parameter {} \
+             (chain id {chain_id}); a node with a divergent min-stake would split off",
+            config.min_stake, network_params.min_stake
+        );
+        std::process::exit(1);
+    }
+    config.min_stake = network_params.min_stake;
     let consensus_type = config.consensus.unwrap_or(match network {
         budlum_core::core::chain_config::Network::Mainnet => ConsensusType::PoS,
         budlum_core::core::chain_config::Network::Testnet => ConsensusType::PoS,
@@ -565,6 +668,16 @@ async fn main() {
         .as_ref()
         .and_then(|s| load_signing_key(s))
         .map(|key| Address::from(key.public_key_bytes()));
+
+    // A mainnet node signs consensus when it holds a validator key, whatever
+    // its role string says. `--role` is self-declared and the custody rules
+    // below used to be keyed on it, so a mainnet node started with another
+    // role and a validator key file signed through the software fallback with
+    // no HSM custody and no post-quantum key at all. The key is the fact; the
+    // role is a label a config file can make up.
+    let mainnet_signs_consensus = config.network
+        == budlum_core::core::chain_config::Network::Mainnet
+        && (config.role == "validator" || local_signer_address.is_some());
 
     // `[features] verify_merkle` does not reach the VM: `bud-vm` decodes
     // with `MainnetActivation::default()` and reads no environment variable
@@ -607,9 +720,7 @@ async fn main() {
             );
             std::process::exit(1);
         }
-        let strict_vendor_native = config.network
-            == budlum_core::core::chain_config::Network::Mainnet
-            && config.role == "validator";
+        let strict_vendor_native = mainnet_signs_consensus;
         if strict_vendor_native {
             let Some(bls_raw) = config.pkcs11_bls_mechanism.as_deref() else {
                 eprintln!(
@@ -617,11 +728,20 @@ async fn main() {
                 );
                 std::process::exit(1);
             };
-            let Some(pq_raw) = config.pkcs11_pq_mechanism.as_deref() else {
-                eprintln!(
-                    "CRITICAL: mainnet validators require an explicit PKCS#11 vendor-native PQ mechanism id"
-                );
-                std::process::exit(1);
+            // the PKCS#11 3.2 standard mechanism is the first path; a
+            // vendor PQ mechanism is accepted only for a token without 3.2.
+            let pq_raw = match (
+                config.pkcs11_pq_key_label.as_deref(),
+                config.pkcs11_pq_mechanism.as_deref(),
+            ) {
+                (Some(_), _) => None,
+                (None, Some(raw)) => Some(raw),
+                (None, None) => {
+                    eprintln!(
+                        "CRITICAL: mainnet validators require a PKCS#11 3.2 PQ key label or an explicit vendor-native PQ mechanism id"
+                    );
+                    std::process::exit(1);
+                }
             };
             // Parse and floor-check, then ask the vendor policy.
             //
@@ -632,7 +752,10 @@ async fn main() {
             // false`, and one outside the vendor's own documented range,
             // which `validate_mechanism_id` refuses for YubiHSM2 above
             // `0x8000_FFFF`. Both checks existed; neither had a caller.
-            let mechanisms = [("BLS", bls_raw), ("PQ", pq_raw)];
+            let mut mechanisms = vec![("BLS", bls_raw)];
+            if let Some(pq_raw) = pq_raw {
+                mechanisms.push(("PQ", pq_raw));
+            }
             let known = budlum_core::crypto::pkcs11::yubihsm2_default_capabilities();
             for (which, raw) in mechanisms {
                 let id =
@@ -660,28 +783,82 @@ async fn main() {
                 module_path.to_string(),
                 slot_id,
                 pin_env.to_string(),
+                config.pkcs11_key_label.clone(),
             )
         } else {
             budlum_core::crypto::pkcs11::Pkcs11Signer::new(
                 module_path.to_string(),
                 slot_id,
                 pin_env.to_string(),
+                config.pkcs11_key_label.clone(),
             )
         };
+        // decision B: operator-configured consensus public keys are
+        // cross-checked against the HSM-held objects at startup and then
+        // pinned as the announced identity.
+        let decode_expected = |raw: Option<&str>, what: &str| -> Option<Vec<u8>> {
+            let raw = raw?.trim().trim_start_matches("0x").to_string();
+            match hex::decode(&raw) {
+                Ok(bytes) => Some(bytes),
+                Err(_) => {
+                    eprintln!("CRITICAL: --{what} is not valid hex; refusing to start");
+                    std::process::exit(1);
+                }
+            }
+        };
+        let expected_bls_key = decode_expected(
+            config.pkcs11_bls_public_key.as_deref(),
+            "pkcs11-bls-public-key",
+        );
+        let expected_pq_key = decode_expected(
+            config.pkcs11_pq_public_key.as_deref(),
+            "pkcs11-pq-public-key",
+        );
         match signer_result.map(|s| {
-            let signer = s
-                .with_vendor_mechanisms(
-                    config.pkcs11_bls_mechanism.clone(),
-                    config.pkcs11_pq_mechanism.clone(),
-                )
-                .with_key_label(config.pkcs11_key_label.clone());
-            if strict_vendor_native {
+            let s = match s.with_expected_consensus_public_keys(expected_bls_key, expected_pq_key) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("CRITICAL: consensus public key cross-check failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let signer = s.with_vendor_mechanisms(
+                config.pkcs11_bls_mechanism.clone(),
+                config.pkcs11_pq_mechanism.clone(),
+            );
+            let signer = match config.pkcs11_pq_key_label.as_deref() {
+                Some(label) => match signer.with_standard_pq_key(label) {
+                    Ok(signer) => signer,
+                    Err(e) => {
+                        eprintln!("CRITICAL: PKCS#11 3.2 PQ key `{label}`: {e}");
+                        std::process::exit(1);
+                    }
+                },
+                None => signer,
+            };
+            // The binding challenge must run under the strict policy, not
+            // before it: otherwise a software fallback can pass the probe.
+            let signer = if strict_vendor_native {
                 signer.require_vendor_native_signing()
             } else {
                 signer
+            };
+            if let Err(e) = signer.verify_consensus_key_bindings() {
+                eprintln!("CRITICAL: HSM consensus key binding test failed: {e}");
+                std::process::exit(1);
             }
+            if strict_vendor_native {
+                use budlum_core::crypto::mainnet_policy::check_mainnet_validator_pq_hsm_policy;
+                let pq_key = signer.pq_public_key();
+                if let Err(e) = check_mainnet_validator_pq_hsm_policy(pq_key.as_deref(), true) {
+                    eprintln!("CRITICAL: mainnet validator key policy: {e}");
+                    std::process::exit(1);
+                }
+            }
+            signer
         }) {
             Ok(signer) => {
+                tracing::info!("{}", signer.connection_info());
                 if strict_vendor_native {
                     let caps = signer.vendor_capabilities();
                     if !caps.vendor_native_signing_configured() {
@@ -723,19 +900,21 @@ async fn main() {
         }
         ConsensusType::PoS => {
             println!("PoS mode - min stake: {}", config.min_stake);
-            if config.network == budlum_core::core::chain_config::Network::Mainnet
-                && config.role == "validator"
+            // mainnet elects leaders with the Filiz Chain, which needs
+            // no VRF key in the HSM. A mainnet validator must hold its chain.
+            if mainnet_signs_consensus
+                && !std::env::var(budlum_core::consensus::filiz::FILIZ_SEED_FILE_ENV)
+                    .is_ok_and(|path| !path.is_empty())
             {
                 eprintln!(
-                    "CRITICAL: mainnet PoS validators require native HSM VRF signing; this startup path has no PKCS#11 VRF backend yet"
+                    "CRITICAL: a mainnet PoS validator elects itself with a Filiz Chain; set {} to its seed file",
+                    budlum_core::consensus::filiz::FILIZ_SEED_FILE_ENV
                 );
                 std::process::exit(1);
             }
             let pos_config = PoSConfig {
                 min_stake: config.min_stake,
-                slot_duration: (network_params.slot_ms / 1000).max(1),
                 epoch_length: network_params.epoch_len,
-                ..Default::default()
             };
             // Mainnet forbids disk-backed ValidatorKeys
             // (BLS + Dilithium secrets stay plaintext on disk today).
@@ -751,18 +930,63 @@ async fn main() {
                 match budlum_core::crypto::primitives::ValidatorKeys::load(path) {
                     Ok(k) => Some(k),
                     Err(e) => {
-                        println!("Failed to load validator keys from {path}: {e}");
-                        None
+                        // A node told to use a validator key and unable to
+                        // read it used to carry on as a spectator: it joined
+                        // the mesh, voted nothing, produced nothing, and said
+                        // so in one line that scrolled away. Worse than the
+                        // silence, its stake still counted towards the voting
+                        // weight the other validators divide their leader
+                        // threshold by, so a run with this node in the set
+                        // could stall with no node able to win a slot. An
+                        // operator's declared intent is not a hint to fall
+                        // back from: refuse to start.
+                        eprintln!(
+                            "CRITICAL: --validator-key-file {path} was set but the keys could not be loaded: {e}; refusing to start as a non-validating node"
+                        );
+                        std::process::exit(1);
                     }
                 }
             } else {
                 None
             };
-            if let Some(signer) = hsm_signer {
-                Arc::new(PoSEngine::with_signer(pos_config, keys, signer))
+            // Filiz Chain: the seed comes from the file the
+            // environment names, never from the config or a log.
+            let filiz_chain = std::env::var(budlum_core::consensus::filiz::FILIZ_SEED_FILE_ENV)
+                .ok()
+                .filter(|path| !path.is_empty())
+                .and_then(|path| {
+                    let address = hsm_signer
+                        .as_ref()
+                        .map(|signer| signer.address())
+                        .or_else(|| keys.as_ref().map(ValidatorKeys::address))?
+                        .0;
+                    let built =
+                        budlum_core::consensus::filiz::read_seed_file(std::path::Path::new(&path))
+                            .and_then(|seed| {
+                                budlum_core::consensus::filiz::chain_for_network(
+                                    address,
+                                    seed,
+                                    config.network.chain_id().0,
+                                )
+                                .map_err(|e| format!("{e:?}"))
+                            });
+                    match built {
+                        Ok(chain) => Some(chain),
+                        Err(e) => {
+                            eprintln!("Filiz Chain not loaded: {e}");
+                            None
+                        }
+                    }
+                });
+            let engine = if let Some(signer) = hsm_signer {
+                PoSEngine::with_signer(pos_config, keys, signer)
             } else {
-                Arc::new(PoSEngine::new(pos_config, keys))
-            }
+                PoSEngine::new(pos_config, keys)
+            };
+            Arc::new(match filiz_chain {
+                Some(chain) => engine.with_filiz_chain(chain),
+                None => engine,
+            })
         }
         ConsensusType::PoA => {
             println!("PoA mode");
@@ -780,13 +1004,25 @@ async fn main() {
                     signer,
                 ))
             } else {
-                Arc::new(PoAEngine::new(
+                let engine = PoAEngine::new(
                     PoAConfig {
                         validators_file: Some(config.validators_file.clone()),
                         ..Default::default()
                     },
                     poa_keypair,
-                ))
+                );
+                // A validator key set with its ML-DSA-65 key signs composite
+                // blocks; a bare key pair keeps the Ed25519 form.
+                let composite = config
+                    .validator_key_file
+                    .as_ref()
+                    .and_then(|path| ValidatorKeys::load(path).ok())
+                    .filter(|keys| keys.pq_key.is_some())
+                    .and_then(|keys| keys.composite_keypair().ok());
+                Arc::new(match composite {
+                    Some(keypair) => engine.with_composite_key(keypair),
+                    None => engine,
+                })
             }
         }
     };
@@ -907,6 +1143,110 @@ async fn main() {
     .with_metrics(metrics.clone())
     .with_sharding(sharding_config);
 
+    // PQ anchor emission: off unless the node says otherwise.
+    match config.anchor.mode.as_deref().unwrap_or("off") {
+        "off" => {}
+        "devnet" => {
+            let log_path = std::path::PathBuf::from(
+                config
+                    .anchor
+                    .log_path
+                    .clone()
+                    .unwrap_or_else(|| "./data/anchors.jsonl".to_string()),
+            );
+            let emission = budlum_core::settlement::AnchorEmission::devnet(chain_id, log_path)
+                .unwrap_or_else(|e| {
+                    eprintln!("CRITICAL: anchor devnet mode: {e}");
+                    std::process::exit(1);
+                });
+            if let Err(e) = blockchain.configure_anchor_emission(emission) {
+                eprintln!("CRITICAL: anchor emission: {e}");
+                std::process::exit(1);
+            }
+            tracing::warn!("PQ anchor emission runs with public development keys (devnet)");
+        }
+        "production" => {
+            let fail = |what: &str| -> ! {
+                eprintln!("CRITICAL: anchor production mode: {what}");
+                std::process::exit(1);
+            };
+            let section = &config.anchor;
+            let Some(ledger) = blockchain.genesis_anchor_ledger().cloned() else {
+                fail("the genesis file carries no anchor_ledger");
+            };
+            let Some(pkcs11) = section.pkcs11.as_ref() else {
+                fail("[anchor.pkcs11] is required (HSM keys only)");
+            };
+            let (Some(module_path), Some(slot_id), Some(pin_env), Some(seal_label)) = (
+                pkcs11.module_path.as_deref(),
+                pkcs11.slot_id,
+                pkcs11.token_pin_env.as_deref(),
+                pkcs11.seal_key_label.as_deref(),
+            ) else {
+                fail(
+                    "[anchor.pkcs11] needs module_path, slot_id, token_pin_env and seal_key_label",
+                );
+            };
+            if budlum_core::crypto::mainnet_policy::is_software_token_path(module_path) {
+                fail("a software token is not allowed for anchor keys");
+            }
+            // The anchor keys are the chain's post-quantum root of trust, and
+            // vendor labels plus a name denylist cannot establish that the
+            // module holding them is hardware. The release pins the module's
+            // bytes; anything else is unknown, and unknown is refused.
+            if !budlum_core::crypto::mainnet_policy::is_sanctioned_module_path(module_path) {
+                fail("anchor keys require a PKCS#11 module the release sanctions");
+            }
+            let anchor_keys: Vec<(u8, String)> = pkcs11
+                .anchor_keys
+                .iter()
+                .flatten()
+                .map(|k| (k.slot, k.label.clone()))
+                .collect();
+            let read_json = |path: Option<&str>, what: &str| -> String {
+                let Some(path) = path else {
+                    fail(&format!("{what} is not configured"));
+                };
+                std::fs::read_to_string(path)
+                    .unwrap_or_else(|e| fail(&format!("cannot read {what} {path}: {e}")))
+            };
+            let ceremony: budlum_core::settlement::CeremonyRecord = serde_json::from_str(
+                &read_json(section.ceremony_file.as_deref(), "ceremony_file"),
+            )
+            .unwrap_or_else(|e| fail(&format!("ceremony file is not a ceremony record: {e}")));
+            let cold: budlum_core::settlement::ColdWalletState = serde_json::from_str(&read_json(
+                section.cold_committee_file.as_deref(),
+                "cold_committee_file",
+            ))
+            .unwrap_or_else(|e| fail(&format!("cold committee file is not a wallet state: {e}")));
+            let log_path = std::path::PathBuf::from(
+                section
+                    .log_path
+                    .clone()
+                    .unwrap_or_else(|| "./data/anchors.jsonl".to_string()),
+            );
+            let custody = budlum_core::settlement::anchor_production::HsmCustody {
+                module_path,
+                slot_id,
+                token_pin_env: pin_env,
+                anchor_keys: &anchor_keys,
+                seal_key_label: seal_label,
+            };
+            let emission = budlum_core::settlement::anchor_production::production_emission(
+                log_path, ledger, &custody, &ceremony, &cold, None,
+            )
+            .unwrap_or_else(|e| fail(&e.to_string()));
+            if let Err(e) = blockchain.configure_anchor_emission(emission) {
+                fail(&e);
+            }
+            tracing::info!("PQ anchor emission runs in production mode (HSM keys)");
+        }
+        other => {
+            eprintln!("CRITICAL: anchor mode `{other}` is not available in this build");
+            std::process::exit(1);
+        }
+    }
+
     if let Some((backup_storage, backup_dir, backup_interval, retention_count)) = backup_schedule {
         tokio::spawn(async move {
             // Blockchain initialization (including genesis) completed before
@@ -921,58 +1261,26 @@ async fn main() {
         });
     }
 
-    let bootstrap_domains = blockchain.domain_registry.domains();
+    // The bootstrap domains and their statuses are genesis state
+    // (`GenesisConfig::initial_state`): BFT domains start active, PoA domains
+    // start frozen until domain-local validator state exists, and only a
+    // block changes either. Startup reads them; it no longer rewrites them.
+    let bootstrap_domains = blockchain.state.settlement.domains.domains();
     for domain in bootstrap_domains {
-        // BFT domains are now activated
-        // At bootstrap instead of being frozen. The BftDomainPlugin provides
-        // Basic quorum-based finality via BftFinalityAdapter. If the BFT
-        // Engine is not yet wired for a specific domain, it will operate
-        // In fail-closed mode (blocks require valid BFT commit signatures).
-        // The status a domain boots with is consensus state: this process
-        // and the next restart must read the same one. The write goes first
-        // and the in-memory change follows it; when the write fails the node
-        // stops instead of running on a status the disk does not hold.
         if domain.kind == ConsensusKind::Bft {
-            if let Some(existing) = blockchain.domain_registry.get_mut(domain.id) {
-                let previous = existing.status;
-                existing.status = DomainStatus::Active;
-                if let Some(store) = blockchain.storage.as_ref() {
-                    if let Err(e) = store.save_consensus_domain(existing) {
-                        existing.status = previous;
-                        eprintln!(
-                            "CRITICAL: BFT bootstrap domain {}: status change not persisted, refusing to start on a status the store does not hold: {e}",
-                            domain.id
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
             tracing::info!(
-                "BFT bootstrap domain {} activated - BFT finality adapter engaged",
-                domain.id
+                "BFT bootstrap domain {} ({:?}) - BFT finality adapter engaged",
+                domain.id,
+                domain.status
             );
             continue;
         }
         if domain.kind == ConsensusKind::PoA {
-            if let Some(existing) = blockchain.domain_registry.get_mut(domain.id) {
-                let previous = existing.status;
-                existing.status = DomainStatus::Frozen;
-                if let Some(store) = blockchain.storage.as_ref() {
-                    if let Err(e) = store.save_consensus_domain(existing) {
-                        existing.status = previous;
-                        eprintln!(
-                            "CRITICAL: PoA bootstrap domain {}: status change not persisted, refusing to start on a status the store does not hold: {e}",
-                            domain.id
-                        );
-                        std::process::exit(1);
-                    }
-                }
-            }
-            tracing::warn!(
-                "PoA bootstrap domain {} kept registered but frozen until domain-local validator state exists",
-                domain.id
+            tracing::info!(
+                "PoA bootstrap domain {} registered with status {:?}; admission and finality are state-rooted",
+                domain.id,
+                domain.status
             );
-            continue;
         }
 
         let plugin_engine: Arc<dyn ConsensusEngine> = match &domain.kind {
@@ -993,9 +1301,7 @@ async fn main() {
                     Arc::new(PoSEngine::new(
                         PoSConfig {
                             min_stake: config.min_stake,
-                            slot_duration: (network_params.slot_ms / 1000).max(1),
                             epoch_length: network_params.epoch_len,
-                            ..Default::default()
                         },
                         None,
                     ))
@@ -1008,6 +1314,7 @@ async fn main() {
                     Arc::new(PoAEngine::new(
                         PoAConfig {
                             validators_file: Some(config.validators_file.clone()),
+                            domain: domain.id,
                             ..Default::default()
                         },
                         None,
@@ -1031,7 +1338,9 @@ async fn main() {
     }
 
     for validator in &poa_validators {
-        blockchain.state.add_validator(*validator, 1);
+        // A restart must not reset a stored authority to stake 1, active and
+        // not slashed.
+        blockchain.state.ensure_validator(*validator, 1);
     }
 
     let (chain_actor, chain) = ChainActor::new(blockchain);
@@ -1146,23 +1455,60 @@ async fn main() {
     );
 
     // B.U.D. Storage Node Initialization (Monolithic Architecture)
-    let (storage_node, sharding_config) = if config.storage_enabled {
-        let store = Arc::new(bud_node::MemoryContentStore::with_default_capacity());
-        let bitswap = Arc::new(bud_node::BudBitswap::new(store));
+    type StorageParts = (
+        Option<Arc<bud_node::BudBitswap>>,
+        Option<bud_node::ShardingConfig>,
+        Option<Arc<dyn bud_node::ContentStore>>,
+    );
+    let (storage_node, sharding_config, content_metrics_store): StorageParts =
+        if config.storage_enabled {
+            // Content bytes are node-local service state, not consensus state, but
+            // losing them on restart strands the manifests and active deals that
+            // the chain still advertises. Keep the store beside the chain DB and
+            // fail closed if it cannot be opened; silently falling back to memory
+            // would turn a restart into data loss again.
+            let content_path = std::path::Path::new(&config.db_path).with_extension("content");
+            let store = Arc::new(
+                bud_node::FileContentStore::with_default_capacity_at(&content_path).unwrap_or_else(
+                    |error| {
+                        eprintln!(
+                            "Error: could not open persistent B.U.D. content store at {}: {error}",
+                            content_path.display()
+                        );
+                        std::process::exit(1);
+                    },
+                ),
+            );
+            let bitswap = Arc::new(bud_node::BudBitswap::new(store.clone()));
 
-        let mut s_config = if config.mobile_mode {
-            bud_node::ShardingConfig::mobile_default()
+            let mut s_config = if config.mobile_mode {
+                bud_node::ShardingConfig::mobile_default()
+            } else {
+                bud_node::ShardingConfig::default()
+            };
+
+            s_config.replication_factor = config.storage_replication_factor;
+            s_config.mandatory = config.storage_mandatory_sharding;
+
+            (Some(bitswap), Some(s_config), Some(store))
         } else {
-            bud_node::ShardingConfig::default()
+            (None, None, None)
         };
 
-        s_config.replication_factor = config.storage_replication_factor;
-        s_config.mandatory = config.storage_mandatory_sharding;
-
-        (Some(bitswap), Some(s_config))
-    } else {
-        (None, None)
-    };
+    if let Some(store) = content_metrics_store {
+        let metrics = metrics.clone();
+        tokio::spawn(async move {
+            loop {
+                metrics
+                    .content_store_chunks
+                    .set(i64::try_from(store.len()).unwrap_or(i64::MAX));
+                metrics
+                    .content_store_bytes
+                    .set(i64::try_from(store.bytes()).unwrap_or(i64::MAX));
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            }
+        });
+    }
 
     let mut node = Node::with_key(
         chain.clone(),
@@ -1290,11 +1636,11 @@ async fn main() {
             }
             Err(e) => {
                 eprintln!("RPC configuration error: {e}");
-                return;
+                std::process::exit(1);
             }
         };
 
-        // (security audit §5 wiring) emit a prominent startup
+        // (security audit wiring) emit a prominent startup
         // Warning if the *resolved* `auth_required` is false. This block
         // Runs regardless of which constructor
         // (`RpcSecurityConfig::default`, `operator_default`,
@@ -1352,10 +1698,36 @@ async fn main() {
             RpcMode::Public,
         )
         .with_metrics(metrics.clone());
+        // In-process TLS: TLS 1.3 with X25519MLKEM768 only. A
+        // certificate without its key, or an unusable pair, stops the node
+        // here instead of falling back to plain HTTP.
+        let pub_server = match (
+            config.rpc_tls_cert_file.as_ref(),
+            config.rpc_tls_key_file.as_ref(),
+        ) {
+            (Some(cert), Some(key)) => {
+                match budlum_core::rpc::tls::acceptor_from_files(
+                    std::path::Path::new(cert),
+                    std::path::Path::new(key),
+                ) {
+                    Ok(acceptor) => pub_server.with_tls(acceptor),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            (None, None) => pub_server,
+            _ => {
+                eprintln!("rpc tls_cert_file and tls_key_file must be set together");
+                std::process::exit(1);
+            }
+        };
         let pub_addr = public_addr.clone();
         tokio::spawn(async move {
             if let Err(e) = pub_server.run(pub_addr.clone()).await {
                 eprintln!("Public RPC Server Error on {pub_addr}: {e}");
+                std::process::exit(1);
             } else {
                 println!("Public JSON-RPC Server running on {pub_addr}");
             }
@@ -1399,6 +1771,7 @@ async fn main() {
             tokio::spawn(async move {
                 if let Err(e) = op_server.run(op_addr.clone()).await {
                     eprintln!("Operator RPC Server Error on {op_addr}: {e}");
+                    std::process::exit(1);
                 } else {
                     println!("Operator JSON-RPC Server running on {op_addr}");
                 }
@@ -1426,7 +1799,7 @@ async fn main() {
             Ok(l) => l,
             Err(e) => {
                 eprintln!("Metrics server bind error: {e}");
-                return;
+                std::process::exit(1);
             }
         };
         println!("Prometheus metrics on {metrics_bind}/metrics");
@@ -1522,63 +1895,26 @@ async fn main() {
         // Existed and was never called, which left the fix inert in
         // Production.
         let cursor_path = std::path::Path::new(&config.db_path).join("relayer-cursor");
-        let mut relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
+        let relayer = budlum_core::relayer::RelayerWorker::new(chain.clone(), relayer_addr)
             .with_cursor_path(Some(cursor_path));
 
-        // Bind the outbound adapters this node was configured for.
-        //
-        // `with_adapters` existed and nothing called it, so the registry was
-        // empty on every deployed node and `build_verified_result` answered
-        // `UnsupportedChain` for all eight chains. That is the safe direction
-        // to be wrong in, a refusal rather than a forged result, but it meant
-        // outbound relay was off while the adapter set suggested otherwise.
-        //
-        // Still off unless the operator supplies a bridge address and topic0,
-        // because there is nothing safe to default them to. What changed is
-        // that saying so is now possible, and saying it wrong is refused here
-        // rather than discovered as a mint against a transaction that never
-        // happened.
-        match config.evm_adapter() {
-            Ok(Some(adapter)) => {
-                let mut registry = budlum_core::cross_domain::chain_adapter::AdapterRegistry::new();
-                match registry.register(Box::new(adapter)) {
-                    Ok(()) => {
-                        println!(
-                            "Relayer: EVM adapter registered (bridge {}, {} confirmations)",
-                            config.evm_bridge_address.as_deref().unwrap_or("?"),
-                            config.evm_confirmations.unwrap_or(
-                                budlum_core::cross_domain::evm::header::DEFAULT_CONFIRMATIONS
-                            )
-                        );
-                        relayer = relayer.with_adapters(Arc::new(registry));
-                    }
-                    Err(e) => {
-                        eprintln!("CRITICAL: the EVM adapter was refused by the registry: {e}");
-                        std::process::exit(1);
-                    }
-                }
-            }
-            Ok(None) => {
-                tracing::info!(
-                    "Relayer: no outbound chain adapter configured; the worker will observe \
-                     relay requests and refuse to submit results. Set --evm-bridge-address \
-                     and --evm-deposit-topic0 to enable the Ethereum bridge."
-                );
-            }
-            Err(e) => {
-                // A half-configured bridge is worse than none: the registry
-                // would advertise Ethereum as supported.
-                eprintln!("CRITICAL: outbound bridge configuration is invalid: {e}");
-                std::process::exit(1);
-            }
-        }
+        // The `--evm-bridge-address`
+        // registration is removed. The EVM bridge leg has no live end-to-end
+        // route - the off-chain half refuses at broadcast - so there is no
+        // configuration to register and nothing safe to default. Outbound
+        // EVM relay stays off until the real receipt flow lands.
+        tracing::info!(
+            "Relayer: outbound EVM relay is disabled: the EVM bridge leg has no \
+             live end-to-end route. The worker will observe relay requests and refuse to \
+             submit results."
+        );
 
         tokio::spawn(async move {
             relayer.run().await;
         });
     }
 
-    // 2026-07-18: the daemon block-production loop, for PoS and PoW.
+    // 2026-07-18: the daemon block-production loop, for PoS, PoW and PoA.
     //
     // Root cause, proven in CI by multinode smoke job 87990206239: the binary
     // produced blocks only through the interactive stdin "mine" command, so
@@ -1592,7 +1928,7 @@ async fn main() {
     // backlog), and `mine` under PoW (difficulty from the CLI flag; smoke runs
     // difficulty=0). Broadcast goes over the gossipsub "blocks" channel, and
     // peers run the same deterministic commit path.
-    if consensus_type == ConsensusType::PoS || consensus_type == ConsensusType::PoW {
+    if daemon_producer_loop_runs(consensus_type) {
         if let Some(producer) = cli_producer_address {
             let chain_p = chain.clone();
             let client_p = client.clone();
@@ -1603,8 +1939,44 @@ async fn main() {
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                // First instant at which a sync round has been holding this
+                // producer, or `None` when no round was holding it. Cleared on
+                // every tick that produces, so a fresh round starts a fresh
+                // window and a stale one cannot accumulate.
+                let mut hold_deadline: Option<tokio::time::Instant> = None;
                 loop {
                     tick.tick().await;
+                    // A node that is catching up produces nothing. Two nodes on
+                    // a mesh that is still forming otherwise build the same
+                    // height at once - each has only genesis, each is the
+                    // leader of the round it happens to reach first - and the
+                    // pair of blocks is a fork below every suffix either node
+                    // can join. In the devnet smoke this is one node booting a
+                    // few seconds late: it produced its own #1 while its first
+                    // sync round was still open, and neither side could reorg
+                    // onto the other. The round is opened on the first
+                    // handshake that reports a taller chain, which is exactly
+                    // the window the guard has to cover.
+                    //
+                    // The hold is bounded. That claim is unverified - any
+                    // handshaked peer can make it, and a peer that never
+                    // answers leaves the round open until the timeout sweep -
+                    // so it may delay this validator but never stop it: a
+                    // window of `PRODUCER_SYNC_HOLD` covers every honest
+                    // catch-up, and producing on a stale tip afterwards costs
+                    // this slot a losing race, not the mesh its liveness.
+                    if client_p.is_syncing() {
+                        let now = tokio::time::Instant::now();
+                        let deadline =
+                            *hold_deadline.get_or_insert_with(|| now + PRODUCER_SYNC_HOLD);
+                        if now < deadline {
+                            continue;
+                        }
+                        tracing::warn!(
+                            "Sync round open past the production hold window; producing anyway"
+                        );
+                    }
+                    hold_deadline = None;
                     if let Some((block, _pruned_cids)) = chain_p.produce_block(producer).await {
                         tracing::info!("Produced block #{}", block.index);
                         client_p
@@ -1670,7 +2042,13 @@ async fn main() {
                             client.broadcast("transactions".to_string(), NetworkMessage::Transaction(tx)).await;
                         }
                         "block" | "mine" => {
-                            let producer = cli_producer_address.unwrap_or(Address::zero());
+                            let producer = match console_producer(cli_producer_address) {
+                                Ok(producer) => producer,
+                                Err(reason) => {
+                                    println!("{reason}");
+                                    continue;
+                                }
+                            };
                             if let Some((block, pruned_cids)) = chain.produce_block(producer).await {
                                 println!("Produced block #{} with {} txs", block.index, block.transactions.len());
                                 for cid in pruned_cids {
@@ -1703,5 +2081,58 @@ async fn main() {
                 }
             }
         } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        claim_new_key_file, console_producer, daemon_producer_loop_runs, try_load_signing_key,
+    };
+    use budlum_core::cli::ConsensusType;
+
+    #[test]
+    fn key_claim_refuses_to_overwrite_an_existing_file() {
+        let dir = std::env::temp_dir().join(format!("budlum-keygen-claim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join("validator.key");
+        let path_str = path.to_str().expect("utf8 path").to_string();
+        std::fs::write(&path, b"existing secret").expect("seed key file");
+
+        let err = claim_new_key_file(&path_str).expect_err("existing key must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&path).expect("read back"), b"existing secret");
+
+        std::fs::remove_file(&path).expect("remove key file");
+        claim_new_key_file(&path_str).expect("a free path is claimed");
+        let err = claim_new_key_file(&path_str).expect_err("second claim must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn daemon_producer_loop_covers_poa() {
+        assert!(daemon_producer_loop_runs(ConsensusType::PoA));
+        assert!(daemon_producer_loop_runs(ConsensusType::PoS));
+        assert!(daemon_producer_loop_runs(ConsensusType::PoW));
+    }
+
+    #[test]
+    fn console_mine_refuses_the_zero_address_producer() {
+        assert!(console_producer(None).is_err());
+        let configured = budlum_core::core::address::Address::from([0x07u8; 32]);
+        assert_eq!(console_producer(Some(configured)), Ok(configured));
+    }
+
+    #[test]
+    fn a_failed_key_load_names_the_file_and_both_errors() {
+        let path = std::env::temp_dir().join(format!("budlum-no-key-{}", std::process::id()));
+        let path_str = path.to_str().expect("utf8 path");
+        let Err(reason) = try_load_signing_key(path_str) else {
+            unreachable!("a missing file is an error");
+        };
+        assert!(reason.contains(path_str));
+        assert!(reason.contains("as validator keys"));
+        assert!(reason.contains("as key pair"));
     }
 }

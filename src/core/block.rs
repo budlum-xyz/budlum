@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 pub const DEFAULT_CHAIN_ID: u64 = 45262;
+/// First byte of `producer_public_key` for a composite (validator suite)
+/// block signature. `0x05` is the ML-DSA-87 producer form.
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+pub const PRODUCER_KEY_COMPOSITE: u8 = 0x06;
 use crate::consensus::pos::SlashingEvidence;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -28,10 +32,18 @@ pub struct BlockHeader {
     pub previous_hash: String,
     pub hash: String,
     pub producer: Option<Address>,
+    /// The producer key of a composite or ML-DSA-87 block signature, as the
+    /// block carries it: evidence over two headers needs it to
+    /// verify a composite signature. Empty for an Ed25519 block. Not part of
+    /// the hash preimage, like the signature.
+    #[serde(default)]
+    pub producer_public_key: Vec<u8>,
     pub chain_id: u64,
     pub state_root: String,
     pub tx_root: String,
     pub slashing_evidence: Option<Vec<SlashingEvidence>>,
+    #[serde(default)]
+    pub slashing_reports: Option<Vec<crate::registry::evidence::SlashingReport>>,
     pub nonce: u64,
     pub epoch: u64,
     pub slot: u64,
@@ -44,6 +56,13 @@ pub struct BlockHeader {
     /// into the block hash, so the BLS finality certificate seals it.
     #[serde(default)]
     pub shards_root: Option<[u8; 32]>,
+    /// Commitment to the witnesses of the block's transactions: the
+    /// `witness_root` over `(txid, witness bytes)` in block order. The
+    /// transaction root commits only the txids (the bodies), so this root is
+    /// what makes a changed witness a different block. `None` only on
+    /// devnet and testnet blocks built before; mainnet requires it.
+    #[serde(default)]
+    pub witness_root: Option<[u8; 32]>,
 }
 
 /// Stand-in bytes hashed when slashing evidence cannot be serialized.
@@ -54,6 +73,107 @@ pub struct BlockHeader {
 /// the hash identical everywhere.
 const EVIDENCE_SERIALIZE_FAILED: &[u8] = b"budlum/serialize-failed/slashing-evidence";
 
+/// Borrowed view of the fields both `BlockHeader` and `Block` fold into the
+/// block hash, so the preimage is written once.
+struct BlockPreimage<'a> {
+    index: u64,
+    timestamp: u128,
+    previous_hash: &'a str,
+    tx_root: &'a str,
+    nonce: u64,
+    producer: Option<&'a Address>,
+    slashing_evidence: Option<&'a Vec<SlashingEvidence>>,
+    slashing_reports: Option<&'a Vec<crate::registry::evidence::SlashingReport>>,
+    chain_id: u64,
+    state_root: &'a str,
+    epoch: u64,
+    slot: u64,
+    vrf_output: &'a [u8],
+    vrf_proof: &'a [u8],
+    validator_set_hash: &'a str,
+    storage_root: Option<crate::domain::types::Hash32>,
+    shards_root: Option<&'a [u8; 32]>,
+    witness_root: Option<&'a [u8; 32]>,
+}
+
+fn hash_block_preimage(p: &BlockPreimage<'_>) -> [u8; 32] {
+    let producer_bytes = p
+        .producer
+        .map(|addr| addr.as_bytes().to_vec())
+        .unwrap_or_default();
+
+    let evidence_bytes = p
+        .slashing_evidence
+        .map(|e| {
+            // SECURITY: block hash input must not silently
+            // Hash empty bytes on serialize failure (collision risk).
+            bincode::serialize(e).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec())
+        })
+        .unwrap_or_default();
+
+    let index_bytes = p.index.to_le_bytes();
+    let timestamp_bytes = p.timestamp.to_le_bytes();
+    let nonce_bytes = p.nonce.to_le_bytes();
+    let chain_id_bytes = p.chain_id.to_le_bytes();
+    let epoch_bytes = p.epoch.to_le_bytes();
+    let slot_bytes = p.slot.to_le_bytes();
+    // Presence-tagged: an absent root and a present all-zero root used to
+    // fold into the same 32 zero bytes, so two distinct headers hashed
+    // (and signed) identically. The tag byte keeps them apart, the way
+    // `shards_root` below already is; the domain tag moved to V4 so no
+    // V3 hash can be replayed as a V4 one.
+    //
+    // Hash-format activation policy (this header hash, the full-block
+    // hash below, and the settlement global header alike):
+    // `BDLM_BLOCK_V4` is the only hash domain from the USL genesis
+    // onward. There is no V3-imaged chain state to carry over - mainnet
+    // has not launched (its genesis timestamp is still TBD) and
+    // devnet/testnet data resets with its genesis - so no dual-path
+    // verification, persisted hash-format version or activation height
+    // exists or is needed. The cost is deliberate: any node holding
+    // pre-USL blocks must resync from the new genesis. A format change
+    // AFTER launch is a different matter: it needs an explicit
+    // activation height, a persisted format version, and verification
+    // routed through the preimage of the block's own format, recorded
+    // in the same commit as the new tag.
+    let report_bytes = p
+        .slashing_reports
+        .map(|r| bincode::serialize(r).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec()));
+
+    let storage_root_bytes = presence_tagged(p.storage_root);
+    let mut fields: Vec<&[u8]> = vec![
+        b"BDLM_BLOCK_V4",
+        &index_bytes,
+        &timestamp_bytes,
+        p.previous_hash.as_bytes(),
+        p.tx_root.as_bytes(),
+        &nonce_bytes,
+        &producer_bytes,
+        &evidence_bytes,
+        &chain_id_bytes,
+        p.state_root.as_bytes(),
+        &epoch_bytes,
+        &slot_bytes,
+        &p.vrf_output,
+        &p.vrf_proof,
+        p.validator_set_hash.as_bytes(),
+        &storage_root_bytes,
+    ];
+    if let Some(shards_root) = &p.shards_root {
+        fields.push(shards_root.as_slice());
+    }
+    if let Some(ref rb) = report_bytes {
+        fields.push(rb.as_slice());
+    }
+    // Tagged so a witness root never reads as a shards root or a report
+    // (each of the three is optional).
+    if let Some(witness_root) = &p.witness_root {
+        fields.push(b"BDLM_WITNESS_ROOT_V1");
+        fields.push(witness_root.as_slice());
+    }
+    hash_fields_bytes(&fields)
+}
+
 impl BlockHeader {
     pub fn from_block(block: &Block) -> Self {
         BlockHeader {
@@ -62,10 +182,12 @@ impl BlockHeader {
             previous_hash: block.previous_hash.clone(),
             hash: block.hash.clone(),
             producer: block.producer,
+            producer_public_key: block.producer_public_key.clone(),
             chain_id: block.chain_id,
             state_root: block.state_root.clone(),
             tx_root: block.tx_root.clone(),
             slashing_evidence: block.slashing_evidence.clone(),
+            slashing_reports: block.slashing_reports.clone(),
             nonce: block.nonce,
             epoch: block.epoch,
             slot: block.slot,
@@ -74,6 +196,7 @@ impl BlockHeader {
             validator_set_hash: block.validator_set_hash.clone(),
             storage_root: block.storage_root,
             shards_root: block.shards_root,
+            witness_root: block.witness_root,
         }
     }
 
@@ -82,70 +205,26 @@ impl BlockHeader {
     }
 
     pub fn calculate_hash_bytes(&self) -> [u8; 32] {
-        let producer_bytes = self
-            .producer
-            .as_ref()
-            .map(|p| p.as_bytes().to_vec())
-            .unwrap_or_default();
-
-        let evidence_bytes = self
-            .slashing_evidence
-            .as_ref()
-            .map(|e| {
-                // SECURITY: block hash input must not silently
-                // Hash empty bytes on serialize failure (collision risk).
-                bincode::serialize(e).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec())
-            })
-            .unwrap_or_default();
-
-        let index_bytes = self.index.to_le_bytes();
-        let timestamp_bytes = self.timestamp.to_le_bytes();
-        let nonce_bytes = self.nonce.to_le_bytes();
-        let chain_id_bytes = self.chain_id.to_le_bytes();
-        let epoch_bytes = self.epoch.to_le_bytes();
-        let slot_bytes = self.slot.to_le_bytes();
-        // Presence-tagged: an absent root and a present all-zero root used to
-        // fold into the same 32 zero bytes, so two distinct headers hashed
-        // (and signed) identically. The tag byte keeps them apart, the way
-        // `shards_root` below already is; the domain tag moved to V4 so no
-        // V3 hash can be replayed as a V4 one.
-        //
-        // Hash-format activation policy (this header hash, the full-block
-        // hash below, and the settlement global header alike):
-        // `BDLM_BLOCK_V4` is the only hash domain from the USL genesis
-        // onward. There is no V3-imaged chain state to carry over - mainnet
-        // has not launched (its genesis timestamp is still TBD) and
-        // devnet/testnet data resets with its genesis - so no dual-path
-        // verification, persisted hash-format version or activation height
-        // exists or is needed. The cost is deliberate: any node holding
-        // pre-USL blocks must resync from the new genesis. A format change
-        // AFTER launch is a different matter: it needs an explicit
-        // activation height, a persisted format version, and verification
-        // routed through the preimage of the block's own format, recorded
-        // in the same commit as the new tag.
-        let storage_root_bytes = presence_tagged(self.storage_root);
-        let mut fields: Vec<&[u8]> = vec![
-            b"BDLM_BLOCK_V4",
-            &index_bytes,
-            &timestamp_bytes,
-            self.previous_hash.as_bytes(),
-            self.tx_root.as_bytes(),
-            &nonce_bytes,
-            &producer_bytes,
-            &evidence_bytes,
-            &chain_id_bytes,
-            self.state_root.as_bytes(),
-            &epoch_bytes,
-            &slot_bytes,
-            &self.vrf_output,
-            &self.vrf_proof,
-            self.validator_set_hash.as_bytes(),
-            &storage_root_bytes,
-        ];
-        if let Some(shards_root) = &self.shards_root {
-            fields.push(shards_root.as_slice());
-        }
-        hash_fields_bytes(&fields)
+        hash_block_preimage(&BlockPreimage {
+            index: self.index,
+            timestamp: self.timestamp,
+            previous_hash: &self.previous_hash,
+            tx_root: &self.tx_root,
+            nonce: self.nonce,
+            producer: self.producer.as_ref(),
+            slashing_evidence: self.slashing_evidence.as_ref(),
+            slashing_reports: self.slashing_reports.as_ref(),
+            chain_id: self.chain_id,
+            state_root: &self.state_root,
+            epoch: self.epoch,
+            slot: self.slot,
+            vrf_output: &self.vrf_output,
+            vrf_proof: &self.vrf_proof,
+            validator_set_hash: &self.validator_set_hash,
+            storage_root: self.storage_root,
+            shards_root: self.shards_root.as_ref(),
+            witness_root: self.witness_root.as_ref(),
+        })
     }
 
     pub fn verify_signature(&self, signature: &[u8]) -> bool {
@@ -153,13 +232,24 @@ impl BlockHeader {
             Some(p) => p,
             None => return false,
         };
-        let public_key = producer_addr.as_bytes();
         let binary_hash = self.calculate_hash_bytes();
         let calculated_hash = hex::encode(binary_hash);
         if calculated_hash != self.hash {
             return false;
         }
-        verify_signature(&binary_hash, signature, public_key).is_ok()
+        // A composite block signature verifies with the key the
+        // header carries; its Ed25519 half must be the producer.
+        if self.producer_public_key.first() == Some(&PRODUCER_KEY_COMPOSITE) {
+            return crate::consensus::block_signature::verify_block(
+                &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+                producer_addr.as_bytes(),
+                &self.producer_public_key[1..],
+                &binary_hash,
+                signature,
+            )
+            .is_ok();
+        }
+        verify_signature(&binary_hash, signature, producer_addr.as_bytes()).is_ok()
     }
 }
 
@@ -184,6 +274,8 @@ pub struct Block {
     pub producer_public_key: Vec<u8>,
     pub chain_id: u64,
     pub slashing_evidence: Option<Vec<SlashingEvidence>>,
+    #[serde(default)]
+    pub slashing_reports: Option<Vec<crate::registry::evidence::SlashingReport>>,
     pub state_root: String,
     pub tx_root: String,
     pub epoch: u64,
@@ -198,6 +290,13 @@ pub struct Block {
     /// into the block hash, so the BLS finality certificate seals it.
     #[serde(default)]
     pub shards_root: Option<[u8; 32]>,
+    /// Commitment to the witnesses of the block's transactions: the
+    /// `witness_root` over `(txid, witness bytes)` in block order. The
+    /// transaction root commits only the txids (the bodies), so this root is
+    /// what makes a changed witness a different block. `None` only on
+    /// devnet and testnet blocks built before; mainnet requires it.
+    #[serde(default)]
+    pub witness_root: Option<[u8; 32]>,
 }
 
 impl Block {
@@ -228,6 +327,7 @@ impl Block {
             producer_public_key: Vec::new(),
             chain_id,
             slashing_evidence: None,
+            slashing_reports: None,
             state_root: String::new(),
             tx_root: String::new(),
             epoch: 0,
@@ -237,6 +337,7 @@ impl Block {
             validator_set_hash: String::new(),
             storage_root: None,
             shards_root: None,
+            witness_root: None,
         };
         block.tx_root = block.calculate_tx_root();
         block.hash = block.calculate_hash();
@@ -247,6 +348,66 @@ impl Block {
         block.timestamp = 0;
         block.hash = block.calculate_hash();
         block
+    }
+
+    /// The witness root of this block's transactions: each
+    /// transaction's id (its body hash; a malformed id folds to all zeros,
+    /// which no body hashes to) and the bincode bytes of its witness.
+    #[must_use]
+    pub fn calculate_witness_root(&self) -> [u8; 32] {
+        let ids: Vec<[u8; 32]> = self
+            .transactions
+            .iter()
+            .map(|tx| hex_32(&tx.hash).unwrap_or([0u8; 32]))
+            .collect();
+        let witnesses: Vec<Vec<u8>> = self
+            .transactions
+            .iter()
+            .map(Transaction::witness_bytes)
+            .collect();
+        crate::network::witness_protocol::witness_root(&ids, &witnesses)
+    }
+
+    /// Whether every transaction's witness was pruned: the body is
+    /// complete, the signatures are gone. Such a block is admitted only
+    /// inside a segment that a finality certificate and its QC end.
+    #[must_use]
+    pub fn witness_is_stripped(&self) -> bool {
+        !self.transactions.is_empty()
+            && self
+                .transactions
+                .iter()
+                .all(|tx| tx.witness() == crate::core::transaction::TxWitness::default())
+    }
+
+    /// This block with every transaction witness removed. The block hash
+    /// and the witness root stay: neither covers the witnesses themselves.
+    #[must_use]
+    pub fn without_witnesses(&self) -> Self {
+        let mut block = self.clone();
+        block.transactions = block
+            .transactions
+            .into_iter()
+            .map(|tx| tx.split_witness().0)
+            .collect();
+        block
+    }
+
+    /// Whether the block's witness root is the one its transactions give.
+    /// An absent root is admitted off mainnet only (blocks built before
+    ///); mainnet requires it.
+    #[must_use]
+    pub fn witness_root_is_valid(&self) -> bool {
+        match &self.witness_root {
+            Some(root) => *root == self.calculate_witness_root(),
+            None => {
+                self.index == 0
+                    || self.chain_id
+                        != crate::core::chain_config::Network::Mainnet
+                            .chain_id()
+                            .value()
+            }
+        }
     }
 
     pub fn calculate_tx_root(&self) -> String {
@@ -341,57 +502,26 @@ impl Block {
     }
 
     pub fn calculate_hash_bytes(&self) -> [u8; 32] {
-        let producer_bytes = self
-            .producer
-            .as_ref()
-            .map(|p| p.as_bytes().to_vec())
-            .unwrap_or_default();
-        let evidence_bytes = self
-            .slashing_evidence
-            .as_ref()
-            .map(|e| {
-                // SECURITY: block hash input must not silently
-                // Hash empty bytes on serialize failure (collision risk).
-                bincode::serialize(e).unwrap_or_else(|_| EVIDENCE_SERIALIZE_FAILED.to_vec())
-            })
-            .unwrap_or_default();
-
-        let index_bytes = self.index.to_le_bytes();
-        let timestamp_bytes = self.timestamp.to_le_bytes();
-        let nonce_bytes = self.nonce.to_le_bytes();
-        let chain_id_bytes = self.chain_id.to_le_bytes();
-        let epoch_bytes = self.epoch.to_le_bytes();
-        let slot_bytes = self.slot.to_le_bytes();
-        // Presence-tagged: an absent root and a present all-zero root used to
-        // fold into the same 32 zero bytes, so two distinct headers hashed
-        // (and signed) identically. The tag byte keeps them apart, the way
-        // `shards_root` below already is; the domain tag moved to V4 so no
-        // V3 hash can be replayed as a V4 one. Hash-format activation
-        // policy: see `BlockHeader::calculate_hash_bytes` - V4 is the only
-        // domain from the USL genesis onward.
-        let storage_root_bytes = presence_tagged(self.storage_root);
-        let mut fields: Vec<&[u8]> = vec![
-            b"BDLM_BLOCK_V4",
-            &index_bytes,
-            &timestamp_bytes,
-            self.previous_hash.as_bytes(),
-            self.tx_root.as_bytes(),
-            &nonce_bytes,
-            &producer_bytes,
-            &evidence_bytes,
-            &chain_id_bytes,
-            self.state_root.as_bytes(),
-            &epoch_bytes,
-            &slot_bytes,
-            &self.vrf_output,
-            &self.vrf_proof,
-            self.validator_set_hash.as_bytes(),
-            &storage_root_bytes,
-        ];
-        if let Some(shards_root) = &self.shards_root {
-            fields.push(shards_root.as_slice());
-        }
-        hash_fields_bytes(&fields)
+        hash_block_preimage(&BlockPreimage {
+            index: self.index,
+            timestamp: self.timestamp,
+            previous_hash: &self.previous_hash,
+            tx_root: &self.tx_root,
+            nonce: self.nonce,
+            producer: self.producer.as_ref(),
+            slashing_evidence: self.slashing_evidence.as_ref(),
+            slashing_reports: self.slashing_reports.as_ref(),
+            chain_id: self.chain_id,
+            state_root: &self.state_root,
+            epoch: self.epoch,
+            slot: self.slot,
+            vrf_output: &self.vrf_output,
+            vrf_proof: &self.vrf_proof,
+            validator_set_hash: &self.validator_set_hash,
+            storage_root: self.storage_root,
+            shards_root: self.shards_root.as_ref(),
+            witness_root: self.witness_root.as_ref(),
+        })
     }
     pub fn sign(&mut self, keypair: &KeyPair) {
         // Block producer signatures are intentionally still Ed25519 in V3
@@ -420,7 +550,98 @@ impl Block {
         );
     }
 
+    /// Sign with the validator suite (`0x0002`, ML-DSA-65 and Ed25519) under
+    /// the `BDLM/BLOCK/V6` context. The producer stays the
+    /// Ed25519 half; `producer_public_key` carries
+    /// [`PRODUCER_KEY_COMPOSITE`] then the composite public key.
+    ///
+    /// # Errors
+    ///
+    /// A key that is not of the validator suite or cannot sign.
+    pub fn sign_composite(
+        &mut self,
+        keypair: &crate::crypto::composite::CompositeKeypair,
+        rnd: &[u8; 32],
+    ) -> Result<(), String> {
+        if keypair.suite() != crate::crypto::scheme::SuiteId::VALIDATOR {
+            return Err("a block is signed with the validator suite".into());
+        }
+        let public = keypair.public_key().map_err(|e| e.to_string())?;
+        self.producer = Some(Address::from(public.ed));
+        let mut key = vec![PRODUCER_KEY_COMPOSITE];
+        key.extend_from_slice(&public.encode());
+        self.producer_public_key = key;
+        let binary_hash = self.calculate_hash_bytes();
+        self.hash = hex::encode(binary_hash);
+        let signature = crate::consensus::block_signature::sign_block(keypair, &binary_hash, rnd)
+            .map_err(|e| e.to_string())?;
+        self.signature = Some(signature);
+        Ok(())
+    }
+
+    /// [`Self::sign_composite`] through a signer backend (an HSM): the
+    /// secrets stay in the backend.
+    ///
+    /// # Errors
+    ///
+    /// The backend has no PQ key or cannot sign a component.
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
+    pub fn sign_composite_with_signer(
+        &mut self,
+        signer: &dyn ConsensusSigner,
+    ) -> Result<(), String> {
+        let public = crate::crypto::signer::composite_public_key(signer)
+            .ok_or("the signer holds no ML-DSA-65 key")?;
+        self.producer = Some(Address::from(public.ed));
+        let mut key = vec![PRODUCER_KEY_COMPOSITE];
+        key.extend_from_slice(&public.encode());
+        self.producer_public_key = key;
+        let binary_hash = self.calculate_hash_bytes();
+        self.hash = hex::encode(binary_hash);
+        let signature = crate::crypto::signer::sign_composite_with(
+            signer,
+            crate::crypto::ctx::BLOCK_V6,
+            &binary_hash,
+        )
+        .map_err(|e| format!("composite block signing failed: {e}"))?;
+        self.signature = Some(signature.encode());
+        Ok(())
+    }
+
+    /// The ML-DSA-65 half of a composite block signature's key, for the
+    /// consensus check against the producer's registered key.
+    #[must_use]
+    pub fn composite_pq_key(&self) -> Option<Vec<u8>> {
+        let (version, key) = self.producer_public_key.split_first()?;
+        if *version != PRODUCER_KEY_COMPOSITE {
+            return None;
+        }
+        crate::crypto::composite::CompositePublicKey::decode(key)
+            .ok()
+            .map(|public| public.pq)
+    }
+
     pub fn sign_with_signer(&mut self, signer: &dyn ConsensusSigner) -> Result<(), String> {
+        // A backend that holds the validator's ML-DSA-65 key signs the
+        // composite form, the only one mainnet admits. Off mainnet a
+        // backend that cannot assemble it keeps the Ed25519 form.
+        if signer.has_pq_key() {
+            match self.sign_composite_with_signer(signer) {
+                Ok(()) => return Ok(()),
+                Err(e)
+                    if self.chain_id
+                        == crate::core::chain_config::Network::Mainnet
+                            .chain_id()
+                            .value() =>
+                {
+                    return Err(e);
+                }
+                Err(e) => {
+                    tracing::warn!("composite block signing unavailable, signing Ed25519: {e}");
+                    self.producer_public_key = Vec::new();
+                }
+            }
+        }
         self.producer = Some(signer.address());
         let binary_hash = self.calculate_hash_bytes();
         self.hash = hex::encode(binary_hash);
@@ -440,7 +661,16 @@ impl Block {
         Ok(())
     }
 
+    /// Verify under the scheme statuses of a fresh genesis. Consensus calls
+    /// [`Self::verify_signature_in`] with the chain-state registry.
     pub fn verify_signature(&self) -> bool {
+        self.verify_signature_in(&crate::crypto::scheme::SchemeStatusRegistry::genesis())
+    }
+
+    pub fn verify_signature_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+    ) -> bool {
         let producer_addr = match &self.producer {
             Some(p) => p,
             None => {
@@ -465,6 +695,31 @@ impl Block {
         // where it will carry the 2592-byte ML-DSA-87 key and producer will
         // become a hash. For an unsigned/legacy block the producer bytes are
         // the public key, matching the prior consensus behavior.
+        // Mainnet admits only the composite block signature.
+        if self.chain_id
+            == crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value()
+            && self.producer_public_key.first() != Some(&PRODUCER_KEY_COMPOSITE)
+        {
+            warn!("Mainnet refuses a block without the composite signature");
+            return false;
+        }
+        if self.producer_public_key.first() == Some(&PRODUCER_KEY_COMPOSITE) {
+            return match crate::consensus::block_signature::verify_block(
+                registry,
+                producer_addr.as_bytes(),
+                &self.producer_public_key[1..],
+                &binary_hash,
+                signature,
+            ) {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!("Composite block signature refused: {e:?}");
+                    false
+                }
+            };
+        }
         if self.producer_public_key.is_empty() {
             match crate::crypto::primitives::verify_signature(
                 &binary_hash,
@@ -493,7 +748,9 @@ impl Block {
                 Ok(addr) if &addr == producer_addr => {}
                 _ => return false,
             }
-            match crate::crypto::primitives::verify_ml_dsa_87_signature(
+            match crate::crypto::primitives::verify_ml_dsa_87_signature_in(
+                registry,
+                crate::crypto::ctx::BLOCK_V6,
                 &binary_hash,
                 signature,
                 public_key,
@@ -509,7 +766,19 @@ impl Block {
             }
         }
     }
+    /// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
     pub fn verify_signature_with_pubkey(&self, expected_pubkey: &Address) -> bool {
+        self.verify_signature_with_pubkey_in(
+            &crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            expected_pubkey,
+        )
+    }
+
+    pub fn verify_signature_with_pubkey_in(
+        &self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        expected_pubkey: &Address,
+    ) -> bool {
         let producer = match &self.producer {
             Some(p) => p,
             None => return false,
@@ -518,57 +787,83 @@ impl Block {
             warn!("Wrong producer. Expected: {expected_pubkey}, Got: {producer}");
             return false;
         }
-        self.verify_signature()
+        self.verify_signature_in(registry)
     }
-    pub fn mine(&mut self, difficulty: usize) {
-        // Use binary bit-level check for consistency with PoWEngine
-        let leading_zero_bits = difficulty * 4;
-        let full_bytes = leading_zero_bits / 8;
-        let remaining_bits = leading_zero_bits % 8;
-
+    /// Searches nonces until the hash has `difficulty` leading zero hex digits.
+    ///
+    /// Returns `false` when the nonce space is exhausted without a hit, so the
+    /// search ends instead of wrapping or panicking on overflow. A
+    /// difficulty above 64 hex digits cannot be met by a 32-byte hash and
+    /// returns `false` at once.
+    pub fn mine(&mut self, difficulty: usize) -> bool {
+        let leading_zero_bits = difficulty.saturating_mul(4);
+        if leading_zero_bits > 256 {
+            return false;
+        }
         loop {
-            let hash_bytes = match hex::decode(&self.hash) {
-                Ok(b) => b,
-                Err(_) => {
-                    self.nonce += 1;
-                    self.hash = self.calculate_hash();
-                    continue;
-                }
+            if Self::hash_meets_leading_zero_bits(&self.hash, leading_zero_bits) {
+                return true;
+            }
+            let Some(next) = self.nonce.checked_add(1) else {
+                return false;
             };
-
-            if hash_bytes.len() < full_bytes + if remaining_bits > 0 { 1 } else { 0 } {
-                self.nonce += 1;
-                self.hash = self.calculate_hash();
-                continue;
-            }
-
-            let mut valid = true;
-            for byte in &hash_bytes[..full_bytes] {
-                if *byte != 0 {
-                    valid = false;
-                    break;
-                }
-            }
-
-            if valid && remaining_bits > 0 {
-                let mask = 0xFFu8 << (8 - remaining_bits);
-                if hash_bytes[full_bytes] & mask != 0 {
-                    valid = false;
-                }
-            }
-
-            if valid {
-                break;
-            }
-
-            self.nonce += 1;
+            self.nonce = next;
             self.hash = self.calculate_hash();
         }
+    }
+
+    fn hash_meets_leading_zero_bits(hash_hex: &str, leading_zero_bits: usize) -> bool {
+        let Ok(hash_bytes) = hex::decode(hash_hex) else {
+            return false;
+        };
+        let full_bytes = leading_zero_bits / 8;
+        let remaining_bits = leading_zero_bits % 8;
+        let needed = full_bytes + usize::from(remaining_bits > 0);
+        if hash_bytes.len() < needed {
+            return false;
+        }
+        if hash_bytes[..full_bytes].iter().any(|byte| *byte != 0) {
+            return false;
+        }
+        if remaining_bits > 0 {
+            let mask = 0xFFu8 << (8 - remaining_bits);
+            if hash_bytes[full_bytes] & mask != 0 {
+                return false;
+            }
+        }
+        true
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_and_block_share_one_hash_preimage() {
+        let mut block = Block::new(3, "ab".repeat(32), vec![]);
+        block.shards_root = Some([5u8; 32]);
+        block.storage_root = Some([6u8; 32]);
+        block.nonce = 9;
+        let header = BlockHeader::from_block(&block);
+        assert_eq!(header.calculate_hash(), block.calculate_hash());
+        block.shards_root = None;
+        let header = BlockHeader::from_block(&block);
+        assert_eq!(header.calculate_hash(), block.calculate_hash());
+    }
+
+    #[test]
+    fn mine_stops_at_nonce_exhaustion_and_impossible_difficulty() {
+        let mut block = Block::new(1, "0".repeat(64), vec![]);
+        assert!(!block.mine(65), "no 32-byte hash has 65 zero hex digits");
+        block.nonce = u64::MAX;
+        block.hash = block.calculate_hash();
+        // Difficulty 63 will not be met by this single nonce.
+        assert!(!block.mine(63));
+        assert_eq!(block.nonce, u64::MAX);
+        let mut easy = Block::new(1, "0".repeat(64), vec![]);
+        assert!(easy.mine(1));
+        assert!(easy.hash.starts_with('0'));
+    }
 
     /// Regression: a malformed `tx.hash` must not be silently reinterpreted as
     /// Raw bytes inside the Merkle leaf preimage.
@@ -858,5 +1153,104 @@ mod merkle_duplicate_leaf_locks {
                 "a {n}-leaf tree accepts a duplicated last leaf"
             );
         }
+    }
+
+    fn block_with_signed_transfer(chain_id: u64) -> Block {
+        let key = KeyPair::generate().expect("key");
+        let mut tx = Transaction::new_with_chain_id(
+            Address::from(key.public_key_bytes()),
+            Address::from([2u8; 32]),
+            5,
+            1,
+            0,
+            Vec::new(),
+            chain_id,
+            crate::core::transaction::TransactionType::Transfer,
+        );
+        tx.sign(&key);
+        let mut block = Block::new_with_chain_id(1, "0".repeat(64), vec![tx], chain_id);
+        block.witness_root = Some(block.calculate_witness_root());
+        block.hash = block.calculate_hash();
+        block
+    }
+
+    #[test]
+    fn a_changed_witness_changes_the_witness_root_but_not_the_tx_root() {
+        let mut block = block_with_signed_transfer(DEFAULT_CHAIN_ID);
+        assert!(block.witness_root_is_valid());
+        let tx_root = block.calculate_tx_root();
+        let mut signature = block.transactions[0].signature.clone().expect("signed");
+        signature[0] ^= 1;
+        block.transactions[0].signature = Some(signature);
+        assert_eq!(block.calculate_tx_root(), tx_root, "the body is unchanged");
+        assert!(
+            !block.witness_root_is_valid(),
+            "the witness root catches it"
+        );
+    }
+
+    #[test]
+    fn the_witness_root_is_part_of_the_block_hash() {
+        let block = block_with_signed_transfer(DEFAULT_CHAIN_ID);
+        let mut other = block.clone();
+        other.witness_root = Some([7u8; 32]);
+        assert_ne!(block.calculate_hash(), other.calculate_hash());
+        other.witness_root = None;
+        assert_ne!(block.calculate_hash(), other.calculate_hash());
+    }
+
+    #[test]
+    fn mainnet_requires_a_witness_root() {
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let mut block = block_with_signed_transfer(mainnet);
+        assert!(block.witness_root_is_valid());
+        block.witness_root = None;
+        assert!(!block.witness_root_is_valid());
+        let mut devnet = block_with_signed_transfer(DEFAULT_CHAIN_ID);
+        devnet.witness_root = None;
+        assert!(devnet.witness_root_is_valid());
+    }
+
+    fn composite_key(tag: u8) -> crate::crypto::composite::CompositeKeypair {
+        crate::crypto::composite::CompositeKeypair::from_seeds(
+            crate::crypto::scheme::SuiteId::VALIDATOR,
+            &[tag; crate::crypto::pq::ML_DSA_SEED_LEN],
+            &[tag.wrapping_add(1); 32],
+        )
+        .expect("validator suite seeds")
+    }
+
+    #[test]
+    fn a_composite_block_signature_verifies_on_the_block_and_its_header() {
+        let mut block = Block::new(4, "ab".repeat(32), vec![]);
+        block
+            .sign_composite(&composite_key(3), &[0u8; 32])
+            .expect("signs");
+        assert!(block.verify_signature());
+        assert!(block.composite_pq_key().is_some());
+        let header = BlockHeader::from_block(&block);
+        let signature = block.signature.clone().expect("signed");
+        assert!(header.verify_signature(&signature));
+        let mut other = block.clone();
+        other.nonce += 1;
+        assert!(!other.verify_signature(), "the hash no longer matches");
+    }
+
+    #[test]
+    fn mainnet_refuses_an_ed25519_only_block() {
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let key = KeyPair::generate().expect("key");
+        let mut classical = Block::new_with_chain_id(4, "ab".repeat(32), vec![], mainnet);
+        classical.sign(&key);
+        assert!(!classical.verify_signature());
+        let mut composite = Block::new_with_chain_id(4, "ab".repeat(32), vec![], mainnet);
+        composite
+            .sign_composite(&composite_key(3), &[0u8; 32])
+            .expect("signs");
+        assert!(composite.verify_signature());
     }
 }

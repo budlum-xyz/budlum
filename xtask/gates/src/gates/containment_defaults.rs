@@ -13,11 +13,34 @@ fn code_of(path: &Path) -> Result<String, String> {
         return Err(format!("expected source file missing: {}", path.display()));
     }
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    Ok(text
-        .lines()
-        .map(|l| l.split("//").next().unwrap_or("").to_string())
-        .collect::<Vec<_>>()
-        .join("\n"))
+    // Literals and comments (line and block) are blanked: a `/* .. */` that
+    // names the call, or a `//` inside a string, must not change what is read.
+    Ok(super::rust_literals::scrub(&text))
+}
+
+/// The text of the first brace-balanced block that starts at or after `from`.
+fn balanced_block(text: &str, from: usize) -> Option<&str> {
+    let open = text[from..].find('{')? + from;
+    let mut depth = 0usize;
+    for (i, c) in text[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(&text[open..=open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Does `execute_bytecode` hand `true` as the mainnet flag to the inner runner?
+fn has_gated_entry(exec_code: &str) -> bool {
+    let compact: String = exec_code.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains("execute_bytecode_inner(bytecode,gas_limit,true,ctx)")
 }
 
 /// # Errors
@@ -29,15 +52,14 @@ pub fn run(root: &Path) -> Result<String, String> {
     let exec = root.join("src/execution/zkvm.rs");
     let isa_code = code_of(&isa)?;
     let vm_code = code_of(&vm)?;
-    let exec_code = code_of(&exec)?;
+    // Production text only: a unit test that mentions the flag is no consultation.
+    let exec_code = super::capability_modules_are_wired::strip_test_mods(&code_of(&exec)?);
 
     // 1. Default impl exists and closes both flags.
     let default_start = isa_code.find("impl Default for MainnetActivation");
-    let default_block = default_start.map(|s| {
-        let rest = &isa_code[s..];
-        let end = rest.find('}').unwrap_or(rest.len());
-        &rest[..=end]
-    });
+    // The whole impl, balanced: lines after the first `}` are read too, and an
+    // impl with no closing brace is a finding, not a panic.
+    let default_block = default_start.and_then(|s| balanced_block(&isa_code, s));
     let Some(default_block) = default_block else {
         return Err(String::from(
             "MainnetActivation no longer has a Default impl - the staged-rollout defaults are the containment boundary",
@@ -54,6 +76,14 @@ pub fn run(root: &Path) -> Result<String, String> {
                  VerifyInference because there is no verification circuit behind it and it\n  \
                  returns a hard-coded zero. Opening either is a consensus-visible decision\n  \
                  that belongs in the commit that makes it, with the verification to match."
+            ));
+        }
+        if default_block
+            .lines()
+            .any(|l| l.contains(flag) && l.contains("true"))
+        {
+            return Err(format!(
+                "MainnetActivation::default() sets {flag} to true somewhere in the impl."
             ));
         }
     }
@@ -73,10 +103,12 @@ pub fn run(root: &Path) -> Result<String, String> {
         ));
     }
 
-    // 3. The execution layer consults the activated flags.
-    if !exec_code.contains("verify_merkle_enabled") && !exec_code.contains("merkle_enabled") {
+    // 3. The execution layer runs contract bytecode in the gated mode. The flag
+    // itself is read inside the VM; what the executor owns is passing `true`
+    // for mainnet mode on the transaction path.
+    if !exec_code.contains("Vm::with_mainnet_mode(") || !has_gated_entry(&exec_code) {
         return Err(String::from(
-            "the execution layer no longer consults the VerifyMerkle activation flag.\n  \
+            "the execution layer no longer runs contract bytecode in mainnet (gated) mode.\n  \
              The containment boundary only holds if the gated opcode is refused at run time.",
         ));
     }
@@ -96,7 +128,7 @@ pub fn self_test() -> Result<String, String> {
     }
     let good_isa = "pub struct MainnetActivation {}\nimpl Default for MainnetActivation {\n    fn default() -> Self {\n        Self {\n            verify_merkle_enabled: false,\n            verify_inference_enabled: false,\n        }\n    }\n}\n";
     let good_vm = "fn decode() { MainnetActivation::default(); }\n";
-    let good_exec = "if activation.verify_merkle_enabled {}\n";
+    let good_exec = "fn execute_bytecode() { Self::execute_bytecode_inner(bytecode, gas_limit, true, ctx) }\nfn inner() { Vm::with_mainnet_mode(1, 2, mainnet); }\n#[cfg(test)]\nmod tests { fn t() { assert!(!d.verify_merkle_enabled); } }\n";
     std::fs::write(dir.join("budzero/bud-isa/src/lib.rs"), good_isa).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("budzero/bud-vm/src/lib.rs"), good_vm).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("src/execution/zkvm.rs"), good_exec).map_err(|e| e.to_string())?;
@@ -120,4 +152,33 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "containment canary OK (off PASSes, on FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gated_entry_needs_true_in_production_text() {
+        assert!(has_gated_entry(
+            "execute_bytecode_inner(bytecode,\n gas_limit, true, ctx)"
+        ));
+        assert!(!has_gated_entry(
+            "execute_bytecode_inner(bytecode, gas_limit, false, ctx)"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    #[test]
+    fn balanced_block_reads_the_whole_impl_and_never_panics() {
+        let t = "impl X { fn d() -> S { S { a: false } } fn e() { s.a = true; } } tail";
+        let b = balanced_block(t, 0).unwrap();
+        assert!(b.ends_with("} }") && b.contains("s.a = true"));
+        assert!(balanced_block("impl X { fn d() {", 0).is_none());
+        assert!(balanced_block("no brace", 0).is_none());
+    }
 }

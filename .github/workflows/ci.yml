@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/architecture-tip-adlari]
+    # Run on the normal protected bases and on stacked continuation bases.
+    # `arena/**` covers this repository's generated continuation branches;
+    # `consensus-of-consensuses` keeps upstream stack covered.
+    branches: [main, fix/architecture-tip-adlari, consensus-of-consensuses, 'arena/**']
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -14,9 +17,10 @@ permissions:
   contents: read
 
 jobs:
-  budlum:
-    name: Budlum Core
+  budlum-pq-build:
+    name: Budlum Core PQ build
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     # Read only. The badge used to be self-committed from this job, which is
     # why it once held `contents: write` and a persisted token; the badge is
     # now verified by `badges-are-current` and nothing here pushes. A job
@@ -30,7 +34,7 @@ jobs:
           persist-credentials: false
       - id: rust
         name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
           components: clippy, rustfmt
@@ -40,13 +44,40 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: budlum-core
+          shared-key: budlum-core-pq-build
       - name: "Feature matrix: pq-ml-dsa solo"
         if: always() && steps.rust.outcome == 'success'
         run: |
           set -euo pipefail
           cargo check --no-default-features --features "pq-ml-dsa wallet-ml-dsa"
           cargo clippy --no-default-features --features "pq-ml-dsa wallet-ml-dsa" --all-targets -- -D warnings
+  budlum-pq-crypto:
+    name: Budlum Core PQ crypto test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - id: protoc
+        name: Install protoc
+        if: always() && steps.rust.outcome == 'success'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core-pq-crypto
+      - name: PQ crypto tests
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
           # `check` and `clippy` prove it compiles. They do not run a single
           # signature. `pq-ml-dsa` is a consensus choice - `PQ_SCHEME_ID` is
           # written into genesis and `validate_pq_scheme` refuses to start on a
@@ -69,13 +100,39 @@ jobs:
               || { echo "ERROR: $t did not run/pass under pq-ml-dsa"; exit 1; }
           done
           grep -E 'test result:' /tmp/mldsa-tests.log
-          # `account_abstraction` is compiled only under `wallet-ml-dsa`, so
-          # this is the one job that sees it. The directory sat unreachable
-          # from lib.rs and never compiled at all: invalid Rust was written
-          # into it and `cargo check --lib` still passed. Inside it three
-          # functions named like security checks could not reject anything.
-          # The filter above stops at `crypto::`, so without this step the
-          # tests that lock those checks would still never run.
+  budlum-pq-aa:
+    name: Budlum Core PQ account abstraction test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - id: protoc
+        name: Install protoc
+        if: always() && steps.rust.outcome == 'success'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core-pq-aa
+      - name: PQ account abstraction tests
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          # `account_abstraction` is compiled only under `wallet-ml-dsa`.
+          # The directory sat unreachable from lib.rs and never compiled at
+          # all: invalid Rust was written into it and `cargo check --lib` still
+          # passed. Inside it three functions named like security checks could
+          # not reject anything. The crypto test job stops at `crypto::`, so
+          # without this test the checks would not run.
           cargo test --no-default-features --features "pq-ml-dsa wallet-ml-dsa" \
             --lib account_abstraction:: 2>&1 | tee /tmp/aa-tests.log
           if grep -qE 'running 0 tests' /tmp/aa-tests.log; then
@@ -94,33 +151,29 @@ jobs:
               || { echo "ERROR: $t did not run/pass"; exit 1; }
           done
           grep -E 'test result:' /tmp/aa-tests.log
-      - name: Feature canary - --all-features MUST BE REFUSED
+  budlum-lib-test:
+    name: Budlum Core library test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - id: protoc
+        name: Install protoc
         if: always() && steps.rust.outcome == 'success'
-        run: |
-          set -uo pipefail
-          # The canary asserts that `--all-features` is REFUSED. With stderr
-          # sent to /dev/null it asserted only that cargo exited non-zero, and
-          # cargo exits non-zero for a hundred reasons that have nothing to do
-          # with the guard: a syntax error, a missing protoc, an unresolved
-          # dependency. In every one of those states this step printed
-          # "Canary OK" - the guard could have been deleted and this gate would
-          # still have said it was there. The reason is read instead of
-          # discarded: the refusal must be the `compile_error!` in
-          # src/crypto/primitives.rs, by its own text.
-          set +e
-          cargo check --all-features > /tmp/all-features.log 2>&1
-          status=$?
-          set -e
-          if [ "$status" -eq 0 ]; then
-            echo "ERROR: --all-features compiled -> no compile_error guard (vacuous gate!)"
-            exit 1
-          fi
-          if ! grep -q "mutually exclusive validator backends" /tmp/all-features.log; then
-            echo "::error::--all-features failed (exit $status) but NOT on the compile_error guard - this canary cannot tell a working guard from a broken build."
-            tail -n 20 /tmp/all-features.log | sed -e 's/^/::error::/'
-            exit 1
-          fi
-          echo "Canary OK: --all-features was refused with compile_error as expected (PQ backends are mutually exclusive)."
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core-lib-test
       - name: Test
         if: always() && steps.rust.outcome == 'success'
         # Pipefail is required: tee alone returns exit 0; otherwise a test failure
@@ -129,6 +182,93 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --lib --verbose 2>&1 | tee /tmp/libtests.log
+      - name: Public service admission tests
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          cargo test --bin budlum-faucet --bin budlum-indexer 2>&1 | tee /tmp/public-service-tests.log
+          for name in direct_and_proxy_modes_are_explicit_and_fail_closed a_partial_request_body_times_out incomplete_headers_expire_and_release_a_connection_slot; do
+            grep -Eq "${name} \.\.\. ok" /tmp/public-service-tests.log || {
+              echo "::error::public service regression $name did not pass"
+              exit 1
+            }
+          done
+  budlum-bpqs:
+    # Crates/bpqs was a package no workflow tested - the
+    # fuzz target and a cargo-hack check were not a test gate. The research
+    # line's KAT freeze, its quota counter and its verifier refusals all live
+    # here, and a silent break in them is exactly what a gate exists for.
+    name: Budlum-BPQS (research crate gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-bpqs
+      - name: Format
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/bpqs/Cargo.toml --all -- --check
+      - name: Clippy
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path crates/bpqs/Cargo.toml --all-targets -- -D warnings
+      - name: Test
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path crates/bpqs/Cargo.toml --verbose 2>&1 | tee /tmp/bpqstests.log
+      - name: Ceremony-scale keygen (release, ignored test)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --release --manifest-path crates/bpqs/Cargo.toml -- --ignored full_size_ceremony_l5
+  budlum-quality:
+    name: Budlum Core quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - id: protoc
+        name: Install protoc
+        if: always() && steps.rust.outcome == 'success'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core-quality
+      # pq-dilithium took the mutually-exclusive pair with it (304cfe8): the
+      # remaining backends coexist, so --all-features MUST BUILD. A refusal
+      # here now means a feature broke, and a guard that no longer exists
+      # cannot be what refused it.
+      - name: "Feature canary - --all-features MUST BUILD"
+        if: always() && steps.rust.outcome == 'success'
+        run: |
+          set -uo pipefail
+          cargo check --all-features > /tmp/all-features.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::--all-features failed to build - a feature combination is broken."
+            tail -n 30 /tmp/all-features.log | sed -e 's/^/::error::/'
+            exit 1
+          fi
+          echo "Canary OK: --all-features builds (all validator backends coexist)."
       - name: cargo doc (Item 6 - public API documentation)
         if: always() && steps.rust.outcome == 'success'
         run: |
@@ -193,7 +333,7 @@ jobs:
           # This prints the per-lint tally and every first-party file:line.
           # It writes nothing and runs before the gate, so it cannot change the
           # verdict.
-          python3 ./ops/scripts/clippy-extra-report.py /tmp/clippy-extra.json
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- clippy-extra-report /tmp/clippy-extra.json
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- clippy-extra /tmp/clippy-extra.json
       - name: Format
         if: always() && steps.rust.outcome == 'success'
@@ -241,6 +381,32 @@ jobs:
         # step stayed green. Measured 2026-08-28 and pinned here so the gap
         # cannot reopen.
         run: cargo fmt --manifest-path kani/Cargo.toml --all -- --check
+  budlum:
+    name: Budlum Core
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - budlum-pq-build
+      - budlum-pq-crypto
+      - budlum-pq-aa
+      - budlum-lib-test
+      - budlum-quality
+    steps:
+      - name: Require every core split
+        env:
+          PQ_BUILD: ${{ needs.budlum-pq-build.result }}
+          PQ_CRYPTO: ${{ needs.budlum-pq-crypto.result }}
+          PQ_AA: ${{ needs.budlum-pq-aa.result }}
+          LIB_TEST: ${{ needs.budlum-lib-test.result }}
+          QUALITY: ${{ needs.budlum-quality.result }}
+        run: |
+          for result in "$PQ_BUILD" "$PQ_CRYPTO" "$PQ_AA" "$LIB_TEST" "$QUALITY"; do
+            if [ "$result" != success ]; then
+              echo "::error::Budlum Core split result: $result"
+              exit 1
+            fi
+          done
   gates:
     name: Gates (a suite that cannot run is not a protection)
     runs-on: ubuntu-latest
@@ -248,18 +414,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Audit Guard aggregation (the gate itself must be alive)
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/audit_guard.py --self-test
-          python3 .github/scripts/audit_guard.py
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
           components: clippy, rustfmt
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: Audit Guard aggregation (the gate itself must be alive)
+        run: |
+          set -euo pipefail
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- audit-guard --self-test
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- audit-guard
       # The fail-closed actionlint gate runs inside this suite as well; without
       # the binary installed here the suite fails on the tool, not on a finding
       # (measured on the run for eafdbb4, 2026-09-13).
@@ -346,6 +512,7 @@ jobs:
         # produce a clippy failure nobody asked for.
         if: always() && steps.build.outcome == 'success'
         run: |
+          set -euo pipefail
           cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets 2>&1 \
             | tee /tmp/gates-clippy.log | tail -n 5
       - name: Clippy surface (annotations)
@@ -478,8 +645,8 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- guards-are-reachable 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       # `guards-are-reachable` covers the refusal-shaped subset. The rest of the
-      # public surface had no ratchet at all: docs/AUDIT-DEAD-PUB-API-2026-09-10.md
-      # measured what that costs and asked for this file, and a gate added here is
+      # public surface had no ratchet at all: measuring what that costs is what
+      # asked for this file, and a gate added here is
       # worthless if nothing runs it, which is the failure the comment above this
       # block was written about.
       - name: Dead public API canary
@@ -517,18 +684,18 @@ jobs:
       # (its SCAN_ROOTS are src/budzero/wallet-core) and `gates-are-wired` only
       # walks scripts that already belong to a list. A protection that is not
       # compiled is not a protection.
-      # Workflow hygiene needs no cargo, so it is not guarded on the build: a red
-      # gate binary must not hide the fact that a guard expression points at a step
+      # Workflow hygiene runs from the tools crate, not the gates crate, so it is
+      # not guarded on the gate build: a red gate binary must not hide the fact that a guard expression points at a step
       # that does not exist - that failure mode skips gates silently, build or not.
       - name: Step reachability canary
         if: always()
         run: |
-          python3 ops/scripts/check-step-reachability.py --self-test 2>&1 | tee -a /tmp/gate-out.log
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- step-reachability --self-test 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       - name: No guard can hide a step
         if: always()
         run: |
-          python3 ops/scripts/check-step-reachability.py 2>&1 | tee -a /tmp/gate-out.log
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- step-reachability 2>&1 | tee -a /tmp/gate-out.log
           exit "${PIPESTATUS[0]}"
       - name: Researched-product naming canary
         if: always() && steps.build.outcome == 'success'
@@ -745,7 +912,7 @@ jobs:
           persist-credentials: false
       - id: rust
         name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         # NOTE: master 2026-07-16 and later make the `toolchain` input MANDATORY
         # (CI evidence: job 87741629986 - "'toolchain' is a required input").
         with:
@@ -764,6 +931,9 @@ jobs:
       - name: Test
         if: always() && steps.rust.outcome == 'success'
         run: cargo test --workspace
+      - name: Test compiler with the experimental ISA
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test -p bud-compiler --features experimental
       - name: Format
         if: always() && steps.rust.outcome == 'success'
         run: cargo fmt --all -- --check
@@ -779,7 +949,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -791,11 +961,12 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud-e2e --self-test
       - name: bud_e2e - 9 invariants + 3 e2e (name canary)
         run: |
+          set -euo pipefail
           cargo test --lib bud_e2e 2>&1 | tee /tmp/bud-e2e.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- bud-e2e /tmp/bud-e2e.txt
 
   economy-invariants:
-    # : EIP-1559 + reward-pool + committed-supply denominator locks.
+    # EIP-1559 + reward-pool + committed-supply denominator locks.
     # Name canary prevents a vacuous green if tests are renamed/deleted.
     name: Economy Invariants
     runs-on: ubuntu-latest
@@ -804,7 +975,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -821,7 +992,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- economy-invariants /tmp/economy-invariants.txt
 
   fork-choice-gate:
-    # : per-domain fork-choice/lifecycle named tests.
+    # per-domain fork-choice/lifecycle named tests.
     # Name canary prevents a vacuous green if fork-choice tests are renamed/deleted.
     name: Fork-Choice Invariants
     runs-on: ubuntu-latest
@@ -830,7 +1001,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -847,7 +1018,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- fork-choice /tmp/fork-choice-gate.txt
 
   storage-provider-gate:
-    # : StorageProvider trait + mock implementation named tests.
+    # StorageProvider trait + mock implementation named tests.
     name: StorageProvider Gate
     runs-on: ubuntu-latest
     steps:
@@ -855,7 +1026,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -879,7 +1050,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-provider /tmp/storage-provider-gate.txt
 
   node-classification-gate:
-    # : full/archive node classification + pruning policy named tests.
+    # full/archive node classification + pruning policy named tests.
     # Name canary prevents a vacuous green if classification tests are renamed/deleted.
     name: Node Classification
     runs-on: ubuntu-latest
@@ -888,7 +1059,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -905,7 +1076,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- node-classification /tmp/node-classification-gate.txt
 
   network-hardening-gate:
-    # : network hardening named tests.
+    # network hardening named tests.
     # Name canary prevents a vacuous green if H5/H11.12 tests are renamed/deleted.
     name: Network Hardening
     runs-on: ubuntu-latest
@@ -914,7 +1085,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -963,7 +1134,7 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- serialize-map-keys-are-strings
 
   poa-compliance-gate:
-    # : MASAK/AML hooks are isolated to PoA domains only.
+    # MASAK/AML hooks are isolated to PoA domains only.
     name: PoA Compliance Isolation
     runs-on: ubuntu-latest
     steps:
@@ -971,7 +1142,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -988,7 +1159,7 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- poa-compliance /tmp/poa-compliance-gate.txt
 
   governance-invariants:
-    # : minimal on-chain governance parameter whitelist + activation timelock.
+    # minimal on-chain governance parameter whitelist + activation timelock.
     name: Governance Invariants
     runs-on: ubuntu-latest
     steps:
@@ -996,7 +1167,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -1012,8 +1183,47 @@ jobs:
           cargo test --lib governance 2>&1 | tee /tmp/governance-invariants-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- governance-invariants /tmp/governance-invariants-gate.txt
 
+  pq-core:
+    # to and: the scheme registry, the dual-verifier facade (RustCrypto
+    # ml-dsa and libcrux-ml-dsa must both accept), the NIST ACVP and Wycheproof vectors,
+    # the explicit bug vectors, the composite signature and the seed wiping. The named
+    # tests are required (`pq-core-gate`); the differential test then runs a million
+    # inputs through both libraries in release.
+    name: PQ Core
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: budlum-core
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      - name: PQ core gate self-test
+        run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-core-gate --self-test
+      - name: PQ core tests
+        run: |
+          set -euo pipefail
+          cargo test --lib crypto:: 2>&1 | tee /tmp/pq-core-gate.txt
+          cargo test --lib pq_verifier_disagreement_is_exported 2>&1 | tee -a /tmp/pq-core-gate.txt
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-core-gate /tmp/pq-core-gate.txt
+      - name: Differential test, one million inputs through both ML-DSA libraries
+        run: |
+          set -euo pipefail
+          BUDLUM_PQ_DIFF_CASES=1000000 cargo test --release --manifest-path crates/wallet-core/Cargo.toml --lib pq_vectors_differential_random_inputs -- --nocapture
+      - name: Vectors in release (SLH-DSA-SHAKE-256s signing included)
+        run: |
+          set -euo pipefail
+          cargo test --release --manifest-path crates/wallet-core/Cargo.toml --lib pq_vectors_
+
   wallet-core-gate:
-    # : wallet-core multisig/social recovery primitives.
+    # wallet-core multisig/social recovery primitives.
     name: Wallet Core
     runs-on: ubuntu-latest
     steps:
@@ -1021,7 +1231,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -1036,7 +1246,17 @@ jobs:
           cargo test --manifest-path crates/wallet-core/Cargo.toml 2>&1 | tee /tmp/wallet-core-gate.txt
           cargo test --manifest-path crates/wallet-core/Cargo.toml --features uniffi --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
           cargo test --manifest-path crates/wallet-core/Cargo.toml --features wasm --lib binding 2>&1 | tee -a /tmp/wallet-core-gate.txt
+          # The production feature is the build that reads OS entropy and signs hedged.
+          cargo test --manifest-path crates/wallet-core/Cargo.toml --features production --lib
+          # the JSON-RPC bodies and readers.
+          cargo test --manifest-path crates/wallet-core/Cargo.toml --features rpc --lib rpc
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-core-gate /tmp/wallet-core-gate.txt
+      - name: wallet-core browser build (wasm32, BrowserWallet exports)
+        run: |
+          set -euo pipefail
+          rustup target add wasm32-unknown-unknown
+          cargo build --manifest-path crates/wallet-core/Cargo.toml --lib --release \
+            --target wasm32-unknown-unknown --features wasm
 
   # ============================ Budscan (web3 tarayici cekirdegi) ============================
   budscan:
@@ -1053,7 +1273,7 @@ jobs:
           persist-credentials: false
       - id: rust
         name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
           components: clippy, rustfmt
@@ -1085,6 +1305,48 @@ jobs:
         if: always() && steps.rust.outcome == 'success'
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- budscan-patchset
 
+  # ============================ Standalone crates: bpqs and note-packing ============================
+  standalone-crates:
+    # Both crates carry their own lock file and are not members of the root
+    # package, so `cargo test --lib` at the root never runs their tests. Without this
+    # job a break in the note packing code or in the BPQS research line stays green.
+    name: Standalone crates (bpqs, note-packing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: rust
+        name: Install Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: standalone-crates
+          workspaces: |
+            crates/bpqs
+            crates/note-packing
+      - name: Format (bpqs)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/bpqs/Cargo.toml --all -- --check
+      - name: Format (note-packing)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo fmt --manifest-path crates/note-packing/Cargo.toml --all -- --check
+      - name: Clippy (bpqs)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path crates/bpqs/Cargo.toml --all-targets -- -D warnings
+      - name: Clippy (note-packing)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo clippy --manifest-path crates/note-packing/Cargo.toml --all-targets -- -D warnings
+      - name: Tests (bpqs)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path crates/bpqs/Cargo.toml
+      - name: Tests (note-packing)
+        if: always() && steps.rust.outcome == 'success'
+        run: cargo test --manifest-path crates/note-packing/Cargo.toml
+
   # ============================  / Bolum 4 (BNS gate) ============================
       - name: Format
         if: always() && steps.rust.outcome == 'success'
@@ -1099,7 +1361,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -1111,6 +1373,7 @@ jobs:
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- bns-gate --self-test
       - name: bns - 8 tests (name canary)
         run: |
+          set -euo pipefail
           cargo test --lib bns 2>&1 | tee /tmp/bns-gate.txt
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- bns-gate /tmp/bns-gate.txt
 
@@ -1128,7 +1391,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -1161,7 +1424,7 @@ jobs:
           fi
 
   dependency-audit:
-    # : cargo audit + SBOM generation + SBOM artifact.
+    # cargo audit + SBOM generation + SBOM artifact.
     name: Dependency Audit + SBOM
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -1170,25 +1433,25 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: budlum-core
       - name: cargo audit (CVE = fail)
-        run: bash ./ops/scripts/audit-deps.sh
+        run: cargo run --release --manifest-path xtask/tools/Cargo.toml -- audit-deps
       - name: Generate SBOM (CycloneDX)
-        run: bash ./ops/scripts/generate-sbom.sh
+        run: cargo run --release --manifest-path xtask/tools/Cargo.toml -- generate-sbom
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-${{ github.sha }}
           path: sbom.cdx.json
           retention-days: 90
 
   cargo-deny:
-    # : the root and budzero graphs are checked in separate matrix steps.
+    # Every committed lockfile graph is checked in its own matrix step.
     name: Cargo Deny (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1201,6 +1464,15 @@ jobs:
           # which cargo-deny discovers on its own.
           - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
+          - { name: bud, manifest: "bud/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budscan, manifest: "crates/budscan/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: note-packing, manifest: "crates/note-packing/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1231,6 +1503,15 @@ jobs:
         include:
           - { name: root, manifest: "./Cargo.toml", config: "--config .quality/deny.toml" }
           - { name: budzero, manifest: "budzero/Cargo.toml", config: "" }
+          - { name: bud, manifest: "bud/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: fuzz, manifest: "fuzz/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: ai-inference, manifest: "crates/ai-inference/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: bpqs, manifest: "crates/bpqs/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: budscan, manifest: "crates/budscan/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: note-packing, manifest: "crates/note-packing/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: wallet-core, manifest: "crates/wallet-core/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: xtask-gates, manifest: "xtask/gates/Cargo.toml", config: "--config .quality/deny.toml" }
+          - { name: xtask-tools, manifest: "xtask/tools/Cargo.toml", config: "--config .quality/deny.toml" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1319,9 +1600,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust (nightly - cargo-fuzz gereksinimi)
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
-          toolchain: nightly
+          # Pin this nightly to avoid the later compiler ICE in p3-goldilocks.
+          toolchain: nightly-2026-10-09
       - name: Install protoc
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -1329,7 +1611,7 @@ jobs:
           workspaces: fuzz
           shared-key: fuzz
       - name: Install cargo-fuzz
-        run: cargo +nightly install --locked cargo-fuzz
+        run: cargo +nightly-2026-10-09 install --locked cargo-fuzz
       # The corpus is carried across runs. Without this every run starts from
       # an empty corpus, so the same 60 seconds re-explores the same shallow
       # surface each time and the gate never gets deeper. `fuzz-nightly.yml`
@@ -1387,12 +1669,34 @@ jobs:
           # one slow input would eat the 60 second budget for the target.
           for t in "${targets[@]}"; do
             echo "=== fuzz-quick: $t (60s) ==="
-            cargo +nightly fuzz run "$t" -- -max_total_time=60 -timeout=25 -print_final_stats=1
+            cargo +nightly-2026-10-09 fuzz run "$t" -- -max_total_time=60 -timeout=25 -print_final_stats=1
           done
           echo "All fuzz targets clean."
+      - name: B.U.D. format fuzz (60s)
+        # bud/ is its own crate with its own fuzz/ directory, so cargo-fuzz
+        # has to run from bud/.
+        working-directory: bud
+        # The use-after-scope opt-out is scoped to this step only: ASan
+        # aborts inside vendored zstd 1.5.7 C code (zstd_opt.c reading its
+        # own getAllMatchesFns dispatch table, a global whose shadow is
+        # nevertheless f8 stack-use-after-scope poisoned - an
+        # instrumentation artifact in third-party C, no bud frame involved;
+        # bud itself is forbid(unsafe_code) and zstd is ASan-fuzzed
+        # upstream). The runtime option covers the Rust/LLVM objects, but
+        # a 2026-10-20 quick-fuzz run still aborted in the GCC-instrumented
+        # C objects: GCC emits that lifetime poisoning at compile time and
+        # does not honour detect_stack_use_after_scope=0 for it. The
+        # matching -fno-sanitize-address-use-after-scope CFLAGS entry is
+        # therefore also required; cc appends it after its default
+        # -fsanitize=address, so every other ASan check (heap/stack/global
+        # overflow, use-after-free) stays enabled for this target.
+        env:
+          ASAN_OPTIONS: detect_stack_use_after_scope=0
+          CFLAGS_x86_64_unknown_linux_gnu: -fno-sanitize-address-use-after-scope
+        run: cargo +nightly-2026-10-09 fuzz run fuzz_bud_format -- -max_total_time=60 -timeout=25 -print_final_stats=1
       - name: Crash artifact (varsa)
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-quick-crashes-${{ github.sha }}
           path: fuzz/artifacts/
@@ -1400,7 +1704,7 @@ jobs:
           retention-days: 30
 
   secret-scan:
-    # : secret scan over the FULL git history (fetch-depth: 0).
+    # secret scan over the FULL git history (fetch-depth: 0).
     # We use the gitleaks OSS binary: the official GitHub Action asks organisation
     # repos for GITLEAKS_LICENSE (an external registration); the binary runs the same engine
     # without a licence. Version + sha256 are pinned. Moving to the official action
@@ -1459,7 +1763,7 @@ jobs:
             --report-format sarif --report-path gitleaks.sarif --exit-code 0
       - name: Upload gitleaks SARIF (Security tab)
         if: always()
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: gitleaks.sarif
           category: gitleaks
@@ -1467,7 +1771,7 @@ jobs:
         run: gitleaks detect --source . --config .gitleaks.toml --redact --verbose
 
   timing-safe:
-    # : static scan for raw equality in RPC/crypto + dudect-style
+    # static scan for raw equality in RPC/crypto + dudect-style
     # Istatistiksel zamanlama regresyon testi (cargo bench).
     name: Timing-Safe Regression
     runs-on: ubuntu-latest
@@ -1477,7 +1781,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
       - name: Install protoc
@@ -1556,7 +1860,7 @@ jobs:
           ignore-unfixed: false
       - name: Trivy SARIF yukle (Security sekmesi)
         if: always()
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
@@ -1573,18 +1877,24 @@ jobs:
           ignore-unfixed: false
 
   coverage:
-    # : nextest + llvm-cov, ratchet gate (Q-7b1(a)).
+    # nextest + llvm-cov, ratchet gate (Q-7b1(a)).
     # Baseline evidence 2026-07-17: lines 64.15% (14493/22594), 531/531 PASS.
     # Tools are version+sha256 pinned (nextest verified byte for byte against the official .sha256 asset).
     name: Coverage (nextest + llvm-cov, ratchet)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 45 minutes used to be enough and stopped being enough without the suite
+    # getting slower: it got longer. The run on `7535554` was still walking the
+    # suite at 44 minutes (2383 of 4355 tests at 17 minutes, plus the instrumented
+    # build, plus a single cold-quorum test that took over a minute), and the
+    # runner cancelled it at 45:00 - a green suite reported as a red gate. The
+    # budget is raised, the ratchet is untouched.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-09-12
         with:
           toolchain: "1.97.1"
           components: llvm-tools-preview
@@ -1635,14 +1945,14 @@ jobs:
       - name: Module coverage report - budzero (report mode)
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- module-coverage coverage/budzero-cov.json
       - name: Coverage artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-${{ github.sha }}
           path: coverage/   # cov.json + budzero-cov.json (module baselines come from this artifact)
           retention-days: 30
 
   repo-lint:
-    # : actionlint + buf + genesis schema (one combined static gate).
+    # actionlint + buf + genesis schema (one combined static gate).
     # Tools are version+sha256 pinned. buf breaking, when buf.yaml is present on main,
     # becomes active (the baseline is established with this wave - SKIP on the first run is an honest marker).
     # the zizmor workflow security lint also runs in this job (with canary, zero-finding policy).
@@ -1718,11 +2028,29 @@ jobs:
       - name: Rust gates canary
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all --self-test
       - name: Rust gates
+        # This job does not install cargo-vet; the dedicated Cargo Vet job
+        # makes the ratchet decision, so a missing tool is allowed here only.
+        env:
+          BUDLUM_VET_OPTIONAL: "1"
         run: cargo run --release --manifest-path xtask/gates/Cargo.toml -- --all
       - name: Rust gates clippy (pedantic, no allow)
         run: cargo clippy --release --manifest-path xtask/gates/Cargo.toml --all-targets -- -D warnings
       - name: Rust gates rustfmt
         run: cargo fmt --manifest-path xtask/gates/Cargo.toml --check
+      # xtask/tools is its own workspace and runs five CI tools (audit-guard,
+      # step-reachability, audit-deps, generate-sbom, the smoke tools). Its
+      # lints are pedantic-deny and its unit tests (the committed FSF document
+      # equals the generated one, the real workflows have no dangling step
+      # references) were never executed, so a regression in a tool was found
+      # only when the tool itself broke.
+      - name: Tools clippy (pedantic, no allow)
+        run: cargo clippy --release --manifest-path xtask/tools/Cargo.toml --all-targets -- -D warnings
+      - name: Tools rustfmt
+        run: cargo fmt --manifest-path xtask/tools/Cargo.toml --check
+      - name: Tools unit tests
+        run: cargo test --release --manifest-path xtask/tools/Cargo.toml
+      - name: Tools canary (seed-corpus, devnet, backup-drill, pre-push)
+        run: cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- --self-test
       # A typographic dash in a workflow `name:` silently unlists the job from
       # branch protection: it runs, it passes, and it stops counting. Three
       # required checks were carrying one. A hand count already missed them
@@ -1738,6 +2066,25 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-node-address-agree --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- wallet-node-address-agree
+      # no object is accepted on a classical signature alone. Every use of
+      # ed25519_dalek, schnorrkel, bls12_381, x25519 or libp2p::noise in production
+      # code needs an entry in docs/pq/classical_allowlist.toml. Count mode: the
+      # baseline only falls and is locked at zero when Phase 3 ends.
+      - name: classical crypto is paired gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- classical-crypto-is-paired --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- classical-crypto-is-paired
+      # INV-03: a scheme is named, never guessed from a length.
+      - name: scheme is never inferred gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- scheme-is-never-inferred --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- scheme-is-never-inferred
+      # every ML-DSA and SLH-DSA call carries a context from src/crypto/ctx.rs,
+      # and the library primitives are called only inside the facade.
+      - name: PQ contexts are bound gate + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-ctx-is-bound --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-ctx-is-bound
       # The tree is written in English. Turkish is allowed in exactly three
       # places: README.tr.md, a Turkish localisation directory whose strings are
       # what the Turkish user reads, and the word "Türkçe" as the label on the
@@ -1768,6 +2115,27 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-unicode-dashes
+      # BudZero proofs are STARKs and rest on a hash only. A Groth16, KZG or
+      # BN254 crate in any manifest, or a verifier arm for the external labels,
+      # would put a pairing assumption on a verification path.
+      - name: no pairing-based SNARK on a verification path + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-pairing-snark-in-verification-path --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-pairing-snark-in-verification-path
+      # INV-12: a function named like a security verdict whose whole body is a
+      # literal tells the reader a question was asked and answered when nothing
+      # was checked.
+      - name: no constant security verdicts + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-constant-security-verdicts --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- no-constant-security-verdicts
+      # INV-11: a quantum statement in a README or in docs/ carries a claim id from
+      # docs/pq/CLAIMS.md, the claim's evidence exists, and the claim has reached
+      # its rung. Nothing stands in the repository that the register does not back.
+      - name: quantum claims are backed + canary
+        run: |
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-claims-are-backed --self-test
+          cargo run --release --manifest-path xtask/gates/Cargo.toml -- pq-claims-are-backed
       # A fuzz target only fuzzes if three files agree: the harness, the
       # [[bin]] in fuzz/Cargo.toml, and a workflow that runs it. If one of the
       # three is missing the target appears in the list and does nothing.
@@ -1822,8 +2190,8 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- cross-table-checks-use-last-row
       # The Fiat-Shamir transcript carried the degrees, the commitments and the
       # public values, but not the FRI parameters, and those decide what a
-      # proof is worth: measured, log_blowup 3 with 100 queries and 16 grinding
-      # bits is roughly 316 bits, while 1 query with log_blowup 1 and no
+      # proof is worth: the stark-soundness tool puts the current set at 128 bits
+      # or more provable, while 1 query with log_blowup 1 and no
       # grinding is one bit and produces a proof of the same shape. Least
       # Authority found this exact class in Plonky3. Absorbing them is half the
       # fix; the other half is that the absorbed numbers must be read out of
@@ -1833,6 +2201,35 @@ jobs:
         run: |
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-parameters-are-derived --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- security-parameters-are-derived
+      # the measured soundness of the configuration. The generated section of
+      # docs/pq/MEASUREMENTS.md must be the one computed from build_config, and the
+      # provable reading (no assumption) must reach 128 bits.
+      - name: is the STARK provably 128 bit and the measurement current + canary
+        run: |
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- stark-soundness --self-test
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- stark-soundness --check
+      # `pq-measure --timings` builds examples/pq_measure.rs, and that is the
+      # node library, whose build script compiles proto/budlum/network/protocol.proto.
+      # Every other job that builds the library installs protoc first; this one
+      # did not, because until the steps above stopped failing no run had ever
+      # reached this step. It failed with `Could not find protoc` from build.rs.
+      - name: Install protoc
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+      # the size, QC blob and daily traffic tables of docs/pq/MEASUREMENTS.md come
+      # from the node library (examples/pq_measure.rs) and must be current. The timings
+      # depend on the machine: they are produced here and uploaded, never compared.
+      - name: are the post-quantum measurement tables current + timings artifact
+        run: |
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- pq-measure --self-test
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- pq-measure --check
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- propagation-sim --check
+          mkdir -p pq-measure-out
+          cargo run -q --release --manifest-path xtask/tools/Cargo.toml -- pq-measure --timings | tee pq-measure-out/timings.md
+      - name: upload the post-quantum timings
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pq-measure-timings
+          path: pq-measure-out/timings.md
       # A transition constrains the difference between consecutive rows and
       # never says where the sequence starts. COL_EVENT_DIGEST_0 had only a
       # transition and a last-row comparison, so the whole accumulator could
@@ -1912,7 +2309,8 @@ jobs:
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size --self-test
           cargo run --release --manifest-path xtask/gates/Cargo.toml -- storage-is-priced-by-size
       # Two entry points take a manifest an untrusted caller built.
-      # `RegisterStorageManifest` ran `validate_untrusted`; `open_deal` ran
+      # Registration (now the `StorageTx::RegisterManifest` door) ran
+      # `validate_untrusted`; `open_deal` ran
       # `verify_id` and stopped, and it is the path that also takes the payer's
       # money. `verify_id` proves the id derives from the fields present, not
       # that they agree: `manifest_id` covers k and n, so three data shards

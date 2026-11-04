@@ -61,6 +61,11 @@ fn without_test_modules(body: &str) -> String {
                 continue;
             }
             if armed {
+                if !line.contains('{') && trimmed.ends_with(';') {
+                    // A braceless item such as `#[cfg(test)] use ...;`.
+                    armed = false;
+                    continue;
+                }
                 if line.contains('{') {
                     let d = line.matches('{').count() as i32 - line.matches('}').count() as i32;
                     if d > 0 {
@@ -86,34 +91,42 @@ fn without_test_modules(body: &str) -> String {
     kept.join("\n")
 }
 
+/// Clock reads whose `Err` is turned into a panic: `.unwrap()` or `.expect(`
+/// within the call and the next two lines, with no fallback in the window.
+fn panicking_clock_reads(body: &str) -> Vec<String> {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut found = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if !line.contains("duration_since") {
+            continue;
+        }
+        let window = lines[i..(i + 5).min(lines.len())].join("\n");
+        if !window.contains("UNIX_EPOCH") {
+            continue;
+        }
+        let panics = (window.contains(".unwrap()") || window.contains(".expect("))
+            && !window.contains(".unwrap_or");
+        if panics {
+            found.push(line.trim().to_string());
+        }
+    }
+    found
+}
+
 #[test]
 fn no_production_code_unwraps_the_wall_clock() {
-    // Match the call and whatever follows on the next couple of lines, since
-    // the idiom is usually split across three.
     let mut offenders = Vec::new();
     for path in production_sources() {
         let Ok(raw) = fs::read_to_string(&path) else {
             continue;
         };
-        let body = without_test_modules(&raw);
-        let lines: Vec<&str> = body.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            if !line.contains("duration_since") || !line.contains("UNIX_EPOCH") {
-                continue;
-            }
-            // Look at this line plus the next two for the disposition.
-            let window = lines[i..(i + 3).min(lines.len())].join("\n");
-            let unwrapped = window.contains(".unwrap()")
-                && !window.contains(".unwrap_or")
-                && !window.contains(".unwrap_or_default");
-            if unwrapped {
-                let rel = path
-                    .strip_prefix(repo_root())
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                offenders.push(format!("{rel}: {}", line.trim()));
-            }
+        let rel = path
+            .strip_prefix(repo_root())
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for line in panicking_clock_reads(&without_test_modules(&raw)) {
+            offenders.push(format!("{rel}: {line}"));
         }
     }
     assert!(
@@ -121,6 +134,21 @@ fn no_production_code_unwraps_the_wall_clock() {
         "a clock set before 1970 would abort the process at these call sites; \
          use `unwrap_or_default()` like consensus/mod.rs does:\n  {}",
         offenders.join("\n  ")
+    );
+}
+
+#[test]
+fn the_clock_scan_detects_planted_violations() {
+    let unwrap_split = "let t = SystemTime::now()\n    .duration_since(\n        UNIX_EPOCH,\n    )\n    .unwrap();";
+    let expect_one = "let t = SystemTime::now().duration_since(UNIX_EPOCH).expect(\"clock\");";
+    let safe = "let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();";
+    assert_eq!(panicking_clock_reads(unwrap_split).len(), 1);
+    assert_eq!(panicking_clock_reads(expect_one).len(), 1);
+    assert!(panicking_clock_reads(safe).is_empty());
+    let kept = without_test_modules("#[cfg(test)]\nuse std::fs;\nfn live() {\n    body();\n}\n");
+    assert!(
+        kept.contains("body();"),
+        "a braceless test item must not hide the next block"
     );
 }
 

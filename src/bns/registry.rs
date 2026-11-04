@@ -4,10 +4,16 @@ use crate::storage::content_id::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BnsRegistry {
     pub names: BTreeMap<String, NameRecord>,
     pub base_cost: u64,
+}
+
+impl Default for BnsRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BnsRegistry {
@@ -23,6 +29,29 @@ impl BnsRegistry {
 
     /// Maximum subdomains per name.
     pub const MAX_SUBDOMAINS_PER_NAME: usize = 1_000;
+
+    /// One label: lowercase ASCII letters, digits and hyphens, not empty, no
+    /// hyphen at either edge. The same table the browser name rule applies, so
+    /// the registry cannot sell a name the rest of the stack refuses or one
+    /// that differs from another only by case or by a look-alike letter.
+    fn is_valid_label(label: &str) -> bool {
+        !label.is_empty()
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    }
+
+    /// A full name: dot separated valid labels (no empty label, so no leading,
+    /// trailing or doubled dot).
+    ///
+    /// Convenience: the full-name rule over `is_valid_label`, pub so
+    /// registration and resolution ask one definition; the label rule
+    /// is the half on the in-tree path today.
+    pub fn is_valid_name(name: &str) -> bool {
+        name.split('.').all(Self::is_valid_label)
+    }
 
     pub fn new() -> Self {
         Self {
@@ -64,7 +93,7 @@ impl BnsRegistry {
     ) -> Result<(), BnsError> {
         // Use char count instead of byte length for Unicode support
         let char_count = name.chars().count();
-        if !(3..=32).contains(&char_count) {
+        if !(3..=32).contains(&char_count) || !Self::is_valid_name(&name) {
             return Err(BnsError::InvalidName);
         }
         // Duration must be > 0. Zero-duration registration
@@ -89,7 +118,7 @@ impl BnsRegistry {
         }
         // Cap total name count - fail-closed.
         // Reuse slots from expired names first; only reject if truly at capacity.
-        if self.names.len() >= Self::MAX_NAMES {
+        if self.names.len() >= Self::MAX_NAMES && !self.names.contains_key(&name) {
             // Try to evict the oldest expired name to make room
             let expired_key = self
                 .names
@@ -102,42 +131,20 @@ impl BnsRegistry {
                 return Err(BnsError::NameTaken); // at capacity, no evictable names
             }
         }
-        let record = NameRecord::new(name.clone(), owner, current_epoch + duration);
+        let expires_at = current_epoch
+            .checked_add(duration)
+            .ok_or(BnsError::InvalidName)?;
+        let record = NameRecord::new(name.clone(), owner, expires_at);
         self.names.insert(name, record);
         Ok(())
     }
 
     /// Renew an existing name registration. Only the current owner may renew
-    /// And only while the record is still live (not expired). The new expiry
-    /// Extends from the current expiry - never from `current_epoch` - so
-    /// Renewing early never shortens the registration.
-    ///
-    /// # No transaction reaches this
-    ///
-    /// `TransactionType` carries `BnsRegister`, `BnsSetContent`,
-    /// `BnsRegisterSubdomain` and `BnsSetStorage`. There is no `BnsRenew` and
-    /// No `BnsTransfer`, so this method and [`Self::transfer`] are called only
-    /// From tests. On a live chain an owner cannot renew, and cannot hand a
-    /// Name over.
-    ///
-    /// It is survivable rather than fatal, because `register` accepts the
-    /// Previous owner inside `GRACE_PERIOD` - see the front-running note there.
-    /// But re-registering is not the same operation:
-    ///
-    /// ```text
-    /// renew:    expires_at += duration        (extends from the old expiry)
-    /// register: expires_at  = now + duration  (restarts from today)
-    /// ```
-    ///
-    /// So the only available path throws away whatever time was left. An owner
-    /// Who renews a year early loses that year, and one who waits until the
-    /// Last epoch to avoid the loss is one missed block from the grace period
-    /// And a squatter. The safe move and the cheap move point in opposite
-    /// Directions, which is exactly the shape `renew` exists to remove.
-    ///
-    /// Wiring it needs a transaction type, an executor arm that charges
-    /// `calculate_cost`, and a signature check, small, but consensus surface,
-    /// So it is recorded here rather than smuggled into a hardening pass.
+    /// while the record is still live (not expired). The new expiry extends
+    /// from the current expiry - never from `current_epoch` - so renewing early
+    /// never shortens the registration. The transaction door charges the same
+    /// duration-based cost as registration, while this method owns the
+    /// lifecycle rule itself.
     pub fn renew(
         &mut self,
         name: &str,
@@ -145,6 +152,9 @@ impl BnsRegistry {
         current_epoch: u64,
         duration: u64,
     ) -> Result<(), BnsError> {
+        if duration == 0 {
+            return Err(BnsError::InvalidName);
+        }
         let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
         if &record.owner != caller {
             return Err(BnsError::NotOwner);
@@ -160,9 +170,10 @@ impl BnsRegistry {
     }
 
     /// Transfer ownership of a live (non-expired) name to a new owner. Only
-    /// The current owner may transfer. Resolver/content bindings and existing
-    /// Subdomain mappings are preserved; after the transfer the previous
-    /// Owner loses all control over the record.
+    /// The current owner may transfer. The pointers the previous owner set
+    /// (resolver, address, storage, content and subdomains) are cleared and the
+    /// address points at the new owner, so the name never resolves to the
+    /// previous owner after the transfer.
     pub fn transfer(
         &mut self,
         name: &str,
@@ -170,6 +181,9 @@ impl BnsRegistry {
         new_owner: Address,
         current_epoch: u64,
     ) -> Result<(), BnsError> {
+        if new_owner == Address::zero() {
+            return Err(BnsError::InvalidName);
+        }
         let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
         if &record.owner != caller {
             return Err(BnsError::NotOwner);
@@ -178,6 +192,14 @@ impl BnsRegistry {
             return Err(BnsError::Expired);
         }
         record.owner = new_owner;
+        record.resolver = None;
+        record.address = Some(new_owner);
+        record.consensus_domain_id = None;
+        record.storage_root = None;
+        record.storage_domain_id = None;
+        record.storage_root_height = None;
+        record.content_id = None;
+        record.subdomains.clear();
         Ok(())
     }
 
@@ -187,13 +209,20 @@ impl BnsRegistry {
         sub_label: String,
         owner: Address,
         caller: &Address,
+        current_epoch: u64,
     ) -> Result<(), BnsError> {
+        if !Self::is_valid_label(&sub_label) {
+            return Err(BnsError::InvalidName);
+        }
         let parent = self
             .names
             .get_mut(parent_name)
             .ok_or(BnsError::InvalidName)?;
         if &parent.owner != caller {
             return Err(BnsError::NotOwner);
+        }
+        if parent.expires_at <= current_epoch {
+            return Err(BnsError::Expired);
         }
         // Cap subdomains per name - fail-closed.
         if parent.subdomains.len() >= Self::MAX_SUBDOMAINS_PER_NAME {
@@ -222,10 +251,14 @@ impl BnsRegistry {
         name: &str,
         owner: &Address,
         cid: ContentId,
+        current_epoch: u64,
     ) -> Result<(), BnsError> {
         let record = self.names.get_mut(name).ok_or(BnsError::InvalidName)?;
         if &record.owner != owner {
             return Err(BnsError::NotOwner);
+        }
+        if record.expires_at <= current_epoch {
+            return Err(BnsError::Expired);
         }
         record.content_id = Some(cid);
         Ok(())
@@ -252,25 +285,22 @@ impl BnsRegistry {
     }
 
     pub fn resolve_full(&self, name: &str, current_epoch: u64) -> Option<BnsResolved> {
-        self.names
-            .get(name)
-            .map(|record| {
-                let expired = record.expires_at <= current_epoch;
-                BnsResolved {
-                    name: record.name.clone(),
-                    owner: record.owner,
-                    address: if expired { None } else { record.address },
-                    storage_root: if expired { None } else { record.storage_root },
-                    storage_domain_id: if expired {
-                        None
-                    } else {
-                        record.storage_domain_id
-                    },
-                    content_id: if expired { None } else { record.content_id },
-                    is_expired: expired,
-                }
-            })
-            .filter(|r| !r.is_expired)
+        self.names.get(name).map(|record| {
+            let expired = record.expires_at <= current_epoch;
+            BnsResolved {
+                name: record.name.clone(),
+                owner: record.owner,
+                address: if expired { None } else { record.address },
+                storage_root: if expired { None } else { record.storage_root },
+                storage_domain_id: if expired {
+                    None
+                } else {
+                    record.storage_domain_id
+                },
+                content_id: if expired { None } else { record.content_id },
+                is_expired: expired,
+            }
+        })
     }
 
     pub fn set_storage(
@@ -389,13 +419,62 @@ impl BnsRegistry {
 mod tests {
     use super::*;
 
+    /// Case and look-alike variants, separators and control
+    /// characters are not registrable names.
+    #[test]
+    fn names_follow_the_lowercase_label_rule() {
+        let mut reg = BnsRegistry::new();
+        let owner = Address::from([1u8; 32]);
+        for bad in [
+            "Alice.bud",
+            "al\u{0456}ce.bud",
+            "ali/ce.bud",
+            "..bud",
+            "a..bud",
+            ".alice",
+            "alice.",
+            "-alice.bud",
+            "alice-.bud",
+            "al ice.bud",
+            "al\u{0007}ice.bud",
+        ] {
+            assert!(
+                reg.register(bad.to_string(), owner, 1, 10).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        reg.register("alice-1.bud".into(), owner, 1, 10).unwrap();
+        assert!(reg
+            .register_subdomain("alice-1.bud", "App".into(), owner, &owner, 1)
+            .is_err());
+        assert!(reg
+            .register_subdomain("alice-1.bud", "a.b".into(), owner, &owner, 1)
+            .is_err());
+        reg.register_subdomain("alice-1.bud", "app".into(), owner, &owner, 1)
+            .unwrap();
+    }
+
+    /// An expired record resolves with the flag set and its bindings
+    /// cleared, so the expired branches of the gateway are reachable.
+    #[test]
+    fn an_expired_name_resolves_as_expired() {
+        let mut reg = BnsRegistry::new();
+        let owner = Address::from([1u8; 32]);
+        reg.register("alice.bud".into(), owner, 1, 10).unwrap();
+        let live = reg.resolve_full("alice.bud", 5).unwrap();
+        assert!(!live.is_expired);
+        let gone = reg.resolve_full("alice.bud", 50).unwrap();
+        assert!(gone.is_expired);
+        assert!(gone.content_id.is_none() && gone.address.is_none());
+    }
+
     #[test]
     fn root_changes_when_record_mutates() {
         let mut reg = BnsRegistry::new();
         let owner = Address::from([1u8; 32]);
         reg.register("alice.bud".into(), owner, 1, 10).unwrap();
         let root_before = reg.root();
-        reg.set_content("alice.bud", &owner, ContentId([0x55; 32]))
+        reg.set_content("alice.bud", &owner, ContentId([0x55; 32]), 1)
             .unwrap();
         assert_ne!(root_before, reg.root());
     }
@@ -411,13 +490,13 @@ mod tests {
 
         let mut a = BnsRegistry::new();
         a.register("alice.bud".into(), owner, 1, 10).unwrap();
-        a.register_subdomain("alice.bud", "ab".into(), sub_owner, &owner)
+        a.register_subdomain("alice.bud", "ab".into(), sub_owner, &owner, 1)
             .unwrap();
         let mut b = BnsRegistry::new();
         b.register("alice.bud".into(), owner, 1, 10).unwrap();
-        b.register_subdomain("alice.bud", "a".into(), sub_owner, &owner)
+        b.register_subdomain("alice.bud", "a".into(), sub_owner, &owner, 1)
             .unwrap();
-        b.register_subdomain("alice.bud", "b".into(), sub_owner, &owner)
+        b.register_subdomain("alice.bud", "b".into(), sub_owner, &owner, 1)
             .unwrap();
         assert_ne!(
             a.root(),

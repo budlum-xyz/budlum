@@ -94,12 +94,25 @@ fn function_body(text: &str, signature: &str) -> Option<String> {
 /// derivation at all, which is itself a finding: the gate must not silently
 /// pass a function it failed to understand.
 fn parse_derivation(body: &str, what: &str) -> Result<Derivation, String> {
+    let body = body
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = body.as_str();
     let hasher = body
-        .find("::new()")
-        .and_then(|at| {
+        .match_indices("::new()")
+        .filter_map(|(at, _)| {
             let head = body.get(..at)?;
-            let start = head.rfind(|c: char| !(c.is_alphanumeric() || c == '_'))?;
-            head.get(start + 1..).map(str::to_string)
+            let start = head
+                .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .map_or(0, |p| p + 1);
+            head.get(start..).map(str::to_string)
+        })
+        .find(|name| {
+            ["Sha", "Keccak", "Blake", "Hash"]
+                .iter()
+                .any(|k| name.contains(k))
         })
         .ok_or_else(|| format!("{what}: no `<Hasher>::new()` call found"))?;
 
@@ -150,11 +163,44 @@ fn read_side(root: &Path, file: &str, signature: &str) -> Result<Derivation, Str
 ///
 /// Returns a finding when the two derivations disagree on the separator, the
 /// hash, or the absorb order, or when either side cannot be read.
+/// The command-line V5 wallet in the node crate.
+const CLI_WALLET_FILE: &str = "src/wallet/mod.rs";
+/// The separator both wallets hash the BIP39 entropy under to get the
+/// ML-DSA-87 seed.
+const SEED_SEPARATOR: &str = "BUDLUM_MLDSA87_SEED_V1";
+/// The one BIP39 word list both wallets read.
+const WORDLIST_FILE: &str = "crates/wallet-core/src/bip39_wordlist.rs";
+
+/// The CLI wallet derives its key from a mnemonic the way wallet-core does:
+/// the same seed separator and the same word list file. Absent in a staged
+/// canary tree, where there is nothing to compare.
+fn cli_wallet_findings(root: &Path) -> Vec<String> {
+    let cli_path = root.join(CLI_WALLET_FILE);
+    if !cli_path.is_file() {
+        return Vec::new();
+    }
+    let read = |rel: &str| fs::read_to_string(root.join(rel)).unwrap_or_default();
+    let cli = read(CLI_WALLET_FILE);
+    let core = read(WALLET_FILE);
+    let mut findings = Vec::new();
+    if !(cli.contains(SEED_SEPARATOR) && core.contains(SEED_SEPARATOR)) {
+        findings.push(format!(
+            "seed separator differs: {CLI_WALLET_FILE} and {WALLET_FILE} must both hash \"{SEED_SEPARATOR}\" || entropy"
+        ));
+    }
+    if !cli.contains(WORDLIST_FILE) {
+        findings.push(format!(
+            "{CLI_WALLET_FILE} does not read the shared word list {WORDLIST_FILE}"
+        ));
+    }
+    findings
+}
+
 pub fn run(root: &Path) -> Result<String, String> {
     let wallet = read_side(root, WALLET_FILE, WALLET_FN)?;
     let node = read_side(root, NODE_FILE, NODE_FN)?;
 
-    let mut findings: Vec<String> = Vec::new();
+    let mut findings: Vec<String> = cli_wallet_findings(root);
 
     if wallet.separator != node.separator {
         findings.push(format!(
@@ -353,4 +399,17 @@ pub fn self_test() -> Result<String, String> {
          differences FAIL; agreeing on a trailing tag FAILs; a renamed or unparsable derivation \
          FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_hasher_is_a_hash_constructor_not_any_new() {
+        let body = "let mut v = Vec::new();\n// Keccak256::new()\nlet mut h = Sha3_256::new();\nh.update(b\"TAG\");\nh.update(key);\n";
+        let d = parse_derivation(body, "x").expect("parses");
+        assert_eq!(d.hasher, "Sha3_256");
+        assert!(d.separator_first);
+    }
 }

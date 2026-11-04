@@ -296,6 +296,7 @@ mod pow_work_does_not_saturate {
             difficulty: 32,
             target_block_time: 10,
             adjustment_interval: 0,
+            ..Default::default()
         });
         let short = chain_of(4, "aa");
         let long = chain_of(9, "aa");
@@ -324,6 +325,7 @@ mod pow_work_does_not_saturate {
             difficulty: 1,
             target_block_time: 10,
             adjustment_interval: 0,
+            ..Default::default()
         });
         let short = chain_of(3, "aa");
         let long = chain_of(7, "aa");
@@ -337,6 +339,7 @@ mod pow_work_does_not_saturate {
             difficulty: 4,
             target_block_time: 10,
             adjustment_interval: 0,
+            ..Default::default()
         });
         let a = chain_of(6, "aa");
         assert!(
@@ -355,6 +358,7 @@ mod equal_weight_resolves_in_every_family {
             difficulty: 4,
             target_block_time: 10,
             adjustment_interval: 0,
+            ..Default::default()
         })
     }
 

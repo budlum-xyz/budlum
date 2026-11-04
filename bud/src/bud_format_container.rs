@@ -6,8 +6,8 @@
 //!    each piece gets its own ContentId - a format-aware cut before CDC16K (lossless).
 //! 3. **Container .bud format improvements**:
 //!    - magic: high-bit set + not ASCII (S.47: do not confuse file(1)) - the v1 magic is kept, v2 adds a flag
-//!    - a multihash-like field (K34): hash_algo code + digest - upgradable to BLAKE3/SHA3/SHA512
-//!    - format_class registry (K23/K43): the registry is updated when a new format is added
+//!    - a multihash-like field: hash_algo code + digest - upgradable to BLAKE3/SHA3/SHA512
+//!    - format_class registry: the registry is updated when a new format is added
 //!    - deterministic, lossless (KF2: resolution is preserved, the format may change)
 //!
 //! Ratio selection is not in this module. An earlier "role-expert" candidate
@@ -35,7 +35,7 @@ pub enum StructuralKind {
 
 #[derive(Debug, Clone)]
 pub struct StructuralChunk {
-    pub content_id: [u8; 32], // BDLM_CONTENT_V1 || len || bytes (cryptographic, K3)
+    pub content_id: [u8; 32], // BDLM_CONTENT_V1 || len || bytes (cryptographic)
     pub data: Vec<u8>,
 }
 
@@ -47,7 +47,7 @@ pub struct StructuralChunk {
 /// CSV/Log/Text: line boundary.
 /// Binary: fixed block (a simplified CDC pre-step - average size).
 ///
-/// COMPLETENESS of losslessness (K38): `structural_join(kind, structural_split(kind, d)) == d`
+/// COMPLETENESS of losslessness: `structural_join(kind, structural_split(kind, d)) == d`
 /// holds for EVERY `d` (empty, malformed UTF-8, unframed JSON, negative depth
 /// included); the join is a pure concatenation and the delimiter information
 /// travels inside the pieces.
@@ -60,7 +60,7 @@ pub fn structural_split(kind: StructuralKind, data: &[u8]) -> Vec<StructuralChun
         StructuralKind::Json => {
             // Because every scanned piece is a contiguous subslice of the
             // original bytes and no byte is skipped, the join always produces
-            // the original (K38). The depth is an i32; on malformed input it
+            // the original. The depth is an i32; on malformed input it
             // goes negative but does not panic, and losslessness holds.
             let s = match std::str::from_utf8(data) {
                 Ok(s) => s,
@@ -144,7 +144,7 @@ pub fn content_id(bytes: &[u8]) -> [u8; 32] {
 }
 
 /// Proof of losslessness: join the pieces -> the original.
-/// K38: a PURE join - the splitting delimiters (`[`, `]`, comma) are embedded
+/// A PURE join - the splitting delimiters (`[`, `]`, comma) are embedded
 /// in the pieces and the join adds no `[`/`]` for any kind, so the round trip
 /// is byte-identical to the original for EVERY input (unframed JSON, malformed
 /// UTF-8, empty input included).
@@ -159,7 +159,7 @@ pub fn structural_join(_kind: StructuralKind, chunks: &[StructuralChunk]) -> Vec
 
 // ── 3. Container .bud v2: multihash + format registry ────────────────────────
 
-/// Multihash-like: a hash algorithm code + digest (K34).
+/// Multihash-like: a hash algorithm code + digest.
 /// 0x12 = SHA-256, 0x16 = SHA3-256, 0x1e = BLAKE3-256, 0x13 = SHA-512 (temsili).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MultiHash {
@@ -189,7 +189,7 @@ impl MultiHash {
     }
 }
 
-/// Format registry (K23/K43): a new format gets a code, backwards compatible.
+/// Format registry: a new format gets a code, backwards compatible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum FormatCodec {
@@ -243,7 +243,9 @@ pub struct BudV2Header {
 impl BudV2Header {
     pub const MAGIC: [u8; 8] = *b"\xB5\x55\x44\xB0\x02\x00\x00\x00";
 
-    pub fn new(codec: FormatCodec, chunks: &[StructuralChunk]) -> Self {
+    // Private: only `BudV2File::new_with_codec` has bounded the count and the
+    // sizes that this constructor casts and sums.
+    fn new(codec: FormatCodec, chunks: &[StructuralChunk]) -> Self {
         let mut h = Sha3_256::new();
         h.update(b"BDLM_BUD_V2");
         for c in chunks {
@@ -304,7 +306,7 @@ impl BudV2Header {
 
 /// Piece encoder: how the pieces are stored (the real lossless compression
 /// flag). Raw = raw bytes; Huffman = real Huffman compression
-/// (bud_format_huffman, K38); Zstd = real zstd FFI (bud_format_real, the V21
+/// (bud_format_huffman); Zstd = real zstd FFI (bud_format_real, the V21
 /// roadmap - the highest ratio).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkCodec {
@@ -328,8 +330,8 @@ impl ChunkCodec {
 }
 
 /// The .bud v2 FULL FILE: header + piece encoder + piece list (length-prefixed,
-/// verifiable). K38 hardening: writes/reads the pieces safely alongside the
-/// header; bomb protection (the K25 pattern): MAX_CHUNK_COUNT /
+/// verifiable). hardening: writes/reads the pieces safely alongside the
+/// header; bomb protection (the pattern): MAX_CHUNK_COUNT /
 /// MAX_CHUNK_BYTES / MAX_TOTAL_BYTES.
 /// Every piece is written as (u64 len + 32B content_id + data); decode
 /// verifies each piece by RECOMPUTING its content_id, so any byte change in
@@ -370,9 +372,9 @@ impl BudV2File {
         Self::new_with_codec(codec, ChunkCodec::Huffman, compressed)
     }
 
-    /// A container compressed with REAL zstd (the V21 roadmap, K38): every
+    /// A container compressed with REAL zstd (the V21 roadmap): every
     /// piece is compressed at zstd level 19; decode/decompression is safe
-    /// under the ZSTD_MAX_DECOMPRESSED ceiling (K25 bomb protection). A better
+    /// under the ZSTD_MAX_DECOMPRESSED ceiling ( bomb protection). A better
     /// ratio than Huffman (proven by test).
     pub fn new_zstd(codec: FormatCodec, chunks: Vec<StructuralChunk>) -> Option<Self> {
         let compressed: Vec<StructuralChunk> = chunks
@@ -404,6 +406,11 @@ impl BudV2File {
             .iter()
             .any(|c| c.data.len() as u64 > Self::MAX_CHUNK_BYTES)
         {
+            return None;
+        }
+        // A supplied id must match its data, or the file written here could
+        // not be read back.
+        if chunks.iter().any(|c| c.content_id != content_id(&c.data)) {
             return None;
         }
         let header = BudV2Header::new(codec, &chunks);
@@ -446,7 +453,7 @@ impl BudV2File {
             return None;
         }
         let mut pos = HDR + 5;
-        // K38: count comes from UNTRUSTED bytes - with_capacity(count) would
+        // Count comes from UNTRUSTED bytes - with_capacity(count) would
         // make a huge allocation from a small file (memory DoS); lazy growth
         // is used instead (no bomb).
         let mut chunks: Vec<StructuralChunk> = Vec::new();
@@ -501,20 +508,36 @@ impl BudV2File {
     /// where needed. The losslessness guarantee: regardless of the encoder,
     /// `restore_original(decode(x))` produces the original input (Raw -> as
     /// is, Huffman -> decompress, Zstd -> decompress). No panics; zstd
-    /// decompression is bounded by the K25 ceiling (ZSTD_MAX_DECOMPRESSED).
+    /// decompression is bounded by the ceiling (ZSTD_MAX_DECOMPRESSED).
     pub fn restore_original(&self) -> Option<Vec<u8>> {
-        let mut out = Vec::new();
+        self.restore_original_within(Self::MAX_TOTAL_BYTES)
+    }
+
+    /// Like [`Self::restore_original`], with a ceiling on the TOTAL output.
+    /// The per-chunk ceiling alone lets many small chunks each expand to the
+    /// full limit; here every chunk may only use what is left of `max_total`.
+    fn restore_original_within(&self, max_total: u64) -> Option<Vec<u8>> {
+        let mut out: Vec<u8> = Vec::new();
         for c in &self.chunks {
+            let left = max_total.checked_sub(out.len() as u64)?;
             match self.chunk_codec {
-                ChunkCodec::Raw => out.extend_from_slice(&c.data),
+                ChunkCodec::Raw => {
+                    if c.data.len() as u64 > left {
+                        return None;
+                    }
+                    out.extend_from_slice(&c.data);
+                }
                 ChunkCodec::Huffman => {
                     let d = crate::bud_format_huffman::HuffmanCoder::decompress(&c.data)?;
+                    if d.len() as u64 > left {
+                        return None;
+                    }
                     out.extend_from_slice(&d);
                 }
                 ChunkCodec::Zstd => {
                     let d = crate::bud_format_real::zstd_decompress_safe(
                         &c.data,
-                        crate::bud_format_real::ZSTD_MAX_DECOMPRESSED,
+                        left.min(crate::bud_format_real::ZSTD_MAX_DECOMPRESSED),
                     )?;
                     out.extend_from_slice(&d);
                 }
@@ -547,8 +570,8 @@ impl BudV2File {
     }
 }
 
-/// K35 compaction: merge pieces below the minimum size (lossless).
-/// The fix for small-object amplification (K21/K35, the S.61 MinIO/Ceph
+/// compaction: merge pieces below the minimum size (lossless).
+/// The fix for small-object amplification (the S.61 MinIO/Ceph
 /// lesson): very small pieces lower dedup/proof efficiency, so adjacent
 /// under-minimum pieces are gathered into one. Still byte-identical to the
 /// original under `structural_join`.
@@ -696,7 +719,7 @@ mod tests {
         assert_eq!(joined, log);
     }
 
-    // -- K38: COMPLETENESS of losslessness - property tests --------------------
+    // --: COMPLETENESS of losslessness - property tests --------------------
 
     /// Deterministic xorshift64* - no external dependency (no rand crate).
     struct Rng(u64);
@@ -799,7 +822,7 @@ mod tests {
 
     #[test]
     fn total_losslessness_property() {
-        // K38: for EVERY input split+join = the original; compact (at various minimums) is lossless too.
+        // For EVERY input split+join = the original; compact (at various minimums) is lossless too.
         let mut rng = Rng(0xB0B2_2026_0816_1337);
         for round in 0..400u32 {
             let kind = match rng.below(5) {
@@ -959,6 +982,25 @@ mod tests {
         assert!(BudV2File::decode(&enc[..59]).is_none());
     }
 
+    /// The output ceiling is shared by all chunks, not granted to
+    /// each chunk again.
+    #[test]
+    fn restore_original_bounds_the_total_output() {
+        let zeros = vec![0u8; 400 * 1024];
+        let chunks: Vec<StructuralChunk> = (0..4)
+            .map(|_| StructuralChunk {
+                content_id: content_id(&zeros),
+                data: zeros.clone(),
+            })
+            .collect();
+        let file = BudV2File::new_zstd(FormatCodec::Unknown, chunks).expect("container");
+        let all = file.restore_original().expect("within the ceiling");
+        assert_eq!(all.len(), 4 * zeros.len());
+        // 1 MiB is below the 1.6 MiB the four chunks expand to.
+        assert!(file.restore_original_within(1024 * 1024).is_none());
+        assert!(file.restore_original_within(all.len() as u64).is_some());
+    }
+
     #[test]
     fn bud_v2_file_bomb_guards() {
         let csv = b"a\n";
@@ -1006,6 +1048,15 @@ mod tests {
     }
 
     #[test]
+    fn bud_v2_file_new_rejects_a_wrong_chunk_id() {
+        let chunks = vec![StructuralChunk {
+            content_id: [7u8; 32],
+            data: b"payload".to_vec(),
+        }];
+        assert!(BudV2File::new(FormatCodec::Text, chunks).is_none());
+    }
+
+    #[test]
     fn bud_v2_file_verify_detects_inconsistency() {
         let csv = b"x\n";
         let chunks = structural_split(StructuralKind::Csv, csv);
@@ -1021,7 +1072,7 @@ mod tests {
 
     #[test]
     fn zstd_container_roundtrip_and_beats_huffman() {
-        // K38 + V21: the zstd container is lossless and smaller than Huffman (real zstd FFI)
+        // + V21: the zstd container is lossless and smaller than Huffman (real zstd FFI)
         let line = b"2026-08-16 INFO req=123 /api/a s=200 b=42 reg=tr\n";
         let mut data = Vec::new();
         for _ in 0..2000 {
@@ -1082,7 +1133,7 @@ mod tests {
 
     #[test]
     fn bud_v2_file_decode_never_panics_on_truncation() {
-        // K38: decode must not panic at ANY truncation length of a valid file
+        // Decode must not panic at ANY truncation length of a valid file
         // (after the alloc-bomb fix a full scan over a small file is fast)
         let line = b"2026-08-16 INFO req=1 /a s=200 b=7 reg=tr\n";
         let mut data = Vec::new();
@@ -1112,7 +1163,7 @@ mod tests {
 
     #[test]
     fn decode_garbage_count_no_alloc_bomb() {
-        // K38: a garbage count field must not cause a huge pre-allocation (lazy growth) - returns fast
+        // A garbage count field must not cause a huge pre-allocation (lazy growth) - returns fast
         let csv = b"a\n";
         let chunks = structural_split(StructuralKind::Csv, csv);
         let hdr = BudV2Header::new(FormatCodec::Csv, &chunks);
@@ -1134,7 +1185,7 @@ mod tests {
 
     #[test]
     fn decode_never_panics_on_arbitrary_bytes() {
-        // Mini-fuzz (K38): every decode/parse path is panic-free on random byte strings.
+        // Mini-fuzz: every decode/parse path is panic-free on random byte strings.
         // BudV2File::decode, BudV2Header::from_bytes and MultiHash::decode on every input
         // It must return Some/None and NEVER panic (evidence of a fuzz-safe design).
         struct Rng(u64);

@@ -14,13 +14,15 @@
 //! WIRING: wired - `Blockchain::verify_domain_commitment_finality` constructs
 //! this bridge for a `ConsensusKind::Custom` domain whose `finality_adapter`
 //! is [`EXTERNAL_DOMAIN_FINALITY_ADAPTER`], rebuilding the adapter from the
-//! consensus-resident intake entry (`external_intake`) and the policy the
+//! consensus-resident intake entry (`settlement.external_intake`) and the
+//! policy the
 //! domain was admitted under. The registry state that feeds it and the
 //! commitment path are documented in `intake.rs`.
 
 use crate::cross_domain::external::spec::{
-    AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, VerificationPolicy,
+    AdapterId, ExternalFinalityAdapter, RawConsensusEvidence, SecurityBacking, VerificationPolicy,
 };
+use crate::crypto::facts::{CryptoFacts, CryptoObserver, NullObserver};
 use crate::domain::finality_adapter::{
     DomainFinalityAdapter, FinalityError, FinalityProof, FinalityStatus,
 };
@@ -111,6 +113,16 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
         commitment: &DomainCommitment,
         proof: &FinalityProof,
     ) -> Result<FinalityStatus, FinalityError> {
+        self.verify_finality_observed(domain, commitment, proof, &mut NullObserver)
+    }
+
+    fn verify_finality_observed(
+        &self,
+        domain: &ConsensusDomain,
+        commitment: &DomainCommitment,
+        proof: &FinalityProof,
+        observer: &mut dyn CryptoObserver,
+    ) -> Result<FinalityStatus, FinalityError> {
         if domain.finality_adapter != EXTERNAL_DOMAIN_FINALITY_ADAPTER {
             return Ok(FinalityStatus::Rejected(format!(
                 "domain {} is not bound to the external-domain finality adapter",
@@ -118,13 +130,35 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
             )));
         }
         let evidence = decode_external_evidence(proof)?;
+        let mut seen = CryptoFacts::new();
         let attestation = self
             .adapter
-            .verify(&evidence, &self.policy)
+            .verify_observed(&evidence, &self.policy, &mut seen)
             .map_err(|error| {
                 FinalityError(format!("external adapter refused evidence: {error}"))
             })?;
 
+        // The policy's `require_slashable` is enforced at
+        // the BRIDGE, for every adapter - not only the one adapter that
+        // happened to check it. A validity proof is at least as strong as a
+        // slashable set; an unslashable signature set is not.
+        if self.policy.require_slashable {
+            let slashable = match &attestation.security {
+                SecurityBacking::SignatureSet { slashable, .. } => *slashable,
+                // A validity proof cannot lie and accumulated work costs
+                // real money - both clear a slashability demand.
+                SecurityBacking::Zk { .. } | SecurityBacking::Work { .. } => true,
+                // A permissioned set and "no backing" are exactly what the
+                // demand excludes.
+                SecurityBacking::Authority { .. } | SecurityBacking::None => false,
+            };
+            if !slashable {
+                return Ok(FinalityStatus::Rejected(
+                    "the policy requires slashable backing; this attestation is not slashable"
+                        .to_string(),
+                ));
+            }
+        }
         if attestation.adapter != self.adapter_id || evidence.adapter != self.adapter_id {
             return Ok(FinalityStatus::Rejected(
                 "the evidence and attestation do not name the bridge's adapter".to_string(),
@@ -146,6 +180,54 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 "external state root does not match local commitment state root".to_string(),
             ));
         }
+        // Every binding-critical field is ATTESTED or
+        // EMPTY. Before this, one valid evidence for (height, state_root)
+        // could carry any block hash, event root and transaction root - the
+        // later checks that rely on those fields rested on unattested data.
+        for (name, committed, attested) in [
+            (
+                "domain_block_hash",
+                commitment.domain_block_hash,
+                attestation.attested_block_hash,
+            ),
+            (
+                "event_root",
+                commitment.event_root,
+                attestation.attested_event_root,
+            ),
+            ("tx_root", commitment.tx_root, attestation.attested_tx_root),
+        ] {
+            match attested {
+                Some(value) if value == committed => {}
+                Some(_) => {
+                    return Ok(FinalityStatus::Rejected(format!(
+                        "external attestation does not bind the commitment's {name}"
+                    )));
+                }
+                None if committed == [0u8; 32] => {}
+                None => {
+                    return Ok(FinalityStatus::Rejected(format!(
+                        "the adapter attests no {name}; the commitment must not claim one"
+                    )));
+                }
+            }
+        }
+        // The remaining free fields: no external evidence carries
+        // them, so a commitment that claims them is claiming data nobody
+        // looked at. `parent_domain_block_hash` is the exception - it is
+        // chain-linked to the previous ATTACHED hash at the blockchain seam
+        // (blockchain.rs), and `sequence` keys the registry rather than
+        // attesting anything.
+        if commitment.validator_set_hash != [0u8; 32]
+            || commitment.timestamp_ms != 0
+            || commitment.producer.is_some()
+            || !commitment.state_updates.is_empty()
+        {
+            return Ok(FinalityStatus::Rejected(
+                "the commitment claims validator set, timestamp, producer or state updates                  that no external evidence attests"
+                    .to_string(),
+            ));
+        }
 
         // The commitment hash is checked here as well as by the surrounding
         // blockchain path. Keeping this invariant at the translation seam
@@ -157,6 +239,12 @@ impl DomainFinalityAdapter for ExternalDomainFinalityBridge {
                 "external finality proof hash does not match the commitment".to_string(),
             ));
         }
+        // Only a commitment that finalizes reports what the adapter checked.
+        for row in seen.observed() {
+            for _ in 0..row.count {
+                observer.observe(row.scheme);
+            }
+        }
         Ok(FinalityStatus::Finalized)
     }
 }
@@ -166,8 +254,7 @@ mod tests {
     use super::*;
     use crate::core::address::Address;
     use crate::cross_domain::external::spec::{
-        AdapterDescriptor, FinalityAttestation, FinalityKind, ProofSystem, SecurityBacking,
-        TimeUnit, TrustModel,
+        AdapterDescriptor, FinalityAttestation, FinalityKind, SecurityBacking, TimeUnit, TrustModel,
     };
     use crate::domain::types::{ConsensusKind, DomainStatus, RootScheme};
 
@@ -203,11 +290,23 @@ mod tests {
                 ),
                 height: evidence.declared_height,
                 state_root: evidence.declared_root,
+                // The fixture attests exactly what its commitment claims
+                // ( binding).
+                attested_block_hash: Some([5; 32]),
+                attested_event_root: Some([1; 32]),
+                attested_tx_root: Some([2; 32]),
                 finalized_at: evidence.declared_height,
                 time_unit: TimeUnit::Height,
-                security: SecurityBacking::Zk {
-                    system: ProofSystem::Stark,
-                    public_inputs_digest: [9; 32],
+                // An unslashable signature set ( fixture): the
+                // slashable-only policy must refuse it.
+                security: SecurityBacking::SignatureSet {
+                    scheme: crate::crypto::facts::ObservedScheme::Scheme(
+                        crate::crypto::scheme::SchemeId::BLS12381_MINSIG,
+                    ),
+                    signers: 3,
+                    required: 2,
+                    total_weight: 3,
+                    slashable: false,
                 },
                 evidence_digest: evidence.digest(),
                 adapter_version: self.descriptor.adapter_version,
@@ -273,7 +372,7 @@ mod tests {
             finality_proof_hash: [0; 32],
             consensus_kind: domain.kind.clone(),
             validator_set_hash: [0; 32],
-            timestamp_ms: 10,
+            timestamp_ms: 0,
             sequence: 1,
             producer: None,
             state_updates: std::collections::BTreeMap::new(),
@@ -313,5 +412,54 @@ mod tests {
         assert!(bridge
             .verify_finality(&domain, &commitment, &wrong)
             .is_err());
+    }
+
+    /// A valid evidence cannot carry a free block hash,
+    /// event root or transaction root - the fields are attested or empty.
+    #[test]
+    fn unattested_commitment_fields_are_refused() {
+        type Mutation = fn(&mut DomainCommitment);
+        let rows: [(&str, Mutation); 3] = [
+            ("domain_block_hash", |c| c.domain_block_hash = [9; 32]),
+            ("event_root", |c| c.event_root = [9; 32]),
+            ("tx_root", |c| c.tx_root = [9; 32]),
+        ];
+        for (name, mutate) in rows {
+            let (adapter, domain, mut commitment) = fixture();
+            let proof = encode_external_evidence(&adapter.evidence).expect("encode");
+            commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+            mutate(&mut commitment);
+            let bridge = ExternalDomainFinalityBridge::new(
+                Box::new(adapter),
+                VerificationPolicy::proven(100),
+            );
+            let status = bridge
+                .verify_finality(&domain, &commitment, &proof)
+                .unwrap();
+            assert!(
+                matches!(status, FinalityStatus::Rejected(_)),
+                "{name} was accepted unattested"
+            );
+        }
+    }
+
+    /// The bridge enforces require_slashable for every
+    /// adapter - the fixture's backing is an unslashable signature set and
+    /// must be refused under such a policy.
+    #[test]
+    fn require_slashable_is_enforced_at_the_bridge() {
+        let (adapter, domain, mut commitment) = fixture();
+        let proof = encode_external_evidence(&adapter.evidence).expect("encode");
+        commitment.finality_proof_hash = crate::domain::hash_finality_proof(&proof).unwrap();
+        let mut policy = VerificationPolicy::proven(100);
+        policy.require_slashable = true;
+        let bridge = ExternalDomainFinalityBridge::new(Box::new(adapter), policy);
+        let status = bridge
+            .verify_finality(&domain, &commitment, &proof)
+            .unwrap();
+        assert!(
+            matches!(status, FinalityStatus::Rejected(_)),
+            "an unslashable set passed a slashable-only policy"
+        );
     }
 }

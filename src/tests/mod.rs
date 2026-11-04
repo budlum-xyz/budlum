@@ -1,12 +1,20 @@
-// Bridge lifecycle integration test (security audit §3). The
+// Bridge lifecycle integration test (security audit). The
 // `bud_lockBridgeTransfer` RPC is removed; the full lock → mint → burn →
 // Unlock happy path is now exercised through the *internal*
 // `Blockchain::lock_bridge_transfer` system path, plus the
 // `apply_bridge_sweep` expiry-sweep.
 #[cfg(test)]
 pub mod bridge_lifecycle;
-pub mod v95_v98_canaries;
-// QcBlob quorum-check unit tests (security audit §4). The
+// A funded chain that applies door transactions in produced blocks and
+// restarts from its own store: the restart tests write through it.
+#[cfg(test)]
+pub mod block_door_harness;
+// four nodes build the same global header sequence; a restart
+// rebuilds it.
+#[cfg(test)]
+pub mod global_header_sequence;
+pub mod regression_canaries;
+// QcBlob quorum-check unit tests (security audit). The
 // `import_qc_blob` minimum-signature count contract is verified by
 // Replaying the same arithmetic the production code uses, against
 // 3-validator snapshots.
@@ -25,7 +33,7 @@ pub mod sharding_e2e;
 // Plus: the B.U.D. end-to-end test and the module-independence invariants.
 // A three-actor scenario (operator A, operator B and observer C) with 9
 // permissionless, whitelist and data-sovereignty invariants (plan section 0.5
-// + §4 acceptance criteria).
+// + acceptance criteria).
 #[cfg(test)]
 pub mod bud_e2e;
 #[cfg(test)]
@@ -41,6 +49,11 @@ pub mod manifest_commitment_locks;
 #[cfg(test)]
 pub mod multi_consensus_locks;
 pub mod operator_kill_chaos;
+// P01 consensus-round behaviour and the P01 negative-validation batch. The file
+// existed and no `mod` declared it, so rustc never read it: 558 lines of round
+// tests that grepped like live coverage and ran nowhere.
+#[cfg(test)]
+pub mod p01_consensus_rounds;
 #[cfg(test)]
 pub mod poisoned_lock_locks;
 #[cfg(test)]
@@ -92,8 +105,8 @@ pub mod prover;
 pub mod regeneration_recovery;
 #[cfg(test)]
 pub mod relayer_liveness;
-// L1 relayer proof kripto-doorulama + M5 budlumxyz fee + M4 BNS fee
-// Regresyon kapilari (Q-A, 2026-07-16).
+// chain relayer proof cryptographic verification + M5 budlumxyz fee + M4 BNS fee
+// Regression gates (Q-A, 2026-07-16).
 #[cfg(test)]
 pub mod relayer_gates;
 // A relayer may stay silent; it may not sign an external outcome it never
@@ -102,6 +115,8 @@ pub mod relayer_gates;
 pub mod relayer_worker_locks;
 #[cfg(test)]
 pub mod settlement_prod;
+#[cfg(test)]
+pub mod storage_tx_door;
 #[cfg(test)]
 pub mod tokenomics;
 pub mod tokenomics_proptest;
@@ -150,6 +165,8 @@ pub mod bridge_negatives;
 pub mod domain_edge_cases;
 #[cfg(test)]
 pub mod encryption_dao;
+#[cfg(test)]
+pub mod evm_finality_contract;
 // The PoA participant onboarding lifecycle, the whitelist requirement and the
 // KYC expiry test matrix. The isolation seal lives in poa_isolation.rs.
 pub mod poa_onboarding_matrix;
@@ -171,7 +188,7 @@ pub mod advisory_reachability;
 pub mod ai_verification_status_locks;
 pub mod audit_findings_locks;
 #[cfg(test)]
-pub mod f20_priority_findings;
+pub mod consensus_rounds;
 #[cfg(test)]
 pub mod hardening_h2_locks;
 #[cfg(test)]
@@ -182,6 +199,8 @@ pub mod hardening_h5_h7_locks;
 pub mod hardening_locks;
 pub mod mempool_dos_locks;
 pub mod network_hardening_locks;
+#[cfg(test)]
+pub mod priority_findings;
 #[cfg(test)]
 pub mod regression_lock;
 pub mod slashing_matrix;
@@ -206,4 +225,10 @@ pub mod consensus_bypass_locks;
 // The fixture is the single source: config/fixtures/real-chain.json, and the
 // xtask `fixture-integrity` gate verifies the same file.
 #[cfg(test)]
+pub mod block_clock;
+#[cfg(test)]
 pub mod real_chain_fixtures;
+// Effect-asserting locks for the slashing matrix and the overflow rule
+//.
+#[cfg(test)]
+pub mod refusal_locks;

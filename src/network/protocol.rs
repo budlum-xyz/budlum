@@ -9,7 +9,7 @@ pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 /// which is stricter in both value and encoding. See that constant for the
 /// comparison and for why this one must stay the looser of the two.
 pub const MAX_BLOCK_SIZE: usize = 1024 * 1024;
-pub const MAX_TX_SIZE: usize = 100 * 1024;
+pub const MAX_TX_SIZE: usize = crate::consensus::budget::MAX_TX_BYTES;
 /// Maximum number of full blocks returned in one range-sync response.
 ///
 /// This is derived from the transport frame ceiling instead of being an
@@ -24,7 +24,6 @@ pub const MAX_HEADER_LOCATOR_HASHES: usize = 64;
 pub enum MessageError {
     TooLarge(usize),
     ParseError(String),
-    VersionMismatch { expected: u32, got: u32 },
 }
 
 /// Snapshot block batches share the same `BlocksByHeight` transport envelope,
@@ -103,6 +102,7 @@ pub enum NetworkMessage {
         checkpoint_hash: String,
         voter_id: String,
         sig_bls: Vec<u8>,
+        auth_sig: Vec<u8>,
     },
 
     Precommit {
@@ -111,6 +111,10 @@ pub enum NetworkMessage {
         checkpoint_hash: String,
         voter_id: String,
         sig_bls: Vec<u8>,
+        auth_sig: Vec<u8>,
+        /// The signer's ML-DSA attestation of the same checkpoint; see
+        /// [`crate::chain::finality::Precommit::pq_sig`].
+        pq_sig: Vec<u8>,
     },
 
     FinalityCert {
@@ -126,14 +130,20 @@ pub enum NetworkMessage {
     GetQcBlob {
         epoch: u64,
         checkpoint_height: u64,
+        /// Zero denotes the first chunk (and the legacy two-field request).
+        chunk_index: u32,
     },
 
     QcBlobResponse {
         epoch: u64,
         checkpoint_height: u64,
         checkpoint_hash: String,
+        /// One chunk of the binary QC V2 blob. A blob of a thousand
+        /// validators is several megabytes and travels as numbered chunks.
         blob_data: Vec<u8>,
         found: bool,
+        chunk_index: u32,
+        chunk_count: u32,
     },
 
     QcFaultProof {
@@ -164,7 +174,37 @@ impl NetworkMessage {
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(MessageError::TooLarge(bytes.len()));
         }
-        Self::from_bytes(bytes).map_err(MessageError::ParseError)
+        // Only the canonical encoding is accepted. Dedup keys and
+        // gossipsub ids hash the raw bytes, but prost skips unknown fields and
+        // accepts any field order and overlong varints, so one signed object
+        // could be re-wrapped into unlimited byte strings that each look new.
+        // The honest encoder is `to_bytes`, which is what the bytes must equal
+        // after a decode and a re-encode.
+        use prost::Message;
+        let proto_msg =
+            crate::network::proto_conversions::pb::ProtoNetworkMessage::decode(bytes)
+                .map_err(|e| MessageError::ParseError(format!("Protobuf decode error: {e}")))?;
+        if proto_msg.encoded_len() != bytes.len() || proto_msg.encode_to_vec() != bytes {
+            return Err(MessageError::ParseError(
+                "non-canonical protobuf encoding".into(),
+            ));
+        }
+        let message = Self::try_from(proto_msg).map_err(MessageError::ParseError)?;
+        // The protobuf can be canonical while its string-valued address is
+        // not. Raw gossip IDs hash the bytes; accepting hex case or a 0x
+        // prefix lets a single signed vote bypass deduplication and repeatedly
+        // trigger expensive BLS checks. Do not count replays as fresh offences:
+        // a third party can replay another validator's authenticated vote.
+        if let Self::Prevote { voter_id, .. } | Self::Precommit { voter_id, .. } = &message {
+            let address = crate::core::address::Address::from_hex(voter_id)
+                .map_err(MessageError::ParseError)?;
+            if address.to_hex() != voter_id.as_str() {
+                return Err(MessageError::ParseError(
+                    "non-canonical finality voter address".into(),
+                ));
+            }
+        }
+        Ok(message)
     }
 
     pub fn validate_block_size(block: &Block) -> Result<(), MessageError> {
@@ -250,6 +290,64 @@ pub fn is_canonical_hash(hash: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An appended unknown field decodes to the same message but is
+    /// not the canonical encoding, so the validated entry point refuses it.
+    #[test]
+    fn a_non_canonical_encoding_of_a_valid_message_is_refused() {
+        let msg = NetworkMessage::GetHeaders {
+            locator: vec!["00".repeat(32)],
+            limit: 10,
+        };
+        let bytes = msg.to_bytes();
+        assert!(NetworkMessage::from_bytes_validated(&bytes).is_ok());
+        let mut padded = bytes.clone();
+        // field 99, varint 1: unknown to the schema, skipped by prost.
+        // (Field 15, the old choice, became `prevote` - a known
+        // length-delimited field - so it no longer decodes leniently.)
+        padded.extend_from_slice(&[0x98, 0x06, 0x01]);
+        assert!(NetworkMessage::from_bytes(&padded).is_ok());
+        assert!(NetworkMessage::from_bytes_validated(&padded).is_err());
+    }
+
+    #[test]
+    fn finality_votes_require_canonical_voter_ids_before_verification() {
+        let canonical = "ab".repeat(32);
+        for voter_id in [
+            canonical.clone(),
+            canonical.to_uppercase(),
+            format!("0x{canonical}"),
+        ] {
+            for is_precommit in [false, true] {
+                let message = if is_precommit {
+                    NetworkMessage::Precommit {
+                        epoch: 1,
+                        checkpoint_height: 10,
+                        checkpoint_hash: "cd".repeat(32),
+                        voter_id: voter_id.clone(),
+                        sig_bls: vec![1; 48],
+                        auth_sig: vec![2; 48],
+                        pq_sig: vec![3; 16],
+                    }
+                } else {
+                    NetworkMessage::Prevote {
+                        epoch: 1,
+                        checkpoint_height: 10,
+                        checkpoint_hash: "cd".repeat(32),
+                        voter_id: voter_id.clone(),
+                        sig_bls: vec![1; 48],
+                        auth_sig: vec![2; 48],
+                    }
+                };
+                let bytes = message.to_bytes();
+                assert!(NetworkMessage::from_bytes(&bytes).is_ok());
+                assert_eq!(
+                    NetworkMessage::from_bytes_validated(&bytes).is_ok(),
+                    voter_id == canonical
+                );
+            }
+        }
+    }
 
     #[test]
     fn range_sync_batch_fits_one_transport_frame_at_worst_case_block_size() {

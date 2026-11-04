@@ -1,22 +1,25 @@
 //! Consensus state must only change inside a block (C3, step 1).
 //!
-//! The `state_updates` half of decision 50 has landed (slice 1+2): a verified
-//! domain commitment's nonce writes now travel in a signed `StateUpdateTx` and
-//! are applied inside block execution by the executor's `StateUpdate` arm,
-//! instead of out of block by `apply_pending_commitments`. This gate pins the
-//! landed invariant and keeps the still-out-of-block mutators
-//! (`message_registry`, `bridge_state`) safe until their slices land:
+//! A verified domain commitment's nonce writes are applied by the settlement
+//! door (`SettlementTx::SubmitCommitment`, `src/settlement/domains.rs`), in
+//! the same in-block transaction that verifies the commitment's finality.
+//! The earlier `StateUpdate` door, which moved other accounts' nonces on a
+//! validator signature alone, is retired. The bridge state, the
+//! bridge's cross-domain messages and the universal relayer are written by
+//! the bridge door (`BridgeTx`, `src/cross_domain/bridge_tx.rs`), also in
+//! block. This gate pins both invariants:
 //!
 //!   1. The state root keeps covering the consensus fields. The fix moves the
 //!      mutation into blocks; it does not drop the fields from the root, which
 //!      would hide the divergence instead of fixing it.
-//!   2. `apply_pending_commitments` no longer writes account nonces out of
-//!      block; the executor's `StateUpdate` arm validates before it writes.
+//!   2. `blockchain.rs` writes no account nonce; the settlement door validates
+//!      a commitment's nonce writes before it applies them; the executor's
+//!      `StateUpdate` arm and the account validation refuse the retired tag.
 //!   3. The validation itself rejects non-monotonic, near-`u64::MAX` and
 //!      over-ceiling updates.
-//!   4. Every out-of-block mutation leaves a durable trail
-//!      (`save_cross_domain_message`, `save_universal_relayer`,
-//!      `save_bridge_state`), so a restart can reconstruct the same state.
+//!   4. `blockchain.rs` production code runs no bridge state transition, no
+//!      message registration and no relay, and keeps no side-store row for
+//!      them; the executor's `Bridge` arm delegates to `execute_bridge_tx`.
 //!
 //! An out-of-block, unvalidated or unpersisted mutation is how two honest
 //! nodes end up with different `state_root` values (partition), or how one
@@ -29,7 +32,14 @@ fn code_of(root: &Path, rel: &str) -> Result<String, String> {
     if !f.is_file() {
         return Err(format!("expected file missing: {}", f.display()));
     }
-    std::fs::read_to_string(&f).map_err(|e| e.to_string())
+    let text = std::fs::read_to_string(&f).map_err(|e| e.to_string())?;
+    Ok(production_text(&text))
+}
+
+/// The text without test items, comments and string literals: a needle in a
+/// comment, a string or a unit test is no evidence about production code.
+fn production_text(text: &str) -> String {
+    super::capability_modules_are_wired::code_only(text)
 }
 
 /// The text between `start` (inclusive) and `end` (exclusive, searched from
@@ -49,10 +59,11 @@ fn slice_of<'a>(src: &'a str, start: &str, end: &str) -> Result<&'a str, String>
 ///
 /// Returns the first violated claim.
 /// Checks 1 and 2: the state root still covers the consensus fields, and
-/// the nonce writes are block-scoped (no out-of-block write, the executor
-/// validates before it writes).
+/// the nonce writes are block-scoped (no out-of-block write, the settlement
+/// door validates before it writes, the retired door refuses).
 fn check_root_covers_and_nonces_are_block_scoped(
     bc: &str,
+    dom: &str,
     acc: &str,
     ex: &str,
 ) -> Result<(), String> {
@@ -77,66 +88,67 @@ fn check_root_covers_and_nonces_are_block_scoped(
         }
     }
 
-    // 2. The commitment nonce writes are block-scoped: the out-of-block path
-    //    must not write account nonces any more, and the executor's StateUpdate
-    //    arm must validate before it writes. The assignment `account.nonce =
-    //    *new_nonce` may only exist in the executor's StateUpdate arm; every
-    //    other copy (apply_pending_commitments, the startup load path, the
-    //    reorg reload path) is an out-of-block mutation.
+    // 2. The commitment nonce writes are block-scoped: blockchain.rs writes
+    //    no account nonce (no startup load, reorg reload or out-of-block
+    //    accept path), the settlement door validates each commitment's writes
+    //    before it applies them, and the retired StateUpdate tag is refused
+    //    by the executor and by the account validation.
     if bc.matches("account.nonce = *new_nonce").count() != 0 {
         return Err(
-            "blockchain.rs still writes account nonces out of block (startup load, reorg reload, or apply_pending_commitments)"
+            "blockchain.rs still writes account nonces out of block (startup load, reorg reload, or an accept path)"
                 .to_string(),
         );
     }
     let apc = slice_of(
-        bc,
+        dom,
         "fn apply_pending_commitments",
-        "pub fn submit_verified_domain_commitment(",
+        "pub fn accept_verified_commitment(",
     )?;
-    if apc.contains("account.nonce = *new_nonce") {
+    let val = apc
+        .find("validate_commitment_state_updates(state, &com)?")
+        .ok_or("the settlement door no longer validates a commitment's nonce writes")?;
+    let write = apc
+        .find("account.nonce = *new_nonce")
+        .ok_or("the settlement door lost the commitment nonce write")?;
+    if val > write {
+        return Err("the settlement door writes nonces before validating them".to_string());
+    }
+    if dom.matches("account.nonce = *new_nonce").count() != 1 {
         return Err(
-            "apply_pending_commitments still writes account nonces out of block".to_string(),
+            "settlement/domains.rs writes account nonces outside apply_pending_commitments"
+                .to_string(),
         );
     }
 
-    let arm = slice_of(ex, "TransactionType::StateUpdate", "Ok(())")?;
-    let val = arm
-        .find("*new_nonce <= current")
-        .ok_or("executor StateUpdate arm lost the monotonic nonce check")?;
-    let write = arm
-        .find("account.nonce = *new_nonce")
-        .ok_or("executor StateUpdate arm lost the nonce write")?;
-    if val > write {
-        return Err("executor StateUpdate arm writes nonces before validating".to_string());
+    let arm = slice_of(
+        ex,
+        "TransactionType::StateUpdate",
+        "TransactionType::Identity",
+    )?;
+    if arm.contains("account.nonce") || !arm.contains("return Err(") {
+        return Err("the executor StateUpdate arm is no longer a refusal".to_string());
     }
-    for (needle, msg) in [
-        (
-            "MAX_STATE_UPDATES",
-            "executor StateUpdate arm lost the update ceiling check",
-        ),
-        (
-            "u64::MAX - 1000",
-            "executor StateUpdate arm lost the near-u64::MAX nonce guard",
-        ),
-    ] {
-        if !arm.contains(needle) {
-            return Err(msg.to_string());
-        }
+    let vac = slice_of(acc, "TransactionType::StateUpdate", "Ok(())")?;
+    if !vac.contains("return Err(") {
+        return Err("the account validation accepts the retired StateUpdate tag".to_string());
     }
     Ok(())
 }
 
 /// Checks 3 and 4: the validation rejects non-monotonic, near-MAX and
-/// over-ceiling updates, and every out-of-block mutator leaves a durable
-/// trail.
-fn check_validation_and_durable_trails(bc: &str) -> Result<(), String> {
+/// over-ceiling updates, and the bridge writes are block-scoped.
+fn check_validation_and_bridge_door(
+    bc: &str,
+    dom: &str,
+    ex: &str,
+    bridge: &str,
+) -> Result<(), String> {
     // 3. The validation itself rejects non-monotonic, near-MAX and
     //    over-ceiling updates.
     let vcu = slice_of(
-        bc,
+        dom,
         "fn validate_commitment_state_updates",
-        "fn apply_pending_commitments",
+        "fn freeze_domain",
     )?;
     for (needle, msg) in [
         (
@@ -154,32 +166,39 @@ fn check_validation_and_durable_trails(bc: &str) -> Result<(), String> {
         }
     }
 
-    // 4. Out-of-block mutators leave a durable trail.
-    let scdm = slice_of(
-        bc,
-        "pub fn submit_cross_domain_message(",
-        "pub fn burn_bridge_transfer(",
-    )?;
-    if !scdm.contains("save_cross_domain_message(") {
-        return Err(
-            "submit_cross_domain_message no longer persists the message (durable trail lost)"
-                .to_string(),
-        );
+    // 4. The bridge writes are block-scoped: blockchain.rs production code
+    //    runs none of them and keeps no side-store row, and the executor's
+    //    Bridge arm delegates to the door.
+    for (needle, what) in [
+        ("bridge_state.lock(", "a bridge lock"),
+        ("bridge_state.mint(", "a bridge mint"),
+        ("bridge_state.unlock(", "a bridge unlock"),
+        ("bridge_state.burn_with_event(", "a bridge burn"),
+        (
+            "bridge_state.register_asset(",
+            "a bridge asset registration",
+        ),
+        (
+            "message_registry.insert(",
+            "a cross-domain message registration",
+        ),
+        ("process_relay(", "a relay"),
+        ("save_bridge_state", "a bridge side-store write"),
+        ("save_universal_relayer", "a relayer side-store write"),
+        ("save_cross_domain_message", "a message side-store write"),
+    ] {
+        if bc.contains(needle) {
+            return Err(format!(
+                "blockchain.rs performs {what} outside the bridge door ({needle})"
+            ));
+        }
     }
-    let srp = slice_of(
-        bc,
-        "pub fn submit_relay_proof(",
-        "pub fn pending_relay_count(",
-    )?;
-    if !srp.contains("save_universal_relayer") {
-        return Err(
-            "submit_relay_proof no longer persists the universal relayer state".to_string(),
-        );
+    if !bridge.contains("pub fn execute_bridge_tx(") {
+        return Err("the bridge door execute_bridge_tx is gone".to_string());
     }
-    if !srp.contains("save_bridge_state") {
-        return Err(
-            "submit_relay_proof no longer persists bridge_state after mint/unlock".to_string(),
-        );
+    let arm = slice_of(ex, "TransactionType::Bridge(bridge_tx)", "Ok(())")?;
+    if !arm.contains("execute_bridge_tx(") {
+        return Err("the executor Bridge arm no longer delegates to the bridge door".to_string());
     }
     Ok(())
 }
@@ -189,13 +208,15 @@ fn check_validation_and_durable_trails(bc: &str) -> Result<(), String> {
 /// Returns the first violated claim.
 pub fn run(root: &Path) -> Result<String, String> {
     let bc = code_of(root, "src/chain/blockchain.rs")?;
+    let dom = code_of(root, "src/settlement/domains.rs")?;
     let acc = code_of(root, "src/core/account.rs")?;
     let ex = code_of(root, "src/execution/executor.rs")?;
+    let bridge = code_of(root, "src/cross_domain/bridge_tx.rs")?;
 
-    check_root_covers_and_nonces_are_block_scoped(&bc, &acc, &ex)?;
-    check_validation_and_durable_trails(&bc)?;
+    check_root_covers_and_nonces_are_block_scoped(&bc, &dom, &acc, &ex)?;
+    check_validation_and_bridge_door(&bc, &dom, &ex, &bridge)?;
 
-    Ok("Consensus-state boundary OK: state root covers consensus fields, StateUpdate nonce writes are block-scoped (executor validates before writing, no out-of-block write), out-of-block mutators persist a durable trail. message_registry and bridge_state move in-block in later slices (decision 50).".to_string())
+    Ok("Consensus-state boundary OK: state root covers consensus fields, commitment nonce writes are block-scoped (the settlement door validates before writing, the retired StateUpdate door refuses, no out-of-block write), and the bridge, its messages and the relayer are written only by the Bridge door.".to_string())
 }
 
 /// # Errors
@@ -234,13 +255,21 @@ pub fn self_test() -> Result<String, String> {
         ));
     }
     let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-cscib")?;
-    for sub in ["src/chain", "src/core", "src/execution"] {
+    for sub in [
+        "src/chain",
+        "src/core",
+        "src/cross_domain",
+        "src/execution",
+        "src/settlement",
+    ] {
         std::fs::create_dir_all(tmp.join(sub)).map_err(|e| e.to_string())?;
     }
     for rel in [
         "src/chain/blockchain.rs",
+        "src/settlement/domains.rs",
         "src/core/account.rs",
         "src/execution/executor.rs",
+        "src/cross_domain/bridge_tx.rs",
     ] {
         std::fs::copy(root.join(rel), tmp.join(rel)).map_err(|e| e.to_string())?;
     }
@@ -259,48 +288,83 @@ pub fn self_test() -> Result<String, String> {
         "a state root without settlement_root passed",
     )?;
 
-    // Break 2: the executor StateUpdate arm accepts equal nonce.
+    // Break 2: the settlement door's validation accepts an equal nonce.
+    break_and_expect_refusal(
+        &tmp,
+        &root,
+        "src/settlement/domains.rs",
+        "*new_nonce <= current",
+        "*new_nonce < current",
+        "a commitment validation that accepts an equal nonce passed",
+    )?;
+
+    // Break 3: the settlement door applies nonce writes unvalidated.
+    break_and_expect_refusal(
+        &tmp,
+        &root,
+        "src/settlement/domains.rs",
+        "        validate_commitment_state_updates(state, &com)?;\n        for (addr, new_nonce)",
+        "        for (addr, new_nonce)",
+        "a settlement door that applies unvalidated nonce writes passed",
+    )?;
+
+    // Break 4: blockchain.rs regains an out-of-block bridge mint.
+    break_and_expect_refusal(
+        &tmp,
+        &root,
+        "src/chain/blockchain.rs",
+        "    fn release_unfrozen_domains(&mut self, unfrozen: &[DomainId]) {\n",
+        "    fn release_unfrozen_domains(&mut self, unfrozen: &[DomainId]) {\n        let _ = self.state.bridge_state.mint(&Default::default(), 0);\n",
+        "an out-of-block bridge mint in blockchain.rs passed",
+    )?;
+
+    // Break 7: the executor Bridge arm stops delegating to the door.
     break_and_expect_refusal(
         &tmp,
         &root,
         "src/execution/executor.rs",
-        "*new_nonce <= current",
-        "*new_nonce < current",
-        "an executor StateUpdate arm that accepts equal nonce passed",
+        "crate::cross_domain::bridge_tx::execute_bridge_tx(state, &ctx, bridge_tx)",
+        "Ok::<(), String>(())",
+        "an executor Bridge arm that skips the door passed",
     )?;
 
-    // Break 3: apply_pending_commitments regains an out-of-block nonce write.
+    // Break 5: blockchain.rs regains an out-of-block nonce write.
     break_and_expect_refusal(
         &tmp,
         &root,
         "src/chain/blockchain.rs",
-        "self.validate_commitment_state_updates(&com)?;",
-        "self.validate_commitment_state_updates(&com)?;\n                for (addr, new_nonce) in &com.state_updates {\n                    let account = self.state.get_or_create(addr);\n                    account.nonce = *new_nonce;\n                }",
-        "an out-of-block nonce write in apply_pending_commitments passed",
+        "    fn release_unfrozen_domains(&mut self, unfrozen: &[DomainId]) {\n",
+        "    fn release_unfrozen_domains(&mut self, unfrozen: &[DomainId]) {\n        for (addr, new_nonce) in &[(Address::zero(), 1u64)] { let account = self.state.get_or_create(addr); account.nonce = *new_nonce; }\n",
+        "an out-of-block nonce write in blockchain.rs passed",
     )?;
 
-    // Break 4: the cross-domain message durable trail is gone.
+    // Break 6: the executor accepts the retired StateUpdate tag again.
     break_and_expect_refusal(
         &tmp,
         &root,
-        "src/chain/blockchain.rs",
-        "save_cross_domain_message(",
-        "save_cross_domain_message_gone(",
-        "an unpersisted cross-domain message passed",
-    )?;
-
-    // Break 5: the startup load path regains an out-of-block nonce write.
-    break_and_expect_refusal(
-        &tmp,
-        &root,
-        "src/chain/blockchain.rs",
-        "// out-of-block mutation of consensus state.\n",
-        "// out-of-block mutation of consensus state.\n                    let account = state.get_or_create(&commitment_addr); account.nonce = *new_nonce;\n",
-        "a startup load path that writes nonces out of block passed",
+        "src/execution/executor.rs",
+        "// blocks keep their meaning; no new block may carry one.\n",
+        "// blocks keep their meaning; no new block may carry one.\n                let account = state.get_or_create(&tx.from); account.nonce = 0;\n",
+        "an executor StateUpdate arm that writes nonces passed",
     )?;
 
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(String::from(
         "consensus-state-only-changes-in-blocks canary OK (clean PASSes, broken FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod production_text_tests {
+    use super::*;
+
+    #[test]
+    fn needles_in_comments_strings_and_tests_are_gone() {
+        let src = "// final_hasher.update(self.bridge_root)\nlet s = \"MAX_STATE_UPDATES\";\n#[cfg(test)]\nmod t { fn x() { save_cross_domain_message(); } }\nfn real() {}\n";
+        let out = production_text(src);
+        assert!(!out.contains("bridge_root"));
+        assert!(!out.contains("MAX_STATE_UPDATES"));
+        assert!(!out.contains("save_cross_domain_message"));
+        assert!(out.contains("fn real"));
+    }
 }

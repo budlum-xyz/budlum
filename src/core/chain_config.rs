@@ -126,7 +126,9 @@ impl Network {
         match self {
             Network::Mainnet => ConsensusParams {
                 epoch_len: 100,
-                min_stake: 1_000_000,
+                // 1 BUD (10^6 atoms). Written in BUD so the unit is explicit
+                //; the mainnet value is Ayaz's decision (DECISIONS.md).
+                min_stake: crate::tokenomics::bud(1),
                 slot_ms: 6_000,
                 finality_checkpoint_interval: 10,
                 finality_quorum_numerator: 2,
@@ -136,7 +138,8 @@ impl Network {
             },
             Network::Testnet => ConsensusParams {
                 epoch_len: 50,
-                min_stake: 10_000,
+                // TESTNET-DEFAULT: 1,000 BUD.
+                min_stake: crate::tokenomics::bud(1_000),
                 slot_ms: 3_000,
                 finality_checkpoint_interval: 5,
                 finality_quorum_numerator: 2,
@@ -154,6 +157,41 @@ impl Network {
                 max_votes_per_msg: 64,
                 transport_v2_activation_height: 0,
             },
+        }
+    }
+
+    /// The validation reward pool this profile pays from, if any.
+    ///
+    /// Testnet: the default schedule, 10M BUD over 100 000 epochs
+    ///. Mainnet waits for Ayaz. Devnet has
+    /// no distribution to fund a pool from.
+    #[must_use]
+    pub fn reward_pool(&self) -> Option<crate::tokenomics::reward_pool::RewardPoolSchedule> {
+        match self {
+            Network::Testnet => Some(crate::tokenomics::reward_pool::RewardPoolSchedule::default()),
+            Network::Mainnet | Network::Devnet => None,
+        }
+    }
+
+    /// The Mikoriza (shared security) parameters of this profile.
+    ///
+    /// The flag is a genesis parameter. Devnet has it on so the rehearsal can
+    /// run the path; testnet keeps it off until the end-to-end Sepolia test
+    /// passes (10.7); the mainnet decision is Ayaz's.
+    /// `max_restaked_share_ppm = 300_000` and one weight atom per allocated
+    /// unit are TESTNET-DEFAULT values.
+    #[must_use]
+    pub const fn shared_security(
+        &self,
+    ) -> crate::settlement::shared_security::SharedSecurityParams {
+        crate::settlement::shared_security::SharedSecurityParams {
+            enabled: matches!(self, Network::Devnet),
+            // TESTNET-DEFAULT: restaked weight stays below a third of
+            // the total, so ETH-backed validators cannot finalize alone.
+            max_restaked_share_ppm: 300_000,
+            // TESTNET-DEFAULT: one BUD weight atom per allocated unit
+            // (a unit is one gwei of allocated ETH magnitude).
+            units_to_weight_ppm: 1_000_000,
         }
     }
 
@@ -239,8 +277,45 @@ impl std::fmt::Display for Network {
 
 pub const EPOCH_LEN: u64 = 100;
 
+/// The Mikoriza parameters of the profile `chain_id` names; an unknown chain
+/// has the feature off.
+#[must_use]
+pub fn shared_security_for_chain_id(
+    chain_id: u64,
+) -> crate::settlement::shared_security::SharedSecurityParams {
+    Network::from_chain_id(chain_id).map_or(
+        crate::settlement::shared_security::SharedSecurityParams::DISABLED,
+        |network| network.shared_security(),
+    )
+}
+
+/// The reward pool of the profile `chain_id` names; none for an unknown chain.
+#[must_use]
+pub fn reward_pool_for_chain_id(
+    chain_id: u64,
+) -> Option<crate::tokenomics::reward_pool::RewardPoolSchedule> {
+    Network::from_chain_id(chain_id).and_then(|network| network.reward_pool())
+}
+
 pub fn epoch_len_for_chain_id(chain_id: u64) -> u64 {
     Network::from_chain_id(chain_id).map_or(EPOCH_LEN, |network| network.epoch_len())
+}
+
+/// The state machine reads the epoch length from the chain id while the
+/// consensus engine reads it from the selected network. One chain must use
+/// one value, so a chain id that maps to another epoch length is refused.
+pub fn check_epoch_len_matches_chain_id(
+    chain_id: u64,
+    engine_epoch_len: u64,
+) -> Result<(), String> {
+    let state_epoch_len = epoch_len_for_chain_id(chain_id);
+    if state_epoch_len == engine_epoch_len {
+        Ok(())
+    } else {
+        Err(format!(
+            "chain id {chain_id} uses epoch length {state_epoch_len} but the selected network uses {engine_epoch_len}"
+        ))
+    }
 }
 
 pub const SLOT_MS: u64 = 1000;
@@ -309,6 +384,7 @@ pub fn slash_penalty(stake: u64, slash_ratio_fixed: u64) -> u64 {
     }
 }
 pub const QC_BLOB_TTL_EPOCHS: u64 = 10;
+/// exposed for: the crypto/key registry's public labels and shapes - production readers land with the anchor-ceremony and key-config doors (wiring pending).
 pub const MAX_QC_BLOB_BYTES: usize = 1_048_576;
 pub const MAX_VOTES_PER_MSG: usize = 128;
 
@@ -389,7 +465,7 @@ pub struct ConsensusParams {
     pub finality_quorum_numerator: u64,
     pub finality_quorum_denominator: u64,
     pub max_votes_per_msg: usize,
-    /// (§1.3 / P0 Transport v2) activation block height for fail-closed v2 wire transport.
+    /// (P0 Transport v2) activation block height for fail-closed v2 wire transport.
     pub transport_v2_activation_height: u64,
 }
 
@@ -451,6 +527,15 @@ mod tests {
         assert_eq!(Network::Testnet.chain_id().value(), 45261);
         assert_eq!(Network::Devnet.chain_id().value(), 45262);
         assert_eq!(Network::Mainnet.default_port(), 4001);
+    }
+
+    #[test]
+    fn a_chain_id_with_another_epoch_length_is_refused() {
+        let devnet = Network::Devnet;
+        assert!(
+            check_epoch_len_matches_chain_id(devnet.chain_id().value(), devnet.epoch_len()).is_ok()
+        );
+        assert!(check_epoch_len_matches_chain_id(1337, devnet.epoch_len() + 1).is_err());
     }
 
     #[test]

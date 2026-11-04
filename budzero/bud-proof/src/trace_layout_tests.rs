@@ -8,11 +8,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::plonky3_air::{
-    COL_ASSERT_INV, COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_MEM_INIT_ACC, COL_MEM_IS_INIT,
-    COL_MERKLE_KEY_REM, COL_POSEIDON_END, COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE,
-    COL_POSEIDON_X4_BASE, COL_PROG_MULT, COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT,
-    COL_REG_SAME_INV, COL_RS1_IDX_INV, COL_STATE_WRITES_0, COL_SYSCALL_IS_1, COL_SYSCALL_IS_2,
-    COL_SYSCALL_IS_3, COL_SYSCALL_IS_6, TRACE_WIDTH,
+    COL_ASSERT_INV, COL_CHAIN_ID, COL_CMP_RS1_HI_INV, COL_CMP_RS2_HI_INV, COL_EVENT_DIGEST_0,
+    COL_EXIT_CODE, COL_FINAL_ROOT_0, COL_GAS_LIMIT, COL_INFERENCE_OUTPUT_COMMIT, COL_INIT_ROOT_0,
+    COL_IS_PRIVACY_COMMIT, COL_IS_VERIFY_INFERENCE, COL_MEM_ADDR_BITS_BASE, COL_MEM_HI_MAX_INV,
+    COL_MEM_INIT_ACC, COL_MEM_IS_INIT, COL_MEM_ORD_BITS_BASE, COL_MEM_SAME_INV, COL_MEM_TID,
+    COL_MEM_TOP_SAME, COL_MEM_TOP_SAME_INV, COL_MERKLE_ACC, COL_MERKLE_KEY_REM, COL_POSEIDON_END,
+    COL_POSEIDON_STATE_BASE, COL_POSEIDON_X2_BASE, COL_POSEIDON_X4_BASE, COL_PROG_MULT,
+    COL_RD_IDX_INV, COL_REG_INIT_ACC, COL_REG_IS_INIT, COL_REG_ORD_BITS_BASE, COL_REG_SAME_INV,
+    COL_RS1_IDX_INV, COL_STATE_WRITES_0, COL_SYSCALL_IS_1, COL_SYSCALL_IS_2, COL_SYSCALL_IS_3,
+    COL_SYSCALL_IS_6, COL_TRACE_LEN_CTR, COL_VM_MERKLE_KEY, MEM_ADDR_BITS, MEM_ORD_BITS,
+    REG_ORD_BITS, TRACE_WIDTH,
 };
 
 struct ColRange {
@@ -102,80 +107,68 @@ fn all_ranges() -> Vec<ColRange> {
             start: COL_POSEIDON_X4_BASE,
             end: COL_POSEIDON_END,
         },
-        // Public-input bindings
+        // Public-input bindings.
+        //
+        // Every range that HAS a named AIR constant is now
+        // written from that constant instead of a mirrored number. A hand-kept
+        // copy of the layout updates only when someone remembers to update it;
+        // a derived copy moves with the layout and lets the coverage assertion
+        // below be a real check.
         ColRange {
             name: "final_root",
-            start: 670,
-            end: 678,
+            start: COL_FINAL_ROOT_0,
+            end: COL_FINAL_ROOT_0 + 8,
         },
         ColRange {
             name: "init_root",
-            start: 678,
-            end: 686,
+            start: COL_INIT_ROOT_0,
+            end: COL_INIT_ROOT_0 + 8,
         },
         // Privacy opcode selectors (consumed from former reserved gap)
         ColRange {
             name: "privacy_selectors",
-            start: 686,
-            end: 689,
+            start: COL_IS_PRIVACY_COMMIT,
+            end: COL_IS_PRIVACY_COMMIT + 3,
         },
         // VerifyInference AIR binding columns
         // (consumed remaining reserved gap 373..378)
         ColRange {
             name: "verify_inference",
-            start: 689,
-            end: 694,
+            start: COL_IS_VERIFY_INFERENCE,
+            end: COL_INFERENCE_OUTPUT_COMMIT + 1,
         },
         ColRange {
             name: "trace_len_ctr",
-            start: 694,
-            end: 695,
+            start: COL_TRACE_LEN_CTR,
+            end: COL_TRACE_LEN_CTR + 1,
         },
         ColRange {
             name: "gas_limit",
-            start: 695,
-            end: 696,
+            start: COL_GAS_LIMIT,
+            end: COL_GAS_LIMIT + 1,
         },
         ColRange {
             name: "event_digest",
-            start: 696,
-            end: 704,
+            start: COL_EVENT_DIGEST_0,
+            end: COL_EVENT_DIGEST_0 + 8,
         },
         ColRange {
             name: "exit_code",
-            start: 704,
-            end: 705,
+            start: COL_EXIT_CODE,
+            end: COL_EXIT_CODE + 1,
         },
         ColRange {
             name: "chain_id",
-            start: 705,
-            end: 706,
+            start: COL_CHAIN_ID,
+            end: COL_CHAIN_ID + 1,
         },
-        // VerifyMerkle path expansion
+        // VerifyMerkle path expansion: the key, the bit, the group kinds, the word read,
+        // the round, the node, the buffer, the gadget flag, the result and the root
+        // comparison, one block.
         ColRange {
             name: "verify_merkle",
-            start: 706,
-            end: 712,
-        },
-        ColRange {
-            name: "merkle_poseidon_x2",
-            start: 712,
-            end: 720,
-        },
-        ColRange {
-            name: "merkle_poseidon_x4",
-            start: 720,
-            end: 728,
-        },
-        ColRange {
-            name: "merkle_diff_inv",
-            start: 728,
-            end: 729,
-        },
-        ColRange {
-            name: "merkle_final_flag",
-            start: 729,
-            end: 730,
+            start: COL_VM_MERKLE_KEY,
+            end: COL_MERKLE_ACC + 1,
         },
         // Initial-memory commitment. Appended past the old end of the
         // layout so the columns before it did not have to move again.
@@ -300,6 +293,51 @@ fn all_ranges() -> Vec<ColRange> {
             start: COL_PROG_MULT,
             end: COL_PROG_MULT + 1,
         },
+        // The register table order witness: 32 bits of the step to the next row.
+        ColRange {
+            name: "reg_ord_bits",
+            start: COL_REG_ORD_BITS_BASE,
+            end: COL_REG_ORD_BITS_BASE + REG_ORD_BITS,
+        },
+        // Inverse witness pinning `mem_same` to the sort key equality.
+        ColRange {
+            name: "mem_same_inv",
+            start: COL_MEM_SAME_INV,
+            end: COL_MEM_SAME_INV + 1,
+        },
+        // The table id of a memory row: 1 memory, 2 stack, 3 storage.
+        ColRange {
+            name: "mem_tid",
+            start: COL_MEM_TID,
+            end: COL_MEM_TID + 1,
+        },
+        // The 64 bits of canonical `COL_MEM_ADDR` (low + high 32-bit limbs).
+        ColRange {
+            name: "mem_addr_bits",
+            start: COL_MEM_ADDR_BITS_BASE,
+            end: COL_MEM_ADDR_BITS_BASE + MEM_ADDR_BITS,
+        },
+        ColRange {
+            name: "mem_hi_max_inv",
+            start: COL_MEM_HI_MAX_INV,
+            end: COL_MEM_HI_MAX_INV + 1,
+        },
+        ColRange {
+            name: "mem_top_same",
+            start: COL_MEM_TOP_SAME,
+            end: COL_MEM_TOP_SAME + 1,
+        },
+        ColRange {
+            name: "mem_top_same_inv",
+            start: COL_MEM_TOP_SAME_INV,
+            end: COL_MEM_TOP_SAME_INV + 1,
+        },
+        // The memory table order witness: 34 bits of the step to the next row.
+        ColRange {
+            name: "mem_ord_bits",
+            start: COL_MEM_ORD_BITS_BASE,
+            end: COL_MEM_ORD_BITS_BASE + MEM_ORD_BITS,
+        },
     ]
 }
 
@@ -345,6 +383,31 @@ fn trace_layout_no_overlap_and_within_bounds() {
          If you added columns, update TRACE_WIDTH or document the reserved gap.",
         max_end, TRACE_WIDTH
     );
+
+    // The check the table was missing. A layout
+    // lock that verifies "no overlaps, all in bounds, ends at the width" still
+    // lets an UNMENTIONED block of columns slip by: the range list simply does
+    // not name them, and nothing says so. Require every column of the trace to
+    // be covered by exactly one range - a gap (columns nobody declared) and an
+    // overlap (columns two owners claim) now fail the same test, whichever
+    // direction the mistake moves in.
+    let mut covered = vec![false; TRACE_WIDTH];
+    for a in &ranges {
+        covered[a.start..a.end].fill(true);
+    }
+    if let Some(gap) = covered.iter().position(|c| !*c) {
+        let mut end = gap;
+        while end + 1 < TRACE_WIDTH && !covered[end + 1] {
+            end += 1;
+        }
+        panic!(
+            "trace layout gap: columns {gap}..={} are owned by no range in \
+             `all_ranges` - a column the AIR can read but the lock does not name \
+             is an unowned witness slot (; overlaps are caught by the
+             pairwise check above, gaps are this assertion's job)",
+            end + 1
+        );
+    }
 }
 
 #[test]
@@ -402,7 +465,7 @@ fn trace_layout_reserved_gap_is_documented() {
 fn poseidon_block_matches_the_round_schedule() {
     use crate::plonky3_air::{
         poseidon_sbox_lanes, POSEIDON_FULL_ROUNDS, POSEIDON_PARTIAL_ROUNDS, POSEIDON_ROUNDS,
-        POSEIDON_SBOX_SLOTS,
+        POSEIDON_SBOX_SLOTS, POSEIDON_WIDTH,
     };
 
     assert_eq!(
@@ -415,14 +478,14 @@ fn poseidon_block_matches_the_round_schedule() {
     assert_eq!(POSEIDON_SBOX_SLOTS, expected_slots);
     assert_eq!(
         expected_slots,
-        POSEIDON_FULL_ROUNDS * 8 + POSEIDON_PARTIAL_ROUNDS,
-        "full rounds squash eight lanes, partial rounds one"
+        POSEIDON_FULL_ROUNDS * POSEIDON_WIDTH + POSEIDON_PARTIAL_ROUNDS,
+        "full rounds squash every lane, partial rounds one"
     );
 
     // State is one row of eight per round; x2 and x4 are one slot per S-box.
     assert_eq!(
         COL_POSEIDON_X2_BASE - COL_POSEIDON_STATE_BASE,
-        POSEIDON_ROUNDS * 8
+        POSEIDON_ROUNDS * POSEIDON_WIDTH
     );
     assert_eq!(
         COL_POSEIDON_X4_BASE - COL_POSEIDON_X2_BASE,
@@ -432,11 +495,15 @@ fn poseidon_block_matches_the_round_schedule() {
 
     // A partial round must be cheaper than a full one, otherwise the whole
     // point of the schedule is lost.
-    assert_eq!(poseidon_sbox_lanes(0), 8, "round 0 is a leading full round");
+    assert_eq!(
+        poseidon_sbox_lanes(0),
+        POSEIDON_WIDTH,
+        "round 0 is a leading full round"
+    );
     assert_eq!(poseidon_sbox_lanes(4), 1, "round 4 is partial");
     assert_eq!(
         poseidon_sbox_lanes(POSEIDON_ROUNDS - 1),
-        8,
+        POSEIDON_WIDTH,
         "the last round is a trailing full round"
     );
 }

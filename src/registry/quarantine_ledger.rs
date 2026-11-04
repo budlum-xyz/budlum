@@ -1,4 +1,4 @@
-//! E1: K3/K4 durable alarm & quarantine ledger.
+//! durable alarm & quarantine ledger.
 //!
 //! A node-local, restart-surviving record of consensus-integrity events:
 //! domains frozen for equivocation and offenders slashed through the
@@ -49,7 +49,7 @@ pub struct AlarmEntry {
     pub severity: u8,
 }
 
-/// Persistent K3/K4 alarm & quarantine ledger.
+/// Persistent alarm & quarantine ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct QuarantineLedger {
     #[serde(with = "crate::core::map_keys")]
@@ -87,6 +87,25 @@ impl QuarantineLedger {
                 height,
             },
         );
+    }
+
+    /// Drops alarms older than `retention_blocks`: the
+    /// alarm log is history, and history that is never trimmed is a disk
+    /// bill paid forever. Quarantine entries are live state - a frozen
+    /// entity stays frozen until [`QuarantineLedger::release_entity`] - so
+    /// they are never pruned by age.
+    ///
+    /// Returns the number of alarms dropped.
+    pub fn prune_expired(&mut self, current_height: u64, retention_blocks: u64) -> usize {
+        let before = self.alarms.len();
+        self.alarms
+            .retain(|_, alarm| alarm.height.saturating_add(retention_blocks) > current_height);
+        before - self.alarms.len()
+    }
+
+    /// Releases a quarantined entity - the ledger half of an unfreeze.
+    pub fn release_entity(&mut self, target_id: &Hash32) {
+        self.quarantined_entities.remove(target_id);
     }
 
     /// Record a security alarm and return its deterministic id.
@@ -155,5 +174,25 @@ mod tests {
         let bytes = bincode::serialize(&ledger).expect("bincode encode");
         let back: QuarantineLedger = bincode::deserialize(&bytes).expect("bincode decode");
         assert_eq!(ledger, back);
+    }
+
+    /// Alarms are trimmed by age; live quarantine
+    /// entries are not (a frozen entity stays frozen until released).
+    #[test]
+    fn alarms_trim_by_age_and_quarantine_survives_until_released() {
+        let mut ledger = QuarantineLedger::new();
+        let old = QuarantineLedger::domain_target(1);
+        ledger.quarantine_entity(old, QuarantineReason::Equivocation("x".into()), 10);
+        ledger.record_alarm("OLD", "an old alarm", 10, 2);
+        ledger.record_alarm("NEW", "a fresh alarm", 90_000, 2);
+        let dropped = ledger.prune_expired(100_000, 50_000);
+        assert_eq!(dropped, 1, "only the old alarm is over the horizon");
+        assert!(ledger.alarms.values().all(|a| a.code == "NEW"));
+        assert!(
+            ledger.quarantined_entities.contains_key(&old),
+            "age must not release a quarantine"
+        );
+        ledger.release_entity(&old);
+        assert!(!ledger.quarantined_entities.contains_key(&old));
     }
 }

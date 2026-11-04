@@ -175,12 +175,21 @@ pub fn run(root: &Path) -> Result<String, String> {
     }
     let air_src = std::fs::read_to_string(&air_path).map_err(|e| e.to_string())?;
     let prover_src = std::fs::read_to_string(&prover_path).map_err(|e| e.to_string())?;
+    // Every check reads comment-free text: a commented `let` or `assert_bool`
+    // must neither be found first nor satisfy a check.
     let air_nc = strip_comments(&air_src);
+    let prover_nc = strip_comments(&prover_src);
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    checked += check_activity_terms(&air_src, &prover_src, &mut problems);
-    checked += check_index_witnesses(&air_src, &prover_src, &mut problems);
+    checked += check_activity_terms(&air_nc, &prover_nc, &mut problems);
+    checked += check_index_witnesses(&air_nc, &prover_nc, &mut problems);
+    // The two constant increments below cannot show the gate looked at anything.
+    if checked == 0 {
+        return Err(String::from(
+            "gate checked nothing: no activity term and no index witness was found",
+        ));
+    }
 
     for (line, expr) in one_minus_idx(&air_nc) {
         problems.push(format!(
@@ -271,4 +280,17 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "logup-multipliers canary OK: a clean multiplier PASSes and an index multiplier FAILs.",
     ))
+}
+
+#[cfg(test)]
+mod comment_tests {
+    use super::*;
+
+    #[test]
+    fn a_commented_definition_is_not_found_first() {
+        let src =
+            strip_comments("// let is_real_mem_op = rs1_idx * x;\nlet is_real_mem_op = a + b;\n");
+        let body = find_def(&src, "is_real_mem_op").unwrap();
+        assert!(!mentions_bare(&body, "rs1_idx"));
+    }
 }

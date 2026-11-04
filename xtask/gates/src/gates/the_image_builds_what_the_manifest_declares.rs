@@ -75,15 +75,18 @@ fn copied_dirs(dockerfile: &str) -> BTreeSet<String> {
         let Some(rest) = line.strip_prefix("COPY ") else {
             continue;
         };
-        for token in rest.split_whitespace() {
-            if token.starts_with("--") {
-                continue;
-            }
-            // The destination is the last token; sources are the rest. Taking
-            // every token is safe because a destination like `./src/` names
-            // the same directory as its source anyway, and a false extra
-            // entry here can only make the gate more permissive about a path
-            // that is genuinely copied.
+        if rest.contains("--from=") {
+            continue;
+        }
+        // The last token is the destination. Only sources are copied in.
+        let tokens: Vec<&str> = rest
+            .split_whitespace()
+            .filter(|t| !t.starts_with("--"))
+            .collect();
+        let Some((_, sources)) = tokens.split_last() else {
+            continue;
+        };
+        for token in sources {
             let token = token.trim_end_matches('/');
             let token = token.strip_prefix("./").unwrap_or(token);
             if !token.is_empty() && token != "." {
@@ -114,6 +117,11 @@ pub fn run(root: &Path) -> Result<String, String> {
     let copied = copied_dirs(&dockerfile);
     let declared = declared_paths(&manifest);
 
+    if declared.is_empty() {
+        return Err(String::from(
+            "Cargo.toml declares no path dependency; this gate would check nothing",
+        ));
+    }
     let mut checked = 0usize;
     let mut missing = Vec::new();
 
@@ -230,4 +238,16 @@ COPY --from=builder /usr/local/bin/x /usr/local/bin/x\n";
         ));
     }
     Err(problems.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_destination_is_not_a_source() {
+        let copied = copied_dirs("COPY other/ ./crates/bpqs/\nCOPY a b ./dst/\n");
+        assert!(!is_covered("crates/bpqs", &copied));
+        assert!(is_covered("a", &copied) && is_covered("b", &copied));
+    }
 }

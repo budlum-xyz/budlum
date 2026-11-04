@@ -19,7 +19,23 @@ use super::rust_literals;
 const ACCUMULATORS: &[(&str, &str)] = &[
     ("COL_MEM_INIT_ACC", "the memory table"),
     ("COL_REG_INIT_ACC", "the register table"),
+    ("COL_MERKLE_ACC", "the root rows"),
 ];
+
+/// Accumulators whose commitment reaches the public inputs transitively, so
+/// they have no direct `public_inputs[...]` binding block to find.
+///
+/// The merkle fold lives on the root rows: the transition rule hands the
+/// finished product to `COL_MERKLE_RESULT` (`nxt[COL_MERKLE_ACC] ==
+/// cu(COL_MERKLE_ACC) * nxt[COL_MERKLE_EQ]`, and the result column equals the
+/// fold when expansion ends), the result feeds the merkle opcode, and every
+/// accepted merkle path is checked against the initial/final state roots bound
+/// on the last row (`public_inputs[10..26]`). The hazard this gate exists for -
+/// a side-table fold still running when the CPU table halts - cannot apply
+/// here: the column is gated on the root-row conditions (`rootg`,
+/// `when_transition`), never on `is_halt`/`cpu_active`. The direct-binding
+/// check is skipped for these columns; every other check still runs.
+const BINDS_VIA_STATE_ROOT: &[&str] = &["COL_MERKLE_ACC"];
 
 /// Non-nested brace blocks that mention `column` and `public_inputs`,
 /// mirroring the shell regex `\{[^{}]*<column>[^{}]*\}`.
@@ -47,6 +63,17 @@ fn binding_blocks(src: &str, column: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// Every `COL_*_ACC` name the scrubbed AIR text uses.
+fn accumulator_columns(scrubbed: &str) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    for word in scrubbed.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if word.starts_with("COL_") && word.ends_with("_ACC") {
+            found.insert(word.to_string());
+        }
+    }
+    found
+}
+
 /// # Errors
 ///
 /// Returns the list of violated claims.
@@ -63,6 +90,18 @@ pub fn run(root: &Path) -> Result<String, String> {
     let mut problems: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
+    // A new accumulator column must be registered here, or its binding is never
+    // checked.
+    for column in accumulator_columns(&scrubbed) {
+        if !ACCUMULATORS.iter().any(|(c, _)| *c == column) {
+            problems.push(format!(
+                "{column} is a side-table accumulator the AIR uses, and it is not in the \
+                 ACCUMULATORS list of this gate, so nothing checks that its binding uses \
+                 `when_last_row`. Add it with its table."
+            ));
+        }
+    }
+
     for (column, table) in ACCUMULATORS {
         if !src.contains(column) {
             problems.push(format!(
@@ -72,7 +111,7 @@ pub fn run(root: &Path) -> Result<String, String> {
             continue;
         }
         let blocks = binding_blocks(&scrubbed, column);
-        if blocks.is_empty() {
+        if blocks.is_empty() && !BINDS_VIA_STATE_ROOT.contains(column) {
             problems.push(format!(
                 "{column} is never compared against a public input, so the \
                  accumulator is folded and then dropped. Either it binds \
@@ -130,7 +169,7 @@ pub fn self_test() -> Result<String, String> {
     let dir = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ct")?;
     let _ = std::fs::create_dir_all(dir.join("budzero/bud-proof/src"));
 
-    let good = "pub const COL_MEM_INIT_ACC: usize = 731;\npub const COL_REG_INIT_ACC: usize = 736;\n        {\n            let acc_last: AB::Expr = cur[COL_MEM_INIT_ACC].into();\n            let expected = public_inputs[10].into();\n            builder.when_last_row().assert_eq(acc_last, expected);\n        }\n        {\n            let acc_last: AB::Expr = cur[COL_REG_INIT_ACC].into();\n            let expected = public_inputs[12].into();\n            builder.when_last_row().assert_eq(acc_last, expected);\n        }\n";
+    let good = "pub const COL_MEM_INIT_ACC: usize = 731;\npub const COL_REG_INIT_ACC: usize = 736;\npub const COL_MERKLE_ACC: usize = 913;\n        {\n            let acc_last: AB::Expr = cur[COL_MEM_INIT_ACC].into();\n            let expected = public_inputs[10].into();\n            builder.when_last_row().assert_eq(acc_last, expected);\n        }\n        {\n            let acc_last: AB::Expr = cur[COL_REG_INIT_ACC].into();\n            let expected = public_inputs[12].into();\n            builder.when_last_row().assert_eq(acc_last, expected);\n        }\n";
     std::fs::write(dir.join("budzero/bud-proof/src/plonky3_air.rs"), good)
         .map_err(|e| e.to_string())?;
     if run(&dir).is_err() {
@@ -152,4 +191,18 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "cross-table canary OK: last_row PASSes and is_halt FAILs.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unregistered_accumulator_columns_are_found() {
+        let cols =
+            accumulator_columns("cur[COL_MEM_INIT_ACC] + cur[COL_NEW_THING_ACC] + COL_GAS_USED");
+        assert!(cols.contains("COL_NEW_THING_ACC"));
+        assert!(cols.contains("COL_MEM_INIT_ACC"));
+        assert!(!cols.contains("COL_GAS_USED"));
+    }
 }

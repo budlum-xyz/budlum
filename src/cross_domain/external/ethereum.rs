@@ -2,9 +2,10 @@
 //! Altair sync committee.
 //!
 //! WIRING: wired - this adapter goes live through an admission into the
-//! external-domain registry, now bound to consensus as
-//! `Blockchain::external_intake` (`AdapterSpec::EthereumSync` builds it, the
-//! node's `PairingBls` supplies the pairing check). The executor still
+//! external-domain registry, bound to consensus in
+//! `AccountState::settlement` and written by the `ExternalDomain`
+//! transaction door (`AdapterSpec::EthereumSync` builds it, the node's
+//! `PairingBls` supplies the pairing check). The executor still
 //! refuses generic Ethereum relay results (`relayer_evm_package_required`):
 //! relay execution and finality attestation are different powers, and this
 //! wiring grants only the second.
@@ -53,6 +54,8 @@ use crate::cross_domain::external::spec::{
     AdapterDescriptor, AdapterError, AdapterId, FinalityAttestation, FinalityKind, ProofSystem,
     RawConsensusEvidence, SecurityBacking, TimeUnit, TrustModel, VerificationPolicy,
 };
+use crate::crypto::facts::{CryptoObserver, NullObserver, ObservedScheme};
+use crate::crypto::scheme::SchemeId;
 use serde::{Deserialize, Serialize};
 
 /// `SYNC_COMMITTEE_SIZE` in the Altair preset: 2**9.
@@ -243,6 +246,53 @@ pub fn parse_update(payload: &[u8]) -> Result<SyncCommitteeUpdate, AdapterError>
     })
 }
 
+/// The sync committee the adapter is pinned to.
+///
+/// The aggregate public key used to be a field of the submitted payload:
+/// whoever could submit evidence generated their own BLS key and signed with
+/// it. The committee is now state the adapter HOLDS - the payload's copy is
+/// checked against the pin, never trusted.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PinnedCommittee {
+    /// The sync-committee period this pin serves.
+    pub period: u64,
+    /// The committee's aggregate public key (BLS12-381 G1, 96 bytes).
+    pub aggregate_pubkey: Vec<u8>,
+    /// The commitment to the NEXT committee's key: a rotation opens it.
+    pub next_committee_root: [u8; 32],
+}
+
+/// The commitment a rotation must open: the root of a
+/// committee is the domain-separated hash of its aggregate key. Both the
+/// pinned `next_committee_root` and [`EthereumSyncAdapter::rotate_committee`]
+/// speak this one function, so a rotation cannot name a key the pin did not
+/// commit to.
+#[must_use]
+pub fn committee_root(aggregate_pubkey: &[u8]) -> [u8; 32] {
+    crate::core::hash::hash_fields_bytes(&[b"BDLM_ETHSYNC_COMMITTEE_ROOT_V1", aggregate_pubkey])
+}
+
+/// The signing root, derived (evidence format v2).
+///
+/// The v1 adapter signed a constant held in `AdapterSpec` - the signature
+/// bound nothing about the update, so one signature replayed under any
+/// state_root. v2 signs the update's OWN fields: the finalized and attested
+/// slots, the period, the next committee root, the participation bits and
+/// the claimed state root all go under the signature.
+#[must_use]
+pub fn signing_root_v2(update: &SyncCommitteeUpdate) -> [u8; 32] {
+    crate::core::hash::hash_fields_bytes(&[
+        b"BDLM_ETHSYNC_SIGNING_ROOT_V2",
+        &update.finalized_root,
+        &update.finalized_slot.to_le_bytes(),
+        &update.attested_slot.to_le_bytes(),
+        &update.period.to_le_bytes(),
+        &update.next_committee_root,
+        &update.participation_bits,
+        &update.state_root,
+    ])
+}
+
 /// The adapter.
 pub struct EthereumSyncAdapter {
     descriptor: AdapterDescriptor,
@@ -251,10 +301,10 @@ pub struct EthereumSyncAdapter {
     /// attestations, because the signing root it holds belongs to the first.
     network: String,
     verifier: Option<Box<dyn BlsVerifier>>,
-    /// The signing root is supplied per call by the caller that owns the
-    /// beacon chain's fork version and genesis validators root. Stored here so
-    /// the adapter has one place that says "I need this and cannot derive it".
-    signing_root: [u8; 32],
+    /// The pinned sync committee. `None` is the closed
+    /// admission state (decision C, interim): the adapter refuses every
+    /// update until a committee is pinned.
+    committee: Option<PinnedCommittee>,
     golden: Option<RawConsensusEvidence>,
 }
 
@@ -267,7 +317,7 @@ impl EthereumSyncAdapter {
     #[must_use]
     pub fn new(
         network: &str,
-        signing_root: [u8; 32],
+        committee: Option<PinnedCommittee>,
         verifier: Option<Box<dyn BlsVerifier>>,
     ) -> Self {
         let id = AdapterId::from_name(&format!("ethereum-sync-{network}"));
@@ -276,8 +326,10 @@ impl EthereumSyncAdapter {
             descriptor: AdapterDescriptor {
                 id,
                 name: format!("ethereum-sync-{network}"),
-                adapter_version: 1,
-                accepted_evidence_versions: vec![1],
+                // Evidence format v2 - the signature
+                // covers the update itself, not a stored constant.
+                adapter_version: 2,
+                accepted_evidence_versions: vec![2],
                 consensus_kind: "gasper-pos".to_string(),
                 finality_kind: FinalityKind::ProtocolFinality,
                 // Two epochs of Casper FFG. Declared rather than derived from
@@ -290,9 +342,44 @@ impl EthereumSyncAdapter {
                 },
             },
             verifier,
-            signing_root,
+            committee,
             golden: None,
         }
+    }
+
+    /// Rotates the pinned committee.
+    ///
+    /// The new key must open the pin's `next_committee_root` under
+    /// [`committee_root`], and the new period must move forward. Anything
+    /// else is a rotation nobody committed to and is refused.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError::ConsensusRule`] when there is no pin to rotate from,
+    /// the period does not move forward, or the new key does not open the
+    /// committed root.
+    pub fn rotate_committee(&mut self, next: PinnedCommittee) -> Result<(), AdapterError> {
+        let Some(current) = self.committee.as_ref() else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "no pinned committee to rotate from".to_string(),
+            });
+        };
+        if next.period <= current.period {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "committee period must move forward: pinned {}, next {}",
+                    current.period, next.period
+                ),
+            });
+        }
+        if committee_root(&next.aggregate_pubkey) != current.next_committee_root {
+            return Err(AdapterError::ConsensusRule {
+                rule: "the next committee's key does not open the committed next_committee_root"
+                    .to_string(),
+            });
+        }
+        self.committee = Some(next);
+        Ok(())
     }
 
     /// Attaches a golden sample. Separate from `new` because a golden sample
@@ -314,6 +401,15 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
         &self,
         evidence: &RawConsensusEvidence,
         policy: &VerificationPolicy,
+    ) -> Result<FinalityAttestation, AdapterError> {
+        self.verify_observed(evidence, policy, &mut NullObserver)
+    }
+
+    fn verify_observed(
+        &self,
+        evidence: &RawConsensusEvidence,
+        policy: &VerificationPolicy,
+        observer: &mut dyn CryptoObserver,
     ) -> Result<FinalityAttestation, AdapterError> {
         if evidence.adapter != self.descriptor.id {
             return Err(AdapterError::WrongAdapter {
@@ -358,6 +454,18 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             }
         }
 
+        // The backing of this adapter is never slashable (Altair has no
+        // slashing rule for sync committee messages). A caller that demands
+        // slashable backing must be refused, not given an attestation that
+        // says `slashable: false` after the fact.
+        if policy.require_slashable {
+            return Err(AdapterError::ConsensusRule {
+                rule:
+                    "the policy requires slashable backing; a sync committee set is not slashable"
+                        .to_string(),
+            });
+        }
+
         // Finalized must not be ahead of attested: the attested header is the
         // one the committee signed, and a finalized header beyond it is a
         // claim about something nobody signed.
@@ -388,6 +496,28 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             });
         }
 
+        // The key the signature is checked against is
+        // the PINNED committee's, never the payload's own claim. No pin is
+        // the closed admission state (decision C, interim).
+        let Some(committee) = self.committee.as_ref() else {
+            return Err(AdapterError::ConsensusRule {
+                rule: "no sync committee pinned; EthereumSync admission is closed".to_string(),
+            });
+        };
+        if update.period != committee.period {
+            return Err(AdapterError::ConsensusRule {
+                rule: format!(
+                    "update period {} is not the pinned committee's period {}",
+                    update.period, committee.period
+                ),
+            });
+        }
+        if update.aggregate_pubkey != committee.aggregate_pubkey {
+            return Err(AdapterError::ConsensusRule {
+                rule: "the update's aggregate public key is not the pinned committee's".to_string(),
+            });
+        }
+
         // The pairing check. Refused when no verifier is installed - there is
         // no mode in which this adapter accepts an unchecked signature.
         let Some(verifier) = self.verifier.as_ref() else {
@@ -396,10 +526,13 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
                     .to_string(),
             });
         };
+        // The signed root is DERIVED from the update -
+        // the signature binds the claimed state root and cannot be replayed
+        // under another one.
         verifier
             .verify_aggregate(
-                &self.signing_root,
-                &update.aggregate_pubkey,
+                &signing_root_v2(&update),
+                &committee.aggregate_pubkey,
                 &update.signature,
                 signers,
             )
@@ -424,6 +557,10 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             }
         }
 
+        // Every check passed. The one scheme this adapter verified is the
+        // committee's BLS12-381 aggregate.
+        observer.observe(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
+
         Ok(FinalityAttestation {
             adapter: self.descriptor.id,
             domain: crate::cross_domain::external::spec::DomainKey::from_parts(
@@ -432,9 +569,15 @@ impl crate::cross_domain::external::spec::ExternalFinalityAdapter for EthereumSy
             ),
             height: update.finalized_slot,
             state_root: update.state_root,
+            // The signed header root IS the block hash
+            // this attestation covers.
+            attested_block_hash: Some(update.finalized_root),
+            attested_event_root: None,
+            attested_tx_root: None,
             finalized_at: epoch_of_slot(update.finalized_slot),
             time_unit: TimeUnit::Epoch,
             security: SecurityBacking::SignatureSet {
+                scheme: ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG),
                 signers,
                 required: minimum_signers(),
                 total_weight: u128::from(SYNC_COMMITTEE_SIZE),
@@ -592,3 +735,157 @@ impl BlsVerifier for RefuseAllBls {
 /// setup, which matters for a component whose whole job is removing trusted
 /// parties.
 pub const ZK_PROOF_SYSTEM: ProofSystem = ProofSystem::Stark;
+
+#[cfg(test)]
+mod slashable_policy_tests {
+    use super::*;
+    use crate::core::address::Address;
+    use crate::cross_domain::external::spec::ExternalFinalityAdapter;
+
+    fn test_committee() -> PinnedCommittee {
+        PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x11; 96],
+            next_committee_root: [0xbb; 32],
+        }
+    }
+
+    fn evidence(adapter: &EthereumSyncAdapter) -> RawConsensusEvidence {
+        let mut payload = vec![0u8; layout::LEN];
+        payload[layout::FINALIZED_SLOT].copy_from_slice(&64u64.to_le_bytes());
+        payload[layout::ATTESTED_SLOT].copy_from_slice(&128u64.to_le_bytes());
+        payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0x11; 96]);
+        payload[layout::SIGNATURE].copy_from_slice(&[0x22; 96]);
+        payload[layout::PARTICIPATION_BITS].copy_from_slice(&[0xff; 64]);
+        payload[layout::STATE_ROOT].copy_from_slice(&[0xcc; 32]);
+        RawConsensusEvidence {
+            adapter: adapter.descriptor().id,
+            evidence_version: 2,
+            network: "testnet".to_string(),
+            payload,
+            declared_height: 64,
+            declared_root: [0xcc; 32],
+            submitter: Address([1; 32]),
+        }
+    }
+
+    #[test]
+    fn a_policy_that_requires_slashable_backing_is_refused() {
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(AcceptAllBls)),
+        );
+        let ev = evidence(&adapter);
+        assert!(adapter
+            .verify(&ev, &VerificationPolicy::strict(1_000))
+            .is_ok());
+        let mut policy = VerificationPolicy::strict(1_000);
+        policy.require_slashable = true;
+        let err = adapter.verify(&ev, &policy).unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// The pin decides which key is trusted - a payload
+    /// naming its own key is refused.
+    #[test]
+    fn a_payload_key_that_is_not_the_pinned_committee_is_refused() {
+        let adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(AcceptAllBls)),
+        );
+        let mut ev = evidence(&adapter);
+        // The attacker's own aggregate key.
+        ev.payload[layout::AGGREGATE_PUBKEY].copy_from_slice(&[0xEE; 96]);
+        let err = adapter
+            .verify(&ev, &VerificationPolicy::strict(1_000))
+            .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "got: {err:?}"
+        );
+    }
+
+    /// Rotation opens the committed root,
+    /// and nothing else.
+    #[test]
+    fn rotation_must_open_the_committed_root() {
+        let mut adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(AcceptAllBls)),
+        );
+        // The wrong key: does not hash to [0xbb; 32].
+        let wrong = PinnedCommittee {
+            period: 1,
+            aggregate_pubkey: vec![0xEE; 96],
+            next_committee_root: [0; 32],
+        };
+        assert!(adapter.rotate_committee(wrong).is_err());
+        // Backward periods are refused even under the right root.
+        let backward = PinnedCommittee {
+            period: 0,
+            aggregate_pubkey: vec![0x33; 96],
+            next_committee_root: [0; 32],
+        };
+        assert!(adapter.rotate_committee(backward).is_err());
+        // The right rotation: the key whose committee_root is the pin's
+        // next_committee_root.
+        let next_key = vec![0x33; 96];
+        let mut adapter = EthereumSyncAdapter::new(
+            "testnet",
+            Some(PinnedCommittee {
+                period: 0,
+                aggregate_pubkey: vec![0x11; 96],
+                next_committee_root: committee_root(&next_key),
+            }),
+            Some(Box::new(AcceptAllBls)),
+        );
+        let good = PinnedCommittee {
+            period: 1,
+            aggregate_pubkey: next_key,
+            next_committee_root: [0; 32],
+        };
+        adapter.rotate_committee(good).expect("committed rotation");
+    }
+
+    /// The signature binds the claimed state root -
+    /// the same signature cannot be replayed under another root.
+    #[test]
+    fn the_v2_signing_root_binds_the_claimed_state_root() {
+        let a = evidence(&EthereumSyncAdapter::new(
+            "testnet",
+            Some(test_committee()),
+            Some(Box::new(AcceptAllBls)),
+        ));
+        let mut b = a.clone();
+        b.payload[layout::STATE_ROOT].copy_from_slice(&[0xAB; 32]);
+        b.declared_root = [0xAB; 32];
+        let update_a = parse_update(&a.payload).unwrap();
+        let update_b = parse_update(&b.payload).unwrap();
+        assert_ne!(
+            signing_root_v2(&update_a),
+            signing_root_v2(&update_b),
+            "a different state root must be a different signing root"
+        );
+    }
+
+    /// With no pinned committee the
+    /// adapter is closed - every update is refused.
+    #[test]
+    fn committee_less_admission_is_closed() {
+        let adapter = EthereumSyncAdapter::new("testnet", None, Some(Box::new(AcceptAllBls)));
+        let ev = evidence(&adapter);
+        let err = adapter
+            .verify(&ev, &VerificationPolicy::strict(1_000))
+            .unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ConsensusRule { .. }),
+            "got: {err:?}"
+        );
+    }
+}

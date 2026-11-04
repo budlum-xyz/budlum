@@ -14,9 +14,18 @@
 //!   "snapshot": <ValidatorSetSnapshot>,
 //!   "headers": [<BlockHeader>, ...],
 //!   "certificates": [<FinalityCert>, ...],   // BLS path, one per checkpoint
-//!   "qc_blobs": [<QcBlob>, ...]              // PQ path, alternative
+//!   "qc_blobs": [<QcBlob>, ...],             // PQ path, alternative
+//!   "global_headers": [                      // optional,
+//!     { "header": <GlobalBlockHeader>, "state_root_body": "<64 hex>" }, ...
+//!   ]
 //! }
 //! ```
+//!
+//! A global header opening extends the verified chain one step: trust
+//! anchor, finality certificate, block, global header. The header must have
+//! been built at the checkpoint's height, and the checkpoint's state root
+//! must reopen with `state_root_body` and the header hash. The opening is
+//! what `bud_getGlobalHeaderProof` returns as `header` and `stateRootBody`.
 //!
 //! A full node can export this from its own state; the transport that fills
 //! the same structures from `GetHeaders` / `GetQcBlob` wire messages is
@@ -29,8 +38,34 @@ use std::process::ExitCode;
 use budlum_core::chain::finality::{FinalityCert, ValidatorSetSnapshot};
 use budlum_core::consensus::qc::QcBlob;
 use budlum_core::core::block::BlockHeader;
-use budlum_core::light_client::{LightClient, LightClientError, TrustedCheckpoint};
+use budlum_core::crypto::scheme::SchemeStatusRegistry;
+use budlum_core::light_client::{
+    LightClient, LightClientError, TrustedCheckpoint, VerifiedCheckpoint,
+};
+use budlum_core::settlement::GlobalBlockHeader;
 use clap::Parser;
+
+/// The network the verifier is configured for.
+///
+/// A closed set on purpose: the chain the client verifies against is a
+/// command-line decision, never a value read from the file under verification.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum Network {
+    Mainnet,
+    Testnet,
+    Devnet,
+}
+
+impl Network {
+    fn chain_id(self) -> u64 {
+        let network = match self {
+            Self::Mainnet => budlum_core::core::chain_config::Network::Mainnet,
+            Self::Testnet => budlum_core::core::chain_config::Network::Testnet,
+            Self::Devnet => budlum_core::core::chain_config::Network::Devnet,
+        };
+        network.chain_id().value()
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -55,6 +90,17 @@ struct Cli {
     #[arg(long)]
     trusted_set_hash: String,
 
+    /// The network this export is claimed to be from: `mainnet`, `testnet`
+    /// or `devnet`.
+    ///
+    /// The network decides the security rule the client applies (mainnet
+    /// refuses a BLS-only checkpoint), so it comes from the operator and not
+    /// from the file being verified. An export whose headers name another chain
+    /// than this one is refused before anything is verified: otherwise the
+    /// exporter chooses the security level of the verifier.
+    #[arg(long, value_enum)]
+    network: Network,
+
     /// Finality checkpoint interval of the chain.
     #[arg(long, default_value_t = 10)]
     checkpoint_interval: u64,
@@ -62,6 +108,24 @@ struct Cli {
     /// The last header height to verify up to (default: the last header).
     #[arg(long)]
     target_height: Option<u64>,
+
+    /// Refuse a verified checkpoint that has no global header opening in the
+    /// export, instead of skipping the global header step for it.
+    #[arg(long)]
+    require_global_headers: bool,
+
+    /// The scheme and suite statuses the chain publishes, so the verifier
+    /// judges a checkpoint by the policy the network actually runs under
+    /// rather than by the policy of a fresh genesis.
+    ///
+    /// JSON, the shape `SchemeStatusRegistry::entries` prints:
+    /// `{ "schemes": [[id, status], ...], "suites": [[id, status], ...] }`.
+    /// Omitted means genesis statuses, which is the right answer only for a
+    /// chain that has never moved a scheme out of its genesis state; a client
+    /// tracking a live chain pins it, exactly as it pins the trust anchor,
+    /// because the export being verified never carries its own policy.
+    #[arg(long)]
+    scheme_registry: Option<PathBuf>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -72,12 +136,129 @@ struct ChainExport {
     certificates: Vec<FinalityCert>,
     #[serde(default)]
     qc_blobs: Vec<QcBlob>,
+    #[serde(default)]
+    global_headers: Vec<GlobalHeaderOpening>,
+}
+
+/// A global header and the state-root body that, with the header hash,
+/// reopens the checkpoint's state root.
+#[derive(Debug, serde::Deserialize)]
+struct GlobalHeaderOpening {
+    header: GlobalBlockHeader,
+    state_root_body: String,
+}
+
+/// Parse a 32-byte digest written as 64 hex characters, `0x` optional.
+fn decode_hash32(text: &str) -> Result<[u8; 32], String> {
+    let digits = text.strip_prefix("0x").unwrap_or(text);
+    let bytes = hex::decode(digits).map_err(|e| format!("{text} is not hex: {e}"))?;
+    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| format!("{text} is not a 32-byte digest"))
+}
+
+/// Run the global header step for one verified checkpoint. `Ok(None)` when
+/// the export carries no opening for it and none is required.
+fn verify_global_opening(
+    verified: &VerifiedCheckpoint,
+    openings: &[GlobalHeaderOpening],
+    required: bool,
+) -> Result<Option<String>, String> {
+    let Some(opening) = openings
+        .iter()
+        .find(|o| o.header.checkpoint_height == verified.height)
+    else {
+        if required {
+            return Err(format!(
+                "no global header opening for checkpoint height {}",
+                verified.height
+            ));
+        }
+        return Ok(None);
+    };
+    let body = decode_hash32(&opening.state_root_body)?;
+    LightClient::verify_global_header(verified, &body, &opening.header)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(hex::encode(opening.header.calculate_hash_bytes())))
+}
+
+/// The interval must be positive: with 0 no checkpoint is ever due, and the
+/// run would end as "trusted" without checking a single certificate.
+fn check_interval(interval: u64) -> Result<(), String> {
+    if interval == 0 {
+        return Err("--checkpoint-interval must be greater than 0".to_string());
+    }
+    Ok(())
+}
+
+/// A run that verified no checkpoint proved nothing. The target at or below
+/// the anchor, or a range with no multiple of the interval, ends here
+/// instead of printing a trusted height with exit code 0.
+fn ensure_checkpoints_verified(
+    count: usize,
+    trusted_height: u64,
+    target: u64,
+) -> Result<(), String> {
+    if count == 0 {
+        return Err(format!(
+            "no checkpoint above height {trusted_height} up to height {target} was verified"
+        ));
+    }
+    Ok(())
+}
+
+/// Largest chain export the tool reads.
+const MAX_CHAIN_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Read a file but refuse one longer than `max` bytes.
+fn read_bounded(path: &std::path::Path, max: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    file.take(max.saturating_add(1))
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.len() as u64 > max {
+        return Err(format!("file is larger than {max} bytes"));
+    }
+    Ok(buf)
+}
+
+/// The `JSON` shape of a pinned scheme-status registry.
+#[derive(Debug, serde::Deserialize)]
+struct SchemeRegistryFile {
+    schemes: Vec<(u16, u8)>,
+    suites: Vec<(u16, u8)>,
+}
+
+/// Parse a pinned registry file.
+///
+/// `SchemeStatusRegistry::from_entries` refuses anything that is not exactly
+/// the scheme and suite tables - a dropped row, an added one, or a status byte
+/// no status uses - so a typo here cannot silently downgrade the policy the
+/// client verifies under. An empty file is refused for the same reason
+/// `--checkpoint-interval 0` is: it would verify every checkpoint under no
+/// policy at all and look green.
+///
+/// # Errors
+///
+/// A message naming what the file is not.
+fn load_scheme_registry(json: &str) -> Result<SchemeStatusRegistry, String> {
+    let file: SchemeRegistryFile =
+        serde_json::from_str(json).map_err(|e| format!("scheme registry is not JSON: {e}"))?;
+    if file.schemes.is_empty() && file.suites.is_empty() {
+        return Err("scheme registry carries no statuses".to_string());
+    }
+    SchemeStatusRegistry::from_entries(&file.schemes, &file.suites)
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let raw = match fs::read(&cli.chain_file) {
+    if let Err(e) = check_interval(cli.checkpoint_interval) {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+
+    let raw = match read_bounded(&cli.chain_file, MAX_CHAIN_FILE_BYTES) {
         Ok(raw) => raw,
         Err(e) => {
             eprintln!("cannot read {}: {e}", cli.chain_file.display());
@@ -105,13 +286,51 @@ fn main() -> ExitCode {
         block_hash: cli.trusted_hash,
         set_hash: cli.trusted_set_hash,
     };
-    let mut client = match LightClient::new(trusted) {
+    // The network comes from the command line, and the export has to agree with
+    // it. Reading it out of `headers[0]` would let an exporter that wants the
+    // testnet rule claim the testnet chain id while shipping mainnet history -
+    // and the trust anchors on the command line cannot catch that, because they
+    // say nothing about which chain produced them.
+    let chain_id = cli.network.chain_id();
+    let declared = export.headers[0].chain_id;
+    if declared != chain_id {
+        eprintln!(
+            "chain export is for chain {declared}, not for the {network:?} chain {chain_id} \
+             this client is verifying against; pass --network to match the export",
+            network = cli.network
+        );
+        return ExitCode::FAILURE;
+    }
+    let mut client = match LightClient::for_chain(trusted, chain_id) {
         Ok(client) => client,
         Err(e) => {
             eprintln!("invalid trust anchor: {e}");
             return ExitCode::FAILURE;
         }
     };
+    // The pinned policy is installed before a single checkpoint is judged: a
+    // family the chain disabled must not verify here merely because a fresh
+    // genesis would have allowed it.
+    if let Some(path) = &cli.scheme_registry {
+        let raw = match read_bounded(path, MAX_CHAIN_FILE_BYTES) {
+            Ok(raw) => raw,
+            Err(e) => {
+                eprintln!("cannot read {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        let registry = match std::str::from_utf8(&raw)
+            .map_err(|e| format!("scheme registry is not UTF-8: {e}"))
+            .and_then(load_scheme_registry)
+        {
+            Ok(registry) => registry,
+            Err(e) => {
+                eprintln!("cannot use {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        client = client.with_scheme_registry(registry);
+    }
 
     if let Err(e) = client.verify_header_chain(&export.headers) {
         eprintln!("header chain rejected: {e}");
@@ -124,6 +343,7 @@ fn main() -> ExitCode {
 
     // The anchor itself is not re-verified; everything strictly above it must
     // carry a verified finality certificate.
+    let mut verified_count = 0usize;
     let mut next = client.next_checkpoint_height(cli.checkpoint_interval, target);
     while let Some(checkpoint_height) = next {
         let Some(header) = export.headers.iter().find(|h| h.index == checkpoint_height) else {
@@ -131,18 +351,21 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         };
 
-        // Prefer the BLS certificate when present, else the PQ blob.
-        let verified = if let Some(cert) = export
+        // Both halves when the export has both, else whichever it
+        // has; a mainnet client refuses the BLS half alone.
+        let cert = export
             .certificates
             .iter()
-            .find(|c| c.checkpoint_height == header.index && c.checkpoint_hash == header.hash)
-        {
-            client.verify_checkpoint(header, cert, &export.snapshot)
-        } else if let Some(blob) = export
+            .find(|c| c.checkpoint_height == header.index && c.checkpoint_hash == header.hash);
+        let blob = export
             .qc_blobs
             .iter()
-            .find(|b| b.checkpoint_height == header.index && b.checkpoint_hash == header.hash)
-        {
+            .find(|b| b.checkpoint_height == header.index && b.checkpoint_hash == header.hash);
+        let verified = if let (Some(cert), Some(blob)) = (cert, blob) {
+            client.verify_hybrid_checkpoint(header, cert, blob, &export.snapshot)
+        } else if let Some(cert) = cert {
+            client.verify_checkpoint(header, cert, &export.snapshot)
+        } else if let Some(blob) = blob {
             client.verify_pq_checkpoint(header, blob, &export.snapshot)
         } else {
             Err(LightClientError::CertificateBinding(format!(
@@ -152,7 +375,7 @@ fn main() -> ExitCode {
 
         match verified {
             Ok(verified) => {
-                // The anchorable external root (AR-GE-6 / F-12): the
+                // The anchorable external root (AR-GE-6 /): the
                 // full-node consensus path anchors exactly this root via
                 // `AccountState::anchor_external_root` once the matching
                 // domain commitment finalizes, and the executor's relayer
@@ -167,10 +390,26 @@ fn main() -> ExitCode {
                     "CHECKPOINT VERIFIED height={} hash={} epoch={} external_root={}",
                     verified.height, verified.block_hash, verified.epoch, external_root
                 );
+                match verify_global_opening(
+                    &verified,
+                    &export.global_headers,
+                    cli.require_global_headers,
+                ) {
+                    Ok(Some(header_hash)) => println!(
+                        "GLOBAL HEADER VERIFIED height={} hash={header_hash}",
+                        verified.height
+                    ),
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("global header at checkpoint {checkpoint_height} rejected: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
                 if let Err(e) = client.advance(&verified) {
                     eprintln!("cannot advance trust anchor: {e}");
                     return ExitCode::FAILURE;
                 }
+                verified_count += 1;
             }
             Err(e) => {
                 eprintln!("checkpoint {checkpoint_height} rejected: {e}");
@@ -181,10 +420,87 @@ fn main() -> ExitCode {
         next = client.next_checkpoint_height(cli.checkpoint_interval, target);
     }
 
+    if let Err(e) = ensure_checkpoints_verified(verified_count, cli.trusted_height, target) {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+
     let trusted = client.trusted();
     println!(
         "LIGHT CLIENT TRUSTED height={} hash={} set={}",
         trusted.height, trusted.block_hash, trusted.set_hash
     );
+    println!("TRUST MODE {}", client.trust_mode().describe());
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        check_interval, decode_hash32, ensure_checkpoints_verified, load_scheme_registry,
+        read_bounded,
+    };
+
+    #[test]
+    fn a_state_root_body_must_be_a_32_byte_digest() {
+        let digest = "ab".repeat(32);
+        assert_eq!(decode_hash32(&digest), Ok([0xab; 32]));
+        assert_eq!(decode_hash32(&format!("0x{digest}")), Ok([0xab; 32]));
+        assert!(decode_hash32("abcd").is_err());
+        assert!(decode_hash32(&"zz".repeat(32)).is_err());
+    }
+
+    /// A run that verifies nothing must not end as trusted.
+    #[test]
+    fn an_unverified_run_is_refused() {
+        assert!(check_interval(0).is_err());
+        assert!(check_interval(10).is_ok());
+        assert!(ensure_checkpoints_verified(0, 5, 5).is_err());
+        assert!(ensure_checkpoints_verified(0, 5, 9).is_err());
+        assert!(ensure_checkpoints_verified(1, 5, 20).is_ok());
+    }
+
+    /// A pinned registry is the chain's policy, so a file that does not name
+    /// exactly the scheme and suite tables is refused instead of repaired.
+    #[test]
+    fn a_pinned_registry_must_be_the_whole_table() {
+        let genesis = budlum_core::crypto::scheme::SchemeStatusRegistry::genesis();
+        let (schemes, suites) = genesis.entries();
+        let as_json = |schemes: &[(u16, u8)], suites: &[(u16, u8)]| {
+            serde_json::json!({ "schemes": schemes, "suites": suites }).to_string()
+        };
+        let json = as_json(&schemes, &suites);
+        assert_eq!(
+            load_scheme_registry(&json).expect("the genesis table round-trips"),
+            genesis
+        );
+
+        let mut short = schemes.clone();
+        short.pop();
+        let json = as_json(&short, &suites);
+        assert!(
+            load_scheme_registry(&json).is_err(),
+            "a table missing a row is refused, not accepted as the policy"
+        );
+
+        let mut bad = schemes.clone();
+        bad[0] = (bad[0].0, 0xfe);
+        let json = as_json(&bad, &suites);
+        assert!(
+            load_scheme_registry(&json).is_err(),
+            "a status byte no status uses is refused"
+        );
+
+        assert!(load_scheme_registry("{\"schemes\":[],\"suites\":[]}").is_err());
+        assert!(load_scheme_registry("not json").is_err());
+    }
+
+    #[test]
+    fn an_oversized_file_is_refused() {
+        let path = std::env::temp_dir().join(format!("budlum_light_bound_{}", std::process::id()));
+        std::fs::write(&path, [0u8; 16]).unwrap();
+        assert!(read_bounded(&path, 16).is_ok());
+        assert!(read_bounded(&path, 15).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
 }

@@ -24,6 +24,15 @@ pub const GENESIS_TIMESTAMP: u128 = 0;
 /// and `Blockchain::new_with_genesis` refuses to start a binary built for any
 /// other scheme. Custom chains (`GenesisConfig::new`) still record the scheme
 /// of the build that created them.
+/// Minimum per-header difficulty (leading zero bits) of a mainnet
+/// bridge-enabled PoW domain. 2^64 hashes per header is out of reach
+/// for a self-mined forgery; the cumulative minimum scales with the
+/// confirmation depth.
+///
+/// Convenience: pub so the bridge finality side can read the same
+/// mainnet floor the genesis parameters in this file are built with.
+pub const MAINNET_BRIDGE_POW_MIN_DIFFICULTY_BITS: u32 = 64;
+
 const LAUNCHED_PQ_SCHEME: &str = "ml-dsa-65";
 
 /// The domain configuration bootstrapped at genesis.
@@ -115,6 +124,42 @@ pub struct GenesisConsensusKeys {
     pub registration: crate::core::transaction::ConsensusKeyRegistration,
 }
 
+/// The validation reward pool as a genesis parameter, written
+/// `"reward_pool": { "enabled": true }` in a ceremony file.
+///
+/// The flag decides two things at once, and they have to agree: whether
+/// genesis moves the pool out of the ecosystem share into the keyless pool
+/// account, and whether the epoch transition of the chain pays from it. A
+/// chain that funds a pool it never pays from strands 10M BUD; a chain that
+/// pays from a pool it never funded would have to mint, which no chain does.
+///
+/// `None` on `GenesisConfig` means "follow the network profile"
+/// ([`crate::core::chain_config::Network::reward_pool`]): testnet on, mainnet
+/// and devnet off. Writing the flag explicitly is what makes the choice a
+/// recorded genesis parameter rather than a property of the binary that
+/// happened to build the chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+pub struct GenesisRewardPool {
+    /// Whether this chain pays validation rewards from a pre-funded pool.
+    pub enabled: bool,
+}
+
+impl GenesisRewardPool {
+    /// The flag, on.
+    #[must_use]
+    pub const fn enabled() -> Self {
+        Self { enabled: true }
+    }
+
+    /// The flag, off.
+    #[must_use]
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+    pub const fn disabled() -> Self {
+        Self { enabled: false }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenesisConfig {
     pub chain_id: u64,
@@ -149,6 +194,19 @@ pub struct GenesisConfig {
     #[serde(default)]
     pub tokenomics_addresses: Option<crate::tokenomics::TokenomicsAddresses>,
 
+    /// Address-only PoA authorities.
+    ///
+    /// A PoA authority signs with an ordinary Ed25519 key and has no VRF, BLS
+    /// or PQ registration, so a plain entry in `validators` lands inactive and
+    /// `validate_candidate_chain` replays against an empty authority set and
+    /// fails with "No active PoA authorities". Listing the addresses here
+    /// seeds them as active stake-1 authorities in `build_state`, so the
+    /// genesis state the candidate replay starts from holds the same set the
+    /// live node was started with. Ignored on chains that require consensus
+    /// keys; ceremony files for PoS chains must keep this empty.
+    #[serde(default)]
+    pub poa_authorities: Vec<Address>,
+
     /// Post-quantum signature scheme this chain was launched with.
     ///
     /// The PQ backend is a compile-time feature, but the public key it emits is
@@ -171,6 +229,27 @@ pub struct GenesisConfig {
     /// empty, for devnet and testnet backward compatibility.
     #[serde(default)]
     pub bootstrap_domains: Vec<BootstrapDomainConfig>,
+
+    /// The PQ anchor key ledger of the ceremony: three
+    /// ML-DSA-87 anchor keys across at least two HSM vendors and the Root Seal
+    /// keys. A signature names a key by its slot here and carries no public
+    /// key. Absent until the anchor key ceremony; a mainnet or testnet node
+    /// cannot enter anchor production mode without it, and devnet derives its
+    /// own public development ledger (`AnchorEmission::devnet`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_ledger: Option<crate::settlement::AnchorKeyLedger>,
+
+    /// The validation reward pool flag of this chain (testnet item 8).
+    ///
+    /// `None` follows the network profile, which is what every ceremony file
+    /// written before the flag existed means: testnet funds and pays the
+    /// default schedule, mainnet and devnet do not. `Some` pins the answer in
+    /// genesis, so a chain can refuse a pool its profile would otherwise
+    /// provide - and, once mainnet's schedule is decided, take one it
+    /// would not. The pool is never minted: it moves out of the ecosystem
+    /// share at genesis and the epoch transition pays only its balance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reward_pool: Option<GenesisRewardPool>,
 }
 
 impl Default for GenesisConfig {
@@ -188,6 +267,9 @@ impl Default for GenesisConfig {
             tokenomics_addresses: None,
             pq_scheme: Some(crate::crypto::primitives::PQ_SCHEME_ID.to_string()),
             bootstrap_domains: vec![],
+            poa_authorities: Vec::new(),
+            anchor_ledger: None,
+            reward_pool: None,
         }
     }
 }
@@ -270,11 +352,35 @@ impl GenesisConfig {
                 );
                 domain.bridge_enabled = cfg.bridge_enabled;
 
+                // The default PoW floor (8 bits, about 1.5k hashes
+                // for six headers) lets anyone mine a "finalized" header
+                // chain for a bridge-enabled domain. On mainnet the floor is
+                // raised to a work level that is not self-mineable.
+                if domain.bridge_enabled && self.chain_id == Network::Mainnet.chain_id().value() {
+                    if let Some(params) = domain.pow_parameters.as_mut() {
+                        params.min_difficulty_bits = MAINNET_BRIDGE_POW_MIN_DIFFICULTY_BITS;
+                        params.min_cumulative_work = u128::from(cfg.min_confirmations.max(1))
+                            .saturating_mul(1u128 << MAINNET_BRIDGE_POW_MIN_DIFFICULTY_BITS);
+                    }
+                }
+
+                let poa_authorities: Vec<String> =
+                    if matches!(domain.kind, crate::domain::ConsensusKind::PoA)
+                        && cfg.poa_authorities.is_empty()
+                        && !self.poa_authorities.is_empty()
+                    {
+                        self.poa_authorities
+                            .iter()
+                            .map(|address| address.to_hex())
+                            .collect()
+                    } else {
+                        cfg.poa_authorities.clone()
+                    };
                 if matches!(domain.kind, crate::domain::ConsensusKind::PoA)
-                    && !cfg.poa_authorities.is_empty()
+                    && !poa_authorities.is_empty()
                 {
-                    let mut entries = Vec::with_capacity(cfg.poa_authorities.len());
-                    for authority in &cfg.poa_authorities {
+                    let mut entries = Vec::with_capacity(poa_authorities.len());
+                    for authority in &poa_authorities {
                         let address = Address::from_hex(authority).map_err(|e| {
                             format!(
                                 "Invalid PoA authority '{}' in bootstrap domain {}: {}",
@@ -328,6 +434,51 @@ impl GenesisConfig {
         Ok(())
     }
 
+    /// Everything `build_state` credits to balances at genesis - the plain
+    /// allocations and the tokenomics distribution - stays within the fixed
+    /// supply. Validator stake is a bond, not a balance credit.
+    ///
+    /// Each part was checked alone, so a ceremony could pass every check and
+    /// still seed more than `BUD_TOTAL_SUPPLY`.
+    ///
+    /// # Errors
+    ///
+    /// Names the total that would be minted and the supply it exceeds.
+    ///
+    /// Convenience: pub so ceremony tooling can run the whole-issuance
+    /// check on its own; in-tree `validate_consensus_ceremony` calls it.
+    pub fn validate_total_issuance(&self) -> Result<(), String> {
+        let allocations: u128 = self.allocations.iter().map(|(_, a)| u128::from(*a)).sum();
+        let distribution = self
+            .bud_tokenomics
+            .as_ref()
+            .map_or(0, |params| u128::from(params.total()));
+        // Genesis validator stake is supply too. With a tokenomics
+        // distribution it is drawn from the ecosystem share (`build_state`),
+        // which therefore has to cover it; without one it adds to the total.
+        let stake = u128::from(self.genesis_stake_total());
+        let total = match &self.bud_tokenomics {
+            Some(params) => {
+                let pool = u128::from(self.genesis_reward_pool());
+                if stake + pool > u128::from(params.ecosystem) {
+                    return Err(format!(
+                        "Genesis validator stake {stake} and reward pool {pool} exceed the ecosystem share {} they are drawn from",
+                        params.ecosystem
+                    ));
+                }
+                allocations + distribution
+            }
+            None => allocations + distribution + stake,
+        };
+        if total > u128::from(crate::tokenomics::BUD_TOTAL_SUPPLY) {
+            return Err(format!(
+                "Genesis mints {total} base units, above the fixed supply of {}",
+                crate::tokenomics::BUD_TOTAL_SUPPLY
+            ));
+        }
+        Ok(())
+    }
+
     /// The `bud_tokenomics` distribution, if present, sums to the fixed
     /// supply, and its team vesting is at least as long as its cliff.
     ///
@@ -369,12 +520,99 @@ impl GenesisConfig {
             if params.epochs_per_year == 0 {
                 return Err("Genesis bud_tokenomics epochs_per_year must be non-zero".into());
             }
+            // A burn ratio above 100% burns more than the fee or the reserve.
+            // The executor then refuses every block that carries a fee.
+            let scale = crate::core::chain_config::FIXED_POINT_SCALE;
+            if params.tx_fee_burn_ratio_fixed > scale {
+                return Err(format!(
+                    "Genesis bud_tokenomics tx_fee_burn_ratio_fixed {} is above the scale {scale}",
+                    params.tx_fee_burn_ratio_fixed
+                ));
+            }
+            if params.annual_burn_ratio_fixed > scale {
+                return Err(format!(
+                    "Genesis bud_tokenomics annual_burn_ratio_fixed {} is above the scale {scale}",
+                    params.annual_burn_ratio_fixed
+                ));
+            }
+            // The third ratio too. A yield above 100%
+            // per year can never be paid from the schedule and was not
+            // checked here at all.
+            if params.validator_annual_yield_ratio_fixed > scale {
+                return Err(format!(
+                    "Genesis bud_tokenomics validator_annual_yield_ratio_fixed {} is above the scale {scale}",
+                    params.validator_annual_yield_ratio_fixed
+                ));
+            }
         }
         Ok(())
     }
 
+    /// Whether this chain pays validation rewards from a pre-funded pool
+    /// (testnet item 8).
+    ///
+    /// The genesis flag when the ceremony file states one, otherwise the
+    /// network profile. This is the single answer genesis uses for both the
+    /// pool funding and the epoch-transition gate, so the two can never
+    /// disagree.
+    #[must_use]
+    pub fn reward_pool_enabled(&self) -> bool {
+        match self.reward_pool {
+            Some(flag) => flag.enabled,
+            None => crate::core::chain_config::reward_pool_for_chain_id(self.chain_id).is_some(),
+        }
+    }
+
+    /// The reward pool flag is consistent with the chain it is written into.
+    ///
+    /// A mainnet genesis may not turn the pool on: there is no mainnet
+    /// schedule yet ( is Ayaz's), and a flag with no schedule would fund
+    /// nothing while telling operators the pool is live. Refusing names the
+    /// owner instead of failing later as an empty epoch payout.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+    pub fn validate_reward_pool_flag(&self) -> Result<(), String> {
+        let Some(flag) = self.reward_pool else {
+            return Ok(());
+        };
+        if !flag.enabled {
+            return Ok(());
+        }
+        let expected = crate::core::chain_config::reward_pool_for_chain_id(self.chain_id);
+        if expected.is_none() {
+            let network = crate::core::chain_config::Network::from_chain_id(self.chain_id);
+            return Err(format!(
+                "Genesis reward_pool.enabled is true on {:?} (chain {}), which has no reward-pool schedule in \
+                 the binary; a mainnet schedule is Ayaz's decision (D-04)",
+                network, self.chain_id
+            ));
+        }
+        Ok(())
+    }
+
+    /// The anchor key ledger, when genesis carries one, is well formed and is
+    /// the ledger of this chain. Absence is allowed here: the ledger
+    /// arrives with the anchor key ceremony, and production anchoring refuses
+    /// to start without it.
+    /// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+    pub fn validate_anchor_ledger(&self) -> Result<(), String> {
+        let Some(ledger) = &self.anchor_ledger else {
+            return Ok(());
+        };
+        if ledger.chain_id != self.chain_id {
+            return Err(format!(
+                "Genesis anchor ledger is for chain {}, this genesis is chain {}",
+                ledger.chain_id, self.chain_id
+            ));
+        }
+        ledger
+            .validate()
+            .map_err(|e| format!("Genesis anchor ledger refused: {e}"))
+    }
+
     pub fn validate_consensus_ceremony(&self, network: Network) -> Result<(), String> {
         self.validate_pq_scheme()?;
+        self.validate_anchor_ledger()?;
+        self.validate_reward_pool_flag()?;
         if self.chain_id != network.chain_id().value() {
             return Err(format!(
                 "Genesis chain ID {} does not match {} profile chain ID {}",
@@ -392,6 +630,7 @@ impl GenesisConfig {
             }
         }
         self.validate_tokenomics_supply()?;
+        self.validate_total_issuance()?;
         let validator_set = self
             .validators
             .iter()
@@ -452,14 +691,17 @@ impl GenesisConfig {
             }
             self.validate_mainnet_poa_authorities()?;
             self.validate_mainnet_pow_parameters()?;
+        }
+        // The testnet is the mainnet rehearsal: the same validator ceremony.
+        if matches!(network, Network::Mainnet | Network::Testnet) {
             if self.validators.len() < 4 {
-                return Err(
-                    "Mainnet genesis requires at least four ceremony validators (3f+1)".into(),
-                );
+                return Err(format!(
+                    "{network} genesis requires at least four ceremony validators (3f+1)"
+                ));
             }
             if registered.len() != self.validators.len() {
                 return Err(format!(
-                    "Mainnet genesis has {} validators but only {} complete consensus-key records",
+                    "{network} genesis has {} validators but only {} complete consensus-key records",
                     self.validators.len(),
                     registered.len()
                 ));
@@ -526,6 +768,16 @@ impl GenesisConfig {
                     ));
                 }
             }
+            if !self.poa_authorities.is_empty() {
+                let declared: std::collections::BTreeSet<Address> =
+                    self.poa_authorities.iter().copied().collect();
+                if declared != unique {
+                    return Err(format!(
+                        "Mainnet PoA domain {} authorities disagree with top-level poa_authorities",
+                        domain.id
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -550,6 +802,7 @@ impl GenesisConfig {
             producer_public_key: Vec::new(),
             chain_id: self.chain_id,
             slashing_evidence: None,
+            slashing_reports: None,
             state_root: genesis_state.calculate_state_root(),
             tx_root: "0".repeat(64),
             epoch: 0,
@@ -559,6 +812,7 @@ impl GenesisConfig {
             validator_set_hash,
             storage_root: None,
             shards_root: None,
+            witness_root: None,
         };
 
         block.tx_root = block.calculate_tx_root();
@@ -568,6 +822,15 @@ impl GenesisConfig {
 
     pub fn build_state(&self) -> AccountState {
         let mut state = AccountState::new();
+        // TESTNET-DEFAULT: fee rates belong to genesis state, not
+        // a node-local config overlay, so every testnet replay commits the same
+        // economic profile. Mainnet and development chains keep their explicit
+        // zero-rate defaults until their own genesis decisions land.
+        if self.chain_id == Network::Testnet.chain_id().value() {
+            state
+                .registry
+                .set_params(crate::registry::RegistryParams::testnet_defaults());
+        }
         state.base_fee = self.base_fee;
         // `block_reward` now lives under `state.tokenomics` (tokenomics
         // Refactor). The top-level `state.block_reward` field was removed.
@@ -606,6 +869,69 @@ impl GenesisConfig {
             }
         }
 
+        // Seed the PoA onboarding trust root from the
+        // ceremony-declared bootstrap PoA domain authorities when top-level
+        // `poa_authorities` is empty, keeping `poa_authorities` as an explicit
+        // override for custom chains that declare no bootstrap PoA domain.
+        let declared: Vec<Address> = if self.poa_authorities.is_empty() {
+            self.bootstrap_domains
+                .iter()
+                .find(|domain| domain.kind == "poa")
+                .map(|domain| {
+                    domain
+                        .poa_authorities
+                        .iter()
+                        .filter_map(|authority| Address::from_hex(authority).ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            self.poa_authorities.clone()
+        };
+        // Address-only PoA authorities: active stake-1 entries with
+        // no consensus keys. Bootstrap-domain authorities must enter the same
+        // consensus state as top-level authorities; otherwise a restart has
+        // an authority hash but no producer set to replay against.
+        for authority in &declared {
+            state.ensure_validator(*authority, 1);
+            if let Some(entry) = state.get_validator_mut(authority) {
+                entry.active = true;
+                entry.slashed = false;
+            }
+        }
+        if let Some((admin, rest)) = declared.split_first() {
+            // A bootstrap domain owns its own admission namespace. Domain 0 is
+            // retained only for custom genesis configurations without a PoA
+            // bootstrap record.
+            let poa_domain = self
+                .bootstrap_domains
+                .iter()
+                .find(|domain| domain.kind == "poa")
+                .map_or(0, |domain| domain.id);
+            const GENESIS_KYC_COMMITMENT: [u8; 32] = [0x01; 32];
+            state.poa_onboarding.add_admin(poa_domain, *admin);
+            for authority in std::iter::once(admin).chain(rest.iter()) {
+                // Both steps cannot refuse on a fresh registry (a distinct
+                // address, a non-zero commitment, a horizon at the ceiling);
+                // a refusal here would leave the authority un-admitted and
+                // the chain would fail closed at its first block.
+                let _ = state.poa_onboarding.submit_application(
+                    poa_domain,
+                    *authority,
+                    GENESIS_KYC_COMMITMENT,
+                    0,
+                );
+                let _ = state.poa_onboarding.approve(
+                    poa_domain,
+                    *admin,
+                    *authority,
+                    0,
+                    crate::registry::poa_onboarding::MAX_KYC_VALIDITY_HORIZON,
+                );
+            }
+            state.refresh_poa_admissions(0);
+        }
+
         // $BUD tokenomics: seed the distribution accounts and configure
         // The on-chain burn-reserve address + team vesting so the timed burn and
         // Vesting enforcement operate on the real chain state.
@@ -624,12 +950,64 @@ impl GenesisConfig {
                     for (address, amount) in allocations {
                         state.add_balance(&address, amount);
                     }
+                    // The genesis validators' stake comes out of the
+                    // ecosystem share, so the genesis holds exactly the
+                    // fixed supply (`validate_total_issuance` checks the
+                    // share covers it).
+                    let stake = self.genesis_stake_total();
+                    if stake > 0 {
+                        let ecosystem = state.get_or_create(&addrs.ecosystem);
+                        ecosystem.balance = ecosystem.balance.saturating_sub(stake);
+                        state.mark_dirty(&addrs.ecosystem);
+                    }
+                    // The validation reward pool also comes out of the
+                    // ecosystem share, into the keyless pool account the
+                    // epoch transition pays from.
+                    let pool = self.genesis_reward_pool();
+                    if pool > 0 {
+                        let ecosystem = state.get_or_create(&addrs.ecosystem);
+                        ecosystem.balance = ecosystem.balance.saturating_sub(pool);
+                        state.mark_dirty(&addrs.ecosystem);
+                        state.add_balance(
+                            &crate::tokenomics::reward_pool::reward_pool_account(),
+                            pool,
+                        );
+                    }
                     state.burn_reserve_address = Some(addrs.burn_reserve);
                     state.team_vesting = Some((addrs.team, params.team_vesting(0)));
                 }
             }
         }
 
+        // The bootstrap consensus domains are genesis state, written into
+        // the settlement registry here and nowhere else (
+        //): every node that builds this genesis holds the same domains,
+        // and a restart replays them instead of rewriting their status. A PoA
+        // domain with a ceremony authority set is ready at genesis; a PoA
+        // domain without one starts frozen and opens only through governance,
+        // in block. A configuration the bootstrap builder refuses is refused
+        // at chain construction, before this state is used.
+        if let Ok(domains) = self.bootstrap_consensus_domains() {
+            for domain in domains {
+                let id = domain.id;
+                let poa = matches!(domain.kind, crate::domain::ConsensusKind::PoA);
+                let poa_ready = poa && !declared.is_empty();
+                if crate::settlement::domains::register_domain(&mut state, domain).is_ok()
+                    && poa
+                    && !poa_ready
+                {
+                    let _ = state
+                        .settlement
+                        .domains
+                        .transition_status_checked(id, crate::domain::DomainStatus::Frozen);
+                }
+            }
+        }
+
+        // testnet item 8: the same answer genesis funded the pool with is the
+        // one the epoch transition reads, recorded in consensus state so a
+        // replay, a snapshot restore and a peer all gate identically.
+        state.reward_pool_enabled = self.reward_pool_enabled();
         state
     }
 
@@ -648,8 +1026,37 @@ impl GenesisConfig {
         Some(crate::tokenomics::TokenomicsAddresses::reserved())
     }
 
+    /// The stake every genesis validator is bonded with.
+    ///
+    /// At least one whole BUD, the smallest bond `bud validator join` can
+    /// express (`--stake-bud 1`). A seat bonded at the bare floor and a
+    /// joiner bonded at one BUD are not peers: on the devnet the four seats
+    /// held 1 000 atoms each against a joiner's 1 000 000, so once the joiner
+    /// was eligible it owned 99.6% of the slot lottery, and the four founders
+    /// (threshold 0.1% each) stopped producing. A seat is sized in the same
+    /// unit the join path uses.
     fn validator_stake(&self) -> u64 {
-        Network::from_chain_id(self.chain_id).map_or(1, |network| network.min_stake())
+        Network::from_chain_id(self.chain_id).map_or(1, |network| {
+            network.min_stake().max(crate::tokenomics::bud(1))
+        })
+    }
+
+    /// The validation reward pool the profile funds at genesis; 0 without one
+    /// or with an invalid schedule.
+    fn genesis_reward_pool(&self) -> u64 {
+        if !self.reward_pool_enabled() {
+            return 0;
+        }
+        crate::core::chain_config::reward_pool_for_chain_id(self.chain_id)
+            .filter(|schedule| schedule.validate().is_ok())
+            .map_or(0, |schedule| schedule.validation_reward_pool)
+    }
+
+    /// The stake every genesis validator is bonded with, summed.
+    fn genesis_stake_total(&self) -> u64 {
+        u64::try_from(self.validators.len())
+            .unwrap_or(u64::MAX)
+            .saturating_mul(self.validator_stake())
     }
 }
 
@@ -679,11 +1086,19 @@ fn address(byte: u8) -> Address {
 /// - Validator APY: 5%
 /// - Metabolic burn: 1% of tx fees
 pub fn mainnet_genesis() -> GenesisConfig {
+    let tokenomics = mainnet_tokenomics();
+    mainnet_genesis_with(tokenomics)
+}
+
+/// The mainnet economic parameters: the 100M fixed-supply distribution, the
+/// burns, the team schedule and the reward settings on the mainnet calendar.
+/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+pub fn mainnet_tokenomics() -> crate::tokenomics::TokenomicsParams {
     use crate::core::chain_config::FIXED_POINT_SCALE;
     use crate::tokenomics::bud;
 
     // Full tokenomics params - 100M fixed supply
-    let tokenomics = crate::tokenomics::TokenomicsParams {
+    crate::tokenomics::TokenomicsParams {
         community: bud(10_000_000),    // 10M - community/dev
         liquidity: bud(10_000_000),    // 10M - liquidity provisioning
         ecosystem: bud(20_000_000),    // 20M - ecosystem growth
@@ -710,8 +1125,10 @@ pub fn mainnet_genesis() -> GenesisConfig {
         // 600 s, so `epochs_per_year` (52 560) is a calendar year.
         slot_duration_secs: 6,
         epoch_length_slots: 100,
-    };
+    }
+}
 
+fn mainnet_genesis_with(tokenomics: crate::tokenomics::TokenomicsParams) -> GenesisConfig {
     GenesisConfig {
         chain_id: Network::Mainnet.chain_id().value(),
 
@@ -740,27 +1157,66 @@ pub fn mainnet_genesis() -> GenesisConfig {
         // real addresses).
         pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: BootstrapDomainConfig::mainnet_defaults(),
+        poa_authorities: Vec::new(),
+        anchor_ledger: None,
+        // mainnet: no pool until Ayaz fixes the schedule. The flag is
+        // written rather than left to default so the ceremony file states the
+        // decision, and a mainnet genesis asking for the pool is refused by
+        // `validate_reward_pool_flag` instead of quietly minting nothing.
+        reward_pool: Some(GenesisRewardPool::disabled()),
     }
 }
 
+/// The testnet ceremony template.
+///
+/// The testnet is the mainnet rehearsal: the same 100M distribution, the
+/// same validator ceremony (at least four validators with complete consensus
+/// keys, `validate_consensus_ceremony`), on the testnet calendar (3 s slots,
+/// 50-slot epochs). The template holds no validator and no destination: the
+/// ceremony (`cargo run --manifest-path xtask/tools/Cargo.toml --
+/// testnet-genesis`) fills both from the operators' public records and
+/// writes the launch file. A node refuses the template itself, which has no
+/// validators.
 pub fn testnet_genesis() -> GenesisConfig {
+    let tokenomics = testnet_tokenomics();
     GenesisConfig {
         chain_id: Network::Testnet.chain_id().value(),
-        allocations: vec![
-            (address(0x30), 1_000_000_000),
-            (address(0x31), 1_000_000_000),
-        ],
-        validators: vec![address(0x40), address(0x41), address(0x42)],
+        allocations: vec![],
+        validators: vec![],
         validator_consensus_keys: vec![],
-        block_reward: 50,
+        block_reward: tokenomics.block_reward,
         base_fee: Network::Testnet.gas_schedule().base_fee,
         gas_schedule: Network::Testnet.gas_schedule(),
         timestamp: 1_735_689_600_000,
-        bud_tokenomics: None,
+        bud_tokenomics: Some(tokenomics),
         tokenomics_addresses: None,
         pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: vec![],
+        poa_authorities: Vec::new(),
+        anchor_ledger: None,
+        // testnet: the reward pool is on, and genesis says so.
+        reward_pool: Some(GenesisRewardPool::enabled()),
     }
+}
+
+/// The mainnet distribution on the testnet calendar: 3 s slots and 50-slot
+/// epochs make a 150 s epoch, so 210 240 epochs are a calendar year. Testnet
+/// block emission remains disabled; the compatibility field is zero.
+/// TESTNET-DEFAULT: every economic value equals the mainnet template's.
+/// WIRING: chain surface - the block/snapshot paths that read it land with their wiring.
+pub fn testnet_tokenomics() -> crate::tokenomics::TokenomicsParams {
+    const EPOCHS_PER_YEAR: u64 = 210_240;
+    let mut params = mainnet_tokenomics();
+    params.epochs_per_year = EPOCHS_PER_YEAR;
+    params.team_cliff_epochs = EPOCHS_PER_YEAR;
+    params.team_vesting_epochs = EPOCHS_PER_YEAR.saturating_mul(4);
+    params.slot_duration_secs = 3;
+    params.epoch_length_slots = 50;
+    // TESTNET-DEFAULT: block execution does not mint emission; the field is
+    // retained only for snapshot/wire compatibility and must not advertise a
+    // live reward on the testnet template.
+    params.block_reward = 0;
+    params
 }
 
 pub fn devnet_genesis() -> GenesisConfig {
@@ -777,6 +1233,10 @@ pub fn devnet_genesis() -> GenesisConfig {
         tokenomics_addresses: None,
         pq_scheme: Some(LAUNCHED_PQ_SCHEME.to_string()),
         bootstrap_domains: vec![],
+        poa_authorities: Vec::new(),
+        anchor_ledger: None,
+        // devnet: no distribution to fund a pool from.
+        reward_pool: Some(GenesisRewardPool::disabled()),
     }
 }
 
@@ -912,6 +1372,23 @@ mod tests {
         assert_eq!(config.build_state().burn_reserve_address, None);
     }
 
+    /// A ceremony whose plain allocations come on top of a balanced
+    /// distribution mints more than the fixed supply and is refused.
+    #[test]
+    fn a_genesis_minting_above_the_fixed_supply_is_refused() {
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        assert!(config.validate_total_issuance().is_ok());
+        config.allocations.push((address(0x77), 1));
+        let error = config
+            .validate_total_issuance()
+            .expect_err("an over-supply genesis must be refused");
+        assert!(error.contains("above the fixed supply"), "{error}");
+        assert!(config
+            .validate_consensus_ceremony(Network::Mainnet)
+            .is_err());
+    }
+
     /// A team vesting shorter than its cliff is a cliff without a schedule:
     /// the ceremony refuses it instead of unlocking the allocation at once.
     #[test]
@@ -934,6 +1411,32 @@ mod tests {
         params.team_vesting_epochs = 0;
         config.bud_tokenomics = Some(params);
         assert!(config.validate_tokenomics_supply().is_ok());
+    }
+
+    /// A burn ratio above the fixed-point scale burns more than the
+    /// fee. The executor then refuses every block that has a transaction.
+    #[test]
+    fn burn_ratio_above_the_scale_is_refused_at_genesis() {
+        use crate::core::chain_config::FIXED_POINT_SCALE;
+        let mut config = mainnet_genesis();
+        config.tokenomics_addresses = Some(ceremony_tokenomics_addresses());
+        let params = config.bud_tokenomics.expect("tokenomics");
+
+        let mut fee_ratio = params;
+        fee_ratio.tx_fee_burn_ratio_fixed = FIXED_POINT_SCALE + 1;
+        config.bud_tokenomics = Some(fee_ratio);
+        let error = config
+            .validate_tokenomics_supply()
+            .expect_err("a fee burn ratio above 100% must be refused");
+        assert!(error.contains("tx_fee_burn_ratio_fixed"), "{error}");
+
+        let mut annual_ratio = params;
+        annual_ratio.annual_burn_ratio_fixed = FIXED_POINT_SCALE + 1;
+        config.bud_tokenomics = Some(annual_ratio);
+        let error = config
+            .validate_tokenomics_supply()
+            .expect_err("an annual burn ratio above 100% must be refused");
+        assert!(error.contains("annual_burn_ratio_fixed"), "{error}");
     }
 
     /// Zero `epochs_per_year` cannot reach the burn or reward math: the
@@ -1050,19 +1553,39 @@ mod tests {
         assert_eq!(genesis1.timestamp, GENESIS_TIMESTAMP);
     }
 
-    /// `ops/scripts/docker-smoke-mainnet.sh` pins the devnet genesis hash and
+    /// The `docker-smoke-mainnet` tool (`xtask/tools`) pins the devnet genesis hash and
     /// refuses to boot when the image disagrees with it. The pin has to move
     /// with `devnet_genesis()`: when this test fails, update
-    /// `DEVNET_GENESIS_HASH` in that script in the same change. The pinned
+    /// `DEVNET_GENESIS_HASH` in `xtask/tools/src/docker_smoke.rs` in the same change. The pinned
     /// value is the hash the docker-smoke job itself printed at head
     /// `25f0583` (run 34156887325).
     #[test]
     fn devnet_genesis_hash_matches_the_docker_smoke_pin() {
         let block = devnet_genesis().build_genesis_block();
         assert_eq!(
-            block.hash, "87d93624975213bbdf7879ba8af973935e21f52d3436cc736b8df586774879ba",
-            "the docker-smoke-mainnet.sh pin must move with devnet_genesis()"
+            block.hash, "ba194aa08eb23a094c04cc1f005266e43f961aa2d8fd127f91cfec1c9f262484",
+            "the pin in xtask/tools/src/docker_smoke.rs must move with devnet_genesis()"
         );
+    }
+
+    /// A genesis that lists PoA authorities declares the
+    /// admission gate; an outsider with stake is not in the admitted set.
+    #[test]
+    fn genesis_poa_authorities_open_the_admission_gate() {
+        let a = Address::from_hex(&"a1".repeat(32)).unwrap();
+        let b = Address::from_hex(&"b2".repeat(32)).unwrap();
+        let outsider = Address::from_hex(&"c3".repeat(32)).unwrap();
+        let mut config = GenesisConfig::new(4242);
+        config.poa_authorities = vec![a, b];
+        let state = config.build_state();
+        assert!(state.poa_is_permissioned(0), "the gate must be declared");
+        let admitted = state.poa_admitted_addresses(0);
+        assert!(admitted.contains(&a) && admitted.contains(&b));
+        assert!(!admitted.contains(&outsider));
+        // No authorities listed: the chain stays ungated, as before.
+        assert!(!GenesisConfig::new(4242)
+            .build_state()
+            .poa_is_permissioned(0));
     }
 
     #[test]
@@ -1073,16 +1596,34 @@ mod tests {
 
         assert_ne!(mainnet.chain_id, testnet.chain_id);
         assert_ne!(mainnet.chain_id, devnet.chain_id);
-        // Mainnet uses full tokenomics; testnet/devnet do not.
+        // Mainnet and its testnet rehearsal use the full tokenomics; devnet
+        // does not.
         assert!(mainnet.bud_tokenomics.is_some());
-        assert!(testnet.bud_tokenomics.is_none());
+        assert!(testnet.bud_tokenomics.is_some());
         assert!(devnet.bud_tokenomics.is_none());
-        // Mainnet is permissionless (empty validators); testnet/devnet seed validators.
+        // Mainnet and testnet are ceremony templates (no validators); devnet
+        // seeds one.
         assert!(mainnet.validators.is_empty());
-        assert!(!testnet.validators.is_empty());
+        assert!(testnet.validators.is_empty());
         assert!(!devnet.validators.is_empty());
         assert_ne!(mainnet.gas_schedule, testnet.gas_schedule);
         assert_ne!(mainnet.gas_schedule, devnet.gas_schedule);
+    }
+
+    #[test]
+    fn testnet_genesis_commits_the_published_fee_profile() {
+        let testnet = GenesisConfig::for_network(Network::Testnet).build_state();
+        let params = testnet.registry.params();
+        assert_eq!(params.transfer_fee_ppm, 200);
+        assert_eq!(params.swap_fee_ppm, 400);
+        assert_eq!(params.bridge_fee_ppm, 800);
+        assert_eq!(params.app_fee_share_ppm, 400_000);
+
+        let devnet = GenesisConfig::for_network(Network::Devnet).build_state();
+        assert_eq!(
+            devnet.registry.params(),
+            &crate::registry::RegistryParams::default()
+        );
     }
 
     #[test]
@@ -1107,9 +1648,11 @@ mod tests {
         assert_eq!(state.get_balance(&allocation.0), allocation.1);
         assert_eq!(state.base_fee, config.base_fee);
         assert_eq!(state.tokenomics.block_reward, config.block_reward);
+        // A seat is one whole BUD even where the floor is lower: see
+        // `validator_stake`. The devnet floor is 1 000 atoms.
         assert_eq!(
             state.get_validator(&validator).map(|v| v.stake),
-            Some(Network::Devnet.min_stake())
+            Some(crate::tokenomics::bud(1))
         );
     }
 
@@ -1154,6 +1697,58 @@ mod tests {
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
         serde_json::from_str(&data)
             .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
+    }
+
+    /// The mainnet bridge-enabled PoW domain must not keep the
+    /// 8-bit default floor.
+    #[test]
+    fn mainnet_bridge_pow_domain_has_a_non_trivial_difficulty_floor() {
+        let config = mainnet_genesis();
+        let domains = config.bootstrap_consensus_domains().unwrap();
+        let pow = domains
+            .iter()
+            .find(|d| d.bridge_enabled && d.pow_parameters.is_some())
+            .expect("mainnet has a bridge-enabled PoW domain");
+        let params = pow.pow_parameters.as_ref().unwrap();
+        assert_eq!(
+            params.min_difficulty_bits,
+            MAINNET_BRIDGE_POW_MIN_DIFFICULTY_BITS
+        );
+        assert!(params.min_cumulative_work >= 6u128 << 64);
+        assert!(params.validate(pow.min_confirmations).is_ok());
+    }
+
+    /// The anchor-recognition list and the genesis domain set are one decision
+    /// written twice, so they are pinned to each other: a bridge-enabled
+    /// bootstrap domain whose id names an external chain has to be a chain the
+    /// settlement layer recognizes, or its own genesis domain could not anchor
+    /// the root the bridge reads for it. It is also the ratchet in the other
+    /// direction: adding Polygon to the list without shipping its genesis
+    /// domain, or shipping the domain without the list, fails here.
+    #[test]
+    fn a_bridge_enabled_genesis_domain_is_an_anchor_recognized_chain() {
+        for (label, config) in [
+            ("mainnet", mainnet_genesis()),
+            ("testnet", testnet_genesis()),
+            ("devnet", devnet_genesis()),
+        ] {
+            for domain in config
+                .bootstrap_consensus_domains()
+                .expect("bootstrap domains materialize")
+            {
+                let canonical =
+                    crate::core::transaction::ExternalChain::from_domain_id(domain.id).is_some();
+                if !canonical || !domain.bridge_enabled {
+                    continue;
+                }
+                assert!(
+                    crate::settlement::domains::anchor_recognized_chain(domain.id).is_some(),
+                    "{label} seeds bridge-enabled domain {} at a canonical external id that the \
+                     settlement layer refuses to anchor for",
+                    domain.id
+                );
+            }
+        }
     }
 
     #[test]
@@ -1219,6 +1814,7 @@ mod tests {
                 epoch: 0,
                 checkpoint_height: 1,
                 checkpoint_hash: hex::encode(commitment.domain_block_hash),
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 agg_sig_bls: vec![],
                 bitmap: vec![],
                 set_hash: snapshot.set_hash.clone(),
@@ -1327,6 +1923,44 @@ mod tests {
             decoded.build_genesis_block().hash
         );
     }
+
+    #[test]
+    fn mainnet_genesis_seeds_permissioned_poa_onboarding_gate() {
+        let from_json = load_genesis_json("config/mainnet-genesis.json");
+        let state = from_json.build_state();
+        let poa_domain_id = from_json
+            .bootstrap_domains
+            .iter()
+            .find(|domain| domain.kind == "poa")
+            .map(|domain| domain.id)
+            .expect("mainnet genesis must declare a PoA bootstrap domain");
+        assert!(
+            state.poa_is_permissioned(poa_domain_id),
+            "mainnet genesis must seed the PoA onboarding gate from bootstrap_domains"
+        );
+        let expected: std::collections::BTreeSet<Address> = from_json
+            .bootstrap_domains
+            .iter()
+            .find(|d| d.kind == "poa")
+            .unwrap()
+            .poa_authorities
+            .iter()
+            .map(|a| Address::from_hex(a).unwrap())
+            .collect();
+        let admitted: std::collections::BTreeSet<Address> = state
+            .poa_admitted_addresses(poa_domain_id)
+            .into_iter()
+            .collect();
+        assert_eq!(admitted, expected);
+        assert_eq!(
+            state.settlement.domains.get(poa_domain_id).unwrap().status,
+            crate::domain::DomainStatus::Active
+        );
+
+        let mut mismatch = from_json;
+        mismatch.poa_authorities = vec![Address::from([0x22; 32])];
+        assert!(mismatch.validate_mainnet_poa_authorities().is_err());
+    }
 }
 
 // === MAINNET GENESIS TESTS ===
@@ -1432,6 +2066,69 @@ mod mainnet_genesis_tests {
 
         // Metabolic burn: 1%
         assert_eq!(params.tx_fee_burn_ratio_fixed, FIXED_POINT_SCALE / 100);
+    }
+
+    /// testnet item 8: `reward_pool.enabled` is the genesis parameter, and it
+    /// decides both halves at once - the funding at genesis and the flag the
+    /// epoch transition reads. Testnet states it on, devnet off, mainnet off.
+    #[test]
+    fn the_reward_pool_flag_is_a_genesis_parameter() {
+        let testnet = testnet_genesis();
+        assert_eq!(testnet.reward_pool, Some(GenesisRewardPool::enabled()));
+        assert!(testnet.reward_pool_enabled());
+        assert!(testnet.validate_reward_pool_flag().is_ok());
+
+        let devnet = devnet_genesis();
+        assert!(!devnet.reward_pool_enabled());
+        assert_eq!(devnet.genesis_reward_pool(), 0);
+
+        let mainnet = mainnet_genesis();
+        assert!(!mainnet.reward_pool_enabled());
+        assert_eq!(mainnet.genesis_reward_pool(), 0);
+    }
+
+    /// The flag is written, not merely read: a ceremony file that leaves it
+    /// out follows the profile, and one that turns the pool off keeps both
+    /// sides off (no funding, no payments).
+    #[test]
+    fn turning_the_flag_off_leaves_the_pool_unfunded_and_the_gate_closed() {
+        let mut genesis = testnet_genesis();
+        genesis.reward_pool = None;
+        assert!(
+            genesis.reward_pool_enabled(),
+            "an absent flag follows the testnet profile"
+        );
+
+        genesis.reward_pool = Some(GenesisRewardPool::disabled());
+        assert!(!genesis.reward_pool_enabled());
+        assert_eq!(genesis.genesis_reward_pool(), 0);
+        let state = genesis.build_state();
+        assert!(!state.reward_pool_enabled);
+        assert_eq!(
+            state.get_balance(&crate::tokenomics::reward_pool::reward_pool_account()),
+            0
+        );
+
+        genesis.reward_pool = Some(GenesisRewardPool::enabled());
+        let state = genesis.build_state();
+        assert!(state.reward_pool_enabled);
+        assert_eq!(
+            state.get_balance(&crate::tokenomics::reward_pool::reward_pool_account()),
+            crate::tokenomics::reward_pool::DEFAULT_VALIDATION_REWARD_POOL
+        );
+    }
+
+    /// A mainnet genesis may not turn the pool on: there is no mainnet
+    /// schedule yet, and the flag would promise an epoch payment nothing can
+    /// make. The refusal names the owner of the decision.
+    #[test]
+    fn mainnet_refuses_to_turn_the_reward_pool_on() {
+        let mut genesis = mainnet_genesis();
+        genesis.reward_pool = Some(GenesisRewardPool::enabled());
+        let error = genesis
+            .validate_reward_pool_flag()
+            .expect_err("a mainnet pool has no schedule to pay from");
+        assert!(error.contains("D-04"), "error names the decision: {error}");
     }
 
     #[test]

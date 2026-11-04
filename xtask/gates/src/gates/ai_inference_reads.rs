@@ -67,6 +67,26 @@ fn check_per_modality_budget(code: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Is this line an enum variant whose name says it generates something?
+///
+/// Any capitalised leading identifier counts, not only names that start with
+/// `Image`, `Video`, `Audio` or `Text`.
+fn is_generating_variant(line: &str) -> bool {
+    let ident: String = line
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if !ident.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    let rest = line[ident.len()..].trim_start();
+    let variant_shape = rest.is_empty() || rest.starts_with([',', '(', '{', '=']);
+    variant_shape
+        && ["Output", "Generation", "Generate", "Render", "Synthesis"]
+            .iter()
+            .any(|w| ident.contains(w))
+}
+
 /// # Errors
 ///
 /// Returns the first violated claim.
@@ -76,15 +96,7 @@ pub fn run(root: &Path) -> Result<String, String> {
     // 1. No generation surface.
     for line in code.lines() {
         let t = line.trim_start();
-        let is_kind = ["Image", "Video", "Audio", "Text"]
-            .iter()
-            .any(|k| t.starts_with(k));
-        if is_kind
-            && (t.contains("Output")
-                || t.contains("Generation")
-                || t.contains("Render")
-                || t.contains("Synthesis"))
-        {
+        if is_generating_variant(t) {
             return Err(String::from(
                 "PerceptionKind gained a generating variant.\n  \
                  AI inference layer reads; it does not produce images or video. Generation needs its own\n  \
@@ -155,7 +167,15 @@ pub fn run(root: &Path) -> Result<String, String> {
         .take(6)
         .map(ToString::to_string)
         .collect();
-    if !decoder_block.iter().any(|l| l.contains("Self::Text")) {
+    let compact_decoder: String = decoder_block
+        .join("")
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    // Text must be the one modality that needs NO decoder.
+    if !((compact_decoder.contains("!matches!(") && compact_decoder.contains(",Self::Text)"))
+        || compact_decoder.contains("Self::Text=>false"))
+    {
         return Err(String::from(
             "needs_decoder no longer singles out text.\n  \
              Text is the only modality that reaches a model without a decoding step.",
@@ -191,4 +211,17 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "ai_inference canary OK (correct PASSes, a generative variant FAILs).",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generating_variant_names_are_found_without_a_kind_prefix() {
+        assert!(is_generating_variant("ImageOutput,"));
+        assert!(is_generating_variant("VoiceSynthesis(u8),"));
+        assert!(!is_generating_variant("Image,"));
+        assert!(!is_generating_variant("pub fn render_frame()"));
+    }
 }

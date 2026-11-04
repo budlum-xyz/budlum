@@ -93,6 +93,24 @@ pub enum MempoolError {
     InvalidTransaction(String),
 }
 
+/// A bundle member the pool refused, and where in the bundle it was.
+///
+/// The index is what the caller needs: the caller's bundle is unchanged by the
+/// refusal, and telling it *which* member the pool objected to is the
+/// difference between a client that can fix its bundle and one that retries the
+/// same body forever.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BundleRefusal {
+    pub index: usize,
+    pub cause: MempoolError,
+}
+
+impl std::fmt::Display for BundleRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "member {} refused: {:?}", self.index, self.cause)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PendingTx {
     tx: Transaction,
@@ -123,6 +141,28 @@ pub struct Mempool {
     /// `resident_bytes_are_exact` re-derives it from scratch to prove the two
     /// have not drifted.
     resident_bytes: usize,
+
+    /// The scheme statuses admission verifies under. The chain copies its
+    /// state registry in through [`Mempool::sync_scheme_registry`] before it
+    /// admits, so a family the chain disabled is refused at the pool door in
+    /// the same block it stops verifying in the executor.
+    scheme_registry: crate::crypto::scheme::SchemeStatusRegistry,
+
+    /// Authorizations this pool already verified under the current registry. A transaction that
+    /// comes back (re-gossip, a block replay) is not verified twice.
+    authority_cache: crate::mempool::authority_cache::AuthorityCache,
+
+    /// Entries this pool removed while a bundle was being admitted.
+    ///
+    /// Admission is not free of side effects on other people's transactions: a
+    /// full pool evicts a cheaper one, and a replacement drops the transaction
+    /// it replaces. A bundle is all or none, so a member refused half way
+    /// through has to put every one of those back; a rollback that only removes
+    /// the members already admitted leaves the evictions and the replacement
+    /// behind, which is a free deletion primitive for whoever can submit a
+    /// bundle that fails at its last member. The journal is `None` outside
+    /// bundle admission, so ordinary admission pays nothing for it.
+    journal: Option<Vec<PendingTx>>,
 }
 
 /// How many bytes one transaction occupies, by the transport's own measure.
@@ -130,7 +170,7 @@ pub struct Mempool {
 /// Reuses the protobuf `encoded_len` that `validate_tx_size` refuses on, so a
 /// transaction charged here is charged the number it was admitted against.
 /// The serialization is discarded; only the length is wanted.
-fn charged_bytes(tx: &Transaction) -> usize {
+pub fn charged_bytes(tx: &Transaction) -> usize {
     use prost::Message;
     let proto = crate::network::proto_conversions::pb::ProtoTransaction::from(tx);
     proto.encoded_len()
@@ -144,6 +184,16 @@ impl Mempool {
             by_sender: HashMap::new(),
             by_fee: BTreeMap::new(),
             resident_bytes: 0,
+            scheme_registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+            authority_cache: crate::mempool::authority_cache::AuthorityCache::default(),
+            journal: None,
+        }
+    }
+
+    /// Adopt the chain-state scheme registry for admission checks.
+    pub fn sync_scheme_registry(&mut self, registry: &crate::crypto::scheme::SchemeStatusRegistry) {
+        if self.scheme_registry != *registry {
+            self.scheme_registry = registry.clone();
         }
     }
 
@@ -160,6 +210,18 @@ impl Mempool {
     }
 
     pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), MempoolError> {
+        // The cheap rejections run first. `Transaction::verify` can cost an
+        // ML-DSA verification, so a duplicate or a below-floor flood must be
+        // refused by a map lookup and an integer compare before it can make
+        // the node spend that CPU (audit).
+        if self.transactions.contains_key(&tx.hash) {
+            return Err(MempoolError::DuplicateTransaction);
+        }
+
+        if tx.fee < self.config.min_fee {
+            return Err(MempoolError::FeeTooLow);
+        }
+
         // Verify transaction signature BEFORE
         // Accepting into mempool. Without this, an attacker can flood the
         // Mempool with invalid-signature transactions that propagate via
@@ -170,18 +232,22 @@ impl Mempool {
         // every other zero-address sender, so no special case is needed
         // here. A blanket zero-address exemption would let an attacker mint
         // unsigned transactions from 0x00..00 (BUDLUM finding #19/#26).
-        if !tx.verify() {
-            return Err(MempoolError::InvalidTransaction(
-                "Invalid transaction signature".into(),
-            ));
-        }
-
-        if self.transactions.contains_key(&tx.hash) {
-            return Err(MempoolError::DuplicateTransaction);
-        }
-
-        if tx.fee < self.config.min_fee {
-            return Err(MempoolError::FeeTooLow);
+        let registry_commitment = self.scheme_registry.commitment();
+        let authorization = bincode::serialize(&tx.authorization).unwrap_or_default();
+        let digest = crate::mempool::authority_cache::authorization_digest(&[
+            &tx.signing_hash(),
+            tx.signature.as_deref().unwrap_or_default(),
+            &tx.signer_public_key,
+            &authorization,
+        ]);
+        if !self.authority_cache.contains(&digest, &registry_commitment) {
+            if !tx.verify_in(&self.scheme_registry) {
+                return Err(MempoolError::InvalidTransaction(
+                    "Invalid transaction signature".into(),
+                ));
+            }
+            self.authority_cache
+                .insert_accepted(digest, registry_commitment);
         }
 
         // Eviction is a side effect on somebody else's transaction, so it may
@@ -311,9 +377,75 @@ impl Mempool {
                     self.by_fee.remove(&pending.tx.fee);
                 }
             }
+            if let Some(journal) = self.journal.as_mut() {
+                journal.push(pending.clone());
+            }
             return Some(pending.tx);
         }
         None
+    }
+
+    /// Admit a bundle's members all or none.
+    ///
+    /// Each member goes through the ordinary admission door, so the same
+    /// checks apply in the same order. What differs is the failure path: the
+    /// pool records every entry it removed on the way (evictions, replacements)
+    /// and, when a member is refused, takes the admitted members back out and
+    /// puts the recorded entries back. The pool is therefore in exactly the
+    /// state it was in before the call - not merely free of the bundle, which
+    /// is what the previous remove-only rollback achieved while leaving the
+    /// evicted victims deleted.
+    pub fn add_transaction_bundle(&mut self, txs: Vec<Transaction>) -> Result<(), BundleRefusal> {
+        if self.journal.is_some() {
+            // Nested admission would journal the inner call's removals into
+            // the outer one and restore them twice. Nothing calls this
+            // re-entrantly; refusing is cheaper than a corrupted pool.
+            return Err(BundleRefusal {
+                index: 0,
+                cause: MempoolError::InvalidTransaction("nested bundle admission".to_string()),
+            });
+        }
+        self.journal = Some(Vec::new());
+        let mut admitted: Vec<String> = Vec::new();
+        for (index, tx) in txs.into_iter().enumerate() {
+            let hash = tx.hash.clone();
+            if let Err(cause) = self.add_transaction(tx) {
+                // The journal is taken first: the removals below take the
+                // admitted members back out and must not be recorded as
+                // evictions of their own.
+                let journal = self.journal.take().unwrap_or_default();
+                for hash in admitted.iter().rev() {
+                    self.remove_transaction(hash);
+                }
+                // Reverse order, so an entry recorded after another is put
+                // back first: the last removal is the one that freed the space
+                // for the removals before it.
+                for pending in journal.into_iter().rev() {
+                    self.restore_entry(pending);
+                }
+                return Err(BundleRefusal { index, cause });
+            }
+            admitted.push(hash);
+        }
+        self.journal = None;
+        Ok(())
+    }
+
+    /// Put back an entry that was in this pool before, without admitting it.
+    ///
+    /// Used only by a bundle rollback, where the entry passed admission once
+    /// already and the pool's counters were charged for it once already.
+    fn restore_entry(&mut self, pending: PendingTx) {
+        self.by_sender
+            .entry(pending.tx.from)
+            .or_default()
+            .insert(pending.tx.nonce, pending.tx.hash.clone());
+        self.by_fee
+            .entry(pending.tx.fee)
+            .or_default()
+            .insert(pending.tx.hash.clone());
+        self.resident_bytes = self.resident_bytes.saturating_add(pending.charged);
+        self.transactions.insert(pending.tx.hash.clone(), pending);
     }
 
     pub fn get_sorted_transactions(&self, limit: usize) -> Vec<Transaction> {
@@ -464,6 +596,16 @@ impl Mempool {
     /// refuses the transaction would be the free-deletion primitive again,
     /// this time paid for in bytes. So the victims are chosen first and
     /// removed only once the sum is known to be enough.
+    /// (accepted with the bound written down): this sweep
+    /// is O(pool entries) in the worst case - it walks `by_fee` until the
+    /// byte budget is met. The bound that makes that acceptable is the entry
+    /// cap (20_000), and the sweep only runs when an admission is about to
+    /// be refused for bytes, so the cost is paid on the path that was about
+    /// to reject anyway. An index on charged-bytes-per-fee would replace one
+    /// linear scan with maintained bookkeeping on EVERY admission - trading
+    /// a rare worst case for a common per-insert cost, which is the worse
+    /// trade for a pool this size. Revisit only if the entry cap grows an
+    /// order of magnitude.
     fn evict_until_bytes_fit(&mut self, new_tx: &Transaction, needed: usize) -> bool {
         let mut victims: Vec<String> = Vec::new();
         let mut freed = 0usize;
@@ -539,6 +681,90 @@ mod tests {
         tx.hash = tx.calculate_hash();
         tx.sign(&keypair);
         tx
+    }
+
+    /// A bundle refused at its last member leaves the pool exactly as it was.
+    ///
+    /// The member before it passed admission by evicting a cheaper transaction.
+    /// A rollback that only removes the admitted members leaves that eviction
+    /// behind: the sender of the refused bundle paid no fee, ended with nothing
+    /// in the pool, and deleted somebody else's transaction. Repeating it with
+    /// a fresh last member empties the pool for the price of the signatures.
+    #[test]
+    fn a_bundle_refused_at_its_last_member_restores_the_evicted_victim() {
+        let mut pool = Mempool::new(MempoolConfig {
+            max_size: 1,
+            min_fee: 1,
+            ..MempoolConfig::default()
+        });
+        let victim = create_test_tx_from_seed(1, 0, 10);
+        let victim_bytes = charged_bytes(&victim);
+        pool.add_transaction(victim.clone())
+            .expect("the victim fits");
+
+        // The first member is admissible: it outbids the victim, which the
+        // full pool evicts. The second is refused by the fee floor.
+        let accepted = create_test_tx_from_seed(2, 0, 100);
+        let refused = create_test_tx_from_seed(3, 0, 0);
+        let err = pool
+            .add_transaction_bundle(vec![accepted.clone(), refused])
+            .expect_err("a below-floor member refuses the whole bundle");
+        assert_eq!(err.index, 1, "the refusal names the member that failed");
+        assert_eq!(err.cause, MempoolError::FeeTooLow);
+
+        assert!(
+            pool.transactions.contains_key(&victim.hash),
+            "the evicted victim is back"
+        );
+        assert!(
+            !pool.transactions.contains_key(&accepted.hash),
+            "the admitted member is gone"
+        );
+        assert_eq!(pool.transactions.len(), 1);
+        assert_eq!(
+            pool.resident_bytes, victim_bytes,
+            "the byte counter matches"
+        );
+    }
+
+    /// A replacement made by an earlier member is undone with the rest.
+    #[test]
+    fn a_bundle_refused_at_its_last_member_restores_the_replaced_transaction() {
+        let mut pool = Mempool::default();
+        let original = create_test_tx_from_seed(1, 0, 10);
+        pool.add_transaction(original.clone()).expect("admitted");
+
+        let replacement = create_test_tx_from_seed(1, 0, 100);
+        let refused = create_test_tx_from_seed(2, 0, 0);
+        let err = pool
+            .add_transaction_bundle(vec![replacement.clone(), refused])
+            .expect_err("the bundle fails at its second member");
+
+        assert_eq!(err.index, 1);
+        assert!(
+            pool.transactions.contains_key(&original.hash),
+            "the replaced transaction is back"
+        );
+        assert!(!pool.transactions.contains_key(&replacement.hash));
+        assert_eq!(pool.transactions.len(), 1);
+    }
+
+    /// A bundle whose every member is admissible admits every member.
+    #[test]
+    fn an_admissible_bundle_admits_every_member() {
+        let mut pool = Mempool::default();
+        let first = create_test_tx_from_seed(1, 0, 10);
+        let second = create_test_tx_from_seed(2, 0, 10);
+        pool.add_transaction_bundle(vec![first.clone(), second.clone()])
+            .expect("both members are admissible");
+        assert!(pool.transactions.contains_key(&first.hash));
+        assert!(pool.transactions.contains_key(&second.hash));
+        assert_eq!(pool.transactions.len(), 2);
+        assert_eq!(
+            pool.resident_bytes,
+            charged_bytes(&first) + charged_bytes(&second)
+        );
+        assert!(pool.journal.is_none(), "the journal is released on success");
     }
 
     /// The byte budget refuses a flood the entry count would admit.
@@ -811,6 +1037,34 @@ mod tests {
             pool.add_transaction(tx),
             Err(MempoolError::DuplicateTransaction)
         );
+    }
+
+    /// Cheap checks run before the signature check (audit): an
+    /// unsigned transaction below the fee floor is refused as `FeeTooLow`,
+    /// which proves `verify` did not run first.
+    #[test]
+    fn cheap_checks_run_before_signature_verification() {
+        let mut pool = Mempool::default();
+        let mut tx = create_test_tx_from_seed(1, 0, 0);
+        tx.signature = None;
+        assert!(!tx.verify());
+        assert_eq!(pool.add_transaction(tx), Err(MempoolError::FeeTooLow));
+
+        let good = create_test_tx_from_seed(2, 0, 10);
+        pool.add_transaction(good.clone()).unwrap();
+        let mut forged = good;
+        forged.signature = None;
+        assert_eq!(
+            pool.add_transaction(forged),
+            Err(MempoolError::DuplicateTransaction)
+        );
+
+        let mut bad = create_test_tx_from_seed(3, 0, 10);
+        bad.signature = None;
+        assert!(matches!(
+            pool.add_transaction(bad),
+            Err(MempoolError::InvalidTransaction(_))
+        ));
     }
 
     #[test]

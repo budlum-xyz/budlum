@@ -100,7 +100,7 @@ impl DeterminismProfile {
 }
 
 /// Bridge configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ServeConfig {
     /// The weight source - the original name is preserved (attribution).
     pub weight_source: String,
@@ -123,6 +123,41 @@ pub struct ServeConfig {
     /// startup, fail-closed. The placement never moves - disk pressure must
     /// not change which tier a shard lands in - only the verdict does.
     pub disk_budget_bytes: Option<u64>,
+}
+
+impl core::fmt::Debug for ServeConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ServeConfig")
+            .field("weight_source", &self.weight_source)
+            .field("served_model_name", &self.served_model_name)
+            .field("tier", &self.tier)
+            .field("engine", &self.engine)
+            .field("port", &self.port)
+            .field("base_url", &"<redacted>")
+            .field("determinism", &self.determinism)
+            .field("disk_budget_bytes", &self.disk_budget_bytes)
+            .finish()
+    }
+}
+
+/// The base URL must be a plain http(s) URL with no credentials, spaces or
+/// query string, so it can neither carry a secret nor smuggle a header.
+fn check_base_url(url: &str) -> Result<(), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or_else(|| String::from("base_url must start with http:// or https://"))?;
+    let authority = rest.split('/').next().unwrap_or("");
+    if authority.is_empty()
+        || authority.contains('@')
+        || url.contains('?')
+        || url.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(String::from(
+            "base_url must name a host and carry no credentials, query or whitespace",
+        ));
+    }
+    Ok(())
 }
 
 impl Default for ServeConfig {
@@ -175,7 +210,18 @@ pub fn assert_served_name_is_ours(cfg: &ServeConfig) -> Result<(), String> {
             cfg.served_model_name
         ));
     }
-    Ok(())
+    // The name must have the tier shape `ai_inference-{tier}-{version}` for
+    // the configured tier, so a Light bridge cannot be listed under the
+    // Normal name and no third-party model name passes.
+    let prefix = cfg.tier.served_model_name("");
+    match cfg.served_model_name.strip_prefix(prefix.as_str()) {
+        Some(version) if !version.is_empty() => Ok(()),
+        _ => Err(format!(
+            "served_model_name must be {prefix}<version> for the {} tier: {}",
+            cfg.tier.as_str(),
+            cfg.served_model_name
+        )),
+    }
 }
 
 /// Whether this bridge may be put into the consensus path.
@@ -295,7 +341,8 @@ fn verify_prompt_text(text: &str) -> Result<(), String> {
     generation_phrases_are_all_refusals(text)?;
 
     for (medium, unit, limit) in DECLARED_LIMITS {
-        if !text.contains(&limit.to_string()) {
+        let line = format!("- {medium}: at most {limit} {unit}");
+        if !text.lines().any(|l| l.trim_end() == line) {
             return Err(format!(
                 "the prompt no longer states the {medium} limit of {limit} {unit}; \
                  the runtime would enforce a number the user was never told"
@@ -360,11 +407,41 @@ pub fn assert_consensus_ready_on_device(
     semantics: SemanticProfile,
 ) -> Result<ResidencyPlan, String> {
     assert_consensus_ready(cfg)?;
+    plan_on_device(cfg, shards, budget, semantics, true)
+}
+
+/// The device check for a bridge that stays local: the same prompt, residency
+/// and disk-budget checks as [`assert_consensus_ready_on_device`], without the
+/// determinism profile and without the streaming refusal. A streaming bridge
+/// serves locally, which is the point of the disk tier.
+///
+/// # Errors
+///
+/// A prompt or device-level refusal.
+pub fn plan_local_on_device(
+    cfg: &ServeConfig,
+    shards: &[WeightShard],
+    budget: DeviceBudget,
+    semantics: SemanticProfile,
+) -> Result<ResidencyPlan, String> {
+    plan_on_device(cfg, shards, budget, semantics, false)
+}
+
+/// The shared device check. `consensus` adds the refusal to stream from disk.
+fn plan_on_device(
+    cfg: &ServeConfig,
+    shards: &[WeightShard],
+    budget: DeviceBudget,
+    semantics: SemanticProfile,
+    consensus: bool,
+) -> Result<ResidencyPlan, String> {
     // A consensus operator serves the checked prompt or does not serve. Two
     // operators answering the same request from different instructions would
     // produce different bytes and never group, and the failure would look like
-    // a liveness problem rather than a configuration one.
+    // a liveness problem rather than a configuration one. A local operator is
+    // held to the same prompt: it is the text shown to the user.
     checked_system_prompt()?;
+    check_base_url(&cfg.base_url)?;
 
     let plan = match cfg.disk_budget_bytes {
         Some(limit) => ResidencyPlan::plan_bounded_by_disk(shards, budget, semantics, limit),
@@ -384,7 +461,7 @@ pub fn assert_consensus_ready_on_device(
         ),
     })?;
 
-    if plan.streams_from_disk() {
+    if consensus && plan.streams_from_disk() {
         return Err(format!(
             "this device streams weights from disk ({} B on disk); that serves \
              locally but cannot join the consensus path",
@@ -442,6 +519,23 @@ mod tests {
     use crate::residency::Demand;
 
     #[test]
+    fn base_url_is_validated_and_hidden_from_debug() {
+        assert!(check_base_url("http://127.0.0.1:8000/v1").is_ok());
+        assert!(check_base_url("https://host/v1").is_ok());
+        assert!(check_base_url("ftp://host").is_err());
+        assert!(check_base_url("http://user:pw@host/v1").is_err());
+        assert!(check_base_url("http://host/v1?key=1").is_err());
+        assert!(check_base_url("http:///v1").is_err());
+        assert!(check_base_url("http://host/a b").is_err());
+
+        let cfg = ServeConfig {
+            base_url: "http://internal.example:9/v1".into(),
+            ..ServeConfig::default()
+        };
+        assert!(!format!("{cfg:?}").contains("internal.example"));
+    }
+
+    #[test]
     fn default_config_is_light_tier() {
         let cfg = ServeConfig::default();
         assert_eq!(cfg.tier, ModelTier::Light);
@@ -464,6 +558,28 @@ mod tests {
             ..Default::default()
         };
         assert!(assert_served_name_is_ours(&cfg).is_err());
+    }
+
+    #[test]
+    fn a_name_outside_the_tier_shape_is_rejected() {
+        for bad in [
+            "my-custom-model",
+            "llama-3-70b",
+            "ai_inference-normal-v0.1", // Normal name on a Light config
+            "ai_inference-light-",
+            "ai_inference-light",
+        ] {
+            let cfg = ServeConfig {
+                served_model_name: bad.to_string(),
+                ..Default::default()
+            };
+            assert!(
+                assert_served_name_is_ours(&cfg).is_err(),
+                "{bad} must be refused"
+            );
+        }
+        let normal = ServeConfig::for_tier(ModelTier::Normal, "v2");
+        assert!(assert_served_name_is_ours(&normal).is_ok());
     }
 
     #[test]
@@ -813,6 +929,17 @@ mod tests {
         }
     }
 
+    /// A limit line with extra text after the number no longer states that limit.
+    #[test]
+    fn a_limit_line_with_a_suffix_is_refused() {
+        let Some(&(medium, unit, limit)) = DECLARED_LIMITS.first() else {
+            return;
+        };
+        let line = format!("- {medium}: at most {limit} {unit}");
+        let doctored = AI_SYSTEM_PROMPT.replace(&line, &format!("{line} per request, roughly"));
+        assert!(verify_prompt_text(&doctored).is_err());
+    }
+
     /// A prompt that lost a closed-loop channel is refused.
     ///
     /// The required phrases are checked, not merely listed. The shipped prompt
@@ -835,6 +962,15 @@ mod tests {
     /// without breaking anything that reads the constants: the numbers are
     /// prose here and code in the crate that enforces them, and the two can
     /// drift apart silently.
+    #[test]
+    fn a_limit_number_outside_its_line_does_not_satisfy_the_check() {
+        let line = "- video: at most 4096 frames";
+        assert!(AI_SYSTEM_PROMPT.contains(line));
+        let moved = AI_SYSTEM_PROMPT.replace(line, "- video: at most 9 frames (see 4096)");
+        let err = verify_prompt_text(&moved).expect_err("the video ceiling line is gone");
+        assert!(err.contains("video"), "{err}");
+    }
+
     #[test]
     fn a_prompt_missing_an_effort_figure_is_refused() {
         let stripped = AI_SYSTEM_PROMPT.replace("10.0x", "<missing>");

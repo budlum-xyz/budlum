@@ -12,4 +12,4 @@ pub use passport::{
     validate_passport_name, DwebPassportProfile, EvidenceCard, EvidenceStatus, PassportProofBundle,
     PassportProofItem,
 };
-pub use service::BudGateway;
+pub use service::{pollen_guard_ids, BudGateway};

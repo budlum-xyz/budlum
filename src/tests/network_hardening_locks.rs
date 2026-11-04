@@ -57,20 +57,34 @@ mod tests {
     /// deliberate decision rather than an accident.
     #[test]
     fn network_event_loop_has_no_bare_lock_unwrap() {
-        let offenders: Vec<_> = code_lines(NODE_RS)
+        // Whitespace is removed so a rustfmt-split chain is still seen, and
+        // `.read()`, `.write()` and `.expect(` are covered like `.lock().unwrap()`.
+        let flat: String = code_lines(NODE_RS)
             .into_iter()
-            .filter(|(_, line)| line.contains(".lock().unwrap()"))
+            .flat_map(|(_, line)| {
+                line.split_whitespace()
+                    .collect::<String>()
+                    .chars()
+                    .collect::<Vec<_>>()
+            })
             .collect();
+        let offenders: Vec<&str> = [
+            ".lock().unwrap()",
+            ".read().unwrap()",
+            ".write().unwrap()",
+            ".lock().expect(",
+            ".read().expect(",
+            ".write().expect(",
+        ]
+        .into_iter()
+        .filter(|pattern| flat.contains(pattern))
+        .collect();
 
         assert!(
             offenders.is_empty(),
-            "node.rs contains bare .lock().unwrap() at {:?} - a poisoned mutex \
-             would panic the node instead of failing the request. Match on the \
-             Result, or use unwrap_or_else with an explicit logged exit.",
-            offenders
-                .iter()
-                .map(|(n, l)| format!("line {n}: {l}"))
-                .collect::<Vec<_>>()
+            "node.rs contains a bare lock unwrap or expect ({offenders:?}) - a poisoned \
+             lock would panic the node instead of failing the request. Match on the \
+             Result, or use unwrap_or_else with an explicit logged exit."
         );
     }
 
@@ -198,8 +212,9 @@ mod tests {
         // now that scoring exists - they cover different things: PeerManager
         // bans on protocol violations, scoring degrades on mesh behaviour.
         assert!(
-            NODE_RS.contains("check_rate_limit"),
-            "PeerManager rate limiting must stay alongside peer scoring"
+            NODE_RS.contains("peer_manager_lock().check_rate_limit(&peer_id)"),
+            "PeerManager rate limiting must stay alongside peer scoring, \
+             called on the inbound message path"
         );
     }
 
@@ -257,6 +272,16 @@ mod tests {
              means 300s and 60s of wall clock; deriving them keeps both the \
              normal and mobile paths honest with one expression"
         );
+        for expr in ["(300 / heartbeat.as_secs())", "(60 / heartbeat.as_secs())"] {
+            let at = NODE_RS
+                .find(expr)
+                .expect("the derived tick expression must exist");
+            let tail = &NODE_RS[at + expr.len()..(at + expr.len() + 12).min(NODE_RS.len())];
+            assert!(
+                tail.starts_with(".max(1)"),
+                "{expr} is not floored right where it is derived: {tail:?}"
+            );
+        }
         assert!(
             NODE_RS.contains(".max(1)"),
             "the derived tick counts lost their floor. A heartbeat longer than \
@@ -435,13 +460,18 @@ mod tests {
             "request_response::Message::Request { request, channel, .. } => {",
             "request_response::Message::Response {",
         );
+        // The arm checks the ban and the rate limit first, then lets a
+        // handshake past the handshaked gate. Compare without white space.
+        let flat: String = arm.chars().filter(|c| !c.is_whitespace()).collect();
+        let exempt_at = flat
+            .find("is_handshake||self.peer_manager_lock().is_handshaked(&peer)")
+            .expect("the /sync request arm must admit the handshake before the handshaked gate");
+        let ban_at = flat
+            .find("!pm.is_banned(&peer)&&pm.check_rate_limit(&peer)")
+            .expect("the handshake exemption must not lift the ban or the rate limit");
         assert!(
-            arm.contains("(is_handshake || pm.is_handshaked(&peer))"),
-            "the /sync request arm must admit the handshake before the handshaked gate"
-        );
-        assert!(
-            arm.contains("!pm.is_banned(&peer)") && arm.contains("pm.check_rate_limit(&peer)"),
-            "the handshake exemption must not lift the ban or the rate limit"
+            ban_at < exempt_at,
+            "the ban and rate limit checks must run before the handshake exemption"
         );
     }
 
@@ -516,6 +546,53 @@ mod tests {
         assert!(
             sync_helper.contains("sync_state.load(Ordering::SeqCst) == 1"),
             "a sync round must not be opened while one is already running"
+        );
+    }
+
+    /// A gossip block that does not join this chain is not a forgery.
+    ///
+    /// `validate_and_add_block` runs after the cheap checks, so a block that
+    /// arrives for `height + 1` while another arm imports a different block at
+    /// that height is refused with `Previous hash mismatch`. Charging that as
+    /// an invalid block bans an honest validator for an hour at ten
+    /// occurrences (`BAN_THRESHOLD` is -100): a four-validator devnet that
+    /// splits a slot then silences the node whose block it needs, which is
+    /// AF-09. The arm must classify the refusal before it penalises, must
+    /// answer `Ignore` rather than `Reject`, and must keep the banning path for
+    /// every other refusal.
+    #[test]
+    fn a_block_that_does_not_join_the_chain_is_not_a_forgery() {
+        let arm = arm_between(
+            NODE_RS,
+            "NetworkMessage::Block(block) => {",
+            "NetworkMessage::Transaction(tx) => {",
+        );
+        let code: String = code_lines(arm).into_iter().map(|(_, l)| l + "\n").collect();
+        assert!(
+            code.contains("Previous hash mismatch"),
+            "the gossip Block arm must recognise the one refusal that is a fork signal"
+        );
+        assert!(
+            code.contains("report_unjoined_block("),
+            "a block that does not join this chain must be demoted without a ban"
+        );
+        assert!(
+            code.contains("report_invalid_block("),
+            "every other validation refusal must keep charging an invalid block"
+        );
+        assert!(
+            code.contains("MessageAcceptance::Ignore"),
+            "an unjoinable block is not a bad message: it must be ignored, not rejected"
+        );
+        assert!(
+            code.contains("MessageAcceptance::Reject"),
+            "a genuinely invalid block must still be rejected"
+        );
+        // The classification must be what decides, not a constant: the arm
+        // reads the refusal string into a value and branches on it.
+        assert!(
+            code.contains("let unjoined = e.contains(\"Previous hash mismatch\")"),
+            "the refusal must be classified into a value the penalty branches on"
         );
     }
 

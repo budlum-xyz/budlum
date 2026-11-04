@@ -6,7 +6,13 @@ pub const INVALID_BLOCK_PENALTY: i32 = -10;
 pub const INVALID_TX_PENALTY: i32 = -5;
 pub const OVERSIZED_MESSAGE_PENALTY: i32 = -3;
 pub const RATE_LIMIT_PENALTY: i32 = -3;
-pub const TIMEOUT_PENALTY: i32 = -15;
+/// A request this node sent came back unanswered. Below the ban threshold by
+/// design: the ask was this node's own choice, so an unanswerable one costs
+/// the peer its place in the sync order, not an hour of silence.
+const UNANSWERED_REQUEST_PENALTY: i32 = -5;
+/// A batch that does not join this chain: a fork signal, priced like an
+/// unanswered request and, like it, floored above the ban threshold.
+const UNJOINED_BLOCK_PENALTY: i32 = -5;
 pub const SLOW_SYNC_PENALTY: i32 = -5;
 pub const INVALID_HANDSHAKE_PENALTY: i32 = -20;
 pub const GOOD_BEHAVIOR_REWARD: i32 = 1;
@@ -20,6 +26,9 @@ pub const BAN_DURATION: Duration = Duration::from_secs(3600);
 /// mints for one burst of malformed handshakes cannot fill the tracked
 /// table forever and refuse every peer the node has never seen.
 const NEGATIVE_RECORD_TTL: Duration = BAN_DURATION;
+/// After a prune that reclaimed nothing, the table is not scanned again for
+/// this long.
+const EMPTY_PRUNE_BACKOFF: Duration = Duration::from_secs(1);
 pub const MAX_SCORE: i32 = 100;
 pub const MIN_SCORE: i32 = BAN_THRESHOLD;
 pub const MAX_MSG_BURST: f64 = 20.0;
@@ -37,6 +46,9 @@ pub struct PeerScore {
     pub last_seen: Option<Instant>,
     pub rate_tokens: f64,
     pub rate_last_refill: Instant,
+    /// Last refill of the vote and blob buckets. Separate from
+    /// `rate_last_refill`, which every inbound message resets.
+    pub aux_last_refill: Instant,
     pub vote_tokens: f64,
     pub blob_tokens: f64,
     pub handshaked: bool,
@@ -53,6 +65,7 @@ impl Default for PeerScore {
             last_seen: None,
             rate_tokens: MAX_MSG_BURST,
             rate_last_refill: Instant::now(),
+            aux_last_refill: Instant::now(),
             vote_tokens: 10.0,
             blob_tokens: 5.0,
             handshaked: false,
@@ -70,17 +83,17 @@ impl PeerScore {
             false
         }
     }
+    /// Refill the vote and blob buckets. The general bucket is refilled by
+    /// `consume_token_with_rate`, so its clock is not shared with these two.
     pub fn refill_tokens(&mut self) {
         let now = Instant::now();
-        let elapsed = now.duration_since(self.rate_last_refill).as_secs_f64();
-
-        self.rate_tokens = (self.rate_tokens + elapsed * MSG_REFILL_RATE).min(MAX_MSG_BURST);
+        let elapsed = now.duration_since(self.aux_last_refill).as_secs_f64();
 
         self.vote_tokens = (self.vote_tokens + elapsed * 2.0).min(20.0);
 
         self.blob_tokens = (self.blob_tokens + elapsed * 0.5).min(10.0);
 
-        self.rate_last_refill = now;
+        self.aux_last_refill = now;
     }
     pub fn consume_token(&mut self) -> bool {
         self.consume_token_with_rate(MSG_REFILL_RATE)
@@ -132,6 +145,10 @@ pub struct PeerManager {
     outbound_subnet_counts: HashMap<[u8; 3], usize>,
     /// Outbound peer → subnet mapping.
     outbound_peer_subnets: HashMap<PeerId, [u8; 3]>,
+    /// When the last full-table prune found nothing to reclaim. While the
+    /// table stays full of unprunable records, scanning it again on every
+    /// message from an unknown peer is a CPU amplifier.
+    last_empty_prune: Option<Instant>,
 }
 impl Default for PeerManager {
     fn default() -> Self {
@@ -153,6 +170,7 @@ impl PeerManager {
             max_outbound_per_subnet: 0,
             outbound_subnet_counts: HashMap::new(),
             outbound_peer_subnets: HashMap::new(),
+            last_empty_prune: None,
         }
     }
 
@@ -313,12 +331,47 @@ impl PeerManager {
     /// accumulated penalty.
     fn get_or_create(&mut self, peer_id: &PeerId) -> Option<&mut PeerScore> {
         if !self.peers.contains_key(peer_id) && self.peers.len() >= self.max_tracked_peers {
-            self.prune_spent_records();
-            if self.peers.len() >= self.max_tracked_peers {
+            let recently_empty = self
+                .last_empty_prune
+                .is_some_and(|t| t.elapsed() < EMPTY_PRUNE_BACKOFF);
+            if !recently_empty {
+                if self.prune_spent_records() == 0 {
+                    self.last_empty_prune = Some(Instant::now());
+                } else {
+                    self.last_empty_prune = None;
+                }
+            }
+            if self.peers.len() >= self.max_tracked_peers
+                && !(self.connected_peers.contains(peer_id) && self.evict_stalest_penalty())
+            {
+                warn!(
+                    "Peer score table full ({}), refusing a record for {}",
+                    self.max_tracked_peers, peer_id
+                );
                 return None;
             }
         }
         Some(self.peers.entry(*peer_id).or_default())
+    }
+
+    /// Make room for a connected peer by dropping the least recently seen
+    /// unbanned, unconnected penalty record. A running ban is never dropped.
+    /// Connected peers are bounded by the connection limits, so this cannot
+    /// be driven faster than connections are admitted. Without it a table
+    /// full of fresh penalty records refuses to track a live peer, which
+    /// then can never complete its handshake.
+    fn evict_stalest_penalty(&mut self) -> bool {
+        let connected = &self.connected_peers;
+        let victim = self
+            .peers
+            .iter()
+            .filter(|(id, s)| !s.is_banned() && !connected.contains(*id))
+            .min_by_key(|(_, s)| s.last_seen)
+            .map(|(id, _)| *id);
+        match victim {
+            Some(id) => self.peers.remove(&id).is_some(),
+            None => false,
+        }
     }
 
     /// Reclaim records that carry nothing worth keeping.
@@ -407,6 +460,15 @@ impl PeerManager {
         } else {
             score.score = (score.score - 1).max(MIN_SCORE);
             score.last_seen = Some(Instant::now());
+            // A penalty that only walks the score down to the threshold never
+            // removes the peer: `MIN_SCORE` is the floor, so a vote flood
+            // costs it tokens and nothing else. The ban is the whole point of
+            // the penalty, so it fires here as it does for every other
+            // bad-behaviour report.
+            let spent = score.score <= BAN_THRESHOLD;
+            if spent {
+                self.ban_peer(peer_id);
+            }
             false
         }
     }
@@ -422,6 +484,10 @@ impl PeerManager {
         } else {
             score.score = (score.score - 5).max(MIN_SCORE);
             score.last_seen = Some(Instant::now());
+            let spent = score.score <= BAN_THRESHOLD;
+            if spent {
+                self.ban_peer(peer_id);
+            }
             false
         }
     }
@@ -554,16 +620,6 @@ impl PeerManager {
             .map(|(id, _)| *id)
             .collect()
     }
-    pub fn report_timeout(&mut self, peer_id: &PeerId) {
-        let Some(score) = self.get_or_create(peer_id) else {
-            return;
-        };
-        score.score = (score.score + TIMEOUT_PENALTY).max(MIN_SCORE);
-        score.last_seen = Some(Instant::now());
-        if score.score <= BAN_THRESHOLD {
-            self.ban_peer(peer_id);
-        }
-    }
     pub fn report_slow_sync(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
             return;
@@ -573,6 +629,57 @@ impl PeerManager {
         if score.score <= BAN_THRESHOLD {
             self.ban_peer(peer_id);
         }
+    }
+    /// A request this node sent came back unanswered.
+    ///
+    /// Asking a peer for a header batch or a block range is this node's own
+    /// decision, and the answer can fail for reasons that say nothing about
+    /// the peer: a connection that churned mid-flight, a peer busy importing
+    /// the blocks it already has, a request the transport dropped. The score
+    /// still moves - a peer that never answers sinks in `get_best_peers` and
+    /// stops being chosen as a sync source - but it does not reach the ban
+    /// threshold, because a ban is one hour of silence and a four-validator
+    /// mesh that bans one of its own on a dropped request can no longer reach
+    /// a finality quorum. Refusals that prove malice keep their own paths:
+    /// an invalid block, a forged vote, an oversized message.
+    pub fn report_unanswered_request(&mut self, peer_id: &PeerId) {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
+        score.score = score
+            .score
+            .saturating_add(UNANSWERED_REQUEST_PENALTY)
+            .max(MIN_SCORE.saturating_add(1));
+        score.last_seen = Some(Instant::now());
+    }
+    /// A block or a sync batch that does not continue this chain.
+    ///
+    /// `validate_and_add_block` answers `Previous hash mismatch` for two
+    /// situations that look alike on the wire and are not alike at all: our
+    /// own tip moved between the request and the answer (another arm of the
+    /// node imported a block first), or the peer is serving a fork that does
+    /// not contain our tip. Neither is a malformed block, and neither is proof
+    /// that the sender forged anything: on a mesh where a slot can have more
+    /// than one elected leader, a peer sitting on the winning branch is
+    /// expected to answer with a suffix that does not join the losing one.
+    /// Charging it as an invalid block let a four-validator devnet ban its own
+    /// validators over an ordinary fork and then fail to reach finality.
+    ///
+    /// The score still moves: a peer that answers every round with a batch
+    /// that cannot be joined sinks in `get_best_peers`, so the re-walk this
+    /// node performs asks someone else next time. The floor is one point above
+    /// [`BAN_THRESHOLD`], so this path can demote a peer but never silence it.
+    /// Refusals that do prove malice keep their own paths: a block whose own
+    /// hash does not match its contents, a forged vote, an oversized message.
+    pub fn report_unjoined_block(&mut self, peer_id: &PeerId) {
+        let Some(score) = self.get_or_create(peer_id) else {
+            return;
+        };
+        score.score = score
+            .score
+            .saturating_add(UNJOINED_BLOCK_PENALTY)
+            .max(MIN_SCORE.saturating_add(1));
+        score.last_seen = Some(Instant::now());
     }
     pub fn report_invalid_handshake(&mut self, peer_id: &PeerId) {
         let Some(score) = self.get_or_create(peer_id) else {
@@ -629,7 +736,10 @@ impl PeerManager {
                 continue;
             };
             let remaining = Duration::from_secs(ban.expires_unix - now_unix);
-            let entry = self.peers.entry(pid).or_default();
+            // The table ceiling applies to a reload too: a long ban file must not grow it.
+            let Some(entry) = self.get_or_create(&pid) else {
+                continue;
+            };
             entry.banned_until = Some(Instant::now() + remaining);
             entry.ban_expires_unix = Some(ban.expires_unix);
             entry.score = BAN_THRESHOLD;
@@ -670,6 +780,26 @@ mod tests {
         PeerId::random()
     }
     #[test]
+    fn vote_bucket_refills_although_general_bucket_is_touched() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        for _ in 0..10 {
+            assert!(manager.check_rate_limit(&peer));
+            assert!(manager.check_vote_rate_limit(&peer));
+        }
+        // Ten seconds pass; the general bucket is consumed on every message.
+        let Some(back) = Instant::now().checked_sub(Duration::from_secs(10)) else {
+            return;
+        };
+        if let Some(s) = manager.peers.get_mut(&peer) {
+            s.aux_last_refill = back;
+            s.rate_last_refill = back;
+        }
+        assert!(manager.check_rate_limit(&peer));
+        assert!(manager.check_vote_rate_limit(&peer));
+        assert!(manager.check_vote_rate_limit(&peer));
+    }
+    #[test]
     fn test_new_peer_has_zero_score() {
         let manager = PeerManager::new();
         let peer = test_peer_id();
@@ -699,6 +829,58 @@ mod tests {
         assert!(manager.is_banned(&peer));
         assert!(manager.get_score(&peer) <= BAN_THRESHOLD);
     }
+    /// A block that does not join this chain demotes the sender but never bans.
+    ///
+    /// This is the devnet failure in one test. A block or a sync answer refused
+    /// with `Previous hash mismatch` is what a peer on another branch of the
+    /// same slot says, and the receiving node used to charge it as an invalid
+    /// block:
+    /// ten such answers (a minute of ordinary fork traffic) banned a validator
+    /// for an hour, and the mesh lost the very node whose block it needed. The
+    /// peer is still demoted, because it must sink below a peer that answers
+    /// usefully, and the score must stop one point above the ban threshold
+    /// however long the fork lasts. Both callers (the gossip block arm and the
+    /// sync `Blocks` arm) use this one report.
+    #[test]
+    fn unjoined_blocks_demote_but_never_ban() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        let useful = test_peer_id();
+        manager.report_good_behavior(&useful);
+        for _ in 0..64 {
+            manager.report_unjoined_block(&peer);
+        }
+        assert!(
+            !manager.is_banned(&peer),
+            "a fork answer must not ban a peer"
+        );
+        let score = manager.get_score(&peer);
+        assert_eq!(
+            score,
+            MIN_SCORE + 1,
+            "the stale-batch score must floor one point above the ban threshold"
+        );
+        assert!(score < manager.get_score(&useful));
+        assert_eq!(
+            manager.get_best_peers(2).last().copied(),
+            Some(peer),
+            "a peer that keeps answering with an unjoinable batch must be asked last"
+        );
+    }
+
+    /// The canary for the test above: the same number of *invalid block*
+    /// reports still bans, so the floor is a property of this one path and not
+    /// of the score arithmetic in general.
+    #[test]
+    fn unjoined_block_floor_is_load_bearing() {
+        let mut manager = PeerManager::new();
+        let peer = test_peer_id();
+        for _ in 0..64 {
+            manager.report_invalid_block(&peer);
+        }
+        assert!(manager.is_banned(&peer));
+    }
+
     #[test]
     fn test_unban_peer() {
         let mut manager = PeerManager::new();
@@ -825,6 +1007,29 @@ mod tests {
             "the ceiling is never exceeded"
         );
         assert!(spent.peers.contains_key(&overflow));
+    }
+
+    /// A full table of unprunable records is scanned once, not on
+    /// every message from an unknown peer; the back-off lifts when a scan can
+    /// succeed again.
+    #[test]
+    fn a_full_unprunable_table_is_not_rescanned_on_every_message() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 4;
+        for _ in 0..4 {
+            let peer = libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id();
+            manager.report_invalid_tx(&peer);
+        }
+        let stranger = test_peer_id();
+        assert!(!manager.check_rate_limit(&stranger));
+        assert!(
+            manager.last_empty_prune.is_some(),
+            "the empty scan is remembered"
+        );
+        assert!(!manager.check_rate_limit(&stranger));
+        assert_eq!(manager.tracked_peer_count(), 4);
     }
 
     /// Burst exhaustion then rejection (token bucket).
@@ -1069,7 +1274,7 @@ mod tests {
         );
     }
 
-    /// Reputation invariant (§3.4): score must stay within
+    /// Reputation invariant: score must stay within
     /// `[MIN_SCORE, MAX_SCORE]` under any penalty sequence. The
     /// Invalid-block / invalid-tx / oversized-message penalty paths clamp to
     /// `MIN_SCORE` (like `report_bad_behavior`) so `get_score` never
@@ -1171,7 +1376,10 @@ mod tests {
             }),
             ("report_bad_behavior", |m, p| m.report_bad_behavior(p)),
             ("report_good_behavior", |m, p| m.report_good_behavior(p)),
-            ("report_timeout", |m, p| m.report_timeout(p)),
+            ("report_unanswered_request", |m, p| {
+                m.report_unanswered_request(p)
+            }),
+            ("report_unjoined_block", |m, p| m.report_unjoined_block(p)),
             ("report_slow_sync", |m, p| m.report_slow_sync(p)),
             ("report_invalid_handshake", |m, p| {
                 m.report_invalid_handshake(p)
@@ -1434,5 +1642,41 @@ mod tests {
             manager.check_rate_limit(&newcomer),
             "the table admits a new peer once the stale garbage is reclaimed"
         );
+    }
+
+    /// A connected peer must be able to handshake when the table is full of
+    /// fresh penalty records minted by short-lived ids.
+    #[test]
+    fn connected_peer_handshakes_when_table_is_full_of_fresh_penalties() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 4;
+        let banned = test_peer_id();
+        manager.ban_peer(&banned);
+        for _ in 0..3 {
+            manager.report_invalid_handshake(&test_peer_id());
+        }
+        assert_eq!(manager.tracked_peer_count(), 4);
+
+        let honest = test_peer_id();
+        assert!(manager.note_connected(honest, None));
+        manager.set_handshaked(&honest, true);
+        assert!(manager.is_handshaked(&honest));
+        assert!(manager.is_banned(&banned), "a running ban must survive");
+    }
+
+    #[test]
+    fn reloading_a_long_ban_list_respects_the_table_ceiling() {
+        let mut manager = PeerManager::new();
+        manager.max_tracked_peers = 4;
+        let expires_unix = unix_now_secs() + 600;
+        let bans: Vec<PersistedBan> = (0..16)
+            .map(|_| PersistedBan {
+                peer_id: PeerId::random().to_base58(),
+                expires_unix,
+            })
+            .collect();
+        manager.reload_banned_peers(&bans);
+        assert!(manager.peers.len() <= 4);
+        assert!(manager.get_banned_peers().len() <= 4);
     }
 }

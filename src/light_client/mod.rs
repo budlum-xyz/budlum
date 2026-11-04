@@ -23,6 +23,7 @@
 //! whose `set_hash` differs from the trusted one is rejected, not silently
 //! followed. A set change needs a new trust anchor out-of-band.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
@@ -73,14 +74,14 @@ pub struct VerifiedCheckpoint {
     /// The external chain's state root at `height` (64-hex), as recorded in the
     /// finalized header. A consensus step anchors this via
     /// `AccountState::anchor_external_root` so the relayer gate can validate
-    /// against it (AR-GE-6 / F-12). Carried here so the verified finality fact
+    /// against it (AR-GE-6 /). Carried here so the verified finality fact
     /// survives past the verification call.
     pub state_root: String,
 }
 
 impl VerifiedCheckpoint {
     /// The external chain's state root at [`Self::height`], as a 32-byte digest
-    /// ready to anchor via `AccountState::anchor_external_root` (AR-GE-6 / F-12).
+    /// ready to anchor via `AccountState::anchor_external_root` (AR-GE-6 /).
     ///
     /// Returns `None` when the recorded root is not a canonical 32-byte digest:
     /// such a value would be refused by the anchor (zero / malformed), so
@@ -116,6 +117,9 @@ pub enum LightClientError {
     SetChanged { trusted: String, candidate: String },
     /// A header chain is not contiguous and parent-linked.
     HeaderChain(String),
+    /// A global header does not reopen the finalized state root, or does
+    /// not belong to the checkpoint it is presented for.
+    GlobalHeaderBinding(String),
 }
 
 impl fmt::Display for LightClientError {
@@ -141,6 +145,9 @@ impl fmt::Display for LightClientError {
                 "validator set changed under the light client: trusted {trusted}, candidate {candidate}"
             ),
             Self::HeaderChain(reason) => write!(f, "header chain invalid: {reason}"),
+            Self::GlobalHeaderBinding(reason) => {
+                write!(f, "global header does not bind to the checkpoint: {reason}")
+            }
         }
     }
 }
@@ -161,6 +168,49 @@ pub struct LightSyncPlan {
 #[derive(Debug, Clone)]
 pub struct LightClient {
     trusted: TrustedCheckpoint,
+    /// Headers (height to hash) that `verify_header_chain` linked to the
+    /// trust anchor. A checkpoint is only accepted for a header in this map,
+    /// so a finalized header from an unrelated fork cannot move the anchor.
+    linked: BTreeMap<u64, String>,
+    /// Refuse a BLS-only checkpoint. Set for a mainnet client:
+    /// there, finality needs the BLS certificate and the ML-DSA-65 QC of the
+    /// same signers.
+    require_pq: bool,
+    /// The scheme statuses this client verifies post-quantum signatures under.
+    ///
+    /// Genesis statuses are the default, which is right for a client built
+    /// against a fresh chain and wrong for one following a live chain: the
+    /// Frost Alarm demotes a broken lattice family to `Disabled` in consensus
+    /// state, and every node then refuses signatures under it in the same
+    /// block. A client that kept judging by genesis statuses would verify a
+    /// checkpoint the network itself rejects and advance its trust anchor on
+    /// it. The wire carries no registry, so a client tracking a live chain pins
+    /// the chain's registry with [`Self::with_scheme_registry`], exactly as it
+    /// pins the trust anchor.
+    registry: crate::crypto::scheme::SchemeStatusRegistry,
+}
+
+/// What a light client's verified checkpoints rest on (Section 6.2 of the PQ
+///). Shown to the user beside every answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// WIRING: light-client surface - the sync doors that read it land with their wiring.
+pub enum TrustMode {
+    /// The validator majority: the trusted set's finality certificates (BLS
+    /// and ML-DSA-65 QC) and, across set changes, the handoff chain.
+    Committee,
+    /// The Budlum anchor key ledger: the last PQ anchor and the root seal.
+    Anchor,
+}
+
+impl TrustMode {
+    /// One line naming the trust a user accepts in this mode.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Committee => "committee mode: trusts a two-thirds majority of the validator set",
+            Self::Anchor => "anchor mode: trusts the Budlum anchor key ledger",
+        }
+    }
 }
 
 impl LightClient {
@@ -186,7 +236,80 @@ impl LightClient {
                 trusted.set_hash
             )));
         }
-        Ok(Self { trusted })
+        Ok(Self {
+            trusted,
+            linked: BTreeMap::new(),
+            require_pq: false,
+            registry: crate::crypto::scheme::SchemeStatusRegistry::genesis(),
+        })
+    }
+
+    /// Bootstrap for the network of `chain_id`. A mainnet client refuses
+    /// BLS-only checkpoints: only [`Self::verify_hybrid_checkpoint`]
+    /// and [`Self::verify_pq_checkpoint`] advance it.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::new`].
+    pub fn for_chain(trusted: TrustedCheckpoint, chain_id: u64) -> Result<Self, LightClientError> {
+        let mut client = Self::new(trusted)?;
+        client.require_pq = chain_id
+            == crate::core::chain_config::Network::Mainnet
+                .chain_id()
+                .value();
+        Ok(client)
+    }
+
+    /// Pin the chain policy this client verifies under: the scheme statuses
+    /// the chain holds in consensus state.
+    ///
+    /// The registry is not on the wire, so the caller pins it out of band like
+    /// the trust anchor. Without it the client verifies under genesis statuses,
+    /// and a family the chain has disabled keeps verifying here.
+    #[must_use]
+    pub fn with_scheme_registry(
+        mut self,
+        registry: crate::crypto::scheme::SchemeStatusRegistry,
+    ) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    /// The trust this client's checkpoints rest on: the validator committee.
+    #[must_use]
+    pub const fn trust_mode(&self) -> TrustMode {
+        TrustMode::Committee
+    }
+
+    /// Whether this client refuses BLS-only checkpoints.
+    #[must_use]
+    /// WIRING: unwired - no caller in this tree yet; kept as a declared surface, and nothing depends on it until one arrives.
+    pub const fn requires_pq(&self) -> bool {
+        self.require_pq
+    }
+
+    /// Verify a checkpoint with both halves: the BLS certificate as
+    /// [`Self::verify_checkpoint`] checks it, and the ML-DSA-65 QC blob of
+    /// the same signers over the same checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Any refusal of the BLS half, or a QC that does not bind to the
+    /// certificate or misses a BLS signer.
+    pub fn verify_hybrid_checkpoint(
+        &self,
+        header: &BlockHeader,
+        cert: &FinalityCert,
+        blob: &QcBlob,
+        snapshot: &ValidatorSetSnapshot,
+    ) -> Result<VerifiedCheckpoint, LightClientError> {
+        let verified = self.verify_bls_half(header, cert, snapshot)?;
+        // The client's pinned registry, not a fresh genesis one: a family the
+        // chain has demoted to `Disabled` must stop verifying here in the same
+        // block it stops verifying on every node.
+        crate::domain::finality_adapter::verify_pq_quorum(&self.registry, cert, snapshot, blob)
+            .map_err(LightClientError::VerificationFailed)?;
+        Ok(verified)
     }
 
     /// The current trust anchor.
@@ -211,7 +334,8 @@ impl LightClient {
     /// Verify a BLS finality certificate checkpoint against the trusted set.
     ///
     /// The checks run in order, each binding the next layer to the previous
-    /// one: the header must hash to itself, the certificate must name exactly
+    /// one: the header must hash to itself and be linked to the trust anchor
+    /// by an earlier `verify_header_chain` call, the certificate must name exactly
     /// that header, the certificate and the snapshot must carry the trusted
     /// validator-set hash, and finally the BLS aggregate signature must carry
     /// the stake and signer quorum (`FinalityCert::verify`).
@@ -226,11 +350,31 @@ impl LightClient {
         cert: &FinalityCert,
         snapshot: &ValidatorSetSnapshot,
     ) -> Result<VerifiedCheckpoint, LightClientError> {
+        if self.require_pq {
+            return Err(LightClientError::VerificationFailed(
+                "a BLS-only checkpoint is refused on mainnet; verify the QC blob too".into(),
+            ));
+        }
+        self.verify_bls_half(header, cert, snapshot)
+    }
+
+    fn verify_bls_half(
+        &self,
+        header: &BlockHeader,
+        cert: &FinalityCert,
+        snapshot: &ValidatorSetSnapshot,
+    ) -> Result<VerifiedCheckpoint, LightClientError> {
         Self::validate_snapshot_metadata(snapshot)?;
         if !is_canonical_hash(&header.hash) || header.hash != header.calculate_hash() {
             return Err(LightClientError::InvalidHeader(format!(
                 "header hash {} is not self-consistent",
                 header.hash
+            )));
+        }
+        if self.linked.get(&header.index) != Some(&header.hash) {
+            return Err(LightClientError::HeaderChain(format!(
+                "header {} at height {} is not linked to the trust anchor; run verify_header_chain first",
+                header.hash, header.index
             )));
         }
         if header.index != cert.checkpoint_height {
@@ -295,6 +439,12 @@ impl LightClient {
                 header.hash
             )));
         }
+        if self.linked.get(&header.index) != Some(&header.hash) {
+            return Err(LightClientError::HeaderChain(format!(
+                "header {} at height {} is not linked to the trust anchor; run verify_header_chain first",
+                header.hash, header.index
+            )));
+        }
         if header.index != blob.checkpoint_height {
             return Err(LightClientError::CertificateBinding(format!(
                 "header height {} != blob height {}",
@@ -321,7 +471,7 @@ impl LightClient {
         }
 
         let verified = blob
-            .verify_against_snapshot(snapshot, None, None)
+            .verify_against_snapshot_in(&self.registry, snapshot, None, None)
             .map_err(LightClientError::VerificationFailed)?;
 
         // Summed exactly, like the threshold: a saturated partial sum met a
@@ -365,12 +515,15 @@ impl LightClient {
     /// segment from an unrelated fork that reuses the same validator set
     /// (CWE-345).
     ///
+    /// A segment that passes is remembered: `verify_checkpoint` and
+    /// `verify_pq_checkpoint` accept only a header from a linked segment.
+    ///
     /// # Errors
     ///
     /// Returns [`LightClientError::HeaderChain`] for a malformed or
     /// disconnected segment and [`LightClientError::NotForward`] for a header
     /// at or below the anchor.
-    pub fn verify_header_chain(&self, headers: &[BlockHeader]) -> Result<(), LightClientError> {
+    pub fn verify_header_chain(&mut self, headers: &[BlockHeader]) -> Result<(), LightClientError> {
         if headers.is_empty() {
             return Err(LightClientError::HeaderChain(
                 "no headers supplied".to_string(),
@@ -413,6 +566,9 @@ impl LightClient {
                 )));
             }
         }
+        for header in headers {
+            self.linked.insert(header.index, header.hash.clone());
+        }
         Ok(())
     }
 
@@ -446,7 +602,72 @@ impl LightClient {
             block_hash: verified.block_hash.clone(),
             set_hash: verified.set_hash.clone(),
         };
+        self.linked.retain(|height, _| *height > verified.height);
         Ok(())
+    }
+
+    /// Move the trusted validator set across set changes by following the
+    /// Handoff Certificate chain. `outgoing` must be the set
+    /// the client trusts; each step is a certificate and the snapshot it
+    /// hands to. Only ML-DSA-65 signatures are checked, so the move holds
+    /// without trusting BLS. The anchor height stays; the next checkpoint
+    /// verified over the new set advances it.
+    ///
+    /// # Errors
+    ///
+    /// `epoch_randomness` is the epoch randomness the caller independently
+    /// obtained for each epoch on the way; the certificate's own `randomness`
+    /// field seats the handoff committee, so a certificate cannot be allowed to
+    /// name it (see [`crate::consensus::handoff::HandoffCertificate::verify_in`]).
+    ///
+    /// # Errors
+    ///
+    /// [`LightClientError::TrustBinding`] when `outgoing` is not the trusted
+    /// set or a snapshot is not self-consistent, and
+    /// [`LightClientError::VerificationFailed`] when the chain does not verify.
+    /// WIRING: light-client surface - the sync doors that read it land with their wiring.
+    pub fn follow_handoffs(
+        &mut self,
+        registry: &crate::crypto::scheme::SchemeStatusRegistry,
+        chain_id: u64,
+        outgoing: &ValidatorSetSnapshot,
+        steps: &[(
+            crate::consensus::handoff::HandoffCertificate,
+            ValidatorSetSnapshot,
+        )],
+        epoch_randomness: &dyn Fn(u64) -> [u8; 32],
+    ) -> Result<u64, LightClientError> {
+        use crate::consensus::handoff::{follow_handoffs, HandoffMember};
+        if outgoing.set_hash != self.trusted.set_hash {
+            return Err(LightClientError::TrustBinding(
+                "the outgoing set is not the trusted set".into(),
+            ));
+        }
+        outgoing
+            .validate_metadata()
+            .map_err(LightClientError::TrustBinding)?;
+        let Some((_, last)) = steps.last() else {
+            return Ok(outgoing.epoch);
+        };
+        let mut member_steps = Vec::with_capacity(steps.len());
+        for (cert, snapshot) in steps {
+            snapshot
+                .validate_metadata()
+                .map_err(LightClientError::TrustBinding)?;
+            member_steps.push((cert.clone(), HandoffMember::from_snapshot(snapshot)));
+        }
+        let trusted_members = HandoffMember::from_snapshot(outgoing);
+        let (epoch, _) = follow_handoffs(
+            registry,
+            chain_id,
+            outgoing.epoch,
+            &trusted_members,
+            &member_steps,
+            epoch_randomness,
+        )
+        .map_err(|e| LightClientError::VerificationFailed(e.to_string()))?;
+        self.trusted.set_hash = last.set_hash.clone();
+        Ok(epoch)
     }
 
     /// The next checkpoint height strictly above the anchor, given the chain's
@@ -460,14 +681,55 @@ impl LightClient {
         if interval == 0 || self.trusted.height >= target_height {
             return None;
         }
-        let mut height = self.trusted.height.saturating_add(1);
-        while height <= target_height {
-            if height.is_multiple_of(interval) {
-                return Some(height);
-            }
-            height = height.saturating_add(1);
+        // Closed form: one division, not a walk of up to 2^64 heights.
+        let start = self.trusted.height.checked_add(1)?;
+        let rest = start % interval;
+        let next = if rest == 0 {
+            start
+        } else {
+            start.checked_add(interval - rest)?
+        };
+        (next <= target_height).then_some(next)
+    }
+
+    /// Verify that `header` is the global header the finalized checkpoint
+    /// commits: it was built at the checkpoint's height, and the
+    /// checkpoint's state root reopens with `state_root_body` and the header
+    /// hash (`AccountState::root_from_opening`). The chain a light client
+    /// walks is then: trust anchor, finality certificate, block, global
+    /// header, and from there any root the header carries.
+    ///
+    /// # Errors
+    ///
+    /// [`LightClientError::GlobalHeaderBinding`] when the header belongs to
+    /// another checkpoint or the opening does not reproduce the state root;
+    /// [`LightClientError::MalformedHash`] when the checkpoint's state root
+    /// is not a 32-byte digest.
+    pub fn verify_global_header(
+        checkpoint: &VerifiedCheckpoint,
+        state_root_body: &crate::domain::types::Hash32,
+        header: &crate::settlement::GlobalBlockHeader,
+    ) -> Result<(), LightClientError> {
+        if header.checkpoint_height != checkpoint.height {
+            return Err(LightClientError::GlobalHeaderBinding(format!(
+                "header was built at height {}, the checkpoint is at {}",
+                header.checkpoint_height, checkpoint.height
+            )));
         }
-        None
+        let state_root = checkpoint
+            .external_root()
+            .ok_or_else(|| LightClientError::MalformedHash(checkpoint.state_root.clone()))?;
+        let reopened = crate::core::account::AccountState::root_from_opening(
+            state_root_body,
+            &header.calculate_hash_bytes(),
+        );
+        if reopened != state_root {
+            return Err(LightClientError::GlobalHeaderBinding(
+                "the opening and the header hash do not reproduce the finalized state root"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// The wire requests a transport must issue from this anchor: a
@@ -517,7 +779,7 @@ mod tests {
                 ValidatorEntry {
                     address: addr,
                     stake: stake_each,
-                    bls_public_key: key.public_key,
+                    bls_public_key: key.public_key.clone(),
                     pop_signature: pop_sig,
                     pq_public_key: Vec::new(),
                 }
@@ -549,11 +811,13 @@ mod tests {
 
         for (i, sk) in sks.iter().enumerate().take(signers) {
             let vote = Prevote {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: snapshot.epoch,
                 checkpoint_height: header.index,
                 checkpoint_hash: checkpoint_hash.clone(),
                 voter_id: snapshot.validators[i].address,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
             };
             let sig = sign_bls(sk, &vote.signing_message());
             let mut signed = vote;
@@ -564,11 +828,14 @@ mod tests {
         let mut agg_sig = G1Projective::identity();
         for (i, sk) in sks.iter().enumerate().take(signers) {
             let pc = Precommit {
+                chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                 epoch: snapshot.epoch,
                 checkpoint_height: header.index,
                 checkpoint_hash: checkpoint_hash.clone(),
                 voter_id: snapshot.validators[i].address,
                 sig_bls: vec![],
+                auth_sig: Vec::new(),
+                pq_sig: Vec::new(),
             };
             let sig = sign_bls(sk, &pc.signing_message());
             let mut signed = pc;
@@ -581,6 +848,39 @@ mod tests {
         let mut cert = agg.try_produce_cert().expect("certificate produced");
         cert.agg_sig_bls = G1Affine::from(agg_sig).to_compressed().to_vec();
         cert
+    }
+
+    #[test]
+    fn a_mainnet_client_refuses_a_bls_only_checkpoint() {
+        let trusted = TrustedCheckpoint {
+            height: 0,
+            block_hash: "0".repeat(64),
+            set_hash: "0".repeat(64),
+        };
+        let mainnet = crate::core::chain_config::Network::Mainnet
+            .chain_id()
+            .value();
+        let client = LightClient::for_chain(trusted.clone(), mainnet).expect("anchor");
+        assert!(client.requires_pq());
+        assert_eq!(client.trust_mode(), TrustMode::Committee);
+        let (snapshot, _) = make_bls_snapshot(1, 100);
+        let header = make_block_header_at(1, mainnet);
+        let cert = FinalityCert {
+            epoch: 1,
+            checkpoint_height: 1,
+            checkpoint_hash: header.hash.clone(),
+            chain_id: mainnet,
+            agg_sig_bls: Vec::new(),
+            bitmap: vec![1],
+            set_hash: snapshot.set_hash.clone(),
+        };
+        let err = client
+            .verify_checkpoint(&header, &cert, &snapshot)
+            .expect_err("BLS-only is refused before any binding check");
+        assert!(matches!(err, LightClientError::VerificationFailed(_)));
+        assert!(!LightClient::for_chain(trusted, TEST_CHAIN_ID)
+            .expect("anchor")
+            .requires_pq());
     }
 
     #[test]
@@ -611,12 +911,13 @@ mod tests {
         let header = make_block_header_at(10, TEST_CHAIN_ID);
         let cert = make_valid_bls_cert(&snapshot, &sks, &header, 3);
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         let verified = client
             .verify_checkpoint(&header, &cert, &snapshot)
@@ -625,7 +926,6 @@ mod tests {
         assert_eq!(verified.block_hash, header.hash);
         assert_eq!(verified.set_hash, snapshot.set_hash);
 
-        let mut client = client;
         client.advance(&verified).expect("advance");
         assert_eq!(client.trusted().height, 10);
         assert_eq!(client.trusted().block_hash, header.hash);
@@ -638,12 +938,13 @@ mod tests {
         let mut cert = make_valid_bls_cert(&snapshot, &sks, &header, 3);
         cert.checkpoint_hash = "1".repeat(64);
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         assert!(matches!(
             client.verify_checkpoint(&header, &cert, &snapshot),
@@ -658,12 +959,13 @@ mod tests {
         let mut cert = make_valid_bls_cert(&snapshot, &sks, &header, 3);
         cert.set_hash = "f".repeat(64);
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         assert!(matches!(
             client.verify_checkpoint(&header, &cert, &snapshot),
@@ -682,12 +984,13 @@ mod tests {
         let mut cert = make_valid_bls_cert(&snapshot, &sks, &header, 3);
         cert.bitmap = vec![0b0000_0011];
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         assert!(matches!(
             client.verify_checkpoint(&header, &cert, &snapshot),
@@ -695,7 +998,7 @@ mod tests {
         ));
     }
 
-    /// AR-GE-6 / F-12: a verified checkpoint exposes the external state root
+    /// AR-GE-6 /: a verified checkpoint exposes the external state root
     /// as an anchorable Hash32; non-32-byte / non-hex roots are refused.
     #[test]
     fn verified_checkpoint_exposes_anchorable_external_root() {
@@ -739,6 +1042,7 @@ mod tests {
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         let verified = client
             .verify_checkpoint(&header, &cert, &snapshot)
@@ -779,21 +1083,72 @@ mod tests {
         let header = make_block_header_at(10, TEST_CHAIN_ID);
         let blob = make_pq_blob(&snapshot, &keys, &header);
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         let verified = client
             .verify_pq_checkpoint(&header, &blob, &snapshot)
             .expect("honest PQ checkpoint verifies");
         assert_eq!(verified.height, 10);
 
-        let mut client = client;
         client.advance(&verified).expect("advance");
         assert_eq!(client.trusted().height, 10);
+    }
+
+    /// The client verifies PQ signatures under the registry it was pinned to,
+    /// not a fresh genesis registry.
+    ///
+    /// The Frost Alarm demotes a lattice family to `Disabled` in consensus
+    /// state and every node refuses signatures under it in the same block. A
+    /// client that verified under `SchemeStatusRegistry::genesis()` kept
+    /// accepting them, printed `CHECKPOINT VERIFIED`, and advanced its trust
+    /// anchor on a checkpoint the network itself rejects.
+    #[test]
+    fn a_pinned_registry_decides_whether_the_pq_half_verifies() {
+        use crate::crypto::scheme::{SchemeId, SchemeStatus, SchemeStatusRegistry};
+
+        let (snapshot, keys) = make_pq_snapshot(3, 1000);
+        let header = make_block_header_at(10, TEST_CHAIN_ID);
+        let blob = make_pq_blob(&snapshot, &keys, &header);
+        let trusted = TrustedCheckpoint {
+            height: 0,
+            block_hash: "0".repeat(64),
+            set_hash: snapshot.set_hash.clone(),
+        };
+        let mut linked = LightClient::new(trusted.clone()).expect("bootstrap");
+        linked.linked.insert(header.index, header.hash.clone());
+        linked
+            .verify_pq_checkpoint(&header, &blob, &snapshot)
+            .expect("the genesis statuses accept the blob");
+
+        // The same blob, judged by a chain that has disabled the family the
+        // validators signed with.
+        let (mut schemes, suites) = SchemeStatusRegistry::genesis().entries();
+        for (id, status) in &mut schemes {
+            if *id == SchemeId::ML_DSA_65.0 {
+                *status = SchemeStatus::Disabled.to_byte();
+            }
+        }
+        let disabled =
+            SchemeStatusRegistry::from_entries(&schemes, &suites).expect("a full registry");
+        assert!(!disabled.scheme_verifies(SchemeId::ML_DSA_65));
+
+        let mut pinned = LightClient::new(trusted)
+            .expect("bootstrap")
+            .with_scheme_registry(disabled);
+        pinned.linked.insert(header.index, header.hash.clone());
+        assert!(
+            matches!(
+                pinned.verify_pq_checkpoint(&header, &blob, &snapshot),
+                Err(LightClientError::VerificationFailed(_))
+            ),
+            "a family the chain disabled must not verify here"
+        );
     }
 
     #[test]
@@ -807,12 +1162,13 @@ mod tests {
         blob.pq_signatures.push(dup);
         blob.merkle_root = QcBlob::compute_merkle_root(&blob.pq_signatures);
 
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash.clone(),
         })
         .unwrap();
+        client.linked.insert(header.index, header.hash.clone());
 
         assert!(matches!(
             client.verify_pq_checkpoint(&header, &blob, &snapshot),
@@ -823,7 +1179,7 @@ mod tests {
     #[test]
     fn header_chain_requires_contiguity_and_forward_motion() {
         let (snapshot, _sks) = make_bls_snapshot(4, 1000);
-        let client = LightClient::new(TrustedCheckpoint {
+        let mut client = LightClient::new(TrustedCheckpoint {
             height: 0,
             block_hash: "0".repeat(64),
             set_hash: snapshot.set_hash,
@@ -847,6 +1203,76 @@ mod tests {
             client.verify_header_chain(&[anchor_header]),
             Err(LightClientError::NotForward { .. })
         ));
+    }
+
+    /// A finalized header that `verify_header_chain` never linked to the
+    /// anchor is refused, even with a valid certificate (audit).
+    #[test]
+    fn checkpoint_requires_a_header_linked_to_the_anchor() {
+        let (snapshot, sks) = make_bls_snapshot(4, 1000);
+        let mut client = LightClient::new(TrustedCheckpoint {
+            height: 0,
+            block_hash: "0".repeat(64),
+            set_hash: snapshot.set_hash.clone(),
+        })
+        .unwrap();
+
+        let mut h1 = make_block_header_at(1, TEST_CHAIN_ID);
+        h1.previous_hash = "0".repeat(64);
+        h1.hash = h1.calculate_hash();
+        let mut h2 = make_block_header_at(2, TEST_CHAIN_ID);
+        h2.previous_hash = h1.hash.clone();
+        h2.hash = h2.calculate_hash();
+
+        // A self-consistent header of an unrelated fork at the same height.
+        let mut fork = make_block_header_at(2, TEST_CHAIN_ID);
+        fork.previous_hash = "9".repeat(64);
+        fork.hash = fork.calculate_hash();
+        let fork_cert = make_valid_bls_cert(&snapshot, &sks, &fork, 3);
+        let cert = make_valid_bls_cert(&snapshot, &sks, &h2, 3);
+
+        // Nothing is linked yet.
+        assert!(matches!(
+            client.verify_checkpoint(&h2, &cert, &snapshot),
+            Err(LightClientError::HeaderChain(_))
+        ));
+
+        client
+            .verify_header_chain(&[h1, h2.clone()])
+            .expect("segment continues the anchor");
+        assert!(client.verify_checkpoint(&h2, &cert, &snapshot).is_ok());
+        assert!(matches!(
+            client.verify_checkpoint(&fork, &fork_cert, &snapshot),
+            Err(LightClientError::HeaderChain(_))
+        ));
+    }
+
+    /// The next checkpoint height is computed in closed form (audit):
+    /// a huge target must not loop height by height.
+    #[test]
+    fn next_checkpoint_height_is_closed_form() {
+        let client = LightClient::new(TrustedCheckpoint {
+            height: 4,
+            block_hash: "0".repeat(64),
+            set_hash: "0".repeat(64),
+        })
+        .unwrap();
+        assert_eq!(client.next_checkpoint_height(10, u64::MAX), Some(10));
+        assert_eq!(client.next_checkpoint_height(5, 100), Some(5));
+        assert_eq!(client.next_checkpoint_height(10, 9), None);
+        assert_eq!(client.next_checkpoint_height(0, 100), None);
+        assert_eq!(client.next_checkpoint_height(1, 100), Some(5));
+        assert_eq!(
+            client.next_checkpoint_height(u64::MAX, u64::MAX),
+            Some(u64::MAX)
+        );
+        let top = LightClient::new(TrustedCheckpoint {
+            height: u64::MAX,
+            block_hash: "0".repeat(64),
+            set_hash: "0".repeat(64),
+        })
+        .unwrap();
+        assert_eq!(top.next_checkpoint_height(3, u64::MAX), None);
     }
 
     #[test]
@@ -913,14 +1339,77 @@ mod tests {
                     &header.hash,
                     u32::try_from(idx).expect("test validator count is small"),
                 );
-                let sig = keys[idx].sign(&message).expect("sign");
+                let sig = keys[idx]
+                    .sign(crate::crypto::ctx::QC_V2, &message)
+                    .expect("sign");
                 PqSignatureEntry {
                     validator_index: u32::try_from(idx).expect("test validator count is small"),
                     validator_address: validator.address.to_string(),
-                    dilithium_signature: sig,
+                    pq_signature: sig,
                 }
             })
             .collect();
         QcBlob::new(snapshot.epoch, header.index, header.hash.clone(), entries)
+    }
+
+    /// a global header binds to a verified checkpoint through the state
+    /// root opening; a header from another checkpoint, a tampered header or
+    /// a wrong opening is refused.
+    #[test]
+    fn a_global_header_binds_to_its_checkpoint_through_the_state_root() {
+        use crate::core::account::AccountState;
+        use crate::settlement::GlobalBlockHeader;
+
+        let mut state = AccountState::new();
+        let header = GlobalBlockHeader {
+            version: 2,
+            global_height: 0,
+            previous_global_hash: [0u8; 32],
+            chain_id: TEST_CHAIN_ID,
+            timestamp_ms: 1,
+            domain_registry_root: [1u8; 32],
+            domain_commitment_root: [2u8; 32],
+            message_root: [3u8; 32],
+            bridge_state_root: [4u8; 32],
+            replay_nonce_root: [5u8; 32],
+            proposer: None,
+            settlement_finality_root: [6u8; 32],
+            storage_root: None,
+            ai_root: None,
+            identity_root: None,
+            checkpoint_height: 10,
+            external_intake_root: None,
+            graft_root: None,
+            delegation_root: None,
+        };
+        state.global_header_summary = header.calculate_hash_bytes();
+        let body = state.state_root_body();
+        let checkpoint = VerifiedCheckpoint {
+            height: 10,
+            block_hash: "aa".repeat(32),
+            set_hash: "bb".repeat(32),
+            epoch: 1,
+            state_root: state.calculate_state_root(),
+        };
+        assert!(LightClient::verify_global_header(&checkpoint, &body, &header).is_ok());
+
+        let mut tampered = header.clone();
+        tampered.domain_commitment_root = [9u8; 32];
+        assert!(matches!(
+            LightClient::verify_global_header(&checkpoint, &body, &tampered),
+            Err(LightClientError::GlobalHeaderBinding(_))
+        ));
+
+        let mut elsewhere = header.clone();
+        elsewhere.checkpoint_height = 20;
+        assert!(matches!(
+            LightClient::verify_global_header(&checkpoint, &body, &elsewhere),
+            Err(LightClientError::GlobalHeaderBinding(_))
+        ));
+
+        assert!(matches!(
+            LightClient::verify_global_header(&checkpoint, &[7u8; 32], &header),
+            Err(LightClientError::GlobalHeaderBinding(_))
+        ));
     }
 }

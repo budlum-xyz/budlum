@@ -2,7 +2,7 @@
 //! (2026-08-16).
 //!
 //! Research: inspiration 2 D (a durable state machine plus checkpoint
-//! conformance), S.123 (decentralised agent coordination) and K53/K67 (the
+//! conformance), S.123 (decentralised agent coordination) and (the
 //! SEC 17a-4 audit trail: a hash chain plus a timestamp, an identity and a
 //! cryptographic proof). B.U.D.'s multi-format multi-ratio consensus is carried
 //! by a durable checkpoint: the chosen ratio and signature of every format is
@@ -55,7 +55,7 @@ impl Checkpoint {
         cp
     }
 
-    /// Domain-tagged cryptographic hash (the K3 pattern).
+    /// Domain-tagged cryptographic hash (the pattern).
     pub fn compute_hash(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(Self::DOMAIN);
@@ -88,6 +88,9 @@ impl Checkpoint {
                 let prev = &checkpoints[i - 1];
                 if cp.prev_hash != prev.hash {
                     return false; // the chain is broken
+                }
+                if cp.epoch <= prev.epoch {
+                    return false; // epochs must strictly increase
                 }
             }
         }
@@ -167,6 +170,34 @@ mod tests {
             !Checkpoint::verify_chain(&[c1, c2]),
             "a chain whose prev hash does not match is REFUSED"
         );
+    }
+
+    #[test]
+    fn epochs_must_increase() {
+        let c1 = Checkpoint::new(
+            5,
+            FormatCodec::Json,
+            "json-expert",
+            "zstd19",
+            7.83,
+            root(1),
+            [0u8; 32],
+        );
+        for epoch in [5u64, 4, 0] {
+            let c2 = Checkpoint::new(
+                epoch,
+                FormatCodec::Log,
+                "log-expert",
+                "zstd19",
+                6.17,
+                root(2),
+                c1.hash,
+            );
+            assert!(
+                !Checkpoint::verify_chain(&[c1.clone(), c2]),
+                "epoch {epoch} after 5 is REFUSED"
+            );
+        }
     }
 
     #[test]

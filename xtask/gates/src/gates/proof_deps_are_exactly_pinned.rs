@@ -52,17 +52,48 @@ fn dependency(line: &str) -> Option<(&str, &str)> {
         return None;
     }
     let rest = rest.trim();
-    // Kisa yazim: ad = "0.6"
+    // Short form: name = "0.6"
     let version = if let Some(v) = rest.strip_prefix('"') {
         v.split('"').next()?
     } else if rest.starts_with('{') {
-        // Tablo yazimi: ad = { version = "0.6", ... }
+        // Table form: name = { version = "0.6", ... }
         let v = rest.split("version").nth(1)?;
         v.split('"').nth(1)?
     } else {
         return None;
     };
     Some((name, version))
+}
+
+/// Is this version expression `=x.y.z` with three numeric parts? `=0.7` would
+/// still let Cargo take any 0.7.x release.
+fn is_exact_pin(version: &str) -> bool {
+    let Some(rest) = version.strip_prefix('=') else {
+        return false;
+    };
+    // An optional pre-release or build suffix after the three numbers.
+    let core = rest.split(['-', '+']).next().unwrap_or("");
+    let parts: Vec<&str> = core.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// A covered dependency written in a form that carries no version on the line:
+/// `{ workspace = true }` or a `git` source. Its version cannot be read here.
+fn unreadable_dependency(line: &str) -> Option<&str> {
+    let t = line.trim();
+    if t.starts_with('#') {
+        return None;
+    }
+    let (name, rest) = t.split_once('=')?;
+    let name = name.trim();
+    if !PINNED_PREFIXES.iter().any(|(p, _)| name.starts_with(p)) || name.contains(' ') {
+        return None;
+    }
+    let rest = rest.trim();
+    (rest.starts_with('{') && !rest.contains("version")).then_some(name)
 }
 
 /// # Errors
@@ -77,6 +108,15 @@ pub fn run(root: &Path) -> Result<String, String> {
         let text = std::fs::read_to_string(&path)
             .map_err(|e| format!("could not read {manifest}: {e}"))?;
         for line in text.lines() {
+            if let Some(name) = unreadable_dependency(line) {
+                checked += 1;
+                let _ = write!(
+                    problems,
+                    "\n  {manifest}: `{name}` has no version on its line (workspace or git \
+                     source), so the exact pin cannot be checked. Pin it here with `=x.y.z`"
+                );
+                continue;
+            }
             let Some((name, version)) = dependency(line) else {
                 continue;
             };
@@ -87,7 +127,7 @@ pub fn run(root: &Path) -> Result<String, String> {
                 continue;
             };
             checked += 1;
-            if !version.starts_with('=') {
+            if !is_exact_pin(version) {
                 let _ = write!(
                     problems,
                     "\n  {manifest}: `{name} = \"{version}\"` is not an exact pin. \
@@ -149,4 +189,35 @@ pub fn self_test() -> Result<String, String> {
         return Err("self_test: a caret spelling was judged an exact pin".into());
     }
     Ok("proof-deps-are-exactly-pinned self-test OK: caret, tilde, table spelling and comments are told apart".into())
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_full_three_part_pin_is_exact() {
+        assert!(is_exact_pin("=0.7.0"));
+        assert!(is_exact_pin("=1.2.3-rc.1"));
+        assert!(!is_exact_pin("=0.7"));
+        assert!(!is_exact_pin("0.7.0"));
+        assert!(!is_exact_pin("^0.7.0"));
+    }
+
+    #[test]
+    fn workspace_and_git_forms_are_reported() {
+        assert_eq!(
+            unreadable_dependency("p3-fri = { workspace = true }"),
+            Some("p3-fri")
+        );
+        assert_eq!(
+            unreadable_dependency("p3-fri = { git = \"https://x\" }"),
+            Some("p3-fri")
+        );
+        assert_eq!(
+            unreadable_dependency("p3-fri = { version = \"=0.7.0\" }"),
+            None
+        );
+        assert_eq!(unreadable_dependency("serde = { workspace = true }"), None);
+    }
 }

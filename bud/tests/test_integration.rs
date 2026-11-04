@@ -1,8 +1,8 @@
 //! B.U.D. 2.0 - cross-module integration test (2026-08-16)
 //!
 //! The layers working together in one scenario:
-//!   the pipeline (store/restore, K38) + the BudV2File root + the checkpoint chain (direction 2)
-//!   + PoR (direction 5) + TenantDedup/PoW (K20).
+//!   the pipeline (store/restore) + the BudV2File root + the checkpoint chain (direction 2)
+//!   + PoR (direction 5) + TenantDedup/PoW.
 //!
 //! Guarantee: user data -> .bud container -> chain/proof/dedup layers ->
 //! restore = THE ORIGINAL (losslessness) + every proof verifies (integrity).
@@ -175,7 +175,7 @@ fn konteyner_parcalari_dedup_uyumlu() {
 
 #[test]
 fn coklu_konteyner_capraz_dedup() {
-    // K20 evidence: two log files with a shared prefix give SHARED chunk cids (the dedup anchor)
+    // evidence: two log files with a shared prefix give SHARED chunk cids (the dedup anchor)
     let prefix = b"2026-08-16T10:00:00Z INFO req=111 /api/shared s=200 b=1 reg=tr\n";
     let mut a = Vec::new();
     let mut b = Vec::new();
@@ -257,7 +257,7 @@ fn her_format_entegrasyonu() {
 
 #[test]
 fn json_columnar_exact_byte_identical() {
-    // INVENTION: columnar Exact mode - store -> restore = the ORIGINAL bytes exactly (K38)
+    // INVENTION: columnar Exact mode - store -> restore = the ORIGINAL bytes exactly
     use bud_core::bud_format_columnar::ColumnarMode;
     use bud_core::bud_format_pipe::{restore_json_columnar, store_json_columnar};
     let rows: Vec<String> = (0..500)
@@ -282,6 +282,20 @@ fn json_columnar_exact_byte_identical() {
         restore_json_columnar(&bud, ColumnarMode::OrderFree).is_none(),
         "a mode mismatch is refused"
     );
+}
+
+/// Parses a JSON array and returns its records as sorted strings, so two
+/// arrays compare as record sets.
+fn record_set(json: &[u8]) -> Result<Vec<String>, String> {
+    let value: serde_json::Value = serde_json::from_slice(json).map_err(|e| e.to_string())?;
+    let mut rows: Vec<String> = value
+        .as_array()
+        .ok_or_else(|| String::from("not a json array"))?
+        .iter()
+        .map(|r| r.to_string())
+        .collect();
+    rows.sort();
+    Ok(rows)
 }
 
 #[test]
@@ -330,9 +344,9 @@ fn json_columnar_ratio_gain_documented() {
         restore_json_columnar(&exact, ColumnarMode::Exact).unwrap(),
         j
     );
-    // OrderFree roundtrip: the record set is equal (an ordered comparison needs JSON parsing -
-    // already verified in the module test; here only the size relation is the canary)
-    let _ = free;
+    // OrderFree roundtrip: the record set is equal
+    let back_free = restore_json_columnar(&free, ColumnarMode::OrderFree).expect("free restore");
+    assert_eq!(record_set(&back_free), record_set(&j));
 }
 
 #[test]
@@ -379,7 +393,8 @@ fn json_columnar_typed_numeric_gain() {
         restore_json_columnar(&exact, ColumnarMode::Exact).unwrap(),
         j
     );
-    let _ = free;
+    let back_free = restore_json_columnar(&free, ColumnarMode::OrderFree).expect("free restore");
+    assert_eq!(record_set(&back_free), record_set(&j));
 }
 
 #[test]
@@ -416,7 +431,7 @@ fn json_columnar_orderfree_beats_exact_on_repetitive() {
     let j = format!("[{}]", rows.join(",")).into_bytes();
     let exact = store_json_columnar(&j, ColumnarMode::Exact, 0).expect("exact store");
     let free = store_json_columnar(&j, ColumnarMode::OrderFree, 0).expect("orderfree store");
-    // on a repeated-key corpus the sorting adjacency gives extra gain (K38/F2)
+    // on a repeated-key corpus the sorting adjacency gives extra gain (F2)
     assert!(
         free.len() < exact.len(),
         "on a repeated-'u' corpus OrderFree is better: free {} vs exact {}",
@@ -429,7 +444,7 @@ fn json_columnar_orderfree_beats_exact_on_repetitive() {
         j
     );
     let back_free = restore_json_columnar(&free, ColumnarMode::OrderFree).expect("free restore");
-    let _ = back_free;
+    assert_eq!(record_set(&back_free), record_set(&j));
 }
 
 #[test]
@@ -480,7 +495,7 @@ fn rejenerasyon_zinciri_uctan_uca() {
 
 #[test]
 fn the_engine_proof_binds_to_the_chain() {
-    // K103+K89: the engine output (PACT + production proof) -> segment ledger -> regeneration block
+    // +: the engine output (PACT + production proof) -> segment ledger -> regeneration block
     use bud_core::bud_format_block::RegenerationBlock;
     use bud_core::bud_format_engine::engine_store;
     use bud_core::bud_format_pact::PactRecord;

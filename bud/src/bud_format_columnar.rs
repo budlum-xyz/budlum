@@ -14,7 +14,7 @@
 //!
 //! Two modes:
 //! - **Exact**: columns follow the original record order -> decode returns the original JSON exactly
-//!   (K38: `decode(encode(d)) == d`). Key order is preserved through preserve_order.
+//!   (`decode(encode(d)) == d`). Key order is preserved through preserve_order.
 //! - **OrderFree**: records are sorted deterministically (numeric comparison on numeric
 //!   columns) -> the ratio improves; decode reproduces the record SET exactly, the order may change
 //!   (KF2: the data is preserved, order is a formatting matter).
@@ -40,7 +40,7 @@ const MAX_KEY_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnarMode {
-    Exact = 0,     // byte-identical (K38)
+    Exact = 0,     // byte-identical
     OrderFree = 1, // the record set is preserved (KF2), higher ratio
 }
 
@@ -363,7 +363,7 @@ pub fn columnar_to_blob(col: &JsonColumnar) -> Option<Vec<u8>> {
             }
         }
     }
-    // K38 integrity: a domain-tagged SHA3-256 digest (tamper detection, the K3 pattern)
+    // integrity: a domain-tagged SHA3-256 digest (tamper detection, the pattern)
     use sha3::{Digest, Sha3_256};
     let mut h = Sha3_256::new();
     h.update(b"BDLM_BUD_COLUMNAR_V1");
@@ -397,6 +397,11 @@ pub fn columnar_from_blob(bytes: &[u8]) -> Option<JsonColumnar> {
         }
         let k = std::str::from_utf8(&bytes[pos..pos + kl]).ok()?.to_string();
         pos += kl;
+        // A repeated key would make `columnar_decode` drop all but the last
+        // column. The encoder never writes one.
+        if keys.contains(&k) {
+            return None;
+        }
         keys.push(k);
     }
     if bytes.len() < pos + 4 {
@@ -478,7 +483,13 @@ fn parse_value(bytes: &[u8], pos: &mut usize, t: ColType) -> Option<Value> {
             }
             let bits = u64::from_le_bytes(bytes[*pos..*pos + 8].try_into().ok()?);
             *pos += 8;
-            Some(Value::from(f64::from_bits(bits)))
+            // NaN and infinity have no JSON form; `Value::from` would turn
+            // them into null. The encoder never writes them.
+            let f = f64::from_bits(bits);
+            if !f.is_finite() {
+                return None;
+            }
+            Some(Value::from(f))
         }
         ColType::Bool => {
             if bytes.len() < *pos + 1 {
@@ -549,9 +560,58 @@ mod tests {
         assert!(columnar_from_blob(&out).is_none());
     }
 
+    fn sealed(mut out: Vec<u8>) -> Vec<u8> {
+        use sha3::{Digest, Sha3_256};
+        let mut h = Sha3_256::new();
+        h.update(b"BDLM_BUD_COLUMNAR_V1");
+        h.update(&out);
+        let digest: [u8; 32] = h.finalize().into();
+        out.extend_from_slice(&digest);
+        out
+    }
+
+    fn head(keys: &[&str], t: ColType) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&COLUMNAR_MAGIC);
+        out.push(COLUMNAR_VERSION);
+        out.push(ColumnarMode::Exact.to_u8());
+        out.extend_from_slice(&(keys.len() as u16).to_le_bytes());
+        for k in keys {
+            out.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            out.extend_from_slice(k.as_bytes());
+        }
+        out.extend_from_slice(&1u32.to_le_bytes());
+        for _ in keys {
+            out.push(t.to_u8());
+        }
+        out
+    }
+
+    #[test]
+    fn a_blob_with_duplicate_keys_is_refused() {
+        let mut out = head(&["a", "a"], ColType::Bool);
+        out.extend_from_slice(&[1, 0]);
+        assert!(columnar_from_blob(&sealed(out)).is_none());
+        let mut ok = head(&["a", "b"], ColType::Bool);
+        ok.extend_from_slice(&[1, 0]);
+        assert!(columnar_from_blob(&sealed(ok)).is_some());
+    }
+
+    #[test]
+    fn a_blob_with_a_non_finite_float_is_refused() {
+        for bits in [f64::NAN.to_bits(), f64::INFINITY.to_bits()] {
+            let mut out = head(&["f"], ColType::F64);
+            out.extend_from_slice(&bits.to_le_bytes());
+            assert!(columnar_from_blob(&sealed(out)).is_none());
+        }
+        let mut out = head(&["f"], ColType::F64);
+        out.extend_from_slice(&1.5f64.to_bits().to_le_bytes());
+        assert!(columnar_from_blob(&sealed(out)).is_some());
+    }
+
     #[test]
     fn exact_roundtrip_byte_identical() {
-        // K38: in Exact mode decode(encode(d)) == d (byte for byte) - with typed columns
+        // In Exact mode decode(encode(d)) == d (byte for byte) - with typed columns
         let d = sample_json();
         let col = columnar_encode(&d, ColumnarMode::Exact).expect("regular JSON encodes");
         let back = columnar_decode(&col).expect("decode");
@@ -686,7 +746,7 @@ mod tests {
 
     #[test]
     fn blob_never_panics_on_arbitrary() {
-        // K38: from_blob is panic free on random bytes (it returns None)
+        // From_blob is panic free on random bytes (it returns None)
         struct Rng(u64);
         impl Rng {
             fn next(&mut self) -> u64 {
@@ -772,7 +832,7 @@ mod tests {
 
     #[test]
     fn numeric_columns_are_typed() {
-        // K38: numeric JSON values are stored as U64/I64/F64 in the column (binary)
+        // Numeric JSON values are stored as U64/I64/F64 in the column (binary)
         let d = br#"[{"a":1,"b":-5,"c":2.5,"d":true,"e":"x"}]"#;
         let col = columnar_encode(d, ColumnarMode::Exact).unwrap();
         assert_eq!(col.col_types[0], ColType::U64);

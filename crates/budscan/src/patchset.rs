@@ -209,7 +209,26 @@ pub fn check_list_matches_disk(entries: &[PatchEntry], present: &[String]) -> Ve
 #[must_use]
 pub fn touched_files(diff: &str) -> Vec<String> {
     let mut out = Vec::new();
+    // Lines still owed to the current hunk body. Inside a body a line that
+    // starts with `+++ ` is an added line, not a file header.
+    let (mut old_left, mut new_left) = (0usize, 0usize);
     for line in diff.lines() {
+        if old_left > 0 || new_left > 0 {
+            if line.starts_with('+') {
+                new_left = new_left.saturating_sub(1);
+            } else if line.starts_with('-') {
+                old_left = old_left.saturating_sub(1);
+            } else if !line.starts_with('\\') {
+                old_left = old_left.saturating_sub(1);
+                new_left = new_left.saturating_sub(1);
+            }
+            continue;
+        }
+        if let Some((old, new)) = parse_hunk_header(line) {
+            old_left = old;
+            new_left = new;
+            continue;
+        }
         let Some(rest) = line.strip_prefix("+++ ") else {
             continue;
         };
@@ -223,6 +242,12 @@ pub fn touched_files(diff: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// A patch path stays inside its tree: it is relative and has no `..`
+/// segment, so a string prefix test on it means what it says.
+fn path_stays_in_tree(path: &str) -> bool {
+    !path.starts_with('/') && !path.split('/').any(|segment| segment == "..")
 }
 
 /// Every hunk header's line counts against the lines that follow it.
@@ -251,11 +276,16 @@ fn hunk_count_errors(name: &str, diff: &str) -> Vec<String> {
         let mut j = i + 1;
         while j < lines.len() {
             let l = lines[j];
-            if parse_hunk_header(l).is_some()
-                || l.starts_with("--- ")
-                || l.starts_with("+++ ")
-                || l.starts_with("diff ")
-            {
+            // A line that looks like a file header is one only once its
+            // own side of the hunk is full: a deleted line that begins
+            // `-- ` is body text while old lines are still owed, but
+            // with the old count already met it can only be the next
+            // file's header - even when the new count is still short,
+            // which is exactly the corrupt shape this check reports.
+            let header_line = (l.starts_with("--- ") && old >= declared_old)
+                || (l.starts_with("+++ ") && new >= declared_new)
+                || l.starts_with("diff ");
+            if parse_hunk_header(l).is_some() || header_line {
                 break;
             }
             if l.is_empty() && j + 1 == lines.len() {
@@ -319,7 +349,7 @@ pub fn check_patch_shape(name: &str, diff: &str, allowed_roots: &[&str]) -> Verd
     }
     let mut problems = hunk_count_errors(name, diff);
     for path in &touched {
-        if !allowed_roots.iter().any(|root| path.starts_with(root)) {
+        if !path_stays_in_tree(path) || !allowed_roots.iter().any(|root| path.starts_with(root)) {
             problems.push(format!(
                 "{name}: {path} is outside the allowed trees ({})",
                 allowed_roots.join(", ")
@@ -410,6 +440,27 @@ mod tests {
         assert!(entries[0].enabled);
         assert!(!entries[1].enabled);
         assert_eq!(entries[1].file_name(), "b.patch");
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_of_the_tree_is_refused() {
+        let diff = "--- a/browser/x\n+++ b/browser/../../etc/x\n@@ -1 +1 @@\n-a\n+b\n";
+        assert!(matches!(
+            check_patch_shape("p.patch", diff, &["browser/"]),
+            Verdict::Fail(_)
+        ));
+        let ok = "--- a/browser/x\n+++ b/browser/x\n@@ -1 +1 @@\n-a\n+b\n";
+        assert!(matches!(
+            check_patch_shape("p.patch", ok, &["browser/"]),
+            Verdict::Pass(_)
+        ));
+    }
+
+    #[test]
+    fn body_lines_that_look_like_headers_are_not_headers() {
+        let diff = "--- a/browser/x\n+++ b/browser/x\n@@ -1,2 +1,2 @@\n--- a sql comment\n+++ added text\n context\n";
+        assert_eq!(touched_files(diff), vec!["browser/x".to_string()]);
+        assert!(hunk_count_errors("p.patch", diff).is_empty());
     }
 
     #[test]

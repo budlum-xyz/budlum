@@ -10,7 +10,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-const SCAN_ROOTS: &[&str] = &["src", "budzero", "wallet-core"];
+const SCAN_ROOTS: &[&str] = &["src", "budzero", "crates"];
 
 /// `let <holder> = include_str!("<name>")` lines.
 fn holders_in(src: &str, name: &str) -> Vec<String> {
@@ -72,7 +72,10 @@ fn literal_searches(src: &str, holders: &[String]) -> Vec<String> {
             if lit.chars().count() >= 4 {
                 out.push(lit.to_string());
             }
-            rest = &after[lit_end + 1..];
+            let Some(next) = after.get(lit_end + 1..) else {
+                break;
+            };
+            rest = next;
         }
     }
     out
@@ -219,4 +222,16 @@ pub fn self_test() -> Result<String, String> {
     Ok(String::from(
         "source-reading canary OK: a narrowed read PASSes and a raw search FAILs.",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unclosed_literal_does_not_panic() {
+        let src = "let s = include_str!(\"a.rs\");\nassert!(s.contains(\"abcd";
+        let found = literal_searches(src, &[String::from("s")]);
+        assert_eq!(found, vec![String::from("abcd")]);
+    }
 }

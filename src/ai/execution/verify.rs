@@ -1,3 +1,4 @@
+//! WIRING: unwired - verify_execution_proof_structural is blocked on the MainnetActivation zkVM audit (verify_merkle_enabled: false); wiring it before the audit would put an unaudited prover on the acceptance path.
 //! Structural + cryptographic verification of AI execution proofs.
 
 use crate::ai::execution::stark::verify_execution_proof_stark;
@@ -126,7 +127,7 @@ pub fn expected_initial_state_root(
     ))
 }
 
-/// Full L1 path: structural checks plus the STARK, one call, `program` and the
+/// Full chain path: structural checks plus the STARK, one call, `program` and the
 /// public inputs supplied together.
 ///
 /// This is the entry point the transaction path uses. It exists so the two
@@ -179,7 +180,7 @@ mod tests {
         let res = AiInferenceResult {
             request_id: req.request_id,
             verifier: owner,
-            output_commitment: [4u8; 32],
+            output_commitment: crate::ai::types::canonical_output_commitment(&[]),
             output_ref: BoundedBytes::empty(),
             result_nonce: 0,
             signature: vec![],

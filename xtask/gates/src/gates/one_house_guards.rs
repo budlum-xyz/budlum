@@ -58,13 +58,13 @@ const FAMILIES: &[Family] = &[
                 start: "MessageKind::BridgeLock => {",
             },
             Sibling {
-                name: "blockchain-verified-mint",
-                file: "src/chain/blockchain.rs",
-                start: "pub fn mint_bridge_transfer_from_verified_event(",
+                name: "bridge-door-verified-mint",
+                file: "src/cross_domain/bridge_tx.rs",
+                start: "pub fn mint_from_verified_event(",
             },
             Sibling {
-                name: "blockchain-relay-mint",
-                file: "src/chain/blockchain.rs",
+                name: "bridge-door-relay-mint",
+                file: "src/cross_domain/bridge_tx.rs",
                 start: "MessageKind::BridgeLock => {",
             },
         ],
@@ -90,7 +90,7 @@ const FAMILIES: &[Family] = &[
     Family {
         name: "bridge-unlock",
         why: "every path that unlocks a burned bridge transfer must run the same \
-              domain check, the same fee split and the same refund",
+              domain check, the same recorded burn debit check and the same refund",
         siblings: &[
             Sibling {
                 name: "executor-bridge-unlock",
@@ -98,8 +98,13 @@ const FAMILIES: &[Family] = &[
                 start: "MessageKind::BridgeBurn => {",
             },
             Sibling {
-                name: "blockchain-relay-unlock",
-                file: "src/chain/blockchain.rs",
+                name: "bridge-door-verified-unlock",
+                file: "src/cross_domain/bridge_tx.rs",
+                start: "pub fn unlock_from_verified_event(",
+            },
+            Sibling {
+                name: "bridge-door-relay-unlock",
+                file: "src/cross_domain/bridge_tx.rs",
                 start: "MessageKind::BridgeBurn => {",
             },
         ],
@@ -113,8 +118,8 @@ const FAMILIES: &[Family] = &[
                 needles: &[".unlock("],
             },
             Guard {
-                name: "fee split",
-                needles: &["split_bridge_fee("],
+                name: "recorded burn debit",
+                needles: &["transfer.burned_amount"],
             },
             Guard {
                 name: "overflow-checked refund",
@@ -286,17 +291,27 @@ fn check_family(root: &Path, family: &Family) -> Result<(), String> {
     let mut bodies = Vec::new();
     for sibling in family.siblings {
         let path = root.join(sibling.file);
-        let src = std::fs::read_to_string(&path)
+        let raw = std::fs::read_to_string(&path)
             .map_err(|e| format!("one-house-guards: {}: {e}", sibling.file))?;
+        // Comments and string literals are blanked: a guard named only in
+        // prose is not carried, and a brace in a string or char literal does
+        // not move the end of the body.
+        let src = super::rust_literals::scrub(&raw);
         bodies.push((sibling.name, body_of(&src, sibling.start, sibling.name)?));
     }
     for guard in family.guards {
         let (with, without) = guard_split(&bodies, guard.needles);
         if with.is_empty() {
-            // Absent everywhere: not an asymmetry. Either the check was
-            // replaced everywhere or the family needs new guards; both are
-            // review decisions, not this gate's refusal.
-            continue;
+            // Absent everywhere: the guard was dropped from every sibling at
+            // once, which symmetry alone cannot see.
+            return Err(format!(
+                "one-house-guards [{}] guard '{}' ({}) is missing from every sibling [{}]: {}",
+                family.name,
+                guard.name,
+                guard.needles.join(" or "),
+                without.join(", "),
+                family.why
+            ));
         }
         if !without.is_empty() {
             return Err(format!(
@@ -344,7 +359,7 @@ pub fn self_test() -> Result<String, String> {
     let tmp = crate::gates::rust_literals::exclusive_scratch_dir("budlum-gates-ohg")?;
     let files = [
         "src/execution/executor.rs",
-        "src/chain/blockchain.rs",
+        "src/cross_domain/bridge_tx.rs",
         "src/consensus/pow.rs",
         "src/consensus/poa.rs",
         "src/consensus/pos.rs",
@@ -364,7 +379,7 @@ pub fn self_test() -> Result<String, String> {
     }
 
     // Break 1: the mint family loses its supply ceiling in one sibling.
-    let rel = "src/chain/blockchain.rs";
+    let rel = "src/cross_domain/bridge_tx.rs";
     let text = std::fs::read_to_string(tmp.join(rel)).map_err(|e| e.to_string())?;
     std::fs::write(
         tmp.join(rel),
@@ -448,5 +463,18 @@ mod tests {
         let (with, without) = guard_split(&bodies, &["mark"]);
         assert_eq!(with, vec!["a", "b"]);
         assert_eq!(without, vec!["c"]);
+    }
+}
+
+#[cfg(test)]
+mod absent_tests {
+    use super::*;
+
+    #[test]
+    fn a_guard_absent_from_every_sibling_is_a_finding() {
+        let bodies = vec![("a", String::from("{ x }")), ("b", String::from("{ y }"))];
+        let (with, without) = guard_split(&bodies, &["ensure_mint_headroom"]);
+        assert!(with.is_empty());
+        assert_eq!(without.len(), 2);
     }
 }

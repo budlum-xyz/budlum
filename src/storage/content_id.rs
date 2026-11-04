@@ -1,11 +1,11 @@
 //! B.U.D. content addressing.
 //!
-//! Vision §8.2 originally proposed a *double-hash* `ContentId` carrying both
+//! Vision originally proposed a *double-hash* `ContentId` carrying both
 //! An IPFS multihash and a Poseidon4 hash. The Poseidon primitive is not
 //! Wired into `budlum-core` (it lives in `BudZKVM`), so we use the
 //! Existing domain-separated SHA-256 (`hash_fields_bytes`) with the
 //! `BDLM_CONTENT_V1` domain tag. This is exactly the same trade-off the Tur
-//! 14 plan §3.1 makes:
+//! 14 makes:
 //!
 //! > "Content addressing: the `ContentId` type, based on a Poseidon4 hash - the
 //! >  same family as the `poseidon4_hash` primitive already used in BudZero, so no new
@@ -15,7 +15,7 @@
 //! So it can never collide with another 32-byte field that happens to be
 //! Hashed the same way in a different module.
 //!
-//! Plan §0.5 (data-sovereignty / team-independence rule),
+//! Plan (data-sovereignty / team-independence rule),
 //! `ContentId` is a **pure on-chain data shape** - no network calls, no
 //! "Budlum Inc. indexer" dependency, no admin/pause hook. Any independent
 //! Node can compute it from the raw chunk bytes alone.
@@ -47,9 +47,9 @@ impl ContentId {
 
     /// Compute the `ContentId` of a chunk plus an explicit sub-chunk byte
     /// Range (used by `RetrievalChallenge` to pin a deterministic
-    /// Sub-range within a chunk - vision §8.3 /).
+    /// Sub-range within a chunk - vision /).
     ///
-    /// **Critically (plan §2.5):** the resulting `ContentId` is
+    /// **Critically:** the resulting `ContentId` is
     /// Only a byte-range hash, not a proof-of-storage. The full chunk can
     /// Be discarded and a fresh chunk holding only the requested range
     /// Can still answer the challenge. This is the documented
@@ -185,5 +185,33 @@ mod tests {
         assert_eq!(oor, oor2);
         assert_ne!(oor, ContentId::of_subrange(chunk, 0, 1));
         assert_ne!(oor, ContentId::of(chunk));
+    }
+
+    /// Fixed-seed xorshift bytes. Same generator is used in `bud-node` tests.
+    fn seeded_bytes(len: usize) -> Vec<u8> {
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bud_node_content_id_matches_core_definition() {
+        let inputs: [Vec<u8>; 4] = [vec![], vec![0u8], seeded_bytes(65_536), seeded_bytes(1000)];
+        for data in &inputs {
+            let core = ContentId::of(data);
+            let node = bud_node::store::ContentId::of(data);
+            assert_eq!(core.0, node.0, "len {}", data.len());
+        }
+        // Same golden vectors as the `bud-node` store tests.
+        assert_eq!(
+            hex::encode(ContentId::of(&[]).0),
+            "b9c2e41839278bfe0711bbdfb660ed31087513891bc2fa80c84f2bb6fa160104"
+        );
     }
 }

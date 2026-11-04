@@ -112,7 +112,7 @@ fn empty_input_is_rejected_not_silently_corrupted() {
 
 #[test]
 fn measured_ratio_is_consistent_with_the_sizes() {
-    // K19: the ratio is not CLAIMED, it is MEASURED from the sizes. Verify that
+    // The ratio is not CLAIMED, it is MEASURED from the sizes. Verify that
     // the recorded ratio really is original_len/stored_len; this is the number
     // the claim-above-measurement gate rests on.
     let mut rows = Vec::new();

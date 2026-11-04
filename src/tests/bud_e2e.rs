@@ -477,7 +477,9 @@ fn invariant_4_any_account_meeting_bond_can_open_deal() {
     let manifest = good_manifest();
     let shard_id = manifest.shards[0].shard_id;
     let dp = domain_params();
-    for i in 0..5u8 {
+    // One replica slot per copy: the replica index stays below the target.
+    let replicas = crate::domain::storage_deal::STORAGE_REPLICATION_TARGET;
+    for i in 0..replicas {
         reg.open_deal(
             1,
             &manifest,
@@ -493,7 +495,7 @@ fn invariant_4_any_account_meeting_bond_can_open_deal() {
         )
         .expect("any account with bond can open a deal");
     }
-    assert_eq!(reg.all_deals().len(), 5);
+    assert_eq!(reg.all_deals().len(), usize::from(replicas));
 }
 
 /// Invariant 5: a challenge opener_bond must be > 0, otherwise anyone could

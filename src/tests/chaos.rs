@@ -260,49 +260,31 @@ mod chaos_tests {
         );
         assert_eq!(
             after.domain_registry_root,
-            blockchain.domain_registry.root(),
+            blockchain.state.settlement.domains.root(),
             "global header must bind the active domain registry root"
         );
     }
 
+    /// The settlement registries are account state. A domain registered
+    /// by a `SettlementTx` in a block is rebuilt by the block replay after a
+    /// restart, and the settlement root comes back byte for byte.
     #[test]
     fn test_chaos_settlement_state_survives_storage_reload() {
-        use crate::core::block::Block;
-        use crate::domain::plugin::default_domain;
-        use crate::domain::{ConsensusKind, DomainCommitment};
-        use crate::storage::db::Storage;
+        use crate::tests::block_door_harness::BlockHarness;
 
         let tempdir = tempfile::tempdir().unwrap();
         let db_path = tempdir.path().join("settlement-state");
         let db_path = db_path.to_str().unwrap();
 
-        {
-            let storage = Storage::new(db_path).unwrap();
-            let consensus = Arc::new(PoWEngine::new(0));
-            let mut blockchain = Blockchain::new(consensus, Some(storage), 45262, None);
-            let domain = default_domain(7, ConsensusKind::PoW, 45262, "pow-header-chain-v1", 0);
-            blockchain
-                .register_consensus_domain(domain.clone())
-                .unwrap();
+        let mut harness = BlockHarness::open(db_path);
+        let domain = harness.operated_domain(7);
+        harness.register_domain(domain);
+        assert!(harness.chain.state.settlement.domains.get(7).is_some());
+        let live_root = harness.chain.state.settlement.root();
 
-            let mut block = Block::new(1, blockchain.last_block().hash.clone(), vec![]);
-            block.state_root = "22".repeat(32);
-            block.tx_root = block.calculate_tx_root();
-            block.hash = block.calculate_hash();
-
-            let commitment =
-                DomainCommitment::from_block(&domain, &block, [4u8; 32], [5u8; 32], 0).unwrap();
-            blockchain.submit_domain_commitment(commitment).unwrap();
-            blockchain.seal_global_header(None).unwrap();
-        }
-
-        let storage = Storage::new(db_path).unwrap();
-        let consensus = Arc::new(PoWEngine::new(0));
-        let blockchain = Blockchain::new(consensus, Some(storage), 45262, None);
-
-        assert!(blockchain.domain_registry.get(7).is_some());
-        assert_eq!(blockchain.global_headers.len(), 1);
-        assert_eq!(blockchain.domain_commitment_registry.len(), 1);
+        let harness = harness.restart();
+        assert!(harness.chain.state.settlement.domains.get(7).is_some());
+        assert_eq!(harness.chain.state.settlement.root(), live_root);
     }
 
     #[test]
@@ -349,7 +331,7 @@ mod chaos_tests {
         blockchain
             .submit_domain_commitment(make_commitment(&poa, 104, 5))
             .unwrap();
-        assert_eq!(blockchain.domain_commitment_registry.len(), 3);
+        assert_eq!(blockchain.state.settlement.commitments.len(), 3);
     }
 
     #[test]
@@ -396,7 +378,10 @@ mod chaos_tests {
         let a = fill(&[1, 2, 3]);
         let b = fill(&[3, 1, 2]);
 
-        assert_eq!(a.domain_registry.root(), b.domain_registry.root());
+        assert_eq!(
+            a.state.settlement.domains.root(),
+            b.state.settlement.domains.root()
+        );
         assert_eq!(
             a.build_global_header(None).domain_commitment_root,
             b.build_global_header(None).domain_commitment_root
@@ -452,23 +437,24 @@ mod chaos_tests {
         let mut commitment =
             DomainCommitment::from_block(&pow, &block, tree.root(), [9u8; 32], 0).unwrap();
         commitment.event_root = tree.root();
+        let block_hash = commitment.domain_block_hash;
         blockchain.submit_domain_commitment(commitment).unwrap();
 
         let proof = tree.proof(0).unwrap();
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, event.clone(), &proof)
+            .verify_domain_event_proof(pow.id, 77, 0, block_hash, event.clone(), &proof)
             .is_ok());
 
         let mut foreign_domain = event.clone();
         foreign_domain.domain_id = 99;
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, foreign_domain, &proof)
+            .verify_domain_event_proof(pow.id, 77, 0, block_hash, foreign_domain, &proof)
             .is_err());
 
         let mut payload_tampered = event;
         payload_tampered.payload_hash = hash_fields_bytes(&[b"tampered"]);
         assert!(blockchain
-            .verify_domain_event_proof(pow.id, 77, 0, None, payload_tampered, &proof,)
+            .verify_domain_event_proof(pow.id, 77, 0, block_hash, payload_tampered, &proof,)
             .is_err());
     }
 
@@ -500,14 +486,19 @@ mod chaos_tests {
             authorities: vec![],
             signatures: vec![],
         };
-        assert!(blockchain
+        let err = blockchain
             .submit_verified_domain_commitment(make_commitment(&pow, &wrong_for_pow), wrong_for_pow)
-            .is_err());
+            .unwrap_err();
+        assert!(
+            err.contains("Expected PoWHeaderChain finality proof"),
+            "{err}"
+        );
 
         let wrong_for_poa = FinalityProof::PoWHeaderChain { headers: vec![] };
-        assert!(blockchain
+        let err = blockchain
             .submit_verified_domain_commitment(make_commitment(&poa, &wrong_for_poa), wrong_for_poa)
-            .is_err());
+            .unwrap_err();
+        assert!(err.contains("Expected PoA finality proof"), "{err}");
     }
 
     #[test]
@@ -603,6 +594,7 @@ mod chaos_tests {
             use crate::chain::finality::{FinalityCert, ValidatorSetSnapshot};
             let pos_proof = FinalityProof::PoS {
                 cert: FinalityCert {
+                    chain_id: crate::core::transaction::DEFAULT_CHAIN_ID,
                     epoch: i,
                     checkpoint_height: i,
                     checkpoint_hash: format!("pos_hash_{i}"),
@@ -666,7 +658,7 @@ mod chaos_tests {
 
         assert_eq!(global_header.global_height, 0);
         assert_eq!(
-            settlement_node.domain_commitment_registry.len(),
+            settlement_node.state.settlement.commitments.len(),
             (num_blocks * 3) as usize
         );
         assert_eq!(
@@ -693,17 +685,17 @@ mod chaos_tests {
         let consensus_settlement = Arc::new(PoWEngine::new(0));
         let mut settlement_node = Blockchain::new(consensus_settlement, None, 45262, None);
 
-        let pos_domain = default_domain(2, ConsensusKind::PoS, 1338, "pos-qc-finality", 0);
+        let source_domain = default_domain(2, ConsensusKind::PoA, 1338, "poa-authority-quorum", 0);
         let poa_domain = default_domain(3, ConsensusKind::PoA, 1339, "poa-authority-quorum", 0);
 
         settlement_node
-            .register_consensus_domain(pos_domain.clone())
+            .register_consensus_domain(source_domain.clone())
             .unwrap();
         settlement_node
             .register_consensus_domain(poa_domain.clone())
             .unwrap();
         let num_transfers = 100;
-        let mut pos_event_tree = DomainEventTree::new();
+        let mut source_event_tree = DomainEventTree::new();
         let mut transfers_data = Vec::new();
 
         for i in 1..=num_transfers {
@@ -714,7 +706,7 @@ mod chaos_tests {
             settlement_node
                 .state
                 .bridge_state
-                .register_asset(asset, pos_domain.id)
+                .register_asset(asset, source_domain.id)
                 .unwrap();
 
             let sender = Address::from([i as u8; 32]);
@@ -724,7 +716,7 @@ mod chaos_tests {
                 .state
                 .bridge_state
                 .lock(
-                    pos_domain.id,
+                    source_domain.id,
                     poa_domain.id,
                     1,
                     (i - 1) as u32,
@@ -736,23 +728,26 @@ mod chaos_tests {
                 )
                 .unwrap();
 
-            pos_event_tree.push(lock_event.clone());
+            source_event_tree.push(lock_event.clone());
             transfers_data.push((transfer, lock_event));
         }
 
-        let mut pos_block = Block::new(1, "pos_prev".repeat(32), vec![]);
-        pos_block.state_root = "pos_state_root".repeat(32)[0..64].to_string();
-        pos_block.tx_root = pos_block.calculate_tx_root();
-        pos_block.hash = pos_block.calculate_hash();
+        let mut source_block = Block::new(1, "source_prev".repeat(32), vec![]);
+        source_block.state_root = "source_state_root".repeat(32)[0..64].to_string();
+        source_block.tx_root = source_block.calculate_tx_root();
+        source_block.hash = source_block.calculate_hash();
 
-        let mut pos_com =
-            DomainCommitment::from_block(&pos_domain, &pos_block, [2u8; 32], [3u8; 32], 1).unwrap();
-        pos_com.event_root = pos_event_tree.root();
-        // (security audit §9) capture the commitment block hash so the
+        let mut source_com =
+            DomainCommitment::from_block(&source_domain, &source_block, [2u8; 32], [3u8; 32], 1)
+                .unwrap();
+        source_com.event_root = source_event_tree.root();
+        // (security audit) capture the commitment block hash so the
         // Bridge-mint forgery gate has a concrete value to bind against.
-        let pos_com_block_hash = pos_com.domain_block_hash;
+        let source_com_block_hash = source_com.domain_block_hash;
 
-        settlement_node.submit_domain_commitment(pos_com).unwrap();
+        settlement_node
+            .submit_domain_commitment(source_com)
+            .unwrap();
 
         for (_transfer, event) in &transfers_data {
             let msg = event.message.clone().unwrap();
@@ -762,7 +757,7 @@ mod chaos_tests {
         let global_header = settlement_node.seal_global_header(None).unwrap();
         assert_eq!(
             global_header.domain_commitment_root,
-            settlement_node.domain_commitment_registry.root()
+            settlement_node.state.settlement.commitments.root()
         );
         assert_eq!(
             global_header.message_root,
@@ -770,13 +765,13 @@ mod chaos_tests {
         );
 
         for (i, (_transfer, lock_event)) in transfers_data.iter().enumerate() {
-            let proof = pos_event_tree.proof(i).unwrap();
+            let proof = source_event_tree.proof(i).unwrap();
 
             let mint_result = settlement_node.mint_bridge_transfer_from_verified_event(
-                pos_domain.id,
+                source_domain.id,
                 1,
                 1,
-                Some(pos_com_block_hash),
+                Some(source_com_block_hash),
                 lock_event.clone(),
                 &proof,
                 Address::from([0x99; 32]), // relayer
@@ -789,10 +784,10 @@ mod chaos_tests {
             );
 
             let duplicate_mint_result = settlement_node.mint_bridge_transfer_from_verified_event(
-                pos_domain.id,
+                source_domain.id,
                 1,
                 1,
-                Some(pos_com_block_hash),
+                Some(source_com_block_hash),
                 lock_event.clone(),
                 &proof,
                 Address::from([0x99; 32]),
@@ -967,36 +962,49 @@ mod chaos_tests {
     /// conservation of funds.
     #[test]
     fn test_chaos_state_determinism_under_tx_reordering() {
-        let consensus = Arc::new(PoWEngine::new(0));
-        let mut chain_a = Blockchain::new(consensus.clone(), None, 45262, None);
-        let mut chain_b = Blockchain::new(consensus, None, 45262, None);
+        use crate::core::transaction::Transaction;
+        use crate::crypto::primitives::KeyPair;
+        use crate::execution::executor::Executor;
 
-        let alice = Address::from_hex(&"01".repeat(32)).unwrap();
-        let bob = Address::from_hex(&"02".repeat(32)).unwrap();
+        let alice_kp = KeyPair::generate().unwrap();
+        let bob_kp = KeyPair::generate().unwrap();
+        let alice = Address::from(alice_kp.public_key_bytes());
+        let bob = Address::from(bob_kp.public_key_bytes());
 
-        // Seed the initial accounts, giving a starting balance for the conservation check.
-        chain_a.state.add_balance(&alice, 1000);
-        chain_a.state.add_balance(&bob, 1000);
-        chain_b.state.add_balance(&alice, 1000);
-        chain_b.state.add_balance(&bob, 1000);
+        let mut to_bob = Transaction::new_with_fee(alice, bob, 100, 1, 0, vec![]);
+        to_bob.sign(&alice_kp);
+        let mut to_alice = Transaction::new_with_fee(bob, alice, 50, 1, 0, vec![]);
+        to_alice.sign(&bob_kp);
 
-        // Simulated balance transfer - direct state mutation (add/spend).
-        // Alice → Bob: 100
-        chain_a.state.add_balance(&bob, 100);
-        chain_a.state.add_balance(&alice, 0); // a no-op, for the conservation check
+        let seeded = || {
+            let mut state = crate::core::account::AccountState::new();
+            state.add_balance(&alice, 1000);
+            state.add_balance(&bob, 1000);
+            state
+        };
+        let mut forward = seeded();
+        let mut reverse = seeded();
+        let supply_before = forward.circulating_supply();
 
-        // Bob to Alice: 50, in the reverse order on chain_b.
-        chain_b.state.add_balance(&alice, 50);
+        Executor::apply_transaction(&mut forward, &to_bob).unwrap();
+        Executor::apply_transaction(&mut forward, &to_alice).unwrap();
+        Executor::apply_transaction(&mut reverse, &to_alice).unwrap();
+        Executor::apply_transaction(&mut reverse, &to_bob).unwrap();
 
-        // Conservation: the total supply has to be equal on both chains.
-        let total_a = chain_a.state.get_balance(&alice) + chain_a.state.get_balance(&bob);
-        let total_b = chain_b.state.get_balance(&alice) + chain_b.state.get_balance(&bob);
-        // We applied different operations but the starting seed is the same, so
-        // conservation holds. This test verifies that the state mutations are
-        // deterministic and that the accounts are independent, with no
-        // cross-contamination.
-        assert!(total_a > 0, "chain A must have non-zero total");
-        assert!(total_b > 0, "chain B must have non-zero total");
+        // The two senders are independent, so the order must not matter.
+        assert_eq!(forward.get_balance(&alice), reverse.get_balance(&alice));
+        assert_eq!(forward.get_balance(&bob), reverse.get_balance(&bob));
+        assert_eq!(
+            forward.calculate_state_root(),
+            reverse.calculate_state_root()
+        );
+        // Funds are conserved: whatever left the accounts is the fees only.
+        assert!(forward.circulating_supply() <= supply_before);
+        assert_eq!(
+            forward.get_balance(&alice) + forward.get_balance(&bob) + 2,
+            2000,
+            "two fees of 1 are the only difference"
+        );
     }
 
     /// **Genesis mismatch:** two chains with different genesis hashes cannot be
@@ -1066,5 +1074,37 @@ mod chaos_tests {
             chain_b.chain.last().unwrap().hash,
             "chain A's tip must match chain B's tip"
         );
+
+        // A transaction applied once on the adopted chain's state cannot be
+        // applied a second time: the nonce moved, so the replay is refused and
+        // the balances stay where the first application left them.
+        use crate::core::transaction::Transaction;
+        use crate::crypto::primitives::KeyPair;
+        use crate::execution::executor::Executor;
+
+        let alice_kp = KeyPair::generate().unwrap();
+        let bob_kp = KeyPair::generate().unwrap();
+        let alice = Address::from(alice_kp.public_key_bytes());
+        let bob = Address::from(bob_kp.public_key_bytes());
+        chain_a.state.add_balance(&alice, 1000);
+        let mut tx = Transaction::new_with_fee(alice, bob, 100, 1, 0, vec![]);
+        tx.sign(&alice_kp);
+
+        // The executor deliberately does not compare nonces: the
+        // ingest gate owns that invariant and `validate_and_add_block` runs
+        // it before every application. A caller bypassing the gate owns the
+        // nonce, so the honest replay check goes through the same door block
+        // application uses: validate, then apply.
+        chain_a.state.validate_transaction(&tx).unwrap();
+        Executor::apply_transaction(&mut chain_a.state, &tx).unwrap();
+        let alice_after = chain_a.state.get_balance(&alice);
+        let bob_after = chain_a.state.get_balance(&bob);
+        assert_eq!(bob_after, 100);
+        assert!(
+            chain_a.state.validate_transaction(&tx).is_err(),
+            "replaying an applied transaction must be refused"
+        );
+        assert_eq!(chain_a.state.get_balance(&alice), alice_after);
+        assert_eq!(chain_a.state.get_balance(&bob), bob_after);
     }
 }

@@ -19,8 +19,14 @@ pub enum ProofVerificationError {
     EventHeightMismatch,
     EventIndexMismatch,
     EventLeafMismatch,
+    /// The message body does not hash to its claimed id.
+    EventMessageIdMismatch,
     InvalidMerkleProof,
     CommitmentBlockHashMismatch,
+    /// The commitment's finality proof does not bind its event root (a PoS or
+    /// BFT certificate signs the checkpoint hash alone), so the root is the
+    /// submitter's claim and no event may be proven against it.
+    UnattestedEventRoot,
 }
 
 impl std::fmt::Display for ProofVerificationError {
@@ -43,6 +49,9 @@ impl std::fmt::Display for ProofVerificationError {
             ProofVerificationError::EventIndexMismatch => {
                 write!(f, "Event index does not match Merkle proof index")
             }
+            ProofVerificationError::EventMessageIdMismatch => {
+                write!(f, "cross-domain message body does not match its id")
+            }
             ProofVerificationError::EventLeafMismatch => {
                 write!(f, "Event leaf hash does not match Merkle proof leaf")
             }
@@ -55,6 +64,10 @@ impl std::fmt::Display for ProofVerificationError {
                     "Commitment block hash does not match expected block hash"
                 )
             }
+            ProofVerificationError::UnattestedEventRoot => write!(
+                f,
+                "Commitment event root is not bound by its finality proof"
+            ),
         }
     }
 }
@@ -69,6 +82,17 @@ impl SettlementProofVerifier {
         event: DomainEvent,
         proof: &MerkleProof,
     ) -> Result<VerifiedDomainEvent, ProofVerificationError> {
+        // The event root is only as good as the proof that binds it. A PoS or
+        // BFT certificate signs `(chain_id, epoch, height, hash)` and nothing
+        // else, so an event root in such a commitment belongs to whoever
+        // submitted it: a relayer could carry a genuine certificate and a
+        // fabricated event tree and have a message the domain never emitted
+        // delivered into the registry its target domain reads.
+        if !crate::settlement::domains::CommitmentAttestation::for_kind(&commitment.consensus_kind)
+            .event_root
+        {
+            return Err(ProofVerificationError::UnattestedEventRoot);
+        }
         if event.domain_id != commitment.domain_id {
             return Err(ProofVerificationError::EventDomainMismatch);
         }
@@ -80,6 +104,15 @@ impl SettlementProofVerifier {
         }
         if event.leaf_hash() != proof.leaf {
             return Err(ProofVerificationError::EventLeafMismatch);
+        }
+        // A carried cross-domain message must be
+        // self-consistent - its id has to match its body. The bridge checks
+        // this on mint (bridge.rs); the verifier accepted any body under any
+        // id, and only the id is bound into the leaf.
+        if let Some(message) = &event.message {
+            if !message.verify_id() {
+                return Err(ProofVerificationError::EventMessageIdMismatch);
+            }
         }
         if !proof.verify(commitment.event_root) {
             return Err(ProofVerificationError::InvalidMerkleProof);
@@ -96,7 +129,7 @@ impl SettlementProofVerifier {
         domain_id: DomainId,
         domain_height: u64,
         sequence: u64,
-        expected_block_hash: Option<Hash32>,
+        expected_block_hash: Hash32,
         event: DomainEvent,
         proof: &MerkleProof,
     ) -> Result<VerifiedDomainEvent, ProofVerificationError> {
@@ -108,10 +141,11 @@ impl SettlementProofVerifier {
             },
         )?;
 
-        if let Some(expected_block_hash) = expected_block_hash {
-            if commitment.domain_block_hash != expected_block_hash {
-                return Err(ProofVerificationError::CommitmentBlockHashMismatch);
-            }
+        // The block hash check is not optional. It used to be a
+        // `None`-skippable Option; every caller knew the hash, and the skip
+        // path was pure bypass surface.
+        if commitment.domain_block_hash != expected_block_hash {
+            return Err(ProofVerificationError::CommitmentBlockHashMismatch);
         }
 
         Self::verify_event_against_commitment(commitment, event, proof)
@@ -221,5 +255,36 @@ mod tests {
             .unwrap_err(),
             ProofVerificationError::InvalidMerkleProof
         );
+    }
+
+    /// A PoS or BFT certificate signs the checkpoint hash and nothing else, so
+    /// the event root in such a commitment is whatever its submitter chose. A
+    /// relayer that carries a genuine certificate can build a tree of its own
+    /// and deliver a message the domain never emitted; the verifier refuses the
+    /// root before it looks at the proof.
+    #[test]
+    fn a_pos_commitment_cannot_authorise_an_event_proof() {
+        let mut tree = DomainEventTree::new();
+        for index in 0..4 {
+            tree.push(event(index));
+        }
+        let mut commitment = make_commitment(tree.root());
+        commitment.consensus_kind = ConsensusKind::PoS;
+        let event = tree.events()[2].clone();
+        let proof = tree.proof(2).unwrap();
+        assert_eq!(
+            SettlementProofVerifier::verify_event_against_commitment(&commitment, event, &proof)
+                .unwrap_err(),
+            ProofVerificationError::UnattestedEventRoot
+        );
+
+        // The same commitment under a proof that binds the roots still verifies.
+        commitment.consensus_kind = ConsensusKind::PoA;
+        assert!(SettlementProofVerifier::verify_event_against_commitment(
+            &commitment,
+            tree.events()[2].clone(),
+            &proof
+        )
+        .is_ok());
     }
 }

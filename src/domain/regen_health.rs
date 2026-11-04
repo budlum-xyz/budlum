@@ -1,8 +1,10 @@
 //! The node-health layer: the caller that decides *when* a node reverts.
 //!
-//! WIRING: unwired - the production caller is the node runtime's health tick
-//! (per-block `assess` plus verdict execution through the ledger). Until that tick lands, the rules are pinned by this file's
-//! tests, the chaos acceptance suite, and the `regen-health-door` gate.
+//! WIRING: wired - the production caller is the node runtime's health tick,
+//! `crate::network::regen_health_tick`, which `Node::run` drives once per
+//! finality beat and which executes the verdict through the ledger. The rules
+//! are pinned by this file's tests, the chaos acceptance suite, and the
+//! `regen-health-door` gate.
 //!
 //! `regeneration_stage` holds the reversion ledger and every rule that makes
 //! reversion safe, and it said so in its own header: the ledger is driven by
@@ -247,6 +249,7 @@ pub fn assess(
                 height: polyp_height,
                 commitment,
                 carried: Default::default(),
+                seal: None,
             },
             stress: Stress::RepairFailed,
         };
@@ -347,6 +350,9 @@ pub fn assess(
             height: target_height,
             commitment: target_commitment,
             carried: Default::default(),
+            // The caller attaches the seal of its canonical source; `assess`
+            // knows commitments only.
+            seal: None,
         },
         stress,
     }
@@ -544,6 +550,7 @@ mod tests {
                     proofs_reusable: 5,
                     proofs_discarded: 1,
                     records_refiled: 2,
+                    proofs_classical_rederive: 0,
                 },
                 event_number: 1,
             });

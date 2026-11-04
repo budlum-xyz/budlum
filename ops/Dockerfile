@@ -51,6 +51,12 @@ COPY crates/note-packing/ ./crates/note-packing/
 # Optional feature-gated research crate (`bpqs-research`); path dependencies
 # must exist in the build context even when their feature is off.
 COPY crates/bpqs/ ./crates/bpqs/
+# The BIP-39 wordlist is compiled straight into the wallet crate
+# (`mod bip39_wordlist` in `crates/wallet-core/src/lib.rs`), so a context
+# without the crate cannot build the node's wallet feature at all: the
+# include resolves a path that does not exist in the image. Path
+# dependencies are copied, not vendored - same rule as note-packing above.
+COPY crates/wallet-core/ ./crates/wallet-core/
 
 # Is the compiler really the pinned version: BEFORE the build, inside the image.
 # Without this line a binary produced by the wrong compiler would be published
@@ -75,25 +81,62 @@ RUN pinned="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" && \
 # Pass the PROTOC env explicitly to the build: prost-build resolves protoc
 # could not find it, docker-smoke reported 'Could not find protoc'.
 RUN PROTOC=/usr/bin/protoc cargo build --release --locked && \
-    cp target/release/budlum-core /usr/local/bin/budlum-core
+    cp target/release/budlum-core /usr/local/bin/budlum-core && \
+    cp target/release/bud /usr/local/bin/bud && \
+    cp target/release/budlum-faucet /usr/local/bin/budlum-faucet && \
+    cp target/release/budlum-indexer /usr/local/bin/budlum-indexer
 
 # ── Stage 2: Runtime ────────────────────────────────────────
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 
-# libpcre2-8-0 is listed explicitly although the base image already carries it:
-# the pinned bookworm-slim digest ships 10.42-1, which Trivy flags for
-# CVE-2026-86145 and CVE-2026-89161 (both HIGH, fixed in 10.42-1+deb12u1), and
-# an explicit install after `apt-get update` pulls the patched revision without
-# a blanket `apt-get upgrade` (hadolint DL3005).
+# The base digest is refreshed deliberately, and the packages below are listed
+# explicitly although the image already carries them. Both are fixes for
+# findings in the Security tab, and each one was measured rather than assumed:
+#
+#   * Digest. The previous pin (88200866...) shipped liblzma5 5.4.1-1, which
+#     Trivy flags for DLA-4783-1 / TEMP-1147318-639065 (fixed in 5.4.1-1+deb12u2).
+#     The digest pinned here carries 5.4.1-1+deb12u2, read out of
+#     /var/lib/dpkg/status of the pulled image - not inferred from the tag.
+#   * tzdata. The image - including the digest pinned above - ships
+#     2026c-0+deb12u1, while bookworm-security publishes 2026e-0+deb12u1, the
+#     version DLA-4854-1 names as fixed. A digest bump alone does not move it
+#     (the snapshot in the image predates the upload), so the package is
+#     installed by name after `apt-get update` and apt selects the candidate.
+#   * libpcre2-8-0 and perl-base. The earlier digest shipped 10.42-1 and
+#     5.36.0-7+deb12u3, which Trivy flagged for CVE-2026-86145, CVE-2026-89161
+#     and the perl-base set; the patched revisions are 10.42-1+deb12u2 and
+#     5.36.0-7+deb12u4. The names stay listed so a future digest that slides
+#     back cannot reintroduce them silently.
+#
+# Named installs are what keeps this off `apt-get upgrade` (hadolint DL3005):
+# only the packages with a published fix are moved, the rest of the image stays
+# at the revision the digest pins.
+#
+# What this does NOT do: close the remaining base-image findings. Of the 197
+# Trivy alerts on this image (2026-10-25), 193 name no fixed version at all -
+# Debian has not published a fix for them in bookworm, so no change inside this
+# tree can close one. They are reported on purpose (docker-smoke sets
+# `ignore-unfixed: false` for the SARIF step) and the gate blocks only the
+# fixable ones; that split is deliberate, see .github/workflows/docker-smoke.yml.
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     openssl \
     curl \
     libpcre2-8-0 \
+    perl-base \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/budlum-core /usr/local/bin/budlum-core
+# The CLI runs the validator key generation and the genesis ceremony
+# (`bud validator init`, `bud genesis assemble`) in the compose rehearsal.
+COPY --from=builder /usr/local/bin/bud /usr/local/bin/bud
+# One image, four roles: validator and RPC
+# node (budlum-core), faucet (budlum-faucet) and explorer API
+# (budlum-indexer). ops/testnet-local.yml picks the role by entrypoint.
+COPY --from=builder /usr/local/bin/budlum-faucet /usr/local/bin/budlum-faucet
+COPY --from=builder /usr/local/bin/budlum-indexer /usr/local/bin/budlum-indexer
 
 # Hadolint DL3066: non-numeric user-id. The user is created with the deterministic
 # UID 1000 and `USER 1000` uses the numeric form, so it resolves on the host side
@@ -104,7 +147,7 @@ RUN useradd --create-home --shell /bin/bash --uid 1000 budlum
 # inherits the image directory ownership on first mount - if it is not created
 # owned by budlum beforehand the container (USER 1000) gets EACCES during storage
 # init and falls into a restart loop (a defect caught in the first CI run, 2026-07-18).
-RUN mkdir -p /home/budlum/data /home/budlum/secrets \
+RUN mkdir -p /home/budlum/data /home/budlum/secrets /home/budlum/ceremony \
     && chown -R 1000:1000 /home/budlum
 
 USER 1000
@@ -116,16 +159,21 @@ EXPOSE 4001 8545 8546 9090
 
 # HEALTHCHECK (Security Plan section 3.7): verifies that the RPC port is listening.
 # `curl` is kept in the runtime image for this legitimate health check use.
-# If the container is up but the RPC does not answer it is marked unhealthy.
-# The JSON form (hadolint DL3025): `curl -f` is already in fail mode - it returns
-# exit 1 on a failed connection, which makes the healthcheck's healthy/unhealthy decision.
+# If the container is up but the RPC port does not answer it is marked unhealthy.
+# The JSON form is hadolint DL3025's; the healthy/unhealthy decision is made by
+# curl's connect/timeout exit status, see P61-F03 below.
 # F-20: JSON-RPC probe on the public listener the image actually binds
 # (8545). Compose's operator listener (8546) is opt-in via
 # --rpc-operator-listener; a default `docker run` never opens it, so a
 # probe there would mark a live rpc-role node unhealthy. A bare GET of
 # / is not a JSON-RPC request.
+# P61-F03: no `-f`. The image and compose run with RPC auth required and the
+# probe carries no key, so the listener answers 401; `-f` turned that live
+# answer into an unhealthy container. Without it curl exits 0 on any HTTP
+# response and non-zero only when the port does not answer (connect failure
+# or timeout), which is what "listening" means here.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD ["curl", "-sf", "--max-time", "4", "-H", "Content-Type: application/json", "-d", "{\"jsonrpc\":\"2.0\",\"method\":\"bud_netListening\",\"params\":[],\"id\":1}", "http://127.0.0.1:8545"]
+  CMD ["curl", "-s", "-o", "/dev/null", "--max-time", "4", "-H", "Content-Type: application/json", "-d", "{\"jsonrpc\":\"2.0\",\"method\":\"bud_netListening\",\"params\":[],\"id\":1}", "http://127.0.0.1:8545"]
 
 ENV RUST_LOG=info
 

@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-const TESTS: &[&str] = &[
+pub(crate) const TESTS: &[&str] = &[
     "governance_rejects_non_whitelisted_parameter_proposal",
     "governance_rejects_invalid_parameter_value",
     "governance_sets_parameter_activation_timelock",

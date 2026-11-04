@@ -5,6 +5,11 @@ global:
   scrape_timeout: 10s
   evaluation_interval: 30s
 
+# Alert rules. Mounted next to this file by
+# ops/docker-compose.yml.
+rule_files:
+  - /etc/prometheus/alerts.yml
+
 scrape_configs:
   - job_name: budlum-node1
     static_configs:
@@ -32,4 +37,10 @@ scrape_configs:
       - targets: ["node4:9090"]
         labels:
           node: "node4"
+          network: "devnet"
+  - job_name: budlum-node5
+    static_configs:
+      - targets: ["node5:9090"]
+        labels:
+          node: "node5"
           network: "devnet"

@@ -3,7 +3,7 @@
 
 [network]
 profile = "testnet"
-chain_id = 42
+chain_id = 45261
 genesis_file = "./config/testnet-genesis.json"
 
 [node]
@@ -42,6 +42,4 @@ rate_limit_per_minute = 600
 listener = "127.0.0.1:19090"
 
 [features]
-governance = false
-zkvm_contracts = false
 pruning = false

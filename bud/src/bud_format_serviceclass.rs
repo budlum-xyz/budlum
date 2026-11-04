@@ -1,4 +1,4 @@
-//! B.U.D. 2.0 - SERVICE CLASSES (F16 plus the K71 SLA - the decision layer).
+//! B.U.D. 2.0 - SERVICE CLASSES (F16 plus the SLA - the decision layer).
 //!
 //! The economic decision: a single price of 0.016, with the CPU cost carried by
 //! the validator. This module defines the service classes as an INTERNAL
@@ -85,9 +85,15 @@ mod tests {
     }
 
     #[test]
-    fn the_single_price_is_preserved() {
-        // The class decision does NOT change the user price; it is internal
-        // placement.
-        assert!(ServiceClass::Hot as u8 <= ServiceClass::Archive as u8);
+    fn more_access_never_picks_a_colder_class() {
+        // The class is internal placement and depends only on access and age.
+        for age in [0u64, 10, 365, 366, 900] {
+            let mut previous = select_class(0, age, false);
+            for access in [1u64, 5, 10, 50, 100, 1_000] {
+                let class = select_class(access, age, false);
+                assert!(class <= previous, "age {age}, access {access}");
+                previous = class;
+            }
+        }
     }
 }

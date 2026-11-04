@@ -60,9 +60,63 @@ const CHAOS_TESTS: &[&str] = &[
     "chaos_no_canonical_source_alarms_and_never_reverts_blind",
 ];
 
+/// The text of one function, from the start of `from` to the brace that
+/// closes its body. Later items and test modules are not part of it. When the
+/// braces never balance, the rest of the text is returned.
+fn function_body(from: &str) -> &str {
+    let Some(open) = from.find('{') else {
+        return from;
+    };
+    let mut depth = 0usize;
+    for (i, c) in from.char_indices().skip_while(|(i, _)| *i < open) {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return &from[..=i];
+                }
+            }
+            _ => {}
+        }
+    }
+    from
+}
+
+/// True when the module declaration sits on its own live line, with no
+/// attribute above it that could turn it off.
+fn declares_module(mod_rs: &str, decl: &str) -> bool {
+    let lines: Vec<&str> = mod_rs.lines().collect();
+    lines.iter().enumerate().any(|(i, l)| {
+        l.trim() == decl
+            && !i
+                .checked_sub(1)
+                .is_some_and(|j| lines[j].trim_start().starts_with("#["))
+    })
+}
+
+/// True when `fn name(` is a live test: a `#[test]` attribute above it and no
+/// `#[ignore` among the attributes directly above it.
+fn is_live_test(src: &str, name: &str) -> bool {
+    let lines: Vec<&str> = src.lines().collect();
+    let head = format!("fn {name}(");
+    lines.iter().enumerate().any(|(i, l)| {
+        if !l.trim_start().starts_with(&head) {
+            return false;
+        }
+        let attrs: Vec<&str> = lines[..i]
+            .iter()
+            .rev()
+            .map(|a| a.trim())
+            .take_while(|a| a.starts_with("#[") || a.starts_with("///"))
+            .collect();
+        attrs.contains(&"#[test]") && !attrs.iter().any(|a| a.starts_with("#[ignore"))
+    })
+}
+
 /// The whole check, factored out so `self_test` can feed it tampered copies.
 fn probe(mod_rs: &str, stage: &str, health: &str, chaos: &str, problems: &mut Vec<String>) {
-    if !mod_rs.contains("pub mod regen_health;") {
+    if !declares_module(mod_rs, "pub mod regen_health;") {
         problems.push(format!(
             "{MOD_RS}: regen_health no longer declared - the health layer was removed silently"
         ));
@@ -95,7 +149,7 @@ fn probe(mod_rs: &str, stage: &str, health: &str, chaos: &str, problems: &mut Ve
         problems.push(format!("{HEALTH_RS}: assess not found"));
         return;
     };
-    let body = &health[start..];
+    let body = function_body(&health[start..]);
     let positions: Vec<(usize, &str)> = ASSESS_ORDER
         .iter()
         .filter_map(|token| {
@@ -122,15 +176,20 @@ fn probe(mod_rs: &str, stage: &str, health: &str, chaos: &str, problems: &mut Ve
             ));
         }
     }
-    if !chaos.contains("RECOVERY_WINDOW_BLOCKS") {
+    if !chaos
+        .lines()
+        .any(|l| l.trim() == "const RECOVERY_WINDOW_BLOCKS: u64 = 64;")
+    {
         problems.push(format!(
-            "{CHAOS_RS}: the recovery-window constant is gone - the acceptance criterion was \
-             dissolved"
+            "{CHAOS_RS}: the recovery-window constant is gone or changed from 64 - the \
+             acceptance criterion was dissolved"
         ));
     }
     for name in CHAOS_TESTS {
-        if !chaos.contains(name) {
-            problems.push(format!("{CHAOS_RS}: pinned chaos test missing: {name}"));
+        if !is_live_test(chaos, name) {
+            problems.push(format!(
+                "{CHAOS_RS}: pinned chaos test missing, not a #[test], or ignored: {name}"
+            ));
         }
     }
 }
@@ -154,6 +213,90 @@ pub fn run(root: &Path) -> Result<String, String> {
     ))
 }
 
+fn self_test_late(
+    good_mod: &str,
+    good_stage: &str,
+    good_health: &str,
+    good_chaos: &str,
+    problems: &mut Vec<String>,
+) {
+    // Canary 4: the decision ordering is scrambled (verdict before canonicality).
+    {
+        let mut p: Vec<String> = Vec::new();
+        let tampered = concat!(
+            "pub enum HealthVerdict pub enum AlarmReason pub struct HealthPolicy ",
+            "pub fn assess( { let _ = ledger.validate(); ",
+            "HealthVerdict::RevertTo { target, stress } ",
+            "let _ = canonical(ledger.stage, ledger.height); ",
+            "let _ = cheapest_target(damaged_below); ",
+            "let _ = reversion_beats_repair(a, b, c, d); }"
+        );
+        let scrambled = tampered.replace("reversion_beats_repair(", "beats_(");
+        probe(good_mod, good_stage, &scrambled, good_chaos, &mut p);
+        if p.is_empty() {
+            problems.push("canary failed: scrambled decision order not caught".into());
+        }
+    }
+    // Canary 4b: the last verdict token sits in a later item, not in `assess`.
+    {
+        let mut p: Vec<String> = Vec::new();
+        let tampered = concat!(
+            "pub enum HealthVerdict pub enum AlarmReason pub struct HealthPolicy ",
+            "pub fn assess( { let _ = ledger.validate(); ",
+            "HealthVerdict::RevertTo { target, stress } ",
+            "let _ = canonical(ledger.stage, ledger.height); ",
+            "let _ = cheapest_target(damaged_below); ",
+            "let _ = reversion_beats_repair(a, b, c, d); } ",
+            "fn later() { HealthVerdict::RevertTo { target, stress } }"
+        );
+        probe(good_mod, good_stage, tampered, good_chaos, &mut p);
+        if p.is_empty() {
+            problems.push("canary failed: a verdict outside assess hid a scrambled ladder".into());
+        }
+    }
+    // Canary 5: a chaos test is renamed/dissolved.
+    {
+        let mut p: Vec<String> = Vec::new();
+        let tampered = good_chaos.replace(
+            "chaos_no_canonical_source_alarms_and_never_reverts_blind",
+            "chaos_trivially_passing_placeholder",
+        );
+        probe(good_mod, good_stage, good_health, &tampered, &mut p);
+        if p.is_empty() {
+            problems.push("canary failed: dissolved chaos test not caught".into());
+        }
+    }
+    // Canary 6: the window is raised, a test is ignored, a name hides in a comment.
+    for (label, tampered) in [
+        ("raised window", good_chaos.replace("= 64;", "= 6400;")),
+        (
+            "ignored test",
+            good_chaos.replacen("#[test]\n", "#[test]\n#[ignore]\n", 1),
+        ),
+        (
+            "commented test",
+            good_chaos.replace(
+                "#[test]\nfn chaos_no_canonical_source",
+                "// fn chaos_no_canonical_source",
+            ),
+        ),
+    ] {
+        let mut p: Vec<String> = Vec::new();
+        probe(good_mod, good_stage, good_health, &tampered, &mut p);
+        if p.is_empty() {
+            problems.push(format!("canary failed: {label} not caught"));
+        }
+    }
+    {
+        let mut p: Vec<String> = Vec::new();
+        let gated = "#[cfg(any())]\npub mod regen_health;\n";
+        probe(gated, good_stage, good_health, good_chaos, &mut p);
+        if p.is_empty() {
+            problems.push("canary failed: a gated module declaration not caught".into());
+        }
+    }
+}
+
 pub fn self_test() -> Result<String, String> {
     let good_mod = "pub mod regen_health;\npub mod regeneration_stage;\n";
     let good_stage = concat!(
@@ -169,11 +312,11 @@ pub fn self_test() -> Result<String, String> {
         "HealthVerdict::RevertTo { target, stress } }"
     );
     let good_chaos = concat!(
-        "const RECOVERY_WINDOW_BLOCKS: u64 = 64; ",
-        "chaos_corrupt_view_recovers_within_n_blocks_via_canonical_reversion ",
-        "chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks ",
-        "chaos_compromised_anchor_reversion_follows_the_canonical_source_by_design ",
-        "chaos_no_canonical_source_alarms_and_never_reverts_blind"
+        "const RECOVERY_WINDOW_BLOCKS: u64 = 64;\n",
+        "#[test]\nfn chaos_corrupt_view_recovers_within_n_blocks_via_canonical_reversion() {}\n",
+        "#[test]\nfn chaos_forged_audit_trail_recovers_by_full_reversion_within_n_blocks() {}\n",
+        "#[test]\nfn chaos_compromised_anchor_reversion_follows_the_canonical_source_by_design() {}\n",
+        "#[test]\nfn chaos_no_canonical_source_alarms_and_never_reverts_blind() {}\n"
     );
 
     let mut problems: Vec<String> = Vec::new();
@@ -210,35 +353,7 @@ pub fn self_test() -> Result<String, String> {
             problems.push("canary failed: deleted forgery door not caught".into());
         }
     }
-    // Canary 4: the decision ordering is scrambled (verdict before canonicality).
-    {
-        let mut p: Vec<String> = Vec::new();
-        let tampered = concat!(
-            "pub enum HealthVerdict pub enum AlarmReason pub struct HealthPolicy ",
-            "pub fn assess( { let _ = ledger.validate(); ",
-            "HealthVerdict::RevertTo { target, stress } ",
-            "let _ = canonical(ledger.stage, ledger.height); ",
-            "let _ = cheapest_target(damaged_below); ",
-            "let _ = reversion_beats_repair(a, b, c, d); }"
-        );
-        let scrambled = tampered.replace("reversion_beats_repair(", "beats_(");
-        probe(good_mod, good_stage, &scrambled, good_chaos, &mut p);
-        if p.is_empty() {
-            problems.push("canary failed: scrambled decision order not caught".into());
-        }
-    }
-    // Canary 5: a chaos test is renamed/dissolved.
-    {
-        let mut p: Vec<String> = Vec::new();
-        let tampered = good_chaos.replace(
-            "chaos_no_canonical_source_alarms_and_never_reverts_blind",
-            "chaos_trivially_passing_placeholder",
-        );
-        probe(good_mod, good_stage, good_health, &tampered, &mut p);
-        if p.is_empty() {
-            problems.push("canary failed: dissolved chaos test not caught".into());
-        }
-    }
+    self_test_late(good_mod, good_stage, good_health, good_chaos, &mut problems);
 
     if !problems.is_empty() {
         return Err(problems.join("\n  "));

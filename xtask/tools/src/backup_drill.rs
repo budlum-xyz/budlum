@@ -109,6 +109,24 @@ pub fn newest_backup(dir: &Path) -> Result<PathBuf, String> {
     })
 }
 
+/// A backup older than the start of this run was not written by it.
+///
+/// # Errors
+///
+/// If the file time cannot be read or the file is older than `since`.
+pub fn ensure_fresh(backup: &Path, since: std::time::SystemTime) -> Result<(), String> {
+    let modified = std::fs::metadata(backup)
+        .and_then(|m| m.modified())
+        .map_err(|e| format!("the time of {} could not be read: {e}", backup.display()))?;
+    if modified < since {
+        return Err(format!(
+            "{} is older than this run; the backup step wrote nothing new",
+            backup.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Say whether the integrity check output passed.
 ///
 /// The shell looked for a substring with `grep -q` and did not say what
@@ -148,6 +166,7 @@ pub fn run(cfg: &DrillConfig, root: &Path) -> Result<String, String> {
         .map_err(|e| format!("{} could not be created: {e}", cfg.backup_dir.display()))?;
 
     let retention = cfg.retention.to_string();
+    let started = std::time::SystemTime::now();
     let status = Command::new(&cfg.binary)
         .args([
             "--db-path",
@@ -166,6 +185,7 @@ pub fn run(cfg: &DrillConfig, root: &Path) -> Result<String, String> {
     }
 
     let backup = newest_backup(&cfg.backup_dir)?;
+    ensure_fresh(&backup, started)?;
 
     let restore_parent =
         std::env::temp_dir().join(format!("budlum-restore-drill-{}", std::process::id()));
@@ -191,13 +211,17 @@ pub fn run(cfg: &DrillConfig, root: &Path) -> Result<String, String> {
     let check = Command::new(&cfg.binary)
         .args(["--db-path", &restore_db.to_string_lossy(), "--check-db"])
         .current_dir(root)
-        .output()
-        .map_err(|e| format!("the integrity check could not be run: {e}"))?;
-    let stdout = String::from_utf8_lossy(&check.stdout).into_owned();
-
-    let verdict = integrity_line(&stdout).map(ToString::to_string);
+        .output();
     let _ = std::fs::remove_dir_all(&restore_parent);
-    let line = verdict?;
+    let check = check.map_err(|e| format!("the integrity check could not be run: {e}"))?;
+    if !check.status.success() {
+        return Err(format!(
+            "the integrity check exited with code {:?}",
+            check.status.code()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&check.stdout).into_owned();
+    let line = integrity_line(&stdout)?.to_string();
 
     Ok(format!(
         "the drill passed: {} -> {}\n{}",
@@ -266,6 +290,18 @@ mod tests {
         let err = newest_backup(&tmp).expect_err("an empty directory must be an error");
         assert!(err.contains("budbak"), "{err}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_backup_older_than_the_run_is_refused() {
+        let dir = std::env::temp_dir().join(format!("backup-fresh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture");
+        let file = dir.join("budlum-1.budbak");
+        std::fs::write(&file, b"x").expect("fixture");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_hours(1);
+        let out = ensure_fresh(&file, later);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.is_err());
     }
 
     #[test]

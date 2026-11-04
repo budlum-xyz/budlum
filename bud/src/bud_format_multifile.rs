@@ -1,6 +1,6 @@
 //! B.U.D. 2.0 - Multi-File Tenant Dedup + Delta (2026-08-16)
 //!
-//! The code counterpart of the V7 66x backup scenario (K20 plus ideas F9/F10):
+//! The code counterpart of the V7 66x backup scenario ( plus ideas F9/F10):
 //! - **Content-addressed dedup:** chunks collapse to one via content_id (the
 //!   same chunk is stored once).
 //! - **Delta:** an XOR/delta against the previous version - a very small delta
@@ -66,6 +66,16 @@ impl TenantMultifileStore {
     /// index it. Returns: (the number of new chunks added, the bytes saved).
     pub fn add_file(&mut self, data: &[u8], chunk_size: usize) -> (usize, u64) {
         if data.is_empty() || chunk_size == 0 || chunk_size > MAX_CHUNK {
+            return (0, 0);
+        }
+        // Keep the store inside the limits `from_blob` enforces, or `to_blob`
+        // would write a blob that nobody can read back. The check is made
+        // before anything changes, for the worst case of all-new chunks.
+        let n_chunks = data.len().div_ceil(chunk_size);
+        if self.file_chunks.len() >= MAX_FILES
+            || n_chunks > MAX_MULTIFILE_CHUNKS
+            || self.chunks.len() + n_chunks > MAX_MULTIFILE_CHUNKS
+        {
             return (0, 0);
         }
         let mut new_chunks = 0usize;
@@ -473,6 +483,25 @@ mod tests {
             store.apply_delta(b"abc", &[0x99], 4).is_none(),
             "a corrupt flag is REFUSED"
         );
+    }
+
+    #[test]
+    fn add_file_stays_inside_the_limits_from_blob_enforces() {
+        let mut store = TenantMultifileStore::new();
+        for _ in 0..MAX_FILES {
+            store.add_file(b"x", 16);
+        }
+        assert_eq!(store.file_chunks.len(), MAX_FILES);
+        // One file more is refused, and the blob still reads back.
+        assert_eq!(store.add_file(b"y", 16), (0, 0));
+        assert_eq!(store.file_chunks.len(), MAX_FILES);
+        assert!(TenantMultifileStore::from_blob(&store.to_blob()).is_some());
+        // A chunk size of one byte on a large input would need more chunks
+        // than the limit allows.
+        let mut other = TenantMultifileStore::new();
+        let big = vec![7u8; MAX_MULTIFILE_CHUNKS + 1];
+        assert_eq!(other.add_file(&big, 1), (0, 0));
+        assert!(other.file_chunks.is_empty());
     }
 
     #[test]

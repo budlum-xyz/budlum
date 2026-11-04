@@ -151,10 +151,67 @@ fn matmul_guest_program_2_3_2() -> Vec<u64> {
     prog.push(instruction(Opcode::Log, 0, R_HASH, 0, 0));
     prog.push(instruction(Opcode::Halt, 0, 0, 0, 0));
     assert_eq!(prog.len(), 90, "matmul [2,3,2] must be 90 instructions");
+    // The length is the shape of the emitter, not its
+    // identity - an emitter that drifted in ORDER still measured 90 rows and
+    // the benchmark proved a program that is not the canonical guest. Pin the
+    // same hash the tree pins (src/ai/execution/guest.rs
+    // `canonical_matmul_program_hash_pins`, dims [2,3,2]); keccak over the
+    // little-endian words is exactly the bench's own program_hash.
+    const CANONICAL_MATMUL_2_3_2: &str =
+        "4c4e86b4d34230df02acb991eb3111e459fb8bf06dd2b65b78c143b7f8b7e8c7";
+    let hash_hex: String = program_hash(&prog)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hash_hex.as_str(),
+        CANONICAL_MATMUL_2_3_2,
+        "the mini-emitter drifted from the canonical matmul [2,3,2] program"
+    );
     prog
 }
 
-fn run_one(name: &str, program: &[u64], samples: u32) {
+/// Seed the VerifyMerkle inputs into the VM. The
+/// challenge used to run on an all-zero memory: 64 expansion rows over zero
+/// siblings measure the prover's cost for a run that no verifier would ever
+/// see (the honest path has real path data), and a zero-filled run can only
+/// ever exercise one direction-bit pattern. Same seeding shape as the
+/// prover's own Merkle tests: key + 64 siblings from address 256, with the
+/// pre-computed root and leaf in the registers the instruction reads.
+fn seed_storage_challenge(vm: &mut Vm) {
+    // The path window at 256, in 8-byte words: the key, the 256-bit leaf, 64 levels of
+    // 256-bit siblings and the 256-bit root the walk reaches. `VerifyMerkle` reads every
+    // word of it; its register operands are not read.
+    let key: u64 = 7;
+    let leaf: [u64; 4] = [0xBEEF, 2, 3, 4];
+    let siblings: Vec<[u64; 4]> = (0..64u64)
+        .map(|i| {
+            let base = i * 31 + 1;
+            [base, base + 1, base + 2, base + 3]
+        })
+        .collect();
+    let mut current = leaf;
+    for (i, sibling) in siblings.iter().enumerate() {
+        let bit = (key >> i) & 1;
+        current = if bit == 0 {
+            bud_vm::merkle_node(current, *sibling)
+        } else {
+            bud_vm::merkle_node(*sibling, current)
+        };
+    }
+    let mut words = vec![key];
+    words.extend_from_slice(&leaf);
+    for sibling in &siblings {
+        words.extend_from_slice(sibling);
+    }
+    words.extend_from_slice(&current);
+    for (i, word) in words.iter().enumerate() {
+        let off = 256 + i * 8;
+        vm.memory[off..off + 8].copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+fn run_one_with_seed(name: &str, program: &[u64], samples: u32, seed: impl Fn(&mut Vm)) {
     let mut prove_total = Duration::ZERO;
     let mut verify_total = Duration::ZERO;
     let mut proof_bytes = 0usize;
@@ -162,6 +219,7 @@ fn run_one(name: &str, program: &[u64], samples: u32) {
 
     for _ in 0..samples {
         let mut vm = Vm::new(8192);
+        seed(&mut vm);
         let receipt = vm.run_receipt(program);
         assert!(receipt.success, "{name} execution failed");
         trace_rows = vm.trace.len();
@@ -179,7 +237,8 @@ fn run_one(name: &str, program: &[u64], samples: u32) {
             chain_id: 1,
             program_hash: program_hash(program),
             initial_state_root,
-            final_state_root: [0u8; 32],
+            // The AIR ties the final root to the storage-writes fold.
+            final_state_root: receipt.state_writes_digest,
             sender: 0,
             nonce: 0,
             block_height: 0,
@@ -198,8 +257,15 @@ fn run_one(name: &str, program: &[u64], samples: u32) {
         proof_bytes = proof.proof_bytes.len();
 
         let started = Instant::now();
-        Plonky3Adapter::verify(&proof, &inputs, program)
-            .expect("canonical proof verification failed");
+        // The storage challenge uses `VerifyMerkle`, which the default verifier
+        // refuses; the benchmark measures it under full activation.
+        Plonky3Adapter::verify_with_activation(
+            &proof,
+            &inputs,
+            program,
+            bud_isa::MainnetActivation::full(),
+        )
+        .expect("canonical proof verification failed");
         verify_total += started.elapsed();
     }
 
@@ -210,6 +276,10 @@ fn run_one(name: &str, program: &[u64], samples: u32) {
     );
 }
 
+fn run_one(name: &str, program: &[u64], samples: u32) {
+    run_one_with_seed(name, program, samples, |_| {});
+}
+
 fn main() {
     let samples = std::env::var("BUDZERO_BENCH_SAMPLES")
         .ok()
@@ -217,7 +287,12 @@ fn main() {
         .unwrap_or(1)
         .clamp(1, 20);
 
-    run_one("storage-challenge", &storage_challenge_program(), samples);
+    run_one_with_seed(
+        "storage-challenge",
+        &storage_challenge_program(),
+        samples,
+        seed_storage_challenge,
+    );
     run_one(
         "private-transfer",
         &private_transfer::build_private_transfer_check_program().unwrap(),

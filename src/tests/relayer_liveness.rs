@@ -15,7 +15,7 @@ use crate::core::address::Address;
 use crate::core::chain_config::FIXED_POINT_SCALE;
 use crate::cross_domain::message::{CrossDomainMessage, CrossDomainMessageParams};
 use crate::cross_domain::MessageKind;
-use crate::registry::evidence::{ProofProvenance, SlashingProof, SlashingReport};
+use crate::registry::evidence::{SlashingProof, SlashingReport};
 use crate::registry::role::roles;
 use crate::storage::db::Storage;
 use std::collections::HashSet;
@@ -55,31 +55,198 @@ fn relayed_message(sender: Address, nonce: u64) -> CrossDomainMessage {
     })
 }
 
-// --- 1. Relayer gating ------------------------------------------------------
+/// The message `keypair` relays: the sender is the keypair's own address, so
+/// the relayer gate names the account that signs the transaction around it.
+fn signed_relayed_message(
+    keypair: &crate::crypto::primitives::KeyPair,
+    nonce: u64,
+) -> CrossDomainMessage {
+    let mut message = relayed_message(Address::from(keypair.public_key_bytes()), nonce);
+    // The door verifies the sender envelope, so the fixture signs what the
+    // sender side signs: an empty envelope is a refusal, not a pass.
+    message.sign_sender_ed25519(keypair);
+    message
+}
+
+/// A V4 transaction from `keypair` that carries `message` through the
+/// `RelayCrossDomainMessage` door.
+fn relay_tx(
+    keypair: &crate::crypto::primitives::KeyPair,
+    message: CrossDomainMessage,
+) -> crate::core::transaction::Transaction {
+    let from = Address::from(keypair.public_key_bytes());
+    let mut tx = crate::core::transaction::Transaction::new_with_chain_id(
+        from,
+        Address::zero(),
+        0,
+        1,
+        0,
+        Vec::new(),
+        45262,
+        crate::core::transaction::TransactionType::RelayCrossDomainMessage(message),
+    );
+    tx.sign(keypair);
+    tx
+}
+
+/// A bonded relayer with a fresh Ed25519 key, funded for fees.
+fn bonded_relayer(bc: &mut Blockchain) -> (crate::crypto::primitives::KeyPair, Address) {
+    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let relayer = Address::from(keypair.public_key_bytes());
+    bc.state.add_balance(&relayer, 5_000);
+    bc.state.bond_relayer(&relayer, 2_000).unwrap();
+    assert!(bc.state.registry.is_active_relayer(&relayer));
+    (keypair, relayer)
+}
+
+// --- 1. Relayer gating -------------
 
 #[test]
 fn unregistered_account_cannot_submit_cross_domain_message() {
     let mut bc = fresh_chain();
     let stranger = addr(0x01);
     let err = bc
-        .submit_relayed_cross_domain_message(relayed_message(stranger, 1))
+        .state
+        .register_relayed_cross_domain_message(&stranger, &relayed_message(stranger, 1))
         .unwrap_err();
-    assert!(err.contains("not an active relayer"));
+    assert!(err.contains("not an active relayer"), "{err}");
     // No message stored.
     assert_eq!(bc.state.message_registry.len(), 0);
 }
 
+/// The door end to end: a signed transaction through the executor registers
+/// the message, charges the fee and advances the nonce.
 #[test]
-fn active_relayer_can_submit_cross_domain_message() {
+fn active_relayer_registers_through_the_transaction_door() {
     let mut bc = fresh_chain();
-    let relayer = addr(0x02);
-    bc.state.add_balance(&relayer, 5_000);
-    bc.state.bond_relayer(&relayer, 2_000).unwrap();
-    assert!(bc.state.registry.is_active_relayer(&relayer));
+    let (keypair, relayer) = bonded_relayer(&mut bc);
+    let balance_before = bc.state.get_balance(&relayer);
+    let tx = relay_tx(&keypair, relayed_message(relayer, 1));
+    assert!(
+        tx.is_valid(),
+        "a well-formed relay transaction passes the shape check"
+    );
 
-    bc.submit_relayed_cross_domain_message(relayed_message(relayer, 1))
-        .unwrap();
+    crate::execution::executor::Executor::apply_transaction(&mut bc.state, &tx).unwrap();
+
     assert_eq!(bc.state.message_registry.len(), 1);
+    assert_eq!(bc.state.get_balance(&relayer), balance_before - tx.fee);
+    assert_eq!(bc.state.get_nonce(&relayer), 1);
+}
+
+/// The transaction signature is the authentication, so the message must
+/// name the signer as its sender. Naming another active relayer is the
+/// spoof closed, and it stays closed at the new door.
+#[test]
+fn a_relayed_message_must_name_its_signer_as_sender() {
+    let mut bc = fresh_chain();
+    let (keypair, relayer) = bonded_relayer(&mut bc);
+    let (_, other_relayer) = bonded_relayer(&mut bc);
+
+    // Naming another relayer: refused by the shape check and by the body.
+    let spoof = relayed_message(other_relayer, 1);
+    assert!(!relay_tx(&keypair, spoof.clone()).is_valid());
+    let err = bc
+        .state
+        .register_relayed_cross_domain_message(&relayer, &spoof)
+        .unwrap_err();
+    assert!(err.contains("not the transaction signer"), "{err}");
+
+    // A body tampered after the id was computed: the id no longer matches
+    // its preimage, so a pre-registered id cannot be reused for a different
+    // message.
+    let mut tampered = relayed_message(relayer, 1);
+    tampered.recipient = addr(0xEF);
+    let err = bc
+        .state
+        .register_relayed_cross_domain_message(&relayer, &tampered)
+        .unwrap_err();
+    assert!(err.contains("preimage"), "{err}");
+    assert_eq!(bc.state.message_registry.len(), 0, "nothing registered");
+}
+
+/// The envelope is outside the signing preimage, so the door refuses any
+/// bytes there rather than store something a relay could have rewritten.
+#[test]
+fn a_relayed_message_with_a_sender_envelope_is_refused() {
+    let mut bc = fresh_chain();
+    let (keypair, relayer) = bonded_relayer(&mut bc);
+    let mut msg = relayed_message(relayer, 1);
+    msg.sender_public_key = keypair.public_key_bytes().to_vec();
+    msg.sender_signature = keypair.sign(&msg.message_id).to_vec();
+    let err = bc
+        .state
+        .register_relayed_cross_domain_message(&relayer, &msg)
+        .unwrap_err();
+    assert!(err.contains("envelope"), "{err}");
+    assert_eq!(bc.state.message_registry.len(), 0);
+}
+
+/// the carried class must equal the class the chain derives for the
+/// source domain from what its adapter observed.
+#[test]
+fn a_relayed_message_must_carry_the_class_derived_for_its_source_domain() {
+    use crate::crypto::facts::{CryptoFacts, ObservedScheme, QuantumClass};
+    use crate::crypto::scheme::SchemeId;
+    use crate::domain::types::ConsensusKind;
+
+    let mut bc = fresh_chain();
+    let (_, relayer) = bonded_relayer(&mut bc);
+    bc.state
+        .settlement
+        .domains
+        .register(crate::domain::default_domain(
+            1,
+            ConsensusKind::PoS,
+            1338,
+            "pos",
+            0,
+        ))
+        .expect("source domain registers");
+
+    // Nothing observed: the derived class is none, and a lattice label lies.
+    let lie = relayed_message(relayer, 1).with_source_quantum_class(Some(QuantumClass::Lattice));
+    let err = bc
+        .state
+        .register_relayed_cross_domain_message(&relayer, &lie)
+        .unwrap_err();
+    assert!(err.contains("derives"), "{err}");
+
+    // A BLS-only domain is classical; a message labelled lattice is refused,
+    // the one labelled classical is accepted.
+    let mut facts = CryptoFacts::new();
+    facts.record(ObservedScheme::Scheme(SchemeId::BLS12381_MINSIG));
+    bc.state.settlement.domains.record_observed(1, &facts);
+    let hidden = relayed_message(relayer, 2).with_source_quantum_class(Some(QuantumClass::Lattice));
+    assert!(bc
+        .state
+        .register_relayed_cross_domain_message(&relayer, &hidden)
+        .is_err());
+    let none = relayed_message(relayer, 3);
+    assert!(bc
+        .state
+        .register_relayed_cross_domain_message(&relayer, &none)
+        .is_err());
+    let honest =
+        relayed_message(relayer, 4).with_source_quantum_class(Some(QuantumClass::Classical));
+    bc.state
+        .register_relayed_cross_domain_message(&relayer, &honest)
+        .expect("the derived class is accepted");
+    assert_eq!(bc.state.message_registry.len(), 1);
+}
+
+#[test]
+fn a_relayed_message_past_its_expiry_is_refused() {
+    let mut bc = fresh_chain();
+    let (_, relayer) = bonded_relayer(&mut bc);
+    // `relayed_message` expires at height 100.
+    bc.state.current_block_height = 101;
+    let err = bc
+        .state
+        .register_relayed_cross_domain_message(&relayer, &relayed_message(relayer, 1))
+        .unwrap_err();
+    assert!(err.contains("expired"), "{err}");
+    assert_eq!(bc.state.message_registry.len(), 0);
 }
 
 #[test]
@@ -101,9 +268,10 @@ fn slashed_relayer_cannot_submit_cross_domain_message() {
     assert!(!bc.state.registry.is_active_relayer(&relayer));
 
     let err = bc
-        .submit_relayed_cross_domain_message(relayed_message(relayer, 1))
+        .state
+        .register_relayed_cross_domain_message(&relayer, &relayed_message(relayer, 1))
         .unwrap_err();
-    assert!(err.contains("not an active relayer"));
+    assert!(err.contains("not an active relayer"), "{err}");
 }
 
 #[test]
@@ -111,15 +279,14 @@ fn unbonding_relayer_can_still_submit() {
     // Decision: unbonding is an exit process, not a punishment; the stake is
     // Still locked and slashable, so the relayer may keep relaying.
     let mut bc = fresh_chain();
-    let relayer = addr(0x04);
-    bc.state.add_balance(&relayer, 5_000);
-    bc.state.bond_relayer(&relayer, 2_000).unwrap();
+    let (_, relayer) = bonded_relayer(&mut bc);
     bc.state
         .registry
         .begin_unbonding(relayer, roles::RELAYER, 0)
         .unwrap();
     assert!(bc.state.registry.is_active_relayer(&relayer));
-    bc.submit_relayed_cross_domain_message(relayed_message(relayer, 1))
+    bc.state
+        .register_relayed_cross_domain_message(&relayer, &relayed_message(relayer, 1))
         .unwrap();
     assert_eq!(bc.state.message_registry.len(), 1);
 }
@@ -136,14 +303,23 @@ fn system_bridge_path_bypasses_relayer_gate() {
 
 // --- 2. Anti-spam fee -------------------------------------------------------
 
-fn double_sign_report(offender: Address, reporter: Option<Address>) -> SlashingReport {
+fn double_sign_report(
+    keys: &crate::crypto::primitives::KeyPair,
+    reporter: Option<Address>,
+) -> SlashingReport {
+    let offender = Address::from(keys.public_key_bytes());
+    let (h1, h2) = ([0x55u8; 32], [0x66u8; 32]);
     SlashingReport::consensus_double_sign(
         offender,
-        7,
-        "aa".into(),
-        "bb".into(),
-        vec![1],
-        vec![2],
+        SlashingProof::DoubleSign {
+            height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: hex::encode(h1),
+            block_hash_2: hex::encode(h2),
+            signature_1: keys.sign(&h1).to_vec(),
+            signature_2: keys.sign(&h2).to_vec(),
+        },
         reporter,
     )
 }
@@ -151,7 +327,8 @@ fn double_sign_report(offender: Address, reporter: Option<Address>) -> SlashingR
 #[test]
 fn actionable_report_refunds_fee() {
     let mut bc = fresh_chain();
-    let offender = addr(0x11);
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
     let reporter = addr(0x12);
     bc.state.add_balance(&offender, 1_000_000);
     bc.state.bond_relayer(&offender, 10_000).unwrap(); // registered so slashable
@@ -162,7 +339,7 @@ fn actionable_report_refunds_fee() {
 
     let before = bc.state.get_balance(&reporter);
     let outcome = bc
-        .submit_registry_slashing_report(double_sign_report(offender, Some(reporter)))
+        .submit_registry_slashing_report(double_sign_report(&keys, Some(reporter)))
         .unwrap();
     assert!(outcome.is_some(), "validator should have been slashed");
     // Fee refunded because the report was actionable.
@@ -194,12 +371,13 @@ fn an_unprovable_report_is_refused_before_the_fee_is_taken() {
         roles::VALIDATOR,
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: "aa".into(),
             block_hash_2: "bb".into(),
             signature_1: vec![1],
             signature_2: vec![2],
         },
-        ProofProvenance::Unverified,
         Some(reporter),
     );
     assert!(bc.submit_registry_slashing_report(report).is_err());
@@ -232,17 +410,18 @@ fn a_provable_report_from_a_stranger_slashes_and_refunds() {
     bc.state.add_balance(&reporter, fee);
 
     let (h1, h2) = ([0x11u8; 32], [0x22u8; 32]);
-    let report = SlashingReport::new(
+    let report = SlashingReport::new_verified(
         offender,
         roles::VALIDATOR,
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: hex::encode(h1),
             block_hash_2: hex::encode(h2),
             signature_1: keys.sign(&h1).to_vec(),
             signature_2: keys.sign(&h2).to_vec(),
         },
-        ProofProvenance::ConsensusVerified,
         Some(reporter),
     );
 
@@ -286,6 +465,8 @@ fn a_stranger_cannot_slash_a_validator_by_asserting_provenance() {
         roles::VALIDATOR,
         SlashingProof::DoubleSign {
             height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
             block_hash_1: hex::encode(h1),
             block_hash_2: hex::encode(h2),
             // Signed by the attacker's key, filed against the victim.
@@ -294,7 +475,6 @@ fn a_stranger_cannot_slash_a_validator_by_asserting_provenance() {
         },
         // The RPC layer overwrites this to `Unverified`; asserted here to
         // show the chain layer does not depend on the RPC layer to do so.
-        ProofProvenance::Unverified,
         Some(attacker),
     );
 
@@ -312,15 +492,78 @@ fn a_stranger_cannot_slash_a_validator_by_asserting_provenance() {
 }
 
 #[test]
+fn a_self_asserted_consensus_verified_report_with_forged_data_is_refused() {
+    let victim_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let attacker_keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let victim = Address::from(victim_keys.public_key_bytes());
+    let attacker = addr(0x1C);
+
+    let mut bc = fresh_chain();
+    bc.state.add_validator(victim, 10_000);
+    bc.state.sync_validator_registration(&victim);
+    let fee = bc.state.registry.params().slashing_report_fee;
+    bc.state.add_balance(&attacker, fee);
+    let stake_before = bc
+        .state
+        .registry
+        .get(&victim, roles::VALIDATOR)
+        .unwrap()
+        .stake;
+
+    let (h1, h2) = ([0x33u8; 32], [0x44u8; 32]);
+    let proofs = [
+        // Made-up hashes and signatures.
+        SlashingProof::DoubleSign {
+            height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: "aa".into(),
+            block_hash_2: "bb".into(),
+            signature_1: vec![1],
+            signature_2: vec![2],
+        },
+        // Well formed, but signed by another key.
+        SlashingProof::DoubleSign {
+            height: 7,
+            kind: crate::registry::evidence::DoubleSignKind::BlockHeader,
+            epoch: None,
+            block_hash_1: hex::encode(h1),
+            block_hash_2: hex::encode(h2),
+            signature_1: attacker_keys.sign(&h1).to_vec(),
+            signature_2: attacker_keys.sign(&h2).to_vec(),
+        },
+    ];
+    for proof in proofs {
+        let report = SlashingReport::consensus_double_sign(victim, proof, Some(attacker));
+        assert!(bc.submit_registry_slashing_report(report).is_err());
+    }
+    assert_eq!(
+        bc.state
+            .registry
+            .get(&victim, roles::VALIDATOR)
+            .unwrap()
+            .stake,
+        stake_before,
+        "an innocent validator keeps every unit of stake"
+    );
+    assert_eq!(
+        bc.state.get_balance(&attacker),
+        fee,
+        "a refused report costs nothing"
+    );
+}
+
+#[test]
 fn report_fee_insufficient_balance_rejected_without_state_change() {
     let mut bc = fresh_chain();
-    let offender = addr(0x15);
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
     let reporter = addr(0x16); // no balance
     bc.state.add_validator(offender, 10_000);
     bc.state.sync_validator_registration(&offender);
 
     let err = bc
-        .submit_registry_slashing_report(double_sign_report(offender, Some(reporter)))
+        .submit_registry_slashing_report(double_sign_report(&keys, Some(reporter)))
         .unwrap_err();
     assert!(err.contains("insufficient balance"));
     // Offender not slashed.
@@ -331,11 +574,12 @@ fn report_fee_insufficient_balance_rejected_without_state_change() {
 fn consensus_internal_report_pays_no_fee() {
     // Reporter: None -> no fee charged (used by consensus-generated reports).
     let mut bc = fresh_chain();
-    let offender = addr(0x17);
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
     bc.state.add_validator(offender, 10_000);
     bc.state.sync_validator_registration(&offender);
     let outcome = bc
-        .submit_registry_slashing_report(double_sign_report(offender, None))
+        .submit_registry_slashing_report(double_sign_report(&keys, None))
         .unwrap();
     assert!(outcome.is_some());
 }
@@ -350,7 +594,10 @@ fn report_against_unregistered_still_refunds_fee() {
     bc.state.add_balance(&reporter, fee);
     let before = bc.state.get_balance(&reporter);
     let outcome = bc
-        .submit_registry_slashing_report(double_sign_report(addr(0x19), Some(reporter)))
+        .submit_registry_slashing_report(double_sign_report(
+            &crate::crypto::primitives::KeyPair::generate().unwrap(),
+            Some(reporter),
+        ))
         .unwrap();
     assert_eq!(outcome, None);
     assert_eq!(bc.state.get_balance(&reporter), before);
@@ -404,7 +651,10 @@ fn liveness_slash_applied_through_blockchain_flow() {
         assert_eq!(bc.record_liveness_epoch(e, &present), 0);
     }
     assert_eq!(bc.record_liveness_epoch(k, &present), 1);
-    assert!(!bc.state.registry.is_active(&v, roles::VALIDATOR));
+    // A liveness fault is a timed jail: the validator
+    // leaves the active set but is not slashed, so its release is possible.
+    let jailed = bc.state.validators.get(&v).expect("still a validator");
+    assert!(jailed.jailed && !jailed.active && !jailed.slashed);
 }
 
 #[test]
@@ -455,18 +705,19 @@ fn liveness_does_not_affect_double_sign_flow() {
     // Regression: the double-sign path still slashes at its own (50%) rate,
     // Unaffected by liveness wiring.
     let mut bc = fresh_chain();
-    let offender = addr(0x24);
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
     let stake = 10_000u64;
     bc.state.add_validator(offender, stake);
     bc.state.sync_validator_registration(&offender);
     let outcome = bc
-        .submit_registry_slashing_report(double_sign_report(offender, None))
+        .submit_registry_slashing_report(double_sign_report(&keys, None))
         .unwrap()
         .unwrap();
     assert_eq!(outcome.penalty, stake / 2);
 }
 
-// --- 4. Quarantine ledger persistence (E1 acceptance) ----------------------
+// --- 4. Quarantine ledger persistence ( acceptance) ----------------------
 
 #[test]
 fn quarantine_ledger_rows_survive_restart_after_slash() {
@@ -483,7 +734,8 @@ fn quarantine_ledger_rows_survive_restart_after_slash() {
         45262,
         None,
     );
-    let offender = addr(0x11);
+    let keys = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let offender = Address::from(keys.public_key_bytes());
     let reporter = addr(0x12);
     bc.state.add_balance(&offender, 1_000_000);
     bc.state.bond_relayer(&offender, 10_000).unwrap();
@@ -491,7 +743,7 @@ fn quarantine_ledger_rows_survive_restart_after_slash() {
     let fee = bc.state.registry.params().slashing_report_fee;
     bc.state.add_balance(&reporter, fee);
 
-    bc.submit_registry_slashing_report(double_sign_report(offender, Some(reporter)))
+    bc.submit_registry_slashing_report(double_sign_report(&keys, Some(reporter)))
         .unwrap()
         .expect("validator should have been slashed");
 
@@ -526,4 +778,86 @@ fn quarantine_ledger_rows_survive_restart_after_slash() {
         .next()
         .expect("alarm row survived the restart");
     assert_eq!(alarm.severity, 3);
+}
+
+// --- 4. Relayed registration is a transaction -------------------------------
+
+/// A relayed message reaches the registry in block, through the executor.
+///
+/// The out-of-block door inserted into `message_registry`, which is folded into
+/// the state root: a node that served the call and a node that did not disagreed
+/// until a state sync. The `CrossDomainMessage` transaction carries the same
+/// gates into block execution, and this drives that exact path.
+#[test]
+fn a_relayed_message_is_registered_by_the_executor_inside_a_block() {
+    use crate::core::transaction::TransactionType;
+    use crate::execution::executor::Executor;
+
+    let mut bc = fresh_chain();
+    let keypair = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let relayer = Address::from(keypair.public_key_bytes());
+    bc.state.add_balance(&relayer, 5_000);
+    bc.state.bond_relayer(&relayer, 2_000).unwrap();
+    let message = signed_relayed_message(&keypair, 1);
+    let mut state = bc.state.clone();
+    // The transaction is signed by the relayer: it pays the fee and it is the
+    // actor the gate names, while the message carries its own sender signature.
+    let tx = crate::core::transaction::Transaction::new_with_chain_id(
+        relayer,
+        Address::zero(),
+        0,
+        state.base_fee,
+        0,
+        Vec::new(),
+        45262,
+        TransactionType::CrossDomainMessage(message.clone()),
+    );
+    Executor::apply_transaction(&mut state, &tx).expect("the message registers in block");
+    assert_eq!(
+        state.message_registry.len(),
+        1,
+        "the registration is consensus state, written by execution"
+    );
+    assert_eq!(state.get_nonce(&relayer), 1, "the fee and nonce are paid");
+
+    // An inactive relayer is refused by the same execution.
+    let stranger = crate::crypto::primitives::KeyPair::generate().unwrap();
+    let stranger_addr = Address::from(stranger.public_key_bytes());
+    let mut unsigned_state = bc.state.clone();
+    // Funded, so the refusal names the relayer gate rather than the fee.
+    unsigned_state.add_balance(&stranger_addr, 1_000);
+    let bad = crate::core::transaction::Transaction::new_with_chain_id(
+        stranger_addr,
+        Address::zero(),
+        0,
+        unsigned_state.base_fee,
+        0,
+        Vec::new(),
+        45262,
+        TransactionType::CrossDomainMessage(signed_relayed_message(&stranger, 2)),
+    );
+    let err = Executor::apply_transaction(&mut unsigned_state, &bad).unwrap_err();
+    assert!(err.contains("not an active relayer"), "{err}");
+    assert_eq!(
+        unsigned_state.message_registry.len(),
+        0,
+        "a refused relay writes nothing"
+    );
+
+    // A value-carrying message transaction is refused before anything moves.
+    let mut value_state = bc.state.clone();
+    let mut carrying = crate::core::transaction::Transaction::new_with_chain_id(
+        relayer,
+        Address::zero(),
+        1,
+        value_state.base_fee,
+        0,
+        Vec::new(),
+        45262,
+        TransactionType::CrossDomainMessage(signed_relayed_message(&keypair, 3)),
+    );
+    carrying.amount = 1;
+    let err = Executor::apply_transaction(&mut value_state, &carrying).unwrap_err();
+    assert!(err.contains("moves no value"), "{err}");
+    assert_eq!(value_state.message_registry.len(), 0);
 }

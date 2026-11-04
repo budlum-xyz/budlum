@@ -1,4 +1,4 @@
-//! E7: Deterministic equal-weight fork resolver (2-2 split).
+//! Deterministic equal-weight fork resolver (2-2 split).
 //!
 //! When two competing fork tips carry identical accumulated weight (a 2-2
 //! validator split), `fork_choice_score` alone cannot order them, and the old

@@ -58,7 +58,6 @@ allow-git = ["https://github.com/libp2p/rust-libp2p"]
 # unsound -> a FAIL in a direct dependency (strict).
 unmaintained = "none"
 unsound = "workspace"
-ignore = [
-    { id = "RUSTSEC-2026-0118", reason = "the HTTP/DNSSEC path is not used in the code (grep: DnssecDnsHandle|dnssec = 0 matches); libp2p-mdns does not validate DNSSEC -> unreachable. An upgrade is impossible on the libp2p 0.55 line (the libp2p-mdns ^0.25.0-alpha.4 pin). Detail: ../../deny.toml" },
-    { id = "RUSTSEC-2026-0119", reason = "triggering it requires the attacker to be in the same L2 multicast domain; mdns_enabled=false in the mainnet/testnet config. The impact is a LAN-neighbourhood DoS. It closes with the libp2p upgrade. Detail: ../../deny.toml" },
-]
+# Empty on purpose: RUSTSEC-2026-0118 and RUSTSEC-2026-0119 are closed by the
+# hickory-proto 0.26.1 lock. A new entry needs evidence, reason and expiry.
+ignore = []

@@ -2,7 +2,7 @@
 //!
 //! The principle: the source kinds AI inference layer can read form a closed set (a Pollen
 //! grant, a B.U.D. StorageDeal, or SocialFi). The permission **rules** are
-//! queried from the chain and are not copied here (the K3 decision; the "the
+//! queried from the chain and are not copied here (the decision; the "the
 //! second copy is the worst copy" principle from budlum).
 
 use ai_core::dataset::{SourceKind, SourceRef};

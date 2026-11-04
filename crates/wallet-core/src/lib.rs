@@ -48,9 +48,20 @@
 //!   Linked SGX/Nitro runtime (no silent plaintext fallback).
 
 mod bip39_wordlist;
+/// The cryptographic core shared with the node: scheme registry, FIPS 204 and
+/// FIPS 205 context strings, the dual-verifier facade and the composite
+/// signature. The files are the node's own (`src/crypto`), mounted by path.
+pub mod crypto;
 mod privacy_crypto;
 mod privacy_transfer;
+/// JSON-RPC bodies and answers for the node's public listener.
+#[cfg(feature = "rpc")]
+pub mod rpc;
 mod tee;
+/// V5 transfers the node accepts, and the V7 composite transfer.
+pub mod transfer;
+/// The V3 wallet: 24 words, SHAKE256 branches, Address V3.
+pub mod wallet_v3;
 
 pub use privacy_crypto::{
     address_to_recipient_tag, field_from_hash, hash_from_field, is_packed, poseidon4_hash,
@@ -65,9 +76,8 @@ pub use tee::{
     UnavailableTeeQuoteVerifier, UnavailableTeeRuntime,
 };
 
-use ml_dsa::{
-    EncodedSignature, KeyInit, MlDsa87, Signature, Signer, SigningKey, Verifier, VerifyingKey,
-};
+use crypto::scheme::SchemeId;
+use ml_dsa::{MlDsa87, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use sha3::Sha3_256;
 use zeroize::Zeroize;
@@ -186,6 +196,8 @@ pub fn entropy_to_mnemonic(entropy: &[u8]) -> Result<String, WalletError> {
         })?;
         words.push(word);
     }
+    // The bits are the entropy, one byte per bit.
+    bits.zeroize();
 
     Ok(words.join(" "))
 }
@@ -219,7 +231,7 @@ pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
     for i in 0..(entropy_bits / 8) {
         let mut byte = 0u8;
         for j in 0..8 {
-            byte = (byte << 1) | (bits[i * 8 + j] as u8);
+            byte = (byte << 1) | bits[i * 8 + j];
         }
         entropy.push(byte);
     }
@@ -227,13 +239,16 @@ pub fn mnemonic_to_entropy(mnemonic: &str) -> Result<Vec<u8>, WalletError> {
     // Extract checksum
     let mut checksum = 0u8;
     for j in 0..checksum_bits {
-        checksum = (checksum << 1) | (bits[entropy_bits + j] as u8);
+        checksum = (checksum << 1) | bits[entropy_bits + j];
     }
+    // Zeroizing a Vec empties it, so the bits are wiped after the last read.
+    bits.zeroize();
 
     // Verify checksum
     let hash = Sha256::digest(&entropy);
     let expected_checksum = hash[0] >> (8 - checksum_bits);
     if checksum != expected_checksum {
+        entropy.zeroize();
         return Err(WalletError::InvalidMnemonic(
             "checksum mismatch - invalid mnemonic".into(),
         ));
@@ -268,74 +283,8 @@ fn verifying_key_bytes(sk: &SigningKey<MlDsa87>) -> PublicKeyBytes {
     out
 }
 
-/// Randomness source for one hedged signature: serves exactly the
-/// CSPRNG-filled 32-byte block FIPS 204 `rnd` consumes, word by word.
-/// Implementing `TryRng` by hand keeps rand_core a traits-only dependency
-/// (no getrandom feature), so the wasm build is untouched.
-#[cfg(feature = "production")]
-struct HedgedRnd {
-    bytes: [u8; 32],
-    pos: usize,
-}
-
-/// The 32-byte block ran out before the signer was satisfied.
-#[derive(Debug, Clone, Copy)]
-#[cfg(feature = "production")]
-struct HedgedRndExhausted;
-
-#[cfg(feature = "production")]
-impl core::fmt::Display for HedgedRndExhausted {
-    // Note: no `<'_>` here on purpose - the repo's binding-claims gate reads
-    // this file with a quote-parity scanner, and a lifetime apostrophe in code
-    // shifts that parity. Eliding the lifetime keeps the file gate-readable.
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        f.write_str("hedged signing randomness exhausted")
-    }
-}
-
-#[cfg(feature = "production")]
-impl std::error::Error for HedgedRndExhausted {}
-
-#[cfg(feature = "production")]
-impl HedgedRnd {
-    fn take(&mut self, dst: &mut [u8]) -> Result<(), HedgedRndExhausted> {
-        let end = self
-            .pos
-            .checked_add(dst.len())
-            .ok_or(HedgedRndExhausted)?;
-        let src = self.bytes.get(self.pos..end).ok_or(HedgedRndExhausted)?;
-        dst.copy_from_slice(src);
-        self.pos = end;
-        Ok(())
-    }
-}
-
-#[cfg(feature = "production")]
-impl rand_core::TryCryptoRng for HedgedRnd {}
-
-#[cfg(feature = "production")]
-impl rand_core::TryRng for HedgedRnd {
-    type Error = HedgedRndExhausted;
-
-    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        let mut b = [0u8; 4];
-        self.take(&mut b)?;
-        Ok(u32::from_le_bytes(b))
-    }
-
-    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        let mut b = [0u8; 8];
-        self.take(&mut b)?;
-        Ok(u64::from_le_bytes(b))
-    }
-
-    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
-        self.take(dst)
-    }
-}
-
-/// Sign a message with an ML-DSA-87 signing key and return the 4627-byte
-/// encoded signature.
+/// Sign a message with an ML-DSA-87 signing key under the FIPS 204 context
+/// `ctx` and return the 4627-byte encoded signature.
 ///
 /// Hedged per FIPS 204 3.6.1 when the `production` CSPRNG is available: a
 /// fresh `rnd` per signature keeps repeated signatures of one message from
@@ -344,51 +293,64 @@ impl rand_core::TryRng for HedgedRnd {
 /// on any read path changes. Without `production` (fixed-entropy builds and
 /// tests) the deterministic variant is kept, mirroring this crate's
 /// fail-closed entropy policy for key generation.
-fn sign_message(sk: &SigningKey<MlDsa87>, message: &[u8]) -> SignatureBytes {
+///
+/// An unusable context (empty or over 255 bytes) is a programming error:
+/// the result is an all-zero array, which no verifier accepts, never a
+/// context-free signature.
+fn sign_message(sk: &SigningKey<MlDsa87>, ctx: &[u8], message: &[u8]) -> SignatureBytes {
+    // The deterministic variant is the FIPS 204 approved
+    // default; the hedge is defense-in-depth against side channels. A platform
+    // whose CSPRNG fails keeps producing VALID, FIPS-conformant signatures,
+    // just without the extra masking; non-production builds always take this
+    // route (`deterministic_fallback_signatures_verify_and_are_stable`).
     #[cfg(feature = "production")]
-    let hedged: Option<Signature<MlDsa87>> = {
-        let mut rnd_bytes = [0u8; 32];
-        match getrandom::getrandom(&mut rnd_bytes) {
-            Ok(()) => sk
-                .expanded_key()
-                .sign_randomized(
-                    message,
-                    b"",
-                    &mut HedgedRnd {
-                        bytes: rnd_bytes,
-                        pos: 0,
-                    },
-                )
-                .ok(),
-            Err(_) => None,
+    let rnd = {
+        let mut block = zeroize::Zeroizing::new([0u8; 32]);
+        if getrandom::getrandom(block.as_mut_slice()).is_err() {
+            block.fill(0);
         }
+        block
     };
     #[cfg(not(feature = "production"))]
-    let hedged: Option<Signature<MlDsa87>> = None;
-
-    let sig: Signature<MlDsa87> = hedged.unwrap_or_else(|| sk.sign(message));
-    let enc: EncodedSignature<MlDsa87> = sig.encode();
+    let rnd = zeroize::Zeroizing::new([0u8; 32]);
+    let seed_slice: &[u8] = sk.as_seed().as_ref();
     let mut out = [0u8; ML_DSA_87_SIGNATURE_LEN];
-    out.copy_from_slice(enc.as_ref());
+    let signed = <&[u8; ML_DSA_87_SEED_LEN]>::try_from(seed_slice)
+        .map_err(|_| crypto::pq::PqError::Signing)
+        .and_then(|seed| crypto::pq::ml_dsa_sign(SchemeId::ML_DSA_87, seed, message, ctx, &rnd));
+    if let Ok(sig) = signed {
+        if sig.len() == out.len() {
+            out.copy_from_slice(&sig);
+        }
+    }
     out
 }
 
-/// Verify an ML-DSA-87 signature against a 2592-byte public key.
+/// Verify an ML-DSA-87 signature against a 2592-byte public key under the
+/// FIPS 204 context `ctx`, through the dual-verifier facade: RustCrypto
+/// `ml-dsa` and `libcrux-ml-dsa` must both accept.
 ///
 /// Returns `false` on any malformed input rather than returning an error: the
 /// multisig and social-recovery paths treat an invalid signature as "this
 /// approval does not count" and the caller's threshold logic does the rest.
 fn verify_signature(
     public_key: &PublicKeyBytes,
+    ctx: &[u8],
     message: &[u8],
     signature: &SignatureBytes,
 ) -> bool {
-    let vk = VerifyingKey::<MlDsa87>::new(public_key.into());
-    let Ok(sig) = Signature::<MlDsa87>::try_from(signature.as_slice()) else {
-        return false;
-    };
-    vk.verify(message, &sig).is_ok()
+    crypto::pq::verify(SchemeId::ML_DSA_87, public_key, message, ctx, signature).is_ok()
 }
+
+/// Context of a multisig approval: the node verifies V6 owner signatures under it.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+pub const MULTISIG_CTX: &[u8] = crypto::ctx::TX_V6;
+/// Context of a social-recovery guardian approval.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+pub const RECOVERY_CTX: &[u8] = crypto::ctx::IDENTITY_V2;
+/// Context of a private-transfer spend authorization.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+pub const PRIVATE_TRANSFER_CTX: &[u8] = crypto::ctx::PRIVATE_TRANSFER_V1;
 
 /// Guardian-based social recovery policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,6 +376,8 @@ pub struct RecoveryProposal {
     pub new_address: BudlumAddress,
     pub created_block: u64,
     pub executable_after: u64,
+    pub chain_id: u64,
+    pub account_nonce: u64,
 }
 
 impl RecoveryProposal {
@@ -422,6 +386,8 @@ impl RecoveryProposal {
         new_owner: PublicKeyBytes,
         policy: &SocialRecoveryPolicy,
         created_block: u64,
+        chain_id: u64,
+        account_nonce: u64,
     ) -> Result<Self, WalletError> {
         if current_owner == new_owner {
             return Err(WalletError::InvalidRecoveryProposal(
@@ -438,6 +404,8 @@ impl RecoveryProposal {
             new_owner,
             created_block,
             executable_after,
+            chain_id,
+            account_nonce,
         })
     }
 
@@ -445,13 +413,15 @@ impl RecoveryProposal {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha3_256::new();
-        hasher.update(b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V1");
-        hasher.update(&self.current_owner);
-        hasher.update(&self.current_address);
-        hasher.update(&self.new_owner);
-        hasher.update(&self.new_address);
-        hasher.update(&self.created_block.to_be_bytes());
-        hasher.update(&self.executable_after.to_be_bytes());
+        hasher.update(b"BUDLUM_WALLET_RECOVERY_PROPOSAL_V3");
+        hasher.update(self.chain_id.to_be_bytes());
+        hasher.update(self.account_nonce.to_be_bytes());
+        hasher.update(self.current_owner);
+        hasher.update(self.current_address);
+        hasher.update(self.new_owner);
+        hasher.update(self.new_address);
+        hasher.update(self.created_block.to_be_bytes());
+        hasher.update(self.executable_after.to_be_bytes());
         hasher.finalize().into()
     }
 
@@ -475,8 +445,13 @@ impl RecoveryProposal {
         policy: &SocialRecoveryPolicy,
         approvals: &[GuardianApproval],
         current_block: u64,
+        expected_chain_id: u64,
+        current_account_nonce: u64,
     ) -> bool {
-        self.is_timelock_satisfied(current_block)
+        // Expected values must come from trusted current state, not the proposal.
+        self.chain_id == expected_chain_id
+            && self.account_nonce == current_account_nonce
+            && self.is_timelock_satisfied(current_block)
             && self.verify_guardian_approvals(policy, approvals)
     }
 }
@@ -529,7 +504,12 @@ impl SocialRecoveryPolicy {
             if seen.contains(&approval.public_key) {
                 continue;
             }
-            if verify_signature(&approval.public_key, recovery_digest, &approval.signature) {
+            if verify_signature(
+                &approval.public_key,
+                RECOVERY_CTX,
+                recovery_digest,
+                &approval.signature,
+            ) {
                 seen.push(approval.public_key);
             }
         }
@@ -616,8 +596,7 @@ pub struct Wallet {
 // state does not outlive the wallet either.
 impl Drop for Wallet {
     fn drop(&mut self) {
-        self.mnemonic.zeroize();
-        self.seed.zeroize();
+        self.zeroize_secrets();
     }
 }
 
@@ -641,7 +620,7 @@ pub type BudlumAddress = [u8; 32];
 ///
 /// A real TEE enclave (SGX/Nitro) is a separate integration track; this struct holds the preference +
 /// view-key material.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WalletPrivacyConfig {
     /// Whether network-level private transfer (the note/UTXO opcode family) is used.
     /// Default `false` - the user enables it in wallet settings (an option for the network).
@@ -655,6 +634,28 @@ pub struct WalletPrivacyConfig {
     /// User-generated view key (32 bytes). `None` = not generated yet.
     /// Shared manually with an authority for selective disclosure; never written to the chain.
     pub view_key: Option<[u8; 32]>,
+}
+
+impl std::fmt::Debug for WalletPrivacyConfig {
+    /// The derived Debug printed `view_key` in the
+    /// clear. The whole point of the key is that it stays off chain and off
+    /// logs - one `{config:?}` in an error path or a test panic message put
+    /// the selective-disclosure secret into whatever captured it. The redacted
+    /// form keeps every toggle visible and says only whether a key is set.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WalletPrivacyConfig")
+            .field("note_privacy_enabled", &self.note_privacy_enabled)
+            .field("tee_enabled", &self.tee_enabled)
+            .field("prefer_client_side_tee", &self.prefer_client_side_tee)
+            .field(
+                "view_key",
+                &match self.view_key {
+                    Some(_) => "[set]",
+                    None => "[none]",
+                },
+            )
+            .finish()
+    }
 }
 
 impl Default for WalletPrivacyConfig {
@@ -754,10 +755,19 @@ pub const VIEW_KEY_VERSION: u32 = 1;
 
 /// The view-key package presented to an authority (section 10 #3).
 /// Closed to the public; delivered manually from the user wallet to the authority.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ViewKeyDisclosure {
     pub version: u32,
     pub view_key: [u8; 32],
+}
+
+impl std::fmt::Debug for ViewKeyDisclosure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ViewKeyDisclosure")
+            .field("version", &self.version)
+            .field("view_key", &"[redacted]")
+            .finish()
+    }
 }
 
 impl ViewKeyDisclosure {
@@ -851,8 +861,10 @@ impl WalletBindingCapabilities {
             stub_version: WALLET_BINDING_STUB_VERSION.to_string(),
             uniffi_feature_compiles: true,
             wasm_feature_compiles: true,
-            // No `.udl`, no `#[wasm_bindgen]` export. Flipping this without
-            // one is what the gate is there to catch.
+            // The browser surface is wired (`wasm_bindings::BrowserWallet`);
+            // the mobile one is not: no `.udl` and no UniFFI export yet. The
+            // flag claims both, so it stays false until UniFFI lands, and
+            // the gate refuses it true before then.
             bindings_are_wired: false,
             exports_seed_material: false,
         }
@@ -880,10 +892,120 @@ pub mod uniffi_bindings {
 #[cfg(feature = "wasm")]
 pub mod wasm_bindings {
     use super::WalletBindingCapabilities;
+    use wasm_bindgen::prelude::*;
 
     #[must_use]
     pub fn binding_capabilities() -> WalletBindingCapabilities {
         WalletBindingCapabilities::current()
+    }
+
+    /// A V5 wallet opened in a browser from its 24 words (
+    ///). The words stay inside the wasm instance; only the address and
+    /// signed transactions leave it.
+    #[wasm_bindgen]
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub struct BrowserWallet {
+        inner: super::Wallet,
+    }
+
+    #[wasm_bindgen]
+    impl BrowserWallet {
+        /// Open a wallet from a 24-word mnemonic. 12-word phrases are refused
+        ///.
+        ///
+        /// # Errors
+        ///
+        /// Another word count, an unknown word or a bad checksum.
+        #[wasm_bindgen(constructor)]
+        pub fn new(mnemonic: &str) -> Result<BrowserWallet, JsError> {
+            let words = mnemonic.split_whitespace().count();
+            if words != 24 {
+                return Err(JsError::new(&format!(
+                    "a mnemonic has 24 words; this one has {words}"
+                )));
+            }
+            super::Wallet::from_mnemonic(mnemonic)
+                .map(|inner| Self { inner })
+                .map_err(|e| JsError::new(&format!("{e:?}")))
+        }
+
+        /// The wallet's address, 64 hex characters.
+        #[must_use]
+        pub fn address(&self) -> String {
+            hex::encode(self.inner.address())
+        }
+
+        /// Sign a V5 transfer and return the JSON `bud_sendRawTransaction`
+        /// takes (wrap it with `send_raw_transaction_body`).
+        ///
+        /// # Errors
+        ///
+        /// A recipient that is not 32 bytes of hex.
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+        pub fn sign_transfer(
+            &self,
+            to_hex: &str,
+            amount: u64,
+            fee: u64,
+            nonce: u64,
+            chain_id: u64,
+            timestamp_ms: u64,
+        ) -> Result<String, JsError> {
+            let to = hex::decode(to_hex.trim_start_matches("0x"))
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+                .ok_or_else(|| JsError::new("the recipient is not 32 bytes of hex"))?;
+            let transfer = super::transfer::UnsignedTransfer {
+                from: self.inner.address(),
+                to,
+                amount,
+                fee,
+                max_fee: fee,
+                priority_fee: 0,
+                nonce,
+                timestamp_ms: u128::from(timestamp_ms),
+                chain_id,
+            };
+            Ok(super::transfer::signed_transfer_json(
+                &self.inner,
+                &transfer,
+            ))
+        }
+    }
+
+    /// The `bud_sendRawTransaction` body of a signed transaction.
+    #[wasm_bindgen]
+    #[must_use]
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn send_raw_transaction_body(signed_json: &str) -> String {
+        super::rpc::send_raw_transaction(signed_json)
+    }
+
+    /// The `bud_getNonce` body of an address.
+    #[wasm_bindgen]
+    #[must_use]
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn get_nonce_body(address_hex: &str) -> String {
+        super::rpc::get_nonce(address_hex)
+    }
+
+    /// The `bud_chainId` body.
+    #[wasm_bindgen]
+    #[must_use]
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn chain_id_body() -> String {
+        super::rpc::chain_id()
+    }
+
+    /// The number in a node answer (`0x` quantity or decimal).
+    ///
+    /// # Errors
+    ///
+    /// The node's error, or a result that is not a number.
+    #[wasm_bindgen]
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn quantity_result(answer: &str) -> Result<u64, JsError> {
+        super::rpc::quantity_result(answer).map_err(|e| JsError::new(&e))
     }
 }
 
@@ -943,7 +1065,12 @@ impl MultisigPolicy {
             if seen.contains(&approval.public_key) {
                 continue;
             }
-            if verify_signature(&approval.public_key, message, &approval.signature) {
+            if verify_signature(
+                &approval.public_key,
+                MULTISIG_CTX,
+                message,
+                &approval.signature,
+            ) {
                 seen.push(approval.public_key);
             }
         }
@@ -952,6 +1079,13 @@ impl MultisigPolicy {
 }
 
 impl Wallet {
+    /// Wipe every secret the wallet itself holds: mnemonic, seed and the
+    /// view key. Called from `Drop`; kept separate so a test can observe it.
+    fn zeroize_secrets(&mut self) {
+        self.mnemonic.zeroize();
+        self.seed.zeroize();
+        self.privacy.view_key.zeroize();
+    }
     /// Create a new wallet (random entropy -> mnemonic -> seed -> keypair).
     ///
     /// `word_count`: 12 (128-bit entropy) or 24 (256-bit entropy).
@@ -969,7 +1103,7 @@ impl Wallet {
 
         // Production CSPRNG: real random entropy via getrandom
         #[cfg(feature = "production")]
-        let entropy = {
+        let mut entropy = {
             let mut buf = vec![0u8; entropy_len];
             getrandom::getrandom(&mut buf)
                 .map_err(|e| WalletError::ProductionEntropyUnavailable(e.to_string()))?;
@@ -982,15 +1116,19 @@ impl Wallet {
 
         #[cfg(not(feature = "production"))]
         {
-            return Err(WalletError::ProductionEntropyUnavailable(
+            Err(WalletError::ProductionEntropyUnavailable(
                 "Wallet::generate requires the 'production' feature for real CSPRNG entropy. \
                  Use Wallet::from_entropy() for test/dev, or build with --features production."
                     .into(),
-            ));
+            ))
         }
 
         #[cfg(feature = "production")]
-        Self::from_entropy(&entropy)
+        {
+            let wallet = Self::from_entropy(&entropy);
+            entropy.zeroize();
+            wallet
+        }
     }
 
     /// Build a wallet from entropy (BIP39 mnemonic + ML-DSA-87 seed).
@@ -1013,10 +1151,11 @@ impl Wallet {
         let mut hasher = Sha3_256::new();
         hasher.update(b"BUDLUM_MLDSA87_SEED_V1");
         hasher.update(entropy);
-        let seed_bytes = hasher.finalize();
+        let mut seed_bytes: [u8; 32] = hasher.finalize().into();
 
         let mut seed = [0u8; ML_DSA_87_SEED_LEN];
         seed.copy_from_slice(&seed_bytes);
+        seed_bytes.zeroize();
 
         let signing_key = signing_key_from_seed(&seed);
 
@@ -1033,15 +1172,17 @@ impl Wallet {
     /// Restore a wallet from a mnemonic (with BIP39 checksum verification).
     pub fn from_mnemonic(mnemonic: &str) -> Result<Self, WalletError> {
         // BIP39 reverse: mnemonic -> entropy (with checksum verification)
-        let entropy = mnemonic_to_entropy(mnemonic)?;
+        let mut entropy = mnemonic_to_entropy(mnemonic)?;
 
         let mut hasher = Sha3_256::new();
         hasher.update(b"BUDLUM_MLDSA87_SEED_V1");
         hasher.update(&entropy);
-        let seed_bytes = hasher.finalize();
+        entropy.zeroize();
+        let mut seed_bytes: [u8; 32] = hasher.finalize().into();
 
         let mut seed = [0u8; ML_DSA_87_SEED_LEN];
         seed.copy_from_slice(&seed_bytes);
+        seed_bytes.zeroize();
 
         let signing_key = signing_key_from_seed(&seed);
 
@@ -1102,20 +1243,42 @@ impl Wallet {
         }
     }
 
-    /// Mesaj imzala (ML-DSA-87, 4627 byte FIPS 204 encoded signature).
+    /// Sign a user transaction message (ML-DSA-87, 4627 byte FIPS 204 encoded
+    /// signature) under the V5 transaction context.
     #[must_use]
     pub fn sign(&self, message: &[u8]) -> SignatureBytes {
-        sign_message(&self.signing_key, message)
+        sign_message(&self.signing_key, crypto::ctx::TX_V5, message)
     }
 
-    /// Verify a signature (static helper - without building a wallet).
-    pub fn verify(public_key: &PublicKeyBytes, message: &[u8], signature: &SignatureBytes) -> bool {
-        verify_signature(public_key, message, signature)
-    }
-
-    /// Seed (32-byte ML-DSA-87 xi - use carefully when exporting).
+    /// Sign under an explicit FIPS 204 context from [`crypto::ctx`].
     #[must_use]
-    pub fn seed(&self) -> &[u8; ML_DSA_87_SEED_LEN] {
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn sign_for(&self, ctx: &[u8], message: &[u8]) -> SignatureBytes {
+        sign_message(&self.signing_key, ctx, message)
+    }
+
+    /// Verify a user transaction signature (static helper - without building
+    /// a wallet).
+    pub fn verify(public_key: &PublicKeyBytes, message: &[u8], signature: &SignatureBytes) -> bool {
+        verify_signature(public_key, crypto::ctx::TX_V5, message, signature)
+    }
+
+    /// Verify under an explicit FIPS 204 context from [`crypto::ctx`].
+/// exposed for: the wallet crate's SDK surface - in-tree readers land with the wallet wiring.
+    pub fn verify_for(
+        public_key: &PublicKeyBytes,
+        ctx: &[u8],
+        message: &[u8],
+        signature: &SignatureBytes,
+    ) -> bool {
+        verify_signature(public_key, ctx, message, signature)
+    }
+
+    /// Seed (32-byte ML-DSA-87 xi). Not part of the public API: the raw
+    /// seed never leaves the wallet outside tests.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn seed(&self) -> &[u8; ML_DSA_87_SEED_LEN] {
         &self.seed
     }
 
@@ -1303,10 +1466,19 @@ impl Wallet {
     ///
     /// Requires `note_privacy_enabled`. If `tee_enabled`, requires a live
     /// [`TeeRuntime`] and refuses to return plaintext witnesses without it.
+    /// Build a private-transfer intent.
+    ///
+    /// `chain_id` and `sender_nonce` come from the caller
+    /// (the network the relayer will submit to, the account nonce at signing
+    /// time) and are bound into the authorization signature; they are not
+    /// wallet state, and silently assuming either was how V1 became
+    /// replayable.
     pub fn build_private_transfer(
         &self,
         req: PrivateTransferRequest,
         runtime: &dyn TeeRuntime,
+        chain_id: u64,
+        sender_nonce: u64,
     ) -> Result<PrivateTransferIntent, WalletError> {
         if !self.privacy.note_privacy_enabled {
             return Err(WalletError::NotePrivacyDisabled);
@@ -1375,9 +1547,10 @@ impl Wallet {
             )));
         }
         let digest = privacy_transfer::public_digest(&nullifiers, &output_commitments);
-        let authorization_sig = self.sign(&digest);
-
-        Ok(PrivateTransferIntent {
+        // The signature covers the binding message, not
+        // the bare digest; construct the intent first and sign the exact helper
+        // relayers and verifiers call so producer and verifier cannot diverge.
+        let mut intent = PrivateTransferIntent {
             output_commitments,
             nullifiers,
             sum_in,
@@ -1385,8 +1558,43 @@ impl Wallet {
             inputs: vec![req.input],
             outputs,
             public_digest: digest,
-            authorization_sig,
-        })
+            chain_id,
+            sender: wallet_address,
+            sender_nonce,
+            authorization_sig: [0u8; ML_DSA_87_SIGNATURE_LEN],
+        };
+        let auth_msg = privacy_transfer::intent_authorization_message(&intent);
+        intent.authorization_sig = self.sign_for(PRIVATE_TRANSFER_CTX, &auth_msg);
+
+        Ok(intent)
+    }
+
+    /// The smallest blinding counter this wallet will still hand out.
+    ///
+    /// The counter lives in memory only, and `from_mnemonic` and
+    /// `from_entropy` start it at 0. A caller that restores a wallet must
+    /// persist this value and give it back through
+    /// [`Self::resume_blinding_counter`], or the first restored note reuses a
+    /// blinding the old wallet already spent.
+    #[must_use]
+    ///
+    /// WIRING: exposed for the host wallet application, which alone owns
+    /// persistence across sessions; this crate is the library and the
+    /// embedding app is the caller, as the note above records.
+    pub fn next_blinding_counter(&self) -> u64 {
+        self.next_blinding_counter
+    }
+
+    /// Restore the blinding counter saved from an earlier session. It only
+    /// moves forward: a value below the current one is ignored, so a stale
+    /// save cannot reopen counters that were already used.
+    ///
+    /// WIRING: exposed for the host wallet application restoring a
+    /// session, the other half of `next_blinding_counter` above.
+    pub fn resume_blinding_counter(&mut self, next: u64) {
+        if next > self.next_blinding_counter {
+            self.next_blinding_counter = next;
+        }
     }
 
     /// Convenience: create a fresh output note commitment for receiving funds
@@ -1455,6 +1663,62 @@ impl Wallet {
 mod tests {
     use super::*;
 
+    /// Rotation is counter-indexed, so the property the
+    /// design depends on must be pinned: same (seed, counter) -> same key no
+    /// matter what key the wallet currently holds, distinct counters ->
+    /// distinct keys. The derivation is deliberately NOT chained through the
+    /// previous key - chaining would make the key unreproducible from the
+    /// seed, which is the whole recovery story - so "purity" is what has to
+    /// hold, and this is where it is said out loud.
+    #[test]
+    fn view_key_rotation_is_a_pure_function_of_seed_and_counter() {
+        let seed = [9u8; 32];
+        let mut w = WalletPrivacyConfig::default();
+        let k0 = w.rotate_view_key(&seed, 0);
+        let k1 = w.rotate_view_key(&seed, 1);
+        assert_ne!(k0, k1, "distinct counters must derive distinct keys");
+        assert_ne!(
+            k0,
+            derive_view_key(&seed),
+            "rotation #0 must differ from the unrotated key"
+        );
+        // Re-deriving counter 0 after the wallet moved on to k1 returns the
+        // SAME k0: no hidden dependence on current state.
+        assert_eq!(
+            w.rotate_view_key(&seed, 0),
+            k0,
+            "rotation must be reproducible"
+        );
+        let mut other_wallet = WalletPrivacyConfig::default();
+        assert_eq!(
+            other_wallet.rotate_view_key(&seed, 0),
+            k0,
+            "rotation must depend on the seed and counter only, not the wallet"
+        );
+        let _ = &mut other_wallet;
+    }
+
+    /// The deterministic fallback must be a working
+    /// signer, not a half-path. In non-production builds every signature
+    /// takes this exact route, so this test pins what the fallback produces:
+    /// verify-able under the wallet's key, and deterministic (same message,
+    /// same signature - the FIPS 204 default property that hedging removes).
+    /// The determinism half only holds on the fallback, so the test runs
+    /// exactly where the fallback is the whole story.
+    #[cfg(not(feature = "production"))]
+    #[test]
+    fn deterministic_fallback_signatures_verify_and_are_stable() {
+        let w = Wallet::from_entropy(&[0x77u8; 16]).unwrap();
+        let msg = b"private transfer authorization";
+        let a = w.sign(msg);
+        let b = w.sign(msg);
+        assert!(
+            Wallet::verify(&w.public_key(), msg, &a),
+            "a fallback-mode signature must verify"
+        );
+        assert_eq!(a, b, "deterministic mode must be byte-stable");
+    }
+
     #[test]
     fn generate_12_word_wallet() {
         let wallet = Wallet::from_entropy(&[0x42u8; 16]).expect("12-word wallet must succeed");
@@ -1473,6 +1737,19 @@ mod tests {
         let wallet = Wallet::from_entropy(&[0x42u8; 32]).expect("24-word wallet must succeed");
         let words: Vec<&str> = wallet.mnemonic().split_whitespace().collect();
         assert_eq!(words.len(), 24, "must have 24 words");
+    }
+
+    /// A restored wallet resumes the saved counter and never goes back.
+    #[test]
+    fn a_resumed_blinding_counter_blocks_reuse_and_only_moves_forward() {
+        let mut wallet = Wallet::from_entropy(&[0x42u8; 16]).unwrap();
+        wallet.set_note_privacy_enabled(true);
+        wallet.resume_blinding_counter(5);
+        assert_eq!(wallet.next_blinding_counter(), 5);
+        assert!(wallet.prepare_receive_note(10, 4).is_err());
+        assert!(wallet.prepare_receive_note(10, 5).is_ok());
+        wallet.resume_blinding_counter(2);
+        assert_eq!(wallet.next_blinding_counter(), 6, "a stale save is ignored");
     }
 
     #[test]
@@ -1649,6 +1926,17 @@ mod tests {
     }
 
     #[test]
+    fn zeroize_secrets_wipes_seed_mnemonic_and_view_key() {
+        let mut wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
+        let _ = wallet.ensure_view_key();
+        assert!(wallet.privacy.view_key.is_some());
+        wallet.zeroize_secrets();
+        assert_eq!(wallet.seed, [0u8; ML_DSA_87_SEED_LEN]);
+        assert!(wallet.mnemonic.is_empty());
+        assert!(wallet.privacy.view_key.is_none());
+    }
+
+    #[test]
     fn binding_export_redacts_seed_and_counts_words() {
         let wallet = Wallet::from_entropy(&[0x42u8; 32]).unwrap();
         let export = wallet.binding_export();
@@ -1701,7 +1989,6 @@ mod tests {
         // This test is a seal - it preserves wallet-core's permissionless principle.
         // README: "anyone can be a relayer, security through stake + slashing."
         // wallet-core is a WALLET, not a RELAYER.
-        assert!(true, "wallet-core has no relayer registration/stake code");
     }
 
     #[test]
@@ -1726,18 +2013,18 @@ mod tests {
 
         let one = [MultisigApproval {
             public_key: w1.public_key(),
-            signature: w1.sign(msg),
+            signature: w1.sign_for(MULTISIG_CTX, msg),
         }];
         assert!(!policy.verify_threshold(msg, &one));
 
         let duplicate = [
             MultisigApproval {
                 public_key: w1.public_key(),
-                signature: w1.sign(msg),
+                signature: w1.sign_for(MULTISIG_CTX, msg),
             },
             MultisigApproval {
                 public_key: w1.public_key(),
-                signature: w1.sign(msg),
+                signature: w1.sign_for(MULTISIG_CTX, msg),
             },
         ];
         assert!(!policy.verify_threshold(msg, &duplicate));
@@ -1745,11 +2032,11 @@ mod tests {
         let quorum = [
             MultisigApproval {
                 public_key: w1.public_key(),
-                signature: w1.sign(msg),
+                signature: w1.sign_for(MULTISIG_CTX, msg),
             },
             MultisigApproval {
                 public_key: w2.public_key(),
-                signature: w2.sign(msg),
+                signature: w2.sign_for(MULTISIG_CTX, msg),
             },
         ];
         assert!(policy.verify_threshold(msg, &quorum));
@@ -1765,11 +2052,11 @@ mod tests {
         let approvals = [
             MultisigApproval {
                 public_key: w1.public_key(),
-                signature: w1.sign(b"different"),
+                signature: w1.sign_for(MULTISIG_CTX, b"different"),
             },
             MultisigApproval {
                 public_key: outsider.public_key(),
-                signature: outsider.sign(msg),
+                signature: outsider.sign_for(MULTISIG_CTX, msg),
             },
         ];
         assert!(!policy.verify_threshold(msg, &approvals));
@@ -1786,7 +2073,7 @@ mod tests {
             .filter(|(idx, _)| (mask & (1usize << idx)) != 0)
             .map(|(_, wallet)| MultisigApproval {
                 public_key: wallet.public_key(),
-                signature: wallet.sign(message),
+                signature: wallet.sign_for(MULTISIG_CTX, message),
             })
             .collect()
     }
@@ -1856,22 +2143,22 @@ mod tests {
         let duplicate = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(digest),
+                signature: g1.sign_for(RECOVERY_CTX, digest),
             },
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(digest),
+                signature: g1.sign_for(RECOVERY_CTX, digest),
             },
         ];
         assert!(!policy.verify_recovery_threshold(digest, &duplicate));
         let quorum = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(digest),
+                signature: g1.sign_for(RECOVERY_CTX, digest),
             },
             GuardianApproval {
                 public_key: g2.public_key(),
-                signature: g2.sign(digest),
+                signature: g2.sign_for(RECOVERY_CTX, digest),
             },
         ];
         assert!(policy.verify_recovery_threshold(digest, &quorum));
@@ -1888,11 +2175,11 @@ mod tests {
         let approvals = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(b"wrong"),
+                signature: g1.sign_for(RECOVERY_CTX, b"wrong"),
             },
             GuardianApproval {
                 public_key: outsider.public_key(),
-                signature: outsider.sign(digest),
+                signature: outsider.sign_for(RECOVERY_CTX, digest),
             },
         ];
         assert!(!policy.verify_recovery_threshold(digest, &approvals));
@@ -1919,28 +2206,34 @@ mod tests {
         assert!(!rotated.guardians.contains(&g1.public_key()));
         assert!(rotated.guardians.contains(&replacement.public_key()));
 
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &rotated, 1_000)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &rotated,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
         let digest = proposal.digest();
         let compromised_quorum = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(&digest),
+                signature: g1.sign_for(RECOVERY_CTX, &digest),
             },
             GuardianApproval {
                 public_key: g2.public_key(),
-                signature: g2.sign(&digest),
+                signature: g2.sign_for(RECOVERY_CTX, &digest),
             },
         ];
         let rotated_quorum = [
             GuardianApproval {
                 public_key: replacement.public_key(),
-                signature: replacement.sign(&digest),
+                signature: replacement.sign_for(RECOVERY_CTX, &digest),
             },
             GuardianApproval {
                 public_key: g2.public_key(),
-                signature: g2.sign(&digest),
+                signature: g2.sign_for(RECOVERY_CTX, &digest),
             },
         ];
         assert!(!proposal.verify_guardian_approvals(&rotated, &compromised_quorum));
@@ -1975,9 +2268,15 @@ mod tests {
         let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
 
         assert_eq!(proposal.current_address, owner.address());
         assert_eq!(proposal.new_address, new_owner.address());
@@ -1994,14 +2293,22 @@ mod tests {
         let other_new_owner = Wallet::from_entropy(&[9u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
         let changed_target = RecoveryProposal::new(
             owner.public_key(),
             other_new_owner.public_key(),
             &policy,
             1_000,
+            45_262,
+            0,
         )
         .unwrap();
         let mut changed_timelock = proposal.clone();
@@ -2024,40 +2331,56 @@ mod tests {
             100,
         )
         .unwrap();
-        let proposal =
-            RecoveryProposal::new(owner.public_key(), new_owner.public_key(), &policy, 1_000)
-                .unwrap();
+        let proposal = RecoveryProposal::new(
+            owner.public_key(),
+            new_owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0,
+        )
+        .unwrap();
         let digest = proposal.digest();
         let one = [GuardianApproval {
             public_key: g1.public_key(),
-            signature: g1.sign(&digest),
+            signature: g1.sign_for(RECOVERY_CTX, &digest),
         }];
         let quorum = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(&digest),
+                signature: g1.sign_for(RECOVERY_CTX, &digest),
             },
             GuardianApproval {
                 public_key: g2.public_key(),
-                signature: g2.sign(&digest),
+                signature: g2.sign_for(RECOVERY_CTX, &digest),
             },
         ];
         let wrong_digest = [
             GuardianApproval {
                 public_key: g1.public_key(),
-                signature: g1.sign(b"wrong recovery digest"),
+                signature: g1.sign_for(RECOVERY_CTX, b"wrong recovery digest"),
             },
             GuardianApproval {
                 public_key: g2.public_key(),
-                signature: g2.sign(&digest),
+                signature: g2.sign_for(RECOVERY_CTX, &digest),
             },
         ];
 
         assert!(!proposal.verify_guardian_approvals(&policy, &one));
         assert!(!proposal.verify_guardian_approvals(&policy, &wrong_digest));
         assert!(proposal.verify_guardian_approvals(&policy, &quorum));
-        assert!(!proposal.is_executable(&policy, &quorum, 1_099));
-        assert!(proposal.is_executable(&policy, &quorum, 1_100));
+        assert!(!proposal.is_executable(&policy, &quorum, 1_099, 45_262, 0));
+        assert!(proposal.is_executable(&policy, &quorum, 1_100, 45_262, 0));
+        assert!(!proposal.is_executable(&policy, &quorum, 1_100, 45_263, 0));
+        assert!(!proposal.is_executable(&policy, &quorum, 1_100, 45_262, 1));
+        let mut replay = proposal.clone();
+        replay.account_nonce = 1;
+        assert_ne!(proposal.digest(), replay.digest());
+        assert!(!replay.verify_guardian_approvals(&policy, &quorum));
+        replay = proposal.clone();
+        replay.chain_id = 45_263;
+        assert_ne!(proposal.digest(), replay.digest());
+        assert!(!replay.verify_guardian_approvals(&policy, &quorum));
     }
 
     #[test]
@@ -2066,14 +2389,22 @@ mod tests {
         let new_owner = Wallet::from_entropy(&[8u8; 16]).unwrap();
         let guardian = Wallet::from_entropy(&[1u8; 16]).unwrap();
         let policy = SocialRecoveryPolicy::new(vec![guardian.public_key()], 1, 100).unwrap();
-        assert!(
-            RecoveryProposal::new(owner.public_key(), owner.public_key(), &policy, 1_000).is_err()
-        );
+        assert!(RecoveryProposal::new(
+            owner.public_key(),
+            owner.public_key(),
+            &policy,
+            1_000,
+            45_262,
+            0
+        )
+        .is_err());
         assert!(RecoveryProposal::new(
             owner.public_key(),
             new_owner.public_key(),
             &policy,
             u64::MAX,
+            45_262,
+            0
         )
         .is_err());
     }
@@ -2131,6 +2462,13 @@ mod tests {
         assert!(hex.starts_with("vk1:1:"));
         let parsed = ViewKeyDisclosure::from_hex(&hex).expect("parse");
         assert_eq!(parsed, disclosure);
+        // Debug is used by error paths and assert macros; only the explicit
+        // export operation may reveal the selective-disclosure secret.
+        let debug = format!("{disclosure:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(debug.contains("version: 1"));
+        assert!(!debug.contains(&format!("{:?}", disclosure.view_key)));
+        assert!(!debug.contains(&hex::encode(disclosure.view_key)));
     }
 
     #[test]
@@ -2181,8 +2519,60 @@ mod tests {
             change_blinding: None,
         };
         let rt = w.default_tee_runtime();
-        let err = w.build_private_transfer(req, &rt).unwrap_err();
+        let err = w.build_private_transfer(req, &rt, 45262, 0).unwrap_err();
         assert!(matches!(err, WalletError::NotePrivacyDisabled));
+    }
+
+    /// The derived Debug printed the note opening, and a
+    /// wallet formats witnesses into error and test output. Redacting only
+    /// `spend_secret` left `amount`, `blinding` and `recipient_tag` - the three
+    /// field elements `privacy_commit` exists to hide - readable, and both the
+    /// intent and the request derive Debug over them. This pins every path a
+    /// formatted value takes to the terminal.
+    #[test]
+    fn a_formatted_transfer_never_prints_the_note_opening() {
+        let w = Wallet::from_entropy(&[0x44u8; 16]).unwrap();
+        let inp = PrivateNoteInput {
+            amount: 987_654_321,
+            recipient_tag: 112_233_445_566,
+            blinding: 77_889_900_112,
+            spend_secret: 1_234_567_890,
+        };
+        let req = PrivateTransferRequest {
+            input: inp.clone(),
+            to: [7u8; 32],
+            // Public on the wire by design; kept distinct from the secrets so
+            // the assertion below is about them and not about this.
+            send_amount: 55,
+            output_blinding: 55_667_788_990,
+            change_recipient_tag: Some(43_211),
+            change_blinding: Some(99_887_766_554),
+        };
+        let out = PrivateNoteOutput {
+            amount: 987_654_321,
+            recipient: [7u8; 32],
+            recipient_tag: 112_233_445_566,
+            blinding: 55_667_788_990,
+        };
+        let rendered = format!("{inp:?} {req:?} {out:?}");
+        for secret in [
+            "987654321",
+            "112233445566",
+            "77889900112",
+            "1234567890",
+            "55667788990",
+            "99887766554",
+            "43211",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "the formatted transfer printed {secret}: {rendered}"
+            );
+        }
+        assert!(rendered.contains("[redacted]"));
+        // The public half still prints: a redaction that hid everything would
+        // pass the assertions above while telling a reader nothing.
+        assert!(rendered.contains("send_amount: 55"));
     }
 
     /// Two notes that share a blinding share a commitment: an observer learns
@@ -2236,16 +2626,41 @@ mod tests {
             change_blinding: None,
         };
         let rt = w.default_tee_runtime();
-        let intent = w.build_private_transfer(req, &rt).unwrap();
+        let intent = w.build_private_transfer(req, &rt, 45262, 3).unwrap();
         assert_eq!(intent.sum_in, intent.sum_out);
         assert_eq!(intent.sum_in, 100);
         assert_eq!(intent.nullifiers.len(), 1);
         assert_eq!(intent.output_commitments.len(), 1);
-        assert!(Wallet::verify(
+        assert!(Wallet::verify_for(
             &w.public_key(),
-            &intent.public_digest,
+            PRIVATE_TRANSFER_CTX,
+            &privacy_transfer::intent_authorization_message(&intent),
             &intent.authorization_sig
         ));
+        // The same signature on another chain (or another nonce)
+        // must not verify - the replay V1 allowed.
+        let mut foreign = intent.clone();
+        foreign.chain_id = 1;
+        assert!(
+            !Wallet::verify_for(
+                &w.public_key(),
+                PRIVATE_TRANSFER_CTX,
+                &privacy_transfer::intent_authorization_message(&foreign),
+                &foreign.authorization_sig
+            ),
+            "an authorization bound to chain 45262 must not verify on chain 1"
+        );
+        let mut reused = intent.clone();
+        reused.sender_nonce = 4;
+        assert!(
+            !Wallet::verify_for(
+                &w.public_key(),
+                PRIVATE_TRANSFER_CTX,
+                &privacy_transfer::intent_authorization_message(&reused),
+                &reused.authorization_sig
+            ),
+            "an authorization must not survive a nonce bump"
+        );
     }
 
     #[test]
@@ -2264,7 +2679,7 @@ mod tests {
             change_blinding: Some(12),
         };
         let intent = w
-            .build_private_transfer(req, &w.default_tee_runtime())
+            .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap();
         assert_eq!(intent.output_commitments.len(), 2);
         assert_eq!(intent.sum_out, 100);
@@ -2286,7 +2701,7 @@ mod tests {
             change_blinding: Some(12),
         };
         let err = w
-            .build_private_transfer(req, &w.default_tee_runtime())
+            .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
     }
@@ -2312,7 +2727,7 @@ mod tests {
             change_recipient_tag: None,
             change_blinding: None,
         };
-        let err = w.build_private_transfer(req, &rt).unwrap_err();
+        let err = w.build_private_transfer(req, &rt, 45262, 0).unwrap_err();
         assert!(matches!(err, WalletError::TeeUnavailable(_)));
     }
 
@@ -2444,7 +2859,7 @@ mod tests {
             change_blinding: None,
         };
         let err = w
-            .build_private_transfer(req, &w.default_tee_runtime())
+            .build_private_transfer(req, &w.default_tee_runtime(), 45262, 0)
             .unwrap_err();
         assert!(matches!(err, WalletError::InvalidPrivateTransfer(_)));
     }

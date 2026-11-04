@@ -203,3 +203,46 @@ async fn boost_without_active_deals_burns_share_and_drains_pool() {
     assert_eq!(bc.state.get_balance(&ghost), 0);
     assert_eq!(bc.state.pending_bud_boost_share, 0);
 }
+
+fn tag_nft(bc: &mut Blockchain, kp: &KeyPair, nft_id: u64, tag: &str) {
+    let from = Address::from(kp.public_key_bytes());
+    let mut tx =
+        Transaction::new_with_fee(from, Address::zero(), 0, 1, bc.get_nonce(&from), Vec::new());
+    tx.tx_type = TransactionType::NftTag {
+        nft_id,
+        tag: tag.to_string(),
+    };
+    submit_tx(bc, tx, kp);
+}
+
+#[tokio::test]
+async fn nft_tag_is_stored_for_the_owner_only() {
+    let dir = tempdir().unwrap();
+    let db = dir.path().join("nft_tag.db");
+    let mut bc = fresh_chain(db.to_str().unwrap());
+
+    let alice_kp = KeyPair::generate().unwrap();
+    let bob_kp = KeyPair::generate().unwrap();
+    let alice = Address::from(alice_kp.public_key_bytes());
+    let bob = Address::from(bob_kp.public_key_bytes());
+    bc.state.add_balance(&alice, 1000);
+    bc.state.add_balance(&bob, 1000);
+
+    mint_nft(&mut bc, &alice_kp, ContentId([0x77; 32]));
+    let nft_id = *bc.state.nft_registry.nfts.keys().next().unwrap();
+
+    tag_nft(&mut bc, &bob_kp, nft_id, "#spam");
+    assert!(bc
+        .state
+        .nft_registry
+        .get_nft(nft_id)
+        .unwrap()
+        .tags
+        .is_empty());
+
+    tag_nft(&mut bc, &alice_kp, nft_id, "#art");
+    assert_eq!(
+        bc.state.nft_registry.get_nft(nft_id).unwrap().tags,
+        vec!["#art".to_string()]
+    );
+}
