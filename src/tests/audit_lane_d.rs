@@ -297,3 +297,40 @@ fn audit_lane_d_test_gap_02_kani_covers_the_four_security_md_targets() {
         "bond arithmetic, QC Merkle paths, PQ signature length classification, finality bitmap accounting"
     ));
 }
+
+/// BLG-030: the development credit paths refuse every chain id except devnet
+/// (testnet included), and out-of-block RPC writers are operator-only refusals.
+#[test]
+fn audit_lane_d_blg_030_testnet_development_credit_is_refused() {
+    use crate::chain::blockchain::Blockchain;
+    use crate::consensus::pow::PoWEngine;
+    use crate::core::address::Address;
+    use crate::core::chain_config::Network;
+    use std::sync::Arc;
+    let addr = Address::from_hex(&"01".repeat(32)).unwrap();
+    let testnet = Network::Testnet.chain_id().value();
+    let genesis = crate::chain::genesis::GenesisConfig::new(testnet);
+    let mut bc =
+        Blockchain::new_with_genesis(Arc::new(PoWEngine::new(0)), None, testnet, None, Some(genesis));
+    assert!(bc.fund_development_account(&addr).is_err());
+    assert!(bc.credit_development_account(&addr, 5).is_err());
+    let devnet = Network::Devnet.chain_id().value();
+    let mut dev = Blockchain::new(Arc::new(PoWEngine::new(0)), None, devnet, None);
+    assert!(dev.fund_development_account(&addr).is_ok());
+
+    let table = read_repo("src/rpc/method_class.rs");
+    for method in [
+        "bud_registerExternalDomain",
+        "bud_submitExternalEvidence",
+        "bud_readmitExternalDomain",
+        "bud_scheduleExternalFork",
+        "bud_slashExternalProver",
+        "bud_bondExternalProver",
+        "bud_setExternalQuorumPolicy",
+    ] {
+        assert!(
+            table.contains(&format!("row(\"{method}\", Operator, Refused)")),
+            "{method} must be an operator-only refusal"
+        );
+    }
+}
